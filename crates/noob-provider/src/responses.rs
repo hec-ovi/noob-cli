@@ -21,31 +21,7 @@ pub fn stream(
     on: &mut dyn FnMut(Event),
 ) -> Result<Turn, ProviderError> {
     let url = format!("{}/responses", ep.base_url);
-    let mut body = json!({
-        "model": ep.model,
-        "input": build_input(req),
-        "store": false,
-        "stream": true,
-    });
-    if let Some(system) = &req.system {
-        body["instructions"] = json!(system);
-    }
-    if !req.tools.is_empty() {
-        body["tools"] = Value::Array(
-            req.tools
-                .iter()
-                .map(|t| {
-                    json!({"type": "function", "name": t.name,
-                        "description": t.description, "parameters": t.parameters})
-                })
-                .collect(),
-        );
-    }
-    // Only api.openai.com returns encrypted reasoning; asking elsewhere 400s.
-    if ep.base_url.contains("api.openai.com") {
-        body["include"] = json!(["reasoning.encrypted_content"]);
-    }
-
+    let mut body = build_body(ep, req);
     let mut resp = client.post_json_stream(&url, &ep.api_key, &mut body)?;
 
     // Same guard as chat: a JSON 200 to a stream:true request is a whole
@@ -92,6 +68,36 @@ pub fn stream(
         }
     }
     Ok(state.finish(on))
+}
+
+/// The full request body. Stateless replay: `store: false` always, never
+/// `previous_response_id`. Only api.openai.com gets the encrypted-reasoning
+/// include (other servers 400 on it, and only OpenAI returns it anyway).
+fn build_body(ep: &Endpoint, req: &TurnRequest) -> Value {
+    let mut body = json!({
+        "model": ep.model,
+        "input": build_input(req),
+        "store": false,
+        "stream": true,
+    });
+    if let Some(system) = &req.system {
+        body["instructions"] = json!(system);
+    }
+    if !req.tools.is_empty() {
+        body["tools"] = Value::Array(
+            req.tools
+                .iter()
+                .map(|t| {
+                    json!({"type": "function", "name": t.name,
+                        "description": t.description, "parameters": t.parameters})
+                })
+                .collect(),
+        );
+    }
+    if ep.base_url.contains("api.openai.com") {
+        body["include"] = json!(["reasoning.encrypted_content"]);
+    }
+    body
 }
 
 /// Serialize the neutral transcript into Responses `input` items.
@@ -409,11 +415,18 @@ impl State {
             })
             .collect();
         let finish = self.finish.unwrap_or_else(|| {
-            // Stream died before response.completed.
-            if tool_calls.is_empty() {
-                Finish::Error("the stream ended before the response completed".to_string())
-            } else {
+            // The stream ended without a terminal event. A lenient server
+            // that just stops after finishing its calls is tolerated, but
+            // only if every call's arguments actually parse: a truncated
+            // call must surface as an error, never execute half-written.
+            let calls_complete = !tool_calls.is_empty()
+                && tool_calls
+                    .iter()
+                    .all(|c| serde_json::from_str::<Value>(&c.arguments).is_ok());
+            if calls_complete {
                 Finish::ToolCalls
+            } else {
+                Finish::Error("the stream ended before the response completed".to_string())
             }
         });
         on(Event::Done(finish.clone()));
@@ -572,6 +585,62 @@ mod tests {
         let (turn, _) = drive(&[("response.output_text.delta", json!({"delta": "par"}))]);
         assert!(matches!(turn.finish, Finish::Error(_)));
         assert_eq!(turn.text, "par");
+    }
+
+    #[test]
+    fn truncated_call_without_terminal_event_is_an_error_not_toolcalls() {
+        // Stream dies mid-arguments: the half-written call must never be
+        // reported as a valid ToolCalls turn.
+        let (turn, _) = drive(&[
+            (
+                "response.output_item.added",
+                json!({"item": {"id": "fc_1", "type": "function_call",
+                    "call_id": "c1", "name": "read", "arguments": ""}}),
+            ),
+            (
+                "response.function_call_arguments.delta",
+                json!({"item_id": "fc_1", "delta": "{\"path\":\"/wo"}),
+            ),
+        ]);
+        assert!(matches!(turn.finish, Finish::Error(_)), "finish: {:?}", turn.finish);
+
+        // A lenient server that stops after COMPLETE calls (arguments
+        // parse) but never sends response.completed is tolerated.
+        let (turn, _) = drive(&[
+            (
+                "response.output_item.added",
+                json!({"item": {"id": "fc_1", "type": "function_call",
+                    "call_id": "c1", "name": "read", "arguments": ""}}),
+            ),
+            (
+                "response.function_call_arguments.done",
+                json!({"item_id": "fc_1", "arguments": "{\"path\":\"/work\"}"}),
+            ),
+        ]);
+        assert_eq!(turn.finish, Finish::ToolCalls);
+    }
+
+    #[test]
+    fn encrypted_reasoning_include_only_for_openai() {
+        let req = TurnRequest {
+            system: None,
+            items: vec![Item::User("hi".into())],
+            tools: vec![],
+        };
+        let openai = Endpoint {
+            base_url: "https://api.openai.com/v1".into(),
+            api_key: String::new(),
+            model: "m".into(),
+            style: crate::types::ApiStyle::Responses,
+        };
+        let body = build_body(&openai, &req);
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(body["store"], false);
+        assert_eq!(body["stream"], true);
+
+        let local = Endpoint { base_url: "http://localhost:8090/v1".into(), ..openai };
+        let body = build_body(&local, &req);
+        assert!(body.get("include").is_none(), "include only for api.openai.com");
     }
 
     #[test]

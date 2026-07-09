@@ -76,7 +76,7 @@ noob-cli/
     │   └── src/             # types.rs http.rs sse.rs chat.rs responses.rs assemble.rs retry.rs envfile.rs
     └── noob-testkit/
         ├── contract.md      # dev-only; hand-rolled mock OpenAI server (both shapes), scripted turns, request recorder, automatic assertions
-        └── testdata/sse/    # captured real byte transcripts with %%CHUNK%% split sentinels
+        └── testdata/sse/    # SSE byte transcripts with %%CHUNK%% split sentinels (provenance in its contract.md)
 ```
 
 ## Dependencies
@@ -330,7 +330,7 @@ No CI, ever; `make test` (offline) and `NOOB_LIVE=1 make smoke` (live) are the w
 
 **Mock harness (noob-testkit)**: a hand-rolled HTTP/1.1 server on `std::net::TcpListener` (~300 lines; it serves only our own client) exposing `/v1/chat/completions` and `/v1/responses`. Tests enqueue scripted turns (canned SSE byte responses or request-assertion closures); the harness records every raw request body. Three assertions run automatically on EVERY request so every future e2e inherits the invariants for free: (1) prefix stability, each request's serialized message/input array is an exact JSON-byte prefix of the next (compaction and plan transitions declare expected breaks); (2) no `max_tokens`/`max_completion_tokens`/`max_output_tokens` key anywhere; (3) transcript validity, every tool_call id paired with exactly one result, in order.
 
-**SSE fixtures**: `testdata/sse/*.sse` are captured real byte transcripts (llama.cpp qwen tool calls, OpenRouter with keepalive comments and a mid-stream error, OpenAI Responses function-call session) with `%%CHUNK%%` sentinel lines marking TCP chunk boundaries, so replay reproduces pathological splits deterministically, including one fixture splitting a multibyte codepoint and one splitting mid-`data:` line.
+**SSE fixtures**: `testdata/sse/*.sse` are byte transcripts with `%%CHUNK%%` sentinels marking TCP chunk boundaries, so replay reproduces pathological splits deterministically, including one fixture splitting a multibyte codepoint and one splitting mid-`data:` line. The llama.cpp ones (qwen tool call, parallel calls, Responses function-call session) are captured real transcripts; the OpenRouter one (keepalive comments + mid-stream in-band error) is synthesized to OpenRouter's documented stream shape, to be replaced with a real capture when an OpenRouter key is on hand (each fixture's provenance is stated in testdata/contract.md).
 
 **e2e** (crates/noob/tests): spawn the compiled binary (`env!("CARGO_BIN_EXE_noob")`) with `NOOB_CONFIG_DIR` at a temp dir whose `.env` targets the mock, cwd in a temp workspace; assert stdout, JSONL session content, recorded request bodies, and file side effects. Both API shapes run the same scenario matrix. Named tests locked now: `hot_reload_env` (rewrite `.env` between turns, assert the Authorization header changes), `cache_prefix` (3-turn prefix property), `no_output_cap`, `parallel_calls` (concurrent read batch, results in emission order), `mutate_barrier` (edit+bash serialize), `plan_gate` (mutating schemas absent in plan mode, restored after /go), `child_fanout` (three task calls, concurrency cap observed via mock timestamps), `doom_loop`, `compaction` (inflated mock usage forces the trigger; asserts summary shape and skill re-listing), `exec_json` (JSONL event stream shape), `session_resume`, `skills_gate` (write into a skills dir requires confirmation), `egress` (cargo-metadata + zero foreign requests).
 

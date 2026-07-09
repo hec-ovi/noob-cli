@@ -522,7 +522,14 @@ impl Client {
                     self.ctl.finish();
                     if retryable_error(&e) {
                         if let Some(&delay) = backoff.next() {
-                            self.sleep_interruptible(delay)?;
+                            // Same full jitter as the status branch: a fleet
+                            // reconnecting to a restarted server must not
+                            // stampede in lockstep.
+                            self.sleep_interruptible(if self.retry.jitter {
+                                jittered(delay)
+                            } else {
+                                delay
+                            })?;
                             continue;
                         }
                     }

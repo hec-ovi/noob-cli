@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/tests-105%20offline%20%2B%203%20live-brightgreen" alt="Tests" />
+  <img src="https://img.shields.io/badge/tests-114%20offline%20%2B%203%20live-brightgreen" alt="Tests" />
   <img src="https://img.shields.io/badge/async%20runtime-none-success" alt="No async runtime" />
   <img src="https://img.shields.io/badge/runtime%20crates-28%20of%2045%20budget-blueviolet" alt="Crate count" />
   <img src="https://img.shields.io/badge/APIs-Chat%20Completions%20%2B%20Responses-7B3FA0" alt="Both OpenAI wire shapes" />
@@ -38,7 +38,7 @@ The provider layer (P1) is done, in active development. Working right now:
 - Retries with backoff before the first content byte (never after: that would duplicate output), `Retry-After` honored, and a reactive fallback that strips a request field an endpoint 400s on and remembers for the session.
 - Hot config reload: `.env` is re-read on every request, so edits apply on the next call with no container restart.
 - A 1 s tick-read watchdog keeps Ctrl-C responsive within about a second, even while llama.cpp spends minutes of silence processing a 131k-token prompt, and even mid-retry-backoff.
-- 105 offline tests via `./dev.sh test` (e2e through the compiled binary against a mock OpenAI server), 3 live smokes via `./dev.sh smoke`.
+- 114 offline tests via `./dev.sh test` (e2e through the compiled binary against a mock OpenAI server), 3 live smokes via `./dev.sh smoke`.
 
 The REPL, the tool set, and the agent loop are the next phase; the roadmap below marks exactly what exists and what does not.
 
@@ -124,7 +124,7 @@ Everything runs inside Docker; nothing is installed on the host. `./dev.sh` is t
 
 | Target | What it does |
 |---|---|
-| `./dev.sh test` | The offline suite: 105 unit + e2e tests against the in-process mock server, run in a dev container |
+| `./dev.sh test` | The offline suite: 114 unit + e2e tests against the in-process mock server, run in a dev container |
 | `./dev.sh build` | The static musl release binary |
 | `./dev.sh docker` | The runtime image |
 | `./dev.sh repl` / `./dev.sh exec "..."` | Compose with your uid:gid passed explicitly, so files under `/work` keep your ownership |
