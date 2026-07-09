@@ -12,10 +12,13 @@ Invariants:
 - `.env` is opened, parsed, and dropped inside every request build; nothing
   is cached, so key edits apply on the next call. Secrets never enter the
   process environment.
-- Three timeouts (connect 10 s, first-byte 300 s, idle 90 s) via a 1 s
-  tick-read watchdog on a custom transport; the idle clock starts only at the
-  first body byte, so long llama.cpp prompt processing never trips it.
-  Interrupts abort within about one tick.
+- Typed timeouts (connect 10 s, DNS 5 s, request send 30 s, first-byte 300 s,
+  idle 90 s) via a 1 s tick-read watchdog on a custom transport; the idle
+  clock starts only at the first body byte, so long llama.cpp prompt
+  processing never trips it. Interrupts abort reads within about one tick
+  (DNS and connect are bounded but not tick-interruptible).
+- Proxy env vars (HTTP_PROXY and friends) are explicitly ignored: noob talks
+  only to the configured endpoints.
 - No request ever carries a max_tokens-family key.
 - Typed errors only, and every rendered message states its remedy.
 - No knowledge of files, tools, or the agent loop.

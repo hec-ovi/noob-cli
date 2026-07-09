@@ -75,6 +75,7 @@ pub enum Event {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimeoutKind {
     Connect,
+    Send,
     FirstByte,
     Idle,
 }
@@ -104,10 +105,26 @@ impl fmt::Display for ProviderError {
             ProviderError::Http { status, body } => {
                 let body = body.trim();
                 let shown: String = body.chars().take(400).collect();
-                write!(f, "endpoint returned HTTP {status}: {shown}")
+                let remedy = match status {
+                    401 | 403 => "check NOOB_API_KEY in your config .env",
+                    404 | 405 => {
+                        "check that NOOB_BASE_URL points at an OpenAI-compatible /v1 base, \
+                         e.g. http://localhost:8090/v1"
+                    }
+                    _ => "the response body usually names the cause; check the server logs \
+                          if it persists",
+                };
+                write!(f, "endpoint returned HTTP {status}: {shown}; {remedy}")
             }
             ProviderError::Timeout(TimeoutKind::Connect) => {
                 write!(f, "timed out connecting; check NOOB_BASE_URL and that the server is up")
+            }
+            ProviderError::Timeout(TimeoutKind::Send) => {
+                write!(
+                    f,
+                    "sending the request stalled; the server accepted the connection but \
+                     stopped reading; retry, and restart the server if it persists"
+                )
             }
             ProviderError::Timeout(TimeoutKind::FirstByte) => {
                 write!(
@@ -121,7 +138,12 @@ impl fmt::Display for ProviderError {
             }
             ProviderError::Interrupted => write!(f, "interrupted"),
             ProviderError::Wire(msg) => {
-                write!(f, "could not parse the server response: {msg}")
+                write!(
+                    f,
+                    "could not parse the server response: {msg}; the endpoint may not be \
+                     OpenAI-compatible, or the wrong wire shape is selected (try \
+                     NOOB_API_STYLE=chat)"
+                )
             }
             ProviderError::Unsupported(msg) => write!(f, "{msg}"),
         }

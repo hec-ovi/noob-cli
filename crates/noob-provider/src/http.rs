@@ -60,6 +60,8 @@ pub enum Trip {
     Interrupted,
     FirstByte,
     Idle,
+    /// The server accepted the connection but stopped reading the request.
+    SendStall,
 }
 
 #[derive(Debug)]
@@ -154,6 +156,10 @@ impl WatchdogCtl {
         trip
     }
 
+    fn set_trip(&self, trip: Trip) {
+        *self.inner.trip.lock().unwrap() = Some(trip);
+    }
+
     fn take_trip(&self) -> Option<Trip> {
         self.inner.trip.lock().unwrap().take()
     }
@@ -190,7 +196,10 @@ impl Transport for TickTransport {
         let output = &self.buffers.output()[..amount];
         self.stream.write_all(output).map_err(|e| {
             if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) {
-                ureq::Error::Io(io::Error::new(io::ErrorKind::TimedOut, "write timed out"))
+                // Record the phase so the error maps to a send-stall remedy,
+                // never to "timed out connecting" (the connect succeeded).
+                self.ctl.set_trip(Trip::SendStall);
+                ureq::Error::Io(io::Error::new(io::ErrorKind::TimedOut, "request send stalled"))
             } else {
                 ureq::Error::Io(e)
             }
@@ -302,6 +311,17 @@ impl Client {
             // We surface non-2xx as data, not errors: callers need the body
             // for compat handling and error messages.
             .http_status_as_error(false)
+            // ureq's Config::default() picks up HTTP_PROXY/HTTPS_PROXY/
+            // ALL_PROXY from the environment, and with a proxy configured it
+            // hands our connector zero resolved addresses (proxying is the
+            // proxy connector's job, which we deliberately do not chain).
+            // noob talks only to the configured endpoints, so proxies are
+            // explicitly off; without this line an exported proxy var breaks
+            // every request with a misleading error.
+            .proxy(None)
+            // Bound getaddrinfo so a dead DNS server cannot hang a request;
+            // with a timeout set ureq resolves on a helper thread.
+            .timeout_resolve(Some(Duration::from_secs(5)))
             .build();
         let connector = ()
             .chain(TickTcpConnector {
@@ -364,6 +384,7 @@ impl Client {
                 Trip::Interrupted => ProviderError::Interrupted,
                 Trip::FirstByte => ProviderError::Timeout(TimeoutKind::FirstByte),
                 Trip::Idle => ProviderError::Timeout(TimeoutKind::Idle),
+                Trip::SendStall => ProviderError::Timeout(TimeoutKind::Send),
             };
         }
         match e {
