@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/tests-41%20passing-brightgreen" alt="Tests" />
+  <img src="https://img.shields.io/badge/tests-105%20offline%20%2B%203%20live-brightgreen" alt="Tests" />
   <img src="https://img.shields.io/badge/async%20runtime-none-success" alt="No async runtime" />
   <img src="https://img.shields.io/badge/runtime%20crates-28%20of%2045%20budget-blueviolet" alt="Crate count" />
   <img src="https://img.shields.io/badge/APIs-Chat%20Completions%20%2B%20Responses-7B3FA0" alt="Both OpenAI wire shapes" />
@@ -29,15 +29,18 @@ Why another one? Most lean harnesses pick one wire shape (Codex CLI is Responses
 
 ## What works today
 
-This is the P0 scaffold, in active development. Working right now:
+The provider layer (P1) is done, in active development. Working right now:
 
 - The whole workspace builds inside Docker; the host needs docker and a shell, nothing else.
-- `docker compose run --rm noob exec -p "your prompt"` answers through a local model (Chat Completions; the Responses adapter is P1).
+- `docker compose run --rm noob exec -p "your prompt"` streams the answer token by token through a local model, on either wire shape (Chat Completions and Responses).
+- Tool calls parse correctly from real llama.cpp streams, including two calls in one inference; verified live against qwen3.6, both shapes, full round trip with the tool result replayed through the template.
+- A byte-exact SSE parser survives every TCP split (tested by re-splitting a real capture at every byte offset), plus a quirk matrix for the ways servers bend the spec: missing tool-call ids, arguments as objects, keepalive comments, mid-stream error payloads.
+- Retries with backoff before the first content byte (never after: that would duplicate output), `Retry-After` honored, and a reactive fallback that strips a request field an endpoint 400s on and remembers for the session.
 - Hot config reload: `.env` is re-read on every request, so edits apply on the next call with no container restart.
-- A 1 s tick-read watchdog keeps Ctrl-C responsive within about a second, even while llama.cpp spends minutes of silence processing a 131k-token prompt.
-- 41 tests pass via `./dev.sh test`, including e2e through the compiled binary against a mock OpenAI server.
+- A 1 s tick-read watchdog keeps Ctrl-C responsive within about a second, even while llama.cpp spends minutes of silence processing a 131k-token prompt, and even mid-retry-backoff.
+- 105 offline tests via `./dev.sh test` (e2e through the compiled binary against a mock OpenAI server), 3 live smokes via `./dev.sh smoke`.
 
-The REPL, the tool set, and the agent loop are the next phases; the roadmap below marks exactly what exists and what does not.
+The REPL, the tool set, and the agent loop are the next phase; the roadmap below marks exactly what exists and what does not.
 
 ## Quickstart
 
@@ -80,7 +83,7 @@ flowchart LR
     end
     WS == "bind mount /work" ==> NOOB
     CFG -- "bind mount /config" --> NOOB
-    PROV -- "Chat Completions (today)<br>Responses API (P1)" --> EP
+    PROV -- "Chat Completions · Responses API<br>SSE streamed, retried, watchdog-guarded" --> EP
 ```
 
 Two shipped crates plus a dev-only one: `noob` (the binary: argv dispatch, agent loop, tools, UI) depends on `noob-provider` (transcript in, events out, the only crate allowed to touch the network); `noob-testkit` is the hand-rolled mock OpenAI server the e2e suite runs against, never a runtime dependency. The compose file uses `network_mode: host` so the container reaches model servers on host loopback, and runs as your UID so files written to `/work` are never root-owned.
@@ -105,8 +108,8 @@ The opinionated bits. Where a rule says "test-enforced" that is literal: the moc
 | Phase | Scope | Status |
 |---|---|---|
 | P0 scaffold | Workspace, contracts, Docker build, mock OpenAI server, `exec` skeleton, watchdog | done |
-| P1 provider layer | SSE streaming, Responses adapter, tool-call parsing, retry/backoff | next |
-| P2 core loop + tools | Interactive REPL, the 7 file/shell tools, agent loop, system prompt, compaction, sessions, endpoint autodetect | |
+| P1 provider layer | SSE streaming, Responses adapter, tool-call parsing, retry/backoff | done |
+| P2 core loop + tools | Interactive REPL, the 7 file/shell tools, agent loop, system prompt, compaction, sessions, endpoint autodetect | next |
 | P3 skills | SKILL.md discovery with progressive disclosure ([agentskills.io](https://agentskills.io) standard) | |
 | P4 MCP client | stdio + Streamable HTTP transports, lazy connect | |
 | P5 plan mode | Read-only exploration, explicit `/go` approval | |
@@ -121,7 +124,7 @@ Everything runs inside Docker; nothing is installed on the host. `./dev.sh` is t
 
 | Target | What it does |
 |---|---|
-| `./dev.sh test` | The offline suite: 41 unit + e2e tests against the in-process mock server, run in a dev container |
+| `./dev.sh test` | The offline suite: 105 unit + e2e tests against the in-process mock server, run in a dev container |
 | `./dev.sh build` | The static musl release binary |
 | `./dev.sh docker` | The runtime image |
 | `./dev.sh repl` / `./dev.sh exec "..."` | Compose with your uid:gid passed explicitly, so files under `/work` keep your ownership |
