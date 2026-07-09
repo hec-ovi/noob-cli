@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ureq::Agent;
@@ -359,12 +359,6 @@ fn retry_after(resp: &ureq::http::Response<ureq::Body>) -> Option<Duration> {
 /// eligible: stripping them cannot produce the request the caller meant.
 const COMPAT_STRIPPABLE: &[&str] = &["stream_options", "store", "include", "parallel_tool_calls"];
 
-/// Fields learned bad for this process lifetime only; no persisted registry.
-fn compat_stripped() -> &'static Mutex<HashSet<String>> {
-    static SET: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    SET.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
 /// If the 400 body names a strippable top-level field we sent, return it.
 fn compat_field(body: &serde_json::Value, error_body: &str) -> Option<String> {
     let map = body.as_object()?;
@@ -395,6 +389,9 @@ pub struct Client {
     ctl: WatchdogCtl,
     timeouts: Timeouts,
     retry: RetryPolicy,
+    /// Fields the endpoint 400ed on, remembered for this client's lifetime
+    /// only (one client per process; no persisted quirk registry).
+    compat_stripped: Mutex<HashSet<String>>,
 }
 
 impl Client {
@@ -427,7 +424,7 @@ impl Client {
             })
             .chain(RustlsConnector::default());
         let agent = Agent::with_parts(config, connector, DefaultResolver::default());
-        Client { agent, ctl, timeouts, retry }
+        Client { agent, ctl, timeouts, retry, compat_stripped: Mutex::new(HashSet::new()) }
     }
 
     /// Watchdog handle, for wiring an interrupt source other than SIGINT.
@@ -477,9 +474,9 @@ impl Client {
         api_key: &str,
         body: &mut serde_json::Value,
     ) -> Result<StreamBody, ProviderError> {
-        // Drop fields this process already learned the endpoint rejects.
+        // Drop fields this client already learned the endpoint rejects.
         if let Some(map) = body.as_object_mut() {
-            let known = compat_stripped().lock().unwrap();
+            let known = self.compat_stripped.lock().unwrap();
             map.retain(|k, _| !known.contains(k));
         }
 
@@ -535,8 +532,10 @@ impl Client {
 
             if status == 400 && !compat_retried {
                 if let Some(field) = compat_field(body, &text) {
-                    compat_stripped().lock().unwrap().insert(field.clone());
-                    body.as_object_mut().map(|m| m.remove(&field));
+                    self.compat_stripped.lock().unwrap().insert(field.clone());
+                    if let Some(map) = body.as_object_mut() {
+                        map.remove(&field);
+                    }
                     compat_retried = true;
                     continue; // immediate, does not consume a backoff slot
                 }
@@ -667,5 +666,59 @@ fn map_ureq_error(ctl: &WatchdogCtl, url: &str, e: ureq::Error) -> ProviderError
             ProviderError::Connect(format!("{io}; is the server at {url} running?"))
         }
         other => ProviderError::Connect(format!("{other}; check NOOB_BASE_URL ({url})")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn retry_set_is_exactly_the_spec_list() {
+        for s in [408, 425, 429, 500, 502, 503, 599] {
+            assert!(retryable_status(s), "{s} must be retryable");
+        }
+        for s in [200, 400, 401, 403, 404, 409, 418, 422] {
+            assert!(!retryable_status(s), "{s} must not be retryable");
+        }
+    }
+
+    #[test]
+    fn default_policy_is_three_attempts_1_2_4() {
+        let p = RetryPolicy::default();
+        assert_eq!(
+            p.delays,
+            vec![
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4)
+            ]
+        );
+        assert!(p.jitter);
+    }
+
+    #[test]
+    fn compat_field_matches_only_strippable_fields_we_sent() {
+        let body = json!({"model": "m", "messages": [], "stream_options": {"include_usage": true}});
+        // Named and sent: strippable.
+        assert_eq!(
+            compat_field(&body, r#"{"error":"unknown field: stream_options"}"#),
+            Some("stream_options".to_string())
+        );
+        // Named but never sent: nothing to strip.
+        assert_eq!(compat_field(&body, "store is not supported"), None);
+        // Core fields are never eligible even if the error names them.
+        assert_eq!(compat_field(&body, "invalid value for: messages"), None);
+        // Error that names nothing.
+        assert_eq!(compat_field(&body, "bad request"), None);
+    }
+
+    #[test]
+    fn jitter_stays_in_range_and_is_nonzero() {
+        for _ in 0..200 {
+            let d = jittered(Duration::from_millis(100));
+            assert!(d > Duration::ZERO && d <= Duration::from_millis(100), "{d:?}");
+        }
     }
 }

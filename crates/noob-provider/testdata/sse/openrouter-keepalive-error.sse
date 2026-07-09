@@ -1,0 +1,13 @@
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-or-1","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-or-1","choices":[{"index":0,"delta":{"content":"cafÃ%%CHUNK%%© ðŸ¦%%CHUNK%%€"}}]}
+
+data: {"id":"gen-or-1","choices":[{"index":0,"delta":{"content":" ok"}}]}
+
+%%CHUNK%%data: {"error":{"message":"Provider returned error","code":502}}
+
+data: [DONE]
