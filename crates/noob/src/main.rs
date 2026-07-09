@@ -43,22 +43,33 @@ fn not_yet(cmd: &str, phase: &str) -> ExitCode {
 }
 
 fn cmd_exec(args: &[String]) -> ExitCode {
+    const USAGE: &str = "usage: noob exec -p \"<prompt>\" [--model <name>] [--base-url <url>]";
+    // A flag's value must exist and must not look like another flag;
+    // consuming blindly turns one forgotten value into a silent misconfig.
+    fn value_for(flag: &str, next: Option<&String>) -> Result<String, String> {
+        match next {
+            Some(v) if !v.starts_with('-') => Ok(v.clone()),
+            _ => Err(format!("noob exec: {flag} needs a value; {USAGE}")),
+        }
+    }
+
     let mut prompt: Option<String> = None;
     let mut ov = Overrides::default();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "-p" | "--prompt" => prompt = it.next().cloned(),
-            "--model" => ov.model = it.next().cloned(),
-            "--base-url" => ov.base_url = it.next().cloned(),
-            other => {
-                eprintln!("noob exec: unknown flag {other:?}; usage: noob exec -p \"<prompt>\"");
-                return ExitCode::from(2);
-            }
+        let taken = match arg.as_str() {
+            "-p" | "--prompt" => value_for(arg, it.next()).map(|v| prompt = Some(v)),
+            "--model" => value_for(arg, it.next()).map(|v| ov.model = Some(v)),
+            "--base-url" => value_for(arg, it.next()).map(|v| ov.base_url = Some(v)),
+            other => Err(format!("noob exec: unknown flag {other:?}; {USAGE}")),
+        };
+        if let Err(msg) = taken {
+            eprintln!("{msg}");
+            return ExitCode::from(2);
         }
     }
     let Some(prompt) = prompt.filter(|p| !p.is_empty()) else {
-        eprintln!("noob exec: missing prompt; usage: noob exec -p \"<prompt>\"");
+        eprintln!("noob exec: missing prompt; {USAGE}");
         return ExitCode::from(2);
     };
 
