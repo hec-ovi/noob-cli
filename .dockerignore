@@ -1,0 +1,7 @@
+.git
+.research
+.cargo-home
+target
+config
+docs
+*.md

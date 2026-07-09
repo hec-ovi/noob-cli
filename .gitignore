@@ -1,1 +1,11 @@
 .research/
+
+# build caches (docker bind mounts, user-owned)
+/target
+/.cargo-home
+
+# real config lives here when the repo checkout is used as the /config mount;
+# only the example and the contract are committed
+/config/*
+!/config/.env.example
+!/config/contract.md

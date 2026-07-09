@@ -1,0 +1,11 @@
+[package]
+name = "noob-testkit"
+description = "Dev-only mock OpenAI server (both wire shapes) with automatic wire assertions."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde_json.workspace = true

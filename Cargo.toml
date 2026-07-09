@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/noob", "crates/noob-provider", "crates/noob-testkit"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+repository = "https://github.com/hec-ovi/noob-cli"
+
+[workspace.dependencies]
+noob-provider = { path = "crates/noob-provider" }
+noob-testkit = { path = "crates/noob-testkit" }
+# Pinned exactly: we implement a custom transport on ureq's `unversioned` API,
+# which is explicitly outside its semver promises.
+ureq = { version = "=3.3.0", default-features = false, features = ["rustls"] }
+serde_json = "1.0.150"
+libc = "0.2.186"
+tempfile = "3.27"
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+panic = "abort"
+strip = true
+codegen-units = 1
