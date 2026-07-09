@@ -1,5 +1,6 @@
-# Dev stage: the toolchain `make test` and `make build` run in, so nothing
-# gets installed on the host. build-base carries the C compiler ring needs.
+# Dev stage: the toolchain `./dev.sh test` and `./dev.sh build` run in, so
+# nothing gets installed on the host. build-base carries the C compiler ring
+# needs.
 FROM rust:1.96-alpine AS dev
 RUN apk add --no-cache build-base jq
 

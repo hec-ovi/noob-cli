@@ -1,5 +1,10 @@
-# REPL:     docker compose run --rm noob
-# One-shot: docker compose run --rm noob exec -p "your prompt"
+# REPL:     ./dev.sh repl        (or: docker compose run --rm noob)
+# One-shot: ./dev.sh exec "..."  (or: docker compose run --rm noob exec -p "...")
+#
+# The user mapping below only works if your shell EXPORTS UID and GID
+# (most do not); ./dev.sh passes your real uid:gid explicitly, and so does
+# `docker compose run --user "$(id -u):$(id -g)" ...` if you prefer raw
+# compose. Wrong ownership shows up as EACCES writes under /work.
 services:
   noob:
     build:

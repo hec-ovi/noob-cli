@@ -6,22 +6,25 @@ OpenAI Chat Completions and Responses APIs against any base URL.
 
 ## Build, test, run
 
-Everything runs inside Docker; the host needs docker and nothing else.
+Everything runs inside Docker; the host needs docker and a shell, nothing
+else. `./dev.sh` is the task runner (the Makefile delegates to it, for people
+who have make).
 
-- `make test` runs the whole offline suite (unit + e2e against an in-process
-  mock server). There is no CI; this is the whole story.
-- `make smoke` runs the live suite against local endpoints (opt-in).
-- `make docker` builds the runtime image; `make build` just the static binary.
-- `docker compose run --rm noob` is the REPL,
-  `docker compose run --rm noob exec -p "..."` a one-shot.
-- `make size-check` enforces the footprint budgets (binary <= 8 MB, runtime
-  crate graph <= 45).
+- `./dev.sh test` runs the whole offline suite (unit + e2e against an
+  in-process mock server). There is no CI; this is the whole story.
+- `./dev.sh smoke` runs the live suite against local endpoints (opt-in).
+- `./dev.sh docker` builds the runtime image; `./dev.sh build` just the
+  static binary.
+- `./dev.sh repl` is the REPL, `./dev.sh exec "..."` a one-shot (both pass
+  your uid:gid to compose so files under /work keep your ownership).
+- `./dev.sh size-check` enforces the footprint budgets (binary <= 8 MB,
+  runtime crate graph <= 45).
 
 ## Layout
 
 - `crates/` the cargo workspace (see its contract.md for the crate map)
 - `config/` the committed `.env.example`; the default `/config` mount source
-- `docker/` the two-stage musl Dockerfile
+- `docker/` the musl Dockerfile (dev, builder, and runtime stages)
 - `docs/` design record (research, architecture); not runtime input
 - `compose.yml` the one-command entry point
 

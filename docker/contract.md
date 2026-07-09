@@ -1,6 +1,6 @@
 # docker/
 
-The two-stage musl Dockerfile.
+The three-stage musl Dockerfile.
 
 - `dev` stage: rust:alpine + build-base; the toolchain every `make` target
   runs in, so nothing gets installed on the host.
