@@ -4,6 +4,7 @@ An extremely lightweight, friendly agentic coding CLI. Rust, single static binar
 
 ## Hard requirements
 
+- Zero-friction UX, no learning curve: plug it in and it works. `docker compose up` (or one `docker run` line) must land in a working chat with no wizard and no mandatory config step. Auto-detect local OpenAI-compatible endpoints (llama.cpp, vLLM, Ollama, LM Studio) and sane-default everything else; a commented `.env.example` with obvious variable names covers the rest. Only familiar conventions (AGENTS.md, SKILL.md skills, the usual slash commands, .mcp.json-style config); no invented concepts a user must study first. A `doctor` command diagnoses setup and prints the one-line fix; every error message states its remedy.
 - Rust, single static binary (musl target), instant startup, tiny memory footprint.
 - Docker-first: development and runtime both happen in containers; nothing gets installed on the host. The agent is sandbox-native: it assumes it runs inside a container and treats that as its natural habitat.
 - Works on a bind-mounted host folder (default `/work`), never inside the container filesystem or a named volume.
