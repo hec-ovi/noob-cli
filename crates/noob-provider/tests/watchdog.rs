@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use noob_provider::http::{Client, Timeouts};
+use noob_provider::http::{Client, RetryPolicy, Timeouts};
 use noob_provider::types::{ProviderError, TimeoutKind};
 use noob_testkit::{MockServer, RawStep, http_response};
 use serde_json::json;
@@ -161,10 +161,11 @@ fn interrupt_aborts_within_a_tick() {
     assert!(elapsed < Duration::from_millis(2600), "took {elapsed:?}");
 }
 
-/// Nobody listening: typed connect error naming the URL.
+/// Nobody listening: typed connect error naming the URL. Connect errors are
+/// retryable, so this uses a no-retry policy to assert the raw outcome.
 #[test]
 fn connection_refused_is_a_typed_connect_error() {
-    let client = Client::new(short_timeouts());
+    let client = Client::with_retry(short_timeouts(), RetryPolicy::none());
     let err = client
         .post_json("http://127.0.0.1:9/x", "", &json!({}))
         .unwrap_err();

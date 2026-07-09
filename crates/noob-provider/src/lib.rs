@@ -3,14 +3,17 @@
 //! Sole owner of ureq. Resolves `.env` keys fresh on every request build, so
 //! editing the config file applies on the next call with no restart.
 
+pub mod assemble;
 pub mod chat;
 pub mod envfile;
 pub mod http;
+pub mod responses;
+pub mod sse;
 pub mod types;
 
 use std::path::Path;
 
-use types::{ApiStyle, Endpoint, Overrides, ProviderError, Turn};
+use types::{ApiStyle, Endpoint, Event, Overrides, ProviderError, Turn, TurnRequest};
 
 /// Resolve the endpoint for one request. Called inside every request build:
 /// the `.env` file is opened, parsed, and dropped here, which is what makes
@@ -83,18 +86,17 @@ pub fn resolve_endpoint(config_dir: &Path, ov: &Overrides) -> Result<Endpoint, P
 }
 
 /// Run one model turn: resolve the endpoint fresh, pick the adapter by
-/// api_style, return the assembled assistant turn.
+/// api_style, stream events through `on`, return the assembled turn.
 pub fn run_turn(
     client: &http::Client,
     config_dir: &Path,
     ov: &Overrides,
-    messages: &[serde_json::Value],
+    req: &TurnRequest,
+    on: &mut dyn FnMut(Event),
 ) -> Result<Turn, ProviderError> {
     let ep = resolve_endpoint(config_dir, ov)?;
     match ep.style {
-        ApiStyle::Chat => chat::complete(client, &ep, messages),
-        ApiStyle::Responses => Err(ProviderError::Unsupported(
-            "the Responses API adapter lands in P1; set NOOB_API_STYLE=chat for now".to_string(),
-        )),
+        ApiStyle::Chat => chat::stream(client, &ep, req, on),
+        ApiStyle::Responses => responses::stream(client, &ep, req, on),
     }
 }

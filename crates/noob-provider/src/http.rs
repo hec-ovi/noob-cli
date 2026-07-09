@@ -15,10 +15,11 @@
 //!   prompt, which is why header bytes must not start the idle clock.
 //! - Streaming: between body bytes, budget = idle, reset on every read.
 
+use std::collections::HashSet;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use ureq::Agent;
@@ -96,12 +97,24 @@ impl WatchdogCtl {
         }
     }
 
-    fn begin(&self, t: &Timeouts) {
+    /// Arm once per logical request, BEFORE the retry loop: clears the trip
+    /// and any stale interrupt. Kept separate from `begin` so an interrupt
+    /// arriving during a between-attempts backoff sleep is not silently
+    /// cleared by the next attempt.
+    fn arm(&self) {
         *self.inner.trip.lock().unwrap() = None;
         self.inner.local_interrupt.store(false, Ordering::SeqCst);
+    }
+
+    /// Start the deadline clock for one attempt.
+    fn begin(&self, t: &Timeouts) {
         *self.inner.phase.lock().unwrap() = Phase::AwaitHeaders {
             deadline: Instant::now() + t.first_byte,
         };
+    }
+
+    fn interrupted(&self) -> bool {
+        INTERRUPTED.load(Ordering::SeqCst) || self.inner.local_interrupt.load(Ordering::SeqCst)
     }
 
     fn body_started(&self, t: &Timeouts) {
@@ -134,9 +147,7 @@ impl WatchdogCtl {
     }
 
     fn check(&self) -> Option<Trip> {
-        let trip = if INTERRUPTED.load(Ordering::SeqCst)
-            || self.inner.local_interrupt.load(Ordering::SeqCst)
-        {
+        let trip = if self.interrupted() {
             Some(Trip::Interrupted)
         } else {
             let now = Instant::now();
@@ -293,6 +304,87 @@ impl<In: Transport> Connector<In> for TickTcpConnector {
 }
 
 // ---------------------------------------------------------------------------
+// Retry policy and reactive compat
+// ---------------------------------------------------------------------------
+
+/// Backoff schedule for pre-content retries. One initial attempt plus one
+/// retry per delay entry. Full jitter: each sleep is uniform in (0, delay].
+#[derive(Clone, Debug)]
+pub struct RetryPolicy {
+    pub delays: Vec<Duration>,
+    pub jitter: bool,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        RetryPolicy {
+            delays: vec![
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+            ],
+            jitter: true,
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// No retries at all (watchdog tests, doctor probes).
+    pub fn none() -> Self {
+        RetryPolicy { delays: Vec::new(), jitter: false }
+    }
+}
+
+/// A retry happens only before the first streamed content byte:
+/// connect/TLS failures and these statuses. Mid-stream death after content
+/// surfaces as a turn error; a silent retry would duplicate output.
+fn retryable_status(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429) || (500..600).contains(&status)
+}
+
+fn retryable_error(e: &ProviderError) -> bool {
+    matches!(
+        e,
+        ProviderError::Connect(_) | ProviderError::Timeout(TimeoutKind::Connect)
+    )
+}
+
+/// `Retry-After: <seconds>` honored up to 60 s; the HTTP-date form is ignored.
+fn retry_after(resp: &ureq::http::Response<ureq::Body>) -> Option<Duration> {
+    let secs: u64 = resp.headers().get("retry-after")?.to_str().ok()?.trim().parse().ok()?;
+    Some(Duration::from_secs(secs.min(60)))
+}
+
+/// Fields a 400-and-strip compat retry may remove. Core fields are never
+/// eligible: stripping them cannot produce the request the caller meant.
+const COMPAT_STRIPPABLE: &[&str] = &["stream_options", "store", "include", "parallel_tool_calls"];
+
+/// Fields learned bad for this process lifetime only; no persisted registry.
+fn compat_stripped() -> &'static Mutex<HashSet<String>> {
+    static SET: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// If the 400 body names a strippable top-level field we sent, return it.
+fn compat_field(body: &serde_json::Value, error_body: &str) -> Option<String> {
+    let map = body.as_object()?;
+    COMPAT_STRIPPABLE
+        .iter()
+        .copied()
+        .find(|f| map.contains_key(*f) && error_body.contains(*f))
+        .map(str::to_string)
+}
+
+/// Uniform jitter in (0, max]. Seeded from the OS via RandomState; no rand
+/// crate for one sleep.
+fn jittered(max: Duration) -> Duration {
+    use std::hash::{BuildHasher, Hasher};
+    let r = std::collections::hash_map::RandomState::new().build_hasher().finish();
+    let ms = max.as_millis().max(1) as u64;
+    Duration::from_millis(r % ms + 1)
+}
+
+// ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
 
@@ -302,10 +394,15 @@ pub struct Client {
     agent: Agent,
     ctl: WatchdogCtl,
     timeouts: Timeouts,
+    retry: RetryPolicy,
 }
 
 impl Client {
     pub fn new(timeouts: Timeouts) -> Client {
+        Client::with_retry(timeouts, RetryPolicy::default())
+    }
+
+    pub fn with_retry(timeouts: Timeouts, retry: RetryPolicy) -> Client {
         let ctl = WatchdogCtl::new();
         let config = Config::builder()
             // We surface non-2xx as data, not errors: callers need the body
@@ -330,7 +427,7 @@ impl Client {
             })
             .chain(RustlsConnector::default());
         let agent = Agent::with_parts(config, connector, DefaultResolver::default());
-        Client { agent, ctl, timeouts }
+        Client { agent, ctl, timeouts, retry }
     }
 
     /// Watchdog handle, for wiring an interrupt source other than SIGINT.
@@ -343,58 +440,232 @@ impl Client {
     }
 
     /// POST a JSON body, read the whole response through the watchdog.
-    /// Returns (status, body bytes). P1 replaces whole-body reads with
-    /// chunked SSE streaming over the same transport.
+    /// Returns (status, body bytes). Non-streamed convenience: same retry
+    /// and compat behavior as the streaming path.
     pub fn post_json(
         &self,
         url: &str,
         api_key: &str,
         body: &serde_json::Value,
     ) -> Result<(u16, Vec<u8>), ProviderError> {
-        self.ctl.begin(&self.timeouts);
-        let result = (|| {
-            let mut req = self
-                .agent
-                .post(url)
-                .header("content-type", "application/json");
-            if !api_key.is_empty() {
-                req = req.header("authorization", &format!("Bearer {api_key}"));
+        let mut body = body.clone();
+        match self.post_json_stream(url, api_key, &mut body) {
+            Ok(mut stream) => {
+                let status = stream.status();
+                let bytes = stream.read_to_end()?;
+                Ok((status, bytes))
             }
-            let mut resp = req
-                .send(body.to_string().as_str())
-                .map_err(|e| self.map_error(url, e))?;
-            let status = resp.status().as_u16();
-            // Headers are in; from here the first-byte budget covers the
-            // silent prompt-processing window before body byte one.
-            self.ctl.body_started(&self.timeouts);
-            let mut bytes = Vec::new();
-            resp.body_mut()
-                .as_reader()
-                .read_to_end(&mut bytes)
-                .map_err(|e| self.map_error(url, ureq::Error::Io(e)))?;
-            Ok((status, bytes))
-        })();
-        self.ctl.finish();
-        result
+            // Callers of this convenience get non-2xx as data, like before.
+            Err(ProviderError::Http { status, body }) => Ok((status, body.into_bytes())),
+            Err(e) => Err(e),
+        }
     }
 
-    fn map_error(&self, url: &str, e: ureq::Error) -> ProviderError {
-        if let Some(trip) = self.ctl.take_trip() {
-            return match trip {
-                Trip::Interrupted => ProviderError::Interrupted,
-                Trip::FirstByte => ProviderError::Timeout(TimeoutKind::FirstByte),
-                Trip::Idle => ProviderError::Timeout(TimeoutKind::Idle),
-                Trip::SendStall => ProviderError::Timeout(TimeoutKind::Send),
+    /// POST a JSON body and hand back the response as a watchdog-guarded
+    /// streaming reader. Everything that may retry happens in here, BEFORE
+    /// the first content byte reaches the caller:
+    /// - connect/TLS errors and 408/425/429/5xx: backoff per the retry
+    ///   policy, `Retry-After` honored up to 60 s;
+    /// - a 400 naming a strippable top-level field we sent (in practice
+    ///   `stream_options`): field removed from `body`, remembered for the
+    ///   process lifetime, one immediate retry.
+    /// Non-2xx after all that surfaces as `ProviderError::Http` with the
+    /// (bounded) body already read.
+    pub fn post_json_stream(
+        &self,
+        url: &str,
+        api_key: &str,
+        body: &mut serde_json::Value,
+    ) -> Result<StreamBody, ProviderError> {
+        // Drop fields this process already learned the endpoint rejects.
+        if let Some(map) = body.as_object_mut() {
+            let known = compat_stripped().lock().unwrap();
+            map.retain(|k, _| !known.contains(k));
+        }
+
+        self.ctl.arm();
+        let mut backoff = self.retry.delays.iter();
+        let mut compat_retried = false;
+        loop {
+            self.ctl.begin(&self.timeouts);
+            let sent = (|| {
+                let mut req = self
+                    .agent
+                    .post(url)
+                    .header("content-type", "application/json");
+                if !api_key.is_empty() {
+                    req = req.header("authorization", &format!("Bearer {api_key}"));
+                }
+                req.send(body.to_string().as_str())
+                    .map_err(|e| map_ureq_error(&self.ctl, url, e))
+            })();
+
+            let resp = match sent {
+                Ok(resp) => resp,
+                Err(e) => {
+                    self.ctl.finish();
+                    if retryable_error(&e) {
+                        if let Some(&delay) = backoff.next() {
+                            self.sleep_interruptible(delay)?;
+                            continue;
+                        }
+                    }
+                    return Err(e);
+                }
             };
-        }
-        match e {
-            ureq::Error::Io(io) if io.kind() == io::ErrorKind::TimedOut => {
-                ProviderError::Timeout(TimeoutKind::Connect)
+
+            let status = resp.status().as_u16();
+            if (200..300).contains(&status) {
+                // Headers are in; from here the first-byte budget covers the
+                // silent prompt-processing window before body byte one.
+                self.ctl.body_started(&self.timeouts);
+                return Ok(StreamBody::new(self.ctl.clone(), url, resp));
             }
-            ureq::Error::Io(io) => ProviderError::Connect(format!(
-                "{io}; is the server at {url} running?"
-            )),
-            other => ProviderError::Connect(format!("{other}; check NOOB_BASE_URL ({url})")),
+
+            // Error statuses: read the (bounded) body through the watchdog,
+            // then decide between compat strip, backoff, and surfacing.
+            let wait = retry_after(&resp);
+            self.ctl.body_started(&self.timeouts);
+            let mut stream = StreamBody::new(self.ctl.clone(), url, resp);
+            let text = match stream.read_to_end() {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(e) => return Err(e),
+            };
+            drop(stream);
+
+            if status == 400 && !compat_retried {
+                if let Some(field) = compat_field(body, &text) {
+                    compat_stripped().lock().unwrap().insert(field.clone());
+                    body.as_object_mut().map(|m| m.remove(&field));
+                    compat_retried = true;
+                    continue; // immediate, does not consume a backoff slot
+                }
+            }
+            if retryable_status(status) {
+                if let Some(&delay) = backoff.next() {
+                    self.sleep_interruptible(wait.unwrap_or_else(|| {
+                        if self.retry.jitter { jittered(delay) } else { delay }
+                    }))?;
+                    continue;
+                }
+            }
+            return Err(ProviderError::Http { status, body: text });
         }
+    }
+
+    /// Backoff sleep in 50 ms slices so Ctrl-C lands between attempts too.
+    fn sleep_interruptible(&self, total: Duration) -> Result<(), ProviderError> {
+        let deadline = Instant::now() + total;
+        loop {
+            if self.ctl.interrupted() {
+                return Err(ProviderError::Interrupted);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(());
+            }
+            std::thread::sleep((deadline - now).min(Duration::from_millis(50)));
+        }
+    }
+}
+
+/// A streaming response body. Every read goes through the tick-read
+/// watchdog: interrupts and stalls surface as typed errors within about a
+/// second. Dropping it returns the watchdog to `Idle`.
+pub struct StreamBody {
+    ctl: WatchdogCtl,
+    url: String,
+    status: u16,
+    content_type: String,
+    reader: ureq::BodyReader<'static>,
+}
+
+/// Bound on non-SSE whole-body reads (error bodies, the content-type-guard
+/// path). SSE streams are unbounded by design; completions are not.
+const MAX_WHOLE_BODY: u64 = 8 * 1024 * 1024;
+
+impl StreamBody {
+    fn new(ctl: WatchdogCtl, url: &str, resp: ureq::http::Response<ureq::Body>) -> StreamBody {
+        let status = resp.status().as_u16();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let (_, body) = resp.into_parts();
+        StreamBody {
+            ctl,
+            url: url.to_string(),
+            status,
+            content_type,
+            reader: body.into_reader(),
+        }
+    }
+
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// Lowercased media type without parameters, e.g. `application/json`.
+    pub fn media_type(&self) -> String {
+        self.content_type
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase()
+    }
+
+    /// Read the next chunk of body bytes; 0 means a clean end of stream.
+    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, ProviderError> {
+        self.reader
+            .read(buf)
+            .map_err(|e| map_ureq_error(&self.ctl, &self.url, ureq::Error::Io(e)))
+    }
+
+    /// Read the whole remaining body (bounded; not for SSE streams).
+    pub fn read_to_end(&mut self) -> Result<Vec<u8>, ProviderError> {
+        let mut bytes = Vec::new();
+        let mut buf = [0u8; 16 * 1024];
+        loop {
+            let n = self.read(&mut buf)?;
+            if n == 0 {
+                return Ok(bytes);
+            }
+            bytes.extend_from_slice(&buf[..n]);
+            if bytes.len() as u64 > MAX_WHOLE_BODY {
+                return Err(ProviderError::Wire(format!(
+                    "response body exceeded {} bytes without ending",
+                    MAX_WHOLE_BODY
+                )));
+            }
+        }
+    }
+}
+
+impl Drop for StreamBody {
+    fn drop(&mut self) {
+        self.ctl.finish();
+    }
+}
+
+fn map_ureq_error(ctl: &WatchdogCtl, url: &str, e: ureq::Error) -> ProviderError {
+    if let Some(trip) = ctl.take_trip() {
+        return match trip {
+            Trip::Interrupted => ProviderError::Interrupted,
+            Trip::FirstByte => ProviderError::Timeout(TimeoutKind::FirstByte),
+            Trip::Idle => ProviderError::Timeout(TimeoutKind::Idle),
+            Trip::SendStall => ProviderError::Timeout(TimeoutKind::Send),
+        };
+    }
+    match e {
+        ureq::Error::Io(io) if io.kind() == io::ErrorKind::TimedOut => {
+            ProviderError::Timeout(TimeoutKind::Connect)
+        }
+        ureq::Error::Io(io) => {
+            ProviderError::Connect(format!("{io}; is the server at {url} running?"))
+        }
+        other => ProviderError::Connect(format!("{other}; check NOOB_BASE_URL ({url})")),
     }
 }

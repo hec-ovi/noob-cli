@@ -75,7 +75,8 @@ fn missing_base_url_fails_with_remedy() {
 #[test]
 fn http_error_body_reaches_the_user() {
     let server = MockServer::start();
-    server.enqueue_json(500, serde_json::json!({"error": "kaboom-marker"}));
+    // 404 is NOT in the retry set (unlike 5xx), so exactly one request.
+    server.enqueue_json(404, serde_json::json!({"error": "kaboom-marker"}));
     let dir = tempfile::tempdir().unwrap();
     write_env(dir.path(), &server.base_url(), "", "m");
 
@@ -83,8 +84,9 @@ fn http_error_body_reaches_the_user() {
 
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("500"), "stderr: {stderr}");
+    assert!(stderr.contains("404"), "stderr: {stderr}");
     assert!(stderr.contains("kaboom-marker"), "stderr: {stderr}");
+    assert_eq!(server.recorded().len(), 1, "a 404 must not be retried");
     server.assert_clean();
 }
 

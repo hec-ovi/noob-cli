@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use serde_json::Value;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApiStyle {
     Chat,
@@ -58,6 +60,48 @@ pub struct Turn {
     pub tool_calls: Vec<ToolCall>,
     pub usage: Option<Usage>,
     pub finish: Finish,
+    /// Responses API only: the completed output items in their captured
+    /// wire form, replayed verbatim in the next request's `input` so
+    /// reasoning items survive byte-identical (append-only cache discipline).
+    /// Always empty for Chat Completions.
+    pub raw_items: Vec<Value>,
+}
+
+/// One tool the model may call, in neutral form. Each adapter wraps it in
+/// its wire shape (chat nests under `function`, responses flattens).
+#[derive(Clone, Debug)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema for the arguments object.
+    pub parameters: Value,
+}
+
+/// One transcript item, adapter-independent. The agent loop (P2) owns the
+/// transcript; adapters serialize it per wire shape.
+#[derive(Clone, Debug)]
+pub enum Item {
+    User(String),
+    /// A prior assistant turn, kept with everything needed to replay it.
+    Assistant {
+        text: String,
+        tool_calls: Vec<ToolCall>,
+        /// Captured Responses output items; replayed verbatim when present.
+        raw_items: Vec<Value>,
+    },
+    ToolResult {
+        call_id: String,
+        content: String,
+    },
+}
+
+/// Everything one model turn needs, minus the endpoint.
+#[derive(Clone, Debug, Default)]
+pub struct TurnRequest {
+    /// System prompt; `instructions` on the Responses shape.
+    pub system: Option<String>,
+    pub items: Vec<Item>,
+    pub tools: Vec<ToolSpec>,
 }
 
 /// Stream events, delivered in arrival order. P0 uses only the assembled

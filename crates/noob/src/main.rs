@@ -3,12 +3,12 @@
 
 mod config;
 
+use std::io::Write;
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
 
 use noob_provider::http::{Client, INTERRUPTED, Timeouts};
-use noob_provider::types::{Overrides, ProviderError};
-use serde_json::json;
+use noob_provider::types::{Event, Item, Overrides, ProviderError, TurnRequest};
 
 fn main() -> ExitCode {
     install_sigint_handler();
@@ -75,19 +75,45 @@ fn cmd_exec(args: &[String]) -> ExitCode {
 
     let config_dir = config::config_dir();
     let client = Client::new(Timeouts::default());
-    // P0: a single user message and one turn. The system prompt, tools, and
-    // the agent loop land in P2.
-    let messages = vec![json!({"role": "user", "content": prompt})];
-    match noob_provider::run_turn(&client, &config_dir, &ov, &messages) {
+    // P1: a single user turn, streamed to stdout as it arrives. The system
+    // prompt, tools, and the agent loop land in P2.
+    let req = TurnRequest {
+        system: None,
+        items: vec![Item::User(prompt)],
+        tools: vec![],
+    };
+    let mut printed = 0usize;
+    let mut on = |ev: Event| {
+        if let Event::Text(t) = ev {
+            print!("{t}");
+            let _ = std::io::stdout().flush();
+            printed += t.len();
+        }
+    };
+    match noob_provider::run_turn(&client, &config_dir, &ov, &req, &mut on) {
         Ok(turn) => {
-            println!("{}", turn.text);
+            if printed > 0 {
+                if !turn.text.ends_with('\n') {
+                    println!();
+                }
+            } else {
+                // Guard against silently empty output (e.g. tool-call-only
+                // turns before the loop exists).
+                println!("{}", turn.text);
+            }
             ExitCode::SUCCESS
         }
         Err(ProviderError::Interrupted) => {
+            if printed > 0 {
+                println!();
+            }
             eprintln!("noob: interrupted");
             ExitCode::from(130)
         }
         Err(e) => {
+            if printed > 0 {
+                println!();
+            }
             eprintln!("noob: {e}");
             ExitCode::FAILURE
         }
