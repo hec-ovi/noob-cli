@@ -33,6 +33,9 @@ pub enum RawStep {
 enum Scripted {
     Json { status: u16, body: String },
     Raw(Vec<RawStep>),
+    /// Like Raw, but keeps the connection open for the next request (the
+    /// bytes must be a self-delimiting response, e.g. chunked encoding).
+    RawKeepAlive(Vec<RawStep>),
 }
 
 #[derive(Clone, Debug)]
@@ -63,6 +66,7 @@ struct Shared {
     recorded: Mutex<Vec<Recorded>>,
     violations: Mutex<Vec<String>>,
     allow_prefix_break: AtomicBool,
+    connections: std::sync::atomic::AtomicUsize,
 }
 
 pub struct MockServer {
@@ -79,6 +83,7 @@ impl MockServer {
             recorded: Mutex::new(Vec::new()),
             violations: Mutex::new(Vec::new()),
             allow_prefix_break: AtomicBool::new(false),
+            connections: std::sync::atomic::AtomicUsize::new(0),
         });
         let accept_shared = shared.clone();
         std::thread::spawn(move || {
@@ -127,6 +132,23 @@ impl MockServer {
             .lock()
             .unwrap()
             .push_back(Scripted::Raw(steps));
+    }
+
+    /// Enqueue raw bytes that leave the connection open afterwards. The
+    /// bytes must form a self-delimiting response (chunked encoding or a
+    /// content-length), or the client will wait forever for the body end.
+    pub fn enqueue_raw_keepalive(&self, steps: Vec<RawStep>) {
+        self.shared
+            .script
+            .lock()
+            .unwrap()
+            .push_back(Scripted::RawKeepAlive(steps));
+    }
+
+    /// How many TCP connections the server has accepted. Lets tests assert
+    /// keep-alive reuse (two requests, one connection).
+    pub fn connection_count(&self) -> usize {
+        self.shared.connections.load(Ordering::SeqCst)
     }
 
     /// Enqueue an SSE response: each entry becomes one `data:` event, sent
@@ -183,6 +205,22 @@ pub fn http_response(status: u16, content_length: Option<usize>) -> Vec<u8> {
 pub fn sse_headers() -> Vec<u8> {
     b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\n\r\n"
         .to_vec()
+}
+
+/// A complete chunked-encoded SSE response (the framing llama.cpp and
+/// OpenAI actually use): one chunk per event, terminated properly, so the
+/// connection can be kept alive. Pair with `enqueue_raw_keepalive`.
+pub fn chunked_sse_response(datas: &[&str]) -> Vec<u8> {
+    let mut out = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n"
+        .to_vec();
+    for d in datas {
+        let event = format!("data: {d}\n\n");
+        out.extend_from_slice(format!("{:x}\r\n", event.len()).as_bytes());
+        out.extend_from_slice(event.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"0\r\n\r\n");
+    out
 }
 
 /// The `data:` payloads of a standard streamed chat completion.
@@ -242,6 +280,7 @@ pub fn load_fixture_chunks(path: impl AsRef<std::path::Path>) -> Vec<Vec<u8>> {
 }
 
 fn handle_connection(mut stream: TcpStream, shared: Arc<Shared>) {
+    shared.connections.fetch_add(1, Ordering::SeqCst);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
     loop {
         let Some(req) = read_request(&mut stream) else { return };
@@ -261,17 +300,16 @@ fn handle_connection(mut stream: TcpStream, shared: Arc<Shared>) {
                 // keep-alive: fall through and read the next request
             }
             Some(Scripted::Raw(steps)) => {
-                for step in steps {
-                    match step {
-                        RawStep::Bytes(b) => {
-                            if stream.write_all(&b).is_err() || stream.flush().is_err() {
-                                return;
-                            }
-                        }
-                        RawStep::SleepMs(ms) => std::thread::sleep(Duration::from_millis(ms)),
-                    }
+                if !write_steps(&mut stream, steps) {
+                    return;
                 }
                 return; // raw scripts close the connection
+            }
+            Some(Scripted::RawKeepAlive(steps)) => {
+                if !write_steps(&mut stream, steps) {
+                    return;
+                }
+                // fall through: keep reading on this connection
             }
             None => {
                 shared
@@ -287,6 +325,20 @@ fn handle_connection(mut stream: TcpStream, shared: Arc<Shared>) {
             }
         }
     }
+}
+
+fn write_steps(stream: &mut TcpStream, steps: Vec<RawStep>) -> bool {
+    for step in steps {
+        match step {
+            RawStep::Bytes(b) => {
+                if stream.write_all(&b).is_err() || stream.flush().is_err() {
+                    return false;
+                }
+            }
+            RawStep::SleepMs(ms) => std::thread::sleep(Duration::from_millis(ms)),
+        }
+    }
+    true
 }
 
 fn read_request(stream: &mut TcpStream) -> Option<Recorded> {
@@ -501,6 +553,7 @@ mod tests {
             recorded: Mutex::new(Vec::new()),
             violations: Mutex::new(Vec::new()),
             allow_prefix_break: AtomicBool::new(false),
+            connections: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 

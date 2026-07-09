@@ -124,6 +124,15 @@ impl WatchdogCtl {
         };
     }
 
+    /// Short grace window for post-stream drain reads: whatever phase was
+    /// active, allow at most `window` of further silence.
+    fn begin_drain(&self, window: Duration) {
+        *self.inner.phase.lock().unwrap() = Phase::Streaming {
+            deadline: Instant::now() + window,
+            idle: window,
+        };
+    }
+
     fn finish(&self) {
         *self.inner.phase.lock().unwrap() = Phase::Idle;
     }
@@ -359,13 +368,23 @@ fn retry_after(resp: &ureq::http::Response<ureq::Body>) -> Option<Duration> {
 /// eligible: stripping them cannot produce the request the caller meant.
 const COMPAT_STRIPPABLE: &[&str] = &["stream_options", "store", "include", "parallel_tool_calls"];
 
-/// If the 400 body names a strippable top-level field we sent, return it.
+/// If the 400 body NAMES a strippable top-level field we sent, return it.
+/// "Names" means quoted like a field (`"stream_options"`, `'store'`,
+/// backticks): servers that reject a field quote it (OpenAI `Unknown
+/// parameter: 'x'`, pydantic `["body","x"]`, llama.cpp `"x"`). A bare
+/// substring match would false-trigger on English prose ("must include",
+/// "cannot be stored") and permanently strip a field the server accepts.
 fn compat_field(body: &serde_json::Value, error_body: &str) -> Option<String> {
     let map = body.as_object()?;
     COMPAT_STRIPPABLE
         .iter()
         .copied()
-        .find(|f| map.contains_key(*f) && error_body.contains(*f))
+        .find(|f| {
+            map.contains_key(*f)
+                && [format!("\"{f}\""), format!("'{f}'"), format!("`{f}`")]
+                    .iter()
+                    .any(|quoted| error_body.contains(quoted.as_str()))
+        })
         .map(str::to_string)
 }
 
@@ -618,9 +637,49 @@ impl StreamBody {
 
     /// Read the next chunk of body bytes; 0 means a clean end of stream.
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, ProviderError> {
-        self.reader
-            .read(buf)
-            .map_err(|e| map_ureq_error(&self.ctl, &self.url, ureq::Error::Io(e)))
+        match self.reader.read(buf) {
+            Ok(n) => {
+                if n > 0 {
+                    // Body bytes that arrived in the same socket read as the
+                    // headers are served from ureq's buffer without touching
+                    // the transport, so the transport-level on_bytes never
+                    // fires for them; delivery to the caller is the reliable
+                    // progress signal that moves the watchdog to the idle
+                    // clock (and keeps resetting it).
+                    self.ctl.on_bytes();
+                }
+                Ok(n)
+            }
+            Err(e) => Err(map_ureq_error(&self.ctl, &self.url, ureq::Error::Io(e))),
+        }
+    }
+
+    /// Consume the residual bytes after a logical end-of-stream marker
+    /// (chat's `[DONE]`) so ureq sees the body reach its real end and
+    /// returns the connection to the pool; stopping short strands it and
+    /// every turn pays a fresh handshake. Bounded by `window` and a small
+    /// byte cap: on a server that misbehaves past the marker we just give
+    /// up and the connection is not reused, same as not draining.
+    pub fn drain_for_reuse(&mut self, window: Duration) {
+        self.ctl.begin_drain(window);
+        let mut buf = [0u8; 4096];
+        let mut total = 0usize;
+        loop {
+            match self.reader.read(&mut buf) {
+                Ok(0) => return,
+                Ok(n) => {
+                    total += n;
+                    if total > 16 * 1024 {
+                        return;
+                    }
+                }
+                Err(_) => {
+                    // A trip here (or any IO error) only costs the reuse.
+                    self.ctl.take_trip();
+                    return;
+                }
+            }
+        }
     }
 
     /// Read the whole remaining body (bounded; not for SSE streams).
@@ -699,19 +758,32 @@ mod tests {
     }
 
     #[test]
-    fn compat_field_matches_only_strippable_fields_we_sent() {
-        let body = json!({"model": "m", "messages": [], "stream_options": {"include_usage": true}});
-        // Named and sent: strippable.
-        assert_eq!(
-            compat_field(&body, r#"{"error":"unknown field: stream_options"}"#),
-            Some("stream_options".to_string())
-        );
+    fn compat_field_matches_only_quoted_field_names_we_sent() {
+        let body = json!({"model": "m", "messages": [],
+            "stream_options": {"include_usage": true}, "store": false});
+        // The real formats: OpenAI single quotes, pydantic loc arrays,
+        // llama.cpp double quotes, backticks.
+        for err in [
+            r#"Unknown parameter: 'stream_options'"#,
+            r#"{"detail":[{"loc":["body","stream_options"],"msg":"extra"}]}"#,
+            r#"Unrecognized member: "stream_options""#,
+            "unexpected field `stream_options`",
+        ] {
+            assert_eq!(
+                compat_field(&body, err),
+                Some("stream_options".to_string()),
+                "err: {err}"
+            );
+        }
+        // English prose containing a field name as a word must NOT strip:
+        // a false strip is remembered for the whole client lifetime.
+        assert_eq!(compat_field(&body, "input must include at least one item"), None);
+        assert_eq!(compat_field(&body, "this response cannot be stored"), None);
+        assert_eq!(compat_field(&body, "unknown field: stream_options"), None, "unquoted");
         // Named but never sent: nothing to strip.
-        assert_eq!(compat_field(&body, "store is not supported"), None);
-        // Core fields are never eligible even if the error names them.
-        assert_eq!(compat_field(&body, "invalid value for: messages"), None);
-        // Error that names nothing.
-        assert_eq!(compat_field(&body, "bad request"), None);
+        assert_eq!(compat_field(&body, "'include' is not supported"), None);
+        // Core fields are never eligible even if the error quotes them.
+        assert_eq!(compat_field(&body, r#"invalid value for "messages""#), None);
     }
 
     #[test]

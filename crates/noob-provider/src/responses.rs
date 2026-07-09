@@ -352,15 +352,54 @@ impl State {
             on(Event::Usage(usage));
         }
         if self.finish.is_none() {
-            self.finish = Some(if self.calls.is_empty() {
-                Finish::Stop
-            } else {
-                Finish::ToolCalls
+            // The status matters on the content-type-guard path, where the
+            // whole response object (possibly failed or incomplete) arrives
+            // as one JSON document and no response.failed event ever fires.
+            self.finish = Some(match response.get("status").and_then(Value::as_str) {
+                Some("failed") => Finish::Error(
+                    response
+                        .pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("the server reported the response failed")
+                        .to_string(),
+                ),
+                Some("incomplete") => {
+                    let reason = response
+                        .pointer("/incomplete_details/reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    if reason == "content_filter" {
+                        Finish::ContentFilter
+                    } else {
+                        Finish::Error(format!("response incomplete: {reason}"))
+                    }
+                }
+                _ if self.calls.is_empty() => Finish::Stop,
+                _ => Finish::ToolCalls,
             });
         }
     }
 
     fn finish(mut self, on: &mut dyn FnMut(Event)) -> Turn {
+        // A server that omitted call_id got a synthesized ToolCall.id; the
+        // captured raw item must carry the same id, or the replayed
+        // transcript pairs a function_call_output with no function_call.
+        for item in &mut self.raw_items {
+            if item.get("type").and_then(Value::as_str) != Some("function_call") {
+                continue;
+            }
+            let missing = item
+                .get("call_id")
+                .and_then(Value::as_str)
+                .map(str::is_empty)
+                .unwrap_or(true);
+            if missing {
+                let item_id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+                if let Some((_, call)) = self.calls.iter().find(|(iid, _)| iid == item_id) {
+                    item["call_id"] = Value::String(call.id.clone());
+                }
+            }
+        }
         let tool_calls: Vec<ToolCall> = self
             .calls
             .drain(..)
@@ -533,6 +572,55 @@ mod tests {
         let (turn, _) = drive(&[("response.output_text.delta", json!({"delta": "par"}))]);
         assert!(matches!(turn.finish, Finish::Error(_)));
         assert_eq!(turn.text, "par");
+    }
+
+    #[test]
+    fn guard_path_failed_and_incomplete_statuses_are_typed() {
+        // The content-type-guard path feeds a whole response object in;
+        // its status must not be mistaken for success.
+        let mut state = State::default();
+        state.on_completed_response(
+            &json!({"status": "failed", "error": {"message": "boom"}, "output": []}),
+            &mut |_| {},
+        );
+        let turn = state.finish(&mut |_| {});
+        assert!(matches!(turn.finish, Finish::Error(ref m) if m == "boom"));
+
+        let mut state = State::default();
+        state.on_completed_response(
+            &json!({"status": "incomplete",
+                "incomplete_details": {"reason": "content_filter"}, "output": []}),
+            &mut |_| {},
+        );
+        let turn = state.finish(&mut |_| {});
+        assert_eq!(turn.finish, Finish::ContentFilter);
+    }
+
+    #[test]
+    fn synthesized_call_id_is_patched_into_the_captured_raw_item() {
+        // Server omits call_id: the ToolCall gets a synthesized id, and the
+        // captured raw item must carry the SAME id or the replayed
+        // transcript pairs a function_call_output with no function_call.
+        let (turn, _) = drive(&[
+            (
+                "response.output_item.added",
+                json!({"item": {"id": "fc_1", "type": "function_call",
+                    "name": "read", "arguments": ""}}),
+            ),
+            (
+                "response.function_call_arguments.delta",
+                json!({"item_id": "fc_1", "delta": "{}"}),
+            ),
+            (
+                "response.completed",
+                json!({"response": {"status": "completed", "output": [
+                    {"id": "fc_1", "type": "function_call",
+                     "name": "read", "arguments": "{}"}]}}),
+            ),
+        ]);
+        let id = &turn.tool_calls[0].id;
+        assert!(id.starts_with("call_resp_"), "{id}");
+        assert_eq!(turn.raw_items[0]["call_id"], json!(id.as_str()));
     }
 
     #[test]

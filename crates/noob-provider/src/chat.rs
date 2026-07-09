@@ -79,6 +79,10 @@ pub fn stream(
             break; // stream ended without [DONE]; finish() handles it
         }
     }
+    // Consume the trailing bytes after [DONE] (normally just the chunked
+    // terminator, already in flight) so the connection returns to ureq's
+    // pool instead of being torn down every turn.
+    resp.drain_for_reuse(std::time::Duration::from_millis(250));
     Ok(asm.finish(on))
 }
 
@@ -175,8 +179,9 @@ pub(crate) fn parse_completion(bytes: &[u8]) -> Result<Turn, ProviderError> {
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
-                    // Some templates omit the id; a tool result needs one.
-                    .unwrap_or_else(|| format!("call_0_{i}")),
+                    // Some templates omit the id; a tool result needs one,
+                    // and it must not collide across turns in a transcript.
+                    .unwrap_or_else(|| crate::assemble::synth_call_id(i)),
                 name: f
                     .get("name")
                     .and_then(Value::as_str)
@@ -233,10 +238,13 @@ mod tests {
             "finish_reason":"tool_calls"}]}"#;
         let turn = parse_completion(body.as_bytes()).unwrap();
         assert_eq!(turn.finish, Finish::ToolCalls);
-        assert_eq!(turn.tool_calls[0].id, "call_0_0");
+        assert!(turn.tool_calls[0].id.starts_with("call_"), "{}", turn.tool_calls[0].id);
         assert_eq!(turn.tool_calls[0].name, "read");
         let args: serde_json::Value = serde_json::from_str(&turn.tool_calls[0].arguments).unwrap();
         assert_eq!(args["path"], "a.txt");
+        // Ids must never collide across turns within one transcript.
+        let turn2 = parse_completion(body.as_bytes()).unwrap();
+        assert_ne!(turn.tool_calls[0].id, turn2.tool_calls[0].id);
     }
 
     #[test]

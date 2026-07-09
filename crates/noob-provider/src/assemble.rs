@@ -14,6 +14,14 @@ use crate::types::{Event, Finish, ToolCall, Turn, Usage};
 /// ids must not collide across turns within one transcript.
 static SYNTH_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// `call_<seq>_<index>`: unique for the process lifetime, so no two turns
+/// in one transcript can collide. Shared by every path that has to invent
+/// an id (streamed deltas, non-streamed completions).
+pub(crate) fn synth_call_id(index: usize) -> String {
+    let seq = SYNTH_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("call_{seq}_{index}")
+}
+
 #[derive(Debug, Default)]
 struct PartialCall {
     id: String,
@@ -113,20 +121,41 @@ impl Assembler {
             on(Event::Reasoning(r.to_string()));
         }
         if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
-            for entry in calls {
-                self.on_tool_delta(entry, on);
+            for (i, entry) in calls.iter().enumerate() {
+                // A non-delta message's array has no index fields; its
+                // position IS the index (parse_completion semantics).
+                let positional = if is_delta { None } else { Some(i as u64) };
+                self.on_tool_delta(entry, positional, on);
             }
         }
     }
 
-    fn on_tool_delta(&mut self, entry: &Value, on: &mut dyn FnMut(Event)) {
-        // Missing index: attribute to the most recently opened call; if none
-        // is open, open index 0.
-        let wire_index = entry
-            .get("index")
-            .and_then(Value::as_u64)
-            .or(self.last_wire_index)
-            .unwrap_or(0);
+    /// Which call does an entry belong to? Explicit `index` wins; a
+    /// non-delta array position is authoritative; an index-less delta with
+    /// a NEW distinct id opens a new call (merging it into the last open
+    /// call would concatenate two calls' arguments into invalid JSON and
+    /// silently drop the second call); otherwise the most recently opened
+    /// call, or index 0 when none is open.
+    fn attribute(&self, entry: &Value, positional: Option<u64>) -> u64 {
+        if let Some(i) = entry.get("index").and_then(Value::as_u64) {
+            return i;
+        }
+        if let Some(i) = positional {
+            return i;
+        }
+        if let Some(id) = entry.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            if let Some((w, _)) = self.calls.iter().find(|(_, c)| c.id == id) {
+                return *w;
+            }
+            // A distinct new id is a new call (an open call always has an
+            // id: real or synthesized at open).
+            return self.calls.iter().map(|(w, _)| w + 1).max().unwrap_or(0);
+        }
+        self.last_wire_index.unwrap_or(0)
+    }
+
+    fn on_tool_delta(&mut self, entry: &Value, positional: Option<u64>, on: &mut dyn FnMut(Event)) {
+        let wire_index = self.attribute(entry, positional);
         self.last_wire_index = Some(wire_index);
 
         let known = self.calls.iter().position(|(w, _)| *w == wire_index);
@@ -159,8 +188,7 @@ impl Assembler {
         if !started {
             // Absent or empty id: synthesize one; a tool result requires it.
             if call.id.is_empty() {
-                let seq = SYNTH_SEQ.fetch_add(1, Ordering::Relaxed);
-                call.id = format!("call_{seq}_{wire_index}");
+                call.id = synth_call_id(wire_index as usize);
             }
             on(Event::ToolCallStart {
                 index: pos as u32,
@@ -379,6 +407,52 @@ mod tests {
             .filter(|k| *k < 9)
             .collect();
         assert_eq!(kinds, vec![0, 1, 2, 1, 2, 0]);
+    }
+
+    #[test]
+    fn final_message_with_multiple_indexless_calls_stays_separate() {
+        // Azure/proxy quirk: the whole tool_calls array arrives in a final
+        // non-delta message, whose entries carry no index fields. Position
+        // is authoritative; the calls must never merge.
+        let (turn, events) = drive(&[json!({"choices": [{"index": 0,
+            "finish_reason": "tool_calls",
+            "message": {"tool_calls": [
+                {"id": "c1", "function": {"name": "read", "arguments": "{\"path\":\"a\"}"}},
+                {"id": "c2", "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}}
+            ]}}]})]);
+        assert_eq!(turn.tool_calls.len(), 2);
+        assert_eq!(turn.tool_calls[0].id, "c1");
+        assert_eq!(turn.tool_calls[0].arguments, "{\"path\":\"a\"}");
+        assert_eq!(turn.tool_calls[1].id, "c2");
+        assert_eq!(turn.tool_calls[1].name, "bash");
+        assert_eq!(turn.tool_calls[1].arguments, "{\"command\":\"ls\"}");
+        let starts = events.iter().filter(|e| matches!(e, Event::ToolCallStart { .. })).count();
+        assert_eq!(starts, 2);
+    }
+
+    #[test]
+    fn indexless_deltas_with_distinct_ids_open_separate_calls() {
+        let (turn, _) = drive(&[
+            delta(json!({"tool_calls": [{"id": "c1",
+                "function": {"name": "read", "arguments": "{\"p\":1}"}}]})),
+            delta(json!({"tool_calls": [{"id": "c2",
+                "function": {"name": "bash", "arguments": "{\"c\":2}"}}]})),
+        ]);
+        assert_eq!(turn.tool_calls.len(), 2);
+        assert_eq!(turn.tool_calls[0].arguments, "{\"p\":1}");
+        assert_eq!(turn.tool_calls[1].arguments, "{\"c\":2}");
+    }
+
+    #[test]
+    fn indexless_idless_fragments_still_merge_into_the_open_call() {
+        let (turn, _) = drive(&[
+            delta(json!({"tool_calls": [{"id": "c1",
+                "function": {"name": "read", "arguments": "{\"a\""}}]})),
+            // Continuation fragments: no index, no id. Belong to c1.
+            delta(json!({"tool_calls": [{"function": {"arguments": ":1}"}}]})),
+        ]);
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].arguments, "{\"a\":1}");
     }
 
     #[test]

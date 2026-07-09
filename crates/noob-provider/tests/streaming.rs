@@ -10,7 +10,7 @@ use noob_provider::types::{
     ApiStyle, Endpoint, Event, Finish, Item, Overrides, ProviderError, ToolSpec, TurnRequest,
 };
 use noob_provider::{chat, responses, run_turn};
-use noob_testkit::{MockServer, RawStep, sse_headers};
+use noob_testkit::{MockServer, RawStep, chat_stream_datas, chunked_sse_response, sse_headers};
 use serde_json::json;
 
 fn endpoint(server: &MockServer, style: ApiStyle) -> Endpoint {
@@ -213,7 +213,7 @@ fn no_retry_after_the_first_content_byte() {
 fn compat_400_strips_the_named_field_and_remembers() {
     let server = MockServer::start();
     server.enqueue_json(400, json!({"error": {
-        "message": "unknown field: stream_options", "type": "invalid_request_error"}}));
+        "message": "Unknown parameter: 'stream_options'", "type": "invalid_request_error"}}));
     server.enqueue_stream_completion("works without it");
     server.enqueue_stream_completion("second turn");
     let client = Client::new(Timeouts::default());
@@ -294,6 +294,70 @@ fn interrupt_mid_stream_aborts_with_partial_output() {
     assert!(matches!(err, ProviderError::Interrupted), "{err:?}");
     assert_eq!(text, "begin");
     assert!(start.elapsed() < Duration::from_millis(2600), "took {:?}", start.elapsed());
+    server.assert_clean();
+}
+
+/// Chunked SSE (the framing real servers use) with the connection kept
+/// alive: consuming past [DONE] must return the connection to the pool, so
+/// two turns share one TCP connection instead of paying a handshake each.
+#[test]
+fn chat_stream_reuses_the_connection_across_turns() {
+    let server = MockServer::start();
+    for text in ["turn one", "turn two"] {
+        let datas = chat_stream_datas(text);
+        let refs: Vec<&str> = datas.iter().map(String::as_str).collect();
+        server.enqueue_raw_keepalive(vec![RawStep::Bytes(chunked_sse_response(&refs))]);
+    }
+    let client = Client::new(Timeouts::default());
+    let ep = endpoint(&server, ApiStyle::Chat);
+
+    let t1 = chat::stream(&client, &ep, &user_turn("go"), &mut |_| {}).unwrap();
+    let t2 = chat::stream(&client, &ep, &user_turn("go"), &mut |_| {}).unwrap();
+
+    assert_eq!(t1.text, "turn one");
+    assert_eq!(t2.text, "turn two");
+    assert_eq!(server.recorded().len(), 2);
+    assert_eq!(server.connection_count(), 1, "keep-alive must reuse the connection");
+    server.assert_clean();
+}
+
+/// When the first body bytes arrive in the same TCP segment as the headers
+/// (KV-cached prompts answer fast; TLS coalesces records), the idle clock
+/// must still engage: a mid-stream stall trips Idle on the idle budget,
+/// not FirstByte on the much larger first-byte budget.
+#[test]
+fn idle_clock_engages_when_body_arrives_with_the_headers() {
+    let server = MockServer::start();
+    let mut first_write = sse_headers();
+    first_write.extend_from_slice(
+        b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"par\"}}]}\n\n",
+    );
+    server.enqueue_raw(vec![RawStep::Bytes(first_write), RawStep::SleepMs(6_000)]);
+    let client = Client::with_retry(
+        Timeouts {
+            connect: Duration::from_secs(5),
+            // Larger than the whole scripted stall: if the phase never
+            // leaves AwaitFirstByte, nothing trips and the test fails.
+            first_byte: Duration::from_secs(30),
+            idle: Duration::from_secs(1),
+        },
+        RetryPolicy::none(),
+    );
+
+    let start = Instant::now();
+    let err = chat::stream(
+        &client,
+        &endpoint(&server, ApiStyle::Chat),
+        &user_turn("go"),
+        &mut |_| {},
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, ProviderError::Timeout(noob_provider::types::TimeoutKind::Idle)),
+        "expected Idle, got {err:?}"
+    );
+    assert!(start.elapsed() < Duration::from_secs(4), "took {:?}", start.elapsed());
     server.assert_clean();
 }
 
