@@ -129,6 +129,25 @@ impl MockServer {
             .push_back(Scripted::Raw(steps));
     }
 
+    /// Enqueue an SSE response: each entry becomes one `data:` event, sent
+    /// as one write. The body is close-delimited (no content-length), like
+    /// a real streaming endpoint that ends by closing.
+    pub fn enqueue_sse(&self, datas: &[&str]) {
+        let mut steps = vec![RawStep::Bytes(sse_headers())];
+        for d in datas {
+            steps.push(RawStep::Bytes(format!("data: {d}\n\n").into_bytes()));
+        }
+        self.enqueue_raw(steps);
+    }
+
+    /// Enqueue a standard streamed chat completion answering with `text`:
+    /// role chunk, per-word content deltas, finish chunk, usage chunk, and
+    /// the `[DONE]` sentinel, the way llama.cpp and OpenAI stream it.
+    pub fn enqueue_stream_completion(&self, text: &str) {
+        let datas = chat_stream_datas(text);
+        self.enqueue_sse(&datas.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+
     /// Declare that the NEXT request is a sanctioned prefix break
     /// (compaction, plan-mode entry or exit).
     pub fn expect_prefix_break(&self) {
@@ -158,6 +177,68 @@ pub fn http_response(status: u16, content_length: Option<usize>) -> Vec<u8> {
     }
     head.push_str("\r\n");
     head.into_bytes()
+}
+
+/// Response head for a close-delimited SSE stream.
+pub fn sse_headers() -> Vec<u8> {
+    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\n\r\n"
+        .to_vec()
+}
+
+/// The `data:` payloads of a standard streamed chat completion.
+pub fn chat_stream_datas(text: &str) -> Vec<String> {
+    fn chunk(delta: Value, finish: Value) -> String {
+        json!({"id": "chatcmpl-mock", "object": "chat.completion.chunk", "created": 0,
+            "model": "mock",
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+        .to_string()
+    }
+    let mut datas = vec![chunk(json!({"role": "assistant", "content": null}), Value::Null)];
+    // Split into word-ish deltas so tests exercise real reassembly.
+    let mut rest = text;
+    while !rest.is_empty() {
+        let cut = rest
+            .char_indices()
+            .filter(|(i, c)| *i > 0 && c.is_whitespace())
+            .map(|(i, _)| i + 1)
+            .find(|&i| i < rest.len())
+            .unwrap_or(rest.len());
+        let (piece, tail) = rest.split_at(cut.min(rest.len()));
+        datas.push(chunk(json!({"content": piece}), Value::Null));
+        rest = tail;
+    }
+    datas.push(chunk(json!({}), json!("stop")));
+    datas.push(
+        json!({"id": "chatcmpl-mock", "object": "chat.completion.chunk", "created": 0,
+            "model": "mock", "choices": [],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5,
+                "prompt_tokens_details": {"cached_tokens": 0}}})
+        .to_string(),
+    );
+    datas.push("[DONE]".to_string());
+    datas
+}
+
+/// Load an SSE fixture and split it into TCP-chunk byte vectors at every
+/// `%%CHUNK%%` sentinel. The sentinel is removed and NOTHING else: place it
+/// exactly at the intended boundary (mid-line and mid-codepoint are legal
+/// and intended; that is the point of the format).
+pub fn load_fixture_chunks(path: impl AsRef<std::path::Path>) -> Vec<Vec<u8>> {
+    let bytes = std::fs::read(path.as_ref())
+        .unwrap_or_else(|e| panic!("read fixture {}: {e}", path.as_ref().display()));
+    const SENTINEL: &[u8] = b"%%CHUNK%%";
+    let mut chunks = Vec::new();
+    let mut rest = &bytes[..];
+    while let Some(pos) = rest
+        .windows(SENTINEL.len())
+        .position(|w| w == SENTINEL)
+    {
+        chunks.push(rest[..pos].to_vec());
+        rest = &rest[pos + SENTINEL.len()..];
+    }
+    chunks.push(rest.to_vec());
+    chunks.retain(|c| !c.is_empty());
+    chunks
 }
 
 fn handle_connection(mut stream: TcpStream, shared: Arc<Shared>) {
