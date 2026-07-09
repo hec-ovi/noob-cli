@@ -14,6 +14,7 @@ Distilled 2026-07-09 from a three-track investigation of the agentic CLI field (
 | Zap | Rust | young | Skill injection, lazy MCP, Docker container sandbox with --network none |
 | Hermes Agent (NousResearch) | Python | ~212k stars | Self-improving skills (agent writes its own SKILL.md files) |
 | Agent Zero | Python | ~18k stars | Docker-native runtime split, superior/subordinate agents with fresh contexts |
+| Zero (Gitlawb/zero) | Go | ~1k stars | Stream-JSON headless protocol, incremental write-root grants, bubblewrap+seccomp helper binary |
 
 Corrections to the initial list we started from: Pi moved from badlogic/pi-mono to earendil-works/pi. QQCode is Python (not Rust) and stale since 2026-01, dropped as a reference. Agent Zero is by Jan Tomasek, unrelated to the OpenCode team. OpenCode's canonical repo really is anomalyco/opencode (SST rebranded to Anomaly).
 
@@ -32,6 +33,8 @@ Corrections to the initial list we started from: Pi moved from badlogic/pi-mono 
 **Zap**: context frugality. Skill injection so a greeting costs ~31 tokens while a full task assembles ~1.8k base plus task-relevant skills. Lazy MCP: server schemas stay out of context entirely until the model actually connects to a server mid-turn. The only surveyed tool with a Docker-native sandbox mode (container wrap with --network none). Casual-turn detection. A pre-transmission secret scanner.
 
 **Hermes Agent**: the self-improvement loop, and its danger. Skills auto-created after complex tasks, error recoveries, and user corrections via a `skill_manage` tool plus a background review pass; a `/learn` command distills skills from directories, URLs, or past conversations. Its security audit (4 critical, 9 high, default allow-all, agent-created skills as persistent injection vectors) is the strongest argument that agent-authored skills must be gated and default-deny.
+
+**Zero (Gitlawb/zero)**: the ops surface. Added late to the survey (same org as OpenClaude, part of Gitlawb's agent stack; Go, created 2026-05, very active). A documented stream-JSON stdin/stdout protocol for headless runs (`zero exec --input-format stream-json --output-format stream-json`), which is exactly the integration surface a Telegram bridge or another agent needs. Incremental write-root grants (`--add-dir`) instead of whole-filesystem access. Instruction files capped at 8 KiB each / 32 KiB total, injected general-to-specific from git root down to cwd. A `doctor` command for setup/key/connectivity checks and provider autodetection for Ollama/LM Studio. The delegation section only enters the system prompt when subagents are actually configured. Notably it speaks the Responses API only against the ChatGPT codex backend, not generically, so full dual-API support stays a noob-cli differentiator.
 
 **Agent Zero**: Docker-native done right. Framework/execution runtime split so agent-installed packages cannot destabilize the harness. Volume-mount only user data, never application code. Prompts as user-editable markdown fragments assembled at runtime, per-tool prompt files included. `call_subordinate` spawns a child with a fresh context cloned from parent config plus a profile; only the child's return value reaches the parent. MCP client calls run in disposable workers with timeouts so a wedged server cannot block the loop; resource payloads capped. A skill-reattachment token budget re-injects loaded skills after compaction.
 
@@ -52,6 +55,8 @@ Corrections to the initial list we started from: Pi moved from badlogic/pi-mono 
 7. Docker-native by design: the sandbox is the container (Agent Zero split, Zap container mode); mount the workspace at /work and config separately; never store state in the image.
 8. Permissions: allow/ask/deny with glob rules (OpenCode), orthogonal to sandbox level (Codex), plus doom-loop detection (Zerostack).
 9. Config as files read lazily (hot reload for free), agents/modes as markdown with frontmatter (OpenCode), prompts as editable files (Agent Zero, zot).
+10. Headless-first integration surface: a documented stream-JSON stdin/stdout protocol and meaningful exit codes (Zero), so bridges like telegram-bot-skill drive the agent without scraping a TUI. Onboarding ergonomics: a doctor-style connectivity check and local-endpoint autodetection (Zero).
+11. Prompt sections that pay rent: subagent/delegation instructions enter the system prompt only when subagents are configured (Zero); instruction files capped per file and in total (Zero 8/32 KiB, Codex 32 KiB).
 
 ## What we deliberately avoid
 
