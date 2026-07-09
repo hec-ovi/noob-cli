@@ -36,9 +36,15 @@ pub fn load(path: &Path) -> Result<HashMap<String, String>, String> {
 
 fn clean_value(raw: &str) -> String {
     let v = raw.trim();
+    // Quoted value: everything up to the matching close quote is the value;
+    // anything after it (typically a trailing comment) is ignored. Checking
+    // only starts_with/ends_with would keep the quotes whenever a comment
+    // follows the closing quote, silently corrupting API keys.
     for quote in ['"', '\''] {
-        if v.len() >= 2 && v.starts_with(quote) && v.ends_with(quote) {
-            return v[1..v.len() - 1].to_string();
+        if let Some(rest) = v.strip_prefix(quote) {
+            if let Some(end) = rest.find(quote) {
+                return rest[..end].to_string();
+            }
         }
     }
     // Unquoted values may carry a trailing comment: KEY=value  # note
@@ -71,6 +77,14 @@ mod tests {
         assert_eq!(map["A"], "quoted # not a comment");
         assert_eq!(map["B"], "single");
         assert_eq!(map["C"], "\"mismatch'");
+    }
+
+    #[test]
+    fn quoted_value_with_trailing_comment_loses_neither_quotes_nor_content() {
+        let map = parse("A=\"sk-abc\" # from provider\nB='x y'   # note\nC=\"\"\n").unwrap();
+        assert_eq!(map["A"], "sk-abc");
+        assert_eq!(map["B"], "x y");
+        assert_eq!(map["C"], "");
     }
 
     #[test]
