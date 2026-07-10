@@ -25,7 +25,7 @@ The name is the design goal: you should be able to use this knowing nothing. `do
 
 A lightweight general-purpose agentic CLI in Rust. Not a coding tool that happens to chat: an agent that reads and writes files, runs commands, loads skills, and calls MCP servers to get whatever task done, on whatever folder you mount. The binary lives inside a Docker container (that container is the sandbox), works on your files through a bind mount at `/work`, and speaks both OpenAI wire shapes, Chat Completions and Responses, against any base URL: llama.cpp, vLLM, Ollama, LM Studio, OpenAI, OpenRouter. Small local models (qwen-class through llama.cpp) are the first-class target, so every design choice optimizes for a tiny prompt budget, byte-stable cache prefixes, and error messages that tell the model what to do next.
 
-Why another one? Most lean harnesses pick one wire shape (Codex CLI is Responses-only, OpenCode is Chat-first); noob speaks both against any URL, and small local models are the primary target rather than a fallback. The design comes from studying Pi, OpenCode, Codex CLI, Hermes Agent, Agent Zero, Zerostack, zot, Zap, and Zero; no code was copied from any of them. The full survey is in [docs/RESEARCH.md](docs/RESEARCH.md).
+Why another one? The full-featured agents (Codex, Claude Code, Hermes, OpenClaw) carry a lot of weight you pay for on every run, whether that is a Node or Python runtime or a large feature stack. The minimal ones (Pi, Zap, and similar) are lighter because they do less. noob-cli tries to take the best from each and stay as small as possible: one small static Rust binary built for performance, with isolation from a Docker-native sandbox rather than a permissions DSL. It still speaks both OpenAI wire shapes (Codex CLI is Responses-only, OpenCode is Chat-first) against any base URL, and small local models are its first-class target. The design comes from studying Pi, OpenCode, Codex CLI, Hermes Agent, Zerostack, zot, Zap, and Zero; no code was copied from any of them. The full survey is in [docs/RESEARCH.md](docs/RESEARCH.md).
 
 ## What works today
 
@@ -140,6 +140,11 @@ A themed interactive surface for the REPL, shipped one version per step. Everyth
 - [ ] `0.2.7` Fenced code blocks
 - [ ] `0.2.8` Markdown tables
 
+Also on the list, not tied to a version yet:
+
+- [ ] Collapsible output: fold long tool and result blocks so a wall of output stays scannable (optional, still exploring)
+- [ ] On-the-fly skill install: add or fetch a skill mid-session so its commands appear without a restart (user-driven; any agent self-install stays gated to a real terminal, per the skills rule above)
+
 Each item builds via `./dev.sh docker`, ships tests under `./dev.sh test`, and is verified in the real REPL before the next. `NOOB_THEME` opens the door to non-matrix themes later.
 
 ## Development
@@ -151,7 +156,7 @@ Everything runs inside Docker; nothing is installed on the host. `./dev.sh` is t
 | `./dev.sh test` | The offline suite: 372 unit + e2e tests against the in-process mock servers, run in a dev container |
 | `./dev.sh build` | The static musl release binary |
 | `./dev.sh docker` | The runtime image |
-| `./dev.sh repl` / `./dev.sh exec "..."` | Compose with your uid:gid passed explicitly, so files under `/work` keep your ownership |
+| `./dev.sh` / `./dev.sh --session <id>` / `./dev.sh exec "..."` | Open the agent, resume a saved session, or run one-shot; Compose passes your uid:gid explicitly so files under `/work` keep your ownership |
 | `./dev.sh smoke` | Live suite against local endpoints (opt-in, `NOOB_LIVE=1`) |
 | `./dev.sh size-check` | Fails if the binary exceeds 8 MB or the runtime crate graph exceeds 45 |
 
