@@ -1,20 +1,20 @@
 <h1 align="center">noob</h1>
 
 <p align="center">
-  <strong>An agentic coding CLI that assumes you know nothing: one 1.7 MB static binary in a Docker sandbox, pointed at whatever local model you already run.</strong>
+  <strong>An agentic coding CLI that assumes you know nothing: one 3.4 MB static binary in a Docker sandbox, pointed at whatever local model you already run.</strong>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/status-in%20development-orange" alt="Status" />
   <img src="https://img.shields.io/badge/Rust-1.96%20%2F%20edition%202024-DEA584?logo=rust&logoColor=white" alt="Rust" />
-  <img src="https://img.shields.io/badge/binary-1.7%20MB%20static%20musl-blue" alt="Binary size" />
-  <img src="https://img.shields.io/badge/image-38.9%20MB-2496ED?logo=docker&logoColor=white" alt="Image size" />
+  <img src="https://img.shields.io/badge/binary-3.4%20MB%20static%20musl-blue" alt="Binary size" />
+  <img src="https://img.shields.io/badge/image-41.2%20MB-2496ED?logo=docker&logoColor=white" alt="Image size" />
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/tests-114%20offline%20%2B%203%20live-brightgreen" alt="Tests" />
+  <img src="https://img.shields.io/badge/tests-239%20offline%20%2B%206%20live-brightgreen" alt="Tests" />
   <img src="https://img.shields.io/badge/async%20runtime-none-success" alt="No async runtime" />
-  <img src="https://img.shields.io/badge/runtime%20crates-28%20of%2045%20budget-blueviolet" alt="Crate count" />
+  <img src="https://img.shields.io/badge/runtime%20crates-40%20of%2045%20budget-blueviolet" alt="Crate count" />
   <img src="https://img.shields.io/badge/APIs-Chat%20Completions%20%2B%20Responses-7B3FA0" alt="Both OpenAI wire shapes" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
 </p>
@@ -29,18 +29,21 @@ Why another one? Most lean harnesses pick one wire shape (Codex CLI is Responses
 
 ## What works today
 
-The provider layer (P1) is done, in active development. Working right now:
+The core loop (P2) is done: noob is now a working coding agent, in active development. Working right now:
 
-- The whole workspace builds inside Docker; the host needs docker and a shell, nothing else.
-- `docker compose run --rm noob exec -p "your prompt"` streams the answer token by token through a local model, on either wire shape (Chat Completions and Responses).
-- Tool calls parse correctly from real llama.cpp streams, including two calls in one inference; verified live against qwen3.6, both shapes, full round trip with the tool result replayed through the template.
-- A byte-exact SSE parser survives every TCP split (tested by re-splitting a real capture at every byte offset), plus a quirk matrix for the ways servers bend the spec: missing tool-call ids, arguments as objects, keepalive comments, mid-stream error payloads.
-- Retries with backoff before the first content byte (never after: that would duplicate output), `Retry-After` honored, and a reactive fallback that strips a request field an endpoint 400s on and remembers for the session.
-- Hot config reload: `.env` is re-read on every request, so edits apply on the next call with no container restart.
-- A 1 s tick-read watchdog keeps Ctrl-C responsive within about a second, even while llama.cpp spends minutes of silence processing a 131k-token prompt, and even mid-retry-backoff.
-- 114 offline tests via `./dev.sh test` (e2e through the compiled binary against a mock OpenAI server), 3 live smokes via `./dev.sh smoke`.
+- `docker compose run --rm noob` opens a chat; `... noob exec -p "your prompt"` is the one-shot. Live-tested against qwen3.6 through llama.cpp: it reads files, edits them, runs commands, and reports back.
+- Seven tools: read, write, edit, bash, grep, glob, ls. Consecutive read-only calls from one turn run in parallel; any mutation is a strict barrier, so two edits can never race.
+- The edit tool is exact string replace with a deterministic fallback ladder (trailing whitespace, typographic characters, uniform indent shift, CRLF files) and hard ambiguity rejection. A failed edit returns the actual file region so the model can fix its next attempt; files changed on disk behind the model's back are refused (hash check-and-set).
+- Append-only prompt discipline, byte-exact: turn 3 of a live session shows a 97% cached-prompt share on llama.cpp's own counters. The mock server fails any test where a request is not a byte-prefix extension of the previous one.
+- Sessions persist as JSONL under `/config/sessions/`; `exec --session <id>` resumes across processes (a session killed mid-tool-run is healed on resume). `exec --json` emits one JSONL event per loop step for wrappers.
+- Compaction at 75% of the context window: the middle of the transcript is summarized in place, the head and recent tail stay byte-identical.
+- Doom-loop breakers for small models: repeated identical calls are intercepted, four consecutive tool errors inject a course correction, eight stop the run.
+- Endpoint autodetect: with an empty config, noob probes llama.cpp/Ollama/LM Studio/vLLM on localhost and uses the first that answers.
+- The system prompt plus all tool schemas fit in 1,500 tokens, enforced by tests against both tiktoken and the live qwen tokenizer.
+- Both OpenAI wire shapes (Chat Completions + Responses) against any base URL; SSE parsing that survives every TCP split; retries with backoff; hot `.env` reload on every request; Ctrl-C responsive within a second at every point, including mid-tool-batch (pending calls are canceled, the session stays valid).
+- 239 offline tests via `./dev.sh test`, 6 live smokes via `./dev.sh smoke`.
 
-The REPL, the tool set, and the agent loop are the next phase; the roadmap below marks exactly what exists and what does not.
+Skills, MCP, plan mode, and sub-agents are the next phases; the roadmap below marks exactly what exists and what does not.
 
 ## Quickstart
 
@@ -51,7 +54,7 @@ cp config/.env.example config/.env   # edit NOOB_BASE_URL if your endpoint diffe
 ./dev.sh exec "say hi"               # or: docker compose run --rm noob exec -p "say hi"
 ```
 
-The first run builds the image (musl static build, all inside Docker). `NOOB_BASE_URL` is the one key you need today; localhost endpoint autodetect lands in P2, after which an empty config also works.
+The first run builds the image (musl static build, all inside Docker). An empty config works too: noob probes the usual localhost ports (llama.cpp :8090/:8080, Ollama :11434, LM Studio :1234, vLLM :8000) and uses the first endpoint that answers.
 
 ## Config
 
@@ -59,11 +62,12 @@ One flat `.env` in the bind-mounted config dir. All keys optional, everything co
 
 | Key | Default | What it does |
 |---|---|---|
-| `NOOB_BASE_URL` | unset (required until P2) | OpenAI-compatible `/v1` base URL |
+| `NOOB_BASE_URL` | localhost autodetect | OpenAI-compatible `/v1` base URL |
 | `NOOB_API_KEY` | empty | API key, if the endpoint wants one; local servers usually accept anything |
 | `NOOB_MODEL` | `default` | Model name as the endpoint knows it |
 | `NOOB_API_STYLE` | by host | `chat` or `responses`; `api.openai.com` defaults to responses, everything else to chat |
-| `NOOB_CTX` | `131072` | Context window in tokens; compaction (P2) starts at 75% |
+| `NOOB_CTX` | `131072` | Context window in tokens; compaction starts at 75% |
+| `NOOB_SANDBOX` | by `/.dockerenv` | `container` (unrestricted tools) or `workspace` (writes stay inside the project) |
 | `NOOB_TASK_CONCURRENCY` | `4` | Concurrent sub-agent cap (P6) |
 | `NOOB_TASK_MAX_TURNS` | `25` | Per-sub-agent turn cap (P6) |
 
@@ -76,8 +80,8 @@ flowchart LR
         CFG["config/.env<br>re-read every request"]
         EP["llama.cpp :8090 · vLLM · Ollama · LM Studio<br>or any OpenAI-compatible base URL"]
     end
-    subgraph box["Docker sandbox · alpine · 38.9 MB · non-root"]
-        NOOB["noob<br>static binary, 1.7 MB"]
+    subgraph box["Docker sandbox · alpine · 41.2 MB · non-root"]
+        NOOB["noob<br>static binary, 3.4 MB"]
         PROV["noob-provider<br>HTTP · SSE · wire adapters<br>sole owner of ureq"]
         NOOB --> PROV
     end
@@ -97,7 +101,7 @@ The opinionated bits. Where a rule says "test-enforced" that is literal: the moc
 | No request ever carries a `max_tokens`-family key; there is no config knob for one (test-enforced) | A capped response truncates mid-answer and breaks structured output; length is shaped by instructions, never by a ceiling |
 | Append-only prompt: every request is an exact prefix extension of the previous one (test-enforced) | llama.cpp prefix KV reuse and provider prompt caching make turn N+1 cost only the new suffix |
 | System prompt budget locked at 1,500 tokens total fixed overhead (about 1.1% of a 131k context) | Small models lose the thread in long prompts; the budget is measured on the shipped artifact |
-| Edit is exact string replace with a deterministic fallback ladder, no similarity-score fuzzing, ever (P2) | A fuzzy match can corrupt a file silently; a rejection comes back with the actual file region so the model can retry correctly |
+| Edit is exact string replace with a deterministic fallback ladder, no similarity-score fuzzing, ever | A fuzzy match can corrupt a file silently; a rejection comes back with the actual file region so the model can retry correctly |
 | The container is the sandbox | No permission-rule DSL: isolation comes from Docker; outside a container the binary falls back to a restricted workspace mode |
 | No telemetry: the binary talks only to the configured endpoints | No update checks, no phoning home; only `noob-provider` may touch the network stack, checked against the crate graph |
 | State lives in the mounts, never in the image | The image contains zero config, keys, or sessions; `docker rmi` loses nothing of yours |
@@ -109,8 +113,8 @@ The opinionated bits. Where a rule says "test-enforced" that is literal: the moc
 |---|---|---|
 | P0 scaffold | Workspace, contracts, Docker build, mock OpenAI server, `exec` skeleton, watchdog | done |
 | P1 provider layer | SSE streaming, Responses adapter, tool-call parsing, retry/backoff | done |
-| P2 core loop + tools | Interactive REPL, the 7 file/shell tools, agent loop, system prompt, compaction, sessions, endpoint autodetect | next |
-| P3 skills | SKILL.md discovery with progressive disclosure ([agentskills.io](https://agentskills.io) standard) | |
+| P2 core loop + tools | Interactive REPL, the 7 file/shell tools, agent loop, system prompt, compaction, sessions, endpoint autodetect | done |
+| P3 skills | SKILL.md discovery with progressive disclosure ([agentskills.io](https://agentskills.io) standard) | next |
 | P4 MCP client | stdio + Streamable HTTP transports, lazy connect | |
 | P5 plan mode | Read-only exploration, explicit `/go` approval | |
 | P6 multi-agent | Self-spawning sub-agents, parallel fan-out, concurrency and turn caps | |
@@ -124,7 +128,7 @@ Everything runs inside Docker; nothing is installed on the host. `./dev.sh` is t
 
 | Target | What it does |
 |---|---|
-| `./dev.sh test` | The offline suite: 114 unit + e2e tests against the in-process mock server, run in a dev container |
+| `./dev.sh test` | The offline suite: 239 unit + e2e tests against the in-process mock server, run in a dev container |
 | `./dev.sh build` | The static musl release binary |
 | `./dev.sh docker` | The runtime image |
 | `./dev.sh repl` / `./dev.sh exec "..."` | Compose with your uid:gid passed explicitly, so files under `/work` keep your ownership |

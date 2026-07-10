@@ -217,6 +217,11 @@ impl Agent {
             }
 
             if turn.tool_calls.is_empty() {
+                // A Ctrl-C that landed between the last token and here (the
+                // stream tail and drain are a real window) has nothing left
+                // to cancel; consume it or it phantom-cancels the next input
+                // and a second press hard-exits the REPL.
+                INTERRUPTED.store(false, Ordering::SeqCst);
                 ui.done(self.last_usage);
                 return RunEnd::Completed(turn.text);
             }

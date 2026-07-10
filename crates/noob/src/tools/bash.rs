@@ -90,13 +90,21 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     let mut reader = unsafe { std::fs::File::from_raw_fd(read_fd) };
     let collected: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let eof_seen = Arc::new(AtomicBool::new(false));
-    let (t_buf, t_eof) = (collected.clone(), eof_seen.clone());
+    // Set when the tool gives up on the pipe (a setsid escapee can hold it
+    // open forever): the collector then discards instead of buffering, so
+    // an abandoned reader can never grow memory without bound.
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let (t_buf, t_eof, t_gone) = (collected.clone(), eof_seen.clone(), abandoned.clone());
     let collector = std::thread::spawn(move || {
         let mut chunk = [0u8; 8192];
         loop {
             match reader.read(&mut chunk) {
                 Ok(0) => break,
-                Ok(n) => t_buf.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Ok(n) => {
+                    if !t_gone.load(Ordering::SeqCst) {
+                        t_buf.lock().unwrap().extend_from_slice(&chunk[..n]);
+                    }
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
             }
@@ -147,14 +155,25 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         unsafe { libc::kill(-pid, libc::SIGKILL) };
         stragglers_killed = true;
     }
-    if wait_eof(Duration::from_millis(500)) {
+    let eof = wait_eof(Duration::from_millis(500));
+    if eof {
         let _ = collector.join();
-    } // else: detach; the shared buffer already holds everything read
+    } else {
+        // Something escaped the process group (setsid) and still holds the
+        // pipe. Detach: the collector discards from here on; the escapee
+        // was NOT killed and the result must say so honestly.
+        abandoned.store(true, Ordering::SeqCst);
+    }
 
     let output = collected.lock().unwrap().clone();
     let text = String::from_utf8_lossy(&output);
     let mut body = head_tail(&text, BASH_HEAD, BASH_TAIL).into_owned();
-    if stragglers_killed {
+    if !eof {
+        body.push_str(
+            "\n[a background process started by the command is still running and holding \
+             its output open; the extra output is discarded; keep commands foreground-only]",
+        );
+    } else if stragglers_killed {
         body.push_str(
             "\n[background processes left by the command were killed when it finished; \
              keep commands foreground-only]",
@@ -290,6 +309,25 @@ mod tests {
             "{}",
             out.content
         );
+    }
+
+    #[test]
+    fn setsid_escapee_reports_honestly_and_returns_promptly() {
+        let (_t, ctx) = test_ctx();
+        let started = std::time::Instant::now();
+        // The escapee leaves the process group, survives the straggler
+        // kill, and holds the pipe; the tool must return anyway and must
+        // NOT claim it was killed.
+        let out = run(&ctx, &json!({"cmd": "setsid sleep 2 & echo hi"}));
+        assert!(started.elapsed() < Duration::from_secs(2), "did not detach");
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("hi"));
+        assert!(
+            out.content.contains("is still running and holding"),
+            "{}",
+            out.content
+        );
+        assert!(!out.content.contains("were killed"), "{}", out.content);
     }
 
     #[test]

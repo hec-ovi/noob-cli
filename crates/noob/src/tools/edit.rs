@@ -259,9 +259,10 @@ fn shadow(s: &str, typo: bool) -> Shadow {
 
 /// Find the needle shadow in the file shadow and map every hit back to
 /// original byte ranges. A needle whose trailing whitespace was dropped at
-/// end-of-input only matches at line boundaries: the dropped whitespace
-/// claimed a line end, so a mid-line hit would match content the file does
-/// not contain.
+/// end-of-input claimed whitespace after its last character, so the hit
+/// must be followed by whitespace or a line end: old "foo " must never
+/// rewrite the "foo" inside "foobar", but may match "foo z" (the file has
+/// the claimed space) and "foo\n" (a real line-trailing space).
 fn shadow_ranges(sh: &Shadow, needle: &Shadow) -> Vec<(usize, usize)> {
     sh.text
         .match_indices(&needle.text)
@@ -270,7 +271,8 @@ fn shadow_ranges(sh: &Shadow, needle: &Shadow) -> Vec<(usize, usize)> {
                 return true;
             }
             let end = i + needle.text.len();
-            end == sh.text.len() || sh.text.as_bytes()[end] == b'\n'
+            end == sh.text.len()
+                || matches!(sh.text.as_bytes()[end], b'\n' | b' ' | b'\t' | b'\r')
         })
         .map(|(i, _)| (sh.map[i], sh.map[i + needle.text.len()]))
         .collect()
@@ -819,6 +821,27 @@ mod tests {
         let out = run(&ctx, &json!({"path": "g.txt", "old": "foo ", "new": "bar"}));
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(file(&ctx, "g.txt"), "bar\n");
+    }
+
+    #[test]
+    fn trailing_space_in_old_matches_when_the_file_has_the_space() {
+        let (_t, ctx) = test_ctx();
+        // The file genuinely contains whitespace after the match; old's
+        // trailing space claims exactly that, so the edit must apply
+        // (over-rejecting here burns the model's retry budget for nothing).
+        seed(&ctx, "f.md", "x \u{2014} y z\n");
+        let out = run(&ctx, &json!({"path": "f.md", "old": "x - y ", "new": "x-y"}));
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(file(&ctx, "f.md"), "x-y z\n");
+
+        seed(&ctx, "g.py", "def f():\n    pass # comment\n");
+        let out = run(
+            &ctx,
+            &json!({"path": "g.py", "old": "def f():  \n    pass ", "new": "def g():\n    pass"}),
+        );
+        assert!(!out.is_error, "{}", out.content);
+        // The file's own space after the match is kept, not consumed.
+        assert_eq!(file(&ctx, "g.py"), "def g():\n    pass # comment\n");
     }
 
     #[test]
