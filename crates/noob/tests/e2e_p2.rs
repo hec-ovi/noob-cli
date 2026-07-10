@@ -301,7 +301,7 @@ fn compaction() {
         sum_msgs[0]["content"]
             .as_str()
             .unwrap()
-            .contains("summarize an agent coding session")
+            .contains("summarize an agent session")
     );
     assert!(reqs[1]["tools"].is_null(), "the summarizer gets no tools");
     let last_sum = sum_msgs.last().unwrap();

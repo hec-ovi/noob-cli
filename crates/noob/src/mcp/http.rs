@@ -7,7 +7,7 @@
 //! a tools/call may have side effects, so a silent replay is never safe.
 
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -181,16 +181,30 @@ impl HttpTransport {
     }
 
     /// Read SSE events until the response with `want` arrives. Server
-    /// requests over the stream are ignored (tools-only client).
+    /// requests over the stream are ignored (tools-only client). An
+    /// ABSOLUTE deadline bounds the whole scan: the provider watchdog's
+    /// idle clock resets on every byte, so a server trickling keepalive
+    /// comments forever would otherwise never trip it (the stdio transport
+    /// has the same absolute guarantee via its recv deadline).
     fn scan_sse(
         &self,
         stream: &mut StreamBody,
         want: u64,
     ) -> Result<Result<Value, String>, RpcFailure> {
+        let deadline = Instant::now() + self.timeout;
         let mut parser = SseParser::new();
         let mut events = Vec::new();
         let mut buf = [0u8; 8 * 1024];
         loop {
+            if Instant::now() >= deadline {
+                return Err(RpcFailure::Other(format!(
+                    "the MCP call timed out after {}s: the server at {} kept the \
+                     stream alive without answering; retry or raise timeout_s in \
+                     mcp.json",
+                    self.timeout.as_secs(),
+                    self.url
+                )));
+            }
             let n = stream.read(&mut buf).map_err(|e| self.map_error(e))?;
             if n == 0 {
                 parser.finish(&mut events);
@@ -324,5 +338,33 @@ mod tests {
         let t = HttpTransport::new("http://127.0.0.1:9", Duration::from_secs(1));
         let err = t.ensure_ready().unwrap_err();
         assert!(err.contains("127.0.0.1:9"), "{err}");
+    }
+
+    #[test]
+    fn endless_keepalive_trickle_hits_the_absolute_deadline() {
+        // A server that keeps the stream alive with comments but never
+        // answers: the idle watchdog resets on every byte, so only the
+        // absolute per-call deadline can save the loop.
+        let server = McpHttpServer::start(echo_tools());
+        let t = HttpTransport::new(&server.url(), Duration::from_secs(1));
+        t.ensure_ready().unwrap();
+        server.trickle_next_call();
+        let started = std::time::Instant::now();
+        let err = t
+            .request("tools/call", json!({"name": "echo", "arguments": {"text": "x"}}))
+            .unwrap_err();
+        assert!(err.contains("timed out after 1s"), "{err}");
+        assert!(err.contains("kept the stream alive"), "{err}");
+        // Bounded by deadline + one idle-window read, never unbounded.
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "took {:?}",
+            started.elapsed()
+        );
+        // The transport stays usable for the next call.
+        let ok = t
+            .request("tools/call", json!({"name": "echo", "arguments": {"text": "back"}}))
+            .unwrap();
+        assert!(ok["content"][0]["text"].as_str().unwrap().contains("back"));
     }
 }

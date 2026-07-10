@@ -10,7 +10,7 @@ use noob_provider::types::ToolSpec;
 
 use crate::mcp::{ConnectInfo, schema};
 
-use super::truncate::mcp_cap;
+use super::truncate::{MCP_HEAD, MCP_TAIL, head_tail_with, mcp_cap};
 use super::{ToolCtx, ToolOutcome, need_str};
 
 /// Frozen delimiters around server-originated text. The closing marker is
@@ -175,10 +175,17 @@ fn render_catalog(server: &str, info: &ConnectInfo) -> String {
             lines.push(format!("- {}{sketch}: {desc}", t.name));
         }
     }
-    format!(
-        "{header}\n{}",
-        wrap_untrusted(server, &mcp_cap(&lines.join("\n")))
+    // Catalog-specific truncation: "ask the tool for less" teaches nothing
+    // here; the real next move is that mcp_call accepts any exact name.
+    let listing = head_tail_with(
+        &lines.join("\n"),
+        MCP_HEAD,
+        MCP_TAIL,
+        "some tools in the middle are not listed; mcp_call still accepts any \
+         exact tool name",
     )
+    .into_owned();
+    format!("{header}\n{}", wrap_untrusted(server, &listing))
 }
 
 /// Flatten a tools/call result into text. Text items concatenate; non-text
@@ -264,6 +271,41 @@ mod tests {
         assert!(out.content.trim_end().ends_with("[end of untrusted content]"));
         assert_eq!(out.summary, "mcp_connect mock (1 tools)");
         server.assert_clean();
+    }
+
+    #[test]
+    fn oversized_catalog_truncates_with_a_catalog_appropriate_next_move() {
+        // 400 tools with fat descriptions blow past the 20 KiB cap.
+        let tools: Vec<serde_json::Value> = (0..400)
+            .map(|i| {
+                tool(
+                    &format!("tool-{i:03}"),
+                    &"does a lot of things ".repeat(8),
+                    json!({"type": "object", "properties": {"q": {"type": "string"}}}),
+                )
+            })
+            .collect();
+        let server = McpHttpServer::start(tools);
+        let (_tmp, ctx) = ctx_with_server(&server);
+        let out = run_connect(&ctx, &json!({"server": "mock"}));
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.starts_with("connected to mock: 400 tools"));
+        assert!(
+            out.content.contains(
+                "some tools in the middle are not listed; mcp_call still accepts \
+                 any exact tool name"
+            ),
+            "catalog marker missing: {}",
+            &out.content[..400]
+        );
+        assert!(
+            !out.content.contains("ask the tool for less data"),
+            "the mcp_call-result phrasing leaked into a catalog"
+        );
+        // Head and tail survive; the delimiters still close.
+        assert!(out.content.contains("- tool-000("));
+        assert!(out.content.contains("- tool-399("));
+        assert!(out.content.trim_end().ends_with("[end of untrusted content]"));
     }
 
     #[test]

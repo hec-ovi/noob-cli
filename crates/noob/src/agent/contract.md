@@ -13,10 +13,16 @@ mode message; the dispatcher refuses hallucinated mutations as defense in
 depth; exit restores the full set), doom-loop breakers
 (identical call 3x within the last 12 intercepts; 4 consecutive errors
 inject a nudge; 8 pause the REPL or abort headless runs), compaction
-(`compact.rs`: at 75% of NOOB_CTX, middle summarized, head + ~20k-token
-tail kept, call/result pairs never split, hard-drop only when the
-summarize itself overflows, loaded-skill names re-listed in the spliced
-summary and recovered from the transcript on resume), prompt assembly
+(`compact.rs`, at 75% of NOOB_CTX, a ladder: prune old fat tool results
+into placeholders when that alone frees enough, else summarize the middle
+against the schema in prompts/compact.md with deterministic validation --
+an empty or non-shrinking summary is retried once, then pruned or
+hard-dropped, never spliced; head + ~20k-token tail always verbatim,
+call/result pairs never split; a deterministic pinned block [task /
+files touched / loaded skills] is appended to every spliced message from
+harness ground truth and carried across cycles and resumes; a transport
+failure sets a backoff so a failing summarizer is not retried every
+round), prompt assembly
 (`prompt.rs`, once per session), the skills-dir write gate (write/edit
 into `**/skills/**` requires confirmation in every mode; headless denies),
 and interrupt handling (partial turns discarded; parsed-but-unexecuted

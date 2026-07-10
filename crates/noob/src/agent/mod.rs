@@ -54,6 +54,9 @@ pub struct Agent {
     full_tools: Vec<ToolSpec>,
     /// Plan mode: read-only exploration until the user approves with /go.
     pub plan: bool,
+    /// Permanently read-only (read-only children): like plan mode's gate
+    /// but with no /go; a hallucinated mutating call must never execute.
+    pub read_only: bool,
     pub items: Vec<Item>,
     pub tool_ctx: ToolCtx,
     pub session: Option<Session>,
@@ -70,6 +73,10 @@ pub struct Agent {
     chars_since_usage: usize,
     recent_calls: VecDeque<u64>,
     consec_errors: u32,
+    /// After a transport-level compaction failure, auto-compaction waits
+    /// until the estimate passes this mark instead of re-firing every
+    /// round (the compression-loop trap). 0 = no backoff.
+    pub(crate) compact_backoff: u64,
 }
 
 pub enum RunEnd {
@@ -111,6 +118,7 @@ impl Agent {
             full_tools: tools.clone(),
             tools,
             plan: false,
+            read_only: false,
             items,
             tool_ctx,
             session,
@@ -122,6 +130,7 @@ impl Agent {
             chars_since_usage: replayed_chars,
             recent_calls: VecDeque::new(),
             consec_errors: 0,
+            compact_backoff: 0,
         }
     }
 
@@ -189,7 +198,9 @@ impl Agent {
 
         for round in 0..self.max_rounds {
             self.last_rounds = round + 1;
-            if self.context_estimate() >= self.ctx_tokens.saturating_mul(3) / 4 {
+            let estimate = self.context_estimate();
+            if estimate >= self.ctx_tokens.saturating_mul(3) / 4 && estimate >= self.compact_backoff
+            {
                 self.compact(ui);
                 // Ctrl-C during the summarization request aborts the input,
                 // not just the compaction.
@@ -468,16 +479,29 @@ impl Agent {
             }
         };
         // Defense in depth behind the structural gate: even a hallucinated
-        // call to an absent schema is refused while planning.
-        if self.plan && !PLAN_TOOLS.contains(&call.name.as_str()) {
-            return (
-                sched::Planned::Canned(ToolOutcome::err(format!(
-                    "plan mode is read-only: {} is unavailable; present your plan \
-                     as text and wait for the user to approve it",
-                    call.name
-                ))),
-                args,
-            );
+        // call to an absent schema is refused while planning or when this
+        // agent is a read-only child.
+        if !PLAN_TOOLS.contains(&call.name.as_str()) {
+            if self.plan {
+                return (
+                    sched::Planned::Canned(ToolOutcome::err(format!(
+                        "plan mode is read-only: {} is unavailable; present your plan \
+                         as text and wait for the user to approve it",
+                        call.name
+                    ))),
+                    args,
+                );
+            }
+            if self.read_only {
+                return (
+                    sched::Planned::Canned(ToolOutcome::err(format!(
+                        "this sub-agent is read-only: {} is unavailable; finish the \
+                         task with the read-only tools and report what you found",
+                        call.name
+                    ))),
+                    args,
+                );
+            }
         }
         // serde_json's default map is sorted, so this serialization is
         // canonical: key order cannot dodge the repeat detector.

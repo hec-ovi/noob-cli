@@ -63,6 +63,14 @@ impl SeenFiles {
     pub fn get(&self, path: &Path) -> Option<FileStamp> {
         self.map.lock().unwrap().get(path).copied()
     }
+
+    /// Every path seen this session, sorted. Compaction pins this list
+    /// deterministically (the harness, not the summarizer, owns file facts).
+    pub fn paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self.map.lock().unwrap().keys().cloned().collect();
+        paths.sort();
+        paths
+    }
 }
 
 /// Resolve a tool `path` argument: absolute or workspace-relative, lexically

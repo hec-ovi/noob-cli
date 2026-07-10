@@ -151,6 +151,39 @@ fn child_tool_sets_by_mode_and_depth() {
     rig.server.assert_clean();
 }
 
+/// Defense in depth behind the filtered schemas: a read-only child whose
+/// model hallucinates a mutating call gets a teaching refusal, and nothing
+/// lands on disk.
+#[test]
+fn read_only_child_refuses_hallucinated_mutations() {
+    let rig = rig();
+    rig.server.enqueue_stream_toolcalls(
+        &[("m1", "write", r#"{"path":"evil.txt","content":"boom"}"#)],
+        None,
+    );
+    rig.server.enqueue_stream_completion("understood, reporting instead");
+
+    let out = rig.run_child(r#"{"prompt": "survey the repo"}"#, None);
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        !rig.work.path().join("evil.txt").exists(),
+        "a read-only child executed a mutating call"
+    );
+    let reqs = rig.api_requests();
+    let refusal = reqs[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(refusal.contains("this sub-agent is read-only"), "{refusal}");
+    assert!(refusal.contains("report what you found"), "{refusal}");
+    rig.server.assert_clean();
+}
+
 /// A malformed payload never hangs or crashes: one error line, exit 1.
 #[test]
 fn child_rejects_bad_payloads_with_one_line() {

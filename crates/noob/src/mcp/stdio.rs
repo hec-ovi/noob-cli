@@ -115,6 +115,16 @@ impl StdioTransport {
                 )
             })?;
         let stdin = child.stdin.take().expect("piped stdin");
+        // Non-blocking stdin: a server that stops READING must not be able
+        // to block the loop either (write_all on a full pipe never returns
+        // and never sees the interrupt flag). Writes go through
+        // write_deadline below.
+        unsafe {
+            use std::os::fd::AsRawFd;
+            let fd = stdin.as_raw_fd();
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
         let stdout = child.stdout.take().expect("piped stdout");
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -148,16 +158,17 @@ impl StdioTransport {
     }
 
     fn send_locked(&self, state: &mut State, msg: &Value) -> Result<(), String> {
+        let deadline = Instant::now() + self.timeout;
         let proc = state.proc.as_mut().expect("ensured");
-        let write = proc
-            .stdin
-            .write_all(format!("{msg}\n").as_bytes())
-            .and_then(|_| proc.stdin.flush());
+        let write = write_deadline(&mut proc.stdin, format!("{msg}\n").as_bytes(), deadline);
         if let Err(e) = write {
-            state.proc = None; // kill + reap via Drop
+            if let Some(proc) = &mut state.proc {
+                proc.kill_group();
+            }
+            state.proc = None;
             return Err(format!(
-                "the MCP server process is not accepting input ({e}); it will be \
-                 restarted on the next call"
+                "the MCP server process is not accepting input ({e}); it was killed \
+                 and will be restarted on the next call"
             ));
         }
         Ok(())
@@ -208,6 +219,38 @@ impl StdioTransport {
             }
         }
     }
+}
+
+/// Write the whole buffer to a non-blocking pipe, bounded by `deadline`.
+/// A full pipe (the server stopped reading) surfaces as a timeout error
+/// instead of an unbounded block the interrupt flag can never reach.
+fn write_deadline(
+    stdin: &mut ChildStdin,
+    mut buf: &[u8],
+    deadline: Instant,
+) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        match stdin.write(buf) {
+            Ok(0) => return Err(std::io::Error::other("the pipe closed mid-write")),
+            Ok(n) => buf = &buf[n..],
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "the server stopped reading its input",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    stdin.flush()
 }
 
 /// Read one `\n`-terminated line without unbounded growth. `Ok(None)` = EOF.
@@ -352,6 +395,39 @@ done
             .request("tools/call", json!({"name": "echo", "arguments": {"text": "ok"}}))
             .unwrap();
         assert_eq!(result["content"][0]["text"], "echo: ok");
+    }
+
+    #[test]
+    fn full_pipe_write_times_out_instead_of_blocking_forever() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Handshake normally, then stop reading stdin entirely: a huge
+        // request fills the ~64 KiB pipe buffer and the old blocking
+        // write_all would never return.
+        let script = r#"#!/bin/sh
+IFS= read -r line
+id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"mock","version":"0"}}}\n' "$id"
+IFS= read -r line
+exec sleep 600
+"#;
+        let path = tmp.path().join("deaf.sh");
+        std::fs::write(&path, script).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let t = StdioTransport::new(path.to_str().unwrap(), &[], Duration::from_secs(1));
+        t.ensure_ready().unwrap();
+        let big = "x".repeat(512 * 1024); // far past any pipe buffer
+        let started = Instant::now();
+        let err = t
+            .request("tools/call", json!({"name": "echo", "arguments": {"text": big}}))
+            .unwrap_err();
+        assert!(err.contains("not accepting input"), "{err}");
+        assert!(err.contains("restarted on the next call"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "write blocked for {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

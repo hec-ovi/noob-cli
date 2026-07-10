@@ -3,6 +3,7 @@
 
 mod agent;
 mod config;
+mod doctor;
 mod mcp;
 mod session;
 mod skills;
@@ -34,7 +35,7 @@ fn main() -> ExitCode {
         Some("exec") => cmd_exec(&args[1..]),
         Some("debug") => cmd_debug(&args[1..]),
         Some("child") => cmd_child(),
-        Some("doctor") => not_yet("doctor", "P7"),
+        Some("doctor") => doctor::run(),
         Some(flag) if flag.starts_with('-') => cmd_repl(&args),
         None => cmd_repl(&[]),
         Some(other) => {
@@ -44,11 +45,6 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
-}
-
-fn not_yet(cmd: &str, phase: &str) -> ExitCode {
-    eprintln!("noob {cmd} lands in {phase}; this build does not have it yet");
-    ExitCode::from(2)
 }
 
 /// A flag's value must exist and must not look like another flag; consuming
@@ -189,6 +185,9 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
     if boot.plan {
         agent.enter_plan(ui);
     }
+    // Read-only children: the schemas are already filtered above; this arms
+    // the dispatcher's defense in depth against hallucinated mutations.
+    agent.read_only = boot.read_only;
     Ok(agent)
 }
 
@@ -262,6 +261,11 @@ fn cmd_repl(args: &[String]) -> ExitCode {
         let input = line.trim();
         if input.is_empty() {
             continue;
+        }
+        // Bare exit/quit leave too: the zero-friction promise says nobody
+        // should have to learn slash commands to get out.
+        if matches!(input, "exit" | "quit") {
+            break;
         }
         if let Some(cmd) = input.strip_prefix('/') {
             match cmd.trim() {

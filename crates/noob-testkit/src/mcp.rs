@@ -22,6 +22,8 @@ struct Shared {
     /// Invalidate the current session before the next non-initialize
     /// request, forcing the client's one re-initialize retry.
     drop_session_once: AtomicBool,
+    /// Answer the next tools/call with an endless keepalive trickle.
+    trickle_next_call: AtomicBool,
     initializes: AtomicUsize,
     session_counter: AtomicUsize,
     sessions: Mutex<HashSet<String>>,
@@ -61,6 +63,7 @@ impl McpHttpServer {
             tools,
             sse_mode: AtomicBool::new(false),
             drop_session_once: AtomicBool::new(false),
+            trickle_next_call: AtomicBool::new(false),
             initializes: AtomicUsize::new(0),
             session_counter: AtomicUsize::new(0),
             sessions: Mutex::new(HashSet::new()),
@@ -92,6 +95,13 @@ impl McpHttpServer {
     /// Invalidate the session before the next request (one 404).
     pub fn drop_session_once(&self) {
         self.shared.drop_session_once.store(true, Ordering::SeqCst);
+    }
+
+    /// The next tools/call answers with an SSE stream that sends keepalive
+    /// comments forever and never the response: the wedged-server shape a
+    /// per-call deadline must survive.
+    pub fn trickle_next_call(&self) {
+        self.shared.trickle_next_call.store(true, Ordering::SeqCst);
     }
 
     /// Enqueue one scripted `tools/call` result value.
@@ -179,6 +189,22 @@ fn handle(mut stream: TcpStream, shared: Arc<Shared>) {
             "tools/call" => {
                 let params = body.get("params").cloned().unwrap_or(Value::Null);
                 shared.calls.lock().unwrap().push(params.clone());
+                if shared.trickle_next_call.swap(false, Ordering::SeqCst) {
+                    // Keepalives forever; the write fails once the client
+                    // gives up and closes, which ends this connection.
+                    let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+                    if stream.write_all(head.as_bytes()).is_err() {
+                        return;
+                    }
+                    loop {
+                        if stream.write_all(b": keepalive\n\n").is_err()
+                            || stream.flush().is_err()
+                        {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
                 let scripted = shared.call_results.lock().unwrap().pop_front();
                 let result = scripted.unwrap_or_else(|| {
                     json!({"content": [{"type": "text",

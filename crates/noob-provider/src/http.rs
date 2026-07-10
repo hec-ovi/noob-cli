@@ -765,6 +765,37 @@ pub fn probe(url: &str, timeout: Duration) -> bool {
     config.new_agent().get(url).call().is_ok()
 }
 
+/// One-shot GET returning (status, body head). `noob doctor`'s reachability
+/// check; only ever called against the user's configured endpoint.
+pub fn get_status(
+    url: &str,
+    api_key: &str,
+    timeout: Duration,
+) -> Result<(u16, String), String> {
+    let config = Config::builder()
+        .http_status_as_error(false)
+        .proxy(None)
+        .timeout_global(Some(timeout))
+        .build();
+    let mut req = config.new_agent().get(url);
+    if !api_key.is_empty() {
+        req = req.header("authorization", &format!("Bearer {api_key}"));
+    }
+    match req.call() {
+        Ok(mut resp) => {
+            let status = resp.status().as_u16();
+            let body = resp
+                .body_mut()
+                .with_config()
+                .limit(4 * 1024)
+                .read_to_string()
+                .unwrap_or_default();
+            Ok((status, body))
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 fn map_ureq_error(ctl: &WatchdogCtl, url: &str, e: ureq::Error) -> ProviderError {
     if let Some(trip) = ctl.take_trip() {
         return match trip {

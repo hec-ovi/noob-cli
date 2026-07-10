@@ -92,7 +92,10 @@ impl Mcp {
     }
 
     /// initialize (idempotent) + tools/list; caches and returns the catalog.
-    /// Reconnecting an already-connected server refreshes its catalog.
+    /// Reconnecting an already-connected server refreshes its catalog. The
+    /// connection is registered ONLY after the whole sequence succeeds: a
+    /// failed connect must leave the server looking unconnected (no phantom
+    /// "(connected)" status, and mcp_call keeps teaching "connect first").
     pub fn connect(&self, name: &str) -> Result<ConnectInfo, String> {
         let Some(cfg) = self.servers.iter().find(|s| s.name == name) else {
             return Err(format!(
@@ -100,26 +103,27 @@ impl Mcp {
                 self.names().join(", ")
             ));
         };
-        let conn = {
-            let mut conns = self.conns.lock().unwrap();
-            conns
-                .entry(name.to_string())
-                .or_insert_with(|| {
-                    let transport = match &cfg.transport {
-                        TransportConfig::Http { url } => {
-                            Transport::Http(http::HttpTransport::new(url, cfg.timeout))
-                        }
-                        TransportConfig::Stdio { command, args } => Transport::Stdio(
-                            stdio::StdioTransport::new(command, args, cfg.timeout),
-                        ),
-                    };
-                    Arc::new(Connection { transport, tools: Mutex::new(Vec::new()) })
-                })
-                .clone()
-        };
+        // Reuse a live connection (its stdio child or HTTP session survives
+        // a catalog refresh); build a fresh one otherwise.
+        let existing = self.conns.lock().unwrap().get(name).cloned();
+        let conn = existing.unwrap_or_else(|| {
+            let transport = match &cfg.transport {
+                TransportConfig::Http { url } => {
+                    Transport::Http(http::HttpTransport::new(url, cfg.timeout))
+                }
+                TransportConfig::Stdio { command, args } => {
+                    Transport::Stdio(stdio::StdioTransport::new(command, args, cfg.timeout))
+                }
+            };
+            Arc::new(Connection { transport, tools: Mutex::new(Vec::new()) })
+        });
         let protocol = conn.transport.ensure_ready()?;
         let tools = list_tools(&conn.transport)?;
         *conn.tools.lock().unwrap() = tools.clone();
+        self.conns
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), conn);
         Ok(ConnectInfo { protocol, tools })
     }
 
@@ -205,6 +209,19 @@ mod tests {
         let err = mcp.connect("ghost").unwrap_err();
         assert!(err.contains("unknown MCP server \"ghost\""), "{err}");
         assert!(err.contains("mock"), "{err}");
+    }
+
+    #[test]
+    fn failed_connect_leaves_the_server_unconnected() {
+        // A down server: connect errs and NO phantom connection may remain
+        // (mcp_call must keep saying "connect first", /status must not say
+        // "(connected)").
+        let mcp = manager_with("http://127.0.0.1:9");
+        assert!(mcp.connect("mock").is_err());
+        assert!(
+            mcp.connection("mock").is_none(),
+            "a failed connect must not register a connection"
+        );
     }
 
     #[test]
