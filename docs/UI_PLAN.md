@@ -85,6 +85,33 @@ No performance or throughput cost, in any direction, proven per version:
 - v0.2.5 JSON pretty-print: gate to `mcp_*` result bodies (not every JSON), and
   sanitize embedded ANSI/control bytes from untrusted MCP output.
 
+## Field notes from real-REPL testing (2026-07-10, Hector)
+
+Standing priority Hector reaffirmed: stability, speed, and efficiency of the
+harness itself come first; visuals never cost throughput (the zero-overhead law).
+
+Observations from a live session, mapped to where each is fixed:
+- v0.2.1 polish (not sign-off blockers, fix in the next round):
+  - The very first input box after the banner renders narrow, not full width:
+    the compose pty reports winsize 0 at startup, so `term_width()` falls back to
+    80 for that one draw; later prompts are correct. Fix: a SIGWINCH-driven
+    redraw of the live box, or re-query width and redraw the top rule on the
+    first keystroke.
+  - The input box "disappears" while the agent is thinking/writing. This is the
+    collapse design (no frame during processing), but it reads as empty. The
+    v0.2.3 scanner fills the request-to-first-token gap; open question for Hector
+    is whether he also wants a persistent input to queue the next message while
+    the agent runs (a scroll-region change, heavier; defer unless he asks).
+- Already-planned phases the session confirmed we need:
+  - v0.2.3 thinking scanner (green squares): "no thinking animation".
+  - v0.2.4 per-tool colors + padding: "each skill and command its own style and
+    color, like padding"; the `* bash ...` activity lines are uniform dim now.
+  - v0.2.6 inline markdown: "MD style has no colors, improve list colors"; the
+    `**bold**` headers and `-`/`1.` lists render raw.
+  - v0.2.7 fenced code blocks.
+  - v0.2.8 tables: "check the tables how awful it looks"; a markdown table asked
+    of the model renders as raw pipes and wraps badly.
+
 ## Pending versions
 
 ### v0.2.1 - Boxed raw-mode input (the strong two-line prompt)  (risk: high)
