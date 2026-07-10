@@ -263,6 +263,64 @@ pub fn chat_stream_datas(text: &str) -> Vec<String> {
     datas
 }
 
+/// The `data:` payloads of a streamed chat completion that answers with
+/// tool calls (llama.cpp shape: id+name first, argument fragments after,
+/// `finish_reason: "tool_calls"`). `usage` overrides the prompt/completion
+/// token counts, for tests that force compaction.
+pub fn chat_stream_toolcalls_datas(
+    calls: &[(&str, &str, &str)],
+    usage: Option<(u64, u64)>,
+) -> Vec<String> {
+    fn chunk(delta: Value, finish: Value) -> String {
+        json!({"id": "chatcmpl-mock", "object": "chat.completion.chunk", "created": 0,
+            "model": "mock",
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+        .to_string()
+    }
+    let mut datas = vec![chunk(json!({"role": "assistant", "content": null}), Value::Null)];
+    for (i, (id, name, args)) in calls.iter().enumerate() {
+        datas.push(chunk(
+            json!({"tool_calls": [{"index": i, "id": id, "type": "function",
+                "function": {"name": name, "arguments": ""}}]}),
+            Value::Null,
+        ));
+        // Argument fragments split mid-JSON, the way real servers stream.
+        let (a, b) = args.split_at(args.len() / 2);
+        for frag in [a, b] {
+            if !frag.is_empty() {
+                datas.push(chunk(
+                    json!({"tool_calls": [{"index": i,
+                        "function": {"arguments": frag}}]}),
+                    Value::Null,
+                ));
+            }
+        }
+    }
+    datas.push(chunk(json!({}), json!("tool_calls")));
+    let (p, c) = usage.unwrap_or((10, 5));
+    datas.push(
+        json!({"id": "chatcmpl-mock", "object": "chat.completion.chunk", "created": 0,
+            "model": "mock", "choices": [],
+            "usage": {"prompt_tokens": p, "completion_tokens": c,
+                "prompt_tokens_details": {"cached_tokens": 0}}})
+        .to_string(),
+    );
+    datas.push("[DONE]".to_string());
+    datas
+}
+
+/// Enqueue a streamed completion calling the given tools.
+impl MockServer {
+    pub fn enqueue_stream_toolcalls(
+        &self,
+        calls: &[(&str, &str, &str)],
+        usage: Option<(u64, u64)>,
+    ) {
+        let datas = chat_stream_toolcalls_datas(calls, usage);
+        self.enqueue_sse(&datas.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+}
+
 /// Load an SSE fixture and split it into TCP-chunk byte vectors at every
 /// `%%CHUNK%%` sentinel. The sentinel is removed and NOTHING else: place it
 /// exactly at the intended boundary (mid-line and mid-codepoint are legal

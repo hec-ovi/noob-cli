@@ -10,8 +10,14 @@ use noob_provider::types::{Item, ProviderError, TurnRequest};
 use super::{Agent, looks_like_context_overflow, prompt};
 use crate::ui::Ui;
 
-/// Tail kept verbatim, in estimated tokens.
+/// Tail kept verbatim, in estimated tokens: ~20k on a full-size context,
+/// scaled down to a quarter of small windows so compaction still has a
+/// middle to remove.
 const TAIL_TOKENS: u64 = 20_000;
+
+fn tail_budget(ctx_tokens: u64) -> u64 {
+    TAIL_TOKENS.min(ctx_tokens / 4)
+}
 
 const SUMMARIZE_ASK: &str =
     "Summarize the conversation above following your instructions. Output only the summary.";
@@ -36,12 +42,13 @@ pub fn item_chars(item: &Item) -> usize {
 impl Agent {
     /// Compact the transcript. Returns true when the transcript changed.
     pub fn compact(&mut self, ui: &mut Ui) -> bool {
-        // Walk back from the end until the tail holds ~TAIL_TOKENS.
+        // Walk back from the end until the tail holds the budget.
+        let budget = tail_budget(self.ctx_tokens);
         let mut cut = self.items.len();
         let mut acc = 0u64;
         while cut > 0 {
             let c = (item_chars(&self.items[cut - 1]) / 4) as u64;
-            if acc + c > TAIL_TOKENS {
+            if acc + c > budget {
                 break;
             }
             acc += c;
