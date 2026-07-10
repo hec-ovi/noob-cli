@@ -30,16 +30,7 @@ pub fn stream(
         "stream_options": {"include_usage": true},
     });
     if !req.tools.is_empty() {
-        body["tools"] = Value::Array(
-            req.tools
-                .iter()
-                .map(|t| {
-                    json!({"type": "function", "function": {
-                        "name": t.name, "description": t.description,
-                        "parameters": t.parameters}})
-                })
-                .collect(),
-        );
+        body["tools"] = wire_tools(&req.tools);
     }
 
     let mut resp = client.post_json_stream(&url, &ep.api_key, &mut body)?;
@@ -90,6 +81,22 @@ pub fn stream(
 /// sent back (DeepSeek rejects it; llama.cpp templates re-inject thinking
 /// themselves). Deterministic: byte-stable across identical inputs, which
 /// is what the append-only prefix property rests on.
+/// The Chat Completions wire shape of the tools array. Public so
+/// `noob debug prompt --json` prints the exact serialized artifact the
+/// budget tests measure, with no reimplementation drift.
+pub fn wire_tools(tools: &[crate::types::ToolSpec]) -> Value {
+    Value::Array(
+        tools
+            .iter()
+            .map(|t| {
+                json!({"type": "function", "function": {
+                    "name": t.name, "description": t.description,
+                    "parameters": t.parameters}})
+            })
+            .collect(),
+    )
+}
+
 fn build_messages(req: &TurnRequest) -> Vec<Value> {
     let mut messages = Vec::new();
     if let Some(system) = &req.system {

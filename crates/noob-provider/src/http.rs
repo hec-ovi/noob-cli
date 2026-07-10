@@ -715,6 +715,18 @@ impl Drop for StreamBody {
     }
 }
 
+/// One-shot GET with a short overall timeout: true when the URL answers with
+/// any HTTP response at all. Used only for the loopback endpoint-autodetect
+/// probes at session start; never called against remote hosts.
+pub fn probe(url: &str, timeout: Duration) -> bool {
+    let config = Config::builder()
+        .http_status_as_error(false)
+        .proxy(None)
+        .timeout_global(Some(timeout))
+        .build();
+    config.new_agent().get(url).call().is_ok()
+}
+
 fn map_ureq_error(ctl: &WatchdogCtl, url: &str, e: ureq::Error) -> ProviderError {
     if let Some(trip) = ctl.take_trip() {
         return match trip {
