@@ -110,24 +110,7 @@ pub fn check_write_allowed(
         return Err(refusal(path));
     }
     // Symlink escape: canonicalize the deepest existing ancestor and re-check.
-    let mut probe = path.to_path_buf();
-    let mut rest = Vec::new();
-    while !probe.exists() {
-        match probe.file_name() {
-            Some(name) => {
-                rest.push(name.to_os_string());
-                probe.pop();
-            }
-            None => break,
-        }
-    }
-    let canon = probe
-        .canonicalize()
-        .map_err(|e| format!("cannot resolve {}: {e}", probe.display()))?;
-    let mut real = canon;
-    for name in rest.iter().rev() {
-        real.push(name);
-    }
+    let real = resolve_real(path)?;
     if !real.starts_with(workspace) {
         return Err(refusal(&real));
     }
@@ -147,7 +130,35 @@ pub fn in_skills_dir(path: &Path) -> bool {
         })
         .collect();
     dirs.pop(); // the final component is the file itself, not an ancestor
-    dirs.iter().any(|name| *name == "skills")
+    // Case-insensitive: a case-preserving filesystem must not let SKILLS/
+    // dodge the gate.
+    dirs.iter()
+        .any(|name| name.to_str().is_some_and(|s| s.eq_ignore_ascii_case("skills")))
+}
+
+/// The filesystem-real form of a (possibly not-yet-existing) path: the
+/// deepest existing ancestor canonicalized, the remainder re-appended.
+/// This is what a write through a symlinked directory actually lands on.
+pub fn resolve_real(path: &Path) -> Result<PathBuf, String> {
+    let mut probe = path.to_path_buf();
+    let mut rest = Vec::new();
+    while !probe.exists() {
+        match probe.file_name() {
+            Some(name) => {
+                rest.push(name.to_os_string());
+                probe.pop();
+            }
+            None => break,
+        }
+    }
+    let canon = probe
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve {}: {e}", probe.display()))?;
+    let mut real = canon;
+    for name in rest.iter().rev() {
+        real.push(name);
+    }
+    Ok(real)
 }
 
 /// Atomic write: temp file in the same directory, fsync, rename over the
@@ -253,6 +264,23 @@ mod tests {
         ] {
             assert!(!in_skills_dir(Path::new(miss)), "{miss} must not be gated");
         }
+        // Case-preserving filesystems must not dodge the gate by casing.
+        assert!(in_skills_dir(Path::new("/work/.claude/SKILLS/x/SKILL.md")));
+        assert!(in_skills_dir(Path::new("/work/Skills/thing.md")));
+    }
+
+    #[test]
+    fn resolve_real_follows_symlinked_dirs_for_nonexistent_leaves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let target = ws.join(".claude/skills/pdf");
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, ws.join("innocent")).unwrap();
+        // A write to innocent/new.md really lands inside the skills dir.
+        let real = resolve_real(&ws.join("innocent/new.md")).unwrap();
+        assert_eq!(real, target.join("new.md"));
+        assert!(in_skills_dir(&real));
+        assert!(!in_skills_dir(&ws.join("innocent/new.md")), "lexical form alone is blind");
     }
 
     #[test]

@@ -378,3 +378,132 @@ fn resume_then_compaction_still_relists_loaded_skills() {
     );
     rig.server.assert_clean();
 }
+
+/// The hard-drop fallback (the summarize request itself overflows) must
+/// also re-list loaded skills: the stub replaces the middle, so the names
+/// are the only trace left.
+#[test]
+fn hard_drop_compaction_relists_loaded_skills() {
+    let rig = rig();
+    let body: String = (0..800).map(|i| format!("procedure step {i}\n")).collect();
+    rig.skill(".claude/skills", "bigproc", "a big procedure", &body);
+    rig.server.enqueue_stream_toolcalls(
+        &[("h1", "skill", r#"{"name":"bigproc"}"#)],
+        Some((3500, 100)),
+    );
+    // The summarize request answers with a context-overflow 400: the
+    // deterministic hard drop must kick in.
+    rig.server.enqueue_json(
+        400,
+        serde_json::json!({"error": {
+            "message": "the request exceeds the available context size. try increasing it"
+        }}),
+    );
+    rig.server.enqueue_stream_completion("continuing after hard drop");
+    rig.server.expect_prefix_break();
+    rig.server.expect_prefix_break();
+
+    let out = noob(rig.config.path(), rig.work.path())
+        .env("NOOB_CTX", "4096")
+        .args(["exec", "-p", "load the bigproc skill"])
+        .output()
+        .unwrap();
+    ok(&out);
+
+    let reqs = rig.api_requests();
+    assert_eq!(reqs.len(), 3);
+    let cont: String = reqs[2]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["content"].as_str().unwrap_or("").to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(cont.contains("[earlier conversation dropped:"), "{cont}");
+    assert!(
+        cont.contains("[loaded skills: bigproc]"),
+        "hard-drop stub lost the re-listing:\n{cont}"
+    );
+    rig.server.assert_clean();
+}
+
+/// The other half of skills_gate: a human at a real terminal answering "y"
+/// lets the write through. Drives the REPL under a pseudo-terminal, because
+/// the gate refuses to take answers from pipes.
+#[test]
+fn skills_gate_grant_via_tty() {
+    use std::io::{Read, Write};
+    use std::os::fd::FromRawFd;
+
+    let rig = rig();
+    rig.skill(".claude/skills", "greeting", "says hello", "original body\n");
+    // A NEW file inside the skills dir: the gate fires on the directory,
+    // and check-and-set (which refuses unread overwrites) stays out of the
+    // picture.
+    rig.server.enqueue_stream_toolcalls(
+        &[(
+            "g2",
+            "write",
+            r#"{"path":".claude/skills/greeting/NOTES.md","content":"improved body\n"}"#,
+        )],
+        None,
+    );
+    rig.server.enqueue_stream_completion("skill improved");
+
+    // A real pty pair; the REPL sees a terminal on stdin/stdout.
+    let (mut master, slave) = unsafe {
+        let mut m: libc::c_int = 0;
+        let mut s: libc::c_int = 0;
+        assert_eq!(
+            libc::openpty(&mut m, &mut s, std::ptr::null_mut(), std::ptr::null(), std::ptr::null()),
+            0,
+            "openpty failed"
+        );
+        (std::fs::File::from_raw_fd(m), s)
+    };
+    let stdio = |fd: i32| unsafe { std::process::Stdio::from_raw_fd(libc::dup(fd)) };
+    let mut child = noob(rig.config.path(), rig.work.path())
+        .stdin(stdio(slave))
+        .stdout(stdio(slave))
+        .stderr(stdio(slave))
+        .spawn()
+        .unwrap();
+    unsafe { libc::close(slave) };
+
+    // Reactive driver: wait for a marker, then answer. Type-ahead would be
+    // flushed by the gate, so answers must follow their prompts.
+    let mut seen = String::new();
+    let mut wait_for = |master: &mut std::fs::File, marker: &str, seen: &mut String| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut buf = [0u8; 4096];
+        while !seen.contains(marker) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {marker:?}; saw:\n{seen}"
+            );
+            match master.read(&mut buf) {
+                Ok(0) => panic!("pty closed before {marker:?}; saw:\n{seen}"),
+                Ok(n) => seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+                Err(e) => panic!("pty read error: {e}; saw:\n{seen}"),
+            }
+        }
+    };
+    wait_for(&mut master, "type a task", &mut seen);
+    master.write_all(b"improve your greeting skill\n").unwrap();
+    wait_for(&mut master, "[y/N]", &mut seen);
+    master.write_all(b"y\n").unwrap();
+    wait_for(&mut master, "skill improved", &mut seen);
+    master.write_all(b"/quit\n").unwrap();
+    let status = child.wait().unwrap();
+    assert!(status.success(), "repl exit: {status:?};\n{seen}");
+
+    let on_disk = std::fs::read_to_string(
+        rig.work.path().join(".claude/skills/greeting/NOTES.md"),
+    )
+    .unwrap();
+    assert!(
+        on_disk.contains("improved body"),
+        "granted confirmation did not let the write through:\n{seen}"
+    );
+    rig.server.assert_clean();
+}

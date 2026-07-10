@@ -383,8 +383,10 @@ fn cmd_debug(args: &[String]) -> ExitCode {
         skills_index: skills::index(&discovered),
         mcp_line: None,
     };
-    let system = prompt::assemble(&inputs);
+    // One head computation feeds both outputs: a date rollover between two
+    // calls must not make "head" disagree with "system".
     let head = prompt::head(&inputs);
+    let system = prompt::assemble_from(head.clone(), &inputs);
     if json_mode {
         let mut tool_specs = tools::specs();
         if !discovered.is_empty() {

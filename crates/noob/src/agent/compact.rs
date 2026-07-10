@@ -119,6 +119,10 @@ impl Agent {
         let mut new_items = vec![Item::User(head_text)];
         new_items.extend_from_slice(&self.items[cut..]);
         self.items = new_items;
+        // The compacted context invalidates the repeat detector: an
+        // identical call is now legitimate (re-loading a skill whose body
+        // was summarized away is exactly the sanctioned move).
+        self.recent_calls.clear();
         // The old usage numbers describe a transcript that no longer
         // exists; fall back to the chars/4 estimate until fresh usage lands.
         self.last_usage = None;

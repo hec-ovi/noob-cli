@@ -27,12 +27,14 @@ case "${1:-test}" in
       cargo build --release --locked --target x86_64-unknown-linux-musl
     ;;
   # Live smoke suite against local endpoints (qwen at :8090 etc). Opt-in.
+  # Serialized: parallel live tests share one llama-server and evict each
+  # other's KV-cache slots, which flakes the cached-share assertions.
   smoke)
     dev_image
     docker run --rm --network host --user "$UIDGID" \
       -e CARGO_HOME=/src/.cargo-home -e NOOB_LIVE=1 \
       -v "$PWD":/src -w /src "$DEV_IMG" \
-      cargo test --workspace -- --ignored
+      cargo test --workspace -- --ignored --test-threads=1
     ;;
   # The runtime image.
   docker)

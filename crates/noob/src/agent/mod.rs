@@ -81,27 +81,7 @@ impl Agent {
                 .map(|t| t.name.len() + t.description.len() + t.parameters.to_string().len())
                 .sum::<usize>();
         let replayed_chars: usize = items.iter().map(compact::item_chars).sum();
-        // The post-compaction re-listing must survive resume: recover
-        // loaded-skill names from replayed `skill` calls. Names missing from
-        // the current registry are dropped (the skill no longer exists).
-        for item in &items {
-            let Item::Assistant { tool_calls, .. } = item else {
-                continue;
-            };
-            for call in tool_calls.iter().filter(|c| c.name == "skill") {
-                let name = serde_json::from_str::<Value>(&call.arguments)
-                    .ok()
-                    .and_then(|v| v.get("name").and_then(Value::as_str).map(str::to_string));
-                if let Some(name) = name {
-                    if tool_ctx.skills.iter().any(|s| s.name == name) {
-                        let mut loaded = tool_ctx.loaded_skills.lock().unwrap();
-                        if !loaded.iter().any(|n| *n == name) {
-                            loaded.push(name);
-                        }
-                    }
-                }
-            }
-        }
+        recover_loaded_skills(&tool_ctx, &items);
         Agent {
             client,
             config_dir,
@@ -269,6 +249,12 @@ impl Agent {
                     ui.note(w);
                 }
                 ui.tool_done(&call.id, &outcome.summary, outcome.is_error);
+                // A canceled call never executed: drop its doom-window
+                // record so an immediate retry after the interrupt is not
+                // intercepted as a repeat that "will not change".
+                if outcome.content == "canceled by user" {
+                    self.forget_recent_call(call);
+                }
                 self.push_item(Item::ToolResult {
                     call_id: call.id.clone(),
                     content: outcome.content.clone(),
@@ -292,10 +278,16 @@ impl Agent {
                     .find(|o| o.is_error)
                     .map(|o| clip(&o.content, 200))
                     .unwrap_or_default();
-                if ui.ask(&format!(
+                let keep_going = ui.ask(&format!(
                     "{} tool calls in a row failed; keep going?",
                     self.consec_errors
-                )) {
+                ));
+                // A Ctrl-C pressed while the ask blocked on stdin has been
+                // superseded by the explicit answer; a stale flag would
+                // either kill the next request after a "y" or phantom-
+                // cancel the next REPL input after a "n".
+                INTERRUPTED.store(false, Ordering::SeqCst);
+                if keep_going {
                     self.consec_errors = 0;
                 } else {
                     return RunEnd::Aborted(format!(
@@ -349,7 +341,14 @@ impl Agent {
             return planned; // the tool itself reports the missing parameter
         };
         let resolved = guard::resolve_path(&self.tool_ctx.workspace, raw);
-        if !guard::in_skills_dir(&resolved) {
+        // The lexical form catches the direct spelling; the filesystem-real
+        // form catches a write routed through a symlinked directory into a
+        // skills tree (the write tool would follow it).
+        let gated = guard::in_skills_dir(&resolved)
+            || guard::resolve_real(&resolved)
+                .map(|real| guard::in_skills_dir(&real))
+                .unwrap_or(false);
+        if !gated {
             return planned;
         }
         if ui.ask(&format!("allow the agent to {name} inside a skills directory ({raw})?")) {
@@ -361,6 +360,21 @@ impl Agent {
              without them"
                 .to_string(),
         ))
+    }
+
+    /// Remove the most recent doom-window record for `call`, mirroring
+    /// plan_call's canonicalization (only object/null args ever got hashed).
+    fn forget_recent_call(&mut self, call: &ToolCall) {
+        let args = match serde_json::from_str::<Value>(&call.arguments) {
+            Ok(v @ Value::Object(_)) => v,
+            Ok(Value::Null) => json!({}),
+            _ => return,
+        };
+        let canonical = format!("{}\u{0}{}", call.name, args);
+        let hash = fnv1a64(canonical.as_bytes());
+        if let Some(pos) = self.recent_calls.iter().rposition(|&h| h == hash) {
+            self.recent_calls.remove(pos);
+        }
     }
 
     /// Doom-loop guard + argument parsing. Returns what to execute plus the
@@ -418,6 +432,56 @@ impl Agent {
             sched::Planned::Run { name: call.name.clone(), args: args.clone() },
             args,
         )
+    }
+}
+
+/// The post-compaction re-listing must survive resume. Two sources, both
+/// needed: (a) successful skill tool results still in the transcript,
+/// paired by call id (errored or canceled calls never delivered a body and
+/// must not count); (b) `[loaded skills: ...]` lines carried by a spliced
+/// compaction summary, because compaction removes the calls themselves.
+/// Names missing from the current registry are dropped.
+fn recover_loaded_skills(tool_ctx: &ToolCtx, items: &[Item]) {
+    let mut pending: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut recovered: Vec<String> = Vec::new();
+    for item in items {
+        match item {
+            Item::Assistant { tool_calls, .. } => {
+                for call in tool_calls.iter().filter(|c| c.name == "skill") {
+                    let name = serde_json::from_str::<Value>(&call.arguments)
+                        .ok()
+                        .and_then(|v| v.get("name").and_then(Value::as_str).map(str::to_string));
+                    if let Some(name) = name {
+                        pending.insert(call.id.clone(), name);
+                    }
+                }
+            }
+            Item::ToolResult { call_id, content } => {
+                if let Some(name) = pending.remove(call_id) {
+                    // Only a delivered body counts; a success opens with the
+                    // frozen "skill: {name}" header.
+                    if content.starts_with(&format!("skill: {name}\n")) {
+                        recovered.push(name);
+                    }
+                }
+            }
+            Item::User(text) => {
+                for line in text.lines() {
+                    if let Some(inner) = line
+                        .strip_prefix("[loaded skills: ")
+                        .and_then(|rest| rest.strip_suffix(']'))
+                    {
+                        recovered.extend(inner.split(", ").map(str::to_string));
+                    }
+                }
+            }
+        }
+    }
+    let mut loaded = tool_ctx.loaded_skills.lock().unwrap();
+    for name in recovered {
+        if tool_ctx.skills.iter().any(|s| s.name == name) && !loaded.iter().any(|n| *n == name) {
+            loaded.push(name);
+        }
     }
 }
 
@@ -498,43 +562,81 @@ mod tests {
         )
     }
 
-    #[test]
-    fn resume_scan_recovers_loaded_skill_names_that_still_exist() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ws = tmp.path().canonicalize().unwrap();
+    fn skill_ctx(tmp: &std::path::Path, names: &[&str]) -> ToolCtx {
+        let ws = tmp.canonicalize().unwrap();
         let mut tool_ctx = ToolCtx::new(ws, crate::tools::guard::Sandbox::Container);
-        tool_ctx.skills.push(crate::skills::Skill {
-            name: "alpha".into(),
-            description: "d".into(),
-            dir: tmp.path().join("a"),
-            file: tmp.path().join("a/SKILL.md"),
-        });
+        for name in names {
+            tool_ctx.skills.push(crate::skills::Skill {
+                name: name.to_string(),
+                description: "d".into(),
+                dir: tmp.join(name),
+                file: tmp.join(name).join("SKILL.md"),
+            });
+        }
+        tool_ctx
+    }
+
+    fn skill_call(id: &str, name: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: "skill".into(),
+            arguments: format!(r#"{{"name":"{name}"}}"#),
+        }
+    }
+
+    #[test]
+    fn resume_scan_counts_only_successful_loads_of_existing_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool_ctx = skill_ctx(tmp.path(), &["alpha", "beta", "gamma"]);
         let items = vec![
             Item::User("hi".into()),
             Item::Assistant {
                 text: String::new(),
                 tool_calls: vec![
-                    ToolCall {
-                        id: "1".into(),
-                        name: "skill".into(),
-                        arguments: r#"{"name":"alpha"}"#.into(),
-                    },
-                    // A skill that no longer exists must not be re-listed.
-                    ToolCall {
-                        id: "2".into(),
-                        name: "skill".into(),
-                        arguments: r#"{"name":"ghost"}"#.into(),
-                    },
+                    skill_call("1", "alpha"), // delivered
+                    skill_call("2", "ghost"), // no longer exists
+                    skill_call("3", "beta"),  // canceled mid-batch
+                    skill_call("4", "gamma"), // errored (file unreadable)
                 ],
                 raw_items: vec![],
             },
-            Item::ToolResult { call_id: "1".into(), content: "body".into() },
-            Item::ToolResult { call_id: "2".into(), content: "unknown skill".into() },
+            Item::ToolResult {
+                call_id: "1".into(),
+                content: "skill: alpha\ndir: alpha\n\nbody".into(),
+            },
+            Item::ToolResult { call_id: "2".into(), content: "unknown skill \"ghost\"".into() },
+            Item::ToolResult { call_id: "3".into(), content: "canceled by user".into() },
+            Item::ToolResult {
+                call_id: "4".into(),
+                content: "cannot read skill \"gamma\" at gamma/SKILL.md: gone".into(),
+            },
         ];
         let agent = test_agent(items, tool_ctx, tmp.path());
         assert_eq!(
             *agent.tool_ctx.loaded_skills.lock().unwrap(),
-            vec!["alpha".to_string()]
+            vec!["alpha".to_string()],
+            "only the delivered body counts"
+        );
+    }
+
+    #[test]
+    fn resume_scan_recovers_names_from_a_spliced_compaction_summary() {
+        // After compaction the skill CALLS are gone; the only trace is the
+        // [loaded skills: ...] line inside the spliced summary message.
+        let tmp = tempfile::tempdir().unwrap();
+        let tool_ctx = skill_ctx(tmp.path(), &["alpha", "beta"]);
+        let items = vec![
+            Item::User(
+                "[conversation summary]\nwork happened\n[loaded skills: alpha, beta, ghost]"
+                    .into(),
+            ),
+            Item::User("continue".into()),
+        ];
+        let agent = test_agent(items, tool_ctx, tmp.path());
+        assert_eq!(
+            *agent.tool_ctx.loaded_skills.lock().unwrap(),
+            vec!["alpha".to_string(), "beta".to_string()],
+            "summary-line names recovered, unknown names dropped"
         );
     }
 
@@ -571,6 +673,84 @@ mod tests {
             agent.gate_skills_write(run("read", ".claude/skills/evil/SKILL.md"), &mut ui),
             sched::Planned::Run { .. }
         ));
+    }
+
+    #[test]
+    fn skills_write_gate_lets_a_granted_confirmation_through() {
+        // The spec is "requires confirmation", not "always refuses": a
+        // granted ask must let the write run (driven via the test seam;
+        // the real tty path is covered by the e2e under a pty).
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let agent =
+            test_agent(vec![], ToolCtx::new(ws, crate::tools::guard::Sandbox::Container), tmp.path());
+        let mut ui = crate::ui::Ui::new(crate::ui::Mode::Repl);
+        ui.forced_ask = Some(true);
+        let planned = sched::Planned::Run {
+            name: "write".into(),
+            args: json!({"path": ".claude/skills/x/SKILL.md", "content": "ok"}),
+        };
+        assert!(matches!(
+            agent.gate_skills_write(planned, &mut ui),
+            sched::Planned::Run { .. }
+        ));
+        ui.forced_ask = Some(false);
+        let planned = sched::Planned::Run {
+            name: "write".into(),
+            args: json!({"path": ".claude/skills/x/SKILL.md", "content": "no"}),
+        };
+        assert!(matches!(
+            agent.gate_skills_write(planned, &mut ui),
+            sched::Planned::Canned(_)
+        ));
+    }
+
+    #[test]
+    fn gate_catches_writes_routed_through_a_symlink_into_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let target = ws.join(".claude/skills/pdf");
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, ws.join("innocent")).unwrap();
+        let agent = test_agent(
+            vec![],
+            ToolCtx::new(ws, crate::tools::guard::Sandbox::Container),
+            tmp.path(),
+        );
+        let mut ui = crate::ui::Ui::new(crate::ui::Mode::Exec);
+        let planned = sched::Planned::Run {
+            name: "write".into(),
+            args: json!({"path": "innocent/SKILL.md", "content": "x"}),
+        };
+        match agent.gate_skills_write(planned, &mut ui) {
+            sched::Planned::Canned(out) => assert!(out.content.contains("refused")),
+            sched::Planned::Run { .. } => panic!("symlink route into skills must be gated"),
+        }
+    }
+
+    #[test]
+    fn canceled_calls_are_forgotten_by_the_doom_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let mut agent = test_agent(
+            vec![],
+            ToolCtx::new(ws, crate::tools::guard::Sandbox::Container),
+            tmp.path(),
+        );
+        let call = ToolCall {
+            id: "c".into(),
+            name: "bash".into(),
+            arguments: r#"{"cmd":"make"}"#.into(),
+        };
+        // Planned twice (one canceled), so only ONE record must remain:
+        // the third plan is the second real attempt and must run.
+        agent.plan_call(&call);
+        agent.plan_call(&call);
+        agent.forget_recent_call(&call);
+        match agent.plan_call(&call).0 {
+            sched::Planned::Run { .. } => {}
+            sched::Planned::Canned(_) => panic!("retry after a canceled call was intercepted"),
+        }
     }
 
     #[test]

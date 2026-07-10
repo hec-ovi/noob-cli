@@ -39,7 +39,14 @@ pub fn head(inputs: &PromptInputs) -> String {
 
 /// The full system prompt: head + AGENTS.md layers + skills index + MCP line.
 pub fn assemble(inputs: &PromptInputs) -> String {
-    let mut out = head(inputs);
+    assemble_from(head(inputs), inputs)
+}
+
+/// Assemble on top of an already-computed head, so a caller that needs both
+/// (debug prompt) computes the head exactly once: two head() calls straddling
+/// midnight would disagree on the date.
+pub fn assemble_from(head: String, inputs: &PromptInputs) -> String {
+    let mut out = head;
     if let Some(global) = &inputs.global_agents {
         out.push_str("\n\n# Global instructions (AGENTS.md)\n\n");
         push_capped(&mut out, global);

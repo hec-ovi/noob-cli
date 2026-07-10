@@ -60,10 +60,11 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     }
     // The ~5k-token recommendation from the skills standard, echoed as a
     // UI-only warning so oversize bodies get noticed without failing.
-    let warning = (body.len() / 4 > 5_000).then(|| {
+    let token_estimate = body.len() / 4;
+    let warning = (token_estimate > 5_000).then(|| {
         format!(
-            "skill {name} is ~{}k tokens; the skills standard recommends bodies under 5k tokens",
-            body.len() / 4_000
+            "skill {name} is ~{token_estimate} tokens; the skills standard recommends \
+             bodies under 5000 tokens"
         )
     });
 
@@ -144,10 +145,21 @@ mod tests {
         let out = run(&ctx, &json!({"name": "big"}));
         assert!(!out.is_error);
         assert!(out.content.len() < 25 * 1024 + 200);
+        // The cap must deliver the leading ~24 KiB, not an empty stub.
+        assert!(out.content.len() > 24 * 1024 - 200, "capped body suspiciously small");
+        assert!(out.content.contains("body line 0\n"), "the body head must survive the cap");
         assert!(out.content.contains("[skill body capped at 24 KiB; read the rest with read "));
         assert!(out.content.contains(".noob/skills/big/SKILL.md offset="));
         let warning = out.warning.expect("oversize warning");
-        assert!(warning.contains("recommends bodies under 5k tokens"), "{warning}");
+        assert!(warning.contains("recommends bodies under 5000 tokens"), "{warning}");
+        // The estimate is the real chars/4 figure, not a floored "5k" that
+        // reads as equal to the recommendation.
+        let est: u64 = warning
+            .split_once("is ~")
+            .and_then(|(_, rest)| rest.split(' ').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no numeric estimate in: {warning}"));
+        assert!(est > 5_000, "estimate {est} must exceed the recommendation");
         // The pointer's offset continues where the cap landed: frontmatter
         // (4 lines) + full body lines shown + 1.
         let offset: usize = out

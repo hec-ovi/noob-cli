@@ -47,8 +47,16 @@ pub fn discover(workspace: &Path, config_dir: &Path) -> Vec<Skill> {
         dirs.sort();
         for dir in dirs {
             let file = dir.join("SKILL.md");
-            let Ok(text) = std::fs::read_to_string(&file) else {
-                continue;
+            let text = match std::fs::read_to_string(&file) {
+                Ok(t) => t,
+                // No SKILL.md: not a skill dir, and not worth a warning.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                // Present but unreadable (permissions, invalid UTF-8): the
+                // mandated stderr warning, not a silent disappearance.
+                Err(e) => {
+                    eprintln!("noob: skipping skill {}: cannot read: {e}", file.display());
+                    continue;
+                }
             };
             match parse(&text).and_then(|p| validate(&p.fields)) {
                 Ok((name, description)) => {
@@ -128,14 +136,19 @@ pub struct Parsed {
 /// (nested metadata) are ignored; a top-level line that is not `key: value`
 /// is an error. All values land in the map trimmed.
 pub fn parse(text: &str) -> Result<Parsed, String> {
+    // YAML permits a BOM at stream start and Windows editors add one; it
+    // must not hide the opening fence. Line indexing is unchanged (the BOM
+    // is not a newline), so body_of's byte math over the original text
+    // stays exact.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let lines: Vec<&str> = text.split('\n').collect();
-    if lines.first().map(|l| l.trim_end_matches('\r')) != Some("---") {
+    if lines.first().map(|l| l.trim_end()) != Some("---") {
         return Err("no frontmatter: the file must start with a `---` line".to_string());
     }
     let mut fields = HashMap::new();
     let mut i = 1;
     while i < lines.len() {
-        let line = lines[i].trim_end_matches('\r');
+        let line = lines[i].trim_end();
         if line == "---" {
             return Ok(Parsed { fields, body_start: i + 1 });
         }
@@ -159,7 +172,7 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
             return Err(format!("line {i}: invalid key {key:?}"));
         }
         let value = line[colon + 1..].trim();
-        let parsed = if matches!(value, "|" | "|-" | "|+" | ">" | ">-" | ">+") {
+        let parsed = if is_block_indicator(value) {
             let (block, next) = scan_block(&lines, i, value.starts_with('>'));
             i = next;
             block
@@ -171,6 +184,17 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
     Err("unterminated frontmatter: no closing `---` line".to_string())
 }
 
+/// `|` or `>` with optional chomping (`+`/`-`) and an optional explicit
+/// indentation digit, in either order (YAML block headers like `|2` or
+/// `>-2`). The digit is accepted but indentation stays auto-detected:
+/// values are trimmed for validation, so the distinction cannot matter.
+fn is_block_indicator(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some('|') | Some('>'))
+        && value.len() <= 3
+        && chars.all(|c| c == '+' || c == '-' || c.is_ascii_digit())
+}
+
 /// Collect a block scalar's indented lines starting at `i`; returns the
 /// joined text and the index of the first line after the block. Literal
 /// (`|`) keeps line breaks; folded (`>`) joins lines with spaces and keeps
@@ -178,7 +202,7 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
 fn scan_block(lines: &[&str], mut i: usize, folded: bool) -> (String, usize) {
     let mut block: Vec<&str> = Vec::new();
     while i < lines.len() {
-        let line = lines[i].trim_end_matches('\r');
+        let line = lines[i].trim_end();
         if line == "---" {
             break;
         }
@@ -188,14 +212,26 @@ fn scan_block(lines: &[&str], mut i: usize, folded: bool) -> (String, usize) {
         block.push(line);
         i += 1;
     }
+    // Indentation is ASCII space/tab BYTES only, and the strip below
+    // consumes only such bytes: a continuation line less indented than the
+    // first (or indented with exotic whitespace) can never split a
+    // multi-byte character, so this cannot panic on any input.
     let indent = block
         .iter()
         .find(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start().len())
+        .map(|l| l.bytes().take_while(|&b| b == b' ' || b == b'\t').count())
         .unwrap_or(0);
     let stripped: Vec<&str> = block
         .iter()
-        .map(|l| if l.len() >= indent { &l[indent..] } else { "" })
+        .map(|l| {
+            let bytes = l.as_bytes();
+            let mut cut = 0;
+            while cut < indent && cut < bytes.len() && (bytes[cut] == b' ' || bytes[cut] == b'\t')
+            {
+                cut += 1;
+            }
+            &l[cut..]
+        })
         .collect();
     let text = if folded {
         let mut out = String::new();
@@ -368,6 +404,60 @@ mod tests {
         let (body, skipped) = body_of(text);
         assert_eq!(skipped, 4);
         assert_eq!(body.as_ref(), "body\r\n");
+    }
+
+    #[test]
+    fn multibyte_char_at_the_indent_offset_never_panics() {
+        // A continuation line less indented than the first, with a
+        // multi-byte char straddling the indent byte offset: the old
+        // byte-slice strip panicked here and killed discovery.
+        let text = "---\nname: b\ndescription: |\n    deeply\n  中文 content\n---\nbody\n";
+        let p = parse(text).unwrap();
+        assert_eq!(p.fields["description"], "deeply\n中文 content");
+        // Same shape with NBSP (unicode whitespace) indentation: NBSP is
+        // not YAML indentation, so the line reads as a malformed key line.
+        // The contract is a clean Err (skip with warning), never a panic.
+        let text = "---\nname: b\ndescription: |\n\u{a0}\u{a0}first\n  中 x\n---\n";
+        assert!(parse(text).unwrap_err().contains("key: value"));
+    }
+
+    #[test]
+    fn bom_and_trailing_fence_whitespace_are_tolerated() {
+        let text = "\u{feff}---\nname: bom-skill\ndescription: windows authored\n--- \nbody\n";
+        let p = parse(text).unwrap();
+        assert_eq!(p.fields["name"], "bom-skill");
+        assert_eq!(p.body_start, 4);
+        let (body, skipped) = body_of(text);
+        assert_eq!(body.as_ref(), "body\n");
+        assert_eq!(skipped, 4);
+    }
+
+    #[test]
+    fn block_headers_with_explicit_indent_digits_parse_as_blocks() {
+        for header in ["|2", ">-2", "|+", ">2-"] {
+            let text = format!("---\nname: n\ndescription: {header}\n  real text\n---\n");
+            let p = parse(&text).unwrap();
+            assert_eq!(p.fields["description"], "real text", "header {header:?}");
+        }
+        // A pipe inside a plain scalar is NOT a block header.
+        let p = parse("---\nname: n\ndescription: a | b\n---\n").unwrap();
+        assert_eq!(p.fields["description"], "a | b");
+    }
+
+    #[test]
+    fn unreadable_skill_md_warns_and_skips_without_crashing() {
+        use std::io::Write;
+        let ws = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        let root = ws.path().join(".claude/skills");
+        write_skill(&root, "good", &skill_md("good", "fine"));
+        // Invalid UTF-8: read_to_string fails with a non-NotFound error.
+        std::fs::create_dir_all(root.join("binary")).unwrap();
+        let mut f = std::fs::File::create(root.join("binary/SKILL.md")).unwrap();
+        f.write_all(&[0xff, 0xfe, 0x00, 0x80]).unwrap();
+        let skills = discover(ws.path(), cfg.path());
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "good");
     }
 
     #[test]

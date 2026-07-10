@@ -69,6 +69,10 @@ struct Shared {
     /// mismatch actually happens, so tests can arm allowances up front
     /// (before spawning a binary that compacts mid-run).
     allowed_prefix_breaks: std::sync::atomic::AtomicUsize,
+    /// Separate from prefix breaks: the tools array must stay byte-stable
+    /// even across sanctioned message breaks (compaction). Plan mode (P5)
+    /// is the first legitimate consumer.
+    allowed_tools_changes: std::sync::atomic::AtomicUsize,
     connections: std::sync::atomic::AtomicUsize,
 }
 
@@ -86,6 +90,7 @@ impl MockServer {
             recorded: Mutex::new(Vec::new()),
             violations: Mutex::new(Vec::new()),
             allowed_prefix_breaks: std::sync::atomic::AtomicUsize::new(0),
+            allowed_tools_changes: std::sync::atomic::AtomicUsize::new(0),
             connections: std::sync::atomic::AtomicUsize::new(0),
         });
         let accept_shared = shared.clone();
@@ -179,6 +184,14 @@ impl MockServer {
     pub fn expect_prefix_break(&self) {
         self.shared
             .allowed_prefix_breaks
+            .fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Sanction one future tools-array change (plan-mode entry or exit,
+    /// P5). Consumed only when a change happens.
+    pub fn expect_tools_change(&self) {
+        self.shared
+            .allowed_tools_changes
             .fetch_add(1, Ordering::SeqCst);
     }
 
@@ -475,16 +488,6 @@ fn run_assertions(shared: &Shared, req: &Recorded) {
                         return Some(v);
                     }
                 }
-                let prev_tools = raw_top_level_value(&prev.body, "tools");
-                let next_tools = raw_top_level_value(&req.body, "tools");
-                if let (Some(p), Some(n)) = (prev_tools, next_tools) {
-                    if p != n {
-                        return Some(format!(
-                            "request #{idx}: the tools array changed since the previous \
-                             request (cache prefix broken)"
-                        ));
-                    }
-                }
                 // Structural fallback for a readable message when the raw
                 // scan is unavailable.
                 prev.json().and_then(|prev| {
@@ -499,6 +502,34 @@ fn run_assertions(shared: &Shared, req: &Recorded) {
             // violation.
             let allowed = self_dec(&shared.allowed_prefix_breaks);
             if !allowed {
+                violations.push(v);
+            }
+        }
+        // Tools-array stability is checked INDEPENDENTLY of the messages
+        // prefix: a prefix-break allowance (compaction) must never swallow
+        // tools drift, and the baseline is the most recent request on this
+        // path that carried a tools key at all (the summarizer sends none,
+        // which must not blind the comparison across it).
+        let tools_drift = {
+            let recorded = shared.recorded.lock().unwrap();
+            raw_top_level_value(&req.body, "tools").and_then(|next| {
+                recorded
+                    .iter()
+                    .rev()
+                    .filter(|r| r.path == req.path)
+                    .find_map(|r| raw_top_level_value(&r.body, "tools"))
+                    .and_then(|prevt| {
+                        (prevt != next).then(|| {
+                            format!(
+                                "request #{idx}: the tools array changed since the last \
+                                 request that carried one (cache prefix broken)"
+                            )
+                        })
+                    })
+            })
+        };
+        if let Some(v) = tools_drift {
+            if !self_dec(&shared.allowed_tools_changes) {
                 violations.push(v);
             }
         }
@@ -778,6 +809,7 @@ mod tests {
             recorded: Mutex::new(Vec::new()),
             violations: Mutex::new(Vec::new()),
             allowed_prefix_breaks: std::sync::atomic::AtomicUsize::new(0),
+            allowed_tools_changes: std::sync::atomic::AtomicUsize::new(0),
             connections: std::sync::atomic::AtomicUsize::new(0),
         }
     }
@@ -918,9 +950,62 @@ mod tests {
         s.recorded.lock().unwrap().push(first);
         // Same messages, different tools serialization: violation.
         run_assertions(&s, &mk(json!([{"type":"function","function":{"name":"write"}}])));
+        let v: Vec<String> = std::mem::take(&mut s.violations.lock().unwrap());
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].contains("tools array changed"), "{}", v[0]);
+    }
+
+    #[test]
+    fn tools_drift_is_caught_across_a_toolless_request_and_a_message_break() {
+        // The compaction shape: a summarizer request with NO tools key and
+        // a full message-prefix break sits between two normal requests. The
+        // prefix allowance must not swallow tools drift, and the toolless
+        // request must not blind the comparison.
+        let s = shared();
+        let normal = |tools_name: &str, msg: &str| {
+            req(
+                "/v1/chat/completions",
+                json!({"messages": [{"role":"user","content":msg}],
+                       "tools": [{"type":"function","function":{"name":tools_name}}]}),
+            )
+        };
+        let first = normal("read", "a");
+        run_assertions(&s, &first);
+        s.recorded.lock().unwrap().push(first);
+        // Summarizer: different messages (sanctioned break), no tools key.
+        s.allowed_prefix_breaks.store(2, Ordering::SeqCst);
+        let summarize = req(
+            "/v1/chat/completions",
+            json!({"messages": [{"role":"user","content":"summarize"}]}),
+        );
+        run_assertions(&s, &summarize);
+        s.recorded.lock().unwrap().push(summarize);
+        // Continuation: another sanctioned message break, but the tools
+        // array DRIFTED vs request 1. That must still be a violation.
+        run_assertions(&s, &normal("write", "b"));
         let v = s.violations.lock().unwrap();
         assert_eq!(v.len(), 1, "{v:?}");
         assert!(v[0].contains("tools array changed"), "{}", v[0]);
+    }
+
+    #[test]
+    fn declared_tools_change_is_accepted_once() {
+        let s = shared();
+        let mk = |name: &str| {
+            req(
+                "/v1/chat/completions",
+                json!({"messages": [{"role":"user","content":"a"}],
+                       "tools": [{"type":"function","function":{"name":name}}]}),
+            )
+        };
+        let first = mk("read");
+        run_assertions(&s, &first);
+        s.recorded.lock().unwrap().push(first);
+        s.allowed_tools_changes.store(1, Ordering::SeqCst);
+        run_assertions(&s, &mk("plan_mode_set"));
+        let v = s.violations.lock().unwrap();
+        assert!(v.is_empty(), "{v:?}");
+        assert_eq!(s.allowed_tools_changes.load(Ordering::SeqCst), 0);
     }
 
     #[test]

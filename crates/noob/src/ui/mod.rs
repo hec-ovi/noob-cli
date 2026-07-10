@@ -26,6 +26,9 @@ pub struct Ui {
     /// Bytes of assistant text printed since the last newline, for prompt
     /// hygiene after streams that do not end in \n.
     mid_line: bool,
+    /// Test seam for the confirmation flow: unit tests cannot own a tty.
+    #[cfg(test)]
+    pub forced_ask: Option<bool>,
 }
 
 const DIM: &str = "\x1b[2m";
@@ -37,6 +40,8 @@ impl Ui {
             mode,
             ansi: std::io::stdout().is_terminal(),
             mid_line: false,
+            #[cfg(test)]
+            forced_ask: None,
         }
     }
 
@@ -137,13 +142,20 @@ impl Ui {
         }
     }
 
-    /// One-line y/N question. Only the REPL can ask; headless surfaces
-    /// degrade to No so unattended runs never block.
+    /// One-line y/N question. Only a human at a real terminal can grant:
+    /// headless surfaces AND a REPL fed from a pipe degrade to No (the spec
+    /// says no TTY means deny), and queued type-ahead is flushed so a line
+    /// typed while the agent was working cannot satisfy the prompt.
     pub fn ask(&mut self, question: &str) -> bool {
-        if self.mode != Mode::Repl {
+        #[cfg(test)]
+        if let Some(forced) = self.forced_ask {
+            return forced;
+        }
+        if self.mode != Mode::Repl || !std::io::stdin().is_terminal() {
             return false;
         }
         self.end_line();
+        unsafe { libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH) };
         self.out(&format!("{question} [y/N] "));
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).is_err() {
@@ -207,5 +219,16 @@ mod tests {
         assert!(!ui.ask("continue?"));
         let mut ui = Ui::new(Mode::ExecJson);
         assert!(!ui.ask("continue?"));
+    }
+
+    #[test]
+    fn repl_ask_without_a_tty_denies_instead_of_eating_stdin() {
+        // Only meaningful when the suite itself runs headless (dev.sh runs
+        // docker without -t); with a live tty this would block on input.
+        if std::io::stdin().is_terminal() {
+            return;
+        }
+        let mut ui = Ui::new(Mode::Repl);
+        assert!(!ui.ask("grant?"), "a piped REPL must never grant a confirmation");
     }
 }
