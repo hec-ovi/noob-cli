@@ -61,6 +61,13 @@ fn value_for(flag: &str, next: Option<&String>, usage: &str) -> Result<String, S
 // Session bootstrap shared by the REPL and exec
 // ---------------------------------------------------------------------------
 
+fn model_label(config_dir: &std::path::Path, ov: &Overrides) -> String {
+    ov.model
+        .clone()
+        .or_else(|| config::setting(config_dir, "NOOB_MODEL"))
+        .unwrap_or_else(|| "default".to_string())
+}
+
 struct BootArgs {
     ov: Overrides,
     yolo: bool,
@@ -82,11 +89,10 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
         .map_err(|e| format!("cannot resolve the working directory: {e}"))?;
     let (sandbox, sandbox_label) = config::detect_sandbox(&config_dir, boot.yolo);
 
-    // Best-effort resolve for the environment block; a missing base URL is
-    // reported per-request (the user can fix .env live, hot reload applies).
-    let model = noob_provider::resolve_endpoint(&config_dir, &ov)
-        .map(|ep| ep.model)
-        .unwrap_or_else(|_| "default".to_string());
+    // The env-block model label follows the same precedence as the real
+    // request (flag > env > .env) but is independent of base-url resolution,
+    // so `debug prompt` and a live session print the identical head.
+    let model = model_label(&config_dir, &ov);
     let inputs = prompt::PromptInputs {
         cwd: workspace.display().to_string(),
         model,
@@ -161,15 +167,16 @@ fn cmd_repl(args: &[String]) -> ExitCode {
         match stdin.lock().read_line(&mut line) {
             Ok(0) => break, // EOF (Ctrl-D)
             Ok(_) => {}
-            Err(_) => {
-                // Ctrl-C at the prompt lands here via EINTR.
-                if INTERRUPTED.swap(false, Ordering::SeqCst) {
-                    println!();
-                    ui.note("(interrupted; /quit to exit)");
-                    continue;
-                }
-                break;
-            }
+            Err(_) => break,
+        }
+        // Ctrl-C while at the prompt: std's read_line retries EINTR
+        // internally, so the flag is the only signal it happened. The tty
+        // has already flushed the typed input (ISIG), so drop this line,
+        // clear the flag, and prompt again; a second Ctrl-C before any
+        // input hard-exits via the signal handler.
+        if INTERRUPTED.swap(false, Ordering::SeqCst) {
+            ui.note("(interrupted; /quit to exit)");
+            continue;
         }
         let input = line.trim();
         if input.is_empty() {
@@ -181,6 +188,9 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                 "status" => status(&agent, &mut ui),
                 "compact" => {
                     agent.compact(&mut ui);
+                    // A Ctrl-C during a manual compaction was consumed by
+                    // it; a stale flag would phantom-cancel the next input.
+                    INTERRUPTED.store(false, Ordering::SeqCst);
                 }
                 "plan" | "go" => ui.note("plan mode lands in P5"),
                 other => ui.note(&format!(
@@ -268,9 +278,15 @@ fn cmd_exec(args: &[String]) -> ExitCode {
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let taken = match arg.as_str() {
-            "-p" | "--prompt" => {
-                value_for(arg, it.next(), USAGE).map(|v| prompt_arg = Some(v))
-            }
+            // The prompt is arbitrary user text relayed by wrappers; a
+            // leading '-' must not be rejected as a missing value.
+            "-p" | "--prompt" => match it.next() {
+                Some(v) => {
+                    prompt_arg = Some(v.clone());
+                    Ok(())
+                }
+                None => Err(format!("noob exec: {arg} needs a value; {USAGE}")),
+            },
             "--model" => value_for(arg, it.next(), USAGE).map(|v| ov.model = Some(v)),
             "--base-url" => value_for(arg, it.next(), USAGE).map(|v| ov.base_url = Some(v)),
             "--session" => value_for(arg, it.next(), USAGE).map(|v| session_id = Some(v)),
@@ -338,9 +354,7 @@ fn cmd_debug(args: &[String]) -> ExitCode {
         .and_then(|d| d.canonicalize())
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let (_, sandbox_label) = config::detect_sandbox(&config_dir, false);
-    let model = noob_provider::resolve_endpoint(&config_dir, &ov)
-        .map(|ep| ep.model)
-        .unwrap_or_else(|_| "default".to_string());
+    let model = model_label(&config_dir, &ov);
     let inputs = prompt::PromptInputs {
         cwd: workspace.display().to_string(),
         model,

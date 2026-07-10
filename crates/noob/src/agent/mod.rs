@@ -130,6 +130,11 @@ impl Agent {
         for _round in 0..TURN_CAP {
             if self.context_estimate() >= self.ctx_tokens.saturating_mul(3) / 4 {
                 self.compact(ui);
+                // Ctrl-C during the summarization request aborts the input,
+                // not just the compaction.
+                if INTERRUPTED.load(Ordering::SeqCst) {
+                    return self.finish_interrupt(ui, &[]);
+                }
             }
             let req = TurnRequest {
                 system: Some(self.system.clone()),
@@ -157,7 +162,11 @@ impl Agent {
                 {
                     emergency_used = true;
                     ui.note("the endpoint reports a full context; compacting and retrying");
-                    if !self.compact(ui) {
+                    let compacted = self.compact(ui);
+                    if INTERRUPTED.load(Ordering::SeqCst) {
+                        return self.finish_interrupt(ui, &[]);
+                    }
+                    if !compacted {
                         return RunEnd::Aborted(
                             "the context window is full and nothing is left to compact; \
                              start a new session"
@@ -173,17 +182,17 @@ impl Agent {
                 Ok(turn) => turn,
             };
 
-            if let Some(u) = turn.usage {
-                self.last_usage = Some(u);
-                self.chars_since_usage = 0;
-            }
             // Output is never capped, so Length means the context filled up
             // mid-turn: discard the partial turn, compact once, retry.
             if turn.finish == Finish::Length && !emergency_used {
                 emergency_used = true;
                 ui.end_line();
                 ui.note("the model hit the end of the context mid-turn; compacting and retrying");
-                if !self.compact(ui) {
+                let compacted = self.compact(ui);
+                if INTERRUPTED.load(Ordering::SeqCst) {
+                    return self.finish_interrupt(ui, &[]);
+                }
+                if !compacted {
                     return RunEnd::Aborted(
                         "the context window is full and nothing is left to compact; \
                          start a new session"
@@ -198,6 +207,14 @@ impl Agent {
                 tool_calls: turn.tool_calls.clone(),
                 raw_items: turn.raw_items.clone(),
             });
+            // Server-reported usage covers the prompt AND this turn's reply,
+            // so it lands AFTER the assistant item is pushed: adding the
+            // item's chars on top would double-count the reply and trigger
+            // compaction below the 75% threshold.
+            if let Some(u) = turn.usage {
+                self.last_usage = Some(u);
+                self.chars_since_usage = 0;
+            }
 
             if turn.tool_calls.is_empty() {
                 ui.done(self.last_usage);
@@ -318,7 +335,15 @@ impl Agent {
         // canonical: key order cannot dodge the repeat detector.
         let canonical = format!("{}\u{0}{}", call.name, args);
         let hash = fnv1a64(canonical.as_bytes());
-        let repeats = self.recent_calls.iter().filter(|&&h| h == hash).count();
+        // "3 times within the last 12 calls": the window includes the
+        // current call, so look at the 11 preceding ones.
+        let repeats = self
+            .recent_calls
+            .iter()
+            .rev()
+            .take(DOOM_WINDOW - 1)
+            .filter(|&&h| h == hash)
+            .count();
         self.recent_calls.push_back(hash);
         if self.recent_calls.len() > DOOM_WINDOW {
             self.recent_calls.pop_front();
@@ -359,6 +384,49 @@ fn clip(s: &str, chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noob_provider::http::Timeouts;
+
+    #[test]
+    fn doom_window_is_twelve_calls_inclusive_of_the_current_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let mut agent = Agent::new(
+            Client::new(Timeouts::default()),
+            tmp.path().to_path_buf(),
+            Overrides::default(),
+            "sys".into(),
+            vec![],
+            vec![],
+            ToolCtx::new(ws, crate::tools::guard::Sandbox::Container),
+            None,
+            131_072,
+        );
+        let call = |args: &str| ToolCall {
+            id: "c".into(),
+            name: "read".into(),
+            arguments: args.into(),
+        };
+        let x = call(r#"{"path":"x"}"#);
+        let ran = |p: &sched::Planned| matches!(p, sched::Planned::Run { .. });
+
+        // X, X, then 10 distinct calls: the next X spans 13 calls, OUTSIDE
+        // the 12-call window, so it must run.
+        assert!(ran(&agent.plan_call(&x).0));
+        assert!(ran(&agent.plan_call(&x).0));
+        for i in 0..10 {
+            let d = call(&format!(r#"{{"path":"d{i}"}}"#));
+            assert!(ran(&agent.plan_call(&d).0));
+        }
+        assert!(ran(&agent.plan_call(&x).0), "a 13-call span must not intercept");
+        // Now two X sit close together; a third within the window trips.
+        assert!(ran(&agent.plan_call(&x).0));
+        match agent.plan_call(&x).0 {
+            sched::Planned::Canned(out) => {
+                assert!(out.content.contains("repeated identical call"));
+            }
+            sched::Planned::Run { .. } => panic!("third X within 12 must intercept"),
+        }
+    }
 
     #[test]
     fn overflow_detector_matches_real_server_phrasings() {

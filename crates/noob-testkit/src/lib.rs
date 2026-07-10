@@ -459,18 +459,40 @@ fn run_assertions(shared: &Shared, req: &Recorded) {
     // 2 + 3 need the conversation array.
     let array_key = if req.path.ends_with("/responses") { "input" } else { "messages" };
     if let Some(items) = body.get(array_key).and_then(Value::as_array) {
+        // Prefix stability is byte-exact on the serialized array: llama.cpp
+        // KV reuse is byte-sensitive, so a serializer that merely reorders
+        // keys between turns is a real cache bust and must be caught.
+        // Tools-array drift is the same class of bust (the schemas sit
+        // before the transcript in the rendered prompt).
         let mismatch = {
             let recorded = shared.recorded.lock().unwrap();
-            recorded
-                .iter()
-                .rev()
-                .find(|r| r.path == req.path)
-                .and_then(|r| r.json())
-                .and_then(|prev| {
+            let prev = recorded.iter().rev().find(|r| r.path == req.path);
+            prev.and_then(|prev| {
+                let prev_raw = raw_top_level_value(&prev.body, array_key);
+                let next_raw = raw_top_level_value(&req.body, array_key);
+                if let (Some(p), Some(n)) = (&prev_raw, &next_raw) {
+                    if let Some(v) = check_byte_prefix(p, n, idx) {
+                        return Some(v);
+                    }
+                }
+                let prev_tools = raw_top_level_value(&prev.body, "tools");
+                let next_tools = raw_top_level_value(&req.body, "tools");
+                if let (Some(p), Some(n)) = (prev_tools, next_tools) {
+                    if p != n {
+                        return Some(format!(
+                            "request #{idx}: the tools array changed since the previous \
+                             request (cache prefix broken)"
+                        ));
+                    }
+                }
+                // Structural fallback for a readable message when the raw
+                // scan is unavailable.
+                prev.json().and_then(|prev| {
                     prev.get(array_key)
                         .and_then(Value::as_array)
                         .and_then(|prev_items| check_prefix(prev_items, items, idx))
                 })
+            })
         };
         if let Some(v) = mismatch {
             // A sanctioned break burns one allowance; otherwise it is a
@@ -510,6 +532,131 @@ fn scan_cap_keys(v: &Value, path: &str, violations: &mut Vec<String>) {
         }
         _ => {}
     }
+}
+
+/// The raw byte slice of one top-level key's value in a JSON object body.
+/// A tiny scanner (string/escape/depth aware), NOT a parser: it exists so
+/// the prefix assertion can compare the exact bytes the client serialized,
+/// which is what llama.cpp's KV prefix cache sees.
+pub fn raw_top_level_value(body: &[u8], key: &str) -> Option<Vec<u8>> {
+    let n = body.len();
+    let mut i = 0;
+    while i < n && body[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= n || body[i] != b'{' {
+        return None;
+    }
+    i += 1;
+    loop {
+        while i < n && body[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        match body.get(i)? {
+            b'}' => return None,
+            b',' => {
+                i += 1;
+                continue;
+            }
+            b'"' => {}
+            _ => return None,
+        }
+        let (k, after) = scan_string(body, i)?;
+        i = after;
+        while i < n && body[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if body.get(i) != Some(&b':') {
+            return None;
+        }
+        i += 1;
+        while i < n && body[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let start = i;
+        let end = scan_value(body, i)?;
+        if k == key.as_bytes() {
+            return Some(body[start..end].to_vec());
+        }
+        i = end;
+    }
+}
+
+/// Returns (contents without quotes, index just past the closing quote).
+fn scan_string(b: &[u8], start: usize) -> Option<(&[u8], usize)> {
+    let mut i = start + 1;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'"' => return Some((&b[start + 1..i], i + 1)),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Index just past one JSON value starting at `start`.
+fn scan_value(b: &[u8], start: usize) -> Option<usize> {
+    match b.get(start)? {
+        b'"' => scan_string(b, start).map(|(_, e)| e),
+        b'{' | b'[' => {
+            let mut depth = 0usize;
+            let mut i = start;
+            while i < b.len() {
+                match b[i] {
+                    b'"' => {
+                        i = scan_string(b, i)?.1;
+                        continue;
+                    }
+                    b'{' | b'[' => depth += 1,
+                    b'}' | b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(i + 1);
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            None
+        }
+        _ => {
+            let mut i = start;
+            while i < b.len()
+                && !matches!(b[i], b',' | b'}' | b']')
+                && !b[i].is_ascii_whitespace()
+            {
+                i += 1;
+            }
+            Some(i)
+        }
+    }
+}
+
+/// Byte-exact prefix rule for a serialized JSON array: the next request's
+/// array must be the previous one with zero or more items appended (same
+/// bytes up to the previous closing bracket).
+fn check_byte_prefix(prev: &[u8], next: &[u8], idx: usize) -> Option<String> {
+    if prev == next || prev == b"[]" {
+        return None;
+    }
+    if prev.last() == Some(&b']') && next.first() == Some(&b'[') {
+        let prefix = &prev[..prev.len() - 1];
+        if next.starts_with(prefix) && next.get(prefix.len()) == Some(&b',') {
+            return None;
+        }
+    }
+    let common = prev
+        .iter()
+        .zip(next.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    Some(format!(
+        "request #{idx}: the serialized conversation array is not a byte-prefix \
+         extension of the previous request (diverges at byte {common}); a \
+         re-serialization that only reorders keys still busts the KV cache"
+    ))
 }
 
 /// Atomically consume one allowance; false when none are left.
@@ -720,6 +867,60 @@ mod tests {
         );
         let v = s.violations.lock().unwrap();
         assert!(v.is_empty(), "{v:?}");
+    }
+
+    #[test]
+    fn raw_scanner_finds_the_real_key_not_a_string_decoy() {
+        // The system prompt CONTAINS the text "messages":[ inside a string;
+        // the scanner must skip it and return the real top-level array.
+        let body = json!({
+            "model": "m",
+            "note": "docs say \"messages\":[{}] goes here",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true
+        })
+        .to_string();
+        let raw = raw_top_level_value(body.as_bytes(), "messages").unwrap();
+        assert_eq!(
+            String::from_utf8(raw).unwrap(),
+            r#"[{"content":"hi","role":"user"}]"#
+        );
+        assert!(raw_top_level_value(body.as_bytes(), "tools").is_none());
+        assert_eq!(
+            raw_top_level_value(body.as_bytes(), "stream").unwrap(),
+            b"true"
+        );
+    }
+
+    #[test]
+    fn byte_prefix_catches_key_reordering_that_value_compare_misses() {
+        // Same structural items, different key order: a real KV-cache bust.
+        let prev = br#"[{"content":"a","role":"user"}]"#;
+        let next_ok = br#"[{"content":"a","role":"user"},{"content":"b","role":"user"}]"#;
+        let next_reordered = br#"[{"role":"user","content":"a"},{"content":"b","role":"user"}]"#;
+        assert!(check_byte_prefix(prev, next_ok, 1).is_none());
+        assert!(check_byte_prefix(prev, prev, 1).is_none());
+        let v = check_byte_prefix(prev, next_reordered, 1).unwrap();
+        assert!(v.contains("byte-prefix"), "{v}");
+    }
+
+    #[test]
+    fn tools_array_drift_is_flagged() {
+        let s = shared();
+        let mk = |tools: Value| {
+            req(
+                "/v1/chat/completions",
+                json!({"messages": [{"role":"user","content":"a"}], "tools": tools}),
+            )
+        };
+        let first = mk(json!([{"type":"function","function":{"name":"read"}}]));
+        run_assertions(&s, &first);
+        s.recorded.lock().unwrap().push(first);
+        // Same messages, different tools serialization: violation.
+        run_assertions(&s, &mk(json!([{"type":"function","function":{"name":"write"}}])));
+        let v = s.violations.lock().unwrap();
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].contains("tools array changed"), "{}", v[0]);
     }
 
     #[test]

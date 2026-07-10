@@ -51,7 +51,15 @@ impl Session {
             let meta = json!({"t": "meta", "v": 1, "id": id, "created_ms": now_ms()});
             let _ = writeln!(file, "{meta}");
         }
-        Ok((Session { id, path, file }, items))
+        let mut session = Session { id, path, file };
+        // A session killed mid-tool-batch (second Ctrl-C, SIGKILL, power
+        // loss) ends with unanswered tool calls; replaying that verbatim
+        // would make every future request API-invalid. Heal it here, in the
+        // file too, so the repair is durable.
+        for repair in repair_dangling_calls(&mut items) {
+            session.log_item(&repair);
+        }
+        Ok((session, items))
     }
 
     pub fn id(&self) -> &str {
@@ -76,6 +84,32 @@ impl Session {
         let _ = writeln!(self.file, "{line}");
         let _ = self.file.flush();
     }
+}
+
+/// Synthetic results for tool calls the replayed transcript never answered.
+/// Appended to `items` AND returned so the caller can persist them.
+fn repair_dangling_calls(items: &mut Vec<Item>) -> Vec<Item> {
+    let mut pending: Vec<String> = Vec::new();
+    for item in items.iter() {
+        match item {
+            Item::Assistant { tool_calls, .. } => {
+                pending = tool_calls.iter().map(|c| c.id.clone()).collect();
+            }
+            Item::ToolResult { call_id, .. } => {
+                pending.retain(|id| id != call_id);
+            }
+            Item::User(_) => pending.clear(),
+        }
+    }
+    let repairs: Vec<Item> = pending
+        .into_iter()
+        .map(|call_id| Item::ToolResult {
+            call_id,
+            content: "canceled: the session ended before this call finished".to_string(),
+        })
+        .collect();
+    items.extend(repairs.iter().cloned());
+    repairs
 }
 
 /// Session ids become file names; keep them boring.
@@ -253,6 +287,37 @@ mod tests {
             };
             assert!(err.contains("invalid"), "{bad}: {err}");
         }
+    }
+
+    #[test]
+    fn resume_repairs_dangling_tool_calls() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _) = Session::open(tmp.path(), Some("t4")).unwrap();
+        s.log_item(&Item::User("go".into()));
+        s.log_item(&Item::Assistant {
+            text: String::new(),
+            tool_calls: vec![
+                ToolCall { id: "c1".into(), name: "bash".into(), arguments: "{}".into() },
+                ToolCall { id: "c2".into(), name: "read".into(), arguments: "{}".into() },
+            ],
+            raw_items: vec![],
+        });
+        s.log_item(&Item::ToolResult { call_id: "c1".into(), content: "partial".into() });
+        drop(s); // killed before c2's result landed
+
+        let (_s2, items) = Session::open(tmp.path(), Some("t4")).unwrap();
+        assert_eq!(items.len(), 4, "one synthetic result appended");
+        match &items[3] {
+            Item::ToolResult { call_id, content } => {
+                assert_eq!(call_id, "c2");
+                assert!(content.contains("session ended before this call finished"));
+            }
+            other => panic!("wrong repair {other:?}"),
+        }
+        // Durable and idempotent: the repair went into the file, so a third
+        // open sees a healed transcript and adds nothing.
+        let (_s3, items) = Session::open(tmp.path(), Some("t4")).unwrap();
+        assert_eq!(items.len(), 4);
     }
 
     #[test]

@@ -383,6 +383,61 @@ fn repl_smoke() {
     rig.server.assert_clean();
 }
 
+/// Ctrl-C while the first call of a batch runs: the remaining calls are
+/// canceled with synthetic results and never execute (a mutation must not
+/// land after the user canceled).
+#[test]
+fn sigint_mid_batch_cancels_remaining_calls() {
+    let rig = rig();
+    rig.server.enqueue_stream_toolcalls(
+        &[
+            ("s1", "bash", r#"{"cmd":"sleep 10"}"#),
+            ("s2", "bash", r#"{"cmd":"echo landed > canary.txt"}"#),
+        ],
+        None,
+    );
+
+    let mut child = noob(rig.config.path(), rig.work.path())
+        .args(["exec", "-p", "run both"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // Let it reach the sleeping bash, then interrupt once.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(6),
+            "did not exit promptly after SIGINT"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(130));
+    assert!(
+        !rig.work.path().join("canary.txt").exists(),
+        "the second mutation ran after the user canceled"
+    );
+    rig.server.assert_clean();
+}
+
+/// A prompt that begins with a dash is arbitrary user text, not a flag.
+#[test]
+fn dash_leading_prompts_are_accepted() {
+    let rig = rig();
+    rig.server.enqueue_stream_completion("dashes are fine");
+    let out = rig.run(&["exec", "-p", "--verbose is broken, help"]);
+    let stdout = ok(&out);
+    assert!(stdout.contains("dashes are fine"));
+    let reqs = rig.api_requests();
+    assert_eq!(reqs[0]["messages"][1]["content"], "--verbose is broken, help");
+    rig.server.assert_clean();
+}
+
 /// Four consecutive tool errors inject the course-correct nudge; eight
 /// abort a headless run with a structured error.
 #[test]

@@ -137,8 +137,8 @@ fn ladder(text: &str, old: &str, new: &str, all: bool) -> Result<Applied, Ladder
 
     // Stage A: per-line trailing whitespace stripped on both sides.
     let f_ws = shadow(text, false);
-    let o_ws = shadow_text(old, false);
-    if !o_ws.is_empty() {
+    let o_ws = shadow(old, false);
+    if !o_ws.text.is_empty() {
         let ranges = shadow_ranges(&f_ws, &o_ws);
         if let Some(applied) = settle(text, new, &ranges, all, Stage::Ws)? {
             return Ok(applied);
@@ -147,8 +147,8 @@ fn ladder(text: &str, old: &str, new: &str, all: bool) -> Result<Applied, Ladder
 
     // Stage B: typographic normalization on top of A.
     let f_ty = shadow(text, true);
-    let o_ty = shadow_text(old, true);
-    if !o_ty.is_empty() {
+    let o_ty = shadow(old, true);
+    if !o_ty.text.is_empty() {
         let ranges = shadow_ranges(&f_ty, &o_ty);
         if let Some(applied) = settle(text, new, &ranges, all, Stage::Typo)? {
             return Ok(applied);
@@ -204,6 +204,10 @@ fn splice(text: &str, ranges: &[(usize, usize)], new: &str) -> String {
 struct Shadow {
     text: String,
     map: Vec<usize>,
+    /// Horizontal whitespace was dropped at end-of-input (no final newline).
+    /// For a needle this means its matches must end at a line boundary:
+    /// old "foo " must never rewrite the "foo" inside "foobar".
+    eof_ws_dropped: bool,
 }
 
 /// Fold one typographic character to its ASCII intent.
@@ -222,6 +226,8 @@ fn shadow(s: &str, typo: bool) -> Shadow {
     let mut text = String::with_capacity(s.len());
     let mut map = Vec::with_capacity(s.len() + 1);
     // Pending horizontal whitespace: dropped at line end, flushed otherwise.
+    // '\r' counts as line-end whitespace so CRLF files behave exactly like
+    // LF files in every stage (the splice still happens on original bytes).
     let mut pending: Vec<(usize, char)> = Vec::new();
     let push = |text: &mut String, map: &mut Vec<usize>, at: usize, c: char| {
         let start = text.len();
@@ -232,7 +238,7 @@ fn shadow(s: &str, typo: bool) -> Shadow {
     };
     for (i, raw) in s.char_indices() {
         let c = if typo { fold(raw) } else { raw };
-        if c == ' ' || c == '\t' {
+        if c == ' ' || c == '\t' || c == '\r' {
             pending.push((i, c));
             continue;
         }
@@ -246,20 +252,27 @@ fn shadow(s: &str, typo: bool) -> Shadow {
         }
         push(&mut text, &mut map, i, c);
     }
+    let eof_ws_dropped = !pending.is_empty();
     map.push(s.len());
-    Shadow { text, map }
+    Shadow { text, map, eof_ws_dropped }
 }
 
-/// The shadow text alone (for `old`, which needs no offset map).
-fn shadow_text(s: &str, typo: bool) -> String {
-    shadow(s, typo).text
-}
-
-/// Find `needle` in the shadow and map every hit back to original byte ranges.
-fn shadow_ranges(sh: &Shadow, needle: &str) -> Vec<(usize, usize)> {
+/// Find the needle shadow in the file shadow and map every hit back to
+/// original byte ranges. A needle whose trailing whitespace was dropped at
+/// end-of-input only matches at line boundaries: the dropped whitespace
+/// claimed a line end, so a mid-line hit would match content the file does
+/// not contain.
+fn shadow_ranges(sh: &Shadow, needle: &Shadow) -> Vec<(usize, usize)> {
     sh.text
-        .match_indices(needle)
-        .map(|(i, _)| (sh.map[i], sh.map[i + needle.len()]))
+        .match_indices(&needle.text)
+        .filter(|(i, _)| {
+            if !needle.eof_ws_dropped {
+                return true;
+            }
+            let end = i + needle.text.len();
+            end == sh.text.len() || sh.text.as_bytes()[end] == b'\n'
+        })
+        .map(|(i, _)| (sh.map[i], sh.map[i + needle.text.len()]))
         .collect()
 }
 
@@ -291,15 +304,47 @@ fn split_indent(line: &str) -> (&str, &str) {
     line.split_at(end)
 }
 
-/// Normalized comparison body: typographic fold + trailing whitespace strip.
+/// Normalized comparison body: typographic fold + trailing whitespace strip
+/// ('\r' included so CRLF lines compare equal to their LF originals).
 fn norm_body(s: &str) -> String {
-    s.trim_end_matches([' ', '\t']).chars().map(fold).collect()
+    s.trim_end_matches([' ', '\t', '\r']).chars().map(fold).collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Delta {
     Add(String),
     Remove(String),
+}
+
+/// The uniform indent delta for one window, or None when it does not match.
+fn window_delta(file_lines: &[&str], old_lines: &[&str], i: usize) -> Option<Delta> {
+    let mut delta: Option<Delta> = None;
+    for (j, old_line) in old_lines.iter().enumerate() {
+        let (fi, fb) = split_indent(file_lines[i + j]);
+        let (oi, ob) = split_indent(old_line);
+        let fb = norm_body(fb);
+        let ob = norm_body(ob);
+        if fb.is_empty() && ob.is_empty() {
+            continue; // blank lines match at any indent
+        }
+        if fb != ob {
+            return None;
+        }
+        let pair = if let Some(p) = fi.strip_suffix(oi) {
+            Delta::Add(p.to_string())
+        } else if let Some(p) = oi.strip_suffix(fi) {
+            Delta::Remove(p.to_string())
+        } else {
+            return None;
+        };
+        match &delta {
+            None => delta = Some(pair),
+            Some(d) if *d == pair => {}
+            Some(_) => return None,
+        }
+    }
+    // All-blank windows carry no signal; never match on them.
+    delta
 }
 
 fn stage_indent(text: &str, old: &str, new: &str, all: bool) -> Result<Applied, LadderFail> {
@@ -314,37 +359,19 @@ fn stage_indent(text: &str, old: &str, new: &str, all: bool) -> Result<Applied, 
     }
     let file_lines: Vec<&str> = spans.iter().map(|&(s, e, _)| &text[s..e]).collect();
 
+    // Non-overlapping greedy collection, the same semantics match_indices
+    // gives the exact stage: after a hit at line i the search resumes at
+    // i + n. Overlapping windows would corrupt content when applied and can
+    // index out of bounds after a shrinking replacement.
     let mut candidates: Vec<(usize, Delta)> = Vec::new();
-    'window: for i in 0..=(file_lines.len() - n) {
-        let mut delta: Option<Delta> = None;
-        for j in 0..n {
-            let (fi, fb) = split_indent(file_lines[i + j]);
-            let (oi, ob) = split_indent(old_lines[j]);
-            let fb = norm_body(fb);
-            let ob = norm_body(ob);
-            if fb.is_empty() && ob.is_empty() {
-                continue; // blank lines match at any indent
+    let mut i = 0;
+    while i + n <= file_lines.len() {
+        match window_delta(&file_lines, &old_lines, i) {
+            Some(d) => {
+                candidates.push((i, d));
+                i += n;
             }
-            if fb != ob {
-                continue 'window;
-            }
-            let pair = if let Some(p) = fi.strip_suffix(oi) {
-                Delta::Add(p.to_string())
-            } else if let Some(p) = oi.strip_suffix(fi) {
-                Delta::Remove(p.to_string())
-            } else {
-                continue 'window;
-            };
-            match &delta {
-                None => delta = Some(pair),
-                Some(d) if *d == pair => {}
-                Some(_) => continue 'window,
-            }
-        }
-        match delta {
-            // All-blank windows carry no signal; never match on them.
-            None => continue,
-            Some(d) => candidates.push((i, d)),
+            None => i += 1,
         }
     }
 
@@ -748,6 +775,76 @@ mod tests {
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(out.content, "edited f.txt (1 replacement)");
         assert_eq!(file(&ctx, "f.txt"), "sword\nother word  here\n");
+    }
+
+    #[test]
+    fn stage_c_all_true_windows_never_overlap() {
+        let (_t, ctx) = test_ctx();
+        // Overlapping candidate windows (lines 0-2 and 2-4) must resolve
+        // greedily like match_indices, not corrupt the unmatched lines.
+        seed(&ctx, "f.txt", "    a\n    b\n    a\n    b\n    a\n");
+        let out = run(
+            &ctx,
+            &json!({"path": "f.txt", "old": "a\nb\na", "new": "z", "all": true}),
+        );
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("1 replacement"), "{}", out.content);
+        assert_eq!(file(&ctx, "f.txt"), "    z\n    b\n    a\n");
+    }
+
+    #[test]
+    fn stage_c_all_true_shrinking_replacement_does_not_panic() {
+        let (_t, ctx) = test_ctx();
+        seed(&ctx, "f.txt", &"    x\n".repeat(5));
+        let out = run(
+            &ctx,
+            &json!({"path": "f.txt", "old": "x\nx\nx\n", "new": "", "all": true}),
+        );
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(file(&ctx, "f.txt"), "    x\n    x\n");
+    }
+
+    #[test]
+    fn trailing_space_in_old_never_matches_mid_line() {
+        let (_t, ctx) = test_ctx();
+        // "a " occurs nowhere in "ab": the dropped trailing space must not
+        // let the shadow match rewrite content the file does not contain.
+        seed(&ctx, "f.txt", "ab\n");
+        let out = run(&ctx, &json!({"path": "f.txt", "old": "a ", "new": "X"}));
+        assert!(out.is_error, "false match applied: {}", out.content);
+        assert_eq!(file(&ctx, "f.txt"), "ab\n");
+        // But the legitimate case (trailing whitespace at a real line end)
+        // still matches.
+        seed(&ctx, "g.txt", "foo\n");
+        let out = run(&ctx, &json!({"path": "g.txt", "old": "foo ", "new": "bar"}));
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(file(&ctx, "g.txt"), "bar\n");
+    }
+
+    #[test]
+    fn crlf_files_work_through_stage_a() {
+        let (_t, ctx) = test_ctx();
+        seed(&ctx, "f.txt", "foo  \r\nbar\r\nrest\r\n");
+        // old copied without the \r (what read/teach show): must match.
+        // The last matched line's \r is consumed like any trailing
+        // whitespace (new goes in verbatim); untouched lines keep CRLF.
+        let out = run(&ctx, &json!({"path": "f.txt", "old": "foo\nbar", "new": "baz"}));
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(file(&ctx, "f.txt"), "baz\nrest\r\n");
+    }
+
+    #[test]
+    fn crlf_files_work_through_stage_c() {
+        let (_t, ctx) = test_ctx();
+        seed(&ctx, "f.txt", "if x {\r\n    go();\r\n    stop();\r\n}\r\n");
+        let out = run(
+            &ctx,
+            &json!({"path": "f.txt", "old": "go();\nstop();", "new": "go();\nwait();\nstop();"}),
+        );
+        assert!(!out.is_error, "{}", out.content);
+        let content = file(&ctx, "f.txt");
+        assert!(content.contains("wait();"), "{content}");
+        assert!(content.starts_with("if x {\r\n"), "untouched lines keep CRLF: {content}");
     }
 
     #[test]

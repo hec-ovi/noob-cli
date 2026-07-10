@@ -5,7 +5,11 @@
 //! free, total determinism where it matters (two edits to one file can
 //! never race).
 
+use std::sync::atomic::Ordering;
+
 use serde_json::Value;
+
+use noob_provider::http::INTERRUPTED;
 
 use crate::tools::{self, ToolCtx, ToolOutcome};
 
@@ -28,7 +32,10 @@ impl Planned {
     }
 }
 
-/// Execute a batch, returning outcomes in emission order.
+/// Execute a batch, returning outcomes in emission order. A Ctrl-C observed
+/// between barriers or waves cancels every remaining call with a synthetic
+/// "canceled by user" result: a mutation must never land AFTER the user
+/// canceled, and every call id still gets exactly one result.
 pub fn run_batch(ctx: &ToolCtx, batch: Vec<Planned>) -> Vec<ToolOutcome> {
     let mut slots: Vec<Option<ToolOutcome>> = batch.iter().map(|_| None).collect();
     let mut i = 0;
@@ -36,6 +43,12 @@ pub fn run_batch(ctx: &ToolCtx, batch: Vec<Planned>) -> Vec<ToolOutcome> {
     // Consume left to right so each Planned is moved exactly once.
     let mut batch: Vec<Option<Planned>> = batch.into_iter().map(Some).collect();
     while i < n {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            for slot in slots.iter_mut().skip(i) {
+                *slot = Some(ToolOutcome::err("canceled by user"));
+            }
+            break;
+        }
         let mut j = i;
         while j < n && batch[j].as_ref().unwrap().read_only() {
             j += 1;
@@ -51,6 +64,12 @@ pub fn run_batch(ctx: &ToolCtx, batch: Vec<Planned>) -> Vec<ToolOutcome> {
         let group: Vec<(usize, Planned)> =
             (i..j).map(|k| (k, batch[k].take().unwrap())).collect();
         for wave in group.chunks(READ_CONCURRENCY) {
+            if INTERRUPTED.load(Ordering::SeqCst) {
+                for (k, _) in wave {
+                    slots[*k] = Some(ToolOutcome::err("canceled by user"));
+                }
+                continue;
+            }
             // chunks() can't move out; rebind by reference and execute via
             // scoped threads writing into disjoint slots.
             std::thread::scope(|scope| {
