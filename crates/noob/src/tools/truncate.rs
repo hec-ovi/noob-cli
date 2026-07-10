@@ -13,6 +13,7 @@ pub const BASH_TAIL: usize = 16 * 1024;
 pub const GREP_MATCH_CAP: usize = 100;
 pub const GREP_BYTE_CAP: usize = 16 * 1024;
 pub const LIST_ENTRY_CAP: usize = 200; // glob and ls
+pub const SKILL_BYTE_CAP: usize = 24 * 1024; // skill body per load
 
 /// Largest byte index <= `at` that is a char boundary of `s`.
 pub fn floor_char_boundary(s: &str, at: usize) -> usize {
@@ -76,6 +77,12 @@ pub fn head_tail(s: &str, head: usize, tail: usize) -> Cow<'_, str> {
 /// Marker for a `read` that hit the 40 KiB hard cap mid-file.
 pub fn read_byte_cap_marker(next_line: usize) -> String {
     format!("[output capped at 40 KiB; continue with offset={next_line}]")
+}
+
+/// Marker for a skill body that hit the 24 KiB cap; points at the ordinary
+/// read tool for the remainder.
+pub fn skill_cap_marker(path: &str, next_line: usize) -> String {
+    format!("[skill body capped at 24 KiB; read the rest with read {path} offset={next_line}]")
 }
 
 /// Trailer for grep: always states the total count; when capped it names the
@@ -151,6 +158,15 @@ mod tests {
         assert_eq!(
             read_byte_cap_marker(213),
             "[output capped at 40 KiB; continue with offset=213]"
+        );
+    }
+
+    #[test]
+    fn golden_skill_cap_marker() {
+        assert_eq!(
+            skill_cap_marker(".claude/skills/pdf/SKILL.md", 812),
+            "[skill body capped at 24 KiB; read the rest with read \
+             .claude/skills/pdf/SKILL.md offset=812]"
         );
     }
 

@@ -49,7 +49,13 @@ pub fn assemble(inputs: &PromptInputs) -> String {
         push_capped(&mut out, project);
     }
     if let Some(skills) = &inputs.skills_index {
-        out.push_str("\n\n# Skills (load with the skill tool)\n\n");
+        // Resolver discipline (thin harness, fat skills): this index is the
+        // dispatcher; bodies cost zero tokens until a match loads one.
+        out.push_str(
+            "\n\n# Skills (resolver)\n\nMatch the task against these skills. Load a \
+             matching skill with the skill tool and follow it before acting; if two \
+             match, load both.\n\n",
+        );
         out.push_str(skills);
     }
     if let Some(mcp) = &inputs.mcp_line {

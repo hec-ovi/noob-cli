@@ -4,6 +4,7 @@
 mod agent;
 mod config;
 mod session;
+mod skills;
 mod tools;
 mod ui;
 
@@ -93,16 +94,25 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
     // request (flag > env > .env) but is independent of base-url resolution,
     // so `debug prompt` and a live session print the identical head.
     let model = model_label(&config_dir, &ov);
+    let discovered = skills::discover(&workspace, &config_dir);
     let inputs = prompt::PromptInputs {
         cwd: workspace.display().to_string(),
         model,
         sandbox: sandbox_label,
         global_agents: prompt::load_agents_md(&config_dir),
         project_agents: prompt::load_agents_md(&workspace),
-        skills_index: None,
+        skills_index: skills::index(&discovered),
         mcp_line: None,
     };
     let system = prompt::assemble(&inputs);
+    // Registered set is decided here and stays byte-stable for the session:
+    // the skill tool exists only when discovery found at least one skill.
+    let mut tool_specs = tools::specs();
+    if !discovered.is_empty() {
+        tool_specs.push(tools::skill::spec());
+    }
+    let mut tool_ctx = ToolCtx::new(workspace, sandbox);
+    tool_ctx.skills = discovered;
 
     let (session, replayed) = match boot.session {
         None => (None, Vec::new()),
@@ -116,9 +126,9 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
         config_dir.clone(),
         ov,
         system,
-        tools::specs(),
+        tool_specs,
         replayed,
-        ToolCtx::new(workspace, sandbox),
+        tool_ctx,
         session,
         config::ctx_tokens(&config_dir),
     ))
@@ -252,13 +262,19 @@ fn status(agent: &Agent, ui: &mut Ui) {
         ),
         None => "last turn: no usage reported yet".to_string(),
     };
+    let skills_line = if agent.tool_ctx.skills.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<&str> = agent.tool_ctx.skills.iter().map(|s| s.name.as_str()).collect();
+        format!("\nskills: {}", names.join(", "))
+    };
     let session = agent
         .session
         .as_ref()
         .map(|s| format!("\nsession: {}", s.path().display()))
         .unwrap_or_default();
     ui.note(&format!(
-        "endpoint: {endpoint}\ncontext: ~{est} of {} tokens ({pct}%)\n{usage}{session}",
+        "endpoint: {endpoint}\ncontext: ~{est} of {} tokens ({pct}%)\n{usage}{skills_line}{session}",
         agent.ctx_tokens
     ));
 }
@@ -355,22 +371,29 @@ fn cmd_debug(args: &[String]) -> ExitCode {
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let (_, sandbox_label) = config::detect_sandbox(&config_dir, false);
     let model = model_label(&config_dir, &ov);
+    // Same discovery as bootstrap: the printed artifact must match what a
+    // real session sends, byte for byte.
+    let discovered = skills::discover(&workspace, &config_dir);
     let inputs = prompt::PromptInputs {
         cwd: workspace.display().to_string(),
         model,
         sandbox: sandbox_label,
         global_agents: prompt::load_agents_md(&config_dir),
         project_agents: prompt::load_agents_md(&workspace),
-        skills_index: None,
+        skills_index: skills::index(&discovered),
         mcp_line: None,
     };
     let system = prompt::assemble(&inputs);
     let head = prompt::head(&inputs);
     if json_mode {
+        let mut tool_specs = tools::specs();
+        if !discovered.is_empty() {
+            tool_specs.push(tools::skill::spec());
+        }
         let out = json!({
             "system": system,
             "head": head,
-            "tools": noob_provider::chat::wire_tools(&tools::specs()),
+            "tools": noob_provider::chat::wire_tools(&tool_specs),
         });
         println!("{out}");
     } else {

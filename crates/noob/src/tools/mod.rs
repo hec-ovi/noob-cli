@@ -9,6 +9,7 @@ pub mod grep;
 pub mod guard;
 pub mod ls;
 pub mod read;
+pub mod skill;
 pub mod truncate;
 pub mod write;
 
@@ -32,6 +33,12 @@ pub struct ToolCtx {
     pub edit_failures: Mutex<std::collections::HashMap<(PathBuf, u64), u32>>,
     /// One-time "no sandbox" warning for the bash tool (workspace mode).
     pub bash_warned: AtomicBool,
+    /// Skills discovered at session start; empty means the skill tool is
+    /// not registered. Set once at bootstrap, read-only afterwards.
+    pub skills: Vec<crate::skills::Skill>,
+    /// Names of skills loaded this session, in load order, for the
+    /// post-compaction re-listing.
+    pub loaded_skills: Mutex<Vec<String>>,
 }
 
 impl ToolCtx {
@@ -42,6 +49,8 @@ impl ToolCtx {
             seen: SeenFiles::new(),
             edit_failures: Mutex::new(std::collections::HashMap::new()),
             bash_warned: AtomicBool::new(false),
+            skills: Vec::new(),
+            loaded_skills: Mutex::new(Vec::new()),
         }
     }
 }
@@ -91,6 +100,7 @@ pub fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
         "grep" => grep::run(ctx, args),
         "glob" => glob::run(ctx, args),
         "ls" => ls::run(ctx, args),
+        "skill" => skill::run(ctx, args),
         other => ToolOutcome::err(format!(
             "unknown tool {other:?}; the available tools are listed in your tool schemas"
         )),
