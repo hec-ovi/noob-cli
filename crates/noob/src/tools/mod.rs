@@ -39,6 +39,11 @@ pub struct ToolCtx {
     /// Names of skills loaded this session, in load order, for the
     /// post-compaction re-listing.
     pub loaded_skills: Mutex<Vec<String>>,
+    /// Real target paths the user confirmed for a skills-dir write. The
+    /// agent gate inserts on grant; write/edit re-check membership at
+    /// execution time so a symlink created earlier in the same batch cannot
+    /// route a write into a skills dir past the confirmation.
+    pub approved_skill_writes: Mutex<std::collections::HashSet<PathBuf>>,
 }
 
 impl ToolCtx {
@@ -51,18 +56,41 @@ impl ToolCtx {
             bash_warned: AtomicBool::new(false),
             skills: Vec::new(),
             loaded_skills: Mutex::new(Vec::new()),
+            approved_skill_writes: Mutex::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// Execution-time half of the skills-dir write gate: refuse a write/edit
+    /// whose real target lands in a skills directory unless the user
+    /// confirmed exactly that target. Returns the refusal message, or None
+    /// when the write may proceed. Closes the plan-time-vs-execution-time
+    /// gap a same-batch symlink would otherwise open.
+    pub(crate) fn skills_write_refusal(&self, raw: &str) -> Option<String> {
+        let target = guard::skill_write_target(&self.workspace, raw)?;
+        if self.approved_skill_writes.lock().unwrap().contains(&target) {
+            return None;
+        }
+        Some(
+            "refused: writing into a skills directory needs the user's confirmation \
+             and it was not granted; leave skill files unchanged and continue \
+             without them"
+                .to_string(),
+        )
     }
 }
 
 /// What one tool call produced. `content` goes into the transcript verbatim;
 /// `summary` is the short human line the UI renders (`* read src/main.rs
-/// (312 lines)`); `warning` is UI-only, never in the transcript.
+/// (312 lines)`); `warning` is UI-only, never in the transcript. `canceled`
+/// is set only by the scheduler when a Ctrl-C skipped the call, so the loop
+/// recognizes cancellation structurally instead of by matching the content
+/// string (which a tool could otherwise echo to forge one).
 pub struct ToolOutcome {
     pub content: String,
     pub is_error: bool,
     pub summary: String,
     pub warning: Option<String>,
+    pub canceled: bool,
 }
 
 impl ToolOutcome {
@@ -72,6 +100,7 @@ impl ToolOutcome {
             is_error: false,
             summary: summary.into(),
             warning: None,
+            canceled: false,
         }
     }
 
@@ -81,6 +110,18 @@ impl ToolOutcome {
             is_error: true,
             summary: "error".to_string(),
             warning: None,
+            canceled: false,
+        }
+    }
+
+    /// A call the scheduler skipped because the user interrupted the batch.
+    pub fn canceled() -> ToolOutcome {
+        ToolOutcome {
+            content: "canceled by user".to_string(),
+            is_error: true,
+            summary: "canceled".to_string(),
+            warning: None,
+            canceled: true,
         }
     }
 }

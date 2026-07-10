@@ -27,6 +27,9 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     let old = need_str(args, "old")?;
     let new = need_str(args, "new")?;
     let all = opt_bool(args, "all")?.unwrap_or(false);
+    if let Some(refusal) = ctx.skills_write_refusal(raw) {
+        return Err(refusal);
+    }
     let path = resolve_path(&ctx.workspace, raw);
     check_write_allowed(ctx.sandbox, &ctx.workspace, &path)?;
     let shown = display_path(ctx, &path);

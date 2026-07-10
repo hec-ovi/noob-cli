@@ -136,6 +136,17 @@ pub fn in_skills_dir(path: &Path) -> bool {
         .any(|name| name.to_str().is_some_and(|s| s.eq_ignore_ascii_case("skills")))
 }
 
+/// If a write to `raw` would land inside a skills directory, return the
+/// filesystem-real target path (the key the write gate approves and the
+/// write/edit tools re-check at execution time). Uses the real path so a
+/// symlinked directory into a skills tree is caught, and falls back to the
+/// lexical form when the real path cannot be resolved.
+pub fn skill_write_target(workspace: &Path, raw: &str) -> Option<PathBuf> {
+    let resolved = resolve_path(workspace, raw);
+    let real = resolve_real(&resolved).unwrap_or_else(|_| resolved.clone());
+    (in_skills_dir(&real) || in_skills_dir(&resolved)).then_some(real)
+}
+
 /// The filesystem-real form of a (possibly not-yet-existing) path: the
 /// deepest existing ancestor canonicalized, the remainder re-appended.
 /// This is what a write through a symlinked directory actually lands on.

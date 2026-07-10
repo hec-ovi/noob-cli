@@ -82,6 +82,7 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
         is_error: false,
         summary: format!("skill {name} ({lines} lines)"),
         warning,
+        canceled: false,
     }
 }
 

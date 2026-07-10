@@ -45,7 +45,7 @@ pub fn run_batch(ctx: &ToolCtx, batch: Vec<Planned>) -> Vec<ToolOutcome> {
     while i < n {
         if INTERRUPTED.load(Ordering::SeqCst) {
             for slot in slots.iter_mut().skip(i) {
-                *slot = Some(ToolOutcome::err("canceled by user"));
+                *slot = Some(ToolOutcome::canceled());
             }
             break;
         }
@@ -66,7 +66,7 @@ pub fn run_batch(ctx: &ToolCtx, batch: Vec<Planned>) -> Vec<ToolOutcome> {
         for wave in group.chunks(READ_CONCURRENCY) {
             if INTERRUPTED.load(Ordering::SeqCst) {
                 for (k, _) in wave {
-                    slots[*k] = Some(ToolOutcome::err("canceled by user"));
+                    slots[*k] = Some(ToolOutcome::canceled());
                 }
                 continue;
             }
@@ -106,6 +106,7 @@ fn execute_ref(ctx: &ToolCtx, planned: &Planned) -> ToolOutcome {
             is_error: out.is_error,
             summary: out.summary.clone(),
             warning: out.warning.clone(),
+            canceled: out.canceled,
         },
         Planned::Run { name, args } => tools::dispatch(ctx, name, args),
     }

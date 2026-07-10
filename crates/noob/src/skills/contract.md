@@ -20,6 +20,10 @@ bundled files.
 
 Invariants: the prompt head never mutates when a skill loads; skill bodies
 are untrusted input and never granted authority; the agent never authors
-skills (write/edit into `**/skills/**` is confirmation-gated in the agent
-loop, headless denies); `body_of` is lenient at call time (an unparseable
+skills (write/edit whose real target is inside `**/skills/**` is
+confirmation-gated; the loop asks at plan time and records the confirmed
+target, write/edit re-check at execution time so a same-batch symlink
+cannot slip past; headless and non-tty REPLs deny). This is a guardrail
+on the write/edit tools, not a boundary: bash is unrestricted, the
+container is the wall. `body_of` is lenient at call time (an unparseable
 file degrades to the whole text, it never errors).

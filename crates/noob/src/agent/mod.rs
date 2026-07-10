@@ -251,8 +251,10 @@ impl Agent {
                 ui.tool_done(&call.id, &outcome.summary, outcome.is_error);
                 // A canceled call never executed: drop its doom-window
                 // record so an immediate retry after the interrupt is not
-                // intercepted as a repeat that "will not change".
-                if outcome.content == "canceled by user" {
+                // intercepted as a repeat that "will not change". Keyed on
+                // the scheduler's structural flag, not the content string,
+                // so a tool cannot forge a cancellation by echoing it.
+                if outcome.canceled {
                     self.forget_recent_call(call);
                 }
                 self.push_item(Item::ToolResult {
@@ -340,18 +342,21 @@ impl Agent {
         let Some(raw) = args.get("path").and_then(Value::as_str) else {
             return planned; // the tool itself reports the missing parameter
         };
-        let resolved = guard::resolve_path(&self.tool_ctx.workspace, raw);
-        // The lexical form catches the direct spelling; the filesystem-real
-        // form catches a write routed through a symlinked directory into a
-        // skills tree (the write tool would follow it).
-        let gated = guard::in_skills_dir(&resolved)
-            || guard::resolve_real(&resolved)
-                .map(|real| guard::in_skills_dir(&real))
-                .unwrap_or(false);
-        if !gated {
+        // Same key the write/edit tools re-check at execution time: the
+        // filesystem-real target when it lands in a skills dir (catching a
+        // symlinked route), else the lexical form.
+        let Some(target) = guard::skill_write_target(&self.tool_ctx.workspace, raw) else {
             return planned;
-        }
+        };
         if ui.ask(&format!("allow the agent to {name} inside a skills directory ({raw})?")) {
+            // Record this exact target so the tool's execution-time re-check
+            // passes; other paths (and a mid-batch symlink target) stay
+            // unapproved and are refused there.
+            self.tool_ctx
+                .approved_skill_writes
+                .lock()
+                .unwrap()
+                .insert(target);
             return planned;
         }
         sched::Planned::Canned(ToolOutcome::err(

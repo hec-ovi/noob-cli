@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/tests-239%20offline%20%2B%206%20live-brightgreen" alt="Tests" />
+  <img src="https://img.shields.io/badge/tests-289%20offline%20%2B%207%20live-brightgreen" alt="Tests" />
   <img src="https://img.shields.io/badge/async%20runtime-none-success" alt="No async runtime" />
   <img src="https://img.shields.io/badge/runtime%20crates-40%20of%2045%20budget-blueviolet" alt="Crate count" />
   <img src="https://img.shields.io/badge/APIs-Chat%20Completions%20%2B%20Responses-7B3FA0" alt="Both OpenAI wire shapes" />
@@ -29,10 +29,11 @@ Why another one? Most lean harnesses pick one wire shape (Codex CLI is Responses
 
 ## What works today
 
-The core loop (P2) is done: noob is now a working coding agent, in active development. Working right now:
+The core loop (P2) and skills (P3) are done: noob is a working coding agent, in active development. Working right now:
 
 - `docker compose run --rm noob` opens a chat; `... noob exec -p "your prompt"` is the one-shot. Live-tested against qwen3.6 through llama.cpp: it reads files, edits them, runs commands, and reports back.
-- Seven tools: read, write, edit, bash, grep, glob, ls. Consecutive read-only calls from one turn run in parallel; any mutation is a strict barrier, so two edits can never race.
+- Seven core tools: read, write, edit, bash, grep, glob, ls, plus a `skill` tool that registers only when skills exist. Consecutive read-only calls from one turn run in parallel; any mutation is a strict barrier, so two edits can never race.
+- SKILL.md skills per the [agentskills.io](https://agentskills.io) standard, discovered from `.noob/skills/`, `.claude/skills/`, `.agents/skills/` in your project and from `/config/skills/`. Only a capped one-line-per-skill index sits in the prompt (the resolver, in the gbrain thin-harness fat-skills sense); bodies load on demand as tool results, capped at 24 KiB, and loaded skills are re-listed by name after compaction, across session resumes too. The agent can never author skills: any write into a skills directory asks you first, at a real terminal only; piped and headless runs are denied.
 - The edit tool is exact string replace with a deterministic fallback ladder (trailing whitespace, typographic characters, uniform indent shift, CRLF files) and hard ambiguity rejection. A failed edit returns the actual file region so the model can fix its next attempt; files changed on disk behind the model's back are refused (hash check-and-set).
 - Append-only prompt discipline, byte-exact: turn 3 of a live session shows a 97% cached-prompt share on llama.cpp's own counters. The mock server fails any test where a request is not a byte-prefix extension of the previous one.
 - Sessions persist as JSONL under `/config/sessions/`; `exec --session <id>` resumes across processes (a session killed mid-tool-run is healed on resume). `exec --json` emits one JSONL event per loop step for wrappers.
@@ -41,9 +42,9 @@ The core loop (P2) is done: noob is now a working coding agent, in active develo
 - Endpoint autodetect: with an empty config, noob probes llama.cpp/Ollama/LM Studio/vLLM on localhost and uses the first that answers.
 - The system prompt plus all tool schemas fit in 1,500 tokens, enforced by tests against both tiktoken and the live qwen tokenizer.
 - Both OpenAI wire shapes (Chat Completions + Responses) against any base URL; SSE parsing that survives every TCP split; retries with backoff; hot `.env` reload on every request; Ctrl-C responsive within a second at every point, including mid-tool-batch (pending calls are canceled, the session stays valid).
-- 239 offline tests via `./dev.sh test`, 6 live smokes via `./dev.sh smoke`.
+- 289 offline tests via `./dev.sh test`, 7 live smokes via `./dev.sh smoke` (serialized: parallel live tests would evict each other's llama.cpp cache slots).
 
-Skills, MCP, plan mode, and sub-agents are the next phases; the roadmap below marks exactly what exists and what does not.
+MCP, plan mode, and sub-agents are the next phases; the roadmap below marks exactly what exists and what does not.
 
 ## Quickstart
 
@@ -114,8 +115,8 @@ The opinionated bits. Where a rule says "test-enforced" that is literal: the moc
 | P0 scaffold | Workspace, contracts, Docker build, mock OpenAI server, `exec` skeleton, watchdog | done |
 | P1 provider layer | SSE streaming, Responses adapter, tool-call parsing, retry/backoff | done |
 | P2 core loop + tools | Interactive REPL, the 7 file/shell tools, agent loop, system prompt, compaction, sessions, endpoint autodetect | done |
-| P3 skills | SKILL.md discovery with progressive disclosure ([agentskills.io](https://agentskills.io) standard) | next |
-| P4 MCP client | stdio + Streamable HTTP transports, lazy connect | |
+| P3 skills | SKILL.md discovery with progressive disclosure ([agentskills.io](https://agentskills.io) standard) | done |
+| P4 MCP client | stdio + Streamable HTTP transports, lazy connect | next |
 | P5 plan mode | Read-only exploration, explicit `/go` approval | |
 | P6 multi-agent | Self-spawning sub-agents, parallel fan-out, concurrency and turn caps | |
 | P7 hardening + release | `doctor`, live gauntlet, integrations, v0.1 (static binary + image) | |
@@ -128,7 +129,7 @@ Everything runs inside Docker; nothing is installed on the host. `./dev.sh` is t
 
 | Target | What it does |
 |---|---|
-| `./dev.sh test` | The offline suite: 239 unit + e2e tests against the in-process mock server, run in a dev container |
+| `./dev.sh test` | The offline suite: 289 unit + e2e tests against the in-process mock server, run in a dev container |
 | `./dev.sh build` | The static musl release binary |
 | `./dev.sh docker` | The runtime image |
 | `./dev.sh repl` / `./dev.sh exec "..."` | Compose with your uid:gid passed explicitly, so files under `/work` keep your ownership |

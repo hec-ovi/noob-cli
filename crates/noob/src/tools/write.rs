@@ -17,6 +17,9 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
 fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     let raw = need_str(args, "path")?;
     let content = need_str(args, "content")?;
+    if let Some(refusal) = ctx.skills_write_refusal(raw) {
+        return Err(refusal);
+    }
     let path = resolve_path(&ctx.workspace, raw);
     check_write_allowed(ctx.sandbox, &ctx.workspace, &path)?;
     let shown = display_path(ctx, &path);
@@ -113,5 +116,28 @@ mod tests {
         let out = run(&ctx, &json!({"path": "/tmp/outside.txt", "content": "x"}));
         assert!(out.is_error);
         assert!(out.content.contains("outside the workspace"));
+    }
+
+    #[test]
+    fn skills_dir_write_is_refused_unless_the_target_was_approved() {
+        let (_t, ctx) = test_ctx();
+        std::fs::create_dir_all(ctx.workspace.join(".claude/skills/x")).unwrap();
+        let args = json!({"path": ".claude/skills/x/SKILL.md", "content": "y"});
+        // Unapproved: refused at execution time, nothing written.
+        let out = run(&ctx, &args);
+        assert!(out.is_error);
+        assert!(out.content.contains("refused"), "{}", out.content);
+        assert!(!ctx.workspace.join(".claude/skills/x/SKILL.md").exists());
+        // Approve exactly this real target (what the agent gate records on
+        // grant) and the write proceeds.
+        let target = super::super::guard::skill_write_target(
+            &ctx.workspace,
+            ".claude/skills/x/SKILL.md",
+        )
+        .unwrap();
+        ctx.approved_skill_writes.lock().unwrap().insert(target);
+        let out = run(&ctx, &args);
+        assert!(!out.is_error, "{}", out.content);
+        assert!(ctx.workspace.join(".claude/skills/x/SKILL.md").exists());
     }
 }

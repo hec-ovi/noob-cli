@@ -172,8 +172,11 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
             return Err(format!("line {i}: invalid key {key:?}"));
         }
         let value = line[colon + 1..].trim();
-        let parsed = if is_block_indicator(value) {
-            let (block, next) = scan_block(&lines, i, value.starts_with('>'));
+        // A block header may carry a trailing YAML comment (`description: | #
+        // keep newlines`), so test only the first token for the indicator.
+        let indicator = value.split_whitespace().next().unwrap_or("");
+        let parsed = if is_block_indicator(indicator) {
+            let (block, next) = scan_block(&lines, i, indicator.starts_with('>'));
             i = next;
             block
         } else {
@@ -434,7 +437,7 @@ mod tests {
 
     #[test]
     fn block_headers_with_explicit_indent_digits_parse_as_blocks() {
-        for header in ["|2", ">-2", "|+", ">2-"] {
+        for header in ["|2", ">-2", "|+", ">2-", "| # keep newlines", ">-  # folded"] {
             let text = format!("---\nname: n\ndescription: {header}\n  real text\n---\n");
             let p = parse(&text).unwrap();
             assert_eq!(p.fields["description"], "real text", "header {header:?}");

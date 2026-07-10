@@ -157,8 +157,12 @@ fn skill_tool_returns_body_and_never_mutates_the_head() {
         !content.contains("description: says hello politely"),
         "frontmatter must be stripped: {content}"
     );
-    // The system prompt did not change when the skill loaded.
+    // The system prompt did not change when the skill loaded, and neither
+    // did the tools array: both are frozen for the session.
     assert_eq!(reqs[0]["messages"][0], reqs[1]["messages"][0]);
+    assert_eq!(reqs[0]["tools"], reqs[1]["tools"], "tools array drifted mid-session");
+    assert_eq!(reqs[0]["tools"].as_array().unwrap().len(), 8);
+    assert!(!reqs[1]["tools"].is_null(), "a real turn must carry the tools array");
     rig.server.assert_clean();
 }
 
@@ -219,6 +223,74 @@ fn malformed_skill_skipped_with_warning() {
         .to_string();
     assert!(system.contains("- working: still fine"));
     assert!(!system.contains("broken"));
+    rig.server.assert_clean();
+}
+
+/// A present-but-unreadable SKILL.md (invalid UTF-8) is skipped with the
+/// mandated stderr warning, not silently dropped. Pins the warning so a
+/// regression to a silent skip fails the test.
+#[test]
+fn unreadable_skill_warns_on_stderr() {
+    use std::io::Write;
+    let rig = rig();
+    let dir = rig.work.path().join(".claude/skills/binary");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut f = std::fs::File::create(dir.join("SKILL.md")).unwrap();
+    f.write_all(&[0xff, 0xfe, 0x00, 0x80]).unwrap(); // not UTF-8
+    rig.skill(".claude/skills", "working", "fine", "body\n");
+    rig.server.enqueue_stream_completion("ok");
+
+    let out = rig.run(&["exec", "-p", "hi"]);
+    ok(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("skipping skill") && stderr.contains("binary"),
+        "no warning for the unreadable skill; stderr: {stderr}"
+    );
+    // The good skill still registered.
+    let system = rig.api_requests()[0]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(system.contains("- working: fine"));
+    rig.server.assert_clean();
+}
+
+/// The execution-time half of the write gate: a bash symlink created
+/// earlier in the SAME batch cannot route a write into a skills dir past
+/// the plan-time confirmation. The write is refused at execution and the
+/// file never lands inside the skills tree.
+#[test]
+fn same_batch_symlink_into_skills_is_refused_at_execution() {
+    let rig = rig();
+    rig.skill(".claude/skills", "greeting", "says hello", "original\n");
+    // One turn, one batch: create a symlink `innocent` -> the skills dir,
+    // then write through it. At plan time `innocent` does not exist, so the
+    // plan-time gate does not fire; the write tool re-checks at execution.
+    rig.server.enqueue_stream_toolcalls(
+        &[
+            ("t1", "bash", r#"{"cmd":"ln -s .claude/skills/greeting innocent"}"#),
+            ("t2", "write", r#"{"path":"innocent/INJECTED.md","content":"payload"}"#),
+        ],
+        None,
+    );
+    rig.server.enqueue_stream_completion("done");
+
+    ok(&rig.run(&["exec", "-p", "sneak a skill in"]));
+
+    assert!(
+        !rig.work.path().join(".claude/skills/greeting/INJECTED.md").exists(),
+        "a same-batch symlink routed a write into the skills dir"
+    );
+    let reqs = rig.api_requests();
+    let refusal = reqs[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .filter_map(|m| m["content"].as_str())
+        .any(|c| c.contains("refused"));
+    assert!(refusal, "the write should have been refused at execution");
     rig.server.assert_clean();
 }
 
@@ -470,18 +542,33 @@ fn skills_gate_grant_via_tty() {
         .unwrap();
     unsafe { libc::close(slave) };
 
+    // Watchdog: a blocking master read on an alive-but-silent child would
+    // otherwise hang the whole suite. Killing the child makes the pty
+    // return EOF, turning any hang into a prompt test failure. Cancellable
+    // so a fast success does not wait out the full timeout on join.
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let child_pid = child.id() as i32;
+    let done = Arc::new(AtomicBool::new(false));
+    let wd_done = done.clone();
+    let watchdog = std::thread::spawn(move || {
+        for _ in 0..200 {
+            if wd_done.load(Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        unsafe { libc::kill(child_pid, libc::SIGKILL) };
+    });
+
     // Reactive driver: wait for a marker, then answer. Type-ahead would be
     // flushed by the gate, so answers must follow their prompts.
     let mut seen = String::new();
     let mut wait_for = |master: &mut std::fs::File, marker: &str, seen: &mut String| {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         let mut buf = [0u8; 4096];
         while !seen.contains(marker) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "timed out waiting for {marker:?}; saw:\n{seen}"
-            );
             match master.read(&mut buf) {
+                // EOF: the child exited or the watchdog killed it.
                 Ok(0) => panic!("pty closed before {marker:?}; saw:\n{seen}"),
                 Ok(n) => seen.push_str(&String::from_utf8_lossy(&buf[..n])),
                 Err(e) => panic!("pty read error: {e}; saw:\n{seen}"),
@@ -495,6 +582,8 @@ fn skills_gate_grant_via_tty() {
     wait_for(&mut master, "skill improved", &mut seen);
     master.write_all(b"/quit\n").unwrap();
     let status = child.wait().unwrap();
+    done.store(true, Ordering::SeqCst);
+    watchdog.join().ok();
     assert!(status.success(), "repl exit: {status:?};\n{seen}");
 
     let on_disk = std::fs::read_to_string(
