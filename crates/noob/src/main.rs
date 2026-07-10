@@ -1,14 +1,24 @@
-//! noob: argv dispatch only. Subcommands: (repl) | exec | child | doctor | debug.
-//! Hand-rolled parsing; the whole surface is a handful of flags.
+//! noob: argv dispatch only. Subcommands: (repl) | exec | child | doctor |
+//! debug. Hand-rolled parsing; the whole surface is a handful of flags.
 
+mod agent;
 mod config;
+mod session;
+mod tools;
+mod ui;
 
-use std::io::Write;
+use std::io::BufRead;
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
 
 use noob_provider::http::{Client, INTERRUPTED, Timeouts};
-use noob_provider::types::{Event, Item, Overrides, ProviderError, TurnRequest};
+use noob_provider::types::Overrides;
+use serde_json::json;
+
+use agent::{Agent, RunEnd, prompt};
+use session::Session;
+use tools::ToolCtx;
+use ui::{Mode, Ui};
 
 fn main() -> ExitCode {
     install_sigint_handler();
@@ -19,18 +29,14 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("exec") => cmd_exec(&args[1..]),
+        Some("debug") => cmd_debug(&args[1..]),
         Some("child") => not_yet("child", "P6"),
         Some("doctor") => not_yet("doctor", "P7"),
-        Some("debug") => not_yet("debug", "P2"),
-        None => {
-            eprintln!(
-                "the interactive REPL lands in P2; for now run: noob exec -p \"<prompt>\""
-            );
-            ExitCode::from(2)
-        }
+        Some(flag) if flag.starts_with('-') => cmd_repl(&args),
+        None => cmd_repl(&[]),
         Some(other) => {
             eprintln!(
-                "noob: unknown command {other:?}; available: exec, doctor, debug, --version"
+                "noob: unknown command {other:?}; available: exec, debug, doctor, --version"
             );
             ExitCode::from(2)
         }
@@ -38,29 +44,244 @@ fn main() -> ExitCode {
 }
 
 fn not_yet(cmd: &str, phase: &str) -> ExitCode {
-    eprintln!("noob {cmd} lands in {phase}; this build is the P0 scaffold");
+    eprintln!("noob {cmd} lands in {phase}; this build is the P2 core loop");
     ExitCode::from(2)
 }
 
-fn cmd_exec(args: &[String]) -> ExitCode {
-    const USAGE: &str = "usage: noob exec -p \"<prompt>\" [--model <name>] [--base-url <url>]";
-    // A flag's value must exist and must not look like another flag;
-    // consuming blindly turns one forgotten value into a silent misconfig.
-    fn value_for(flag: &str, next: Option<&String>) -> Result<String, String> {
-        match next {
-            Some(v) if !v.starts_with('-') => Ok(v.clone()),
-            _ => Err(format!("noob exec: {flag} needs a value; {USAGE}")),
+/// A flag's value must exist and must not look like another flag; consuming
+/// blindly turns one forgotten value into a silent misconfig.
+fn value_for(flag: &str, next: Option<&String>, usage: &str) -> Result<String, String> {
+    match next {
+        Some(v) if !v.starts_with('-') => Ok(v.clone()),
+        _ => Err(format!("noob: {flag} needs a value; {usage}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session bootstrap shared by the REPL and exec
+// ---------------------------------------------------------------------------
+
+struct BootArgs {
+    ov: Overrides,
+    yolo: bool,
+    /// None = no persistence; Some(None) = fresh id; Some(Some(id)) = resume.
+    session: Option<Option<String>>,
+}
+
+fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
+    let config_dir = config::config_dir();
+    let mut ov = boot.ov;
+    if ov.base_url.is_none() && config::setting(&config_dir, "NOOB_BASE_URL").is_none() {
+        if let Some(found) = config::autodetect_base_url() {
+            ui.note(&format!("using {found} (autodetected)"));
+            ov.base_url = Some(found);
         }
     }
+    let workspace = std::env::current_dir()
+        .and_then(|d| d.canonicalize())
+        .map_err(|e| format!("cannot resolve the working directory: {e}"))?;
+    let (sandbox, sandbox_label) = config::detect_sandbox(&config_dir, boot.yolo);
 
-    let mut prompt: Option<String> = None;
+    // Best-effort resolve for the environment block; a missing base URL is
+    // reported per-request (the user can fix .env live, hot reload applies).
+    let model = noob_provider::resolve_endpoint(&config_dir, &ov)
+        .map(|ep| ep.model)
+        .unwrap_or_else(|_| "default".to_string());
+    let inputs = prompt::PromptInputs {
+        cwd: workspace.display().to_string(),
+        model,
+        sandbox: sandbox_label,
+        global_agents: prompt::load_agents_md(&config_dir),
+        project_agents: prompt::load_agents_md(&workspace),
+        skills_index: None,
+        mcp_line: None,
+    };
+    let system = prompt::assemble(&inputs);
+
+    let (session, replayed) = match boot.session {
+        None => (None, Vec::new()),
+        Some(id) => {
+            let (s, items) = Session::open(&config_dir, id.as_deref())?;
+            (Some(s), items)
+        }
+    };
+    Ok(Agent::new(
+        Client::new(Timeouts::default()),
+        config_dir.clone(),
+        ov,
+        system,
+        tools::specs(),
+        replayed,
+        ToolCtx::new(workspace, sandbox),
+        session,
+        config::ctx_tokens(&config_dir),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// REPL
+// ---------------------------------------------------------------------------
+
+fn cmd_repl(args: &[String]) -> ExitCode {
+    const USAGE: &str = "usage: noob [--model <name>] [--base-url <url>] [--yolo]";
     let mut ov = Overrides::default();
+    let mut yolo = false;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let taken = match arg.as_str() {
-            "-p" | "--prompt" => value_for(arg, it.next()).map(|v| prompt = Some(v)),
-            "--model" => value_for(arg, it.next()).map(|v| ov.model = Some(v)),
-            "--base-url" => value_for(arg, it.next()).map(|v| ov.base_url = Some(v)),
+            "--model" => value_for(arg, it.next(), USAGE).map(|v| ov.model = Some(v)),
+            "--base-url" => value_for(arg, it.next(), USAGE).map(|v| ov.base_url = Some(v)),
+            "--yolo" => {
+                yolo = true;
+                Ok(())
+            }
+            other => Err(format!("noob: unknown flag {other:?}; {USAGE}")),
+        };
+        if let Err(msg) = taken {
+            eprintln!("{msg}");
+            return ExitCode::from(2);
+        }
+    }
+
+    let mut ui = Ui::new(Mode::Repl);
+    let mut agent = match bootstrap(BootArgs { ov, yolo, session: Some(None) }, &mut ui) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("noob: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    greet(&agent, &mut ui);
+
+    let stdin = std::io::stdin();
+    loop {
+        ui.end_line();
+        prompt_marker();
+        let mut line = String::new();
+        match stdin.lock().read_line(&mut line) {
+            Ok(0) => break, // EOF (Ctrl-D)
+            Ok(_) => {}
+            Err(_) => {
+                // Ctrl-C at the prompt lands here via EINTR.
+                if INTERRUPTED.swap(false, Ordering::SeqCst) {
+                    println!();
+                    ui.note("(interrupted; /quit to exit)");
+                    continue;
+                }
+                break;
+            }
+        }
+        let input = line.trim();
+        if input.is_empty() {
+            continue;
+        }
+        if let Some(cmd) = input.strip_prefix('/') {
+            match cmd.trim() {
+                "quit" | "q" | "exit" => break,
+                "status" => status(&agent, &mut ui),
+                "compact" => {
+                    agent.compact(&mut ui);
+                }
+                "plan" | "go" => ui.note("plan mode lands in P5"),
+                other => ui.note(&format!(
+                    "unknown command /{other}; available: /status /compact /quit"
+                )),
+            }
+            continue;
+        }
+        match agent.run_input(input, &mut ui) {
+            RunEnd::Completed(_) | RunEnd::Interrupted => {}
+            RunEnd::Aborted(msg) => ui.note(&format!("error: {msg}")),
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn prompt_marker() {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(b"> ");
+    let _ = out.flush();
+}
+
+fn greet(agent: &Agent, ui: &mut Ui) {
+    let endpoint = noob_provider::resolve_endpoint(&agent.config_dir, &agent.ov)
+        .map(|ep| format!("{} · {}", ep.base_url, ep.model))
+        .unwrap_or_else(|_| "no endpoint configured; set NOOB_BASE_URL in .env".to_string());
+    let session = agent
+        .session
+        .as_ref()
+        .map(|s| format!(" · session {}", s.id()))
+        .unwrap_or_default();
+    ui.note(&format!(
+        "noob {} · {endpoint}{session}\ntype a task; /status /compact /quit",
+        env!("CARGO_PKG_VERSION")
+    ));
+}
+
+fn status(agent: &Agent, ui: &mut Ui) {
+    let endpoint = noob_provider::resolve_endpoint(&agent.config_dir, &agent.ov)
+        .map(|ep| {
+            format!(
+                "{} · {} · {}",
+                ep.base_url,
+                ep.model,
+                match ep.style {
+                    noob_provider::types::ApiStyle::Chat => "chat",
+                    noob_provider::types::ApiStyle::Responses => "responses",
+                }
+            )
+        })
+        .unwrap_or_else(|e| e.to_string());
+    let est = agent.context_estimate();
+    let pct = est * 100 / agent.ctx_tokens.max(1);
+    let usage = match agent.last_usage() {
+        Some(u) => format!(
+            "last turn: prompt {} (cached {}), completion {}",
+            u.prompt_tokens, u.cached_prompt_tokens, u.completion_tokens
+        ),
+        None => "last turn: no usage reported yet".to_string(),
+    };
+    let session = agent
+        .session
+        .as_ref()
+        .map(|s| format!("\nsession: {}", s.path().display()))
+        .unwrap_or_default();
+    ui.note(&format!(
+        "endpoint: {endpoint}\ncontext: ~{est} of {} tokens ({pct}%)\n{usage}{session}",
+        agent.ctx_tokens
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// exec
+// ---------------------------------------------------------------------------
+
+fn cmd_exec(args: &[String]) -> ExitCode {
+    const USAGE: &str = "usage: noob exec -p \"<prompt>\" [--json] [--session <id>] \
+                         [--model <name>] [--base-url <url>] [--yolo]";
+    let mut prompt_arg: Option<String> = None;
+    let mut ov = Overrides::default();
+    let mut json_mode = false;
+    let mut yolo = false;
+    let mut session_id: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        let taken = match arg.as_str() {
+            "-p" | "--prompt" => {
+                value_for(arg, it.next(), USAGE).map(|v| prompt_arg = Some(v))
+            }
+            "--model" => value_for(arg, it.next(), USAGE).map(|v| ov.model = Some(v)),
+            "--base-url" => value_for(arg, it.next(), USAGE).map(|v| ov.base_url = Some(v)),
+            "--session" => value_for(arg, it.next(), USAGE).map(|v| session_id = Some(v)),
+            "--json" => {
+                json_mode = true;
+                Ok(())
+            }
+            "--yolo" => {
+                yolo = true;
+                Ok(())
+            }
             other => Err(format!("noob exec: unknown flag {other:?}; {USAGE}")),
         };
         if let Err(msg) = taken {
@@ -68,56 +289,80 @@ fn cmd_exec(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    let Some(prompt) = prompt.filter(|p| !p.is_empty()) else {
+    let Some(input) = prompt_arg.filter(|p| !p.is_empty()) else {
         eprintln!("noob exec: missing prompt; {USAGE}");
         return ExitCode::from(2);
     };
 
-    let config_dir = config::config_dir();
-    let client = Client::new(Timeouts::default());
-    // P1: a single user turn, streamed to stdout as it arrives. The system
-    // prompt, tools, and the agent loop land in P2.
-    let req = TurnRequest {
-        system: None,
-        items: vec![Item::User(prompt)],
-        tools: vec![],
-    };
-    let mut printed = 0usize;
-    let mut on = |ev: Event| {
-        if let Event::Text(t) = ev {
-            print!("{t}");
-            let _ = std::io::stdout().flush();
-            printed += t.len();
+    let mut ui = Ui::new(if json_mode { Mode::ExecJson } else { Mode::Exec });
+    let session = session_id.map(Some);
+    let mut agent = match bootstrap(BootArgs { ov, yolo, session }, &mut ui) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("noob: {e}");
+            return ExitCode::from(2);
         }
     };
-    match noob_provider::run_turn(&client, &config_dir, &ov, &req, &mut on) {
-        Ok(turn) => {
-            if printed > 0 {
-                if !turn.text.ends_with('\n') {
-                    println!();
-                }
-            } else {
-                // Guard against silently empty output (e.g. tool-call-only
-                // turns before the loop exists).
-                println!("{}", turn.text);
-            }
-            ExitCode::SUCCESS
-        }
-        Err(ProviderError::Interrupted) => {
-            if printed > 0 {
-                println!();
-            }
+    match agent.run_input(&input, &mut ui) {
+        RunEnd::Completed(_) => ExitCode::SUCCESS,
+        RunEnd::Interrupted => {
             eprintln!("noob: interrupted");
             ExitCode::from(130)
         }
-        Err(e) => {
-            if printed > 0 {
-                println!();
-            }
-            eprintln!("noob: {e}");
+        RunEnd::Aborted(msg) => {
+            eprintln!("noob: {msg}");
             ExitCode::FAILURE
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// debug
+// ---------------------------------------------------------------------------
+
+/// `noob debug prompt [--json]`: the EXACT assembled system prompt and wire
+/// tools array this binary would send, so budget tests measure the shipped
+/// artifact rather than a reimplementation.
+fn cmd_debug(args: &[String]) -> ExitCode {
+    match args.first().map(String::as_str) {
+        Some("prompt") => {}
+        _ => {
+            eprintln!("usage: noob debug prompt [--json]");
+            return ExitCode::from(2);
+        }
+    }
+    let json_mode = args.iter().any(|a| a == "--json");
+    let config_dir = config::config_dir();
+    let ov = Overrides::default();
+    let workspace = std::env::current_dir()
+        .and_then(|d| d.canonicalize())
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let (_, sandbox_label) = config::detect_sandbox(&config_dir, false);
+    let model = noob_provider::resolve_endpoint(&config_dir, &ov)
+        .map(|ep| ep.model)
+        .unwrap_or_else(|_| "default".to_string());
+    let inputs = prompt::PromptInputs {
+        cwd: workspace.display().to_string(),
+        model,
+        sandbox: sandbox_label,
+        global_agents: prompt::load_agents_md(&config_dir),
+        project_agents: prompt::load_agents_md(&workspace),
+        skills_index: None,
+        mcp_line: None,
+    };
+    let system = prompt::assemble(&inputs);
+    let head = prompt::head(&inputs);
+    if json_mode {
+        let out = json!({
+            "system": system,
+            "head": head,
+            "tools": noob_provider::chat::wire_tools(&tools::specs()),
+        });
+        println!("{out}");
+    } else {
+        println!("{system}");
+    }
+    ExitCode::SUCCESS
 }
 
 /// First Ctrl-C sets the watchdog flag (the in-flight request aborts within

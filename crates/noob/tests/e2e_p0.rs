@@ -55,8 +55,11 @@ fn exec_round_trip_against_mock() {
     assert_eq!(req.header("authorization"), Some("Bearer sekret-key"));
     let body = req.json().unwrap();
     assert_eq!(body["model"], "mockmodel");
-    assert_eq!(body["messages"][0]["role"], "user");
-    assert_eq!(body["messages"][0]["content"], "say hi");
+    // P2: the request carries the frozen system head and the 7 core tools.
+    assert_eq!(body["messages"][0]["role"], "system");
+    assert_eq!(body["messages"][1]["role"], "user");
+    assert_eq!(body["messages"][1]["content"], "say hi");
+    assert_eq!(body["tools"].as_array().unwrap().len(), 7);
     server.assert_clean();
 }
 
@@ -158,7 +161,10 @@ fn config_precedence_flag_env_file() {
         .unwrap();
     assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
 
-    // Process env beats file; the secret still comes from the file.
+    // Process env beats file; the secret still comes from the file. A new
+    // exec run is a new session (different model in the env block), so the
+    // prefix break is declared.
+    server.expect_prefix_break();
     let out2 = noob(dir.path())
         .env("NOOB_MODEL", "proc-model")
         .env("NOOB_API_KEY", "proc-key")

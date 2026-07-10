@@ -1,7 +1,11 @@
-//! Config-dir resolution. Keys themselves are read lazily per request inside
-//! noob-provider; this module only decides which directory to read from.
+//! Config-dir resolution, non-secret settings lookup, sandbox detection,
+//! and localhost endpoint autodetect. API keys are NOT read here: they stay
+//! lazy inside noob-provider so they never enter the process environment.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use crate::tools::guard::Sandbox;
 
 /// Resolution order: NOOB_CONFIG_DIR > /config (the container bind mount) >
 /// ~/.config/noob outside Docker. The directory does not have to exist yet;
@@ -18,4 +22,128 @@ pub fn config_dir() -> PathBuf {
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".config/noob")
+}
+
+/// One non-secret setting: process env wins, then the config `.env`.
+/// Read fresh on every call (the .env parse is cheap and hot reload is the
+/// whole point of the flat file).
+pub fn setting(config_dir: &Path, key: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(key) {
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    let env_path = config_dir.join(".env");
+    if !env_path.is_file() {
+        return None;
+    }
+    noob_provider::envfile::load(&env_path)
+        .ok()?
+        .get(key)
+        .cloned()
+        .filter(|v| !v.is_empty())
+}
+
+/// NOOB_CTX: the context window compaction budgets against.
+pub fn ctx_tokens(config_dir: &Path) -> u64 {
+    setting(config_dir, "NOOB_CTX")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&n| n >= 4096)
+        .unwrap_or(131_072)
+}
+
+/// Two states, no permission DSL: the container is the wall. An explicit
+/// NOOB_SANDBOX setting wins; otherwise /.dockerenv decides. `--yolo` lifts
+/// the workspace restriction entirely.
+pub fn detect_sandbox(config_dir: &Path, yolo: bool) -> (Sandbox, String) {
+    if yolo {
+        return (Sandbox::Container, "off (--yolo)".to_string());
+    }
+    match setting(config_dir, "NOOB_SANDBOX").as_deref() {
+        Some("container") => (Sandbox::Container, "container".to_string()),
+        Some(_) => (Sandbox::Workspace, "workspace".to_string()),
+        None => {
+            if Path::new("/.dockerenv").exists() {
+                (Sandbox::Container, "container".to_string())
+            } else {
+                (Sandbox::Workspace, "workspace".to_string())
+            }
+        }
+    }
+}
+
+/// The zero-friction path: when no base URL is configured, probe the usual
+/// localhost ports with a short timeout. Loopback only, only when
+/// unconfigured, never a remote call.
+pub fn autodetect_base_url() -> Option<String> {
+    let candidates = [
+        "http://localhost:8090/v1", // llama.cpp (this project's default)
+        "http://localhost:8080/v1", // llama.cpp default port
+        "http://localhost:11434/v1", // Ollama
+        "http://localhost:1234/v1", // LM Studio
+        "http://localhost:8000/v1", // vLLM
+    ];
+    first_responding(&candidates)
+}
+
+/// Testable core: the first candidate whose /models answers HTTP.
+pub fn first_responding(candidates: &[&str]) -> Option<String> {
+    candidates
+        .iter()
+        .find(|base| {
+            noob_provider::http::probe(&format!("{base}/models"), Duration::from_millis(500))
+        })
+        .map(|s| s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctx_tokens_default_parse_and_floor() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(ctx_tokens(tmp.path()), 131_072);
+        std::fs::write(tmp.path().join(".env"), "NOOB_CTX=32768\n").unwrap();
+        assert_eq!(ctx_tokens(tmp.path()), 32_768);
+        // Nonsense and sub-floor values fall back to the default.
+        std::fs::write(tmp.path().join(".env"), "NOOB_CTX=potato\n").unwrap();
+        assert_eq!(ctx_tokens(tmp.path()), 131_072);
+        std::fs::write(tmp.path().join(".env"), "NOOB_CTX=100\n").unwrap();
+        assert_eq!(ctx_tokens(tmp.path()), 131_072);
+    }
+
+    #[test]
+    fn sandbox_explicit_setting_beats_dockerenv() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "NOOB_SANDBOX=workspace\n").unwrap();
+        let (mode, label) = detect_sandbox(tmp.path(), false);
+        assert_eq!(mode, Sandbox::Workspace);
+        assert_eq!(label, "workspace");
+        let (mode, label) = detect_sandbox(tmp.path(), true);
+        assert_eq!(mode, Sandbox::Container);
+        assert_eq!(label, "off (--yolo)");
+    }
+
+    #[test]
+    fn first_responding_finds_a_live_listener_and_skips_dead_ports() {
+        // A real listener on an ephemeral port, speaking minimal HTTP.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                );
+            }
+        });
+        let live = format!("http://{addr}");
+        let dead = "http://127.0.0.1:9".to_string(); // discard port; nothing listens
+        let got = first_responding(&[dead.as_str(), live.as_str()]);
+        assert_eq!(got, Some(live));
+        assert_eq!(first_responding(&[dead.as_str()]), None);
+    }
 }
