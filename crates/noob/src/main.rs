@@ -11,7 +11,7 @@ mod task;
 mod tools;
 mod ui;
 
-use std::io::{BufRead, Read};
+use std::io::Read;
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
 
@@ -239,25 +239,21 @@ fn cmd_repl(args: &[String]) -> ExitCode {
     };
     greet(&agent, &mut ui);
 
-    let stdin = std::io::stdin();
     loop {
         ui.end_line();
-        ui.prompt(agent.plan);
-        let mut line = String::new();
-        match stdin.lock().read_line(&mut line) {
-            Ok(0) => break, // EOF (Ctrl-D)
-            Ok(_) => {}
-            Err(_) => break,
-        }
-        // Ctrl-C while at the prompt: std's read_line retries EINTR
-        // internally, so the flag is the only signal it happened. The tty
-        // has already flushed the typed input (ISIG), so drop this line,
-        // clear the flag, and prompt again; a second Ctrl-C before any
-        // input hard-exits via the signal handler.
-        if INTERRUPTED.swap(false, Ordering::SeqCst) {
-            ui.note("(interrupted; /quit to exit)");
-            continue;
-        }
+        // The reader draws the boxed termios editor at an interactive terminal
+        // and falls back to cooked `read_line` when piped. EOF (Ctrl-D) exits;
+        // a Ctrl-C at the prompt reprompts, kept distinct from EOF. In cooked
+        // mode a second Ctrl-C before any input still hard-exits via the signal
+        // handler; in raw mode Ctrl-C cancels the line and Ctrl-D or /quit exit.
+        let line = match ui.read_prompt(agent.plan) {
+            ui::Input::Eof => break,
+            ui::Input::Interrupted => {
+                ui.note("(interrupted; /quit to exit)");
+                continue;
+            }
+            ui::Input::Line(l) => l,
+        };
         let input = line.trim();
         if input.is_empty() {
             continue;
@@ -619,6 +615,10 @@ fn cmd_debug(args: &[String]) -> ExitCode {
 fn install_sigint_handler() {
     extern "C" fn on_sigint(_: libc::c_int) {
         if INTERRUPTED.swap(true, Ordering::SeqCst) {
+            // A second Ctrl-C hard-exits; restore the terminal first so a raw
+            // editor session does not leave the shell garbled. Restore touches
+            // only atomics, tcsetattr, and write, all async-signal-safe.
+            ui::prompt::restore_terminal();
             unsafe { libc::_exit(130) };
         }
     }

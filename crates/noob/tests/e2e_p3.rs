@@ -564,7 +564,7 @@ fn skills_gate_grant_via_tty() {
     // Reactive driver: wait for a marker, then answer. Type-ahead would be
     // flushed by the gate, so answers must follow their prompts.
     let mut seen = String::new();
-    let mut wait_for = |master: &mut std::fs::File, marker: &str, seen: &mut String| {
+    let wait_for = |master: &mut std::fs::File, marker: &str, seen: &mut String| {
         let mut buf = [0u8; 4096];
         while !seen.contains(marker) {
             match master.read(&mut buf) {

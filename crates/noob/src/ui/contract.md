@@ -1,8 +1,23 @@
 # noob/src/ui
 
-Rendering for the four surfaces (P2), now themeable. No TUI framework and no
-line-editor crate: the terminal provides line editing; escapes are hand-rolled
-over `libc` (zero new crates).
+Rendering for the four surfaces (P2), now themeable, plus an opt-in line editor
+for the interactive prompt. No TUI framework and no line-editor crate: escapes
+and the termios editor are hand-rolled over `libc` (zero new crates).
+
+Input (prompt.rs): at an interactive terminal the REPL runs a small raw-mode
+line editor that draws a two-line green input box and offers real editing
+(insert, backspace across a multibyte char, Ctrl-A/E/U/K/W, left/right/Home/End,
+Delete, bracketed paste that holds newlines until a real Enter). It is off the
+inference path: raw mode is entered only while typing and restored to cooked
+before the agent runs, so keystrokes never reach the model (it sees the message
+once, on Enter). Three hooks restore the terminal so a crash never leaves the
+shell raw: the RAII guard on the normal return, a panic hook (release is
+`panic = "abort"`, so `Drop` does not run on a panic), and the SIGINT handler
+before its `_exit(130)`. EOF (Ctrl-D) exits; Ctrl-C at the prompt cancels the
+line and reprompts, kept distinct. `NOOB_RAW=0` forces the cooked reader.
+Piped or headless input falls back to the exact cooked `read_line`, so those
+surfaces stay byte-for-byte what they were: no box, no bracketed-paste toggles,
+no escapes.
 
 An interactive REPL at a color terminal gets a display-only themed surface: a
 green `No0B-CL1` banner, role-colored activity and notes, a red error accent,

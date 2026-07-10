@@ -226,7 +226,7 @@ fn repl_plan_then_go_flow() {
     });
 
     let mut seen = String::new();
-    let mut wait_for = |master: &mut std::fs::File, marker: &str, seen: &mut String| {
+    let wait_for = |master: &mut std::fs::File, marker: &str, seen: &mut String| {
         let mut buf = [0u8; 4096];
         while !seen.contains(marker) {
             match master.read(&mut buf) {

@@ -13,9 +13,11 @@ use serde_json::{Value, json};
 
 use noob_provider::types::Usage;
 
+pub(crate) mod prompt;
 mod style;
 mod theme;
 
+pub use prompt::Input;
 use style::{ColorDepth, DIM, RESET};
 use theme::Theme;
 
