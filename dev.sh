@@ -13,11 +13,13 @@ RUN=(docker run --rm --user "$UIDGID" -e CARGO_HOME=/src/.cargo-home
 
 dev_image() { docker build --target dev -t "$DEV_IMG" -f docker/Dockerfile .; }
 
-case "${1:-help}" in
-  # Bare `./dev.sh` prints this instead of silently running the whole suite.
-  help|-h|--help)
-    echo "usage: ./dev.sh {test|build|smoke|docker|repl [noob args]|exec \"prompt\"|size-check|clean}"
-    ;;
+# Open the interactive agent: build the runtime image (cached, so fast when
+# nothing changed) and run it through compose in one step, forwarding any noob
+# flags (e.g. --session <id>). Compose passes the caller's uid:gid so files
+# under /work are never root-owned on the host.
+open_agent() { docker compose run --build --rm --user "$UIDGID" noob "$@"; }
+
+case "${1:-}" in
   # Offline suite: unit + e2e against the in-process mock. The whole story;
   # there is no CI.
   test)
@@ -40,20 +42,14 @@ case "${1:-help}" in
       -v "$PWD":/src -w /src "$DEV_IMG" \
       cargo test --workspace -- --ignored --test-threads=1
     ;;
-  # The runtime image.
+  # Build the runtime image without running it.
   docker)
     docker build -t noob -f docker/Dockerfile .
     ;;
-  # Interactive REPL / one-shot through compose, with the caller's uid:gid
-  # passed explicitly (compose only sees UID/GID when the shell exports them,
-  # which most shells do not).
-  repl)
-    shift
-    docker compose run --rm --user "$UIDGID" noob "$@"
-    ;;
+  # One-shot headless run through compose.
   exec)
     shift
-    docker compose run --rm --user "$UIDGID" noob exec -p "${1:?usage: ./dev.sh exec \"prompt\"}"
+    open_agent exec -p "${1:?usage: ./dev.sh exec \"prompt\"}"
     ;;
   # Footprint budgets from ARCHITECTURE.md: stripped binary <= 8 MB,
   # runtime crate graph <= 45.
@@ -70,8 +66,24 @@ case "${1:-help}" in
   clean)
     rm -rf target .cargo-home
     ;;
+  -h|--help|help)
+    echo "usage:"
+    echo "  ./dev.sh                    open the agent"
+    echo "  ./dev.sh --session <id>     resume a saved session"
+    echo "  ./dev.sh --plan | --yolo    any noob flag is forwarded to the agent"
+    echo "  ./dev.sh test|build|docker|exec \"prompt\"|smoke|size-check|clean"
+    ;;
+  # Bare `./dev.sh`, or leading-dash noob flags (--session, --plan, ...): open
+  # the agent. `repl` is kept as a silent alias for old muscle memory.
+  ""|-*)
+    open_agent "$@"
+    ;;
+  repl)
+    shift
+    open_agent "$@"
+    ;;
   *)
-    echo "usage: ./dev.sh {test|build|smoke|docker|repl [noob args]|exec \"prompt\"|size-check|clean}" >&2
+    echo "./dev.sh: unknown command '${1}'; run ./dev.sh --help" >&2
     exit 2
     ;;
 esac

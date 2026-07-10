@@ -1,4 +1,5 @@
-# REPL:     ./dev.sh repl        (or: docker compose run --rm noob)
+# Agent:    ./dev.sh             (or: docker compose run --build --rm noob)
+# Resume:   ./dev.sh --session <id>
 # One-shot: ./dev.sh exec "..."  (or: docker compose run --rm noob exec -p "...")
 #
 # The user mapping below only works if your shell EXPORTS UID and GID
