@@ -30,14 +30,30 @@ const DOOM_REPEATS: usize = 3;
 const NUDGE_AT: u32 = 4;
 const PAUSE_AT: u32 = 8;
 
+/// The plan-mode tool set (ARCHITECTURE.md, plan mode): read-only
+/// exploration plus skills. Everything else is structurally absent from the
+/// request, so it cannot tempt a small model into rejected round trips.
+const PLAN_TOOLS: &[&str] = &["read", "grep", "glob", "ls", "skill"];
+
+/// The injected user-role mode message (frozen phrasing; e2e-asserted).
+pub const PLAN_ENTER_MSG: &str =
+    "[plan mode] Explore read-only, then present a numbered implementation plan.";
+/// What /go appends when the user approves (frozen phrasing).
+pub const PLAN_APPROVED_MSG: &str = "Plan approved. Execute it.";
+
 pub struct Agent {
     pub client: Client,
     pub config_dir: PathBuf,
     pub ov: Overrides,
     /// Frozen at session start; every request sends exactly this head.
     pub system: String,
-    /// Frozen at session start; byte-stable for the whole session.
+    /// The active tool set. Byte-stable for the whole session except the
+    /// two sanctioned plan-mode swaps (entry filters, /go restores).
     pub tools: Vec<ToolSpec>,
+    /// The full registered set, kept for the /go restore.
+    full_tools: Vec<ToolSpec>,
+    /// Plan mode: read-only exploration until the user approves with /go.
+    pub plan: bool,
     pub items: Vec<Item>,
     pub tool_ctx: ToolCtx,
     pub session: Option<Session>,
@@ -87,7 +103,9 @@ impl Agent {
             config_dir,
             ov,
             system,
+            full_tools: tools.clone(),
             tools,
+            plan: false,
             items,
             tool_ctx,
             session,
@@ -102,6 +120,39 @@ impl Agent {
 
     pub fn last_usage(&self) -> Option<Usage> {
         self.last_usage
+    }
+
+    /// Enter plan mode: the tools array shrinks to the read-only set (one
+    /// sanctioned cache bust) and a user-role mode message is appended (an
+    /// ordinary append; the message prefix itself stays intact). False when
+    /// already in plan mode.
+    pub fn enter_plan(&mut self, ui: &mut Ui) -> bool {
+        if self.plan {
+            return false;
+        }
+        self.plan = true;
+        self.tools = self
+            .full_tools
+            .iter()
+            .filter(|t| PLAN_TOOLS.contains(&t.name.as_str()))
+            .cloned()
+            .collect();
+        self.push_item(Item::User(PLAN_ENTER_MSG.to_string()));
+        ui.note("cache prefix reset: plan mode (read-only tools; approve with /go)");
+        true
+    }
+
+    /// Leave plan mode: the full tool set comes back (the second sanctioned
+    /// bust). The caller follows up with `run_input(PLAN_APPROVED_MSG)`.
+    /// False when not in plan mode.
+    pub fn exit_plan(&mut self, ui: &mut Ui) -> bool {
+        if !self.plan {
+            return false;
+        }
+        self.plan = false;
+        self.tools = self.full_tools.clone();
+        ui.note("cache prefix reset: plan approved (full tools restored)");
+        true
     }
 
     /// Estimated tokens currently in the context: the last server-reported
@@ -406,6 +457,18 @@ impl Agent {
                 );
             }
         };
+        // Defense in depth behind the structural gate: even a hallucinated
+        // call to an absent schema is refused while planning.
+        if self.plan && !PLAN_TOOLS.contains(&call.name.as_str()) {
+            return (
+                sched::Planned::Canned(ToolOutcome::err(format!(
+                    "plan mode is read-only: {} is unavailable; present your plan \
+                     as text and wait for the user to approve it",
+                    call.name
+                ))),
+                args,
+            );
+        }
         // serde_json's default map is sorted, so this serialization is
         // canonical: key order cannot dodge the repeat detector.
         let canonical = format!("{}\u{0}{}", call.name, args);
@@ -755,6 +818,64 @@ mod tests {
         match agent.plan_call(&call).0 {
             sched::Planned::Run { .. } => {}
             sched::Planned::Canned(_) => panic!("retry after a canceled call was intercepted"),
+        }
+    }
+
+    #[test]
+    fn plan_mode_swaps_tool_sets_and_appends_the_mode_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let spec = |name: &str| ToolSpec {
+            name: name.into(),
+            description: "d".into(),
+            parameters: json!({"type": "object"}),
+        };
+        let full: Vec<ToolSpec> =
+            ["read", "grep", "glob", "ls", "skill", "write", "edit", "bash", "mcp_call"]
+                .iter()
+                .map(|n| spec(n))
+                .collect();
+        let mut agent = Agent::new(
+            Client::new(Timeouts::default()),
+            tmp.path().to_path_buf(),
+            Overrides::default(),
+            "sys".into(),
+            full.clone(),
+            vec![],
+            ToolCtx::new(ws, crate::tools::guard::Sandbox::Container),
+            None,
+            131_072,
+        );
+        let mut ui = crate::ui::Ui::new(crate::ui::Mode::Exec);
+
+        assert!(agent.enter_plan(&mut ui));
+        assert!(!agent.enter_plan(&mut ui), "double entry must be a no-op");
+        let names: Vec<&str> = agent.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["read", "grep", "glob", "ls", "skill"]);
+        assert!(matches!(&agent.items[..], [Item::User(m)] if m == PLAN_ENTER_MSG));
+
+        // Defense in depth: a hallucinated mutating call is refused even
+        // though its schema is absent.
+        let call = ToolCall { id: "c".into(), name: "write".into(),
+            arguments: r#"{"path":"x","content":"y"}"#.into() };
+        match agent.plan_call(&call).0 {
+            sched::Planned::Canned(out) => {
+                assert!(out.is_error);
+                assert!(out.content.contains("plan mode is read-only"), "{}", out.content);
+            }
+            sched::Planned::Run { .. } => panic!("mutating call ran in plan mode"),
+        }
+        // Read-only calls still run.
+        let read = ToolCall { id: "r".into(), name: "read".into(),
+            arguments: r#"{"path":"x"}"#.into() };
+        assert!(matches!(agent.plan_call(&read).0, sched::Planned::Run { .. }));
+
+        assert!(agent.exit_plan(&mut ui));
+        assert!(!agent.exit_plan(&mut ui), "double exit must be a no-op");
+        assert_eq!(agent.tools.len(), full.len(), "full set restored");
+        match agent.plan_call(&call).0 {
+            sched::Planned::Run { .. } => {}
+            sched::Planned::Canned(_) => panic!("write must run again after /go"),
         }
     }
 

@@ -73,6 +73,8 @@ fn model_label(config_dir: &std::path::Path, ov: &Overrides) -> String {
 struct BootArgs {
     ov: Overrides,
     yolo: bool,
+    /// Start in plan mode (read-only tools until /go).
+    plan: bool,
     /// None = no persistence; Some(None) = fresh id; Some(Some(id)) = resume.
     session: Option<Option<String>>,
 }
@@ -134,7 +136,7 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
             (Some(s), items)
         }
     };
-    Ok(Agent::new(
+    let mut agent = Agent::new(
         Client::new(Timeouts::default()),
         config_dir.clone(),
         ov,
@@ -144,7 +146,11 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
         tool_ctx,
         session,
         config::ctx_tokens(&config_dir),
-    ))
+    );
+    if boot.plan {
+        agent.enter_plan(ui);
+    }
+    Ok(agent)
 }
 
 // ---------------------------------------------------------------------------
@@ -152,9 +158,10 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
 // ---------------------------------------------------------------------------
 
 fn cmd_repl(args: &[String]) -> ExitCode {
-    const USAGE: &str = "usage: noob [--model <name>] [--base-url <url>] [--yolo]";
+    const USAGE: &str = "usage: noob [--model <name>] [--base-url <url>] [--plan] [--yolo]";
     let mut ov = Overrides::default();
     let mut yolo = false;
+    let mut plan = false;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let taken = match arg.as_str() {
@@ -162,6 +169,10 @@ fn cmd_repl(args: &[String]) -> ExitCode {
             "--base-url" => value_for(arg, it.next(), USAGE).map(|v| ov.base_url = Some(v)),
             "--yolo" => {
                 yolo = true;
+                Ok(())
+            }
+            "--plan" => {
+                plan = true;
                 Ok(())
             }
             other => Err(format!("noob: unknown flag {other:?}; {USAGE}")),
@@ -173,7 +184,7 @@ fn cmd_repl(args: &[String]) -> ExitCode {
     }
 
     let mut ui = Ui::new(Mode::Repl);
-    let mut agent = match bootstrap(BootArgs { ov, yolo, session: Some(None) }, &mut ui) {
+    let mut agent = match bootstrap(BootArgs { ov, yolo, plan, session: Some(None) }, &mut ui) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("noob: {e}");
@@ -185,7 +196,7 @@ fn cmd_repl(args: &[String]) -> ExitCode {
     let stdin = std::io::stdin();
     loop {
         ui.end_line();
-        prompt_marker();
+        prompt_marker(agent.plan);
         let mut line = String::new();
         match stdin.lock().read_line(&mut line) {
             Ok(0) => break, // EOF (Ctrl-D)
@@ -215,9 +226,23 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                     // it; a stale flag would phantom-cancel the next input.
                     INTERRUPTED.store(false, Ordering::SeqCst);
                 }
-                "plan" | "go" => ui.note("plan mode lands in P5"),
+                "plan" => {
+                    if !agent.enter_plan(&mut ui) {
+                        ui.note("already in plan mode; /go approves the plan");
+                    }
+                }
+                "go" => {
+                    if agent.exit_plan(&mut ui) {
+                        match agent.run_input(agent::PLAN_APPROVED_MSG, &mut ui) {
+                            RunEnd::Completed(_) | RunEnd::Interrupted => {}
+                            RunEnd::Aborted(msg) => ui.note(&format!("error: {msg}")),
+                        }
+                    } else {
+                        ui.note("not in plan mode; /plan enters it");
+                    }
+                }
                 other => ui.note(&format!(
-                    "unknown command /{other}; available: /status /compact /quit"
+                    "unknown command /{other}; available: /plan /go /status /compact /quit"
                 )),
             }
             continue;
@@ -230,10 +255,10 @@ fn cmd_repl(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn prompt_marker() {
+fn prompt_marker(plan: bool) {
     use std::io::Write;
     let mut out = std::io::stdout().lock();
-    let _ = out.write_all(b"> ");
+    let _ = out.write_all(if plan { b"plan> ".as_slice() } else { b"> ".as_slice() });
     let _ = out.flush();
 }
 
@@ -247,7 +272,7 @@ fn greet(agent: &Agent, ui: &mut Ui) {
         .map(|s| format!(" · session {}", s.id()))
         .unwrap_or_default();
     ui.note(&format!(
-        "noob {} · {endpoint}{session}\ntype a task; /status /compact /quit",
+        "noob {} · {endpoint}{session}\ntype a task; /plan /go /status /compact /quit",
         env!("CARGO_PKG_VERSION")
     ));
 }
@@ -303,8 +328,9 @@ fn status(agent: &Agent, ui: &mut Ui) {
         .as_ref()
         .map(|s| format!("\nsession: {}", s.path().display()))
         .unwrap_or_default();
+    let plan_line = if agent.plan { "\nplan mode: on (read-only; /go approves)" } else { "" };
     ui.note(&format!(
-        "endpoint: {endpoint}\ncontext: ~{est} of {} tokens ({pct}%)\n{usage}{skills_line}{mcp_line}{session}",
+        "endpoint: {endpoint}\ncontext: ~{est} of {} tokens ({pct}%)\n{usage}{skills_line}{mcp_line}{plan_line}{session}",
         agent.ctx_tokens
     ));
 }
@@ -315,11 +341,12 @@ fn status(agent: &Agent, ui: &mut Ui) {
 
 fn cmd_exec(args: &[String]) -> ExitCode {
     const USAGE: &str = "usage: noob exec -p \"<prompt>\" [--json] [--session <id>] \
-                         [--model <name>] [--base-url <url>] [--yolo]";
+                         [--plan] [--model <name>] [--base-url <url>] [--yolo]";
     let mut prompt_arg: Option<String> = None;
     let mut ov = Overrides::default();
     let mut json_mode = false;
     let mut yolo = false;
+    let mut plan = false;
     let mut session_id: Option<String> = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -344,6 +371,10 @@ fn cmd_exec(args: &[String]) -> ExitCode {
                 yolo = true;
                 Ok(())
             }
+            "--plan" => {
+                plan = true;
+                Ok(())
+            }
             other => Err(format!("noob exec: unknown flag {other:?}; {USAGE}")),
         };
         if let Err(msg) = taken {
@@ -358,7 +389,7 @@ fn cmd_exec(args: &[String]) -> ExitCode {
 
     let mut ui = Ui::new(if json_mode { Mode::ExecJson } else { Mode::Exec });
     let session = session_id.map(Some);
-    let mut agent = match bootstrap(BootArgs { ov, yolo, session }, &mut ui) {
+    let mut agent = match bootstrap(BootArgs { ov, yolo, plan, session }, &mut ui) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("noob: {e}");
