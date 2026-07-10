@@ -90,6 +90,12 @@ impl Ui {
         self.mode == Mode::Repl && self.color
     }
 
+    /// True at an interactive REPL terminal. Gates the exit session hint, which
+    /// a piped REPL neither needs nor should print (it must stay byte-identical).
+    pub fn is_interactive(&self) -> bool {
+        self.mode == Mode::Repl && self.ansi
+    }
+
     fn out(&mut self, s: &str) {
         let _ = self.out.write_all(s.as_bytes());
         let _ = self.out.flush();

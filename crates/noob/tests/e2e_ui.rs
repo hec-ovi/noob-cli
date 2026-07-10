@@ -178,6 +178,7 @@ fn raw_editor_edits_then_submits_the_clean_line() {
     pty.wait_for("done one");
     pty.wait_for(RAW_READY); // prompt 2 is now in raw mode
     pty.send(&[0x04]); // Ctrl-D at the empty prompt: exit
+    pty.wait_for("resume with --session"); // the exit hint tells you how to reopen
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -185,6 +186,44 @@ fn raw_editor_edits_then_submits_the_clean_line() {
     assert_eq!(reqs.len(), 1, "only the edited line should have run");
     assert_eq!(last_user(&reqs[0]), "say hi", "the killed draft leaked into the message");
     rig.server.assert_clean();
+}
+
+/// The REPL persists its session and `--session <id>` resumes it: a second run
+/// against the same id byte-extends the first run's transcript.
+#[test]
+fn repl_session_resume_extends_the_transcript() {
+    let rig = rig();
+    rig.server.enqueue_stream_completion("noted");
+    let out1 = run_repl(&rig, &["--session", "reptest"], b"remember alpha\n/quit\n");
+    assert!(out1.status.success(), "run 1 failed: {out1:?}");
+
+    rig.server.enqueue_stream_completion("recalled");
+    let out2 = run_repl(&rig, &["--session", "reptest"], b"what did i say\n/quit\n");
+    assert!(out2.status.success(), "run 2 failed: {out2:?}");
+
+    // Run 2's request replays run 1's user message: the transcript resumed and
+    // extended append-only (the mock's prefix assertion also saw no break).
+    let reqs = rig.api_requests();
+    let last = reqs.last().unwrap();
+    let msgs = last["messages"].as_array().unwrap();
+    assert!(
+        msgs.iter().any(|m| m["role"] == "user" && m["content"] == "remember alpha"),
+        "resumed transcript missing the first turn: {msgs:?}"
+    );
+    rig.server.assert_clean();
+}
+
+/// Run the REPL with args and piped stdin; return its output.
+fn run_repl(rig: &Rig, args: &[&str], input: &[u8]) -> std::process::Output {
+    let mut child = noob(rig.config.path(), rig.work.path())
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    child.wait_with_output().unwrap()
 }
 
 /// Ctrl-C at the prompt cancels the current line and reprompts; it never

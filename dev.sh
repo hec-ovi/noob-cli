@@ -13,7 +13,11 @@ RUN=(docker run --rm --user "$UIDGID" -e CARGO_HOME=/src/.cargo-home
 
 dev_image() { docker build --target dev -t "$DEV_IMG" -f docker/Dockerfile .; }
 
-case "${1:-test}" in
+case "${1:-help}" in
+  # Bare `./dev.sh` prints this instead of silently running the whole suite.
+  help|-h|--help)
+    echo "usage: ./dev.sh {test|build|smoke|docker|repl [noob args]|exec \"prompt\"|size-check|clean}"
+    ;;
   # Offline suite: unit + e2e against the in-process mock. The whole story;
   # there is no CI.
   test)
@@ -44,7 +48,8 @@ case "${1:-test}" in
   # passed explicitly (compose only sees UID/GID when the shell exports them,
   # which most shells do not).
   repl)
-    docker compose run --rm --user "$UIDGID" noob
+    shift
+    docker compose run --rm --user "$UIDGID" noob "$@"
     ;;
   exec)
     shift
@@ -66,7 +71,7 @@ case "${1:-test}" in
     rm -rf target .cargo-home
     ;;
   *)
-    echo "usage: ./dev.sh {test|build|smoke|docker|repl|exec \"prompt\"|size-check|clean}" >&2
+    echo "usage: ./dev.sh {test|build|smoke|docker|repl [noob args]|exec \"prompt\"|size-check|clean}" >&2
     exit 2
     ;;
 esac

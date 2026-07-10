@@ -196,17 +196,19 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
 // ---------------------------------------------------------------------------
 
 fn cmd_repl(args: &[String]) -> ExitCode {
-    const USAGE: &str =
-        "usage: noob [--model <name>] [--base-url <url>] [--plan] [--verbose] [--yolo]";
+    const USAGE: &str = "usage: noob [--model <name>] [--base-url <url>] [--session <id>] \
+                         [--plan] [--verbose] [--yolo]";
     let mut ov = Overrides::default();
     let mut yolo = false;
     let mut plan = false;
     let mut verbose = false;
+    let mut session_id: Option<String> = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let taken = match arg.as_str() {
             "--model" => value_for(arg, it.next(), USAGE).map(|v| ov.model = Some(v)),
             "--base-url" => value_for(arg, it.next(), USAGE).map(|v| ov.base_url = Some(v)),
+            "--session" => value_for(arg, it.next(), USAGE).map(|v| session_id = Some(v)),
             "--yolo" => {
                 yolo = true;
                 Ok(())
@@ -228,7 +230,13 @@ fn cmd_repl(args: &[String]) -> ExitCode {
     }
 
     let mut ui = Ui::new(Mode::Repl);
-    let mut boot = BootArgs::new(ov, yolo, plan, Some(None));
+    // The REPL always persists: a fresh id, or resume the one given so a closed
+    // session can be picked up where it left off.
+    let session = match session_id {
+        Some(id) => Some(Some(id)),
+        None => Some(None),
+    };
+    let mut boot = BootArgs::new(ov, yolo, plan, session);
     boot.verbose = verbose;
     let mut agent = match bootstrap(boot, &mut ui) {
         Ok(a) => a,
@@ -297,6 +305,14 @@ fn cmd_repl(args: &[String]) -> ExitCode {
         match agent.run_input(input, &mut ui) {
             RunEnd::Completed(_) | RunEnd::Interrupted => {}
             RunEnd::Aborted(msg) => ui.error(&format!("error: {msg}")),
+        }
+    }
+    // On the way out, tell the human how to pick this session back up. Only at
+    // an interactive terminal, so a piped REPL stays byte-identical.
+    if ui.is_interactive() {
+        if let Some(s) = agent.session.as_ref() {
+            let id = s.id().to_string();
+            ui.note(&format!("session {id} saved · resume with --session {id}"));
         }
     }
     ExitCode::SUCCESS

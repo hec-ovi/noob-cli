@@ -104,11 +104,11 @@ impl Ui {
                     Step::Continue => {}
                     Step::Submit => return self.submit(&ed, queue),
                     Step::Interrupt => {
-                        self.finish_box();
+                        self.erase_box();
                         return self.interrupted();
                     }
                     Step::Eof => {
-                        self.finish_box();
+                        self.erase_box();
                         return Input::Eof;
                     }
                 }
@@ -123,16 +123,16 @@ impl Ui {
                 // Ctrl-C already exited via the handler.
                 if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
                     if INTERRUPTED.swap(false, Ordering::SeqCst) {
-                        self.finish_box();
+                        self.erase_box();
                         return Input::Interrupted;
                     }
                     continue;
                 }
-                self.finish_box();
+                self.erase_box();
                 return Input::Eof;
             }
             if n == 0 {
-                self.finish_box();
+                self.erase_box();
                 return Input::Eof;
             }
             for key in dec.feed(&buf[..n as usize]) {
@@ -148,11 +148,10 @@ impl Ui {
     /// line and carry any keys decoded past the Enter to the next prompt.
     fn submit(&mut self, ed: &Editor, rest: VecDeque<Key>) -> Input {
         if INTERRUPTED.swap(false, Ordering::SeqCst) {
-            self.finish_box();
+            self.erase_box();
             return Input::Interrupted;
         }
-        self.redraw_line(ed);
-        self.finish_box();
+        self.collapse_to_message(ed);
         if !rest.is_empty() {
             CARRYOVER.with(|c| *c.borrow_mut() = rest);
         }
@@ -176,22 +175,16 @@ impl Ui {
         }
     }
 
-    /// The top rule, drawn once: `╭─ No0B-CL1 ─...─╮`, plan mode flagged in the
-    /// label. Leaves the cursor at the start of the input line below it.
+    /// The top rule, drawn once: a full-width `╭───...───╮`, no wordmark (the
+    /// banner already carries it). Plan mode is the only label. Leaves the
+    /// cursor at the start of the input line below it.
     fn draw_box_top(&mut self, plan: bool) {
         let color = self.box_color();
         let reset = if color.is_empty() { "" } else { RESET };
-        let width = term_width().clamp(24, 100);
-        let label = if plan {
-            format!("{} · plan", self.theme.wordmark)
-        } else {
-            self.theme.wordmark.to_string()
-        };
-        // `╭─ label ` then dashes out to the closing `╮`.
-        let head_cells = 3 + label.chars().count() + 1; // ╭ ─ space label space
-        let fill = width.saturating_sub(head_cells + 1); // room before ╮
-        let mut rule = format!("╭─ {label} ");
-        for _ in 0..fill {
+        let width = term_width();
+        let head = if plan { "╭─ plan " } else { "╭" };
+        let mut rule = String::from(head);
+        for _ in head.chars().count()..width.saturating_sub(1) {
             rule.push('─');
         }
         rule.push('╮');
@@ -223,10 +216,27 @@ impl Ui {
         self.out(&s);
     }
 
-    /// Drop below the box so the agent's output starts on a fresh line. The
-    /// `\r` guards column 0 even if output post-processing were off.
-    fn finish_box(&mut self) {
-        self.out("\r\n");
+    /// Wipe the two box lines, leaving the cursor at the box's origin so the
+    /// next output takes its place. `2K` clears each whole line irrespective of
+    /// the cursor column.
+    fn erase_box(&mut self) {
+        self.out("\r\x1b[2K\x1b[1A\x1b[2K\r");
+    }
+
+    /// On submit, collapse the box to a compact record of the message: a green
+    /// arrow and the text, then a newline so the reply flows below. The box
+    /// frame is not left behind, so history reads as `› message` lines, not a
+    /// stack of frames.
+    fn collapse_to_message(&mut self, ed: &Editor) {
+        self.erase_box();
+        let shown: String = ed
+            .buf
+            .iter()
+            .map(|&c| if c.is_control() { ' ' } else { c })
+            .collect();
+        let color = self.box_color();
+        let reset = if color.is_empty() { "" } else { RESET };
+        self.out(&format!("{color}› {reset}{shown}\r\n"));
     }
 }
 
@@ -244,15 +254,16 @@ fn raw_enabled_by_env() -> bool {
     }
 }
 
-/// Terminal width in columns via the window-size ioctl; 60 when it is
-/// unavailable (a reasonable rule width, never a hard failure).
+/// Terminal width in columns via the window-size ioctl; 80 when it is
+/// unavailable (a startup pty that has not been sized yet reports 0). The box
+/// spans the full width, so no upper clamp.
 fn term_width() -> usize {
     unsafe {
         let mut ws: libc::winsize = std::mem::zeroed();
         if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 {
-            ws.ws_col as usize
+            (ws.ws_col as usize).max(20)
         } else {
-            60
+            80
         }
     }
 }
