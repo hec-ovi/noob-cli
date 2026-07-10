@@ -189,7 +189,7 @@ Assembled once per session in fixed order (order is a cache invariant):
 1. `prompts/base.md` via `include_str!`: identity ("noob, a coding agent running inside a sandbox container, cwd /work"), edit discipline (read before edit; make `old` unique with 3-8 lines of context; prefer edit over write), parallel-call encouragement (batch independent reads in one message), verification norm (run tests/build after changes). No word/sentence/length caps anywhere in the text; output is shaped by content instruction only. Budget <= 500 tokens.
 2. Environment block: cwd, platform, date, model, sandbox flag; computed once at session start. <= 60 tokens.
 3. AGENTS.md: `/config/AGENTS.md` (global) then `/work/AGENTS.md` (project), each hard-capped at 16 KiB with a truncation notice.
-4. Skills index: one `- name: description` line per discovered skill (description clipped at 200 chars); section capped at 1,000 tokens; overflow skills get name-only lines, then a count note.
+4. Skills index: a `# Skills (resolver)` section opening with the dispatcher instruction ("Match the task against these skills. Load a matching skill with the skill tool and follow it before acting; if two match, load both."), then one `- name: description` line per discovered skill (description clipped at 200 chars); section capped at 1,000 tokens; overflow skills get name-only lines, then a count note. The index is the resolver (GBrain RESOLVER.md / thin-harness-fat-skills pattern): descriptions are the triggers, bodies cost zero tokens until loaded.
 5. One line naming configured MCP servers when `mcp.json` has any: `MCP servers (use mcp_connect): websearch, fs`.
 
 Plan mode never touches the head: it is an injected user-role message plus a tools-array change (see Plan mode).

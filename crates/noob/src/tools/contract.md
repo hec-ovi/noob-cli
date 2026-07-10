@@ -1,8 +1,9 @@
 # noob/src/tools
 
-The built-in tool set: read, write, edit, bash, grep, glob, ls, plus the
-registry (`specs()`, byte-stable for the session). Each tool is a pure
-fn(ctx, args) -> ToolOutcome with no knowledge of the agent loop.
+The built-in tool set: read, write, edit, bash, grep, glob, ls, plus skill
+(registered only when discovery found at least one skill) and the registry
+(`specs()` + `skill::spec()`, byte-stable for the session). Each tool is a
+pure fn(ctx, args) -> ToolOutcome with no knowledge of the agent loop.
 
 Key rules:
 - read returns plain text with NO line numbers (number prefixes contaminate
@@ -19,6 +20,11 @@ Key rules:
 - bash merges stdout/stderr at the fd level, runs in its own process group,
   and is killed as a group on timeout (default 120s, max 600s).
 - grep/glob are gitignore-aware (ignore crate); ls is not (explicit listing).
+- skill returns the SKILL.md body (frontmatter stripped, byte-exact) plus
+  the skill's directory, capped at 24 KiB with a read pointer; oversize
+  bodies raise a UI-only warning citing the standard's ~5k-token
+  recommendation; loads are tracked in `ToolCtx.loaded_skills` for the
+  post-compaction re-listing.
 - Every result is truncated ONCE at emission (`truncate.rs`, caps and
   marker phrasing frozen in golden tests; every marker names the next
   action), then byte-frozen in the transcript.

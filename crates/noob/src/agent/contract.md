@@ -11,10 +11,13 @@ barrier; results always append in emission order), doom-loop breakers
 inject a nudge; 8 pause the REPL or abort headless runs), compaction
 (`compact.rs`: at 75% of NOOB_CTX, middle summarized, head + ~20k-token
 tail kept, call/result pairs never split, hard-drop only when the
-summarize itself overflows), prompt assembly (`prompt.rs`, once per
-session), and interrupt handling (partial turns discarded; parsed-but-
-unexecuted calls get synthetic "canceled by user" results; the flag is
-cleared so the session continues).
+summarize itself overflows, loaded-skill names re-listed in the spliced
+summary and recovered from the transcript on resume), prompt assembly
+(`prompt.rs`, once per session), the skills-dir write gate (write/edit
+into `**/skills/**` requires confirmation in every mode; headless denies),
+and interrupt handling (partial turns discarded; parsed-but-unexecuted
+calls get synthetic "canceled by user" results; the flag is cleared so
+the session continues).
 
 Invariants: the system prompt and tools array are frozen at session start;
 every request is an exact prefix-extension of the previous one; the only
