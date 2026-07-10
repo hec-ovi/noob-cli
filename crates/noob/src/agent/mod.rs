@@ -52,8 +52,10 @@ pub struct Agent {
 }
 
 pub enum RunEnd {
-    /// The model finished with plain text.
-    Completed(String),
+    /// The model finished with plain text. The text has already streamed to
+    /// the UI; the carried value is for surfaces that need it whole (the
+    /// P6 child returns it as its single JSON result line).
+    Completed(#[allow(dead_code)] String),
     /// Ctrl-C; the transcript is valid and the session can continue.
     Interrupted,
     /// A breaker or provider error stopped the run; message states why.

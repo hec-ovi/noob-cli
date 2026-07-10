@@ -1,11 +1,14 @@
 # noob/src/config
 
-Config-dir resolution and, from P2, endpoint autodetect and mcp.json loading.
+Config-dir resolution, non-secret settings lookup, sandbox detection,
+endpoint autodetect; mcp.json loading lands in P4.
 
 Directory precedence: `NOOB_CONFIG_DIR` > `/config` (the container mount) >
 `~/.config/noob`. Setting precedence: CLI flag > process env (non-secret keys
-only) > `/config/.env`.
+only) > `/config/.env`. API keys are never read here: they stay lazy inside
+noob-provider and never enter the process environment.
 
-The keys themselves are read lazily per request inside noob-provider; this
-module never caches values. Autodetect (P2) probes localhost candidates only,
-and only when no base URL is configured.
+Sandbox: explicit NOOB_SANDBOX wins, otherwise /.dockerenv decides;
+`--yolo` lifts the workspace restriction. Autodetect probes localhost
+candidates only (:8090, :8080, :11434, :1234, :8000, in that order, 500 ms
+each), and only when no base URL is configured anywhere.
