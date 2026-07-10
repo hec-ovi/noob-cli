@@ -28,18 +28,21 @@ impl Theme {
     pub const fn matrix() -> Theme {
         Theme {
             wordmark: "No0B-CL1",
-            prompt: Style::new(rgb(46, 224, 96), true),
-            assistant: Style::new(rgb(150, 225, 170), false),
-            activity: Style::new(rgb(0, 160, 70), false),
-            note: Style::new(rgb(96, 140, 104), false),
-            error: Style::new(rgb(224, 72, 72), true),
+            // A muted mid-green band: nothing so dark it vanishes on black,
+            // nothing so bright it shouts. Retune these freely; no test keys
+            // on a color value.
+            prompt: Style::new(rgb(90, 185, 120), true),
+            assistant: Style::new(rgb(130, 175, 145), false),
+            activity: Style::new(rgb(85, 145, 105), false),
+            note: Style::new(rgb(115, 145, 128), false),
+            error: Style::new(rgb(205, 95, 90), true),
             ramp: [
-                rgb(0, 70, 20),
-                rgb(0, 110, 35),
-                rgb(0, 150, 55),
-                rgb(20, 190, 80),
-                rgb(70, 224, 120),
-                rgb(150, 245, 175),
+                rgb(60, 125, 85),
+                rgb(78, 145, 100),
+                rgb(96, 165, 118),
+                rgb(116, 185, 135),
+                rgb(138, 202, 152),
+                rgb(160, 215, 175),
             ],
         }
     }
