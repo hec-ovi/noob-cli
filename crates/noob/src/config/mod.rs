@@ -52,6 +52,37 @@ pub fn ctx_tokens(config_dir: &Path) -> u64 {
         .unwrap_or(131_072)
 }
 
+/// NOOB_TASK_CONCURRENCY: concurrent sub-agent cap (P6). Bounded: every
+/// child is a full agent hitting the same endpoint.
+pub fn task_concurrency(config_dir: &Path) -> usize {
+    setting(config_dir, "NOOB_TASK_CONCURRENCY")
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(crate::task::DEFAULT_CONCURRENCY)
+        .min(16)
+}
+
+/// NOOB_TASK_MAX_TURNS: per-child inference-round cap (P6). A loop budget,
+/// never an output-token cap.
+pub fn task_max_turns(config_dir: &Path) -> u32 {
+    setting(config_dir, "NOOB_TASK_MAX_TURNS")
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(crate::task::DEFAULT_MAX_TURNS)
+        .min(50)
+}
+
+/// NOOB_TASK_WALL_CLOCK_S: per-child wall clock before the parent kills the
+/// process group. Settable mostly so tests do not wait five minutes.
+pub fn task_wall_clock(config_dir: &Path) -> std::time::Duration {
+    let secs = setting(config_dir, "NOOB_TASK_WALL_CLOCK_S")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(crate::task::DEFAULT_WALL_CLOCK_S)
+        .min(3_600);
+    std::time::Duration::from_secs(secs)
+}
+
 /// Two states, no permission DSL: the container is the wall. An explicit
 /// NOOB_SANDBOX setting wins; otherwise /.dockerenv decides. `--yolo` lifts
 /// the workspace restriction entirely.

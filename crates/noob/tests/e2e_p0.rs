@@ -55,11 +55,12 @@ fn exec_round_trip_against_mock() {
     assert_eq!(req.header("authorization"), Some("Bearer sekret-key"));
     let body = req.json().unwrap();
     assert_eq!(body["model"], "mockmodel");
-    // P2: the request carries the frozen system head and the 7 core tools.
+    // The request carries the frozen system head and the core tools
+    // (7 file/shell tools + task; no skills or MCP in this workspace).
     assert_eq!(body["messages"][0]["role"], "system");
     assert_eq!(body["messages"][1]["role"], "user");
     assert_eq!(body["messages"][1]["content"], "say hi");
-    assert_eq!(body["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(body["tools"].as_array().unwrap().len(), 8);
     server.assert_clean();
 }
 

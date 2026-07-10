@@ -6,10 +6,11 @@ mod config;
 mod mcp;
 mod session;
 mod skills;
+mod task;
 mod tools;
 mod ui;
 
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
 
@@ -32,7 +33,7 @@ fn main() -> ExitCode {
         }
         Some("exec") => cmd_exec(&args[1..]),
         Some("debug") => cmd_debug(&args[1..]),
-        Some("child") => not_yet("child", "P6"),
+        Some("child") => cmd_child(),
         Some("doctor") => not_yet("doctor", "P7"),
         Some(flag) if flag.starts_with('-') => cmd_repl(&args),
         None => cmd_repl(&[]),
@@ -46,7 +47,7 @@ fn main() -> ExitCode {
 }
 
 fn not_yet(cmd: &str, phase: &str) -> ExitCode {
-    eprintln!("noob {cmd} lands in {phase}; this build is the P2 core loop");
+    eprintln!("noob {cmd} lands in {phase}; this build does not have it yet");
     ExitCode::from(2)
 }
 
@@ -75,8 +76,26 @@ struct BootArgs {
     yolo: bool,
     /// Start in plan mode (read-only tools until /go).
     plan: bool,
+    /// Register only the read-only set (read-only children).
+    read_only: bool,
+    /// Relay sub-agent stderr as `[task] ...` lines.
+    verbose: bool,
     /// None = no persistence; Some(None) = fresh id; Some(Some(id)) = resume.
     session: Option<Option<String>>,
+}
+
+impl BootArgs {
+    fn new(ov: Overrides, yolo: bool, plan: bool, session: Option<Option<String>>) -> BootArgs {
+        BootArgs { ov, yolo, plan, read_only: false, verbose: false, session }
+    }
+}
+
+/// NOOB_DEPTH: 0 for the user's agent; children run at parent+1.
+fn current_depth() -> u32 {
+    std::env::var("NOOB_DEPTH")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
@@ -109,12 +128,16 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
         global_agents: prompt::load_agents_md(&config_dir),
         project_agents: prompt::load_agents_md(&workspace),
         skills_index: skills::index(&discovered),
-        mcp_line: prompt::mcp_line(&mcp_servers),
+        // A read-only child has no mcp_call; naming servers would only
+        // tempt it into calls it cannot make.
+        mcp_line: if boot.read_only { None } else { prompt::mcp_line(&mcp_servers) },
     };
     let system = prompt::assemble(&inputs);
     // Registered set is decided here and stays byte-stable for the session:
     // the skill tool exists only when discovery found at least one skill,
-    // the MCP pair only when mcp.json configured at least one server.
+    // the MCP pair only when mcp.json configured at least one server, and
+    // the task tool only below the recursion ceiling with the full set.
+    let depth = current_depth();
     let mut tool_specs = tools::specs();
     if !discovered.is_empty() {
         tool_specs.push(tools::skill::spec());
@@ -123,10 +146,26 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
         tool_specs.push(tools::mcp::connect_spec());
         tool_specs.push(tools::mcp::call_spec());
     }
+    let with_task = depth < task::MAX_DEPTH && !boot.read_only;
+    if with_task {
+        tool_specs.push(task::spec());
+    }
+    if boot.read_only {
+        tool_specs.retain(|t| tools::READ_ONLY_SET.contains(&t.name.as_str()));
+    }
     let mut tool_ctx = ToolCtx::new(workspace, sandbox);
     tool_ctx.skills = discovered;
-    if !mcp_servers.is_empty() {
+    if !mcp_servers.is_empty() && !boot.read_only {
         tool_ctx.mcp = Some(mcp::Mcp::new(mcp_servers));
+    }
+    if with_task {
+        tool_ctx.task = Some(task::TaskCfg {
+            depth,
+            concurrency: config::task_concurrency(&config_dir),
+            max_turns: config::task_max_turns(&config_dir),
+            wall_clock: config::task_wall_clock(&config_dir),
+            verbose: boot.verbose,
+        });
     }
 
     let (session, replayed) = match boot.session {
@@ -158,10 +197,12 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
 // ---------------------------------------------------------------------------
 
 fn cmd_repl(args: &[String]) -> ExitCode {
-    const USAGE: &str = "usage: noob [--model <name>] [--base-url <url>] [--plan] [--yolo]";
+    const USAGE: &str =
+        "usage: noob [--model <name>] [--base-url <url>] [--plan] [--verbose] [--yolo]";
     let mut ov = Overrides::default();
     let mut yolo = false;
     let mut plan = false;
+    let mut verbose = false;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let taken = match arg.as_str() {
@@ -175,6 +216,10 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                 plan = true;
                 Ok(())
             }
+            "--verbose" => {
+                verbose = true;
+                Ok(())
+            }
             other => Err(format!("noob: unknown flag {other:?}; {USAGE}")),
         };
         if let Err(msg) = taken {
@@ -184,7 +229,9 @@ fn cmd_repl(args: &[String]) -> ExitCode {
     }
 
     let mut ui = Ui::new(Mode::Repl);
-    let mut agent = match bootstrap(BootArgs { ov, yolo, plan, session: Some(None) }, &mut ui) {
+    let mut boot = BootArgs::new(ov, yolo, plan, Some(None));
+    boot.verbose = verbose;
+    let mut agent = match bootstrap(boot, &mut ui) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("noob: {e}");
@@ -341,12 +388,13 @@ fn status(agent: &Agent, ui: &mut Ui) {
 
 fn cmd_exec(args: &[String]) -> ExitCode {
     const USAGE: &str = "usage: noob exec -p \"<prompt>\" [--json] [--session <id>] \
-                         [--plan] [--model <name>] [--base-url <url>] [--yolo]";
+                         [--plan] [--verbose] [--model <name>] [--base-url <url>] [--yolo]";
     let mut prompt_arg: Option<String> = None;
     let mut ov = Overrides::default();
     let mut json_mode = false;
     let mut yolo = false;
     let mut plan = false;
+    let mut verbose = false;
     let mut session_id: Option<String> = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -375,6 +423,10 @@ fn cmd_exec(args: &[String]) -> ExitCode {
                 plan = true;
                 Ok(())
             }
+            "--verbose" => {
+                verbose = true;
+                Ok(())
+            }
             other => Err(format!("noob exec: unknown flag {other:?}; {USAGE}")),
         };
         if let Err(msg) = taken {
@@ -389,7 +441,9 @@ fn cmd_exec(args: &[String]) -> ExitCode {
 
     let mut ui = Ui::new(if json_mode { Mode::ExecJson } else { Mode::Exec });
     let session = session_id.map(Some);
-    let mut agent = match bootstrap(BootArgs { ov, yolo, plan, session }, &mut ui) {
+    let mut boot = BootArgs::new(ov, yolo, plan, session);
+    boot.verbose = verbose;
+    let mut agent = match bootstrap(boot, &mut ui) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("noob: {e}");
@@ -407,6 +461,93 @@ fn cmd_exec(args: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// child (P6)
+// ---------------------------------------------------------------------------
+
+/// The sub-agent entry point. Reads ONE JSON task object from stdin
+/// (`{"prompt", "tools": "read-only"|"all", "max_turns"}`), runs a fresh
+/// scoped context with no parent history, streams progress to stderr, and
+/// writes exactly one JSON result line to stdout:
+/// `{"status": "ok"|"error", "result", "turns", "usage"}`.
+fn cmd_child() -> ExitCode {
+    /// Bound on the task payload; a parent never sends anything near this.
+    const STDIN_CAP: u64 = 8 * 1024 * 1024;
+    let mut payload = String::new();
+    let read = std::io::stdin().lock().take(STDIN_CAP).read_to_string(&mut payload);
+    let parsed: Option<serde_json::Value> = match read {
+        Ok(_) => serde_json::from_str(payload.trim()).ok(),
+        Err(_) => None,
+    };
+    let Some(task_obj) = parsed.filter(|v| v.is_object()) else {
+        return child_result("error", "no task: stdin must carry one JSON object", 0, None);
+    };
+    let Some(prompt_text) = task_obj
+        .get("prompt")
+        .and_then(serde_json::Value::as_str)
+        .filter(|p| !p.trim().is_empty())
+    else {
+        return child_result("error", "no task: the JSON object needs a \"prompt\"", 0, None);
+    };
+    let read_only = match task_obj.get("tools").and_then(serde_json::Value::as_str) {
+        None | Some("read-only") => true,
+        Some("all") => false,
+        Some(other) => {
+            return child_result(
+                "error",
+                &format!("unknown tools mode {other:?}; use \"read-only\" or \"all\""),
+                0,
+                None,
+            );
+        }
+    };
+
+    let mut ui = Ui::new(Mode::Child);
+    let mut boot = BootArgs::new(Overrides::default(), false, false, None);
+    boot.read_only = read_only;
+    let mut agent = match bootstrap(boot, &mut ui) {
+        Ok(a) => a,
+        Err(e) => return child_result("error", &e, 0, None),
+    };
+    // Both sides enforce the turn cap: the parent clamped its request; the
+    // child clamps that against its own environment's ceiling.
+    let env_cap = config::task_max_turns(&agent.config_dir);
+    agent.max_rounds = task_obj
+        .get("max_turns")
+        .and_then(serde_json::Value::as_u64)
+        .map(|n| (n as u32).clamp(1, env_cap))
+        .unwrap_or(env_cap);
+
+    let (status, result) = match agent.run_input(prompt_text, &mut ui) {
+        RunEnd::Completed(text) => ("ok", text),
+        RunEnd::Aborted(msg) => ("error", msg),
+        RunEnd::Interrupted => ("error", "interrupted".to_string()),
+    };
+    child_result(status, &result, agent.last_rounds, agent.last_usage())
+}
+
+/// The single stdout line; everything else this process printed went to
+/// stderr, so the parent's parse is mechanical.
+fn child_result(
+    status: &str,
+    result: &str,
+    turns: u32,
+    usage: Option<noob_provider::types::Usage>,
+) -> ExitCode {
+    let usage = usage.map(|u| {
+        json!({
+            "prompt": u.prompt_tokens,
+            "completion": u.completion_tokens,
+            "cached_prompt": u.cached_prompt_tokens,
+        })
+    });
+    println!(
+        "{}",
+        json!({"status": status, "result": result, "turns": turns, "usage": usage})
+    );
+    if status == "ok" { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }
 
 // ---------------------------------------------------------------------------
@@ -460,6 +601,9 @@ fn cmd_debug(args: &[String]) -> ExitCode {
         if !mcp_servers.is_empty() {
             tool_specs.push(tools::mcp::connect_spec());
             tool_specs.push(tools::mcp::call_spec());
+        }
+        if current_depth() < task::MAX_DEPTH {
+            tool_specs.push(task::spec());
         }
         let out = json!({
             "system": system,

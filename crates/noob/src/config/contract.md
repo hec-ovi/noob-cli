@@ -1,7 +1,10 @@
 # noob/src/config
 
 Config-dir resolution, non-secret settings lookup, sandbox detection,
-endpoint autodetect; mcp.json loading lands in P4.
+endpoint autodetect, and the sub-agent caps (NOOB_TASK_CONCURRENCY <= 16,
+NOOB_TASK_MAX_TURNS <= 50, NOOB_TASK_WALL_CLOCK_S <= 3600, all with the
+locked defaults 4 / 25 / 300). mcp.json parsing lives in `mcp/config.rs`,
+not here.
 
 Directory precedence: `NOOB_CONFIG_DIR` > `/config` (the container mount) >
 `~/.config/noob`. Setting precedence: CLI flag > process env (non-secret keys

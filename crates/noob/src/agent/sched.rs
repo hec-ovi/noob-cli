@@ -1,10 +1,12 @@
 //! Batch scheduler: within one assistant tool batch, consecutive read-only
-//! calls run concurrently on scoped threads (cap 8); any mutating call is a
-//! sequential barrier executed alone, in order. Results always come back in
-//! emission order regardless of completion order: parallelism where it is
-//! free, total determinism where it matters (two edits to one file can
-//! never race).
+//! calls run concurrently on scoped threads (cap 8), consecutive task calls
+//! form one fan-out group run concurrently up to the child cap, and any
+//! other mutating call is a sequential barrier executed alone, in order.
+//! Results always come back in emission order regardless of completion
+//! order: parallelism where it is free, total determinism where it matters
+//! (two edits to one file can never race).
 
+use std::ops::Range;
 use std::sync::atomic::Ordering;
 
 use serde_json::Value;
@@ -22,14 +24,72 @@ pub enum Planned {
     Canned(ToolOutcome),
 }
 
-impl Planned {
-    fn read_only(&self) -> bool {
-        match self {
-            // Canned outcomes execute nothing; they join any group.
-            Planned::Canned(_) => true,
-            Planned::Run { name, .. } => tools::is_read_only(name),
+/// Scheduling class of one planned call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// Canned outcomes execute nothing; they join any group.
+    Free,
+    Read,
+    /// task calls: one fan-out group, concurrent up to the child cap.
+    Task,
+    /// Everything else mutates: alone, in order.
+    Mutating,
+}
+
+fn kind(planned: &Planned) -> Kind {
+    match planned {
+        Planned::Canned(_) => Kind::Free,
+        Planned::Run { name, .. } if name == "task" => Kind::Task,
+        Planned::Run { name, .. } if tools::is_read_only(name) => Kind::Read,
+        Planned::Run { .. } => Kind::Mutating,
+    }
+}
+
+/// One scheduled group: a contiguous range and the concurrency it runs at.
+#[derive(Debug, PartialEq, Eq)]
+struct Group {
+    range: Range<usize>,
+    kind: Kind,
+}
+
+/// Split a batch into contiguous groups: maximal runs of one concurrent
+/// kind (Free items join whatever group they sit in), and single-item
+/// groups for every mutating call. Pure, so the invariants are unit-tested
+/// without spawning anything.
+fn partition(kinds: &[Kind]) -> Vec<Group> {
+    let mut groups = Vec::new();
+    let n = kinds.len();
+    let mut i = 0;
+    while i < n {
+        let mut group_kind: Option<Kind> = None;
+        let mut j = i;
+        while j < n {
+            match kinds[j] {
+                Kind::Free => {
+                    j += 1;
+                }
+                Kind::Mutating => break,
+                k => match group_kind {
+                    None => {
+                        group_kind = Some(k);
+                        j += 1;
+                    }
+                    Some(g) if g == k => j += 1,
+                    Some(_) => break,
+                },
+            }
+        }
+        if j == i {
+            // kinds[i] is Mutating: alone, in order.
+            groups.push(Group { range: i..i + 1, kind: Kind::Mutating });
+            i += 1;
+        } else {
+            // All-Free groups run at the read cap (nothing executes anyway).
+            groups.push(Group { range: i..j, kind: group_kind.unwrap_or(Kind::Read) });
+            i = j;
         }
     }
+    groups
 }
 
 /// Execute a batch, returning outcomes in emission order. A Ctrl-C observed
@@ -37,33 +97,32 @@ impl Planned {
 /// "canceled by user" result: a mutation must never land AFTER the user
 /// canceled, and every call id still gets exactly one result.
 pub fn run_batch(ctx: &ToolCtx, batch: Vec<Planned>) -> Vec<ToolOutcome> {
+    let kinds: Vec<Kind> = batch.iter().map(kind).collect();
     let mut slots: Vec<Option<ToolOutcome>> = batch.iter().map(|_| None).collect();
-    let mut i = 0;
-    let n = batch.len();
     // Consume left to right so each Planned is moved exactly once.
     let mut batch: Vec<Option<Planned>> = batch.into_iter().map(Some).collect();
-    while i < n {
+    for group in partition(&kinds) {
         if INTERRUPTED.load(Ordering::SeqCst) {
-            for slot in slots.iter_mut().skip(i) {
+            for slot in slots[group.range.clone()].iter_mut() {
                 *slot = Some(ToolOutcome::canceled());
             }
-            break;
+            continue; // later groups get their synthetic results too
         }
-        let mut j = i;
-        while j < n && batch[j].as_ref().unwrap().read_only() {
-            j += 1;
-        }
-        if j == i {
-            // A mutating call: alone, in order.
-            let planned = batch[i].take().unwrap();
-            slots[i] = Some(execute(ctx, planned));
-            i += 1;
+        if group.kind == Kind::Mutating {
+            let planned = batch[group.range.start].take().unwrap();
+            slots[group.range.start] = Some(execute(ctx, planned));
             continue;
         }
-        // The read-only group [i, j), in waves of READ_CONCURRENCY.
-        let group: Vec<(usize, Planned)> =
-            (i..j).map(|k| (k, batch[k].take().unwrap())).collect();
-        for wave in group.chunks(READ_CONCURRENCY) {
+        let cap = match group.kind {
+            Kind::Task => ctx.task_concurrency(),
+            _ => READ_CONCURRENCY,
+        };
+        let group_items: Vec<(usize, Planned)> = group
+            .range
+            .clone()
+            .map(|k| (k, batch[k].take().unwrap()))
+            .collect();
+        for wave in group_items.chunks(cap) {
             if INTERRUPTED.load(Ordering::SeqCst) {
                 for (k, _) in wave {
                     slots[*k] = Some(ToolOutcome::canceled());
@@ -87,7 +146,6 @@ pub fn run_batch(ctx: &ToolCtx, batch: Vec<Planned>) -> Vec<ToolOutcome> {
                 }
             });
         }
-        i = j;
     }
     slots.into_iter().map(Option::unwrap).collect()
 }
@@ -239,6 +297,46 @@ mod tests {
         assert!(out[1].is_error);
         assert_eq!(out[1].content, "repeated identical call");
         assert!(!out[2].is_error);
+    }
+
+    #[test]
+    fn partition_groups_match_the_locked_scheduling_semantics() {
+        use Kind::*;
+        let groups = |kinds: &[Kind]| -> Vec<(Range<usize>, Kind)> {
+            partition(kinds).into_iter().map(|g| (g.range, g.kind)).collect()
+        };
+        // Reads group; a mutation is alone; tasks fan out together.
+        assert_eq!(
+            groups(&[Read, Read, Mutating, Task, Task, Task, Read]),
+            vec![(0..2, Read), (2..3, Mutating), (3..6, Task), (6..7, Read)]
+        );
+        // Free (canned) items join whatever group surrounds them, including
+        // a task group, and an all-free batch runs as one read-cap group.
+        assert_eq!(
+            groups(&[Task, Free, Task]),
+            vec![(0..3, Task)]
+        );
+        assert_eq!(groups(&[Free, Free]), vec![(0..2, Read)]);
+        // Free items before a mutation group together; the mutation stays alone.
+        assert_eq!(
+            groups(&[Free, Mutating, Free]),
+            vec![(0..1, Read), (1..2, Mutating), (2..3, Read)]
+        );
+        // A read run and a task run never merge: their caps differ.
+        assert_eq!(
+            groups(&[Read, Task]),
+            vec![(0..1, Read), (1..2, Task)]
+        );
+        assert_eq!(groups(&[]), vec![]);
+    }
+
+    #[test]
+    fn task_calls_classify_as_task_and_everything_else_keeps_its_class() {
+        let task = Planned::Run { name: "task".into(), args: json!({"prompt": "x"}) };
+        assert_eq!(kind(&task), Kind::Task);
+        assert_eq!(kind(&read("f")), Kind::Read);
+        assert_eq!(kind(&bash("ls")), Kind::Mutating);
+        assert_eq!(kind(&Planned::Canned(ToolOutcome::err("x"))), Kind::Free);
     }
 
     #[test]

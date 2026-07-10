@@ -30,10 +30,10 @@ const DOOM_REPEATS: usize = 3;
 const NUDGE_AT: u32 = 4;
 const PAUSE_AT: u32 = 8;
 
-/// The plan-mode tool set (ARCHITECTURE.md, plan mode): read-only
-/// exploration plus skills. Everything else is structurally absent from the
-/// request, so it cannot tempt a small model into rejected round trips.
-const PLAN_TOOLS: &[&str] = &["read", "grep", "glob", "ls", "skill"];
+/// The plan-mode tool set (ARCHITECTURE.md, plan mode): the shared
+/// read-only set. Everything else is structurally absent from the request,
+/// so it cannot tempt a small model into rejected round trips.
+const PLAN_TOOLS: &[&str] = tools::READ_ONLY_SET;
 
 /// The injected user-role mode message (frozen phrasing; e2e-asserted).
 pub const PLAN_ENTER_MSG: &str =
@@ -59,6 +59,11 @@ pub struct Agent {
     pub session: Option<Session>,
     /// NOOB_CTX: the context window compaction budgets against.
     pub ctx_tokens: u64,
+    /// Inference rounds allowed per user input. TURN_CAP for the user's
+    /// agent; children run under their (smaller) task turn cap.
+    pub max_rounds: u32,
+    /// Rounds the last `run_input` actually used (the child reports it).
+    pub last_rounds: u32,
     /// chars/4 stand-in for the fixed head when no usage has arrived yet.
     fixed_chars: usize,
     last_usage: Option<Usage>,
@@ -70,8 +75,8 @@ pub struct Agent {
 pub enum RunEnd {
     /// The model finished with plain text. The text has already streamed to
     /// the UI; the carried value is for surfaces that need it whole (the
-    /// P6 child returns it as its single JSON result line).
-    Completed(#[allow(dead_code)] String),
+    /// child returns it as its single JSON result line).
+    Completed(String),
     /// Ctrl-C; the transcript is valid and the session can continue.
     Interrupted,
     /// A breaker or provider error stopped the run; message states why.
@@ -110,6 +115,8 @@ impl Agent {
             tool_ctx,
             session,
             ctx_tokens,
+            max_rounds: TURN_CAP,
+            last_rounds: 0,
             fixed_chars,
             last_usage: None,
             chars_since_usage: replayed_chars,
@@ -177,9 +184,11 @@ impl Agent {
     pub fn run_input(&mut self, input: &str, ui: &mut Ui) -> RunEnd {
         self.push_item(Item::User(input.to_string()));
         self.consec_errors = 0;
+        self.last_rounds = 0;
         let mut emergency_used = false;
 
-        for _round in 0..TURN_CAP {
+        for round in 0..self.max_rounds {
+            self.last_rounds = round + 1;
             if self.context_estimate() >= self.ctx_tokens.saturating_mul(3) / 4 {
                 self.compact(ui);
                 // Ctrl-C during the summarization request aborts the input,
@@ -357,8 +366,9 @@ impl Agent {
             }
         }
         RunEnd::Aborted(format!(
-            "reached the {TURN_CAP}-round cap for one input; the task may be stuck; \
-             give a narrower instruction to continue"
+            "reached the {}-round cap for one input; the task may be stuck; \
+             give a narrower instruction to continue",
+            self.max_rounds
         ))
     }
 

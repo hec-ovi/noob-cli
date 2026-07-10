@@ -47,6 +47,8 @@ pub struct Recorded {
     /// Header names lowercased.
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    /// When the request head arrived; fan-out tests assert overlap with it.
+    pub arrived: std::time::Instant,
 }
 
 impl Recorded {
@@ -75,6 +77,11 @@ struct Shared {
     /// even across sanctioned message breaks (compaction). Plan mode (P5)
     /// is the first legitimate consumer.
     allowed_tools_changes: std::sync::atomic::AtomicUsize,
+    /// Fan-out mode (P6): a parent and its children share this server, so
+    /// consecutive requests belong to different transcripts and the
+    /// cross-request prefix/tools assertions are meaningless. Per-request
+    /// assertions (no output cap, transcript validity) still run.
+    allow_interleaved: std::sync::atomic::AtomicBool,
     connections: std::sync::atomic::AtomicUsize,
 }
 
@@ -93,6 +100,7 @@ impl MockServer {
             violations: Mutex::new(Vec::new()),
             allowed_prefix_breaks: std::sync::atomic::AtomicUsize::new(0),
             allowed_tools_changes: std::sync::atomic::AtomicUsize::new(0),
+            allow_interleaved: std::sync::atomic::AtomicBool::new(false),
             connections: std::sync::atomic::AtomicUsize::new(0),
         });
         let accept_shared = shared.clone();
@@ -195,6 +203,13 @@ impl MockServer {
         self.shared
             .allowed_tools_changes
             .fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Fan-out mode: a parent and its concurrent children share this
+    /// server, so the cross-request prefix and tools-drift assertions are
+    /// off; the per-request assertions still run on every request.
+    pub fn allow_interleaving(&self) {
+        self.shared.allow_interleaved.store(true, Ordering::SeqCst);
     }
 
     pub fn recorded(&self) -> Vec<Recorded> {
@@ -451,7 +466,13 @@ pub(crate) fn read_request(stream: &mut TcpStream) -> Option<Recorded> {
     if len > 0 {
         reader.read_exact(&mut body).ok()?;
     }
-    Some(Recorded { method, path, headers, body })
+    Some(Recorded {
+        method,
+        path,
+        headers,
+        body,
+        arrived: std::time::Instant::now(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +493,7 @@ fn run_assertions(shared: &Shared, req: &Recorded) {
     scan_cap_keys(&body, "$", &mut violations);
 
     // 2 + 3 need the conversation array.
+    let interleaved = shared.allow_interleaved.load(Ordering::SeqCst);
     let array_key = if req.path.ends_with("/responses") { "input" } else { "messages" };
     if let Some(items) = body.get(array_key).and_then(Value::as_array) {
         // Prefix stability is byte-exact on the serialized array: llama.cpp
@@ -479,7 +501,9 @@ fn run_assertions(shared: &Shared, req: &Recorded) {
         // keys between turns is a real cache bust and must be caught.
         // Tools-array drift is the same class of bust (the schemas sit
         // before the transcript in the rendered prompt).
-        let mismatch = {
+        let mismatch = if interleaved {
+            None
+        } else {
             let recorded = shared.recorded.lock().unwrap();
             let prev = recorded.iter().rev().find(|r| r.path == req.path);
             prev.and_then(|prev| {
@@ -512,7 +536,9 @@ fn run_assertions(shared: &Shared, req: &Recorded) {
         // tools drift, and the baseline is the most recent request on this
         // path that carried a tools key at all (the summarizer sends none,
         // which must not blind the comparison across it).
-        let tools_drift = {
+        let tools_drift = if interleaved {
+            None
+        } else {
             let recorded = shared.recorded.lock().unwrap();
             raw_top_level_value(&req.body, "tools").and_then(|next| {
                 recorded
@@ -812,6 +838,7 @@ mod tests {
             violations: Mutex::new(Vec::new()),
             allowed_prefix_breaks: std::sync::atomic::AtomicUsize::new(0),
             allowed_tools_changes: std::sync::atomic::AtomicUsize::new(0),
+            allow_interleaved: std::sync::atomic::AtomicBool::new(false),
             connections: std::sync::atomic::AtomicUsize::new(0),
         }
     }
@@ -822,6 +849,7 @@ mod tests {
             path: path.into(),
             headers: vec![],
             body: body.to_string().into_bytes(),
+            arrived: std::time::Instant::now(),
         }
     }
 

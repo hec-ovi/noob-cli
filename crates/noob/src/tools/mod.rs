@@ -48,6 +48,9 @@ pub struct ToolCtx {
     /// MCP manager; Some only when mcp.json configured at least one server
     /// (and then mcp_connect/mcp_call are registered). Set at bootstrap.
     pub mcp: Option<crate::mcp::Mcp>,
+    /// Sub-agent settings; Some only when the task tool is registered
+    /// (depth below the ceiling, full tool set). Set at bootstrap.
+    pub task: Option<crate::task::TaskCfg>,
 }
 
 impl ToolCtx {
@@ -62,7 +65,13 @@ impl ToolCtx {
             loaded_skills: Mutex::new(Vec::new()),
             approved_skill_writes: Mutex::new(std::collections::HashSet::new()),
             mcp: None,
+            task: None,
         }
+    }
+
+    /// The fan-out cap for a group of task calls in one batch.
+    pub(crate) fn task_concurrency(&self) -> usize {
+        self.task.as_ref().map(|t| t.concurrency).unwrap_or(1).max(1)
     }
 
     /// Execution-time half of the skills-dir write gate: refuse a write/edit
@@ -136,6 +145,11 @@ pub fn is_read_only(name: &str) -> bool {
     matches!(name, "read" | "grep" | "glob" | "ls" | "skill" | "mcp_connect")
 }
 
+/// The read-only tool SET (plan mode and read-only children): exploration
+/// plus skills. Narrower than `is_read_only` on purpose: mcp_connect is
+/// safe to parallelize but pointless without mcp_call, so it stays out.
+pub const READ_ONLY_SET: &[&str] = &["read", "grep", "glob", "ls", "skill"];
+
 /// Execute one tool call. `args` is the parsed arguments object.
 pub fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
     match name {
@@ -149,6 +163,7 @@ pub fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
         "skill" => skill::run(ctx, args),
         "mcp_connect" => mcp::run_connect(ctx, args),
         "mcp_call" => mcp::run_call(ctx, args),
+        "task" => crate::task::run(ctx, args),
         other => ToolOutcome::err(format!(
             "unknown tool {other:?}; the available tools are listed in your tool schemas"
         )),

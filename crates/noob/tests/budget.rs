@@ -69,7 +69,7 @@ fn no_output_cap_budget_and_phrasing() {
 
     // With no AGENTS.md, skills, or MCP, the system prompt IS the head.
     assert_eq!(system, head);
-    assert_eq!(artifact["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(artifact["tools"].as_array().unwrap().len(), 8);
 
     let head_tokens = tokens(head);
     let tools_tokens = tokens(&tools);
@@ -104,7 +104,7 @@ fn no_output_cap_budget_and_phrasing() {
 }
 
 /// The ceilings hold for the full registered set: with a skill discovered
-/// and MCP configured the tools array grows to 10 (skill + the MCP pair),
+/// and MCP configured the tools array grows to 11 (task, skill, the MCP pair),
 /// the system prompt gains the resolver section and the MCP line; the head
 /// itself must stay byte-identical.
 #[test]
@@ -114,8 +114,8 @@ fn budget_holds_with_everything_registered() {
     let head = artifact["head"].as_str().unwrap();
 
     let tools = artifact["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 10);
-    for name in ["skill", "mcp_connect", "mcp_call"] {
+    assert_eq!(tools.len(), 11);
+    for name in ["skill", "mcp_connect", "mcp_call", "task"] {
         assert!(
             tools.iter().any(|t| t["function"]["name"] == name),
             "{name} must be registered"
@@ -143,7 +143,7 @@ fn budget_holds_with_everything_registered() {
 fn tool_descriptions_stay_terse() {
     let artifact = debug_prompt(true, true);
     let tools = artifact["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 11);
     for t in tools {
         let f = &t["function"];
         let desc = f["description"].as_str().unwrap();

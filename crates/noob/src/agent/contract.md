@@ -5,8 +5,12 @@ append results, repeat until a turn ends with no tool calls or a breaker
 trips (cap: 50 rounds per user input).
 
 Owns: the scheduler (`sched.rs`: consecutive read-only calls run
-concurrently on scoped threads, cap 8; any mutating call is a sequential
-barrier; results always append in emission order), doom-loop breakers
+concurrently on scoped threads, cap 8; consecutive task calls form one
+fan-out group run concurrently up to the child cap; any other mutating call
+is a sequential barrier; results always append in emission order), plan
+mode (enter filters the active tools to the read-only set and injects the
+mode message; the dispatcher refuses hallucinated mutations as defense in
+depth; exit restores the full set), doom-loop breakers
 (identical call 3x within the last 12 intercepts; 4 consecutive errors
 inject a nudge; 8 pause the REPL or abort headless runs), compaction
 (`compact.rs`: at 75% of NOOB_CTX, middle summarized, head + ~20k-token
@@ -22,4 +26,5 @@ the session continues).
 Invariants: the system prompt and tools array are frozen at session start;
 every request is an exact prefix-extension of the previous one; the only
 sanctioned prefix breaks are compaction and plan-mode entry or exit, each
-logged as `cache prefix reset: <reason>`.
+logged as `cache prefix reset: <reason>`. The per-input round cap is
+`max_rounds` (50 for the user's agent; children run under their task cap).

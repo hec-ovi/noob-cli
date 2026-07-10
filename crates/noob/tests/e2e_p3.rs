@@ -107,7 +107,7 @@ fn resolver_index_and_tool_registration() {
     );
     assert!(system.contains("- greeting: says hello politely"));
     let tools = reqs[0]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 8);
+    assert_eq!(tools.len(), 9);
     assert!(tools.iter().any(|t| t["function"]["name"] == "skill"));
     rig.server.assert_clean();
 }
@@ -124,7 +124,7 @@ fn no_skills_means_no_skill_tool_and_no_section() {
     let reqs = rig.api_requests();
     let system = reqs[0]["messages"][0]["content"].as_str().unwrap();
     assert!(!system.contains("# Skills"));
-    assert_eq!(reqs[0]["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(reqs[0]["tools"].as_array().unwrap().len(), 8);
     rig.server.assert_clean();
 }
 
@@ -161,7 +161,7 @@ fn skill_tool_returns_body_and_never_mutates_the_head() {
     // did the tools array: both are frozen for the session.
     assert_eq!(reqs[0]["messages"][0], reqs[1]["messages"][0]);
     assert_eq!(reqs[0]["tools"], reqs[1]["tools"], "tools array drifted mid-session");
-    assert_eq!(reqs[0]["tools"].as_array().unwrap().len(), 8);
+    assert_eq!(reqs[0]["tools"].as_array().unwrap().len(), 9);
     assert!(!reqs[1]["tools"].is_null(), "a real turn must carry the tools array");
     rig.server.assert_clean();
 }

@@ -18,6 +18,10 @@ pub enum Mode {
     Exec,
     /// `noob exec --json`: JSONL events on stdout, activity to stderr.
     ExecJson,
+    /// `noob child` (P6): stdout is reserved for the single JSON result
+    /// line, so text AND activity stream to stderr as parent-relayable
+    /// progress. Never a TTY; asks always deny.
+    Child,
 }
 
 pub struct Ui {
@@ -60,7 +64,7 @@ impl Ui {
         };
         match self.mode {
             Mode::Repl => self.out(&rendered),
-            Mode::Exec | Mode::ExecJson => {
+            Mode::Exec | Mode::ExecJson | Mode::Child => {
                 let mut err = std::io::stderr().lock();
                 let _ = err.write_all(rendered.as_bytes());
             }
@@ -79,6 +83,13 @@ impl Ui {
         }
         match self.mode {
             Mode::ExecJson => self.event(json!({"t": "text", "d": s})),
+            // A child's stdout carries exactly one JSON line at the end;
+            // its text streams to stderr as progress the parent may relay.
+            Mode::Child => {
+                let mut err = std::io::stderr().lock();
+                let _ = err.write_all(s.as_bytes());
+                self.mid_line = !s.ends_with('\n');
+            }
             _ => {
                 self.out(s);
                 self.mid_line = !s.ends_with('\n');
@@ -95,10 +106,16 @@ impl Ui {
         }
     }
 
-    /// Close an unterminated streamed line, if any.
+    /// Close an unterminated streamed line, if any (on the stream the text
+    /// went to: a child's text lives on stderr, everyone else's on stdout).
     pub fn end_line(&mut self) {
         if self.mid_line {
-            self.out("\n");
+            if self.mode == Mode::Child {
+                let mut err = std::io::stderr().lock();
+                let _ = err.write_all(b"\n");
+            } else {
+                self.out("\n");
+            }
             self.mid_line = false;
         }
     }
@@ -185,6 +202,7 @@ impl Ui {
 fn brief_args(name: &str, args: &Value) -> String {
     let s = match name {
         "bash" => args.get("cmd").and_then(Value::as_str).unwrap_or(""),
+        "task" => args.get("prompt").and_then(Value::as_str).unwrap_or(""),
         _ => args
             .get("path")
             .or_else(|| args.get("pattern"))
