@@ -16,7 +16,7 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -65,7 +65,10 @@ struct Shared {
     script: Mutex<VecDeque<Scripted>>,
     recorded: Mutex<Vec<Recorded>>,
     violations: Mutex<Vec<String>>,
-    allow_prefix_break: AtomicBool,
+    /// How many prefix MISMATCHES are sanctioned. Consumed only when a
+    /// mismatch actually happens, so tests can arm allowances up front
+    /// (before spawning a binary that compacts mid-run).
+    allowed_prefix_breaks: std::sync::atomic::AtomicUsize,
     connections: std::sync::atomic::AtomicUsize,
 }
 
@@ -82,7 +85,7 @@ impl MockServer {
             script: Mutex::new(VecDeque::new()),
             recorded: Mutex::new(Vec::new()),
             violations: Mutex::new(Vec::new()),
-            allow_prefix_break: AtomicBool::new(false),
+            allowed_prefix_breaks: std::sync::atomic::AtomicUsize::new(0),
             connections: std::sync::atomic::AtomicUsize::new(0),
         });
         let accept_shared = shared.clone();
@@ -170,10 +173,13 @@ impl MockServer {
         self.enqueue_sse(&datas.iter().map(String::as_str).collect::<Vec<_>>());
     }
 
-    /// Declare that the NEXT request is a sanctioned prefix break
-    /// (compaction, plan-mode entry or exit).
+    /// Sanction one future prefix mismatch (compaction, plan-mode entry or
+    /// exit, a fresh session against the same server). Call N times to
+    /// allow N; the allowance is consumed only when a mismatch happens.
     pub fn expect_prefix_break(&self) {
-        self.shared.allow_prefix_break.store(true, Ordering::SeqCst);
+        self.shared
+            .allowed_prefix_breaks
+            .fetch_add(1, Ordering::SeqCst);
     }
 
     pub fn recorded(&self) -> Vec<Recorded> {
@@ -395,18 +401,25 @@ fn run_assertions(shared: &Shared, req: &Recorded) {
     // 2 + 3 need the conversation array.
     let array_key = if req.path.ends_with("/responses") { "input" } else { "messages" };
     if let Some(items) = body.get(array_key).and_then(Value::as_array) {
-        let allow_break = shared.allow_prefix_break.swap(false, Ordering::SeqCst);
-        if !allow_break {
+        let mismatch = {
             let recorded = shared.recorded.lock().unwrap();
-            if let Some(prev) = recorded
+            recorded
                 .iter()
                 .rev()
                 .find(|r| r.path == req.path)
                 .and_then(|r| r.json())
-            {
-                if let Some(prev_items) = prev.get(array_key).and_then(Value::as_array) {
-                    check_prefix(prev_items, items, idx, &mut violations);
-                }
+                .and_then(|prev| {
+                    prev.get(array_key)
+                        .and_then(Value::as_array)
+                        .and_then(|prev_items| check_prefix(prev_items, items, idx))
+                })
+        };
+        if let Some(v) = mismatch {
+            // A sanctioned break burns one allowance; otherwise it is a
+            // violation.
+            let allowed = self_dec(&shared.allowed_prefix_breaks);
+            if !allowed {
+                violations.push(v);
             }
         }
         if array_key == "messages" {
@@ -441,25 +454,32 @@ fn scan_cap_keys(v: &Value, path: &str, violations: &mut Vec<String>) {
     }
 }
 
-fn check_prefix(prev: &[Value], next: &[Value], idx: usize, violations: &mut Vec<String>) {
+/// Atomically consume one allowance; false when none are left.
+fn self_dec(counter: &std::sync::atomic::AtomicUsize) -> bool {
+    counter
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+        .is_ok()
+}
+
+/// The first prefix mismatch between consecutive requests, if any.
+fn check_prefix(prev: &[Value], next: &[Value], idx: usize) -> Option<String> {
     if next.len() < prev.len() {
-        violations.push(format!(
+        return Some(format!(
             "request #{idx}: conversation array shrank from {} to {} items (prefix broken)",
             prev.len(),
             next.len()
         ));
-        return;
     }
     for (i, item) in prev.iter().enumerate() {
         if &next[i] != item {
-            violations.push(format!(
+            return Some(format!(
                 "request #{idx}: conversation item {i} changed since the previous request \
                  (prefix broken); prev={item} next={}",
                 next[i]
             ));
-            return;
         }
     }
+    None
 }
 
 fn check_chat_transcript(messages: &[Value], idx: usize, violations: &mut Vec<String>) {
@@ -552,7 +572,7 @@ mod tests {
             script: Mutex::new(VecDeque::new()),
             recorded: Mutex::new(Vec::new()),
             violations: Mutex::new(Vec::new()),
-            allow_prefix_break: AtomicBool::new(false),
+            allowed_prefix_breaks: std::sync::atomic::AtomicUsize::new(0),
             connections: std::sync::atomic::AtomicUsize::new(0),
         }
     }
@@ -593,14 +613,16 @@ mod tests {
             &req("/v1/chat/completions", json!({"messages": [{"role":"user","content":"CHANGED"}]})),
         );
         assert_eq!(s.violations.lock().unwrap().len(), 1);
-        // Same change again, but declared: clean.
+        // Same change again, but declared: clean, and the allowance is
+        // consumed only by the mismatch.
         s.violations.lock().unwrap().clear();
-        s.allow_prefix_break.store(true, Ordering::SeqCst);
+        s.allowed_prefix_breaks.store(2, Ordering::SeqCst);
         run_assertions(
             &s,
             &req("/v1/chat/completions", json!({"messages": [{"role":"user","content":"CHANGED"}]})),
         );
         assert!(s.violations.lock().unwrap().is_empty());
+        assert_eq!(s.allowed_prefix_breaks.load(Ordering::SeqCst), 1);
     }
 
     #[test]
