@@ -493,6 +493,23 @@ impl Client {
         api_key: &str,
         body: &mut serde_json::Value,
     ) -> Result<StreamBody, ProviderError> {
+        let auth: Vec<(String, String)> = if api_key.is_empty() {
+            Vec::new()
+        } else {
+            vec![("authorization".to_string(), format!("Bearer {api_key}"))]
+        };
+        self.post_json_stream_with(url, &auth, body)
+    }
+
+    /// Like `post_json_stream`, but with arbitrary extra request headers
+    /// (the MCP Streamable HTTP transport needs Accept, MCP-Protocol-Version
+    /// and Mcp-Session-Id). Content-type is always set here.
+    pub fn post_json_stream_with(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        body: &mut serde_json::Value,
+    ) -> Result<StreamBody, ProviderError> {
         // Drop fields this client already learned the endpoint rejects.
         if let Some(map) = body.as_object_mut() {
             let known = self.compat_stripped.lock().unwrap();
@@ -509,8 +526,8 @@ impl Client {
                     .agent
                     .post(url)
                     .header("content-type", "application/json");
-                if !api_key.is_empty() {
-                    req = req.header("authorization", &format!("Bearer {api_key}"));
+                for (name, value) in headers {
+                    req = req.header(name, value);
                 }
                 req.send(body.to_string().as_str())
                     .map_err(|e| map_ureq_error(&self.ctl, url, e))
@@ -602,6 +619,8 @@ pub struct StreamBody {
     url: String,
     status: u16,
     content_type: String,
+    /// Response headers, names lowercased (MCP captures Mcp-Session-Id).
+    headers: Vec<(String, String)>,
     reader: ureq::BodyReader<'static>,
 }
 
@@ -618,18 +637,37 @@ impl StreamBody {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
+        let headers = resp
+            .headers()
+            .iter()
+            .filter_map(|(n, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|v| (n.as_str().to_ascii_lowercase(), v.to_string()))
+            })
+            .collect();
         let (_, body) = resp.into_parts();
         StreamBody {
             ctl,
             url: url.to_string(),
             status,
             content_type,
+            headers,
             reader: body.into_reader(),
         }
     }
 
     pub fn status(&self) -> u16 {
         self.status
+    }
+
+    /// One response header by (case-insensitive) name.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        let name = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.as_str())
     }
 
     /// Lowercased media type without parameters, e.g. `application/json`.

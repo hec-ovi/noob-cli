@@ -3,6 +3,7 @@
 
 mod agent;
 mod config;
+mod mcp;
 mod session;
 mod skills;
 mod tools;
@@ -95,6 +96,10 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
     // so `debug prompt` and a live session print the identical head.
     let model = model_label(&config_dir, &ov);
     let discovered = skills::discover(&workspace, &config_dir);
+    let (mcp_servers, mcp_warnings) = mcp::config::load(&workspace, &config_dir);
+    for warning in &mcp_warnings {
+        ui.note(&format!("mcp: {warning}"));
+    }
     let inputs = prompt::PromptInputs {
         cwd: workspace.display().to_string(),
         model,
@@ -102,17 +107,25 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
         global_agents: prompt::load_agents_md(&config_dir),
         project_agents: prompt::load_agents_md(&workspace),
         skills_index: skills::index(&discovered),
-        mcp_line: None,
+        mcp_line: prompt::mcp_line(&mcp_servers),
     };
     let system = prompt::assemble(&inputs);
     // Registered set is decided here and stays byte-stable for the session:
-    // the skill tool exists only when discovery found at least one skill.
+    // the skill tool exists only when discovery found at least one skill,
+    // the MCP pair only when mcp.json configured at least one server.
     let mut tool_specs = tools::specs();
     if !discovered.is_empty() {
         tool_specs.push(tools::skill::spec());
     }
+    if !mcp_servers.is_empty() {
+        tool_specs.push(tools::mcp::connect_spec());
+        tool_specs.push(tools::mcp::call_spec());
+    }
     let mut tool_ctx = ToolCtx::new(workspace, sandbox);
     tool_ctx.skills = discovered;
+    if !mcp_servers.is_empty() {
+        tool_ctx.mcp = Some(mcp::Mcp::new(mcp_servers));
+    }
 
     let (session, replayed) = match boot.session {
         None => (None, Vec::new()),
@@ -268,13 +281,30 @@ fn status(agent: &Agent, ui: &mut Ui) {
         let names: Vec<&str> = agent.tool_ctx.skills.iter().map(|s| s.name.as_str()).collect();
         format!("\nskills: {}", names.join(", "))
     };
+    let mcp_line = match &agent.tool_ctx.mcp {
+        None => String::new(),
+        Some(mcp) => {
+            let entries: Vec<String> = mcp
+                .names()
+                .iter()
+                .map(|name| {
+                    if mcp.connection(name).is_some() {
+                        format!("{name} (connected)")
+                    } else {
+                        (*name).to_string()
+                    }
+                })
+                .collect();
+            format!("\nmcp servers: {}", entries.join(", "))
+        }
+    };
     let session = agent
         .session
         .as_ref()
         .map(|s| format!("\nsession: {}", s.path().display()))
         .unwrap_or_default();
     ui.note(&format!(
-        "endpoint: {endpoint}\ncontext: ~{est} of {} tokens ({pct}%)\n{usage}{skills_line}{session}",
+        "endpoint: {endpoint}\ncontext: ~{est} of {} tokens ({pct}%)\n{usage}{skills_line}{mcp_line}{session}",
         agent.ctx_tokens
     ));
 }
@@ -374,6 +404,10 @@ fn cmd_debug(args: &[String]) -> ExitCode {
     // Same discovery as bootstrap: the printed artifact must match what a
     // real session sends, byte for byte.
     let discovered = skills::discover(&workspace, &config_dir);
+    let (mcp_servers, mcp_warnings) = mcp::config::load(&workspace, &config_dir);
+    for warning in &mcp_warnings {
+        eprintln!("noob: mcp: {warning}");
+    }
     let inputs = prompt::PromptInputs {
         cwd: workspace.display().to_string(),
         model,
@@ -381,7 +415,7 @@ fn cmd_debug(args: &[String]) -> ExitCode {
         global_agents: prompt::load_agents_md(&config_dir),
         project_agents: prompt::load_agents_md(&workspace),
         skills_index: skills::index(&discovered),
-        mcp_line: None,
+        mcp_line: prompt::mcp_line(&mcp_servers),
     };
     // One head computation feeds both outputs: a date rollover between two
     // calls must not make "head" disagree with "system".
@@ -391,6 +425,10 @@ fn cmd_debug(args: &[String]) -> ExitCode {
         let mut tool_specs = tools::specs();
         if !discovered.is_empty() {
             tool_specs.push(tools::skill::spec());
+        }
+        if !mcp_servers.is_empty() {
+            tool_specs.push(tools::mcp::connect_spec());
+            tool_specs.push(tools::mcp::call_spec());
         }
         let out = json!({
             "system": system,

@@ -13,6 +13,8 @@
 //! Violations are collected, not panicked (a panic in the server thread would
 //! vanish); tests must end with `assert_clean()`.
 
+pub mod mcp;
+
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -418,7 +420,7 @@ fn write_steps(stream: &mut TcpStream, steps: Vec<RawStep>) -> bool {
     true
 }
 
-fn read_request(stream: &mut TcpStream) -> Option<Recorded> {
+pub(crate) fn read_request(stream: &mut TcpStream) -> Option<Recorded> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
     let mut line = String::new();
     if reader.read_line(&mut line).ok()? == 0 {

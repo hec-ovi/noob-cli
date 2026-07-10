@@ -8,6 +8,7 @@ pub mod glob;
 pub mod grep;
 pub mod guard;
 pub mod ls;
+pub mod mcp;
 pub mod read;
 pub mod skill;
 pub mod truncate;
@@ -44,6 +45,9 @@ pub struct ToolCtx {
     /// execution time so a symlink created earlier in the same batch cannot
     /// route a write into a skills dir past the confirmation.
     pub approved_skill_writes: Mutex<std::collections::HashSet<PathBuf>>,
+    /// MCP manager; Some only when mcp.json configured at least one server
+    /// (and then mcp_connect/mcp_call are registered). Set at bootstrap.
+    pub mcp: Option<crate::mcp::Mcp>,
 }
 
 impl ToolCtx {
@@ -57,6 +61,7 @@ impl ToolCtx {
             skills: Vec::new(),
             loaded_skills: Mutex::new(Vec::new()),
             approved_skill_writes: Mutex::new(std::collections::HashSet::new()),
+            mcp: None,
         }
     }
 
@@ -142,6 +147,8 @@ pub fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
         "glob" => glob::run(ctx, args),
         "ls" => ls::run(ctx, args),
         "skill" => skill::run(ctx, args),
+        "mcp_connect" => mcp::run_connect(ctx, args),
+        "mcp_call" => mcp::run_call(ctx, args),
         other => ToolOutcome::err(format!(
             "unknown tool {other:?}; the available tools are listed in your tool schemas"
         )),

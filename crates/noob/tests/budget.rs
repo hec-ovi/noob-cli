@@ -14,10 +14,12 @@ const HEAD_CEILING: usize = 560; // base.md + environment block
 const TOOLS_CEILING: usize = 940; // serialized wire tools array
 const TOTAL_CEILING: usize = 1500; // total fixed first-request overhead
 
-/// `with_skill` plants one skill in the workspace so the artifact carries
-/// the FULL registered set (7 core + skill) and the resolver section: the
-/// ceilings must hold with everything registered, not just the bare core.
-fn debug_prompt(with_skill: bool) -> Value {
+/// `with_skill` plants one skill in the workspace and `with_mcp` one
+/// configured server, so the artifact carries the FULL registered set (7
+/// core + skill + mcp_connect + mcp_call) plus the resolver section and the
+/// MCP line: the ceilings must hold with everything registered, not just
+/// the bare core.
+fn debug_prompt(with_skill: bool, with_mcp: bool) -> Value {
     let config = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     std::fs::write(config.path().join(".env"), "NOOB_MODEL=qwen3.6-35b-a3b\n").unwrap();
@@ -27,6 +29,13 @@ fn debug_prompt(with_skill: bool) -> Value {
         std::fs::write(
             dir.join("SKILL.md"),
             "---\nname: budget-probe\ndescription: a probe skill for the budget test\n---\nbody\n",
+        )
+        .unwrap();
+    }
+    if with_mcp {
+        std::fs::write(
+            config.path().join("mcp.json"),
+            r#"{"servers": {"websearch": {"url": "http://localhost:8000"}}}"#,
         )
         .unwrap();
     }
@@ -53,7 +62,7 @@ fn tokens(text: &str) -> usize {
 
 #[test]
 fn no_output_cap_budget_and_phrasing() {
-    let artifact = debug_prompt(false);
+    let artifact = debug_prompt(false, false);
     let system = artifact["system"].as_str().unwrap();
     let head = artifact["head"].as_str().unwrap();
     let tools = artifact["tools"].to_string();
@@ -95,23 +104,27 @@ fn no_output_cap_budget_and_phrasing() {
 }
 
 /// The ceilings hold for the full registered set: with a skill discovered
-/// the tools array grows to 8 (the skill tool) and the system prompt gains
-/// the resolver section; the head itself must stay byte-identical.
+/// and MCP configured the tools array grows to 10 (skill + the MCP pair),
+/// the system prompt gains the resolver section and the MCP line; the head
+/// itself must stay byte-identical.
 #[test]
-fn budget_holds_with_the_skill_tool_registered() {
-    let artifact = debug_prompt(true);
+fn budget_holds_with_everything_registered() {
+    let artifact = debug_prompt(true, true);
     let system = artifact["system"].as_str().unwrap();
     let head = artifact["head"].as_str().unwrap();
 
     let tools = artifact["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 8);
-    assert!(
-        tools.iter().any(|t| t["function"]["name"] == "skill"),
-        "the skill tool must be registered when a skill exists"
-    );
+    assert_eq!(tools.len(), 10);
+    for name in ["skill", "mcp_connect", "mcp_call"] {
+        assert!(
+            tools.iter().any(|t| t["function"]["name"] == name),
+            "{name} must be registered"
+        );
+    }
     assert!(system.starts_with(head), "the head never mutates");
     assert!(system.contains("# Skills (resolver)"));
     assert!(system.contains("- budget-probe: a probe skill for the budget test"));
+    assert!(system.contains("MCP servers (use mcp_connect): websearch"));
 
     let head_tokens = tokens(head);
     let tools_tokens = tokens(&artifact["tools"].to_string());
@@ -121,16 +134,16 @@ fn budget_holds_with_the_skill_tool_registered() {
     );
     assert!(
         tools_tokens <= TOOLS_CEILING,
-        "tools array with skill is {tools_tokens} tokens (ceiling {TOOLS_CEILING})"
+        "full tools array is {tools_tokens} tokens (ceiling {TOOLS_CEILING})"
     );
     assert!(head_tokens + tools_tokens <= TOTAL_CEILING);
 }
 
 #[test]
 fn tool_descriptions_stay_terse() {
-    let artifact = debug_prompt(true);
+    let artifact = debug_prompt(true, true);
     let tools = artifact["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 8);
+    assert_eq!(tools.len(), 10);
     for t in tools {
         let f = &t["function"];
         let desc = f["description"].as_str().unwrap();

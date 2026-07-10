@@ -14,6 +14,8 @@ pub const GREP_MATCH_CAP: usize = 100;
 pub const GREP_BYTE_CAP: usize = 16 * 1024;
 pub const LIST_ENTRY_CAP: usize = 200; // glob and ls
 pub const SKILL_BYTE_CAP: usize = 24 * 1024; // skill body per load
+pub const MCP_HEAD: usize = 8 * 1024; // mcp results: 20 KiB head+tail,
+pub const MCP_TAIL: usize = 12 * 1024; // tail-heavy like bash
 
 /// Largest byte index <= `at` that is a char boundary of `s`.
 pub fn floor_char_boundary(s: &str, at: usize) -> usize {
@@ -60,6 +62,17 @@ pub fn clip_line(line: &str) -> Cow<'_, str> {
 /// `tail` bytes (rounded to char boundaries) with an omission marker between.
 /// Tail-heavy because compilers and test runners put the verdict last.
 pub fn head_tail(s: &str, head: usize, tail: usize) -> Cow<'_, str> {
+    head_tail_with(s, head, tail, "narrow the command if you need the omitted part")
+}
+
+/// Same shape with a caller-supplied next action, because the marker is API
+/// surface: "narrow the command" teaches nothing on an MCP result.
+pub fn head_tail_with<'a>(
+    s: &'a str,
+    head: usize,
+    tail: usize,
+    next_action: &str,
+) -> Cow<'a, str> {
     if s.len() <= head + tail {
         return Cow::Borrowed(s);
     }
@@ -68,10 +81,20 @@ pub fn head_tail(s: &str, head: usize, tail: usize) -> Cow<'_, str> {
     let omitted = tail_start - head_end;
     Cow::Owned(format!(
         "{}\n[output truncated: {omitted} bytes omitted from the middle; the start and \
-         end are shown; narrow the command if you need the omitted part]\n{}",
+         end are shown; {next_action}]\n{}",
         &s[..head_end],
         &s[tail_start..]
     ))
+}
+
+/// The MCP result cap: 20 KiB head+tail with an MCP-appropriate next action.
+pub fn mcp_cap(s: &str) -> Cow<'_, str> {
+    head_tail_with(
+        s,
+        MCP_HEAD,
+        MCP_TAIL,
+        "ask the tool for less data if you need the omitted part",
+    )
 }
 
 /// Marker for a `read` that hit the 40 KiB hard cap mid-file.
@@ -151,6 +174,21 @@ mod tests {
         // from the head, never split.
         assert!(out.starts_with(&"a".repeat(9)));
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn golden_mcp_cap_marker() {
+        let s = format!("{}{}{}", "a".repeat(MCP_HEAD), "b".repeat(64), "c".repeat(MCP_TAIL));
+        let out = mcp_cap(&s);
+        assert!(
+            out.contains(
+                "[output truncated: 64 bytes omitted from the middle; the start and \
+                 end are shown; ask the tool for less data if you need the omitted part]"
+            ),
+            "{}",
+            &out[MCP_HEAD..MCP_HEAD + 200]
+        );
+        assert!(matches!(mcp_cap("small"), Cow::Borrowed(_)));
     }
 
     #[test]

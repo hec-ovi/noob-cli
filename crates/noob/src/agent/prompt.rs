@@ -86,6 +86,16 @@ fn push_capped(out: &mut String, text: &str) {
     out.push_str("\n[AGENTS.md truncated at 16 KiB]");
 }
 
+/// The one-line MCP layer: server names only; schemas stay out of the head
+/// forever (mcp_connect returns catalogs as tool results).
+pub fn mcp_line(servers: &[crate::mcp::config::ServerConfig]) -> Option<String> {
+    if servers.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
+    Some(format!("MCP servers (use mcp_connect): {}", names.join(", ")))
+}
+
 /// Read one AGENTS.md if present and non-empty.
 pub fn load_agents_md(dir: &Path) -> Option<String> {
     let text = std::fs::read_to_string(dir.join("AGENTS.md")).ok()?;
@@ -181,6 +191,37 @@ mod tests {
         let s = assemble(&i);
         assert!(s.contains("[AGENTS.md truncated at 16 KiB]"));
         assert!(s.len() < 20 * 1024);
+    }
+
+    #[test]
+    fn mcp_line_lists_names_only_and_lands_last() {
+        use crate::mcp::config::{ServerConfig, TransportConfig};
+        let servers = vec![
+            ServerConfig {
+                name: "fs".into(),
+                transport: TransportConfig::Stdio { command: "fs-mcp".into(), args: vec![] },
+                timeout: std::time::Duration::from_secs(30),
+            },
+            ServerConfig {
+                name: "websearch".into(),
+                transport: TransportConfig::Http { url: "http://localhost:8000".into() },
+                timeout: std::time::Duration::from_secs(30),
+            },
+        ];
+        assert_eq!(
+            mcp_line(&servers).unwrap(),
+            "MCP servers (use mcp_connect): fs, websearch"
+        );
+        assert!(mcp_line(&[]).is_none());
+        let mut i = inputs();
+        i.skills_index = Some("- fmt: formats".into());
+        i.mcp_line = mcp_line(&servers);
+        let s = assemble(&i);
+        // The MCP line is the last layer, after the resolver section, and
+        // never carries schemas or URLs.
+        assert!(s.ends_with("MCP servers (use mcp_connect): fs, websearch"));
+        assert!(!s.contains("localhost:8000"));
+        assert!(s.find("# Skills (resolver)").unwrap() < s.find("MCP servers").unwrap());
     }
 
     #[test]
