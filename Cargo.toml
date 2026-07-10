@@ -17,7 +17,10 @@ noob-testkit = { path = "crates/noob-testkit" }
 ureq = { version = "=3.3.0", default-features = false, features = ["rustls"] }
 serde_json = "1.0.150"
 libc = "0.2.186"
+regex = "1.13"
+ignore = "0.4.28"
 tempfile = "3.27"
+tiktoken-rs = "0.12"
 
 [profile.release]
 opt-level = "s"

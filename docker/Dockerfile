@@ -1,8 +1,9 @@
 # Dev stage: the toolchain `./dev.sh test` and `./dev.sh build` run in, so
 # nothing gets installed on the host. build-base carries the C compiler ring
-# needs.
+# needs; bash and git are what the bash-tool tests exercise (the runtime
+# stage ships the same pair).
 FROM rust:1.96-alpine AS dev
-RUN apk add --no-cache build-base jq
+RUN apk add --no-cache build-base jq bash git
 
 # Builder: static musl release binary.
 FROM dev AS builder

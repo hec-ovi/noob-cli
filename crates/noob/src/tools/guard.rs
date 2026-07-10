@@ -1,0 +1,244 @@
+//! File-safety guards shared by the mutating tools: check-and-set staleness
+//! (fnv1a64 of the last-seen content), workspace sandbox path policy, and
+//! atomic writes (temp + fsync + rename; no partial write is ever visible).
+
+use std::collections::HashMap;
+use std::fs;
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
+
+/// fnv1a64: tiny, dependency-free, good enough to detect any edit.
+pub fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileStamp {
+    pub len: u64,
+    pub hash: u64,
+}
+
+impl FileStamp {
+    pub fn of(bytes: &[u8]) -> FileStamp {
+        FileStamp {
+            len: bytes.len() as u64,
+            hash: fnv1a64(bytes),
+        }
+    }
+}
+
+/// Two states total; no permission-rule DSL. The container is the wall.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sandbox {
+    /// Inside a container (or `--yolo`): tools run unrestricted.
+    Container,
+    /// Outside a container: write/edit refuse paths outside the workspace.
+    Workspace,
+}
+
+/// Session-scoped registry of last-known file content, keyed by resolved
+/// path. `read` records, successful `write`/`edit` update; a mismatch means
+/// the file changed on disk behind the model's back.
+pub struct SeenFiles {
+    map: Mutex<HashMap<PathBuf, FileStamp>>,
+}
+
+impl SeenFiles {
+    pub fn new() -> SeenFiles {
+        SeenFiles {
+            map: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn record(&self, path: &Path, stamp: FileStamp) {
+        self.map.lock().unwrap().insert(path.to_path_buf(), stamp);
+    }
+
+    pub fn get(&self, path: &Path) -> Option<FileStamp> {
+        self.map.lock().unwrap().get(path).copied()
+    }
+}
+
+/// Resolve a tool `path` argument: absolute or workspace-relative, lexically
+/// normalized (`.` and `..` folded without touching the filesystem).
+pub fn resolve_path(workspace: &Path, raw: &str) -> PathBuf {
+    let p = Path::new(raw);
+    let joined = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        workspace.join(p)
+    };
+    let mut out = PathBuf::new();
+    for comp in joined.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Workspace-mode write gate. `path` must already be resolved. Checks the
+/// lexical path AND the canonicalized deepest existing ancestor, so a
+/// symlink inside the tree cannot smuggle a write outside it.
+pub fn check_write_allowed(
+    sandbox: Sandbox,
+    workspace: &Path,
+    path: &Path,
+) -> Result<(), String> {
+    if sandbox == Sandbox::Container {
+        return Ok(());
+    }
+    let refusal = |p: &Path| {
+        format!(
+            "refused: {} is outside the workspace {}; without a container sandbox, \
+             write and edit are limited to the workspace tree (run with --yolo to lift this)",
+            p.display(),
+            workspace.display()
+        )
+    };
+    if !path.starts_with(workspace) {
+        return Err(refusal(path));
+    }
+    // Symlink escape: canonicalize the deepest existing ancestor and re-check.
+    let mut probe = path.to_path_buf();
+    let mut rest = Vec::new();
+    while !probe.exists() {
+        match probe.file_name() {
+            Some(name) => {
+                rest.push(name.to_os_string());
+                probe.pop();
+            }
+            None => break,
+        }
+    }
+    let canon = probe
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve {}: {e}", probe.display()))?;
+    let mut real = canon;
+    for name in rest.iter().rev() {
+        real.push(name);
+    }
+    if !real.starts_with(workspace) {
+        return Err(refusal(&real));
+    }
+    Ok(())
+}
+
+/// Atomic write: temp file in the same directory, fsync, rename over the
+/// target. Preserves the target's mode when it already exists.
+pub fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
+    let dir = dir.ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+    fs::create_dir_all(dir)
+        .map_err(|e| format!("cannot create directory {}: {e}", dir.display()))?;
+    let mode = fs::metadata(path).ok().map(|m| {
+        use std::os::unix::fs::MetadataExt;
+        m.mode()
+    });
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("noob-tmp");
+    // Uniquified per process+attempt so parallel sessions cannot collide.
+    let tmp = dir.join(format!(
+        ".{file_name}.noob-{}-{:x}",
+        std::process::id(),
+        fnv1a64(content) ^ content.len() as u64
+    ));
+    let write = (|| -> std::io::Result<()> {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(content)?;
+        f.sync_all()?;
+        if let Some(mode) = mode {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(fs::Permissions::from_mode(mode))?;
+        }
+        drop(f);
+        fs::rename(&tmp, path)
+    })();
+    if let Err(e) = write {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("cannot write {}: {e}", path.display()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fnv_matches_reference_vectors() {
+        // Published FNV-1a 64-bit vectors.
+        assert_eq!(fnv1a64(b""), 0xcbf29ce484222325);
+        assert_eq!(fnv1a64(b"a"), 0xaf63dc4c8601ec8c);
+        assert_eq!(fnv1a64(b"foobar"), 0x85944171f73967e8);
+    }
+
+    #[test]
+    fn resolve_folds_dots_and_joins_relative() {
+        let ws = Path::new("/work");
+        assert_eq!(resolve_path(ws, "src/main.rs"), PathBuf::from("/work/src/main.rs"));
+        assert_eq!(resolve_path(ws, "./a/../b"), PathBuf::from("/work/b"));
+        assert_eq!(resolve_path(ws, "/etc/passwd"), PathBuf::from("/etc/passwd"));
+        assert_eq!(resolve_path(ws, "../../etc/x"), PathBuf::from("/etc/x"));
+    }
+
+    #[test]
+    fn workspace_mode_refuses_outside_and_container_allows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let outside = PathBuf::from("/etc/nope");
+        assert!(check_write_allowed(Sandbox::Workspace, &ws, &outside).is_err());
+        assert!(check_write_allowed(Sandbox::Container, &ws, &outside).is_ok());
+        let inside = ws.join("new/file.txt");
+        assert!(check_write_allowed(Sandbox::Workspace, &ws, &inside).is_ok());
+    }
+
+    #[test]
+    fn symlink_escape_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let ws = ws.canonicalize().unwrap();
+        std::os::unix::fs::symlink(&elsewhere, ws.join("link")).unwrap();
+        let target = ws.join("link/escape.txt");
+        let err = check_write_allowed(Sandbox::Workspace, &ws, &target).unwrap_err();
+        assert!(err.contains("outside the workspace"), "{err}");
+    }
+
+    #[test]
+    fn atomic_write_preserves_mode_and_replaces_content() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("f.sh");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        atomic_write(&path, b"new content").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+        // No temp litter left behind.
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn atomic_write_creates_parent_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("deep/nested/f.txt");
+        atomic_write(&path, b"x").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x");
+    }
+}
