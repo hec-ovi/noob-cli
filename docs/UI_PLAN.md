@@ -87,24 +87,6 @@ No performance or throughput cost, in any direction, proven per version:
 
 ## Pending versions
 
-### v0.2.0 - Theme foundation + role colors + test seam  (risk: low)
-Status: BUILT. `./dev.sh test` green (215 unit + all e2e, incl. the two PTY
-styled-path tests); 4-lens adversarial review passed with 0 findings. Awaiting
-Hector's REPL test; on approval this entry is wiped and the README box checked.
-Tests are error/regression-oriented (byte-identity, bleed, marker-split, panics),
-never asserting a theme color, so live color retuning does not break the suite.
-Goal: one hand-rolled `Theme`/style layer (SGR + green ramp with fallback),
-role colors on the discrete surfaces (prompt marker, tool activity, notes,
-errors) and a light assistant tint, the `No0B-CL1` banner, and the test seam.
-Files: `ui/style.rs` (new), `ui/theme.rs` (new), `ui/mod.rs`, `main.rs`.
-Arch: amends the "dim single lines" / "raw" wording (consolidated amendment).
-Tests: pure `paint()`/theme unit tests; `styled()` false for Exec/ExecJson/Child;
-`NO_COLOR` emits no SGR but keeps content; prompt marker byte-identical when not
-styled; existing ui tests stay green.
-Manual: TTY shows banner + distinct role colors + assistant tint; `exec`,
-`--json | cat`, and piped REPL are byte-identical to the old binary; `NO_COLOR=1`
-shows no color but nothing disappears.
-
 ### v0.2.1 - Boxed raw-mode input (the strong two-line prompt)  (risk: high)
 Goal: replace cooked input with an opt-in termios editor that draws a two-line
 framed green input box, real line editing, restored on every exit; cooked
@@ -201,4 +183,10 @@ line editor move to landed), `ui/contract.md`, and the `ui/mod.rs` header commen
 
 ## Shipped
 
-(none yet)
+- `v0.2.0` Theme foundation + role colors + test seam. `ui/style.rs` (SGR +
+  color-depth ladder), `ui/theme.rs` (matrix Theme + banner), `ui/mod.rs`
+  rewritten with a `Box<dyn Write>` seam and a tint-open-once state machine,
+  `main.rs` wired. Interactive-REPL-only; all other surfaces byte-identical.
+  4-lens adversarial review = 0 findings; Hector verified in the real REPL
+  (colors retuned to a muted mid-green band). Commits `51c0a30`, `0c7cf0d`.
+  Crate version left at `0.1.0`; not yet tagged (Hector's call).
