@@ -1,7 +1,7 @@
-<h1 align="center">noob</h1>
+<h1 align="center">noob-CLI</h1>
 
 <p align="center">
-  <strong>An agentic coding CLI that assumes you know nothing: one 3.4 MB static binary in a Docker sandbox, pointed at whatever local model you already run.</strong>
+  <strong>An agentic CLI that assumes you know nothing: one small static binary in a Docker sandbox, pointed at whatever local model you already run.</strong>
 </p>
 
 <p align="center">
@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/tests-289%20offline%20%2B%207%20live-brightgreen" alt="Tests" />
+  <img src="https://img.shields.io/badge/tests-372%20offline%20%2B%208%20live-brightgreen" alt="Tests" />
   <img src="https://img.shields.io/badge/async%20runtime-none-success" alt="No async runtime" />
   <img src="https://img.shields.io/badge/runtime%20crates-40%20of%2045%20budget-blueviolet" alt="Crate count" />
   <img src="https://img.shields.io/badge/APIs-Chat%20Completions%20%2B%20Responses-7B3FA0" alt="Both OpenAI wire shapes" />
@@ -23,28 +23,31 @@ The name is the design goal: you should be able to use this knowing nothing. `do
 
 ## What this is
 
-A lightweight agentic coding CLI in Rust. The binary lives inside a Docker container (that container is the sandbox), works on your project through a bind mount at `/work`, and speaks both OpenAI wire shapes, Chat Completions and Responses, against any base URL: llama.cpp, vLLM, Ollama, LM Studio, OpenAI, OpenRouter. Small local models (qwen-class through llama.cpp) are the first-class target, so every design choice optimizes for a tiny prompt budget, byte-stable cache prefixes, and error messages that tell the model what to do next.
+A lightweight general-purpose agentic CLI in Rust. Not a coding tool that happens to chat: an agent that reads and writes files, runs commands, loads skills, and calls MCP servers to get whatever task done, on whatever folder you mount. The binary lives inside a Docker container (that container is the sandbox), works on your files through a bind mount at `/work`, and speaks both OpenAI wire shapes, Chat Completions and Responses, against any base URL: llama.cpp, vLLM, Ollama, LM Studio, OpenAI, OpenRouter. Small local models (qwen-class through llama.cpp) are the first-class target, so every design choice optimizes for a tiny prompt budget, byte-stable cache prefixes, and error messages that tell the model what to do next.
 
 Why another one? Most lean harnesses pick one wire shape (Codex CLI is Responses-only, OpenCode is Chat-first); noob speaks both against any URL, and small local models are the primary target rather than a fallback. The design comes from studying Pi, OpenCode, Codex CLI, Hermes Agent, Agent Zero, Zerostack, zot, Zap, and Zero; no code was copied from any of them. The full survey is in [docs/RESEARCH.md](docs/RESEARCH.md).
 
 ## What works today
 
-The core loop (P2) and skills (P3) are done: noob is a working coding agent, in active development. Working right now:
+P0 through P6 are done plus most of P7's hardening: noob is a working agent with skills, MCP, plan mode, and sub-agents, in active development. Working right now:
 
-- `docker compose run --rm noob` opens a chat; `... noob exec -p "your prompt"` is the one-shot. Live-tested against qwen3.6 through llama.cpp: it reads files, edits them, runs commands, and reports back.
-- Seven core tools: read, write, edit, bash, grep, glob, ls, plus a `skill` tool that registers only when skills exist. Consecutive read-only calls from one turn run in parallel; any mutation is a strict barrier, so two edits can never race.
+- `docker compose run --rm noob` opens a chat; `... noob exec -p "your prompt"` is the one-shot. Live-tested against qwen3.6 through llama.cpp: it reads files, edits them, runs commands, and reports back. `noob doctor` checks the setup and prints a one-line fix for anything broken. Leave with `/quit`, or just type `exit`.
+- Seven core tools: read, write, edit, bash, grep, glob, ls. Three more register only when they can work: `skill` (when skills exist), `mcp_connect`/`mcp_call` (when mcp.json has servers), `task` (sub-agents, below the recursion ceiling). Consecutive read-only calls from one turn run in parallel; any mutation is a strict barrier, so two edits can never race.
 - SKILL.md skills per the [agentskills.io](https://agentskills.io) standard, discovered from `.noob/skills/`, `.claude/skills/`, `.agents/skills/` in your project and from `/config/skills/`. Only a capped one-line-per-skill index sits in the prompt (the resolver, in the gbrain thin-harness fat-skills sense); bodies load on demand as tool results, capped at 24 KiB, and loaded skills are re-listed by name after compaction, across session resumes too. The agent can never author skills: any write into a skills directory asks you first, at a real terminal only; piped and headless runs are denied.
+- MCP client (protocol 2025-11-25, tools only), lazy to the bone: nothing connects at startup, one line in the prompt names the servers, `mcp_connect` fetches a catalog as a tool result, `mcp_call` validates args against the cached schema before anything touches the wire. stdio servers get per-call kill-on-timeout on both the read and write side and respawn transparently; Streamable HTTP keeps the session id, re-initializes once on 404, and has an absolute per-call deadline a keepalive trickle cannot dodge. Everything a server sends comes back capped and wrapped in untrusted-content delimiters.
+- Plan mode: `/plan` (or `--plan`) shrinks the tool set to read-only exploration, structurally: mutating schemas are absent from the request, so they cannot tempt a small model, and the dispatcher refuses hallucinated mutations anyway. `/go` approves the plan and restores the full set; `exec --plan` prints the plan and exits, and resuming the session executes it, which is a review-then-approve flow for wrappers.
+- Sub-agents: the binary spawns itself. `task` fans out scoped children (read-only by default) with fresh contexts; one JSON result line per child comes back, nothing else enters the parent transcript. Caps enforced on both sides: 4 concurrent, 25 turns, 300 s wall clock (the parent kills the whole process group), recursion depth 2.
 - The edit tool is exact string replace with a deterministic fallback ladder (trailing whitespace, typographic characters, uniform indent shift, CRLF files) and hard ambiguity rejection. A failed edit returns the actual file region so the model can fix its next attempt; files changed on disk behind the model's back are refused (hash check-and-set).
 - Append-only prompt discipline, byte-exact: turn 3 of a live session shows a 97% cached-prompt share on llama.cpp's own counters. The mock server fails any test where a request is not a byte-prefix extension of the previous one.
 - Sessions persist as JSONL under `/config/sessions/`; `exec --session <id>` resumes across processes (a session killed mid-tool-run is healed on resume). `exec --json` emits one JSONL event per loop step for wrappers.
-- Compaction at 75% of the context window: the middle of the transcript is summarized in place, the head and recent tail stay byte-identical.
+- Compaction built to survive heavy sessions (the design notes live in the repo's research store): at 75% of the window a ladder runs, cheapest first. Old fat tool results become one-line placeholders with no LLM call when that alone frees enough; otherwise the middle is summarized against a fixed section schema and the result is validated before splicing (an empty or non-shrinking summary is retried once, then pruned or hard-dropped, never trusted). Every spliced message carries a pinned block the harness builds from ground truth: the original task, files touched, loaded skills. Pins merge across cycles and process resumes instead of eroding through summary-of-summary drift.
 - Doom-loop breakers for small models: repeated identical calls are intercepted, four consecutive tool errors inject a course correction, eight stop the run.
 - Endpoint autodetect: with an empty config, noob probes llama.cpp/Ollama/LM Studio/vLLM on localhost and uses the first that answers.
 - The system prompt plus all tool schemas fit in 1,500 tokens, enforced by tests against both tiktoken and the live qwen tokenizer.
-- Both OpenAI wire shapes (Chat Completions + Responses) against any base URL; SSE parsing that survives every TCP split; retries with backoff; hot `.env` reload on every request; Ctrl-C responsive within a second at every point, including mid-tool-batch (pending calls are canceled, the session stays valid).
-- 289 offline tests via `./dev.sh test`, 7 live smokes via `./dev.sh smoke` (serialized: parallel live tests would evict each other's llama.cpp cache slots).
+- Both OpenAI wire shapes (Chat Completions + Responses) against any base URL; SSE parsing that survives every TCP split; retries with backoff; hot `.env` reload on every request; Ctrl-C responsive within a second at every point, including mid-tool-batch and mid-fan-out (pending calls are canceled, children are killed, the session stays valid).
+- 372 offline tests via `./dev.sh test`, 8 live smokes via `./dev.sh smoke` (serialized: parallel live tests would evict each other's llama.cpp cache slots).
 
-MCP, plan mode, and sub-agents are the next phases; the roadmap below marks exactly what exists and what does not.
+What remains before v0.1 is the live all-terrain gauntlet (PLAN.md, Testing) and release packaging; the roadmap below marks exactly what exists.
 
 ## Quickstart
 
@@ -116,12 +119,12 @@ The opinionated bits. Where a rule says "test-enforced" that is literal: the moc
 | P1 provider layer | SSE streaming, Responses adapter, tool-call parsing, retry/backoff | done |
 | P2 core loop + tools | Interactive REPL, the 7 file/shell tools, agent loop, system prompt, compaction, sessions, endpoint autodetect | done |
 | P3 skills | SKILL.md discovery with progressive disclosure ([agentskills.io](https://agentskills.io) standard) | done |
-| P4 MCP client | stdio + Streamable HTTP transports, lazy connect | next |
-| P5 plan mode | Read-only exploration, explicit `/go` approval | |
-| P6 multi-agent | Self-spawning sub-agents, parallel fan-out, concurrency and turn caps | |
-| P7 hardening + release | `doctor`, live gauntlet, integrations, v0.1 (static binary + image) | |
+| P4 MCP client | stdio + Streamable HTTP transports, lazy connect | done |
+| P5 plan mode | Read-only exploration, explicit `/go` approval | done |
+| P6 multi-agent | Self-spawning sub-agents, parallel fan-out, concurrency and turn caps | done |
+| P7 hardening + release | `doctor` and compaction hardening are in; live gauntlet, integrations, v0.1 (static binary + image) remain | in progress |
 
-Where it lands at v0.1: seven file/shell tools with parallel calls, SKILL.md skills, an MCP client, plan mode, sub-agents the binary spawns from itself, and a headless JSONL surface (`exec --json --session`) built to be driven by other CLI agents, not just humans.
+Everything on the v0.1 feature list is built: seven file/shell tools with parallel calls, SKILL.md skills, an MCP client, plan mode, sub-agents the binary spawns from itself, and a headless JSONL surface (`exec --json --session`) built to be driven by other CLI agents, not just humans. What stands between here and the tag is the gauntlet.
 
 ## Development
 
@@ -129,7 +132,7 @@ Everything runs inside Docker; nothing is installed on the host. `./dev.sh` is t
 
 | Target | What it does |
 |---|---|
-| `./dev.sh test` | The offline suite: 289 unit + e2e tests against the in-process mock server, run in a dev container |
+| `./dev.sh test` | The offline suite: 372 unit + e2e tests against the in-process mock servers, run in a dev container |
 | `./dev.sh build` | The static musl release binary |
 | `./dev.sh docker` | The runtime image |
 | `./dev.sh repl` / `./dev.sh exec "..."` | Compose with your uid:gid passed explicitly, so files under `/work` keep your ownership |

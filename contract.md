@@ -1,6 +1,6 @@
 # noob-cli
 
-An extremely lightweight agentic coding CLI: one static Rust binary that lives
+An extremely lightweight agentic CLI: one static Rust binary that lives
 in a Docker sandbox, works on a bind-mounted `/work` folder, and speaks both
 OpenAI Chat Completions and Responses APIs against any base URL.
 

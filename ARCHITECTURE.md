@@ -2,7 +2,7 @@
 
 ## Goal
 
-noob-cli is an extremely lightweight agentic coding CLI: one static Rust binary that lives in a Docker sandbox, works on a bind-mounted `/work` folder, speaks both OpenAI Chat Completions and Responses APIs against any base URL, and ships skills, MCP, plan mode, parallel tool calls, and self-spawned sub-agents.
+noob-cli is an extremely lightweight general-purpose agentic CLI: one static Rust binary that lives in a Docker sandbox, works on a bind-mounted `/work` folder, speaks both OpenAI Chat Completions and Responses APIs against any base URL, and ships skills, MCP, plan mode, parallel tool calls, and self-spawned sub-agents.
 Small local models (qwen-class through llama.cpp) are the first-class target: every choice below optimizes for byte-stable prompt prefixes, a tiny measured prompt budget, wire-quirk tolerance, and error messages that teach the model its next move.
 
 ## Synthesis basis and resolved judge disagreements
@@ -207,6 +207,8 @@ Turn machine: build request -> stream events -> render -> execute tool calls -> 
 **Interrupts**: first Ctrl-C during a stream aborts the HTTP request via the watchdog (responsive within 1 s even during prompt processing). A partial turn interrupted mid-stream is discarded entirely (never committed, so the prefix stays replayable) and a user note `[interrupted]` is appended. If the turn had completed and tool calls were parsed but not yet executed, each receives a synthetic tool result "canceled by user" so the transcript stays API-valid for the next request. Second Ctrl-C hard-exits.
 
 **Compaction** (the sanctioned prefix break): context usage is estimated from the last server-reported usage plus chars/4 for the delta since; at 75% of `NOOB_CTX` the middle of the transcript is LLM-summarized with `prompts/compact.md` into one spliced message, keeping the system head and the most recent ~20k tokens intact and never splitting a call/result pair. The summary preserves the task statement, decisions, files touched, unresolved errors, and re-lists loaded-skill names (names only) so the model does not forget what it loaded. A provider context-overflow 400 or `finish_reason: length` triggers one emergency compaction and retry; if the summarization request itself overflows, fall back to deterministic hard-drop of oldest turns with a stub note.
+
+P7 amendment (design record: `.research/context-compaction-survival`): compaction is a ladder. Old large tool results in the middle are first replaced with one-line placeholders; when that alone brings usage under 60% no summarize call happens at all. Otherwise the middle (including any previous summary, so cycles merge) is summarized against a fixed section schema (prompts/compact.md) and validated deterministically before splicing: empty or non-shrinking output retries once, then prunes or hard-drops. Every spliced message ends with a harness-built pinned block ([task], [files touched], [loaded skills]) recovered from ground truth and carried verbatim across cycles and resumes. A transport failure sets a backoff so a failing summarizer is not re-invoked every round.
 
 **Session log**: every session appends JSONL events to `/config/sessions/<id>.jsonl` (unix-millis hex id) from P2. `noob exec --session <id>` resumes by replaying the transcript.
 

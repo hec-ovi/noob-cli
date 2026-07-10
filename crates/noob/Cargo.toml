@@ -1,6 +1,6 @@
 [package]
 name = "noob"
-description = "An extremely lightweight, friendly agentic coding CLI built to live inside a Docker sandbox."
+description = "An extremely lightweight, friendly agentic CLI built to live inside a Docker sandbox."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
