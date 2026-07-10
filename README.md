@@ -126,6 +126,22 @@ The opinionated bits. Where a rule says "test-enforced" that is literal: the moc
 
 Everything on the v0.1 feature list is built: seven file/shell tools with parallel calls, SKILL.md skills, an MCP client, plan mode, sub-agents the binary spawns from itself, and a headless JSONL surface (`exec --json --session`) built to be driven by other CLI agents, not just humans. What stands between here and the tag is the gauntlet.
 
+## Interface and visuals (0.2.x, in progress)
+
+A themed interactive surface for the REPL, shipped one version per step. Everything here is TTY-only: piped, `exec`, `--json`, and child output stay byte-identical and uncolored. Zero new runtime crates (hand-rolled ANSI over the `libc` already linked), and no effect on inference: the model still sees your message once, on Enter, and throughput is unchanged. Tracked in [docs/UI_PLAN.md](docs/UI_PLAN.md).
+
+- [ ] `0.2.0` Theme foundation: `No0B-CL1` wordmark and banner, matrix green ramp (truecolor with 256/16-color fallback), role colors, a swappable `Theme` (default `matrix`), and a test seam for the styled path
+- [ ] `0.2.1` Boxed raw-mode input: a two-line framed green prompt with real line editing, restored cleanly on every exit
+- [ ] `0.2.2` Slash-command Tab-completion with ghost-text and in-session history
+- [ ] `0.2.3` Thinking scanner: a green square comet that sweeps while waiting for the first token
+- [ ] `0.2.4` Per-tool colored activity lines
+- [ ] `0.2.5` Pretty colored JSON for tool and MCP result bodies
+- [ ] `0.2.6` Inline markdown on assistant text (headings, bold, italic, inline code, lists)
+- [ ] `0.2.7` Fenced code blocks
+- [ ] `0.2.8` Markdown tables
+
+Each item builds via `./dev.sh docker`, ships tests under `./dev.sh test`, and is verified in the real REPL before the next. `NOOB_THEME` opens the door to non-matrix themes later.
+
 ## Development
 
 Everything runs inside Docker; nothing is installed on the host. `./dev.sh` is the task runner (plain bash; a thin Makefile delegates to it if you prefer `make test`). Every folder ships a `contract.md` stating its purpose, interface, and invariants, and nothing about the rest of the system. There is no CI: `./dev.sh test` is the whole story.
