@@ -242,7 +242,7 @@ fn cmd_repl(args: &[String]) -> ExitCode {
     let stdin = std::io::stdin();
     loop {
         ui.end_line();
-        prompt_marker(agent.plan);
+        ui.prompt(agent.plan);
         let mut line = String::new();
         match stdin.lock().read_line(&mut line) {
             Ok(0) => break, // EOF (Ctrl-D)
@@ -286,7 +286,7 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                     if agent.exit_plan(&mut ui) {
                         match agent.run_input(agent::PLAN_APPROVED_MSG, &mut ui) {
                             RunEnd::Completed(_) | RunEnd::Interrupted => {}
-                            RunEnd::Aborted(msg) => ui.note(&format!("error: {msg}")),
+                            RunEnd::Aborted(msg) => ui.error(&format!("error: {msg}")),
                         }
                     } else {
                         ui.note("not in plan mode; /plan enters it");
@@ -300,17 +300,10 @@ fn cmd_repl(args: &[String]) -> ExitCode {
         }
         match agent.run_input(input, &mut ui) {
             RunEnd::Completed(_) | RunEnd::Interrupted => {}
-            RunEnd::Aborted(msg) => ui.note(&format!("error: {msg}")),
+            RunEnd::Aborted(msg) => ui.error(&format!("error: {msg}")),
         }
     }
     ExitCode::SUCCESS
-}
-
-fn prompt_marker(plan: bool) {
-    use std::io::Write;
-    let mut out = std::io::stdout().lock();
-    let _ = out.write_all(if plan { b"plan> ".as_slice() } else { b"> ".as_slice() });
-    let _ = out.flush();
 }
 
 fn greet(agent: &Agent, ui: &mut Ui) {
@@ -322,7 +315,7 @@ fn greet(agent: &Agent, ui: &mut Ui) {
         .as_ref()
         .map(|s| format!(" · session {}", s.id()))
         .unwrap_or_default();
-    ui.note(&format!(
+    ui.greeting(&format!(
         "noob {} · {endpoint}{session}\ntype a task; /plan /go /status /compact /quit",
         env!("CARGO_PKG_VERSION")
     ));

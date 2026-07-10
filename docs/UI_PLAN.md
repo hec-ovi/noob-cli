@@ -88,6 +88,11 @@ No performance or throughput cost, in any direction, proven per version:
 ## Pending versions
 
 ### v0.2.0 - Theme foundation + role colors + test seam  (risk: low)
+Status: BUILT. `./dev.sh test` green (215 unit + all e2e, incl. the two PTY
+styled-path tests); 4-lens adversarial review passed with 0 findings. Awaiting
+Hector's REPL test; on approval this entry is wiped and the README box checked.
+Tests are error/regression-oriented (byte-identity, bleed, marker-split, panics),
+never asserting a theme color, so live color retuning does not break the suite.
 Goal: one hand-rolled `Theme`/style layer (SGR + green ramp with fallback),
 role colors on the discrete surfaces (prompt marker, tool activity, notes,
 errors) and a light assistant tint, the `No0B-CL1` banner, and the test seam.
@@ -111,6 +116,11 @@ forward (consolidated amendment).
 Zero-overhead: editor active only while typing; cooked restored before
 `run_input`; measure per-keystroke render cost and assert inference throughput is
 unchanged with editor on vs off.
+Crash scope (owner): losing an unsubmitted in-progress line on a crash is fine;
+do not gold-plate. A submitted line is logged to the session JSONL on Enter
+(push_item, before the model replies), so it is never lost and a crash after
+submit is resumable. Keep the three terminal-restore hooks only so the shell is
+not left raw; nothing more.
 Tests: editor buffer as a pure function over scripted keys (insert, backspace
 across a multibyte char, Ctrl-A/E/U/K/W, cursor moves); `0x03` returns interrupt,
 EOF returns None distinctly; no-TTY falls back to cooked and is byte-identical;
@@ -124,7 +134,13 @@ Goal: Tab completes the current `/`-token against a single command-table source
 of truth (also feeds the banner and the unknown-command list); dim ghost-text of
 the completion; optional in-session Up/Down history. Interactive TTY only.
 Files: `ui/prompt.rs`, `main.rs`, `ui/mod.rs`.
-Zero-overhead: string-match over a ~7-item list, no model/network/tokens.
+Zero-overhead: string-match over a small in-memory command registry, no
+model/network/tokens.
+Dynamic (design for it now): the command table is a RUNTIME registry (single
+source of truth), not a compile-time const, so the future dynamic tool/command
+install can register a `/newtool` and have it auto-appear in completion, the
+banner, and the unknown-command list. Forward-compatible with the deferred
+dynamic-install feature.
 Tests: matcher as a pure function (`/pl`->`/plan `, `/`->lists all, unknown->none);
 one table drives dispatch + banner + unknown-command; no completion on the cooked
 path; Up then Enter re-submits.
