@@ -80,9 +80,9 @@ impl Agent {
             &mut |_ev| {},
         );
 
-        let head_item = match result {
+        let mut head_text = match result {
             Ok(turn) if !turn.text.trim().is_empty() => {
-                Item::User(format!("[conversation summary]\n{}", turn.text.trim()))
+                format!("[conversation summary]\n{}", turn.text.trim())
             }
             Err(ProviderError::Interrupted) => {
                 ui.note("compaction canceled");
@@ -93,10 +93,10 @@ impl Agent {
             Err(ProviderError::Http { status: 400, ref body })
                 if looks_like_context_overflow(body) =>
             {
-                Item::User(format!(
+                format!(
                     "[earlier conversation dropped: {cut} items removed because the \
                      context overflowed]"
-                ))
+                )
             }
             Ok(_) | Err(_) => {
                 // A failed summarize must never destroy content.
@@ -108,8 +108,15 @@ impl Agent {
                 return false;
             }
         };
+        // Deterministic re-listing (names only) so the model does not forget
+        // what it loaded, even when the summarizer ignores its instructions
+        // or the hard-drop path ran. Bodies are reloadable via the tool.
+        let loaded = self.tool_ctx.loaded_skills.lock().unwrap().join(", ");
+        if !loaded.is_empty() {
+            head_text.push_str(&format!("\n[loaded skills: {loaded}]"));
+        }
 
-        let mut new_items = vec![head_item];
+        let mut new_items = vec![Item::User(head_text)];
         new_items.extend_from_slice(&self.items[cut..]);
         self.items = new_items;
         // The old usage numbers describe a transcript that no longer

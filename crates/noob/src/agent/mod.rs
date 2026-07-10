@@ -19,7 +19,7 @@ use noob_provider::types::{
 };
 
 use crate::session::Session;
-use crate::tools::guard::fnv1a64;
+use crate::tools::guard::{self, fnv1a64};
 use crate::tools::{self, ToolCtx, ToolOutcome};
 use crate::ui::Ui;
 
@@ -81,6 +81,27 @@ impl Agent {
                 .map(|t| t.name.len() + t.description.len() + t.parameters.to_string().len())
                 .sum::<usize>();
         let replayed_chars: usize = items.iter().map(compact::item_chars).sum();
+        // The post-compaction re-listing must survive resume: recover
+        // loaded-skill names from replayed `skill` calls. Names missing from
+        // the current registry are dropped (the skill no longer exists).
+        for item in &items {
+            let Item::Assistant { tool_calls, .. } = item else {
+                continue;
+            };
+            for call in tool_calls.iter().filter(|c| c.name == "skill") {
+                let name = serde_json::from_str::<Value>(&call.arguments)
+                    .ok()
+                    .and_then(|v| v.get("name").and_then(Value::as_str).map(str::to_string));
+                if let Some(name) = name {
+                    if tool_ctx.skills.iter().any(|s| s.name == name) {
+                        let mut loaded = tool_ctx.loaded_skills.lock().unwrap();
+                        if !loaded.iter().any(|n| *n == name) {
+                            loaded.push(name);
+                        }
+                    }
+                }
+            }
+        }
         Agent {
             client,
             config_dir,
@@ -236,6 +257,7 @@ impl Agent {
             let mut batch = Vec::new();
             for call in &turn.tool_calls {
                 let (planned, shown_args) = self.plan_call(call);
+                let planned = self.gate_skills_write(planned, ui);
                 ui.tool_start(&call.name, &shown_args, tools::is_read_only(&call.name));
                 batch.push(planned);
             }
@@ -310,6 +332,35 @@ impl Agent {
         self.push_item(Item::User("[interrupted]".to_string()));
         ui.note("[interrupted]");
         RunEnd::Interrupted
+    }
+
+    /// Skills are loaded, never authored by the agent: a write/edit whose
+    /// path lands inside any skills directory needs explicit confirmation
+    /// in every mode, container included (agent-created skills are
+    /// persistent injection vectors). Headless surfaces degrade to deny.
+    fn gate_skills_write(&self, planned: sched::Planned, ui: &mut Ui) -> sched::Planned {
+        let sched::Planned::Run { name, args } = &planned else {
+            return planned;
+        };
+        if !matches!(name.as_str(), "write" | "edit") {
+            return planned;
+        }
+        let Some(raw) = args.get("path").and_then(Value::as_str) else {
+            return planned; // the tool itself reports the missing parameter
+        };
+        let resolved = guard::resolve_path(&self.tool_ctx.workspace, raw);
+        if !guard::in_skills_dir(&resolved) {
+            return planned;
+        }
+        if ui.ask(&format!("allow the agent to {name} inside a skills directory ({raw})?")) {
+            return planned;
+        }
+        sched::Planned::Canned(ToolOutcome::err(
+            "refused: writing into a skills directory needs the user's confirmation \
+             and it was not granted; leave skill files unchanged and continue \
+             without them"
+                .to_string(),
+        ))
     }
 
     /// Doom-loop guard + argument parsing. Returns what to execute plus the
@@ -431,6 +482,95 @@ mod tests {
             }
             sched::Planned::Run { .. } => panic!("third X within 12 must intercept"),
         }
+    }
+
+    fn test_agent(items: Vec<Item>, tool_ctx: ToolCtx, config: &std::path::Path) -> Agent {
+        Agent::new(
+            Client::new(Timeouts::default()),
+            config.to_path_buf(),
+            Overrides::default(),
+            "sys".into(),
+            vec![],
+            items,
+            tool_ctx,
+            None,
+            131_072,
+        )
+    }
+
+    #[test]
+    fn resume_scan_recovers_loaded_skill_names_that_still_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let mut tool_ctx = ToolCtx::new(ws, crate::tools::guard::Sandbox::Container);
+        tool_ctx.skills.push(crate::skills::Skill {
+            name: "alpha".into(),
+            description: "d".into(),
+            dir: tmp.path().join("a"),
+            file: tmp.path().join("a/SKILL.md"),
+        });
+        let items = vec![
+            Item::User("hi".into()),
+            Item::Assistant {
+                text: String::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "1".into(),
+                        name: "skill".into(),
+                        arguments: r#"{"name":"alpha"}"#.into(),
+                    },
+                    // A skill that no longer exists must not be re-listed.
+                    ToolCall {
+                        id: "2".into(),
+                        name: "skill".into(),
+                        arguments: r#"{"name":"ghost"}"#.into(),
+                    },
+                ],
+                raw_items: vec![],
+            },
+            Item::ToolResult { call_id: "1".into(), content: "body".into() },
+            Item::ToolResult { call_id: "2".into(), content: "unknown skill".into() },
+        ];
+        let agent = test_agent(items, tool_ctx, tmp.path());
+        assert_eq!(
+            *agent.tool_ctx.loaded_skills.lock().unwrap(),
+            vec!["alpha".to_string()]
+        );
+    }
+
+    #[test]
+    fn skills_write_gate_denies_headless_and_ignores_other_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let agent = test_agent(vec![], ToolCtx::new(ws, crate::tools::guard::Sandbox::Container), tmp.path());
+        let mut ui = crate::ui::Ui::new(crate::ui::Mode::Exec); // headless: ask degrades to deny
+        let run = |name: &str, path: &str| sched::Planned::Run {
+            name: name.into(),
+            args: json!({"path": path, "content": "x"}),
+        };
+
+        match agent.gate_skills_write(run("write", ".claude/skills/evil/SKILL.md"), &mut ui) {
+            sched::Planned::Canned(out) => {
+                assert!(out.is_error);
+                assert!(out.content.contains("refused"), "{}", out.content);
+                assert!(out.content.contains("confirmation"));
+            }
+            sched::Planned::Run { .. } => panic!("headless skills write must be denied"),
+        }
+        // Relative traversal into a skills dir is still gated.
+        match agent.gate_skills_write(run("edit", "src/../.noob/skills/x/SKILL.md"), &mut ui) {
+            sched::Planned::Canned(_) => {}
+            sched::Planned::Run { .. } => panic!("traversal into skills must be gated"),
+        }
+        // Ordinary paths and read-only tools pass untouched.
+        assert!(matches!(
+            agent.gate_skills_write(run("write", "src/main.rs"), &mut ui),
+            sched::Planned::Run { .. }
+        ));
+        assert!(matches!(
+            agent.gate_skills_write(run("read", ".claude/skills/evil/SKILL.md"), &mut ui),
+            sched::Planned::Run { .. }
+        ));
     }
 
     #[test]

@@ -134,6 +134,22 @@ pub fn check_write_allowed(
     Ok(())
 }
 
+/// `**/skills/**`: true when any ancestor directory component of `path` is
+/// named exactly `skills`. Agent-created skills are persistent injection
+/// vectors, so write/edit into such a path needs explicit confirmation in
+/// EVERY mode, container included (headless surfaces degrade to deny).
+pub fn in_skills_dir(path: &Path) -> bool {
+    let mut dirs: Vec<&std::ffi::OsStr> = path
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect();
+    dirs.pop(); // the final component is the file itself, not an ancestor
+    dirs.iter().any(|name| *name == "skills")
+}
+
 /// Atomic write: temp file in the same directory, fsync, rename over the
 /// target. Preserves the target's mode when it already exists.
 pub fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
@@ -217,6 +233,26 @@ mod tests {
         let target = ws.join("link/escape.txt");
         let err = check_write_allowed(Sandbox::Workspace, &ws, &target).unwrap_err();
         assert!(err.contains("outside the workspace"), "{err}");
+    }
+
+    #[test]
+    fn skills_dir_predicate_matches_ancestor_dirs_only() {
+        for hit in [
+            "/work/.claude/skills/pdf/SKILL.md",
+            "/work/.noob/skills/x/nested/helper.py",
+            "/config/skills/a/SKILL.md",
+            "/work/skills/thing.md",
+        ] {
+            assert!(in_skills_dir(Path::new(hit)), "{hit} must be gated");
+        }
+        for miss in [
+            "/work/src/main.rs",
+            "/work/skills",              // a file named skills, not a dir of it
+            "/work/my-skills/notes.md",  // exact component match only
+            "/work/docs/skillset/a.md",
+        ] {
+            assert!(!in_skills_dir(Path::new(miss)), "{miss} must not be gated");
+        }
     }
 
     #[test]
