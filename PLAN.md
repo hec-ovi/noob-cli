@@ -1,60 +1,56 @@
-# noob-cli: project plan
+# noob-cli status and release plan
 
-An extremely lightweight, friendly agentic CLI. Rust, single static binary, built to live inside a Docker sandbox and work on a mounted host folder. Provider-agnostic (Chat Completions and Responses APIs), skills, MCP, plan mode, parallel tool calls, and dynamic multi-agent workflows. Ideas are learned from the best existing harnesses (Pi, OpenCode, Codex CLI, Hermes Agent, Agent Zero, and the small Rust/Go ones); no code is copied from any of them.
+Status date: 2026-07-11.
 
-## Hard requirements
+## Completed
 
-- Zero-friction UX, no learning curve: plug it in and it works. `docker compose up` (or one `docker run` line) must land in a working chat with no wizard and no mandatory config step. Auto-detect local OpenAI-compatible endpoints (llama.cpp, vLLM, Ollama, LM Studio) and sane-default everything else; a commented `.env.example` with obvious variable names covers the rest. Only familiar conventions (AGENTS.md, SKILL.md skills, the usual slash commands, .mcp.json-style config); no invented concepts a user must study first. A `doctor` command diagnoses setup and prints the one-line fix; every error message states its remedy.
-- Rust, single static binary (musl target), instant startup, tiny memory footprint.
-- Docker-first: development and runtime both happen in containers; nothing gets installed on the host. The agent is sandbox-native: it assumes it runs inside a container and treats that as its natural habitat.
-- Works on a bind-mounted host folder (default `/work`), never inside the container filesystem or a named volume.
-- Config lives in a bind-mounted directory containing an easy `.env`. Keys are read lazily on each API request, never cached at startup, so editing `.env` on the host applies on the next call with no container restart. Container env vars are not used for secrets (they freeze at `docker run`).
-- Provider-agnostic: speaks both OpenAI Chat Completions and Responses APIs against any base URL (llama.cpp, vLLM, OpenAI, OpenRouter, etc.). Anthropic-style APIs can come later behind the same trait.
-- Minimal instruction overhead: the system prompt has a measured token budget (target well under 1k tokens; the exact number gets locked in the design phase). Small local models are first-class citizens.
-- File tools: read, write, edit (exact string replace), grep, glob, ls, bash. Multiple tool calls in a single inference, executed in parallel where independent.
-- Skills: SKILL.md standard with progressive disclosure (only name + description in context until a skill is actually used).
-- MCP client: stdio and streamable HTTP transports, tools first.
-- Plan mode: read-only exploration, then an approved plan before writes.
-- Dynamic multi-agent workflows: the agent can spawn scoped sub-agents with fresh contexts at runtime, fan them out in parallel, collect each result as a single message, and keep child context out of the parent. Budget and concurrency caps are enforced.
-- Every folder in the repo ships a `contract.md`: what the folder does, its interface, and nothing about the rest of the system. Contracts are agnostic and isolated.
-- Every behavioral change ships tests that run locally. No CI pipelines.
+- Audited the codebase, contracts, user feedback, current Zero and Codex source, and the current websearch package.
+- Removed request-side model output limits and full-transcript request cloning.
+- Hardened provider writes, retries, finish states, MCP transports, Bash collection, file reads, child-agent pipes, and Git skill installation.
+- Bounded retained tool, progress, diagnostic, catalog, JSON, SSE, and stdio-queue data without capping model completions or child final results.
+- Made session replay streaming and persistence failures visible, with dangling-call repair and provider-valid interruption handling.
+- Made parallel scheduling report real start and completion order while preserving transcript emission order.
+- Rebuilt the interactive path around one terminal owner, a default three-row dock, typeahead, queueing, confirmations, cancellation, Markdown, JSON, tables, sanitization, and four themes.
+- Added an isolated Linux installer and `noob` launcher with `noob --restore <session>`, caller UID/GID mapping, workspace and config mounts, and safe overwrite behavior.
+- Added amd64 and arm64 musl target selection plus Python 3, uv, and `websearch-skill==0.1.0` to the runtime image.
+- Seeded both standalone web-search skill instructions and lazy stdio MCP configuration from the same package.
+- Kept host API keys out of the container environment and documented exact reload boundaries.
+- Made endpoint autodetection controllable and the live runner endpoint-overridable.
+- Removed parallel-test interference from the process-wide interrupt flag.
+- Organized the work as eleven logical commits on `main`, pushed continuously to `origin/main`.
 
-## Environment facts (verified 2026-07-09)
+## Verification
 
-- Local model for live testing: `qwen3.6-35b-a3b` (35B MoE, Q4_K_XL, thinking disabled) served by llama.cpp Vulkan at `http://localhost:8090/v1`, 131072 ctx, key `noauth`. Verified reachable.
-- A Responses API endpoint is also available locally when needed: the `vllm-qwen` stack serves `/v1/responses`.
-- websearch MCP server (from `websearch-skill`) runs at `http://localhost:8000`.
-- Container pattern to follow (from `pi-gemma`): `network_mode: host` so the container reaches host-loopback services, repo mounted at `/work` as the agent cwd, a config dir bind-mounted for global settings, `run --rm` for headless one-shots and interactive TTY for the REPL.
-- Repo: `github.com/hec-ovi/noob-cli` (SSH remote), commits on `main`.
-- Integration targets: `websearch-skill` (MCP) and `telegram-bot-skill` (expose noob-cli over Telegram).
+| Gate | Result |
+|---|---|
+| Strict workspace Clippy | pass |
+| Host offline suite | 522 pass |
+| Docker offline suite | 522 pass |
+| Real PTY interaction suite | 24 pass |
+| Opt-in live suite | 8 pass |
+| Static musl binary | 3,748,736 bytes, limit 8 MiB |
+| Runtime crate graph | 40 crates, limit 45 |
+| Runtime image | 90,275,508 bytes on amd64 |
+| Actual host installer and wrapper | pass |
+| Standalone live `websearch web-search` | pass |
+| stdio `websearch mcp` initialize | pass, protocol 2025-11-25 |
 
-## Process
+The final live suite used the running Qwen3.6 27B endpoint (`obliterated-27b-mtp`) at `http://localhost:8080/v1` with a 131072-token context, plus an isolated Streamable HTTP websearch endpoint. An earlier interactive Qwen3.6 35B drive covered headings, emphasis, JSON fences, tables, typeahead, queueing, active Bash status, and cancellation.
 
-1. **Research**: three parallel investigations covering (a) minimal harnesses: Pi, Zap, zot, Zerostack, QQCode, (b) OpenCode and Codex CLI, (c) Hermes Agent, Agent Zero, multi-agent patterns, the SKILL.md standard, and the current MCP spec. Findings land in the local research store and get distilled into `docs/RESEARCH.md` (committed).
-2. **Design** (multi-agent workflow): four independent architecture proposals under different lenses (minimal footprint, provider abstraction, agentic loop quality, extensibility and UX), scored by a judge panel, synthesized into `ARCHITECTURE.md` plus the initial `contract.md` set. Design locks: async runtime choice, HTTP client, TUI vs plain REPL, crate layout, exact system prompt budget.
-3. **Build** in the phases below. A phase is done when its tests pass locally. Commits are small and frequent (conventional style), pushed to `origin main` as they land.
+## Remaining
 
-## Build phases
+No implementation requirement from the current request remains open.
 
-- **P0 scaffold**: cargo workspace, per-crate `contract.md`, Dockerfile (musl builder stage, minimal runtime stage), `compose.yml` with the `/work` + config mounts, task runner, e2e test harness with an in-process mock OpenAI server.
-- **P1 provider layer**: Chat Completions adapter with SSE streaming and tool-call parsing, Responses API adapter behind the same trait, parallel tool-call support, retry/backoff, lazy `.env` resolution per request.
-- **P2 core loop + tools**: the agent loop, the file/shell tool set, tool result truncation, the minimal system prompt (token-counted in tests), context compaction.
-- **P3 skills**: SKILL.md discovery and progressive disclosure, compatible with the existing skills ecosystem.
-- **P4 MCP client**: stdio + streamable HTTP, config file, live test against the local websearch MCP.
-- **P5 plan mode**: read-only tool gating and the plan approval flow.
-- **P6 multi-agent**: dynamic sub-agent spawning, parallel fan-out, result collection, budget and concurrency caps.
-- **P7 hardening + release**: live e2e suite against local qwen, integrations (websearch MCP, telegram-bot-skill), README, repo description and topics, v0.1 release (static binary + docker image).
+- An arm64 hardware smoke remains advisable before publishing an arm64 release artifact; target selection and the Docker build path are implemented, while the final image measurement above is amd64.
+- Version bump, release tag, and GitHub release are intentionally pending until requested.
+- Telegram integration remains opt-in and was not changed.
+- Interface enhancements such as history navigation, slash completion, and resize handling remain in [docs/UI_PLAN.md](docs/UI_PLAN.md).
 
-## Testing
+## Release invariants
 
-- End-to-end through the real binary: tests spawn the compiled CLI against an in-process mock OpenAI server (both API shapes), asserting on transcripts and file side effects.
-- A live smoke suite (opt-in flag) runs against the local qwen endpoint at `:8090`.
-- Unit tests where logic is intricate (streaming parsers, patch application, context accounting).
-- An all-terrain live gauntlet, grown with each phase and complete at P7 (the v0.1 exit bar): hard multi-step prompts; several tool calls in a single inference; create, read, and edit files through the tools; repeated session close/resume/close/restore cycles with recall checks (ask about content from before the resume and expect the right answer); a real websearch call through the MCP client; interrupts at the nastiest points (mid-stream generation, mid tool execution such as during a file write) followed by a clean next turn; and a chaos pass sending SIGINT at random moments. Pass criteria: nothing wedges, transcripts stay API-valid, sessions always reopen, no partial file is ever left behind. The whole gauntlet runs against the small local model (qwen at `:8090`): if the harness only works with frontier models it has failed its design goal. And it is driven agent-to-agent: the gauntlet scripts speak to noob exclusively through the headless surface (`exec --json --session`, JSONL events, exit codes), the same way another CLI agent would drive it, so being operable by another agent is proven by construction, not claimed.
-
-## Risks and open questions
-
-- Tool-calling quality of qwen 3.6 MoE through llama-server jinja templates: validate in P1, first thing.
-- llama.cpp does not serve the Responses API; the Responses adapter is validated against the mock server and the local vLLM stack.
-- TUI vs plain REPL: lightweight-first bias, decided in the design phase.
-- Windows is out of scope; Linux (and macOS via Docker) only.
+- No lint or test failures.
+- No protocol change to piped REPL, `exec`, JSONL, or child output.
+- No request-side output limit and no application cap on model or child final output.
+- No unbounded retention for tool, progress, diagnostic, or hostile integration streams.
+- Sessions remain provider-valid after interruption or persistence failure.
+- Release binary stays below 8 MiB with no more than 45 runtime crates.

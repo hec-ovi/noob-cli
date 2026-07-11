@@ -1,365 +1,262 @@
-# noob-cli ARCHITECTURE.md
+# noob-cli architecture
 
-## Goal
+## Goals
 
-noob-cli is an extremely lightweight general-purpose agentic CLI: one static Rust binary that lives in a Docker sandbox, works on a bind-mounted `/work` folder, speaks both OpenAI Chat Completions and Responses APIs against any base URL, and ships skills, MCP, plan mode, parallel tool calls, and self-spawned sub-agents.
-Small local models (qwen-class through llama.cpp) are the first-class target: every choice below optimizes for byte-stable prompt prefixes, a tiny measured prompt budget, wire-quirk tolerance, and error messages that teach the model its next move.
+noob-cli is a small, general-purpose agent for OpenAI-compatible endpoints. The shipped unit is one static Rust binary inside a Docker runtime. The workspace and configuration are bind mounts, so the image contains no project state, sessions, or secrets.
 
-## Synthesis basis and resolved judge disagreements
+The design prioritizes:
 
-The base is the ruthless-minimalist proposal (ranked first by judges 1 and 2). The wire-protocol proposal's provider layer is adopted nearly wholesale as the spec for the provider crate (endorsed by all three judges). The agent-loop-quality edit engine, scheduling semantics, and truncation policy are grafted in, as is the extensibility lens's headless integration surface. Disagreements resolved:
+- Small fixed prompt and dependency budgets.
+- Byte-stable transcript replay for prompt-cache reuse.
+- Compatibility with Chat Completions and Responses APIs.
+- Deterministic file mutation and explicit failure remedies.
+- Bounded memory for tools and untrusted integrations.
+- Cancellation that remains responsive during network, process, pipe, and terminal activity.
+- A rich interactive terminal without changing headless bytes or model input.
 
-- **Winning base**: ruthless-minimalist (2 of 3 judges); judge 3's wire-protocol pick is honored by adopting its provider layer, fixtures, and named tests wholesale inside the minimalist skeleton.
-- **Crate layout**: 2 shipped crates + 1 dev-only testkit in a workspace, not the winner's single crate; this keeps PLAN P0's workspace requirement (judge 3's objection), enables the cargo-metadata egress test (judges 1-3 graft), and stays at minimalist weight (judge 1 suggested "single-crate-or-2-crate").
-- **HTTP stack**: blocking ureq (judges 1 and 2) over hyper+tokio (judge 3's winner); the one hole judges found in the blocking story (first-byte vs idle timeout, dead Ctrl-C during prompt processing) is fixed with a tick-read watchdog, which judge 2 confirms is implementable on ureq.
-- **Plan-mode gating**: structural schema removal (minimalist, grafted by judge 3) over wire-protocol's dispatch gating; all three judges noted visible write/edit schemas tempt qwen-class models into multi-minute rejected round-trips, which costs more than one cache bust.
-- **Plan approval**: explicit `/go` from the user (extensibility lens); both automatic triggers were judge-criticized (minimalist's "turn ends with no tool calls" misfires, agent-loop's `submit_plan` dead-ends when the model prints its plan as text).
-- **MCP tool shape**: two fixed tools `mcp_connect` + `mcp_call` (agent-loop, grafted by judge 3); minimalist's per-tool schema registration reinvents the eager dump and busts the cache, and the single overloaded `mcp` tool's presence-of-field discriminator is a small-model trap (judges 2 and 3).
-- **Token counting**: offline tiktoken o200k ceilings as a conservative gate plus live llama-server `/tokenize` checks against the real qwen tokenizer, both measured on the shipped artifact via `noob debug prompt --json`; this replaces both the chars/3.5 heuristic (judge 1 objection) and trusting o200k alone (judge 2 objection).
-- **bash truncation direction**: tail-heavy 8 KiB head + 16 KiB tail (agent-loop, grafted by judge 3) over the winner's middle-truncated 64 KiB (too large, judge 3) and wire-protocol's head-heavy split (verdicts live at the tail).
+Linux on amd64 and arm64 is the supported host target. Other host operating systems are outside the current installer contract.
 
-## Locked decisions
+## Runtime flow
 
-| # | Decision | Choice | Why |
-|---|---|---|---|
-| 1 | Crate layout | Cargo workspace: `noob` (bin) + `noob-provider` + `noob-testkit` (dev-only) | Keeps PLAN's workspace, enables the cargo-metadata egress test, near-minimalist weight; extraction of more crates later is mechanical |
-| 2 | Async runtime | None; blocking IO + `std::thread` | One inference at a time; threads cover tool fan-out and children; tokio would be the largest shipped subtree for work we do not have |
-| 3 | HTTP client + TLS | ureq 3.x (default-features off) + rustls with the ring provider + compiled-in webpki-roots | Cleanest musl story (no cmake, no system cert store); feature wiring pinned first thing in P0 |
-| 4 | Timeouts | connect 10 s, first-byte 300 s, inter-chunk idle 90 s, via a 1 s tick-read watchdog | A single read timeout either kills legitimate 131k-ctx llama.cpp prompt processing or never catches a stalled stream (all judges) |
-| 5 | UI | Termios line editor at an interactive tty (default-on, `NOOB_RAW=0` opts out; boxed prompt, real editing); cooked `read_line` when piped; no ratatui, no rustyline | Zero-dep editor over libc, restored by three hooks; TUIs add a redraw bug class; piped/exec/child stay byte-identical |
-| 6 | Tool set | read, write, edit, bash, grep, glob, ls + skill + mcp_connect/mcp_call + task | PLAN's seven plus fixed infra tools that keep the tools array byte-stable for the whole session |
-| 7 | Edit engine | Exact string replace + 3-stage ladder (trailing whitespace, unicode punctuation, uniform indent shift), hard ambiguity rejection, fnv1a64 check-and-set | Indent shift is the dominant qwen edit failure; no similarity-score fuzzing ever (silent corruption is unrecoverable) |
-| 8 | Parallel tool semantics | Consecutive read-only calls run concurrently (cap 8); any mutating call is a sequential barrier; results appended in emission order | Fixes the winner's unguarded all-N-concurrent race (judge 2: disqualifying if unfixed) |
-| 9 | System prompt budget | base <= 500 tokens, env block <= 60, full tool schema array <= 940, total fixed overhead <= 1,500 | Enforced offline (tiktoken o200k) and live (llama-server /tokenize) on the shipped artifact |
-| 10 | api_style | Host `api.openai.com` -> responses; anything else -> chat; `NOOB_API_STYLE` override | The field-proven convention (Zerostack, Pi); the entire compat matrix, no probe requests |
-| 11 | Config | `/config` bind mount; flat `.env` re-read on every request; `mcp.json`; no TOML/YAML crates | Hot reload for free; secrets never enter the process environment; model switch is a text edit |
-| 12 | Skills | 4 discovery paths, agentskills.io frontmatter, 3-level disclosure, body delivered as a tool result (24 KiB cap) | The prompt head never mutates; ecosystem-compatible (`.claude/skills/`, `.agents/skills/`) |
-| 13 | MCP | Two fixed tools `mcp_connect`/`mcp_call`; stdio + Streamable HTTP through noob-provider's http/sse modules | Tools array never changes mid-session; lazy to the bone (Zap); egress invariant holds mechanically |
-| 14 | Plan mode | Structural removal of mutating schemas + injected user-role mode message; explicit `/go` approval | Absent schemas cannot tempt small models; one accepted cache bust on entry and exit |
-| 15 | Multi-agent | Self-spawn via `current_exe() child`; JSON task on stdin, one JSON result line on stdout, progress on stderr; caps 4 concurrent / 25 turns / 300 s / depth 2 | The process boundary is the context boundary; argv+pipes survive being wrapped by anything |
-| 16 | Docker | 3-stage alpine musl build (dev toolchain, static musl builder, alpine runtime); runtime = alpine + bash + git + ca-certificates; non-root compose user; `network_mode: host` | Non-root fixes root-owned bind-mount files (judge 2: real daily pain); host network reaches llama.cpp :8090 and MCP :8000 |
-| 17 | Headless surface | `noob exec -p ... [--json] [--session <id>]` JSONL event protocol; `noob debug prompt --json`; `noob doctor` | The concrete integration surface telegram-bot-skill needs (PLAN names it); budget tests measure the shipped artifact |
-| 18 | Onboarding | No wizard; localhost endpoint autodetect when unconfigured; committed commented `.env.example` | PLAN hard requirement: compose run lands in a working chat with no mandatory config step |
-
-## Folder tree
-
-Every folder ships a `contract.md`: purpose, public interface, invariants, nothing about siblings.
-
-```
-noob-cli/
-├── contract.md              # repo: what noob-cli is, how to build/test/run; "no CI, cargo test is the whole story"
-├── Cargo.toml               # workspace manifest + release profile (opt-level="s", lto="fat", panic="abort", strip)
-├── Makefile                 # build, test, smoke (NOOB_LIVE=1), docker, size-check
-├── config/
-│   └── contract.md          # committed .env.example (commented) and default compose mount target; never real secrets
-├── docker/
-│   └── contract.md          # Dockerfile (3-stage musl); the compose.yml lives at the repo root; the image contains zero state, config, or keys
-├── docs/
-│   └── contract.md          # RESEARCH.md, ARCHITECTURE.md; design record, not runtime input
-└── crates/
-    ├── contract.md          # crate map; dependency direction noob -> noob-provider; noob-testkit is dev-only
-    ├── noob/
-    │   ├── contract.md      # the binary; argv dispatch only: repl | exec | child | doctor | debug | --version
-    │   ├── prompts/         # contract.md: base.md + compact.md, compiled in via include_str!, budget-tested
-    │   ├── src/
-    │   │   ├── agent/       # contract.md: turn loop, scheduler, doom-loop guard, compaction, prompt assembly, interrupts
-    │   │   ├── tools/       # contract.md: 7 built-ins + registry; pure fn(args) -> ToolResult; truncation policy; no loop knowledge
-    │   │   ├── skills/      # contract.md: SKILL.md discovery (4 paths), frontmatter micro-parser, skill tool
-    │   │   ├── mcp/         # contract.md: JSON-RPC framing, stdio + Streamable HTTP (HTTP via noob-provider), lazy connect
-    │   │   ├── task/        # contract.md: task tool, child stdin/stdout protocol, caps
-    │   │   ├── config/      # contract.md: precedence, endpoint autodetect, mcp.json, hot-reload semantics
-    │   │   ├── session/     # contract.md: append-only JSONL transcripts under /config/sessions/; resume
-    │   │   └── ui/          # contract.md: REPL input (cooked when piped, termios line editor at a tty by default), streaming stdout writer, ANSI, y/N prompts, JSONL event emitter
-    │   └── tests/           # contract.md: e2e through the compiled binary vs noob-testkit; live smoke opt-in (NOOB_LIVE=1)
-    ├── noob-provider/
-    │   ├── contract.md      # transcript in, event stream out; both wire shapes; sole owner of ureq; .env parser; no fs/tool knowledge
-    │   ├── src/             # types.rs http.rs sse.rs chat.rs responses.rs assemble.rs envfile.rs (retry/backoff lives in http.rs)
-    │   └── testdata/sse/    # SSE byte transcripts with %%CHUNK%% split sentinels (provenance in its contract.md)
-    └── noob-testkit/
-        ├── contract.md      # dev-only; hand-rolled mock OpenAI server (both shapes), scripted turns, request recorder, automatic assertions
-        └── src/             # lib.rs (the mock server) + mcp.rs (a mock MCP server)
+```mermaid
+flowchart LR
+    Human[Human or wrapper] --> CLI[noob CLI]
+    CLI --> Agent[Agent loop]
+    Agent --> Provider[noob-provider]
+    Provider --> Endpoint[OpenAI-compatible endpoint]
+    Agent --> Tools[Built-in tools]
+    Agent --> MCP[MCP transports]
+    Agent --> Tasks[Child noob processes]
+    Agent --> Session[JSONL session]
+    Tools --> Workspace[Bind-mounted workspace]
+    CLI --> UI[Interactive dock or plain output]
+    Agent --> UI
 ```
 
-## Dependencies
+One user input can require several inference rounds. Each round streams a provider turn, commits a complete assistant item, executes any tool calls, appends one result per call, and repeats. A turn with no tool calls ends the input.
 
-Direct runtime deps, the whole list:
+## Workspace layout
 
-| Crate | Features | Why |
-|---|---|---|
-| ureq | default-features off; rustls (ring provider) + webpki-roots | Blocking HTTP/1.1, streaming body reader, per-call timeouts; only `noob-provider` may depend on it (test-enforced) |
-| serde_json (+serde, NO derive) | - | Tolerant Value-based wire parsing, which heterogeneous servers demand anyway; skipping derive drops syn/quote/proc-macro2 |
-| regex | - | grep tool correctness |
-| ignore (brings globset, walkdir) | parallel-walk off | Gitignore-aware grep/glob; matches inside node_modules/target poison a 131k window faster than anything else (judge 2 graft) |
-| libc | - | ~15-line SIGINT handler setting an AtomicBool, plus kill(-pgid) for bash/MCP timeout enforcement |
+The Cargo workspace has three crates:
 
-Dev-dependencies only: tiktoken-rs (o200k_base, budget tests), tempfile. Hand-rolled instead of crates: argv dispatch (~80 lines), .env parser (~60 lines), YAML frontmatter scanner (~120 lines), JSON-RPC framing (~150 lines), SSE parser (~150 lines), fnv1a64 (~10 lines), backoff jitter (xorshift from SystemTime nanos). Explicitly rejected: tokio, hyper, reqwest, clap, rustyline, toml, any YAML crate, dotenvy, any eventsource crate, anyhow/thiserror, rand, chrono, tracing, crc32fast.
+- `crates/noob`: binary, agent, tools, sessions, skills, MCP, child tasks, configuration, and UI.
+- `crates/noob-provider`: HTTP client, watchdog, endpoint resolution, SSE, wire adapters, and neutral transcript types.
+- `crates/noob-testkit`: test-only OpenAI and MCP servers plus wire-contract assertions.
 
-Footprint budgets, enforced by `make size-check`: runtime crate graph <= 45, stripped musl binary <= 8 MB, idle RSS <= 25 MB, cold start to first prompt < 50 ms.
+Only `noob-provider` depends on the HTTP client. A crate-graph test enforces that boundary.
 
-## Provider layer (crates/noob-provider)
+The builder selects `x86_64-unknown-linux-musl` for amd64 or `aarch64-unknown-linux-musl` for arm64. The runtime image contains Alpine, Bash, Git, CA certificates, Python 3, uv, a pinned `websearch-skill` tool environment, and the static binary.
 
-The wire-protocol proposal's provider design, ported to blocking IO.
+## Distribution
 
-### Streaming functions and types
+`install.sh` builds the `noob:local` runtime image and installs a managed host launcher at `${NOOB_INSTALL_PREFIX:-$HOME/.local}/bin/noob`. The launcher bind-mounts the selected workspace and config directory, uses the caller's UID and GID, joins the host network, and removes the container on exit. `noob --restore <id>` forwards directly to the binary's session resume path.
 
-Streaming is two free functions, one per wire shape (no `Provider` trait): `chat::stream` and `responses::stream`, each with the same signature.
+The installer seeds a global `web-search` skill and stdio MCP entry without overwriting existing files. Both invoke the same bundled Python package: standalone commands run as `websearch web-search`, `websearch web-fetch`, and related subcommands, while MCP runs as `websearch mcp`.
 
-```rust
-// Blocking; invokes `on` for each stream event; returns the assembled assistant turn.
-pub fn stream(client: &Client, ep: &Endpoint, req: &TurnRequest, on: &mut dyn FnMut(Event)) -> Result<Turn, ProviderError>;
-pub enum Event {
-    Text(String), Reasoning(String),
-    ToolCallStart { index: u32, id: String, name: String },
-    ToolArgsDelta { index: u32, delta: String },
-    Usage(Usage),                    // prompt, completion, cached_prompt
-    Done(Finish),                    // Stop | ToolCalls | Length | ContentFilter | Error
-}
-pub struct Turn { pub text: String, pub reasoning: Option<String>, pub tool_calls: Vec<ToolCall>, pub usage: Option<Usage>, pub finish: Finish, pub raw_items: Vec<Value> }
+## Configuration
+
+Configuration directory precedence is:
+
+1. `NOOB_CONFIG_DIR`
+2. `/config` when it exists
+3. `~/.config/noob`
+
+Setting precedence is CLI flag, then an allowed process environment key, then `<config>/.env`. The provider opens and parses `.env` for every model request, so configured endpoint, model, API style, and key edits apply on the next call unless a CLI or environment override pins the value. `NOOB_API_KEY` is read only from `.env` and is never exported to child tools. Context, sandbox, and task budgets are captured at bootstrap.
+
+If no base URL is configured, startup probes loopback ports 8090, 8080, 11434, 1234, and 8000 in that order. An autodetected URL is pinned for that process. `NOOB_AUTODETECT=0` disables probing for deterministic automation and shared hosts.
+
+Sandbox selection is explicit `NOOB_SANDBOX` first, then container detection. Container mode permits workspace tools to use the mounted environment. Workspace mode confines write and edit targets to the project and rejects symlink escapes. `--yolo` explicitly lifts that restriction.
+
+## Provider boundary
+
+`noob-provider` accepts a neutral transcript and returns semantic events plus a complete `Turn`.
+
+The agent uses `TurnRequestRef` to borrow the system prompt, transcript items, and tool schemas for each round. The owned `TurnRequest` remains as a compatibility wrapper. This avoids cloning the full transcript on every request.
+
+Both adapters share these rules:
+
+- No request contains `max_tokens`, `max_output_tokens`, or an equivalent output limit.
+- Streamed completions have no application length cap. Whole JSON completions are also read without a length cap.
+- Chat and Responses output is normalized to text, reasoning, tool calls, usage, and a typed finish state.
+- Responses requests use stateless replay with `store: false`; captured raw output items are replayed verbatim.
+- A plain `application/json` response to a streaming request is parsed as a complete response.
+- Retries are permitted only before streamed content reaches the caller.
+- Proxy environment variables are ignored.
+
+The custom blocking transport uses a watchdog around DNS, connect, request write, first-byte, and idle progress. Request writes use one-second ticks, check cancellation between writes, and have a 30-second no-progress deadline. Default connect, first-byte, and idle budgets are 10, 300, and 90 seconds. Retry backoff is 1, 2, and 4 seconds with jitter; `Retry-After` is honored up to 60 seconds.
+
+HTTP error and auxiliary integration bodies can be bounded because they are not model completions. MCP JSON bodies are bounded before parsing, and rendered MCP results are capped again before entering the transcript.
+
+## Transcript and cache invariants
+
+The system prompt is assembled once in this order:
+
+1. Embedded base prompt.
+2. Environment facts.
+3. Global and project `AGENTS.md`, each capped at 16 KiB.
+4. The SKILL.md resolver index when skills exist.
+5. One line naming configured MCP servers when any exist.
+
+The fixed prompt plus all registered tool schemas must remain below the 1,500-token budget enforced by offline and live tokenizer tests.
+
+Within a stable mode, each provider request is an exact byte-prefix extension of the prior request. The mock server checks serialized prefix bytes and tool-array stability on every turn. Deliberate prefix changes are limited to:
+
+- Plan-mode entry and exit, which change the available schemas.
+- First registration of the skill tool during an in-session skill reload.
+- Context compaction.
+
+The agent records the reason whenever it resets the cache baseline.
+
+Provider error, content-filter, or incomplete length finishes are rejected before assistant content, tool execution, or session persistence can accept them as complete turns.
+
+## Agent loop and scheduling
+
+The user-facing agent permits at most 50 inference rounds per input. Doom-loop controls are structural:
+
+- Three identical tool calls within the most recent twelve are intercepted.
+- Four consecutive tool errors append a course-correction nudge.
+- Eight consecutive tool errors ask the user in a terminal or abort headless execution.
+
+The scheduler partitions one assistant tool batch in emission order:
+
+- Consecutive read-only calls run on scoped threads, up to eight at once.
+- Consecutive `task` calls form one fan-out group limited by child concurrency.
+- Every other mutation is a sequential barrier.
+- Results are returned and appended in emission order.
+- Start events are emitted immediately before real execution.
+- Parallel completion events are emitted in actual completion order.
+
+Canceled outcomes carry a structural flag. The agent does not infer cancellation by matching result text, so tool output cannot forge it. A canceled call is removed from the repeated-call window and still receives one API-valid tool result.
+
+Skills-directory write approvals are counted one-use grants tied to one planned batch. Unused grants are cleared after completion, cancellation, or a planning interruption.
+
+## Context compaction
+
+Compaction starts when the estimated context reaches 75 percent of `NOOB_CTX` or when the provider reports overflow.
+
+The ladder is:
+
+1. Replace older large tool results with deterministic placeholders.
+2. If that is insufficient, summarize the middle against the fixed schema in `prompts/compact.md`.
+3. Validate that a summary is non-empty, smaller, and structurally complete.
+4. Retry one invalid summary, then prune or hard-drop instead of accepting it.
+
+The head and recent tail stay verbatim, and call/result pairs are never split. A harness-built pin block preserves the original task, touched files, and loaded skills across repeated compactions and process resumes.
+
+## Tools and bounded I/O
+
+The core tools are `read`, `write`, `edit`, `bash`, `grep`, `glob`, and `ls`. Conditional tools are `skill`, `mcp_connect`, `mcp_call`, and `task`.
+
+Important mechanics:
+
+- `read` opens with `O_NONBLOCK`, validates the opened handle with `fstat`, rejects non-regular files, and drains the full file in 64 KiB chunks. It hashes and counts all bytes while retaining only the requested page and line previews.
+- `write` and `edit` use read-before-write stamps, same-directory temporary files, `fsync`, and rename. Existing mode bits are preserved.
+- `edit` applies exact matching first, then trailing-whitespace, typographic, uniform-indent, and CRLF-compatible shadows. Every stage rejects ambiguity.
+- `bash` merges stdout and stderr at the file-descriptor level, drains output continuously into a bounded 8 KiB head plus 16 KiB tail, and kills its process group on timeout or cancellation.
+- `grep`, `glob`, and `ls` cap retained result entries or bytes and include an actionable continuation marker.
+- Tool truncation occurs once before transcript insertion. It does not alter the underlying command or file operation.
+
+The read and Bash loops check the shared interrupt flag. Partial Bash output can be retained in a structurally canceled outcome.
+
+## Sessions
+
+Sessions are append-only JSONL files under `<config>/sessions`. Fresh IDs contain hexadecimal time, process, and per-process serial components to avoid same-millisecond collisions.
+
+Every append, flush, reset, and repair error is propagated. If persistence fails during a live run, the agent detaches the broken session, keeps the valid in-memory transcript, and shows one ordered warning. It never silently claims that an item was saved.
+
+Resume streams the JSONL through a buffered reader, skips corrupt lines, repairs dangling tool calls with synthetic results, reconstructs compaction pins, and restores a provider-valid transcript without retaining stale pre-reset history.
+
+## Skills
+
+Discovery checks project `.noob/skills`, `.claude/skills`, `.agents/skills`, then global `<config>/skills`. First name wins and each root is sorted.
+
+The prompt contains a bounded name and description index. The `skill` tool loads the body on demand, and ordinary `read` loads referenced files.
+
+`/skills add` accepts one local directory, one bare `SKILL.md`, or one Git URL. Candidate files must be bounded regular, non-symlink files; frontmatter parsing stops after a 64 KiB budget. Installation skips `.git`, copies into a hidden sibling staging directory, and publishes with one rename. A failed or canceled copy cannot expose a partial skill. Git clone runs in its own process group with bounded diagnostic capture, a 120-second wall clock, and cancellation. The dock remains active during installation.
+
+Agent-authored write or edit targets inside a skills directory require a real terminal confirmation. Headless and child modes deny the operation. This is a guardrail on persistent instructions; Docker remains the security boundary for Bash.
+
+## MCP
+
+MCP configuration is merged from `<config>/mcp.json` and `<workspace>/.noob/mcp.json`, with project entries winning by name.
+
+Startup only names servers. `mcp_connect` initializes one server and caches its tool catalog. `mcp_call` validates arguments against the cached schema before transport.
+
+stdio transport:
+
+- Newline-delimited JSON-RPC with an 8 MiB inbound line bound.
+- A 16-message inbound queue, so a noisy server receives pipe backpressure.
+- Nonblocking stdin writes with timeout and interrupt checks.
+- A 50 ms receive poll so silent servers cannot hide cancellation.
+- Process-group kill and reap on timeout, cancellation, or drop.
+- Transparent respawn on the next request.
+
+Streamable HTTP transport:
+
+- JSON or event-stream responses with an 8 MiB total response budget.
+- Session ID replay and one re-initialization on 404.
+- Protocol-version headers after initialization.
+- An absolute per-call deadline, so keepalive traffic cannot extend a call forever.
+
+Server catalogs and results are wrapped as untrusted content before transcript insertion.
+
+## Child agents
+
+The `task` tool spawns `current_exe() child` with a JSON task on stdin. The child gets a fresh prompt and no parent history. It writes progress to stderr and exactly one JSON result line to stdout. Only the result field enters the parent transcript.
+
+Defaults are four concurrent children, 25 rounds, 300 seconds, and recursion depth two. The parent starts the wall clock before sending the task. Child stdin is nonblocking and cancellation-aware, the final result line is read without an output-length cap, and optional progress retention is bounded at 64 KiB while both streams continue to drain.
+
+These are loop and transport budgets, not output-token limits.
+
+## Terminal architecture
+
+Interactive mode uses a session-long raw terminal guard and three cooperating paths:
+
+```mermaid
+flowchart LR
+    Reader[stdin reader] --> Events[mpsc event stream]
+    Worker[agent worker] --> Semantics[TurnEvent semantics]
+    Semantics --> Events
+    Events --> Renderer[main-thread terminal owner]
+    Renderer --> Terminal[TTY]
 ```
 
-`ProviderError` is a hand-rolled enum (typed wire errors, never stringly). Adapters are pure functions of (transcript, SSE bytes): fixture-replayable with zero mocks. Each adapter has a `finish()` pass because several backends end streams without `[DONE]` or without closing tool-call state: every started call must have complete, parseable args; `ToolCallDone` is synthesized if the server never signaled it.
+The main thread is the only terminal writer. The worker emits semantic text, reasoning, tool start, tool finish, note, error, ask, and end events. Adjacent render events can share an 8 ms repaint window; asks, keys, reader loss, and end are strict ordering barriers.
 
-### HTTP transport and timeouts
+The active frame always has three rows:
 
-One in-flight request per agent; keep-alive to localhost via a persistent ureq agent. Three timeouts: connect 10 s; first-byte 300 s (llama.cpp prompt processing on a 131k-ctx request legitimately takes minutes before token one); inter-chunk idle 90 s. Mechanism: the response body is read through a 1 s tick loop (socket read timeout 1 s; a timeout tick is not an error). Each tick checks the SIGINT flag, the first-byte deadline, and the idle deadline (reset on every received byte); tripping any of the three closes the socket and surfaces the corresponding typed error. This makes Ctrl-C responsive within 1 s even during minutes of silent prompt processing. If ureq's body reader cannot resume across a timeout tick, the fallback is a custom ureq transport that owns the TcpStream and implements the tick loop below ureq; this is verified in P0 alongside the feature wiring.
+1. Animated comet, elapsed time, plan state, and active tools.
+2. Editable draft or confirmation question.
+3. Queue count and cancellation state.
 
-### SSE parser (sse.rs), owned and byte-exact
+Entering a message during a turn immediately records it above the frame as queued. At most one queued message is dispatched after a turn. Cancellation drains queued messages back into the draft. Escape twice within five seconds cancels; Ctrl-C cancels immediately; a second Ctrl-C during cancellation restores the terminal and exits with status 130.
 
-~150 lines plus exhaustive table tests: incremental UTF-8 decoding (TCP chunks split multibyte codepoints; trailing incomplete sequences buffered across reads); event framing across chunk boundaries; multiple `data:` lines per event joined with `\n`; optional space after colon; CRLF and LF; BOM stripped on first chunk; comment lines (`:` prefix) ignored (OpenRouter's `: OPENROUTER PROCESSING` keepalives crash naive parsers); `event:` field captured (Responses routes on it); `retry:`/`id:` tolerated and dropped; `data: [DONE]` terminates chat streams and its absence is handled by `finish()`. Content-type guard: a 200 with `application/json` on a `stream: true` request is parsed as a single non-streamed completion, not fed to the SSE parser. The same parser serves MCP Streamable HTTP; there is exactly one SSE parser in the binary.
+Reader loss is an ordering barrier. Keys accepted before EOF are processed first, pending confirmations are denied, and the REPL exits once queued work is drained rather than waiting on an input thread that can no longer answer.
 
-### Chat Completions adapter
+Assistant Markdown is parsed only for the interactive REPL. The line-streaming renderer supports headings, emphasis, code spans, lists, quotes, fenced code, JSON accents, and GFM-style tables. Tables switch to stacked records on narrow terminals. Parser buffers are bounded, but overflow degrades to literal streaming and never drops model output.
 
-Request: POST `{base}/chat/completions`, `stream: true`, `stream_options: {"include_usage": true}`. Never any of `max_tokens`/`max_completion_tokens`/`max_output_tokens`; there is no config knob for one. No `parallel_tool_calls` field sent (several OSS servers 400 on it). Reactive compat: if a 400 names a top-level field we sent (in practice `stream_options`), strip it, retry once, remember for process lifetime only; no persisted quirk registry, no startup probe.
+Model text and all untrusted summaries are sanitized so control bytes cannot execute terminal commands. `NO_COLOR` removes color without removing structure, liveness, or reasoning text.
 
-Delta assembler (assemble.rs), a state machine keyed by `tool_calls[].index`, hardened against the full quirk matrix:
-- Standard flow: first delta for an index carries id + name; later deltas append `function.arguments` fragments.
-- Missing `index` (some proxies, older Azure/Mistral): attribute to the most recently opened call; if none open, open index 0.
-- Absent or empty `id` (llama.cpp with some templates): synthesize `call_<turn>_<index>`; a tool result requires `tool_call_id`, so an id must always exist.
-- Repeated id/name in every delta: ignore after first.
-- `arguments` as a JSON object instead of a string (live llama.cpp regression, ggml-org/llama.cpp issue #20198): re-serialize canonically to a string. Same tolerance for non-streamed responses.
-- Whole call in one delta, or the whole `tool_calls` array only in a final non-delta `choices[].message`: accepted at any point.
-- Text deltas interleaved with tool-call deltas, and multiple concurrent indexes, preserved in arrival order.
-- In-band mid-stream `error` payloads (OpenRouter emits these after streaming starts): Done(Error) with the message, never a panic.
-- finish_reason mapping: `tool_calls`/`function_call` -> ToolCalls; `stop` -> Stop; `length` -> Length. Since output is never capped, Length means the context is full: it triggers compaction, not retry.
-- `finish()` validation: every open call's args must parse as JSON; one mechanical repair (strip markdown fences, trim); if still invalid the call is dispatched as an error tool result ("arguments were not valid JSON: <parse error>; re-issue the call") so the model self-corrects.
+Piped REPL, `exec`, `exec --json`, and `child` bypass the rich renderer. Their protocol bytes remain plain and stable.
 
-Reasoning: accept `delta.reasoning_content` (DeepSeek convention, llama.cpp, vLLM) and `delta.reasoning` (OpenRouter), emit Reasoning events, keep in the transcript for display, never serialize back in subsequent requests (DeepSeek rejects it; llama.cpp templates re-inject thinking themselves). No `resend_reasoning` option in v0.1 (judge 1: speculative).
+## Verification budgets
 
-Serialization back: ToolCall items become an assistant message with a `tool_calls` array (args always a string); each ToolResult becomes `{"role":"tool","tool_call_id":...,"content":...}` in the same index order the calls were emitted.
+The enforced release budgets are:
 
-### Responses API adapter
+| Budget | Limit | Current validation |
+|---|---:|---:|
+| Static release binary | 8 MiB | Re-measured by `./dev.sh size-check` |
+| Runtime dependency graph | 45 crates | 40 crates |
+| Fixed prompt plus schemas | 1,500 tokens | Offline and live tokenizer checks |
+| Offline tests | None | 522 tests, plus 8 opt-in live tests |
 
-Request: `instructions` = the system prompt (byte-identical across turns), `input` = item array (`message`, `function_call`, `function_call_output`, `reasoning` items replayed verbatim from their captured wire form), `store: false` always (stateless full-input replay preserves append-only and works on vLLM), `stream: true`. Against `api.openai.com` additionally `include: ["reasoning.encrypted_content"]`. No `previous_response_id` ever.
+The required local gates are:
 
-Event routing on the SSE `event:` field: `response.output_item.added` (type function_call -> ToolCallStart), `response.function_call_arguments.delta`/`.done`, `response.output_text.delta`, `response.reasoning_text.delta` and `response.reasoning_summary_text.delta` -> Reasoning, `response.output_item.done` (capture completed reasoning items verbatim), `response.completed` -> Usage + Done, `response.failed`/`response.incomplete`/`error` -> Done(Error). Unknown event types are ignored (the vocabulary grows; a new event must never crash the client). Validated against the mock and the local vllm-qwen `/v1/responses` (llama.cpp does not serve it).
-
-### Retry and backoff
-
-Retries only before the first streamed content byte: connect/TLS errors, 408, 425, 429, 5xx. 3 attempts, 1 s / 2 s / 4 s with full jitter, `Retry-After` honored up to 60 s. Mid-stream death after content surfaces as a turn error the user retries; silent mid-stream retry would duplicate output. Other 4xx surface immediately (except the one-shot compat field-strip retry).
-
-### Append-only cache discipline (tested invariant)
-
-The system prompt and tools array are frozen at session start; the environment block (date, cwd, model) is computed once at session start, never per request, or every day rollover would bust the cache mid-session. Messages only append; tool results are truncated once at emission and byte-frozen. Every request is an exact prefix-extension of the previous one. Sanctioned prefix breaks, exactly two, each logging `cache prefix reset: <reason>`: compaction, and plan-mode entry/exit. Payoff: llama.cpp prefix KV reuse makes turn N+1 cost only the new suffix; OpenAI/OpenRouter prompt caching hits at Codex-reported rates. Usage events (including `cached_tokens`) feed `/status`; 0% cache hits on turn 5 is a live serializer-bug alarm.
-
-## Config and secrets (crates/noob/src/config + noob-provider/src/envfile.rs)
-
-Config dir: `/config` in the container (bind mount), `NOOB_CONFIG_DIR` override, fallback `~/.config/noob` outside Docker.
-
-```
-/config/
-├── .env          # KEY=VALUE; # comments; optional quotes; no interpolation
-├── mcp.json      # MCP servers
-├── AGENTS.md     # optional global instructions
-├── skills/       # global skills
-└── sessions/     # per-session JSONL transcripts (state lives here, never in the image)
+```bash
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+./dev.sh test
+./dev.sh size-check
 ```
 
-`.env` keys: `NOOB_BASE_URL`, `NOOB_API_KEY`, `NOOB_MODEL`, `NOOB_API_STYLE`, `NOOB_CTX` (default 131072), `NOOB_TASK_CONCURRENCY`, `NOOB_TASK_MAX_TURNS`, `NOOB_SANDBOX`.
-
-Lazy mechanics: the ~60-line parser in `noob-provider::envfile` opens and parses `/config/.env` inside every request build, resolves the needed keys, and drops the parse. Nothing is cached, so editing `.env` on the host applies on the very next API call (hot reload with no restart, test-enforced by the named `hot_reload_env` e2e). Secrets never enter the process environment, so the bash tool's subprocesses, MCP stdio servers, and child agents cannot read them by accident. Only the config-dir `.env` is read, never `/work/.env`, which belongs to the user's project. A parse error keeps the previous good values and prints one warning line.
-
-Precedence (highest wins): CLI flag (`--model`, `--base-url`) > process env var (non-secret settings only) > `/config/.env`. No project-local env overlay in v0.1.
-
-Endpoint autodetect (PLAN zero-friction requirement): when `NOOB_BASE_URL` is unset, probe localhost candidates in order with a 500 ms connect timeout and `GET /v1/models`: `:8090/v1`, `:8080/v1` (llama.cpp), `:11434/v1` (Ollama), `:1234/v1` (LM Studio), `:8000/v1` (vLLM). First responder wins; one line printed naming it. Loopback only, only when unconfigured; never a remote call.
-
-`noob doctor`: checks config dir presence and writability, `.env` parse, endpoint reachability (`GET {base}/models`, 2 s timeout), api_style sanity, `mcp.json` parse, `/work` writability; each failure prints one line stating the fix. Every error message in the binary states its remedy (PLAN requirement).
-
-## System prompt (crates/noob/prompts + agent/prompt assembly)
-
-Assembled once per session in fixed order (order is a cache invariant):
-1. `prompts/base.md` via `include_str!`: identity ("noob, an agent working in your working directory ... whatever the task is"; deliberately general-purpose, not coding-specific), edit discipline (read before edit; copy `old` exactly with enough surrounding lines to make it unique; prefer edit over write), parallel-call encouragement (batch independent reads in one message), verification norm (run tests/build after changes). No word/sentence/length caps anywhere in the text; output is shaped by content instruction only. Budget <= 500 tokens.
-2. Environment block: cwd, platform, date, model, sandbox flag; computed once at session start. <= 60 tokens.
-3. AGENTS.md: `/config/AGENTS.md` (global) then `/work/AGENTS.md` (project), each hard-capped at 16 KiB with a truncation notice.
-4. Skills index: a `# Skills (resolver)` section opening with the dispatcher instruction ("Match the task against these skills. Load a matching skill with the skill tool and follow it before acting; if two match, load both."), then one `- name: description` line per discovered skill (description clipped at 200 chars); section capped at 1,000 tokens; overflow skills get name-only lines, then a count note. The index is the resolver (GBrain RESOLVER.md / thin-harness-fat-skills pattern): descriptions are the triggers, bodies cost zero tokens until loaded.
-5. One line naming configured MCP servers when `mcp.json` has any: `MCP servers (use mcp_connect): websearch, fs`.
-
-Plan mode never touches the head: it is an injected user-role message plus a tools-array change (see Plan mode).
-
-Locked budget: layers 1+2 <= 560 tokens; serialized tool schema array (all registered tools including skill, mcp_connect, mcp_call, task) <= 940 tokens; total fixed first-request overhead <= 1,500 tokens, about 1.1% of qwen's 131k ctx. Enforcement is threefold: (a) an offline test runs the real binary's `noob debug prompt --json` and tokenizes with tiktoken o200k as a conservative ceiling; (b) the live smoke suite POSTs the assembled prompt to llama-server `/tokenize` and asserts the same ceilings against the real qwen tokenizer; (c) a lint asserts the prompt text contains no forbidden cap phrasing (`in N words`, `max N sentences`, "keep it brief") and the request JSON contains no `max_tokens`-family key. Budget numbers live in one `const` block so raising them is a visible diff.
-
-## Agent loop (crates/noob/src/agent)
-
-Turn machine: build request -> stream events -> render -> execute tool calls -> append results -> repeat until a turn ends with no tool calls or a breaker trips.
-
-**Scheduling**: within one assistant tool batch, calls are partitioned in emission order. Consecutive read-only calls (read, grep, glob, ls, skill, mcp_connect) run concurrently on `std::thread::scope` (cap 8). Any mutating call (write, edit, bash, mcp_call, task) is a sequential barrier executed alone in order, except that multiple `task` calls in one batch are recognized as one fan-out group and run concurrently up to the child cap. Results are always appended in emission order, one tool message per call id, regardless of completion order: parallelism where it is free, total determinism where it matters (two edits to one file can never race).
-
-**Doom-loop breakers** (all thresholds locked): identical (tool, canonical-args-hash) 3 times within the last 12 calls intercepts execution and returns "repeated identical call; the result will not change; take a different approach". Edit-retry escalation: the 2nd failed edit on the same (path, old) returns the actual file region (up to 40 lines) around the best anchor so the error contains the ground truth; the 3rd suggests re-read then region rewrite. 4 consecutive tool errors of any kind injects a course-correct nudge; 8 pauses and asks the user (REPL) or aborts with a structured error (exec). Turn cap: 50 inference rounds per user input.
-
-**Interrupts**: first Ctrl-C during a stream aborts the HTTP request via the watchdog (responsive within 1 s even during prompt processing). A partial turn interrupted mid-stream is discarded entirely (never committed, so the prefix stays replayable) and a user note `[interrupted]` is appended. If the turn had completed and tool calls were parsed but not yet executed, each receives a synthetic tool result "canceled by user" so the transcript stays API-valid for the next request. Second Ctrl-C hard-exits.
-
-**Compaction** (the sanctioned prefix break): context usage is estimated from the last server-reported usage plus chars/4 for the delta since; at 75% of `NOOB_CTX` the middle of the transcript is LLM-summarized with `prompts/compact.md` into one spliced message, keeping the system head and the most recent ~20k tokens intact and never splitting a call/result pair. The summary preserves the task statement, decisions, files touched, unresolved errors, and re-lists loaded-skill names (names only) so the model does not forget what it loaded. A provider context-overflow 400 or `finish_reason: length` triggers one emergency compaction and retry; if the summarization request itself overflows, fall back to deterministic hard-drop of oldest turns with a stub note.
-
-P7 amendment (design record: `.research/context-compaction-survival`): compaction is a ladder. Old large tool results in the middle are first replaced with one-line placeholders; when that alone brings usage under 60% no summarize call happens at all. Otherwise the middle (including any previous summary, so cycles merge) is summarized against a fixed section schema (prompts/compact.md) and validated deterministically before splicing: empty or non-shrinking output retries once, then prunes or hard-drops. Every spliced message ends with a harness-built pinned block ([task], [files touched], [loaded skills]) recovered from ground truth and carried verbatim across cycles and resumes. A transport failure sets a backoff so a failing summarizer is not re-invoked every round.
-
-**Session log**: every session appends JSONL events to `/config/sessions/<id>.jsonl` (unix-millis hex id) from P2. `noob exec --session <id>` resumes by replaying the transcript.
-
-## Tools (crates/noob/src/tools)
-
-Registered set is decided at session start and stays byte-stable: 7 core tools always; `skill` only when at least one skill is discovered; `mcp_connect`/`mcp_call` only when `mcp.json` has servers; `task` from P6, absent at max depth. Descriptions are <= 20 words each.
-
-```jsonc
-read        {"path": "string", "offset": "int?", "limit": "int?"}     // plain text, NO line numbers
-write       {"path": "string", "content": "string"}
-edit        {"path": "string", "old": "string", "new": "string", "all": "bool?"}
-bash        {"cmd": "string", "timeout_s": "int?"}                     // bash -c, merged output, default 120s max 600s, kill process group on expiry
-grep        {"pattern": "string", "path": "string?", "glob": "string?", "ignore_case": "bool?"}
-glob        {"pattern": "string"}                                      // paths, mtime-sorted, newest first
-ls          {"path": "string?"}
-skill       {"name": "string"}
-mcp_connect {"server": "string"}
-mcp_call    {"server": "string", "tool": "string", "args": "object"}
-task        {"prompt": "string", "tools": "\"read-only\"|\"all\"?", "max_turns": "int?"}
-```
-
-No line numbers anywhere: `read` returns raw lines with a one-line header (`src/main.rs lines 1-500 of 1240`). Line-number prefixes are the most common contaminant of small-model `old` strings; the failure mode is removed at the source. grep and glob are gitignore-aware via the `ignore` crate.
-
-**Edit engine**: exact string replace with a deterministic ladder and hard ambiguity rejection.
-1. Exact byte match. Exactly 1 occurrence: apply. More than 1 without `all: true`: reject with "old matched N locations; add surrounding lines to make it unique". Zero: descend.
-2. Stage A: per-line trailing whitespace stripped on both sides.
-3. Stage B: typographic normalization (smart quotes, unicode dashes, NBSP -> ASCII) on a shadow view with a byte-offset map back to the original; matching on the shadow, splicing on the original bytes; `new` spliced verbatim.
-4. Stage C, uniform indent shift: if `old`'s lines match a contiguous region modulo one constant leading-whitespace delta, accept and re-indent `new` by the same delta (the dominant qwen-class failure, fixed losslessly).
-5. Every stage independently enforces uniqueness; a stage finding multiple candidates rejects and does not fall through. No similarity-score fuzzing (no Levenshtein thresholds), ever.
-6. Failure teaching: when the whole ladder misses, the error locates the closest region by anchor-line match and returns a character-level diff of that region against `old`. Goal: 2-retry convergence because the error contains the ground truth. Which fallback stage fired is logged into the tool result so the model learns.
-
-Check-and-set staleness: `read` records `(path, len, fnv1a64)` in a session registry; successful write/edit updates it. `edit` on a never-read path is rejected ("read the file first"). `write`/`edit` on a path whose current hash differs from the recorded one fails with "file changed on disk since your last read; re-read it". Atomicity: temp file in the same directory, fsync, rename over target, mode preserved; no partial write is ever visible. Hashedit (CRC line tags) stays the documented post-v0.1 upgrade behind the same tool name.
-
-**Truncation** (applied once at emission, then byte-frozen in the transcript):
-
-| Tool | Cap | Shape |
-|---|---|---|
-| read | 500 lines default, 500 chars per line, 40 KiB hard | header states total line count for paging with offset/limit |
-| bash | 24 KiB: head 8 KiB + tail 16 KiB | tail-heavy; compilers and test runners put the verdict last |
-| grep | 100 matches or 16 KiB | always ends with the total count: "312 matches, showing 100; narrow the pattern or add a glob" |
-| glob / ls | 200 entries | count note |
-| skill | 24 KiB | pointer to read the remainder with `read` |
-| mcp_call | 20 KiB head+tail | wrapped in untrusted-content delimiters |
-
-Every truncation marker names the next action, and marker phrasing is frozen in golden tests: error text is API surface for small models.
-
-## Skills (crates/noob/src/skills)
-
-Discovery at session start, first hit per name wins: `/work/.noob/skills/`, `/work/.claude/skills/`, `/work/.agents/skills/`, `/config/skills/`. Each candidate is `<dir>/<skill>/SKILL.md` per agentskills.io: frontmatter with required `name` (<= 64 chars, lowercase+hyphens) and `description` (<= 1024 chars), parsed by the hand-rolled ~120-line scanner (plain scalars, quoted strings, `|`/`>` blocks); malformed skills are skipped with a stderr warning, never a crash.
-
-Disclosure: L1 is the one-line-per-skill index in the prompt (capped, see System prompt). L2 is the `skill {name}` tool returning the SKILL.md body (frontmatter stripped) plus the skill's directory path as a tool result, capped at 24 KiB, with the standard's ~5k-token recommendation echoed as a warning on oversize bodies. L3 is ordinary `read` of bundled files. Skill bodies are untrusted input and never granted authority.
-
-Loaded-skill names are tracked and re-listed (names only) after compaction. The agent never authors skills in v0.1; as defense in depth, any write/edit whose real target resolves inside a `**/skills/**` directory requires confirmation in every mode including auto (agent-created skills are persistent injection vectors; in headless/child contexts where there is no TTY, and for any REPL not attached to a real terminal, this ask degrades to deny).
-
-On-the-fly install (user-driven, REPL only): `/skills add <path|git-url>` copies a validated skill into `/work/.noob/skills/`, `/skills remove <name>` deletes a workspace-installed one, and `/skills reload` re-runs discovery; each reconciles the live session. Because the prompt head (and its L1 index) is frozen at session start, the reconciliation is in-band: the live skill set and `ToolCtx.skills` are swapped, the `skill` tool is registered if it was absent (the zero-skills-to-some transition, one accepted cache break, like plan mode), and a user-role `[skills updated]` message names the now-available skills (with descriptions, the resolver triggers) and the removed ones, so the model's working set is corrected even though the head cannot change; a removed skill is also rejected structurally by the `skill` tool, and compaction pins the current set when it drifted so the correction survives summarization. Git URLs are fetched by the `git` binary, so the noob process opens no new sockets and the egress invariant holds. This is user-initiated (the trust signal); the agent-authoring gate above is unchanged. A local `.noob/skills/` install is not committed to the user's repo unless they choose to. This is a guardrail against the write/edit tools authoring skills, not a sandbox boundary: bash is unrestricted (the container is the wall). The gate has two halves so a symlink created earlier in the same tool batch cannot route a write past it: the loop asks at plan time and records the confirmed real target; write/edit re-resolve the real target at execution time and refuse it unless it was the confirmed one.
-
-## MCP client (crates/noob/src/mcp)
-
-Config `/config/mcp.json`, merged with `/work/.noob/mcp.json` (project wins per name):
-
-```json
-{ "servers": {
-    "websearch": { "url": "http://localhost:8000", "timeout_s": 30 },
-    "fs":        { "command": "some-mcp-server", "args": ["--flag"], "timeout_s": 30 }
-} }
-```
-
-`url` -> Streamable HTTP; `command` -> stdio; both on one entry is a config error. Protocol 2025-11-25, tools only in v0.1.
-
-Lazy to the bone: startup connects nothing; the prompt carries one line of server names. `mcp_connect {server}` performs initialize + tools/list and returns a compact catalog (tool name, first 150 chars of description, parameter sketch) as a tool result wrapped in untrusted-content delimiters; schemas never enter the head and the tools array never changes, so the cache prefix survives MCP use entirely. `mcp_call {server, tool, args}` validates `args` client-side against the cached schema before sending; a validation miss returns the expected schema snippet to the model instead of a wire error. Calling an unconnected server returns "connect first with mcp_connect".
-
-Transports: stdio is a child process with newline-delimited JSON-RPC, one reader thread, `mpsc::recv_timeout` for per-call timeouts (default 30 s, per-server override), kill-on-timeout of the process group so a wedged server can never block the loop; a dead server is respawned transparently on the next call. Streamable HTTP is POST with `Accept: application/json, text/event-stream`, both response types handled, `MCP-Session-Id` captured and replayed with one re-initialize on 404, `MCP-Protocol-Version: 2025-11-25` on every request. All MCP HTTP goes through `noob_provider`'s http and sse modules, which is what keeps the cargo-metadata egress test true.
-
-## Plan mode (agent + tools registry)
-
-Entered via `noob --plan`, `noob exec --plan`, or `/plan` in the REPL. Implementation is structural: the tools array sent to the model contains only read, grep, glob, ls, and skill. No bash (a read-only bash cannot be cheaply verified), no MCP, no task, no write/edit. Absent schemas cannot be called, cost zero prompt tokens, and do not tempt small models; as defense in depth the dispatcher also refuses any mutating call while in plan mode. Entry appends a user-role message: `[plan mode] Explore read-only, then present a numbered implementation plan.` and is one accepted cache bust (the tools array changed).
-
-The plan is plain assistant text; there is no plan tool and no end-of-turn heuristic. Approval is explicit: `/go` in the REPL restores the full tool set (the second accepted bust) and appends "Plan approved. Execute it."; the loop continues in the same session. `noob exec --plan -p "..."` prints the plan and exits 0; `noob exec --session <id> -p "go"` continues it, which gives telegram-bot-skill a review-then-approve flow from a phone.
-
-## Multi-agent (crates/noob/src/task)
-
-The binary spawns itself: parent runs `current_exe() child` with env `NOOB_DEPTH=n+1`. The task payload goes to the child's stdin as one JSON object `{"prompt", "tools": "read-only"|"all", "max_turns"}`. The child builds a fresh context (base prompt + AGENTS.md + the skills index, no parent history), runs its own loop, resolves `/config/.env` lazily itself (key rotation applies to running children), streams progress to stderr (parent relays as dim `[task] ...` lines under `--verbose`, otherwise discards), and writes exactly one JSON line to stdout: `{"status": "ok"|"error", "result": "...", "turns": N, "usage": {...}}`. The fd separation makes single-message result return a mechanical guarantee. Only `result` enters the parent transcript, as the `task` call's tool result.
-
-`task` defaults to `tools: "read-only"` (children are research agents unless the model explicitly asks for a mutating child). Caps, enforced by both parent and child: concurrency `NOOB_TASK_CONCURRENCY` (default 4; fan-out beyond it queues), per-child turn cap `NOOB_TASK_MAX_TURNS` (default 25; child exits with status error at the cap), per-child wall clock 300 s (parent kills the process group on expiry), recursion depth max 2 via `NOOB_DEPTH` (the child's `task` tool is simply not registered at max depth). Children have no TTY, so any ask-gated action (skills-dir writes) degrades to deny. Turn and wall-clock caps bound spend; they are loop budgets, never output-token caps, and no request ever carries a max_tokens-family field. No sockets, no shared memory, no scratch files: argv + stdin + stdout is the whole IPC surface, and tests spawn children exactly the way the parent does.
-
-## UI and headless surface (crates/noob/src/ui)
-
-Interactive REPL: at a terminal `noob` runs a zero-dependency termios line editor by default (`NOOB_RAW=0` opts out to the cooked reader): a green input frame with real editing (insert, backspace across a multibyte char, word and line kills, cursor moves, bracketed paste) that collapses to a `› message` record on submit, restored to cooked on every exit by three hooks (RAII guard, panic hook, and the SIGINT handler before `_exit(130)`, since release is `panic = abort`); piped or headless it falls back to cooked `read_line`, byte-identical. It streams model text raw to stdout as it arrives (no markdown rendering; small local models produce cleaner plain text when nothing reformats them), renders reasoning deltas dim, and renders tool activity as one line per call: `* read src/main.rs (312 lines)`, `* bash cargo test (4.1s, exit 0)`, per-tool-colored and column-aligned at an interactive color terminal, a single dim `* ...` line when piped or in exec/child. `IsTerminal` disables ANSI when piped. Slash commands: `/plan`, `/go`, `/status` (usage, cache-hit tokens, endpoint), `/compact`, `/skills` (list, or `add <path|git-url>` / `remove <name>` / `reload` to manage skills without a restart, see Skills), `/quit`. Approval prompts are one-line y/N questions. The REPL persists its session and `--session <id>` resumes a closed one, with a resume hint printed on exit. Arrow-key history is not yet bound (planned for v0.2.2). The interactive surface is under active theming (docs/UI_PLAN.md); its display details are display-only and never change request bytes.
-
-Persistent-input dock (opt-in, `NOOB_DOCK=1`; docs/UI_PLAN.md v0.3.x and fable.md): the two-writers-one-terminal mode. The input frame stays live while the model streams (output scrolls above it into native scrollback); typing during a turn edits a draft that never reaches the model until Enter, and Enter queues it to run as the next turn; a double-tap ESC or a single Ctrl-C cancels the running turn through the existing `INTERRUPTED` watchdog; an interrupt drains the queue back into the editor. It holds raw mode for the whole turn and runs the turn on a worker thread whose `Ui` renders byte-identically over an `mpsc` channel to a single-owner render loop, so the agent loop and the rendering are unchanged. When `NOOB_DOCK` is unset the REPL uses the per-prompt editor above; every non-interactive surface is byte-identical in either mode.
-
-Headless: `noob exec -p "<prompt>" [--json] [--session <id>]`. Default prints the final assistant text to stdout, progress to stderr, nonzero exit on failure. `--json` emits one JSONL event per loop step (`{"t":"text","d":...}`, `{"t":"tool","name":...,"args":...}`, `{"t":"result","id":...,"err":...}`, `{"t":"done","usage":...}`) so wrappers stream progress; `--session` persists and resumes a JSONL session under `/config/sessions/`. This is the telegram-bot-skill surface: streaming multi-turn chats with zero daemon.
-
-Debug surface: `noob debug prompt --json` prints the exact assembled system prompt and tools array the binary would send, so budget tests measure the shipped artifact rather than a reimplementation.
-
-## Docker and sandbox (docker/)
-
-Dockerfile, three stages:
-1. `dev` (`rust:1.96-alpine` + `build-base` (the C toolchain ring needs), plus jq, bash, git): the toolchain used by `dev.sh` for build and test.
-2. `builder` (`FROM dev`): `cargo build --release --locked --target x86_64-unknown-linux-musl`, strip.
-3. `alpine:3.22` + `apk add --no-cache bash git ca-certificates` (the bash tool needs a real shell; git needs system roots for https clones; noob itself uses compiled-in webpki-roots), binary at `/usr/local/bin/noob`, `ENV NOOB_SANDBOX=container`, `WORKDIR /work`, `ENTRYPOINT ["noob"]`. No config, no state, no keys in the image, ever. Image lands around 40 MB.
-
-```yaml
-services:
-  noob:
-    build: { context: ., dockerfile: docker/Dockerfile }
-    network_mode: host          # reaches llama.cpp :8090 and websearch MCP :8000 on host loopback
-    working_dir: /work
-    user: "${UID:-1000}:${GID:-1000}"   # files written to /work are never root-owned on the host
-    volumes:
-      - ${WORKSPACE:-.}:/work
-      - ${NOOB_CONFIG:-./config}:/config
-    stdin_open: true
-    tty: true
-```
-
-`docker compose run --rm noob` is the REPL; `docker compose run --rm noob exec -p "..."` is a one-shot. The committed `config/.env.example` plus endpoint autodetect means an empty config still lands in a working chat.
-
-Sandbox levels, two states total, no permission-rule DSL in v0.1 (the container is the wall; permission matrices without OS isolation are a false wall): inside a container (detected via `/.dockerenv` or `NOOB_SANDBOX=container`) tools run unrestricted except the skills-dir write gate. Outside a container the binary starts in workspace mode: write/edit refuse paths resolving outside the cwd tree (paths canonicalized; symlink escapes rejected), bash prints a one-time "no sandbox, commands run on your host" warning; `--yolo` lifts it.
-
-Egress invariant: the binary makes network calls only to the configured base URL, configured MCP endpoints, and the loopback autodetect probes; no telemetry, no update checks, no title generation. Mechanically enforced: a test parses `cargo metadata` and fails if any crate other than `noob-provider` depends on ureq, and a mock e2e asserts zero requests to any URL other than the configured base.
-
-## Testing strategy
-
-No CI, ever; `make test` (offline) and `NOOB_LIVE=1 make smoke` (live) are the whole story, stated in the root contract.md.
-
-**Mock harness (noob-testkit)**: a hand-rolled HTTP/1.1 server on `std::net::TcpListener` (~300 lines; it serves only our own client) exposing `/v1/chat/completions` and `/v1/responses`. Tests enqueue scripted turns (canned SSE byte responses or request-assertion closures); the harness records every raw request body. Three assertions run automatically on EVERY request so every future e2e inherits the invariants for free: (1) prefix stability, each request's serialized message/input array is an exact JSON-byte prefix of the next (compaction and plan transitions declare expected breaks); (2) no `max_tokens`/`max_completion_tokens`/`max_output_tokens` key anywhere; (3) transcript validity, every tool_call id paired with exactly one result, in order.
-
-**SSE fixtures**: `testdata/sse/*.sse` are byte transcripts with `%%CHUNK%%` sentinels marking TCP chunk boundaries, so replay reproduces pathological splits deterministically, including one fixture splitting a multibyte codepoint and one splitting mid-`data:` line. The llama.cpp ones (qwen tool call, parallel calls, Responses function-call session) are captured real transcripts; the OpenRouter one (keepalive comments + mid-stream in-band error) is synthesized to OpenRouter's documented stream shape, to be replaced with a real capture when an OpenRouter key is on hand (each fixture's provenance is stated in testdata/contract.md).
-
-**e2e** (crates/noob/tests): spawn the compiled binary (`env!("CARGO_BIN_EXE_noob")`) with `NOOB_CONFIG_DIR` at a temp dir whose `.env` targets the mock, cwd in a temp workspace; assert stdout, JSONL session content, recorded request bodies, and file side effects. Both API shapes run the same scenario matrix. Named tests locked now: `hot_reload_env` (rewrite `.env` between turns, assert the Authorization header changes), `cache_prefix` (3-turn prefix property), `no_output_cap`, `parallel_calls` (concurrent read batch, results in emission order), `mutate_barrier` (edit+bash serialize), `plan_gate` (mutating schemas absent in plan mode, restored after /go), `child_fanout` (three task calls, concurrency cap observed via mock timestamps), `doom_loop`, `compaction` (inflated mock usage forces the trigger; asserts summary shape and skill re-listing), `exec_json` (JSONL event stream shape), `session_resume`, `skills_gate` (write into a skills dir requires confirmation), `egress` (cargo-metadata + zero foreign requests).
-
-**Unit tests** where logic is intricate: SSE parser table tests (every case in the parser section, driven by fixtures re-split at every byte offset), chat assembler quirk tests (every quirk-matrix case), edit ladder per stage plus ambiguity and staleness rejection, truncation goldens (marker phrasing frozen), .env parser, frontmatter scanner, JSON-RPC framing, compat 400-strip.
-
-**Token budget**: offline test runs `noob debug prompt --json` and tokenizes with tiktoken o200k (dev-dep) against the locked ceilings, plus the forbidden-phrase lint; the live suite closes the loop with llama-server `/tokenize` against the real qwen tokenizer.
-
-**Live smoke** (opt-in, `NOOB_LIVE=1`) against qwen3.6-35b-a3b at `:8090`: (1) edit round-trip (read, edit, verify file); (2) parallel tool calls in one turn; (3) a 3-turn cache check asserting llama.cpp `timings.prompt_n` on turn 3 is approximately suffix-sized, proving prefix reuse end to end; (4) `/tokenize` budget checks; (5) skill load and use (P3+); (6) a real call through the websearch MCP at `:8000` (P4+); (7) one Responses-shape turn against the local vllm-qwen stack. Item 1 runs first in P1: it is the gate on PLAN's top risk (qwen tool-calling through llama.cpp jinja).
-
-**Size budget**: `make size-check` fails on crate graph > 45, stripped binary > 8 MB.
-
-## Phase mapping P0-P7 and cut lines
-
-- **P0 scaffold**: workspace (noob, noob-provider, noob-testkit) + full contract.md set, Dockerfile, compose.yml, Makefile, `config/.env.example`, mock harness skeleton serving both endpoints with the three automatic assertions wired (they exist before any provider code), `exec` skeleton. Two risk gates retired here: ureq/rustls/ring feature wiring on musl, and the 1 s tick-read watchdog feasibility on ureq's body reader (fallback: custom transport). Done = an e2e runs the real binary against the mock.
-- **P1 provider**: both adapters complete with the full quirk matrix, SSE parser + fixtures, dual timeouts + interrupt plumbing, retry/backoff, compat strip-retry, lazy `.env`. Named tests `hot_reload_env` and `no_output_cap` land here. Live smoke item 1 runs vs qwen (PLAN's top risk, first thing) and one Responses turn vs vLLM.
-- **P2 core loop + tools**: agent loop, 7 tools, edit ladder + check-and-set, truncation goldens, scheduler (read-concurrent/mutate-barrier), doom-loop breakers, system prompt assembly + budget tests + `debug prompt`, compaction, session JSONL, cooked REPL, `exec --json --session`, endpoint autodetect. `cache_prefix`, `parallel_calls`, `mutate_barrier` e2e land here.
-- **P3 skills**: 4 discovery paths, frontmatter scanner, skill tool, capped index, post-compaction re-listing, skills-dir write gate. Ecosystem-path tests plus live skill load.
-- **P4 MCP**: both transports through noob-provider's http/sse, mcp.json merge, mcp_connect/mcp_call with client-side validation, per-call kill-on-timeout. Live test vs websearch MCP at `:8000`. (P5 has no dependency on P4 and can land first if P4 stalls on live testing.)
-- **P5 plan mode**: structural gating, injected mode message, `/go` flow, `exec --plan`. `plan_gate` e2e. Small phase; the registry machinery exists from P2.
-- **P6 multi-agent**: `child` subcommand, task tool, fan-out group scheduling, caps, ask-degrades-to-deny in children. `child_fanout` e2e including a cap-exhaustion case.
-- **P7 hardening + release**: `noob doctor`, full live suite, integrations (websearch MCP recipe, telegram-bot-skill via `exec --json --session` with the exact compose invocation documented), README, repo description and topics per repo-visibility policy, size budgets, v0.1 tag: static binary + docker image.
-
-**Cut from v0.1** (each with its upgrade path recorded here): CRC hashedit (check-and-set covers the safety property; hashedit slots behind the same tool name), Anthropic API adapter (the neutral Turn/Event types and per-shape adapters accommodate it), ratatui or any TUI, history (v0.2.2; the termios line editor itself landed in v0.2.1), markdown rendering, permission glob-rule DSL (the container is the wall), first-run wizard (autodetect + .env.example instead), agent-authored skills (deliberately never without an explicit user gate), MCP resources and prompts, `resend_reasoning` and any persisted compat registry (process-lifetime cache only), background bash, LSP anything, token-level child budgets (turn + wall-clock caps instead), network-isolated compose profile (documented as future work), secret scanner, aarch64 image (P7 stretch), Windows.
-
+Live checks use `./dev.sh smoke`. By default, the websearch MCP test additionally requires its Streamable HTTP endpoint on port 8000. `NOOB_LIVE_BASE_URL` and `NOOB_LIVE_MCP_URL` select other live endpoints. Installer tests cover the host wrapper with a fake Docker process; release validation also builds and runs the real image, standalone websearch CLI, and stdio MCP handshake.

@@ -2,6 +2,21 @@
 
 Distilled 2026-07-09 from a three-track investigation of the agentic CLI field (full findings with all sources live in the local research store; this file keeps only what shapes noob-cli's design).
 
+## Current terminal cross-check
+
+The 2026-07-11 interface audit re-checked official upstream source rather than relying on the older survey snapshot:
+
+- [Zero at commit `1af5882`](https://github.com/Gitlawb/zero/tree/1af58828eb3c22567599c000736c913a290959d2) keeps elapsed in-flight status and queue state in its TUI model, and has dedicated streaming Markdown, fenced-code, and table rendering in [`assistant_markdown.go`](https://github.com/Gitlawb/zero/blob/1af58828eb3c22567599c000736c913a290959d2/internal/tui/assistant_markdown.go).
+- [Codex at commit `5c19155`](https://github.com/openai/codex/tree/5c19155cbd93bfa099016e7487259f61669823ff) uses a live status row above the composer with elapsed time, interrupt hints, and width-aware details in [`status_indicator_widget.rs`](https://github.com/openai/codex/blob/5c19155cbd93bfa099016e7487259f61669823ff/codex-rs/tui/src/status_indicator_widget.rs).
+
+Those patterns informed the persistent status/composer separation and width-aware Markdown work. noob keeps its own zero-dependency ANSI implementation and ordered semantic event channel.
+
+## Websearch runtime cross-check
+
+The 2026-07-11 packaging audit used the current [websearch-skill source at commit `dcbbdf7`](https://github.com/hec-ovi/websearch-skill/tree/dcbbdf786527345c32894c52767fd72a6ea44c92), its [installation documentation](https://github.com/hec-ovi/websearch-skill/blob/dcbbdf786527345c32894c52767fd72a6ea44c92/docs/INSTALL.md), and the published [PyPI 0.1.0 package](https://pypi.org/project/websearch-skill/).
+
+One Python package exposes both the standalone `websearch` commands and the stdio `websearch mcp` server. That makes a second sidecar unnecessary for the default install: the runtime image installs the pinned package in a uv tool environment, the bundled skill can call the standalone CLI through Bash, and the seeded MCP configuration launches the same package lazily over stdio. Alpine 3.22 supplies [Python 3](https://pkgs.alpinelinux.org/package/v3.22/main/x86_64/python3) and [uv](https://pkgs.alpinelinux.org/package/v3.22/community/x86_64/uv) from its package repositories.
+
 ## The field at a glance
 
 | Tool | Language | Scale | One key trait |
