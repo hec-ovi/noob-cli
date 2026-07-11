@@ -320,9 +320,11 @@ impl Cancel {
         self.armed_until.is_some()
     }
 
-    /// Commit the cancel: set the process-wide flag (the watchdog trips the
-    /// in-flight read within one tick) and drop the arm.
+    /// Commit the cancel and drop the arm. The shipped binary sets the
+    /// process-wide flag here; unit tests keep the state local so one parallel
+    /// test cannot cancel unrelated tools. PTY tests exercise the real flag.
     fn commit(&mut self) {
+        #[cfg(not(test))]
         INTERRUPTED.store(true, Ordering::SeqCst);
         self.committed = true;
         self.armed_until = None;
@@ -1270,14 +1272,13 @@ mod tests {
 
     #[test]
     fn cancel_is_two_tap_but_ctrl_c_can_commit_directly() {
-        INTERRUPTED.store(false, Ordering::SeqCst);
         let mut cancel = Cancel {
             armed_until: Some(Instant::now() + CANCEL_WINDOW),
             ..Cancel::default()
         };
         assert!(cancel.disarm(), "first ESC must arm without canceling");
-        assert!(!INTERRUPTED.load(Ordering::SeqCst));
+        assert!(!cancel.committed);
         cancel.commit();
-        assert!(INTERRUPTED.swap(false, Ordering::SeqCst));
+        assert!(cancel.committed);
     }
 }
