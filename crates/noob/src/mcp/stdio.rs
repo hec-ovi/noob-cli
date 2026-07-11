@@ -8,10 +8,12 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use noob_provider::http::INTERRUPTED;
 use serde_json::Value;
 
 use super::proto::{self, Inbound};
@@ -20,12 +22,19 @@ use super::proto::{self, Inbound};
 /// not ours. Larger than any sane tool result (which we cap at 20 KiB
 /// anyway) with room for big tool catalogs.
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
+/// Bound parsed messages waiting for the request loop. When a server floods
+/// stdout, its pipe supplies the backpressure instead of an unbounded heap.
+const INBOUND_QUEUE: usize = 16;
+/// A silent MCP server must not hide Ctrl-C until its full request timeout.
+const INTERRUPT_POLL: Duration = Duration::from_millis(50);
 
 pub struct StdioTransport {
     command: String,
     args: Vec<String>,
     timeout: Duration,
     state: Mutex<State>,
+    #[cfg(test)]
+    test_interrupted: std::sync::atomic::AtomicBool,
 }
 
 struct State {
@@ -38,6 +47,7 @@ struct Proc {
     child: Child,
     stdin: ChildStdin,
     rx: mpsc::Receiver<Value>,
+    live: bool,
 }
 
 impl Proc {
@@ -45,6 +55,10 @@ impl Proc {
     /// the child was spawned with `process_group(0)`, so a server that
     /// forked helpers cannot leave them behind.
     fn kill_group(&mut self) {
+        if !self.live {
+            return;
+        }
+        self.live = false;
         let pid = self.child.id() as libc::pid_t;
         unsafe {
             libc::kill(-pid, libc::SIGKILL);
@@ -71,6 +85,22 @@ impl StdioTransport {
                 next_id: 1,
                 protocol: proto::PROTOCOL_VERSION.to_string(),
             }),
+            #[cfg(test)]
+            test_interrupted: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn interrupted(&self) -> bool {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            return true;
+        }
+        #[cfg(test)]
+        {
+            self.test_interrupted.load(Ordering::SeqCst)
+        }
+        #[cfg(not(test))]
+        {
+            false
         }
     }
 
@@ -119,23 +149,28 @@ impl StdioTransport {
         // to block the loop either (write_all on a full pipe never returns
         // and never sees the interrupt flag). Writes go through
         // write_deadline below.
-        unsafe {
-            use std::os::fd::AsRawFd;
-            let fd = stdin.as_raw_fd();
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        if let Err(error) = set_nonblocking(&stdin) {
+            let pid = child.id() as libc::pid_t;
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "cannot configure the MCP server input pipe ({error}); restart noob and try again"
+            ));
         }
         let stdout = child.stdout.take().expect("piped stdout");
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(INBOUND_QUEUE);
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             loop {
                 match read_line_bounded(&mut reader, MAX_LINE_BYTES) {
                     Ok(Some(line)) => {
-                        if let Ok(v) = serde_json::from_slice::<Value>(&line) {
-                            if tx.send(v).is_err() {
-                                return; // transport dropped
-                            }
+                        if let Ok(v) = serde_json::from_slice::<Value>(&line)
+                            && tx.send(v).is_err()
+                        {
+                            return; // transport dropped
                         }
                         // Non-JSON lines (stray prints) are dropped.
                     }
@@ -143,10 +178,19 @@ impl StdioTransport {
                 }
             }
         });
-        state.proc = Some(Proc { child, stdin, rx });
+        state.proc = Some(Proc { child, stdin, rx, live: true });
 
         // Handshake: initialize -> capture negotiated version -> initialized.
-        let init = self.rpc_locked(state, "initialize", proto::initialize_params())?;
+        let init = match self.rpc_locked(state, "initialize", proto::initialize_params()) {
+            Ok(init) => init,
+            Err(error) => {
+                if let Some(proc) = &mut state.proc {
+                    proc.kill_group();
+                }
+                state.proc = None;
+                return Err(error);
+            }
+        };
         state.protocol = init
             .get("protocolVersion")
             .and_then(Value::as_str)
@@ -159,13 +203,31 @@ impl StdioTransport {
 
     fn send_locked(&self, state: &mut State, msg: &Value) -> Result<(), String> {
         let deadline = Instant::now() + self.timeout;
+        self.send_locked_until(state, msg, deadline)
+    }
+
+    fn send_locked_until(
+        &self,
+        state: &mut State,
+        msg: &Value,
+        deadline: Instant,
+    ) -> Result<(), String> {
         let proc = state.proc.as_mut().expect("ensured");
-        let write = write_deadline(&mut proc.stdin, format!("{msg}\n").as_bytes(), deadline);
+        let write = write_deadline(
+            &mut proc.stdin,
+            format!("{msg}\n").as_bytes(),
+            deadline,
+            || self.interrupted(),
+        );
         if let Err(e) = write {
+            let canceled = e.kind() == std::io::ErrorKind::Interrupted && self.interrupted();
             if let Some(proc) = &mut state.proc {
                 proc.kill_group();
             }
             state.proc = None;
+            if canceled {
+                return Err("MCP call canceled by user; the server process was killed and will be restarted on the next call".to_string());
+            }
             return Err(format!(
                 "the MCP server process is not accepting input ({e}); it was killed \
                  and will be restarted on the next call"
@@ -181,6 +243,16 @@ impl StdioTransport {
         self.send_locked(state, &msg)?;
         let deadline = Instant::now() + self.timeout;
         loop {
+            if self.interrupted() {
+                if let Some(proc) = &mut state.proc {
+                    proc.kill_group();
+                }
+                state.proc = None;
+                return Err(
+                    "MCP call canceled by user; the server process was killed and will be restarted on the next call"
+                        .to_string(),
+                );
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 if let Some(proc) = &mut state.proc {
@@ -193,17 +265,20 @@ impl StdioTransport {
                     self.timeout.as_secs()
                 ));
             }
-            let proc = state.proc.as_mut().expect("ensured");
-            match proc.rx.recv_timeout(remaining) {
+            let received = state
+                .proc
+                .as_mut()
+                .expect("ensured")
+                .rx
+                .recv_timeout(remaining.min(INTERRUPT_POLL));
+            match received {
                 Ok(msg) => match proto::classify(&msg) {
                     Inbound::Response { id: got, outcome } if got == id => return outcome,
                     // A response to an id we gave up on earlier: stale, skip.
                     Inbound::Response { .. } => {}
                     Inbound::ServerRequest { id } => {
-                        // Best effort; a dead pipe surfaces on our next send.
                         let reply = proto::method_not_found(&id);
-                        let _ = proc.stdin.write_all(format!("{reply}\n").as_bytes());
-                        let _ = proc.stdin.flush();
+                        self.send_locked_until(state, &reply, deadline)?;
                     }
                     Inbound::Other => {}
                 },
@@ -221,6 +296,17 @@ impl StdioTransport {
     }
 }
 
+fn set_nonblocking(stdin: &ChildStdin) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let fd = stdin.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Write the whole buffer to a non-blocking pipe, bounded by `deadline`.
 /// A full pipe (the server stopped reading) surfaces as a timeout error
 /// instead of an unbounded block the interrupt flag can never reach.
@@ -228,8 +314,15 @@ fn write_deadline(
     stdin: &mut ChildStdin,
     mut buf: &[u8],
     deadline: Instant,
+    interrupted: impl Fn() -> bool,
 ) -> std::io::Result<()> {
     while !buf.is_empty() {
+        if interrupted() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "MCP call canceled by user",
+            ));
+        }
         match stdin.write(buf) {
             Ok(0) => return Err(std::io::Error::other("the pipe closed mid-write")),
             Ok(n) => buf = &buf[n..],
@@ -249,6 +342,12 @@ fn write_deadline(
             }
             Err(e) => return Err(e),
         }
+    }
+    if interrupted() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "MCP call canceled by user",
+        ));
     }
     stdin.flush()
 }
@@ -305,8 +404,6 @@ done
         );
         let path = dir.join(name);
         std::fs::write(&path, script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path.to_str().unwrap().to_string()
     }
 
@@ -317,7 +414,7 @@ done
     fn round_trip_handshake_list_and_call() {
         let tmp = tempfile::tempdir().unwrap();
         let cmd = shell_server(tmp.path(), "server.sh", ECHO_CALL);
-        let t = StdioTransport::new(&cmd, &[], Duration::from_secs(5));
+        let t = StdioTransport::new("sh", &[cmd], Duration::from_secs(5));
         assert_eq!(t.ensure_ready().unwrap(), "2025-11-25");
         let listed = t.request("tools/list", json!({})).unwrap();
         assert_eq!(listed["tools"][0]["name"], "echo");
@@ -325,6 +422,51 @@ done
             .request("tools/call", json!({"name": "echo", "arguments": {"text": "hi"}}))
             .unwrap();
         assert_eq!(result["content"][0]["text"], "echo: hi");
+    }
+
+    #[test]
+    fn failed_initialize_is_killed_and_retried_from_a_fresh_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let flag = tmp.path().join("failed-once");
+        let script = format!(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      if [ ! -f {flag} ]; then
+        touch {flag}
+        printf '{{"jsonrpc":"2.0","id":%s,"error":{{"code":-32000,"message":"first init failed"}}}}\n' "$id"
+      else
+        printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":"2025-11-25"}}}}\n' "$id"
+      fi ;;
+    *) : ;;
+  esac
+done
+"#,
+            flag = flag.display()
+        );
+        let path = tmp.path().join("init-fails-once.sh");
+        std::fs::write(&path, script).unwrap();
+        let t = StdioTransport::new(
+            "sh",
+            &[path.to_string_lossy().into_owned()],
+            Duration::from_secs(2),
+        );
+        assert!(t.ensure_ready().unwrap_err().contains("first init failed"));
+        assert_eq!(t.ensure_ready().unwrap(), "2025-11-25");
+    }
+
+    #[test]
+    fn parsed_inbound_queue_is_bounded() {
+        let (tx, _rx) = mpsc::sync_channel(INBOUND_QUEUE);
+        for n in 0..INBOUND_QUEUE {
+            tx.try_send(json!(n)).unwrap();
+        }
+        assert!(matches!(
+            tx.try_send(json!("overflow")),
+            Err(mpsc::TrySendError::Full(_))
+        ));
     }
 
     #[test]
@@ -337,7 +479,7 @@ done
             flag = tmp.path().join("wedged.flag").display()
         );
         let cmd = shell_server(tmp.path(), "server.sh", &call_case);
-        let t = StdioTransport::new(&cmd, &[], Duration::from_secs(1));
+        let t = StdioTransport::new("sh", &[cmd], Duration::from_secs(1));
         t.ensure_ready().unwrap();
         let started = Instant::now();
         let err = t
@@ -354,6 +496,42 @@ done
     }
 
     #[test]
+    fn interrupt_cancels_a_silent_rpc_and_next_call_respawns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let call_case = format!(
+            r#"if [ ! -f {flag} ]; then touch {flag}; sleep 600; fi
+      {ECHO_CALL}"#,
+            flag = tmp.path().join("interrupted.flag").display()
+        );
+        let cmd = shell_server(tmp.path(), "server.sh", &call_case);
+        let t = std::sync::Arc::new(StdioTransport::new(
+            "sh",
+            &[cmd],
+            Duration::from_secs(30),
+        ));
+        t.ensure_ready().unwrap();
+
+        let signal = t.clone();
+        let interrupter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            signal.test_interrupted.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let err = t
+            .request("tools/call", json!({"name": "echo", "arguments": {"text": "x"}}))
+            .unwrap_err();
+        interrupter.join().unwrap();
+        assert!(err.contains("canceled by user"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(2), "cancel was not prompt");
+
+        t.test_interrupted.store(false, Ordering::SeqCst);
+        let result = t
+            .request("tools/call", json!({"name": "echo", "arguments": {"text": "back"}}))
+            .unwrap();
+        assert_eq!(result["content"][0]["text"], "echo: back");
+    }
+
+    #[test]
     fn dead_server_is_reported_and_respawned() {
         let tmp = tempfile::tempdir().unwrap();
         let call_case = format!(
@@ -362,7 +540,7 @@ done
             flag = tmp.path().join("died.flag").display()
         );
         let cmd = shell_server(tmp.path(), "server.sh", &call_case);
-        let t = StdioTransport::new(&cmd, &[], Duration::from_secs(5));
+        let t = StdioTransport::new("sh", &[cmd], Duration::from_secs(5));
         let err = t
             .request("tools/call", json!({"name": "echo", "arguments": {"text": "x"}}))
             .unwrap_err();
@@ -390,7 +568,7 @@ done
       {ECHO_CALL}"#
         );
         let cmd = shell_server(tmp.path(), "server.sh", &call_case);
-        let t = StdioTransport::new(&cmd, &[], Duration::from_secs(5));
+        let t = StdioTransport::new("sh", &[cmd], Duration::from_secs(5));
         let result = t
             .request("tools/call", json!({"name": "echo", "arguments": {"text": "ok"}}))
             .unwrap();
@@ -412,9 +590,8 @@ exec sleep 600
 "#;
         let path = tmp.path().join("deaf.sh");
         std::fs::write(&path, script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let t = StdioTransport::new(path.to_str().unwrap(), &[], Duration::from_secs(1));
+        let script = path.to_str().unwrap().to_string();
+        let t = StdioTransport::new("sh", &[script], Duration::from_secs(1));
         t.ensure_ready().unwrap();
         let big = "x".repeat(512 * 1024); // far past any pipe buffer
         let started = Instant::now();
@@ -428,6 +605,40 @@ exec sleep 600
             "write blocked for {:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn interrupt_cancels_a_blocked_pipe_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = r#"#!/bin/sh
+IFS= read -r line
+id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"mock","version":"0"}}}\n' "$id"
+IFS= read -r line
+exec sleep 600
+"#;
+        let path = tmp.path().join("deaf-interrupt.sh");
+        std::fs::write(&path, script).unwrap();
+        let script = path.to_str().unwrap().to_string();
+        let t = std::sync::Arc::new(StdioTransport::new(
+            "sh",
+            &[script],
+            Duration::from_secs(30),
+        ));
+        t.ensure_ready().unwrap();
+        let signal = t.clone();
+        let interrupter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            signal.test_interrupted.store(true, Ordering::SeqCst);
+        });
+        let big = "x".repeat(512 * 1024);
+        let started = Instant::now();
+        let err = t
+            .request("tools/call", json!({"name": "echo", "arguments": {"text": big}}))
+            .unwrap_err();
+        interrupter.join().unwrap();
+        assert!(err.contains("canceled by user"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(2), "cancel was not prompt");
     }
 
     #[test]

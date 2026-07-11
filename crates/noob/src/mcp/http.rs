@@ -17,6 +17,8 @@ use noob_provider::types::ProviderError;
 
 use super::proto::{self, Inbound};
 
+const MAX_MCP_JSON_BODY: usize = 8 * 1024 * 1024;
+
 pub struct HttpTransport {
     url: String,
     timeout: Duration,
@@ -30,6 +32,8 @@ struct HttpState {
     protocol: Option<String>,
     next_id: u64,
 }
+
+type PostOutcome = (Option<Result<Value, String>>, Option<String>);
 
 impl HttpTransport {
     pub fn new(url: &str, timeout: Duration) -> HttpTransport {
@@ -125,7 +129,7 @@ impl HttpTransport {
         state: &HttpState,
         msg: &Value,
         want_id: Option<u64>,
-    ) -> Result<(Option<Result<Value, String>>, Option<String>), RpcFailure> {
+    ) -> Result<PostOutcome, RpcFailure> {
         let mut headers: Vec<(String, String)> = vec![(
             "accept".to_string(),
             "application/json, text/event-stream".to_string(),
@@ -157,7 +161,9 @@ impl HttpTransport {
             return Ok((Some(outcome), session));
         }
         // Default: a single JSON body.
-        let bytes = stream.read_to_end().map_err(|e| self.map_error(e))?;
+        let bytes = stream
+            .read_to_end_bounded(MAX_MCP_JSON_BODY)
+            .map_err(|e| self.map_error(e))?;
         if want_id.is_none() {
             return Ok((None, session));
         }
@@ -195,6 +201,7 @@ impl HttpTransport {
         let mut parser = SseParser::new();
         let mut events = Vec::new();
         let mut buf = [0u8; 8 * 1024];
+        let mut received = 0usize;
         loop {
             if Instant::now() >= deadline {
                 return Err(RpcFailure::Other(format!(
@@ -206,6 +213,14 @@ impl HttpTransport {
                 )));
             }
             let n = stream.read(&mut buf).map_err(|e| self.map_error(e))?;
+            received = received.saturating_add(n);
+            if received > MAX_MCP_JSON_BODY {
+                return Err(RpcFailure::Other(format!(
+                    "the MCP server at {} sent more than 8 MiB without answering; ask the tool \
+                     for less data or fix the server response",
+                    self.url
+                )));
+            }
             if n == 0 {
                 parser.finish(&mut events);
             } else {
@@ -213,10 +228,10 @@ impl HttpTransport {
             }
             for ev in events.drain(..) {
                 let Ok(msg) = serde_json::from_str::<Value>(&ev.data) else { continue };
-                if let Inbound::Response { id, outcome } = proto::classify(&msg) {
-                    if id == want {
-                        return Ok(outcome);
-                    }
+                if let Inbound::Response { id, outcome } = proto::classify(&msg)
+                    && id == want
+                {
+                    return Ok(outcome);
                 }
             }
             if n == 0 {
@@ -362,6 +377,23 @@ mod tests {
             started.elapsed()
         );
         // The transport stays usable for the next call.
+        let ok = t
+            .request("tools/call", json!({"name": "echo", "arguments": {"text": "back"}}))
+            .unwrap();
+        assert!(ok["content"][0]["text"].as_str().unwrap().contains("back"));
+    }
+
+    #[test]
+    fn oversized_sse_is_rejected_before_parser_memory_can_grow_without_bound() {
+        let server = McpHttpServer::start(echo_tools());
+        let t = transport(&server);
+        t.ensure_ready().unwrap();
+        server.oversize_next_call();
+        let err = t
+            .request("tools/call", json!({"name": "echo", "arguments": {"text": "x"}}))
+            .unwrap_err();
+        assert!(err.contains("more than 8 MiB"), "{err}");
+
         let ok = t
             .request("tools/call", json!({"name": "echo", "arguments": {"text": "back"}}))
             .unwrap();

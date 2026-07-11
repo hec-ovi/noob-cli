@@ -24,6 +24,8 @@ struct Shared {
     drop_session_once: AtomicBool,
     /// Answer the next tools/call with an endless keepalive trickle.
     trickle_next_call: AtomicBool,
+    /// Answer the next tools/call with one over-limit SSE data line.
+    oversize_next_call: AtomicBool,
     initializes: AtomicUsize,
     session_counter: AtomicUsize,
     sessions: Mutex<HashSet<String>>,
@@ -64,6 +66,7 @@ impl McpHttpServer {
             sse_mode: AtomicBool::new(false),
             drop_session_once: AtomicBool::new(false),
             trickle_next_call: AtomicBool::new(false),
+            oversize_next_call: AtomicBool::new(false),
             initializes: AtomicUsize::new(0),
             session_counter: AtomicUsize::new(0),
             sessions: Mutex::new(HashSet::new()),
@@ -102,6 +105,10 @@ impl McpHttpServer {
     /// per-call deadline must survive.
     pub fn trickle_next_call(&self) {
         self.shared.trickle_next_call.store(true, Ordering::SeqCst);
+    }
+
+    pub fn oversize_next_call(&self) {
+        self.shared.oversize_next_call.store(true, Ordering::SeqCst);
     }
 
     /// Enqueue one scripted `tools/call` result value.
@@ -204,6 +211,21 @@ fn handle(mut stream: TcpStream, shared: Arc<Shared>) {
                         }
                         std::thread::sleep(std::time::Duration::from_millis(100));
                     }
+                }
+                if shared.oversize_next_call.swap(false, Ordering::SeqCst) {
+                    let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n";
+                    if stream.write_all(head.as_bytes()).is_err()
+                        || stream.write_all(b"data: ").is_err()
+                    {
+                        return;
+                    }
+                    let chunk = vec![b'x'; 64 * 1024];
+                    for _ in 0..=128 {
+                        if stream.write_all(&chunk).is_err() {
+                            return;
+                        }
+                    }
+                    return;
                 }
                 let scripted = shared.call_results.lock().unwrap().pop_front();
                 let result = scripted.unwrap_or_else(|| {

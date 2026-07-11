@@ -98,7 +98,8 @@ impl ToolCtx {
 /// (312 lines)`); `warning` is UI-only, never in the transcript. `canceled`
 /// is set only by the scheduler when a Ctrl-C skipped the call, so the loop
 /// recognizes cancellation structurally instead of by matching the content
-/// string (which a tool could otherwise echo to forge one).
+/// string (which a tool could otherwise echo to forge one). Tools that were
+/// already running also set it when they observe the shared interrupt.
 pub struct ToolOutcome {
     pub content: String,
     pub is_error: bool,
@@ -130,8 +131,14 @@ impl ToolOutcome {
 
     /// A call the scheduler skipped because the user interrupted the batch.
     pub fn canceled() -> ToolOutcome {
+        Self::canceled_with("canceled by user")
+    }
+
+    /// A running tool that observed cancellation, optionally preserving
+    /// useful partial output while keeping cancellation structural.
+    pub fn canceled_with(content: impl Into<String>) -> ToolOutcome {
         ToolOutcome {
-            content: "canceled by user".to_string(),
+            content: content.into(),
             is_error: true,
             summary: "canceled".to_string(),
             warning: None,

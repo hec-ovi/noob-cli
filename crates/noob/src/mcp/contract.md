@@ -1,13 +1,9 @@
 # noob/src/mcp
 
-MCP client (P4): JSON-RPC framing, stdio and Streamable HTTP transports,
-protocol 2025-11-25, tools only.
+Tools-only MCP client for protocol 2025-11-25 over stdio and Streamable HTTP.
 
-Lazy to the bone: startup connects nothing; `mcp_connect` does initialize +
-tools/list and returns a compact catalog as a tool result; `mcp_call`
-validates args client-side against the cached schema before sending.
+Startup connects nothing. `mcp_connect` initializes one named server and caches its catalog. `mcp_call` validates arguments against the cached schema before transport. Server content is untrusted, bounded, and wrapped before transcript insertion.
 
-Invariants: the tools array never changes when servers connect; MCP tool
-descriptions and results are untrusted input, wrapped in delimiters; per-call
-timeouts kill the process group so a wedged server can never block the loop;
-all HTTP goes through noob-provider.
+stdio uses newline-delimited JSON-RPC, bounded line reads, nonblocking writes, 50 ms interrupt polling, absolute per-call timeout, and process-group kill plus reap on timeout, cancellation, or drop. A subsequent call respawns the server.
+
+Streamable HTTP accepts JSON and event-stream responses, carries session and protocol headers, retries initialization once after a 404 session loss, and applies an absolute call deadline. All HTTP uses noob-provider.

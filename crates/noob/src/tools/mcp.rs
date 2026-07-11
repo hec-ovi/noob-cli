@@ -4,8 +4,11 @@
 //! server sends (catalogs, results) is untrusted input: capped and wrapped
 //! in delimiters before it enters the transcript.
 
+use std::sync::atomic::Ordering;
+
 use serde_json::{Value, json};
 
+use noob_provider::http::INTERRUPTED;
 use noob_provider::types::ToolSpec;
 
 use crate::mcp::{ConnectInfo, schema};
@@ -59,6 +62,7 @@ pub fn run_connect(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
             let n = info.tools.len();
             ToolOutcome::ok(render_catalog(server, &info), format!("mcp_connect {server} ({n} tools)"))
         }
+        Err(e) if INTERRUPTED.load(Ordering::SeqCst) => ToolOutcome::canceled_with(e),
         Err(e) => ToolOutcome::err(e),
     }
 }
@@ -138,6 +142,7 @@ pub fn run_call(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
                 canceled: false,
             }
         }
+        Err(e) if INTERRUPTED.load(Ordering::SeqCst) => ToolOutcome::canceled_with(e),
         Err(e) => ToolOutcome::err(e),
     }
 }
