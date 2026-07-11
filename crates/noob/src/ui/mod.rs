@@ -12,20 +12,24 @@
 //! the session log, or the JSONL protocol.
 
 use std::io::{IsTerminal, Write};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
 use noob_provider::types::Usage;
 
 mod dock;
+mod markdown;
 pub(crate) mod prompt;
 mod scanner;
 mod style;
+mod table;
 mod theme;
 
 pub use dock::DockSession;
 pub use prompt::Input;
 use style::{ColorDepth, DIM, RESET};
+use markdown::Markdown;
 use theme::Theme;
 
 /// The column the label is padded to on the themed activity line, so the brief
@@ -47,6 +51,79 @@ pub enum Mode {
     Child,
 }
 
+/// A semantic rendering operation produced by a dock-managed turn. The turn
+/// worker never renders terminal bytes: it sends these operations in program
+/// order, and the main thread replays adjacent operations through the ordinary
+/// `Ui` renderer before performing one terminal repaint. Keeping `Ask` and
+/// `End` as separate channel events makes them hard FIFO barriers.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum TurnEvent {
+    Text(String),
+    Reasoning(String),
+    EndLine,
+    ToolStart { id: String, name: String, brief: String, read_only: bool },
+    ToolDone { id: String, summary: String, is_error: bool },
+    Note(String),
+    Error(String),
+    Done(Option<Usage>),
+}
+
+/// Shared in-memory sink used by the main-thread turn renderer. Stdout and
+/// stderr intentionally share one buffer: each semantic operation writes to
+/// only one of them, so sharing preserves the event order while still letting
+/// the normal `Ui` routing code decide which surface an operation belongs to.
+#[derive(Clone, Default)]
+struct TurnBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl Write for TurnBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl TurnBuffer {
+    fn take(&self) -> Vec<u8> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+/// Persistent renderer for one dock turn. It lives on the terminal-owning
+/// main thread, so renderer state such as an open assistant tint or a partial
+/// line survives across streamed events without allowing worker threads to
+/// touch terminal bytes.
+pub(super) struct BufferedTurnRenderer {
+    ui: Ui,
+    buffer: TurnBuffer,
+}
+
+impl BufferedTurnRenderer {
+    pub(super) fn render(&mut self, event: TurnEvent) {
+        match event {
+            TurnEvent::Text(s) => self.ui.text_delta(&s),
+            TurnEvent::Reasoning(s) => self.ui.reasoning_delta(&s),
+            TurnEvent::EndLine => self.ui.end_line(),
+            TurnEvent::ToolStart { name, brief, read_only, .. } => {
+                self.ui.render_tool_start(&name, &brief, read_only);
+            }
+            TurnEvent::ToolDone { id, summary, is_error } => {
+                self.ui.tool_done(&id, &summary, is_error);
+            }
+            TurnEvent::Note(line) => self.ui.note(&line),
+            TurnEvent::Error(line) => self.ui.error(&line),
+            TurnEvent::Done(usage) => self.ui.done(usage),
+        }
+    }
+
+    pub(super) fn take(&self) -> Vec<u8> {
+        self.buffer.take()
+    }
+}
+
 pub struct Ui {
     pub mode: Mode,
     /// stdout is a terminal. Drives the legacy dim lines and reasoning display
@@ -58,6 +135,10 @@ pub struct Ui {
     color: bool,
     depth: ColorDepth,
     theme: Theme,
+    /// Streaming Markdown state for a real interactive terminal. A dock turn
+    /// keeps this only on the main-thread buffered renderer; the provider
+    /// worker sends semantic text and never parses or styles it.
+    markdown: Markdown,
     /// The assistant tint is open on stdout and awaits its reset.
     tinted: bool,
     /// Bytes of assistant text printed since the last newline, for prompt
@@ -94,7 +175,8 @@ impl Ui {
             ansi,
             color,
             depth,
-            theme: Theme::matrix(),
+            theme: Theme::from_env(),
+            markdown: Markdown::new(),
             tinted: false,
             mid_line: false,
             out: Box::new(std::io::stdout()),
@@ -106,11 +188,10 @@ impl Ui {
         }
     }
 
-    /// A `Ui` for one dock-managed turn: it renders exactly like this one
-    /// (same mode, color, depth, theme) but its sinks ship every styled byte
-    /// over the dock channel instead of touching the terminal, so the render
-    /// loop stays the terminal's only writer. Confirmations reroute through
-    /// the channel too (`ask`), and the scanner thread never starts.
+    /// A `Ui` for one dock-managed turn. Its public rendering operations ship
+    /// semantic events over the dock channel; its sinks are deliberately inert
+    /// so a future helper that forgets to intercept cannot become a second
+    /// terminal writer. Confirmations reroute through the same channel too.
     pub(crate) fn for_turn(&self, tx: std::sync::mpsc::SyncSender<dock::Ev>) -> Ui {
         Ui {
             mode: self.mode,
@@ -118,14 +199,61 @@ impl Ui {
             color: self.color,
             depth: self.depth,
             theme: self.theme,
+            markdown: Markdown::new(),
             tinted: false,
             mid_line: false,
-            out: Box::new(dock::ChannelWriter(tx.clone())),
-            err: Box::new(dock::ChannelWriter(tx.clone())),
+            out: Box::new(std::io::sink()),
+            err: Box::new(std::io::sink()),
             scanner: None,
             turn_tx: Some(tx),
             #[cfg(test)]
             forced_ask: None,
+        }
+    }
+
+    /// Main-thread renderer paired with [`Ui::for_turn`]. It uses the exact
+    /// same mode and theme as the production surface, but collects bytes until
+    /// the dock chooses a repaint boundary.
+    pub(super) fn buffered_turn_renderer(&self) -> BufferedTurnRenderer {
+        let buffer = TurnBuffer::default();
+        BufferedTurnRenderer {
+            ui: Ui {
+                mode: self.mode,
+                ansi: self.ansi,
+                color: self.color,
+                depth: self.depth,
+                theme: self.theme,
+                markdown: Markdown::new(),
+                tinted: false,
+                mid_line: false,
+                out: Box::new(buffer.clone()),
+                err: Box::new(buffer.clone()),
+                scanner: None,
+                turn_tx: None,
+                #[cfg(test)]
+                forced_ask: None,
+            },
+            buffer,
+        }
+    }
+
+    /// Send one semantic render operation from a turn Ui. Returning true means
+    /// this is a turn surface and the caller must not also render locally. A
+    /// closed channel is swallowed because teardown must never panic a worker.
+    fn send_turn(&self, event: TurnEvent) -> bool {
+        let Some(tx) = &self.turn_tx else {
+            return false;
+        };
+        let _ = tx.send(dock::Ev::Render(event));
+        true
+    }
+
+    /// Finish a dock turn through the same sender instance that emitted its
+    /// semantic operations. The worker calls this only after parking its result,
+    /// making `End` a strict FIFO barrier after all rendering from that turn.
+    pub(crate) fn turn_end(&self) {
+        if let Some(tx) = &self.turn_tx {
+            let _ = tx.send(dock::Ev::End);
         }
     }
 
@@ -134,6 +262,13 @@ impl Ui {
     /// terminal flag, so `exec` at a tty stays raw.
     fn styled(&self) -> bool {
         self.mode == Mode::Repl && self.color
+    }
+
+    /// Rich text is an interactive-terminal feature, not a color feature.
+    /// `NO_COLOR` removes SGR while headings, lists, code, tables, and control
+    /// sanitization remain readable. Piped and headless surfaces stay raw.
+    fn rich_text(&self) -> bool {
+        self.mode == Mode::Repl && self.ansi
     }
 
     /// True at an interactive REPL terminal. Gates the exit session hint, which
@@ -162,8 +297,8 @@ impl Ui {
 
     /// Open a dock session: the persistent-input REPL driver (fable.md).
     /// Engages only where the raw editor would (interactive REPL, both ends
-    /// ttys, `NOOB_RAW` on) AND `NOOB_DOCK=1` opts in while the driver is
-    /// being proven; every other surface keeps the exact existing readers.
+    /// ttys, and `NOOB_RAW` on). `NOOB_DOCK=0` is the explicit compatibility
+    /// opt-out; every other surface keeps the existing line readers.
     pub fn dock_session(&mut self) -> Option<dock::DockSession> {
         if self.use_raw_editor() && dock::enabled_by_env() {
             dock::DockSession::start()
@@ -210,6 +345,7 @@ impl Ui {
     /// role; an empty opener (depthless) falls through to the legacy path.
     fn styled_line(&mut self, line: &str, opener: &str) {
         self.end_line();
+        let line = safe_terminal_text(line);
         let rendered = if self.styled() && !opener.is_empty() {
             format!("{opener}{line}{RESET}\n")
         } else if self.ansi {
@@ -233,6 +369,8 @@ impl Ui {
     /// reserved failure color and a failed line reads red end to end.
     fn activity_line(&mut self, line: &str, is_error: bool) {
         self.end_line();
+        let line = safe_terminal_text(line);
+        let line = line.as_ref();
         let rendered = if self.styled() {
             // styled() implies a real depth, so every opener below is non-empty.
             if is_error {
@@ -277,6 +415,9 @@ impl Ui {
         if s.is_empty() {
             return;
         }
+        if self.send_turn(TurnEvent::Text(s.to_string())) {
+            return;
+        }
         match self.mode {
             Mode::ExecJson => self.event(json!({"t": "text", "d": s})),
             // A child's stdout carries exactly one JSON line at the end; its
@@ -284,6 +425,14 @@ impl Ui {
             Mode::Child => {
                 self.err_out(s);
                 self.mid_line = !s.ends_with('\n');
+            }
+            _ if self.rich_text() => {
+                let rendered =
+                    self.markdown.feed(s, prompt::term_width(), &self.theme, self.depth);
+                if !rendered.is_empty() {
+                    self.out(&rendered);
+                    self.mid_line = !rendered.ends_with('\n');
+                }
             }
             _ => {
                 if self.styled() && !self.tinted {
@@ -305,10 +454,17 @@ impl Ui {
     /// display; it never lands in transcripts or JSON events. Behavior is
     /// unchanged; it closes any open assistant tint first so the two never nest.
     pub fn reasoning_delta(&mut self, s: &str) {
+        if s.is_empty() {
+            return;
+        }
+        if self.send_turn(TurnEvent::Reasoning(s.to_string())) {
+            return;
+        }
         if self.mode == Mode::Repl && self.ansi && !s.is_empty() {
             self.close_tint();
-            self.out(&format!("{DIM}{s}{RESET}"));
-            self.mid_line = !s.ends_with('\n');
+            let safe = safe_terminal_text(s);
+            self.out(&format!("{DIM}{safe}{RESET}"));
+            self.mid_line = !safe.ends_with('\n');
         }
     }
 
@@ -324,7 +480,20 @@ impl Ui {
     /// Close an unterminated streamed line, if any (on the stream the text went
     /// to: a child's text lives on stderr, everyone else's on stdout).
     pub fn end_line(&mut self) {
+        if self.send_turn(TurnEvent::EndLine) {
+            return;
+        }
         self.close_tint();
+        if self.rich_text() && self.markdown.has_pending() {
+            // `finish` also clears CRLF/fence/table state when it currently
+            // has no visible bytes, so every assistant message starts clean.
+            let rendered =
+                self.markdown.finish(prompt::term_width(), &self.theme, self.depth);
+            if !rendered.is_empty() {
+                self.out(&rendered);
+                self.mid_line = !rendered.ends_with('\n');
+            }
+        }
         if self.mid_line {
             if self.mode == Mode::Child {
                 self.err_out("\n");
@@ -335,28 +504,53 @@ impl Ui {
         }
     }
 
-    /// A tool call is about to run (emission order).
-    pub fn tool_start(&mut self, name: &str, args: &Value, read_only: bool) {
+    /// Record a model-requested call on the JSONL surface. Interactive tool
+    /// activity waits for the scheduler's real start transition instead.
+    pub fn tool_requested(&mut self, name: &str, args: &Value) {
+        if self.mode == Mode::ExecJson {
+            self.event(json!({"t": "tool", "name": name, "args": args}));
+        }
+    }
+
+    /// A tool call is actually about to run.
+    pub fn tool_start(&mut self, id: &str, name: &str, brief: &str, read_only: bool) {
+        if self.turn_tx.is_some() {
+            let _ = self.send_turn(TurnEvent::ToolStart {
+                id: id.to_string(),
+                name: name.to_string(),
+                brief: brief.to_string(),
+                read_only,
+            });
+            return;
+        }
         match self.mode {
-            Mode::ExecJson => self.event(json!({"t": "tool", "name": name, "args": args})),
-            _ => {
-                // Barrier calls (bash, edit, ...) may run long; announce them.
-                // Read-only groups print only their completion line.
-                if !read_only {
-                    let brief = brief_args(name, args);
-                    let line = if brief.is_empty() {
-                        name.to_string()
-                    } else {
-                        format!("{name} {brief}")
-                    };
-                    self.activity_line(&line, false);
-                }
-            }
+            Mode::ExecJson => {}
+            _ => self.render_tool_start(name, brief, read_only),
+        }
+    }
+
+    fn render_tool_start(&mut self, name: &str, brief: &str, read_only: bool) {
+        // Barrier calls may run long; read-only groups keep their compact
+        // completion-only transcript while the dock still names them live.
+        if !read_only {
+            let line = if brief.is_empty() {
+                name.to_string()
+            } else {
+                format!("{name} {brief}")
+            };
+            self.activity_line(&line, false);
         }
     }
 
     /// A tool call finished (emission order).
     pub fn tool_done(&mut self, id: &str, summary: &str, is_error: bool) {
+        if self.send_turn(TurnEvent::ToolDone {
+            id: id.to_string(),
+            summary: summary.to_string(),
+            is_error,
+        }) {
+            return;
+        }
         match self.mode {
             Mode::ExecJson => self.event(json!({"t": "result", "id": id, "err": is_error})),
             _ => self.activity_line(summary, is_error),
@@ -365,6 +559,9 @@ impl Ui {
 
     /// Loop / lifecycle note ("cache prefix reset: compaction", nudges).
     pub fn note(&mut self, line: &str) {
+        if self.send_turn(TurnEvent::Note(line.to_string())) {
+            return;
+        }
         match self.mode {
             Mode::ExecJson => self.err_out(&format!("{line}\n")),
             _ => {
@@ -376,6 +573,9 @@ impl Ui {
 
     /// An error line: red when styled, otherwise identical bytes to a note.
     pub fn error(&mut self, line: &str) {
+        if self.send_turn(TurnEvent::Error(line.to_string())) {
+            return;
+        }
         match self.mode {
             Mode::ExecJson => self.err_out(&format!("{line}\n")),
             _ => {
@@ -439,7 +639,7 @@ impl Ui {
         }
         self.end_line();
         unsafe { libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH) };
-        self.out(&format!("{question} [y/N] "));
+        self.out(&format!("{} [y/N] ", safe_terminal_text(question)));
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).is_err() {
             return false;
@@ -449,6 +649,9 @@ impl Ui {
 
     /// End of one user input's processing.
     pub fn done(&mut self, usage: Option<Usage>) {
+        if self.send_turn(TurnEvent::Done(usage)) {
+            return;
+        }
         if self.mode == Mode::ExecJson {
             let u = usage.map(|u| {
                 json!({
@@ -464,6 +667,35 @@ impl Ui {
     }
 }
 
+/// Make display text harmless before surrounding it with terminal controls.
+/// Newlines remain structural, tabs become spaces, carriage returns become
+/// newlines, and every other C0/C1 byte becomes visible. Model assistant text
+/// uses the stateful Markdown sanitizer; this covers reasoning, tool summaries,
+/// notes, endpoint strings, and confirmation questions.
+fn safe_terminal_text(input: &str) -> std::borrow::Cow<'_, str> {
+    let clean = input.chars().all(|c| {
+        c == '\n' || !matches!(c as u32, 0x00..=0x1f | 0x7f..=0x9f)
+    });
+    if clean {
+        return std::borrow::Cow::Borrowed(input);
+    }
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        match c {
+            '\n' => out.push('\n'),
+            '\r' => out.push('\n'),
+            '\t' => out.push_str("    "),
+            c if (c as u32) <= 0x1f => {
+                out.push(char::from_u32(0x2400 + c as u32).unwrap_or('�'));
+            }
+            '\u{7f}' => out.push('␡'),
+            c if matches!(c as u32, 0x80..=0x9f) => out.push('�'),
+            c => out.push(c),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// Color allowed unless `NO_COLOR` is present and non-empty (the spec: honor it
 /// only when set to a non-empty value).
 fn no_color_allowed() -> bool {
@@ -474,7 +706,7 @@ fn no_color_allowed() -> bool {
 }
 
 /// The most telling argument for the one-line activity display.
-fn brief_args(name: &str, args: &Value) -> String {
+pub(crate) fn brief_args(name: &str, args: &Value) -> String {
     let s = match name {
         "bash" => args.get("cmd").and_then(Value::as_str).unwrap_or(""),
         "task" => args.get("prompt").and_then(Value::as_str).unwrap_or(""),
@@ -484,13 +716,33 @@ fn brief_args(name: &str, args: &Value) -> String {
             .and_then(Value::as_str)
             .unwrap_or(""),
     };
-    let one = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one.chars().count() > 60 {
-        let cut: String = one.chars().take(60).collect();
-        format!("{cut}…")
-    } else {
-        one
+    let mut shown = String::with_capacity(64);
+    let mut chars = 0usize;
+    let mut first = true;
+    let mut truncated = false;
+    'words: for word in s.split_whitespace() {
+        if !first {
+            if chars == 60 {
+                truncated = true;
+                break;
+            }
+            shown.push(' ');
+            chars += 1;
+        }
+        first = false;
+        for ch in word.chars() {
+            if chars == 60 {
+                truncated = true;
+                break 'words;
+            }
+            shown.push(ch);
+            chars += 1;
+        }
     }
+    if truncated {
+        shown.push('…');
+    }
+    shown
 }
 
 #[cfg(test)]
@@ -533,6 +785,7 @@ mod tests {
             color,
             depth: if color { ColorDepth::Truecolor } else { ColorDepth::None },
             theme: Theme::matrix(),
+            markdown: Markdown::new(),
             tinted: false,
             mid_line: false,
             out: Box::new(out.clone()),
@@ -611,7 +864,7 @@ mod tests {
         // The alignment contract: whatever the label's length, the brief after
         // it starts at the same column, so a column of lines reads cleanly.
         let (mut ui, out, _) = harness(Mode::Repl, true, true);
-        ui.tool_start("bash", &json!({"cmd": "cargo test"}), false); // 4-char label
+        ui.tool_start("b", "bash", "cargo test", false); // 4-char label
         ui.tool_done("t", "task done (2 turns)", false); //                4-char label
         ui.tool_done("l", "ls . (3 entries)", false); //                  2-char label
         let lines: Vec<String> = strip_ansi(&out.text()).lines().map(str::to_string).collect();
@@ -642,7 +895,7 @@ mod tests {
         // Byte-identity for the start line too: piped surfaces get no padding,
         // no color, exactly the pre-v0.2.4 single-space form.
         let (mut ui, out, _) = harness(Mode::Repl, false, false);
-        ui.tool_start("bash", &json!({"cmd": "ls -a"}), false);
+        ui.tool_start("b", "bash", "ls -a", false);
         assert_eq!(out.text(), "* bash ls -a\n");
     }
 
@@ -687,31 +940,27 @@ mod tests {
     }
 
     #[test]
-    fn assistant_tint_opens_once_and_keeps_text_contiguous() {
-        // The word-split streaming case: a marker must survive across deltas.
+    fn assistant_markdown_keeps_split_text_contiguous_and_flushes_cleanly() {
+        // Line buffering keeps a marker or word split across provider deltas
+        // intact, then end_line flushes the final partial line.
         let (mut ui, out, _) = harness(Mode::Repl, true, true);
         ui.text_delta("1. write ");
         ui.text_delta("greeting.txt");
-        let s = out.text();
-        assert!(s.contains("1. write greeting.txt"), "marker split by an escape: {s:?}");
-        // One escape so far (the single opener), no reset yet. Counting escapes
-        // rather than a color keeps this green when the theme is retuned.
-        assert_eq!(s.matches('\x1b').count(), 1, "tint reopened per delta: {s:?}");
+        assert!(out.text().is_empty(), "partial source line should stay buffered");
         ui.end_line();
         let s = out.text();
-        assert_eq!(s.matches('\x1b').count(), 2, "expected one opener + one reset: {s:?}");
-        assert!(s.ends_with("\x1b[0m\n"), "tint not reset before the prompt: {s:?}");
+        assert!(strip_ansi(&s).contains("1. write greeting.txt\n"), "split text changed: {s:?}");
+        assert_eq!(s.matches("\x1b[0m").count() * 2, s.matches("\x1b[").count());
     }
 
     #[test]
-    fn tint_resets_even_when_message_ends_in_newline() {
-        // The bleed bug: a \n-terminated message no-ops the old end_line, so
-        // the tint must be reset unconditionally or it leaks into the prompt.
+    fn markdown_resets_even_when_message_ends_in_newline() {
         let (mut ui, out, _) = harness(Mode::Repl, true, true);
-        ui.text_delta("done\n");
+        ui.text_delta("**done**\n");
         ui.end_line();
         let s = out.text();
-        assert!(s.contains("done\n\x1b[0m"), "tint bled past newline: {s:?}");
+        assert_eq!(strip_ansi(&s), "done\n");
+        assert_eq!(s.matches("\x1b[0m").count() * 2, s.matches("\x1b[").count());
     }
 
     #[test]
@@ -772,23 +1021,23 @@ mod tests {
 
     // --- the turn Ui (dock plumbing) ---------------------------------------
 
-    /// Drain every pending Out event into one byte string.
-    fn drain_out(rx: &std::sync::mpsc::Receiver<dock::Ev>) -> Vec<u8> {
-        let mut bytes = Vec::new();
+    /// Replay every semantic Render event through the main-thread renderer.
+    fn drain_render(
+        rx: &std::sync::mpsc::Receiver<dock::Ev>,
+        renderer: &mut BufferedTurnRenderer,
+    ) -> Vec<u8> {
         while let Ok(ev) = rx.try_recv() {
-            if let dock::Ev::Out(b) = ev {
-                bytes.extend_from_slice(&b);
+            if let dock::Ev::Render(event) = ev {
+                renderer.render(event);
             }
         }
-        bytes
+        renderer.take()
     }
 
     #[test]
-    fn turn_ui_ships_the_exact_styled_bytes_over_the_channel() {
-        // The relay contract: a turn Ui produces byte-for-byte what the
-        // direct Ui would have written, just over the channel. This is what
-        // keeps agent/ and the rendering untouched by the inversion.
+    fn turn_ui_semantics_replay_to_the_exact_direct_bytes() {
         let (mut direct, refout, _) = harness(Mode::Repl, true, true);
+        let mut renderer = direct.buffered_turn_renderer();
         let (tx, rx) = std::sync::mpsc::sync_channel(64);
         let mut turn = direct.for_turn(tx);
         for ui in [&mut direct, &mut turn] {
@@ -799,9 +1048,9 @@ mod tests {
             ui.end_line();
         }
         assert_eq!(
-            String::from_utf8_lossy(&drain_out(&rx)),
+            String::from_utf8_lossy(&drain_render(&rx, &mut renderer)),
             refout.text(),
-            "turn Ui bytes drifted from the direct Ui"
+            "semantic replay drifted from the direct Ui"
         );
     }
 

@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use noob_provider::http::{Client, INTERRUPTED};
 use noob_provider::types::{
-    Event, Finish, Item, Overrides, ProviderError, ToolCall, ToolSpec, TurnRequest, Usage,
+    Event, Finish, Item, Overrides, ProviderError, ToolCall, ToolSpec, TurnRequestRef, Usage,
 };
 
 use crate::session::Session;
@@ -64,6 +64,9 @@ pub struct Agent {
     /// `/skills` change so compaction can pin the drift.
     initial_skills: Vec<String>,
     pub session: Option<Session>,
+    /// A failed append detaches persistence but does not corrupt the in-memory
+    /// transcript. Surface the failure once at the next ordered UI point.
+    pub(crate) session_warning: Option<String>,
     /// NOOB_CTX: the context window compaction budgets against.
     pub ctx_tokens: u64,
     /// Inference rounds allowed per user input. TURN_CAP for the user's
@@ -92,6 +95,37 @@ pub enum RunEnd {
     Interrupted,
     /// A breaker or provider error stopped the run; message states why.
     Aborted(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FinishDisposition {
+    Accept,
+    CompactAndRetry,
+    Abort(String),
+}
+
+/// Decide whether an assembled turn is complete before any assistant item
+/// or tool call is persisted. Error finishes can carry partial text/calls;
+/// those bytes are display-only and must never become executable state.
+fn finish_disposition(finish: &Finish, emergency_used: bool) -> FinishDisposition {
+    match finish {
+        Finish::Stop | Finish::ToolCalls => FinishDisposition::Accept,
+        Finish::Length if !emergency_used => FinishDisposition::CompactAndRetry,
+        Finish::Length => FinishDisposition::Abort(
+            "the model hit the end of the context again after compaction; the partial response \
+             was discarded; start a new session or raise NOOB_CTX"
+                .to_string(),
+        ),
+        Finish::ContentFilter => FinishDisposition::Abort(
+            "the model's content filter stopped the response; the partial response was \
+             discarded and no tool calls were executed"
+                .to_string(),
+        ),
+        Finish::Error(message) => FinishDisposition::Abort(format!(
+            "model response failed: {message}; the partial response was discarded and no tool \
+             calls were executed"
+        )),
+    }
 }
 
 impl Agent {
@@ -128,6 +162,7 @@ impl Agent {
             tool_ctx,
             initial_skills,
             session,
+            session_warning: None,
             ctx_tokens,
             max_rounds: TURN_CAP,
             last_rounds: 0,
@@ -160,6 +195,7 @@ impl Agent {
             .cloned()
             .collect();
         self.push_item(Item::User(PLAN_ENTER_MSG.to_string()));
+        self.show_session_warning(ui);
         ui.note("cache prefix reset: plan mode (read-only tools; approve with /go)");
         true
     }
@@ -246,6 +282,7 @@ impl Agent {
                 ));
             }
             self.push_item(Item::User(msg));
+            self.show_session_warning(ui);
         }
         (added, removed)
     }
@@ -276,15 +313,26 @@ impl Agent {
 
     fn push_item(&mut self, item: Item) {
         self.chars_since_usage += compact::item_chars(&item);
-        if let Some(s) = &mut self.session {
-            s.log_item(&item);
+        let failure = self.session.as_mut().and_then(|session| session.log_item(&item).err());
+        if let Some(error) = failure {
+            self.session = None;
+            self.session_warning = Some(format!(
+                "session persistence failed: {error}; continuing in memory without a saved session"
+            ));
         }
         self.items.push(item);
+    }
+
+    pub(crate) fn show_session_warning(&mut self, ui: &mut Ui) {
+        if let Some(warning) = self.session_warning.take() {
+            ui.error(&warning);
+        }
     }
 
     /// Process one user input to completion (or breaker / interrupt).
     pub fn run_input(&mut self, input: &str, ui: &mut Ui) -> RunEnd {
         self.push_item(Item::User(input.to_string()));
+        self.show_session_warning(ui);
         self.consec_errors = 0;
         self.last_rounds = 0;
         let mut emergency_used = false;
@@ -301,16 +349,16 @@ impl Agent {
                     return self.finish_interrupt(ui, &[]);
                 }
             }
-            let req = TurnRequest {
-                system: Some(self.system.clone()),
-                items: self.items.clone(),
-                tools: self.tools.clone(),
+            let req = TurnRequestRef {
+                system: Some(&self.system),
+                items: &self.items,
+                tools: &self.tools,
             };
-            let result = noob_provider::run_turn(
+            let result = noob_provider::run_turn_ref(
                 &self.client,
                 &self.config_dir,
                 &self.ov,
-                &req,
+                req,
                 &mut |ev| match ev {
                     Event::Text(t) => ui.text_delta(&t),
                     Event::Reasoning(r) => ui.reasoning_delta(&r),
@@ -347,24 +395,33 @@ impl Agent {
                 Ok(turn) => turn,
             };
 
-            // Output is never capped, so Length means the context filled up
-            // mid-turn: discard the partial turn, compact once, retry.
-            if turn.finish == Finish::Length && !emergency_used {
-                emergency_used = true;
-                ui.end_line();
-                ui.note("the model hit the end of the context mid-turn; compacting and retrying");
-                let compacted = self.compact(ui);
-                if INTERRUPTED.load(Ordering::SeqCst) {
-                    return self.finish_interrupt(ui, &[]);
-                }
-                if !compacted {
-                    return RunEnd::Aborted(
-                        "the context window is full and nothing is left to compact; \
-                         start a new session"
-                            .to_string(),
+            // Validate the finish before persisting the assistant turn or
+            // executing any calls parsed from an incomplete response.
+            match finish_disposition(&turn.finish, emergency_used) {
+                FinishDisposition::Accept => {}
+                FinishDisposition::CompactAndRetry => {
+                    emergency_used = true;
+                    ui.end_line();
+                    ui.note(
+                        "the model hit the end of the context mid-turn; compacting and retrying",
                     );
+                    let compacted = self.compact(ui);
+                    if INTERRUPTED.load(Ordering::SeqCst) {
+                        return self.finish_interrupt(ui, &[]);
+                    }
+                    if !compacted {
+                        return RunEnd::Aborted(
+                            "the context window is full and nothing is left to compact; \
+                             start a new session"
+                                .to_string(),
+                        );
+                    }
+                    continue;
                 }
-                continue;
+                FinishDisposition::Abort(message) => {
+                    ui.end_line();
+                    return RunEnd::Aborted(message);
+                }
             }
             ui.end_line();
             self.push_item(Item::Assistant {
@@ -372,6 +429,7 @@ impl Agent {
                 tool_calls: turn.tool_calls.clone(),
                 raw_items: turn.raw_items.clone(),
             });
+            self.show_session_warning(ui);
             // Server-reported usage covers the prompt AND this turn's reply,
             // so it lands AFTER the assistant item is pushed: adding the
             // item's chars on top would double-count the reply and trigger
@@ -399,20 +457,43 @@ impl Agent {
             // Plan the batch: doom-loop intercepts and argument parsing
             // happen up front, in emission order.
             let mut batch = Vec::new();
+            let mut shown_briefs = Vec::new();
             for call in &turn.tool_calls {
-                let (planned, shown_args) = self.plan_call(call);
+                let (planned, shown) = self.plan_call(call);
+                ui.tool_requested(&call.name, &shown);
+                shown_briefs.push(crate::ui::brief_args(&call.name, &shown));
                 let planned = self.gate_skills_write(planned, ui);
-                ui.tool_start(&call.name, &shown_args, tools::is_read_only(&call.name));
                 batch.push(planned);
+                if INTERRUPTED.load(Ordering::SeqCst) {
+                    self.tool_ctx.approved_skill_writes.lock().unwrap().clear();
+                    return self.finish_interrupt(ui, &turn.tool_calls);
+                }
             }
-            let outcomes = sched::run_batch(&self.tool_ctx, batch);
+            let outcomes = sched::run_batch_with(&self.tool_ctx, batch, |progress| match progress {
+                sched::Progress::Started { index } => {
+                    let call = &turn.tool_calls[index];
+                    ui.tool_start(
+                        &call.id,
+                        &call.name,
+                        &shown_briefs[index],
+                        tools::is_read_only(&call.name),
+                    );
+                }
+                sched::Progress::Finished { index, outcome } => {
+                    if let Some(warning) = &outcome.warning {
+                        ui.note(warning);
+                    }
+                    let call = &turn.tool_calls[index];
+                    ui.tool_done(&call.id, &outcome.summary, outcome.is_error);
+                }
+            });
+            // Approvals belong to this one planned batch. Successful tools
+            // consumed their counts; cancellation or a crash must not leak an
+            // unused grant into a later model turn.
+            self.tool_ctx.approved_skill_writes.lock().unwrap().clear();
 
             let mut nudge = false;
             for (call, outcome) in turn.tool_calls.iter().zip(&outcomes) {
-                if let Some(w) = &outcome.warning {
-                    ui.note(w);
-                }
-                ui.tool_done(&call.id, &outcome.summary, outcome.is_error);
                 // A canceled call never executed: drop its doom-window
                 // record so an immediate retry after the interrupt is not
                 // intercepted as a repeat that "will not change". Keyed on
@@ -434,6 +515,7 @@ impl Agent {
                     self.consec_errors = 0;
                 }
             }
+            self.show_session_warning(ui);
             if INTERRUPTED.load(Ordering::SeqCst) {
                 return self.finish_interrupt(ui, &[]);
             }
@@ -467,6 +549,7 @@ impl Agent {
                      re-read the file or take a different approach"
                         .to_string(),
                 ));
+                self.show_session_warning(ui);
             }
         }
         RunEnd::Aborted(format!(
@@ -489,6 +572,7 @@ impl Agent {
             });
         }
         self.push_item(Item::User("[interrupted]".to_string()));
+        self.show_session_warning(ui);
         ui.note("[interrupted]");
         RunEnd::Interrupted
     }
@@ -521,7 +605,9 @@ impl Agent {
                 .approved_skill_writes
                 .lock()
                 .unwrap()
-                .insert(target);
+                .entry(target)
+                .and_modify(|count| *count = count.saturating_add(1))
+                .or_insert(1);
             return planned;
         }
         sched::Planned::Canned(ToolOutcome::err(
@@ -674,7 +760,7 @@ fn recover_loaded_skills(tool_ctx: &ToolCtx, items: &[Item]) {
     }
     let mut loaded = tool_ctx.loaded_skills.lock().unwrap();
     for name in recovered {
-        if tool_ctx.skills.iter().any(|s| s.name == name) && !loaded.iter().any(|n| *n == name) {
+        if tool_ctx.skills.iter().any(|s| s.name == name) && !loaded.contains(&name) {
             loaded.push(name);
         }
     }
@@ -1076,5 +1162,25 @@ mod tests {
         // Ordinary 400s must NOT trigger emergency compaction.
         assert!(!looks_like_context_overflow("Unknown field: stream_options"));
         assert!(!looks_like_context_overflow("invalid model name"));
+    }
+
+    #[test]
+    fn incomplete_finishes_are_never_accepted_after_assembly() {
+        assert_eq!(
+            finish_disposition(&Finish::Length, false),
+            FinishDisposition::CompactAndRetry
+        );
+        assert!(matches!(
+            finish_disposition(&Finish::Length, true),
+            FinishDisposition::Abort(message) if message.contains("again after compaction")
+        ));
+        assert!(matches!(
+            finish_disposition(&Finish::ContentFilter, false),
+            FinishDisposition::Abort(message) if message.contains("no tool calls were executed")
+        ));
+        assert!(matches!(
+            finish_disposition(&Finish::Error("upstream failed".into()), false),
+            FinishDisposition::Abort(message) if message.contains("upstream failed")
+        ));
     }
 }

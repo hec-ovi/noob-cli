@@ -39,6 +39,8 @@ enum Kind {
 fn kind(planned: &Planned) -> Kind {
     match planned {
         Planned::Canned(_) => Kind::Free,
+        #[cfg(test)]
+        Planned::Run { name, .. } if name == "__test_wait" => Kind::Read,
         Planned::Run { name, .. } if name == "task" => Kind::Task,
         Planned::Run { name, .. } if tools::is_read_only(name) => Kind::Read,
         Planned::Run { .. } => Kind::Mutating,
@@ -96,21 +98,47 @@ fn partition(kinds: &[Kind]) -> Vec<Group> {
 /// between barriers or waves cancels every remaining call with a synthetic
 /// "canceled by user" result: a mutation must never land AFTER the user
 /// canceled, and every call id still gets exactly one result.
+pub enum Progress<'a> {
+    Started { index: usize },
+    Finished { index: usize, outcome: &'a ToolOutcome },
+}
+
+#[cfg(test)]
 pub fn run_batch(ctx: &ToolCtx, batch: Vec<Planned>) -> Vec<ToolOutcome> {
+    run_batch_with(ctx, batch, |_| {})
+}
+
+/// Execute a batch while reporting lifecycle transitions on the scheduler
+/// thread. Starts are emitted immediately before execution; parallel finishes
+/// are reported in real completion order. Returned outcomes remain in model
+/// emission order, preserving the transcript and cache invariants.
+pub fn run_batch_with(
+    ctx: &ToolCtx,
+    batch: Vec<Planned>,
+    mut on_progress: impl FnMut(Progress<'_>),
+) -> Vec<ToolOutcome> {
     let kinds: Vec<Kind> = batch.iter().map(kind).collect();
     let mut slots: Vec<Option<ToolOutcome>> = batch.iter().map(|_| None).collect();
     // Consume left to right so each Planned is moved exactly once.
     let mut batch: Vec<Option<Planned>> = batch.into_iter().map(Some).collect();
     for group in partition(&kinds) {
         if INTERRUPTED.load(Ordering::SeqCst) {
-            for slot in slots[group.range.clone()].iter_mut() {
-                *slot = Some(ToolOutcome::canceled());
+            for index in group.range.clone() {
+                let outcome = ToolOutcome::canceled();
+                on_progress(Progress::Finished { index, outcome: &outcome });
+                slots[index] = Some(outcome);
             }
             continue; // later groups get their synthetic results too
         }
         if group.kind == Kind::Mutating {
-            let planned = batch[group.range.start].take().unwrap();
-            slots[group.range.start] = Some(execute(ctx, planned));
+            let index = group.range.start;
+            let planned = batch[index].take().unwrap();
+            if matches!(&planned, Planned::Run { .. }) {
+                on_progress(Progress::Started { index });
+            }
+            let outcome = execute(ctx, planned);
+            on_progress(Progress::Finished { index, outcome: &outcome });
+            slots[index] = Some(outcome);
             continue;
         }
         let cap = match group.kind {
@@ -125,24 +153,51 @@ pub fn run_batch(ctx: &ToolCtx, batch: Vec<Planned>) -> Vec<ToolOutcome> {
         for wave in group_items.chunks(cap) {
             if INTERRUPTED.load(Ordering::SeqCst) {
                 for (k, _) in wave {
-                    slots[*k] = Some(ToolOutcome::canceled());
+                    let outcome = ToolOutcome::canceled();
+                    on_progress(Progress::Finished { index: *k, outcome: &outcome });
+                    slots[*k] = Some(outcome);
                 }
                 continue;
             }
-            // chunks() can't move out; rebind by reference and execute via
-            // scoped threads writing into disjoint slots.
             std::thread::scope(|scope| {
-                let handles: Vec<_> = wave
-                    .iter()
-                    .map(|(k, planned)| (*k, scope.spawn(move || execute_ref(ctx, planned))))
-                    .collect();
-                for (k, handle) in handles {
-                    slots[k] = Some(handle.join().unwrap_or_else(|_| {
-                        ToolOutcome::err(
-                            "the tool crashed while running; this is a noob bug, \
-                             try a different approach",
-                        )
-                    }));
+                let (done_tx, done_rx) = std::sync::mpsc::channel();
+                let mut running = 0usize;
+                for (index, planned) in wave {
+                    match planned {
+                        Planned::Canned(_) => {
+                            let outcome = execute_ref(ctx, planned);
+                            on_progress(Progress::Finished {
+                                index: *index,
+                                outcome: &outcome,
+                            });
+                            slots[*index] = Some(outcome);
+                        }
+                        Planned::Run { .. } => {
+                            on_progress(Progress::Started { index: *index });
+                            running += 1;
+                            let tx = done_tx.clone();
+                            scope.spawn(move || {
+                                let outcome = std::panic::catch_unwind(
+                                    std::panic::AssertUnwindSafe(|| execute_ref(ctx, planned)),
+                                )
+                                .unwrap_or_else(|_| {
+                                    ToolOutcome::err(
+                                        "the tool crashed while running; this is a noob bug, \
+                                         try a different approach",
+                                    )
+                                });
+                                let _ = tx.send((*index, outcome));
+                            });
+                        }
+                    }
+                }
+                drop(done_tx);
+                for _ in 0..running {
+                    let (index, outcome) = done_rx
+                        .recv()
+                        .expect("every scoped tool sends one completion");
+                    on_progress(Progress::Finished { index, outcome: &outcome });
+                    slots[index] = Some(outcome);
                 }
             });
         }
@@ -153,7 +208,7 @@ pub fn run_batch(ctx: &ToolCtx, batch: Vec<Planned>) -> Vec<ToolOutcome> {
 fn execute(ctx: &ToolCtx, planned: Planned) -> ToolOutcome {
     match planned {
         Planned::Canned(out) => out,
-        Planned::Run { name, args } => tools::dispatch(ctx, &name, &args),
+        Planned::Run { name, args } => dispatch(ctx, &name, &args),
     }
 }
 
@@ -166,8 +221,18 @@ fn execute_ref(ctx: &ToolCtx, planned: &Planned) -> ToolOutcome {
             warning: out.warning.clone(),
             canceled: out.canceled,
         },
-        Planned::Run { name, args } => tools::dispatch(ctx, name, args),
+        Planned::Run { name, args } => dispatch(ctx, name, args),
     }
+}
+
+fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
+    #[cfg(test)]
+    if name == "__test_wait" {
+        let millis = args.get("millis").and_then(Value::as_u64).unwrap_or(1);
+        std::thread::sleep(std::time::Duration::from_millis(millis));
+        return ToolOutcome::ok(millis.to_string(), format!("waited {millis}ms"));
+    }
+    tools::dispatch(ctx, name, args)
 }
 
 #[cfg(test)]
@@ -205,47 +270,41 @@ mod tests {
     #[test]
     fn read_only_group_genuinely_overlaps() {
         let (_t, ctx) = ctx();
-        // 6 FIFOs; each read blocks on open until a writer arrives. The
-        // writer services them in REVERSE emission order, so a serialized
-        // scheduler would wedge on the first read forever; only a concurrent
-        // group lets the writer reach the last FIFO while the first is
-        // still waiting.
-        let n = 6;
-        for i in 0..n {
-            let p = ctx.workspace.join(format!("fifo{i}"));
-            let c = std::ffi::CString::new(p.to_str().unwrap()).unwrap();
-            assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
-        }
-        let ws = ctx.workspace.clone();
-        let writer = std::thread::spawn(move || {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            for i in (0..n).rev() {
-                let p = ws.join(format!("fifo{i}"));
-                let deadline = Instant::now() + Duration::from_secs(5);
-                // Non-blocking open fails with ENXIO until a reader is
-                // present; a bounded retry turns "not concurrent" into a
-                // clean panic instead of a hung test.
-                let mut file = loop {
-                    match std::fs::OpenOptions::new()
-                        .write(true)
-                        .custom_flags(libc::O_NONBLOCK)
-                        .open(&p)
-                    {
-                        Ok(f) => break f,
-                        Err(_) if Instant::now() < deadline => {
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
-                        Err(e) => panic!("reads did not run concurrently: fifo{i}: {e}"),
-                    }
-                };
-                file.write_all(b"data\n").unwrap();
-            }
+        // A test-only read-class operation isolates scheduler timing without
+        // teaching the real read tool to open FIFOs or other special files.
+        let waits: Vec<Planned> = (0..6)
+            .map(|_| Planned::Run {
+                name: "__test_wait".into(),
+                args: json!({"millis": 100}),
+            })
+            .collect();
+        let started = Instant::now();
+        let out = run_batch(&ctx, waits);
+        assert_eq!(out.len(), 6);
+        assert!(out.iter().all(|o| !o.is_error));
+        assert!(
+            started.elapsed() < Duration::from_millis(350),
+            "six 100ms reads serialized: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn progress_reports_parallel_finishes_when_they_really_complete() {
+        let (_t, ctx) = ctx();
+        let batch = vec![
+            Planned::Run { name: "__test_wait".into(), args: json!({"millis": 80}) },
+            Planned::Run { name: "__test_wait".into(), args: json!({"millis": 5}) },
+        ];
+        let mut events = Vec::new();
+        let out = run_batch_with(&ctx, batch, |event| match event {
+            Progress::Started { index } => events.push(("start", index)),
+            Progress::Finished { index, .. } => events.push(("done", index)),
         });
-        let out = run_batch(&ctx, (0..n).map(|i| read(&format!("fifo{i}"))).collect());
-        writer.join().unwrap();
-        assert_eq!(out.len(), n);
-        assert!(out.iter().all(|o| !o.is_error), "{:?}", out[0].content);
+        assert_eq!(events[..2], [("start", 0), ("start", 1)]);
+        assert_eq!(events[2..], [("done", 1), ("done", 0)]);
+        assert_eq!(out[0].content, "80");
+        assert_eq!(out[1].content, "5");
     }
 
     #[test]

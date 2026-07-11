@@ -1,30 +1,19 @@
 # noob/src/tools
 
-The built-in tool set: read, write, edit, bash, grep, glob, ls, plus skill
-(registered only when discovery found at least one skill) and the registry
-(`specs()` + `skill::spec()`, byte-stable for the session). Each tool is a
-pure fn(ctx, args) -> ToolOutcome with no knowledge of the agent loop.
+Built-in tools and their schemas. Core tools are read, write, edit, bash, grep, glob, and ls. Skill, MCP, and task tools register only when available.
 
-Key rules:
-- read returns plain text with NO line numbers (number prefixes contaminate
-  small-model edit strings); the header states the page and total for
-  offset/limit paging.
-- edit is exact string replace with a deterministic ladder (A trailing
-  whitespace, B typographic fold, C uniform indent shift), hard ambiguity
-  rejection at every stage, and teaching errors that escalate to the real
-  file region on repeat failures. No similarity-score fuzzing, ever.
-- write/edit sit behind check-and-set (`guard.rs`: fnv1a64 stamps recorded
-  by read, verified before mutation) and the workspace sandbox path policy
-  (symlink escapes rejected); writes are atomic (temp + fsync + rename,
-  mode preserved).
-- bash merges stdout/stderr at the fd level, runs in its own process group,
-  and is killed as a group on timeout (default 120s, max 600s).
-- grep/glob are gitignore-aware (ignore crate); ls is not (explicit listing).
-- skill returns the SKILL.md body (frontmatter stripped, byte-exact) plus
-  the skill's directory, capped at 24 KiB with a read pointer; oversize
-  bodies raise a UI-only warning citing the standard's ~5k-token
-  recommendation; loads are tracked in `ToolCtx.loaded_skills` for the
-  post-compaction re-listing.
-- Every result is truncated ONCE at emission (`truncate.rs`, caps and
-  marker phrasing frozen in golden tests; every marker names the next
-  action), then byte-frozen in the transcript.
+## File operations
+
+- `read` opens with `O_NONBLOCK`, checks the opened handle is a regular file, drains the whole file in chunks, hashes all bytes, and retains only the requested bounded page. It returns no line-number prefixes.
+- `write` and `edit` require current read stamps before overwriting, reject symlink escapes in workspace mode, and publish through same-directory temp, fsync, and rename.
+- `edit` tries exact bytes, trailing whitespace, typographic folding, uniform indentation, and CRLF-compatible views. Every stage rejects ambiguity.
+
+## Processes and results
+
+- `bash` merges stdout and stderr, continuously drains through a bounded head/tail buffer, and kills its process group on timeout or cancellation.
+- `grep` and `glob` honor gitignore; `ls` lists explicitly.
+- Retained tool results are bounded once before transcript insertion and include continuation instructions when clipped.
+- Tool operations continue to completion or cancellation even when only a bounded display/context result is retained.
+- `ToolOutcome.canceled` is a structural flag, including for tools already running when interruption arrives.
+
+Skills-directory write and edit targets require a one-use approval recorded by the agent and rechecked against the real execution target.

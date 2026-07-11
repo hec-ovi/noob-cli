@@ -22,7 +22,7 @@
 //! summarizer. A provider failure sets a backoff so a failing summarizer
 //! is not retried on every subsequent round (the compression-loop trap).
 
-use noob_provider::types::{Item, ProviderError, TurnRequest};
+use noob_provider::types::{Item, ProviderError, TurnRequestRef};
 
 use super::{Agent, looks_like_context_overflow, prompt};
 use crate::ui::Ui;
@@ -232,20 +232,20 @@ impl Agent {
         let mut middle: Vec<Item> = self.items[..cut].to_vec();
         middle.push(Item::User(SUMMARIZE_ASK.to_string()));
         let middle_chars: usize = self.items[..cut].iter().map(item_chars).sum();
-        let req = TurnRequest {
-            system: Some(prompt::COMPACT_MD.to_string()),
-            items: middle,
-            tools: vec![],
+        let req = TurnRequestRef {
+            system: Some(prompt::COMPACT_MD),
+            items: &middle,
+            tools: &[],
         };
         ui.note("compacting the conversation…");
         let mut summary: Option<String> = None;
         let mut hard_drop_reason: Option<String> = None;
         for attempt in 0..2 {
-            let result = noob_provider::run_turn(
+            let result = noob_provider::run_turn_ref(
                 &self.client,
                 &self.config_dir,
                 &self.ov,
-                &req,
+                req,
                 &mut |_ev| {},
             );
             match result {
@@ -374,15 +374,23 @@ impl Agent {
     /// Install a compacted transcript and reset everything the old one
     /// backed: the repeat detector (an identical call is now legitimate),
     /// the usage baseline, the failure backoff, and the session log.
-    fn adopt(&mut self, items: Vec<Item>, _ui: &mut Ui) {
+    fn adopt(&mut self, items: Vec<Item>, ui: &mut Ui) {
         self.items = items;
         self.recent_calls.clear();
         self.last_usage = None;
         self.chars_since_usage = self.items.iter().map(item_chars).sum();
         self.compact_backoff = 0;
-        if let Some(s) = &mut self.session {
-            s.log_reset(&self.items);
+        let failure = self
+            .session
+            .as_mut()
+            .and_then(|session| session.log_reset(&self.items).err());
+        if let Some(error) = failure {
+            self.session = None;
+            self.session_warning = Some(format!(
+                "session persistence failed: {error}; continuing in memory without a saved session"
+            ));
         }
+        self.show_session_warning(ui);
     }
 }
 

@@ -694,6 +694,12 @@ fn match_esc(data: &[u8]) -> Option<(EscKind, usize)> {
         return None; // just ESC so far
     }
     let intro = data[1];
+    if intro == 0x1b {
+        // Two rapid human ESC presses can arrive in one read. Emit the first
+        // now and leave the second for the normal dangling-ESC grace path;
+        // treating ESC+ESC as an unknown chord would silently lose one tap.
+        return Some((EscKind::Key(Key::Esc), 1));
+    }
     if intro != b'[' && intro != b'O' {
         // ESC + anything else (a lone ESC, an Alt-chord): drop the ESC only.
         return Some((EscKind::Ignore, 1));
@@ -1066,7 +1072,7 @@ mod tests {
         // left holding an unbounded junk sequence).
         let mut dec = Decoder::default();
         let mut body = Vec::from(&b"\x1b["[..]);
-        body.extend(std::iter::repeat(b'0').take(200));
+        body.extend(std::iter::repeat_n(b'0', 200));
         let ks = dec.feed(&body);
         assert!(ks.iter().any(|k| matches!(k, Key::Char('0'))), "did not recover: {ks:?}");
         assert_eq!(dec.feed(b"a\r"), vec![Key::Char('a'), Key::Enter]);
@@ -1105,6 +1111,14 @@ mod tests {
         assert!(matches!(ed.apply(Key::Esc), Step::Continue));
         assert_eq!(ed.line(), "hi");
         assert_eq!(ed.cursor, 2);
+    }
+
+    #[test]
+    fn two_esc_bytes_in_one_read_remain_two_cancel_taps() {
+        let mut dec = Decoder::default();
+        assert_eq!(dec.feed(b"\x1b\x1b"), vec![Key::Esc]);
+        assert!(dec.has_dangling_esc());
+        assert_eq!(dec.flush_dangling_esc(), Some(Key::Esc));
     }
 
     #[test]
@@ -1189,7 +1203,7 @@ mod tests {
         // Guard against an accidental blow-up in the decode path: a big paste
         // decodes without hanging (kept well within a paste a human would do).
         let mut body = Vec::from(&b"\x1b[200~"[..]);
-        body.extend(std::iter::repeat(b'x').take(20_000));
+        body.extend(std::iter::repeat_n(b'x', 20_000));
         body.extend_from_slice(b"\x1b[201~");
         let ks = Decoder::default().feed(&body);
         assert_eq!(ks.len(), 20_000);

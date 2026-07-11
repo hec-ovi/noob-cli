@@ -135,9 +135,14 @@ mod tests {
             ".claude/skills/x/SKILL.md",
         )
         .unwrap();
-        ctx.approved_skill_writes.lock().unwrap().insert(target);
+        ctx.approved_skill_writes.lock().unwrap().insert(target, 1);
         let out = run(&ctx, &args);
         assert!(!out.is_error, "{}", out.content);
         assert!(ctx.workspace.join(".claude/skills/x/SKILL.md").exists());
+        // The confirmation is scoped to that one operation, not the rest of
+        // the session. A second write needs a fresh explicit grant.
+        let out = run(&ctx, &args);
+        assert!(out.is_error);
+        assert!(out.content.contains("refused"), "{}", out.content);
     }
 }

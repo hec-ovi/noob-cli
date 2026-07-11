@@ -97,11 +97,12 @@ fn current_depth() -> u32 {
 fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
     let config_dir = config::config_dir();
     let mut ov = boot.ov;
-    if ov.base_url.is_none() && config::setting(&config_dir, "NOOB_BASE_URL").is_none() {
-        if let Some(found) = config::autodetect_base_url() {
-            ui.note(&format!("using {found} (autodetected)"));
-            ov.base_url = Some(found);
-        }
+    if ov.base_url.is_none()
+        && config::setting(&config_dir, "NOOB_BASE_URL").is_none()
+        && let Some(found) = config::autodetect_base_url()
+    {
+        ui.note(&format!("using {found} (autodetected)"));
+        ov.base_url = Some(found);
     }
     let workspace = std::env::current_dir()
         .and_then(|d| d.canonicalize())
@@ -246,9 +247,9 @@ fn cmd_repl(args: &[String]) -> ExitCode {
         }
     };
     greet(&agent, &mut ui);
-    // The dock (fable.md, opt-in via NOOB_DOCK=1): raw mode held for the
-    // session, a live input frame during turns, output above it. None keeps
-    // the exact per-prompt editor and blocking turn below.
+    // The dock (fable.md): raw mode held for the session, a live input frame
+    // during turns, output above it. NOOB_DOCK=0 keeps the classic per-prompt
+    // editor and blocking turn below.
     let mut dock = ui.dock_session();
 
     loop {
@@ -294,14 +295,15 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                         Some(d) => {
                             let plan = agent.plan;
                             d.run_turn(&mut ui, plan, |tui| agent.compact(tui));
+                            if INTERRUPTED.swap(false, Ordering::SeqCst) {
+                                d.drain_queue_to_draft();
+                            }
                         }
                         None => {
                             agent.compact(&mut ui);
+                            INTERRUPTED.store(false, Ordering::SeqCst);
                         }
                     }
-                    // A Ctrl-C during a manual compaction was consumed by
-                    // it; a stale flag would phantom-cancel the next input.
-                    INTERRUPTED.store(false, Ordering::SeqCst);
                 }
                 "plan" => {
                     if !agent.enter_plan(&mut ui) {
@@ -322,7 +324,28 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                 }
                 s if s == "skills" || s.starts_with("skills ") => {
                     let args = s.strip_prefix("skills").unwrap_or("").trim();
-                    handle_skills(args, &mut agent, &mut ui);
+                    // Installation can clone a remote repository or copy a
+                    // large local tree. Keep the dock alive so Ctrl-C remains
+                    // actionable and typed input is retained while it runs.
+                    if args.starts_with("add ") {
+                        match dock.as_mut() {
+                            Some(d) => {
+                                let plan = agent.plan;
+                                d.run_turn(&mut ui, plan, |tui| {
+                                    handle_skills(args, &mut agent, tui)
+                                });
+                                if INTERRUPTED.swap(false, Ordering::SeqCst) {
+                                    d.drain_queue_to_draft();
+                                }
+                            }
+                            None => {
+                                handle_skills(args, &mut agent, &mut ui);
+                                INTERRUPTED.store(false, Ordering::SeqCst);
+                            }
+                        }
+                    } else {
+                        handle_skills(args, &mut agent, &mut ui);
+                    }
                 }
                 other => ui.note(&format!(
                     "unknown command /{other}; available: /plan /go /status /compact /skills /quit"
@@ -340,11 +363,11 @@ fn cmd_repl(args: &[String]) -> ExitCode {
     drop(dock);
     // On the way out, tell the human how to pick this session back up. Only at
     // an interactive terminal, so a piped REPL stays byte-identical.
-    if ui.is_interactive() {
-        if let Some(s) = agent.session.as_ref() {
-            let id = s.id().to_string();
-            ui.note(&format!("session {id} saved · resume with --session {id}"));
-        }
+    if ui.is_interactive()
+        && let Some(s) = agent.session.as_ref()
+    {
+        let id = s.id().to_string();
+        ui.note(&format!("session {id} saved · resume with --session {id}"));
     }
     ExitCode::SUCCESS
 }

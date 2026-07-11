@@ -1,13 +1,12 @@
 //! The dock: a persistent input frame that stays live while a turn streams,
 //! output scrolling above it into native scrollback. One thread (the render
-//! loop, on main) is the only terminal writer; the turn worker renders
-//! through its own `Ui` whose sinks ship every styled byte here, and a
-//! reader thread ships decoded keys, all over one channel (fable.md).
+//! loop, on main) is the only terminal writer; the turn worker ships semantic
+//! rendering operations and a reader thread ships decoded keys over one
+//! strictly ordered channel.
 //!
-//! Nothing in this module knows the agent: the worker is a closure the
-//! caller hands in, and the turn's outcome travels back opaquely. Opt-in
-//! via `NOOB_DOCK=1` while the driver is being proven; without it the REPL
-//! keeps the exact per-prompt raw editor.
+//! Nothing in this module knows the agent: the worker is a closure the caller
+//! hands in, and the turn's outcome travels back opaquely. The dock is the
+//! default interactive driver; `NOOB_DOCK=0` keeps the classic prompt.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -18,14 +17,16 @@ use std::time::{Duration, Instant};
 use noob_provider::http::INTERRUPTED;
 
 use super::prompt::{Decoder, Editor, Input, Key, RawGuard, Step, term_width};
-use super::style::{ColorDepth, DIM, RESET};
-use super::{Ui, scanner};
+use super::style::{ColorDepth, RESET};
+use super::{TurnEvent, Ui, safe_terminal_text, scanner};
 
-/// One event on the dock channel. Producers: the turn worker's `Ui` sinks
-/// (`Out`, `Ask`), the run wrapper (`End`), and the stdin reader (`Key`).
+/// One event on the dock channel. Its receive order is the behavioral order:
+/// only adjacent `Render` events may be coalesced, while Ask/Key/ReaderGone/End
+/// are hard barriers that are handled before anything after them.
 pub(crate) enum Ev {
-    /// Styled bytes from the turn `Ui`, relayed to the terminal verbatim.
-    Out(Vec<u8>),
+    /// A semantic rendering operation from the turn worker. The main thread
+    /// replays it through the normal renderer and owns the resulting bytes.
+    Render(TurnEvent),
     /// A y/N confirmation from agent code. The worker blocks on the reply,
     /// so the render loop must answer (or drop the sender to deny).
     Ask(String, SyncSender<bool>),
@@ -43,38 +44,23 @@ pub(crate) enum Ev {
     End,
 }
 
-/// A `Write` sink that ships bytes to the render loop. A send error means
-/// the render loop is gone (the turn is being torn down); the write is
-/// swallowed so a worker mid-stream can never panic the process over it.
-pub(crate) struct ChannelWriter(pub(crate) SyncSender<Ev>);
-
-impl std::io::Write for ChannelWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if !buf.is_empty() {
-            let _ = self.0.send(Ev::Out(buf.to_vec()));
-        }
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// `NOOB_DOCK=1|true|on|yes` opts the interactive REPL into the dock driver.
-/// Default off until the driver has survived its real-REPL shakedown; the
-/// flag then flips to an opt-out.
+/// `NOOB_DOCK=0|false|off|no` opts out of the dock. Unset and every other
+/// value leave the default interactive driver enabled.
 pub(super) fn enabled_by_env() -> bool {
     match std::env::var("NOOB_DOCK") {
-        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"),
-        Err(_) => false,
+        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
+        Err(_) => true,
     }
 }
 
 /// How long the reader waits for the tail of an escape sequence before a
 /// dangling lone ESC is flushed as the ESC key.
 const ESC_GRACE_MS: i32 = 50;
-/// Comet cadence while a request is in flight and nothing has streamed yet.
+/// Liveness repaint cadence for the whole active turn.
 const COMET_MS: u64 = 120;
+/// Small frame budget used to fold a sparse run of adjacent semantic render
+/// operations into one terminal repaint. A non-render event ends it early.
+const COALESCE_MS: u64 = 8;
 /// How long a first ESC arms the cancel: a second ESC inside this window
 /// cancels the turn, and the window lapsing reverts the dock to normal.
 const CANCEL_WINDOW: Duration = Duration::from_secs(5);
@@ -84,7 +70,7 @@ const CANCEL_WINDOW: Duration = Duration::from_secs(5);
 // ---------------------------------------------------------------------------
 
 /// Escape-sequence scanner state, kept across feeds because a sequence can
-/// straddle two `Ev::Out` chunks (a model is free to emit a split escape).
+/// straddle two `Ev::Render` chunks (a model is free to emit a split escape).
 enum EscScan {
     Normal,
     /// Saw ESC, waiting for the introducer.
@@ -285,12 +271,11 @@ fn reader(tx: SyncSender<Ev>) {
         if dec.has_dangling_esc() {
             let mut pfd = libc::pollfd { fd: libc::STDIN_FILENO, events: libc::POLLIN, revents: 0 };
             let ready = unsafe { libc::poll(&mut pfd, 1, ESC_GRACE_MS) };
-            if ready == 0 {
-                if let Some(key) = dec.flush_dangling_esc() {
-                    if tx.send(Ev::Key(key)).is_err() {
-                        return;
-                    }
-                }
+            if ready == 0
+                && let Some(key) = dec.flush_dangling_esc()
+                && tx.send(Ev::Key(key)).is_err()
+            {
+                return;
             }
             // ready > 0: the sequence tail is waiting, the next read joins
             // it; ready < 0 (EINTR): the next read's error path handles it.
@@ -324,6 +309,12 @@ struct Cancel {
     committed: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InterruptAction {
+    Cancel,
+    HardExit,
+}
+
 impl Cancel {
     fn is_armed(&self) -> bool {
         self.armed_until.is_some()
@@ -342,6 +333,29 @@ impl Cancel {
     fn disarm(&mut self) -> bool {
         self.armed_until.take().is_some()
     }
+
+    fn expire(&mut self, now: Instant) -> bool {
+        if self.armed_until.is_some_and(|deadline| now >= deadline) {
+            self.armed_until = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn interrupt(&mut self) -> InterruptAction {
+        if self.committed {
+            InterruptAction::HardExit
+        } else {
+            self.commit();
+            InterruptAction::Cancel
+        }
+    }
+}
+
+fn hard_exit() -> ! {
+    super::prompt::restore_terminal();
+    unsafe { libc::_exit(130) }
 }
 
 /// One dock REPL session: raw mode held for its lifetime, a persistent
@@ -358,6 +372,10 @@ pub struct DockSession {
     /// dispatched one per turn once the agent is free (FIFO), and drained back
     /// into the draft if the turn is interrupted rather than fired blindly.
     queue: VecDeque<String>,
+    /// Permanent input-stream state. The channel itself cannot disconnect
+    /// while this session owns `tx`, so ReaderGone must survive the turn where
+    /// it was observed and make every later prompt return EOF immediately.
+    reader_gone: bool,
     _guard: RawGuard,
 }
 
@@ -375,6 +393,7 @@ impl DockSession {
             pending: VecDeque::new(),
             draft: Editor::default(),
             queue: VecDeque::new(),
+            reader_gone: false,
             _guard: guard,
         })
     }
@@ -407,13 +426,13 @@ impl DockSession {
     /// Ctrl-C cancels the line, Ctrl-D on an empty line is EOF. A draft
     /// typed during the previous turn is already visible and editable.
     pub fn read_prompt(&mut self, ui: &mut Ui, plan: bool) -> Input {
-        // A message queued during the previous turn dispatches first, one per
-        // prompt. Echo it as an ordinary `› message` record so history reads
-        // the same as a typed submit, then hand it straight to the agent.
-        if let Some(Input::Line(msg)) = self.next_queued() {
-            let ed = Editor::from_line(&msg);
-            ui.collapse_to_message(&ed, false);
-            return Input::Line(msg);
+        // Queued messages were echoed at acceptance time during the turn. Do
+        // not print them a second time when they are dispatched.
+        if let Some(input) = self.next_queued() {
+            return input;
+        }
+        if self.reader_gone && self.pending.is_empty() {
+            return Input::Eof;
         }
         let mut width = term_width();
         let mut expanded = false;
@@ -440,6 +459,10 @@ impl DockSession {
                     }
                 }
             }
+            if self.reader_gone {
+                ui.erase(expanded);
+                return Input::Eof;
+            }
             if acted && !expanded {
                 expanded = true;
                 width = term_width();
@@ -461,8 +484,10 @@ impl DockSession {
             // Sender), so end the REPL. Any complete line already in `pending`
             // was submitted by the drain above before this point.
             if gone {
-                ui.erase(expanded);
-                return Input::Eof;
+                self.reader_gone = true;
+                // Loop once more: keys sent before ReaderGone are ahead of it
+                // in the channel and may contain a final complete submission.
+                continue;
             }
         }
     }
@@ -476,7 +501,10 @@ impl DockSession {
                 self.pending.push_back(k);
                 false
             }
-            Ev::ReaderGone => true,
+            Ev::ReaderGone => {
+                self.reader_gone = true;
+                true
+            }
             _ => false,
         }
     }
@@ -496,11 +524,9 @@ impl DockSession {
         Input::Line(line)
     }
 
-    /// Run one turn with the dock live: the worker runs `f` with a
-    /// channel-sinked `Ui` on a scoped thread while this thread renders its
-    /// output above the frame, keeps the draft editable, answers asks, and
-    /// tears the frame down when the turn ends. Generic over the outcome so
-    /// this module never learns the agent's types.
+    /// Run one turn with the dock live: the worker emits semantic events while
+    /// this main-thread loop owns all rendering and input. Generic over the
+    /// outcome so this module never learns the agent's types.
     pub fn run_turn<R: Send>(
         &mut self,
         ui: &mut Ui,
@@ -510,12 +536,24 @@ impl DockSession {
         let mut turn_ui = ui.for_turn(self.tx.clone());
         let slot: Mutex<Option<R>> = Mutex::new(None);
         std::thread::scope(|s| {
-            let tx = self.tx.clone();
             let slot = &slot;
             s.spawn(move || {
-                let end = f(&mut turn_ui);
-                *slot.lock().unwrap() = Some(end);
-                let _ = tx.send(Ev::End);
+                // Always send the End barrier, including a panic path, so the
+                // terminal-owning thread cannot wait forever. The scoped
+                // thread rethrows after the render loop has restored the dock.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    f(&mut turn_ui)
+                }));
+                match outcome {
+                    Ok(end) => {
+                        *slot.lock().unwrap() = Some(end);
+                        turn_ui.turn_end();
+                    }
+                    Err(payload) => {
+                        turn_ui.turn_end();
+                        std::panic::resume_unwind(payload);
+                    }
+                }
             });
             self.render_loop(ui, plan);
         });
@@ -524,308 +562,483 @@ impl DockSession {
             .expect("the turn worker ended without parking its result")
     }
 
-    /// The render loop: sole terminal writer while a turn runs. Blocks on
-    /// the channel (a timed wake exists only while the comet is sweeping),
-    /// coalesces output bursts into one repaint, and keeps the cursor
-    /// parked on the dock's input row between flushes.
+    /// The render loop: sole terminal writer while a turn runs. Receive order
+    /// is semantic order. Only adjacent Render events share a repaint; Ask,
+    /// keys, reader loss, and End are strict barriers.
     fn render_loop(&mut self, ui: &mut Ui, plan: bool) {
         let mut tracker = OutTracker::default();
         let mut width = term_width();
-        let mut expanded = !self.draft.is_empty();
         let mut ask: Option<AskState> = None;
         let mut cancel = Cancel::default();
-        let mut awaiting_first = true;
-        let mut comet = 0usize;
-        let row = self.row(ui, awaiting_first, expanded, &ask, &cancel, comet);
-        self.draw_dock(ui, plan, expanded, width, &ask, row);
+        let mut renderer = ui.buffered_turn_renderer();
+        let mut active_tools: Vec<(String, String)> = Vec::new();
+        let started = Instant::now();
+        let mut deferred: Option<Ev> = None;
+
+        // A running turn always owns a stable three-row frame. Its top status,
+        // editable draft, and queue/cancel line are independent, so typing can
+        // never hide liveness again.
+        self.draw_active_frame(
+            ui,
+            plan,
+            width,
+            &ask,
+            &cancel,
+            started,
+            &active_tools,
+        );
 
         loop {
-            // The soonest timed wake: the comet frame while awaiting the first
-            // byte, and the cancel-arm window expiry. Neither runs otherwise,
-            // so an idle turn still blocks with no polling.
-            let comet_active =
-                awaiting_first && !expanded && ask.is_none() && !cancel.is_armed();
-            let mut wait: Option<Duration> =
-                comet_active.then(|| Duration::from_millis(COMET_MS));
+            cancel.expire(Instant::now());
+            let now_width = term_width();
+            if now_width != width {
+                ui.erase(true);
+                width = now_width;
+                self.draw_active_frame(
+                    ui,
+                    plan,
+                    width,
+                    &ask,
+                    &cancel,
+                    started,
+                    &active_tools,
+                );
+            }
+
+            // Whole-turn liveness wakes only this display loop. Tool work,
+            // provider I/O, and the transcript remain untouched.
+            let mut wait = Duration::from_millis(COMET_MS);
             if let Some(deadline) = cancel.armed_until {
                 let rem = deadline.saturating_duration_since(Instant::now());
-                wait = Some(wait.map_or(rem, |w| w.min(rem)));
+                wait = wait.min(rem);
             }
-            let first = match wait {
-                Some(w) => match self.rx.recv_timeout(w) {
+            let first = match deferred.take() {
+                Some(ev) => ev,
+                None => match self.rx.recv_timeout(wait) {
                     Ok(ev) => ev,
                     Err(RecvTimeoutError::Timeout) => {
-                        // The cancel window lapsed: revert the dock to normal.
-                        if cancel.armed_until.is_some_and(|d| Instant::now() >= d) {
-                            cancel.armed_until = None;
-                        }
-                        if comet_active {
-                            comet += 1;
-                        }
-                        let row = self.row(ui, awaiting_first, expanded, &ask, &cancel, comet);
-                        self.redraw_input(ui, width, &ask, row);
+                        cancel.expire(Instant::now());
+                        self.refresh_active_frame(
+                            ui,
+                            plan,
+                            width,
+                            &ask,
+                            &cancel,
+                            started,
+                            &active_tools,
+                        );
                         continue;
                     }
                     Err(RecvTimeoutError::Disconnected) => return,
                 },
-                None => match self.rx.recv() {
-                    Ok(ev) => ev,
-                    Err(_) => return,
-                },
             };
 
-            // Drain the burst: batch output bytes, queue keys, catch the
-            // rest. Order across kinds is irrelevant; within Out it is
-            // preserved by the concatenation.
-            let mut batch: Vec<u8> = Vec::new();
-            let mut keys: VecDeque<Key> = VecDeque::new();
-            let mut ended = false;
-            let mut dirty = false;
-            let mut reader_gone = false;
-            let mut ev = Some(first);
-            loop {
-                match ev.take() {
-                    Some(Ev::Out(b)) => batch.extend_from_slice(&b),
-                    Some(Ev::Key(k)) => keys.push_back(k),
-                    Some(Ev::Ask(question, reply)) => {
-                        ask = Some(AskState { question, answer: String::new(), reply });
-                        // The modal must paint even when nothing else is
-                        // happening: the worker is now blocked on the answer
-                        // and a human cannot answer an invisible question.
-                        dirty = true;
-                    }
-                    Some(Ev::ReaderGone) => reader_gone = true,
-                    Some(Ev::End) => ended = true,
-                    None => {}
-                }
-                match self.rx.try_recv() {
-                    Ok(e) => ev = Some(e),
-                    Err(_) => break,
-                }
-            }
+            match first {
+                Ev::Render(event) => {
+                    Self::observe_render(&event, &mut active_tools);
+                    renderer.render(event);
 
-            // The reader has exited (real EOF/error) mid-turn. If a y/N modal
-            // is open the worker is blocked on its reply and no keystroke can
-            // ever arrive to answer it; deny so the worker unblocks, finishes,
-            // and sends `End`. Without this the render loop and the worker
-            // both wait forever and the scope never joins.
-            if reader_gone {
-                if let Some(a) = &ask {
-                    let _ = a.reply.send(false);
+                    // Coalesce only adjacent rendering operations, for at most
+                    // one small frame budget. The first non-render event is
+                    // parked and handled next, never reordered behind output.
+                    let deadline = Instant::now() + Duration::from_millis(COALESCE_MS);
+                    loop {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            break;
+                        }
+                        match self.rx.recv_timeout(remaining) {
+                            Ok(Ev::Render(event)) => {
+                                Self::observe_render(&event, &mut active_tools);
+                                renderer.render(event);
+                            }
+                            Ok(barrier) => {
+                                deferred = Some(barrier);
+                                break;
+                            }
+                            Err(RecvTimeoutError::Timeout) => break,
+                            Err(RecvTimeoutError::Disconnected) => return,
+                        }
+                    }
+                    let batch = renderer.take();
+                    if !batch.is_empty() {
+                        self.write_above(
+                            ui,
+                            &mut tracker,
+                            &batch,
+                            plan,
+                            width,
+                            &ask,
+                            &cancel,
+                            started,
+                            &active_tools,
+                        );
+                    } else {
+                        self.refresh_active_frame(
+                            ui,
+                            plan,
+                            width,
+                            &ask,
+                            &cancel,
+                            started,
+                            &active_tools,
+                        );
+                    }
                 }
-                ask = None;
-            }
+                Ev::Ask(question, reply) => {
+                    route_ask(self.reader_gone, &mut ask, question, reply);
+                    self.refresh_active_frame(
+                        ui,
+                        plan,
+                        width,
+                        &ask,
+                        &cancel,
+                        started,
+                        &active_tools,
+                    );
+                }
+                Ev::Key(key) => {
+                    cancel.expire(Instant::now());
+                    let mut queued_record = None;
+                    if ask.is_some() {
+                        match key {
+                            Key::Enter => {
+                                let a = ask.take().expect("ask exists");
+                                let yes = matches!(a.answer.trim(), "y" | "Y" | "yes");
+                                let _ = a.reply.send(yes);
+                                cancel.disarm();
+                            }
+                            Key::Interrupt => {
+                                let a = ask.take().expect("ask exists");
+                                let _ = a.reply.send(false);
+                                if cancel.interrupt() == InterruptAction::HardExit {
+                                    hard_exit();
+                                }
+                            }
+                            Key::Esc => {
+                                if !cancel.committed && cancel.disarm() {
+                                    let a = ask.take().expect("ask exists");
+                                    let _ = a.reply.send(false);
+                                    cancel.commit();
+                                } else if !cancel.committed {
+                                    cancel.armed_until = Some(Instant::now() + CANCEL_WINDOW);
+                                }
+                            }
+                            Key::Eof => {
+                                let a = ask.take().expect("ask exists");
+                                let _ = a.reply.send(false);
+                                cancel.disarm();
+                            }
+                            Key::Char(c) => {
+                                cancel.disarm();
+                                ask.as_mut().expect("ask exists").answer.push(c);
+                            }
+                            Key::Backspace => {
+                                cancel.disarm();
+                                ask.as_mut().expect("ask exists").answer.pop();
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        match key {
+                            Key::Interrupt => {
+                                if cancel.interrupt() == InterruptAction::HardExit {
+                                    hard_exit();
+                                }
+                            }
+                            Key::Esc => {
+                                if cancel.committed {
+                                    // Already canceling.
+                                } else if cancel.disarm() {
+                                    cancel.commit();
+                                } else {
+                                    cancel.armed_until = Some(Instant::now() + CANCEL_WINDOW);
+                                }
+                            }
+                            Key::Enter => {
+                                cancel.disarm();
+                                if !cancel.committed && !self.draft.is_empty() {
+                                    let message = self.draft.line();
+                                    self.queue.push_back(message.clone());
+                                    self.draft = Editor::default();
+                                    queued_record = Some(self.queued_record(ui, &message));
+                                }
+                            }
+                            Key::Eof => {
+                                cancel.disarm();
+                            }
+                            other => {
+                                cancel.disarm();
+                                let _ = self.draft.apply(other);
+                            }
+                        }
+                    }
 
-            // Flush the output batch above the dock: erase the frame, put
-            // the cursor back on the stream's insertion point, relay the
-            // bytes (they scroll into native scrollback), open a fresh row
-            // if the stream stopped mid-line, redraw the frame below.
-            if !batch.is_empty() {
-                awaiting_first = false;
-                width = term_width();
-                ui.erase(expanded);
-                if !tracker.fresh {
-                    ui.out_raw(format!("\x1b[1A\x1b[{}G", tracker.col + 1).as_bytes());
-                }
-                ui.out_raw(&batch);
-                tracker.feed(&batch, width);
-                // Advance to a fresh row before the dock unless the batch ended
-                // with a real newline. The exact-fill case reports fresh (col 0)
-                // but has NOT advanced a row (deferred-wrap latch), so it needs
-                // the `\r\n` too, or the dock redraw would erase the filled line.
-                if !tracker.newline {
-                    ui.out_raw(b"\r\n");
-                }
-                let row = self.row(ui, awaiting_first, expanded, &ask, &cancel, comet);
-                self.draw_dock(ui, plan, expanded, width, &ask, row);
-            }
-
-            // Keys: the ask modal consumes them while open; otherwise ESC drives
-            // the double-tap cancel and any other key edits the draft (Enter is
-            // inert during a turn until the queue milestone).
-            while let Some(key) = keys.pop_front() {
-                if let Some(a) = &mut ask {
-                    match key {
-                        Key::Enter => {
-                            let yes = matches!(a.answer.trim(), "y" | "Y" | "yes");
-                            let _ = a.reply.send(yes);
-                            ask = None;
-                        }
-                        // Ctrl-C and Ctrl-D at a confirmation both deny: the
-                        // contract is that anything but an explicit yes is No.
-                        Key::Interrupt | Key::Eof => {
-                            let _ = a.reply.send(false);
-                            ask = None;
-                        }
-                        Key::Char(c) => a.answer.push(c),
-                        Key::Backspace => {
-                            a.answer.pop();
-                        }
-                        _ => {}
-                    }
-                    dirty = true;
-                    continue;
-                }
-                match key {
-                    // Ctrl-C mid-turn cancels immediately (no arming ceremony):
-                    // the shared flag every existing checkpoint polls, so the
-                    // agent's own `[interrupted]` note is the feedback.
-                    Key::Interrupt => {
-                        cancel.commit();
-                        dirty = true;
-                    }
-                    Key::Esc => {
-                        if cancel.committed {
-                            // already canceling; further ESC is a no-op
-                        } else if cancel.disarm() {
-                            // second ESC inside the window: commit the cancel.
-                            cancel.commit();
-                        } else {
-                            // first ESC: arm the window (repaints the red hint).
-                            cancel.armed_until = Some(Instant::now() + CANCEL_WINDOW);
-                        }
-                        dirty = true;
-                    }
-                    // Enter queues the draft for the next turn: it is not a
-                    // second ESC (so it disarms), and while canceling it is
-                    // inert. An empty draft queues nothing.
-                    Key::Enter => {
-                        cancel.disarm();
-                        if !cancel.committed && !self.draft.is_empty() {
-                            self.queue.push_back(self.draft.line());
-                            self.draft = Editor::default();
-                        }
-                        dirty = true;
-                    }
-                    // Ctrl-D is inert mid-turn; a stray one still disarms.
-                    Key::Eof => {
-                        if cancel.disarm() {
-                            dirty = true;
-                        }
-                    }
-                    other => {
-                        // Any edit key means the user did not double-tap ESC.
-                        cancel.disarm();
-                        let _ = self.draft.apply(other);
-                        if !expanded {
-                            // First draft key mid-turn: grow marker to frame.
-                            ui.erase(false);
-                            expanded = true;
-                            width = term_width();
-                            let row = self.row(ui, awaiting_first, expanded, &ask, &cancel, comet);
-                            self.draw_dock(ui, plan, expanded, width, &ask, row);
-                        }
-                        dirty = true;
+                    if let Some(record) = queued_record {
+                        self.write_above(
+                            ui,
+                            &mut tracker,
+                            record.as_bytes(),
+                            plan,
+                            width,
+                            &ask,
+                            &cancel,
+                            started,
+                            &active_tools,
+                        );
+                    } else {
+                        self.refresh_active_frame(
+                            ui,
+                            plan,
+                            width,
+                            &ask,
+                            &cancel,
+                            started,
+                            &active_tools,
+                        );
                     }
                 }
-            }
-            if dirty {
-                let row = self.row(ui, awaiting_first, expanded, &ask, &cancel, comet);
-                self.redraw_input(ui, width, &ask, row);
-            }
-
-            if ended {
-                // The worker is done (End is its last event). Remove the
-                // frame; the stream already ended its own line (`end_line`
-                // flowed through as bytes), so the caller resumes on a
-                // clean row. The draft stays for the next prompt.
-                ui.erase(expanded);
-                return;
+                Ev::ReaderGone => {
+                    self.reader_gone = true;
+                    if let Some(a) = ask.take() {
+                        let _ = a.reply.send(false);
+                    }
+                    self.refresh_active_frame(
+                        ui,
+                        plan,
+                        width,
+                        &ask,
+                        &cancel,
+                        started,
+                        &active_tools,
+                    );
+                }
+                Ev::End => {
+                    ui.erase(true);
+                    return;
+                }
             }
         }
     }
 
-    /// Draw the whole dock at the cursor (assumed: column 0 of a fresh
-    /// row): the frame when expanded, then the input row content, parking
-    /// the cursor there.
-    fn draw_dock(
+    fn observe_render(event: &TurnEvent, active: &mut Vec<(String, String)>) {
+        match event {
+            TurnEvent::ToolStart { id, name, .. } => {
+                active.retain(|(active_id, _)| active_id != id);
+                active.push((id.clone(), frame_label(name)));
+            }
+            TurnEvent::ToolDone { id, .. } => active.retain(|(active_id, _)| active_id != id),
+            TurnEvent::Done(_) => active.clear(),
+            _ => {}
+        }
+    }
+
+    /// Relay bytes above the frame without losing a partial output line, then
+    /// redraw the active frame below it.
+    #[allow(clippy::too_many_arguments)]
+    fn write_above(
+        &mut self,
+        ui: &mut Ui,
+        tracker: &mut OutTracker,
+        bytes: &[u8],
+        plan: bool,
+        width: usize,
+        ask: &Option<AskState>,
+        cancel: &Cancel,
+        started: Instant,
+        active_tools: &[(String, String)],
+    ) {
+        ui.erase(true);
+        if !tracker.fresh {
+            ui.out_raw(format!("\x1b[1A\x1b[{}G", tracker.col + 1).as_bytes());
+        }
+        ui.out_raw(bytes);
+        tracker.feed(bytes, width);
+        if !tracker.newline {
+            ui.out_raw(b"\r\n");
+        }
+        self.draw_active_frame(ui, plan, width, ask, cancel, started, active_tools);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_active_frame(
         &mut self,
         ui: &mut Ui,
         plan: bool,
-        expanded: bool,
         width: usize,
         ask: &Option<AskState>,
-        row: Row,
+        cancel: &Cancel,
+        started: Instant,
+        active_tools: &[(String, String)],
     ) {
-        if expanded {
-            ui.expand(plan, width);
-        }
-        self.redraw_input(ui, width, ask, row);
+        let top = self.top_rule(ui, plan, width, started, active_tools);
+        let bottom = self.bottom_rule(ui, width, ask, cancel);
+        ui.out_raw(format!("\r\x1b[2K{top}\r\n\r\n{bottom}\x1b[1A").as_bytes());
+        self.redraw_active_input(ui, width, ask);
     }
 
-    /// Redraw only the input row in place. A confirmation always wins the row;
-    /// otherwise the cancel status, the comet, or the draft, by priority.
-    fn redraw_input(&mut self, ui: &mut Ui, width: usize, ask: &Option<AskState>, row: Row) {
-        if let Some(a) = ask {
-            let shown = format!("{} [y/N] {}", a.question, a.answer);
-            let ed = Editor::from_line(&shown);
-            ui.redraw_input_row(&ed, width);
-            return;
-        }
-        match row {
-            Row::Comet(frame) => ui.out_raw(format!("\r\x1b[2K{frame}").as_bytes()),
-            Row::Armed => self.status_row(ui, ui.theme.error.sgr(ui.depth), "press ESC again to cancel"),
-            Row::Canceling => self.status_row(ui, ui.theme.error.sgr(ui.depth), "canceling…"),
-            Row::Queued(n) => {
-                let dim = if ui.depth == ColorDepth::None { String::new() } else { DIM.to_string() };
-                self.status_row(ui, dim, &format!("› {n} queued"));
-            }
-            Row::Draft => ui.redraw_input_row(&self.draft, width),
-        }
-    }
-
-    /// What the input row should show this frame, by priority: the committed
-    /// cancel status, the armed hint, the request-to-first-byte comet, else
-    /// the editable draft.
-    fn row(
-        &self,
-        ui: &Ui,
-        awaiting_first: bool,
-        expanded: bool,
+    /// Repaint the two status rows without erasing committed output. Cursor is
+    /// parked on the input row before and after this operation.
+    #[allow(clippy::too_many_arguments)]
+    fn refresh_active_frame(
+        &mut self,
+        ui: &mut Ui,
+        plan: bool,
+        width: usize,
         ask: &Option<AskState>,
         cancel: &Cancel,
-        tick: usize,
-    ) -> Row {
-        if cancel.committed {
-            Row::Canceling
-        } else if cancel.is_armed() {
-            Row::Armed
-        } else if awaiting_first && !expanded && ask.is_none() {
-            // The dock row is the liveness indicator (the scanner thread is
-            // retired in dock mode); once a draft expands the frame it takes
-            // the row instead.
-            Row::Comet(scanner::frame(tick, ui.depth, &ui.theme.scanner))
-        } else if self.draft.is_empty() && !self.queue.is_empty() {
-            // Nothing half-typed but messages are waiting: show the count so
-            // the human sees their type-ahead landed.
-            Row::Queued(self.queue.len())
+        started: Instant,
+        active_tools: &[(String, String)],
+    ) {
+        let top = self.top_rule(ui, plan, width, started, active_tools);
+        let bottom = self.bottom_rule(ui, width, ask, cancel);
+        ui.out_raw(
+            format!(
+                "\r\x1b[1A\r\x1b[2K{top}\x1b[2B\r\x1b[2K{bottom}\x1b[1A\r"
+            )
+            .as_bytes(),
+        );
+        self.redraw_active_input(ui, width, ask);
+    }
+
+    fn redraw_active_input(&mut self, ui: &mut Ui, width: usize, ask: &Option<AskState>) {
+        if let Some(a) = ask {
+            let shown = format!("{} [y/N] {}", safe_terminal_text(&a.question), a.answer);
+            let ed = Editor::from_line(&shown);
+            ui.redraw_input_row(&ed, width);
         } else {
-            Row::Draft
+            ui.redraw_input_row(&self.draft, width);
         }
     }
 
-    /// Paint the input row as a one-line status with the given SGR opener (an
-    /// empty opener stays plain, for a no-color terminal): the red ESC-cancel
-    /// hint and canceling notice, and the dim queued-count.
-    fn status_row(&mut self, ui: &mut Ui, open: String, msg: &str) {
+    fn top_rule(
+        &self,
+        ui: &Ui,
+        plan: bool,
+        width: usize,
+        started: Instant,
+        active_tools: &[(String, String)],
+    ) -> String {
+        let elapsed = elapsed_label(started.elapsed());
+        let mut label = format!("Working {elapsed}");
+        if plan {
+            label.push_str(" · plan");
+        }
+        if active_tools.len() == 1 {
+            label.push_str(" · ");
+            label.push_str(&active_tools[0].1);
+        } else if active_tools.len() > 1 {
+            label.push_str(&format!(" · {} tools", active_tools.len()));
+        }
+
+        let open = ui.box_color();
         let reset = if open.is_empty() { "" } else { RESET };
-        ui.out_raw(format!("\r\x1b[2K{open}{msg}{reset}").as_bytes());
+        let tick = (started.elapsed().as_millis() / COMET_MS as u128) as usize;
+        let track = scanner::track(tick, ui.depth, &ui.theme.scanner);
+        let fixed = 3 + scanner::TRACK + 1 + label.chars().count() + 1;
+        if width >= fixed {
+            let fill = "─".repeat(width - fixed);
+            format!("{open}── {reset}{track}{open} {label} {fill}{reset}")
+        } else {
+            styled_rule(&label, width, &open)
+        }
+    }
+
+    fn bottom_rule(
+        &self,
+        ui: &Ui,
+        width: usize,
+        ask: &Option<AskState>,
+        cancel: &Cancel,
+    ) -> String {
+        let (label, open) = if cancel.committed {
+            ("canceling".to_string(), ui.theme.error.sgr(ui.depth))
+        } else if cancel.is_armed() {
+            ("press ESC again to cancel".to_string(), ui.theme.error.sgr(ui.depth))
+        } else if self.reader_gone {
+            ("input closed".to_string(), ui.theme.error.sgr(ui.depth))
+        } else if ask.is_some() {
+            ("Enter confirms · Ctrl-C cancels all".to_string(), ui.box_color())
+        } else if self.queue.is_empty() {
+            ("Esc Esc to cancel".to_string(), ui.box_color())
+        } else {
+            (
+                format!("{} queued · Esc Esc to cancel", self.queue.len()),
+                ui.box_color(),
+            )
+        };
+        styled_rule(&label, width, &open)
+    }
+
+    fn queued_record(&self, ui: &Ui, message: &str) -> String {
+        let shown: String = message
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        let prompt = ui.box_color();
+        let reset = if prompt.is_empty() { "" } else { RESET };
+        let note = if ui.depth == ColorDepth::None || !ui.color {
+            String::new()
+        } else {
+            ui.theme.note.sgr(ui.depth)
+        };
+        let note_reset = if note.is_empty() { "" } else { RESET };
+        format!("{prompt}› {reset}{shown} {note}[queued]{note_reset}\r\n")
     }
 }
 
-/// The input-row content for one repaint (the ask modal is handled ahead of
-/// this, so it is not a variant here).
-enum Row {
-    /// The request-to-first-byte comet animation frame.
-    Comet(String),
-    /// A first ESC is armed: the red "press ESC again to cancel" hint.
-    Armed,
-    /// The cancel is committed: the red "canceling…" notice.
-    Canceling,
-    /// Messages are queued and nothing is half-typed: the dim count.
-    Queued(usize),
-    /// The editable draft (the default).
-    Draft,
+fn frame_label(input: &str) -> String {
+    let mut shown = String::new();
+    let mut chars = input.chars();
+    for ch in chars.by_ref().take(80) {
+        shown.push(if ch.is_control() { ' ' } else { ch });
+    }
+    if chars.next().is_some() {
+        shown.push('…');
+    }
+    shown
+}
+
+/// Start a confirmation only while keyboard input can still arrive. A reader
+/// may disappear before a later tool reaches its write gate; denying that ask
+/// immediately keeps the worker from waiting forever on an impossible reply.
+fn route_ask(
+    reader_gone: bool,
+    ask: &mut Option<AskState>,
+    question: String,
+    reply: SyncSender<bool>,
+) {
+    if reader_gone {
+        let _ = reply.send(false);
+    } else {
+        *ask = Some(AskState {
+            question,
+            answer: String::new(),
+            reply,
+        });
+    }
+}
+
+fn elapsed_label(elapsed: Duration) -> String {
+    let millis = elapsed.as_millis();
+    if millis < 60_000 {
+        format!("{}.{:01}s", millis / 1_000, (millis % 1_000) / 100)
+    } else {
+        format!("{}m{:02}s", millis / 60_000, (millis / 1_000) % 60)
+    }
+}
+
+fn styled_rule(label: &str, width: usize, open: &str) -> String {
+    let reset = if open.is_empty() { "" } else { RESET };
+    let max_label = width.saturating_sub(4);
+    let mut shown: String = label.chars().take(max_label).collect();
+    if label.chars().count() > max_label && max_label > 0 {
+        shown.pop();
+        shown.push('…');
+    }
+    let used = (3 + shown.chars().count() + 1).min(width);
+    let fill = "─".repeat(width.saturating_sub(used));
+    format!("{open}── {shown} {fill}{reset}")
 }
 
 #[cfg(test)]
@@ -836,6 +1049,60 @@ mod tests {
         let mut t = OutTracker::default();
         t.feed(bytes, width);
         t
+    }
+
+    #[test]
+    fn confirmation_after_input_closes_is_denied_without_waiting() {
+        let (tx, rx) = sync_channel(1);
+        let mut ask = None;
+        route_ask(true, &mut ask, "write?".to_string(), tx);
+        assert!(ask.is_none());
+        assert_eq!(rx.recv_timeout(Duration::from_millis(50)), Ok(false));
+    }
+
+    #[test]
+    fn confirmation_with_live_input_enters_the_modal() {
+        let (tx, _rx) = sync_channel(1);
+        let mut ask = None;
+        route_ask(false, &mut ask, "write?".to_string(), tx);
+        let ask = ask.expect("live input must retain the confirmation");
+        assert_eq!(ask.question, "write?");
+    }
+
+    #[test]
+    fn expired_escape_arm_cannot_turn_a_late_tap_into_cancellation() {
+        let mut cancel = Cancel {
+            armed_until: Some(Instant::now() - Duration::from_millis(1)),
+            committed: false,
+        };
+        assert!(cancel.expire(Instant::now()));
+        assert!(!cancel.disarm(), "the late tap must become a new first tap");
+        assert!(!cancel.committed);
+    }
+
+    #[test]
+    fn second_ctrl_c_chooses_the_hard_exit_path() {
+        let mut cancel = Cancel::default();
+        assert_eq!(cancel.interrupt(), InterruptAction::Cancel);
+        assert!(cancel.committed);
+        assert_eq!(cancel.interrupt(), InterruptAction::HardExit);
+    }
+
+    #[test]
+    fn active_tool_labels_cannot_inject_terminal_controls() {
+        let mut active = Vec::new();
+        DockSession::observe_render(
+            &TurnEvent::ToolStart {
+                id: "call".into(),
+                name: "bad\x1b]52;c;secret\x07\nname".into(),
+                brief: String::new(),
+                read_only: false,
+            },
+            &mut active,
+        );
+        assert_eq!(active.len(), 1);
+        assert!(!active[0].1.chars().any(char::is_control));
+        assert!(active[0].1.contains("bad ]52;c;secret  name"));
     }
 
     #[test]
@@ -945,7 +1212,7 @@ mod tests {
         // A CSI that never sends its final byte gives up at the cap and
         // the text after it is counted again.
         let mut junk = Vec::from(&b"\x1b["[..]);
-        junk.extend(std::iter::repeat(b'0').take(200));
+        junk.extend(std::iter::repeat_n(b'0', 200));
         junk.extend_from_slice(b"abc");
         let mut t = OutTracker::default();
         t.feed(&junk, 80);
@@ -954,7 +1221,7 @@ mod tests {
         // to text (the exact cut inside the junk run is unimportant; what
         // matters is it counts again instead of staying swallowed).
         let mut junk = Vec::from(&b"\x1b]"[..]);
-        junk.extend(std::iter::repeat(b'x').take(OSC_CAP + 10));
+        junk.extend(std::iter::repeat_n(b'x', OSC_CAP + 10));
         junk.extend_from_slice(b"ab");
         let mut t = OutTracker::default();
         t.feed(&junk, 200);
@@ -987,19 +1254,30 @@ mod tests {
     }
 
     #[test]
-    fn channel_writer_relays_bytes_and_survives_a_dropped_receiver() {
-        use std::io::Write;
-        let (tx, rx) = std::sync::mpsc::sync_channel(8);
-        let mut w = ChannelWriter(tx);
-        w.write_all(b"hello").unwrap();
-        w.write_all(b"").unwrap(); // empty writes send nothing
-        match rx.try_recv() {
-            Ok(Ev::Out(b)) => assert_eq!(b, b"hello"),
-            _ => panic!("expected one Out event"),
+    fn status_rules_fit_narrow_and_wide_terminals() {
+        for width in [20, 40, 120] {
+            let rule = styled_rule("Working 12.3s · several tools", width, "");
+            assert_eq!(rule.chars().count(), width, "bad width {width}: {rule:?}");
         }
-        assert!(rx.try_recv().is_err(), "empty write must not send");
-        drop(rx);
-        // The render loop is gone: writes are swallowed, never a panic.
-        w.write_all(b"late").unwrap();
+    }
+
+    #[test]
+    fn elapsed_status_switches_to_minutes_without_jittery_milliseconds() {
+        assert_eq!(elapsed_label(Duration::from_millis(123)), "0.1s");
+        assert_eq!(elapsed_label(Duration::from_millis(12_345)), "12.3s");
+        assert_eq!(elapsed_label(Duration::from_secs(125)), "2m05s");
+    }
+
+    #[test]
+    fn cancel_is_two_tap_but_ctrl_c_can_commit_directly() {
+        INTERRUPTED.store(false, Ordering::SeqCst);
+        let mut cancel = Cancel {
+            armed_until: Some(Instant::now() + CANCEL_WINDOW),
+            ..Cancel::default()
+        };
+        assert!(cancel.disarm(), "first ESC must arm without canceling");
+        assert!(!INTERRUPTED.load(Ordering::SeqCst));
+        cancel.commit();
+        assert!(INTERRUPTED.swap(false, Ordering::SeqCst));
     }
 }

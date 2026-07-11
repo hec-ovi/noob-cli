@@ -1,36 +1,28 @@
 # noob/src/agent
 
-The turn loop: build request, stream events, render, execute tool calls,
-append results, repeat until a turn ends with no tool calls or a breaker
-trips (cap: 50 rounds per user input).
+The inference and tool loop. A user input can run at most 50 rounds.
 
-Owns: the scheduler (`sched.rs`: consecutive read-only calls run
-concurrently on scoped threads, cap 8; consecutive task calls form one
-fan-out group run concurrently up to the child cap; any other mutating call
-is a sequential barrier; results always append in emission order), plan
-mode (enter filters the active tools to the read-only set and injects the
-mode message; the dispatcher refuses hallucinated mutations as defense in
-depth; exit restores the full set), doom-loop breakers
-(identical call 3x within the last 12 intercepts; 4 consecutive errors
-inject a nudge; 8 pause the REPL or abort headless runs), compaction
-(`compact.rs`, at 75% of NOOB_CTX, a ladder: prune old fat tool results
-into placeholders when that alone frees enough, else summarize the middle
-against the schema in prompts/compact.md with deterministic validation --
-an empty or non-shrinking summary is retried once, then pruned or
-hard-dropped, never spliced; head + ~20k-token tail always verbatim,
-call/result pairs never split; a deterministic pinned block [task /
-files touched / loaded skills] is appended to every spliced message from
-harness ground truth and carried across cycles and resumes; a transport
-failure sets a backoff so a failing summarizer is not retried every
-round), prompt assembly
-(`prompt.rs`, once per session), the skills-dir write gate (write/edit
-into `**/skills/**` requires confirmation in every mode; headless denies),
-and interrupt handling (partial turns discarded; parsed-but-unexecuted
-calls get synthetic "canceled by user" results; the flag is cleared so
-the session continues).
+Each round borrows the system prompt, items, and active schemas through `TurnRequestRef`, streams one provider turn, validates its finish state, persists the completed assistant item, schedules tool calls, appends one result per call, and repeats.
 
-Invariants: the system prompt and tools array are frozen at session start;
-every request is an exact prefix-extension of the previous one; the only
-sanctioned prefix breaks are compaction and plan-mode entry or exit, each
-logged as `cache prefix reset: <reason>`. The per-input round cap is
-`max_rounds` (50 for the user's agent; children run under their task cap).
+## Scheduler
+
+- Consecutive read-only calls run concurrently on scoped threads, cap 8.
+- Consecutive task calls form one fan-out group under child concurrency.
+- Other mutations are sequential barriers.
+- Starts are reported immediately before execution.
+- Parallel finishes are reported in actual completion order.
+- Returned outcomes and transcript results remain in model emission order.
+
+Canceled outcomes are structural. They are removed from the repeated-call window and never inferred from result text.
+
+## Modes and breakers
+
+Plan mode sends only the read-only tool set and refuses hallucinated mutations. `/go` restores the full set. Identical calls repeated three times within twelve are intercepted; four consecutive errors add a nudge; eight ask the terminal user or abort headless execution.
+
+Compaction prunes old large tool results first, then summarizes and validates the middle if needed. Call/result pairs stay intact, and harness-built pins preserve task, files, and loaded skills.
+
+## Persistence and approvals
+
+Every item append checks the session result. A failed session detaches, leaves the in-memory transcript valid, and produces one ordered warning. Skill-write approvals are counted, batch-scoped, and cleared after completion or cancellation.
+
+The system prompt and tool array remain byte-stable except for explicit plan transitions, first live skill-tool registration, and compaction. Tests enforce request prefix stability.

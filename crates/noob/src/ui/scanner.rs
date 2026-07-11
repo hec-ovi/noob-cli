@@ -24,7 +24,7 @@ use super::style::{ColorDepth, RESET, Rgb, fg_sgr};
 /// to read as motion.
 const FRAME_MS: u64 = 90;
 /// Cells the comet sweeps across.
-const TRACK: usize = 14;
+pub(super) const TRACK: usize = 14;
 /// Length of the fading tail behind the head (uses the 6-stop ramp: head is the
 /// brightest stop, the tail steps down through the rest).
 const TAIL: usize = 5;
@@ -96,13 +96,19 @@ fn run(stop: &AtomicBool, depth: ColorDepth, ramp: [Rgb; 6]) {
 /// carries its own reset, so nothing bleeds past the line. A pure function of
 /// its inputs, so it is unit-testable without a terminal.
 pub(super) fn frame(t: usize, depth: ColorDepth, ramp: &[Rgb; 6]) -> String {
+    format!("\r  {}", track(t, depth, ramp))
+}
+
+/// The same comet without cursor movement or indentation, for embedding in
+/// the dock's persistent top status row.
+pub(super) fn track(t: usize, depth: ColorDepth, ramp: &[Rgb; 6]) -> String {
     let period = 2 * (TRACK - 1);
     let phase = t % period;
     // Head bounces 0 -> TRACK-1 -> 0; the tail trails behind it.
     let head = if phase < TRACK { phase } else { period - phase };
     let going_right = phase < TRACK - 1;
 
-    let mut s = String::from("\r  ");
+    let mut s = String::new();
     for c in 0..TRACK {
         if c == head {
             s.push_str(&cell(depth, ramp[ramp.len() - 1], true));

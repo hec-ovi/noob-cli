@@ -7,7 +7,7 @@
 //!   {"t":"item","item":{...}}            one transcript item appended
 //!   {"t":"reset","items":[...]}          compaction replaced the transcript
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -21,8 +21,8 @@ pub struct Session {
 }
 
 impl Session {
-    /// Open (resuming) or create the session `id`; a fresh id is unix-millis
-    /// hex when none is given. Returns the session and any replayed items.
+    /// Open (resuming) or create the session `id`; a fresh id combines time,
+    /// process, and serial components when none is given.
     pub fn open(
         config_dir: &Path,
         id: Option<&str>,
@@ -38,9 +38,9 @@ impl Session {
         let mut items = Vec::new();
         let existed = path.is_file();
         if existed {
-            let text = std::fs::read_to_string(&path)
+            let input = std::fs::File::open(&path)
                 .map_err(|e| format!("cannot read session {}: {e}", path.display()))?;
-            items = replay(&text);
+            items = replay(BufReader::new(input));
         }
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -49,7 +49,9 @@ impl Session {
             .map_err(|e| format!("cannot open session {}: {e}", path.display()))?;
         if !existed {
             let meta = json!({"t": "meta", "v": 1, "id": id, "created_ms": now_ms()});
-            let _ = writeln!(file, "{meta}");
+            writeln!(file, "{meta}")
+                .and_then(|_| file.flush())
+                .map_err(|e| format!("cannot initialize session {}: {e}", path.display()))?;
         }
         let mut session = Session { id, path, file };
         // A session killed mid-tool-batch (second Ctrl-C, SIGKILL, power
@@ -57,7 +59,7 @@ impl Session {
         // would make every future request API-invalid. Heal it here, in the
         // file too, so the repair is durable.
         for repair in repair_dangling_calls(&mut items) {
-            session.log_item(&repair);
+            session.log_item(&repair)?;
         }
         Ok((session, items))
     }
@@ -70,19 +72,23 @@ impl Session {
         &self.path
     }
 
-    pub fn log_item(&mut self, item: &Item) {
+    pub fn log_item(&mut self, item: &Item) -> Result<(), String> {
         let line = json!({"t": "item", "item": item_to_json(item)});
-        let _ = writeln!(self.file, "{line}");
-        let _ = self.file.flush();
+        self.append(&line)
     }
 
     /// Compaction replaced the transcript; the log records the full new
     /// state so resume never sees the dropped middle.
-    pub fn log_reset(&mut self, items: &[Item]) {
+    pub fn log_reset(&mut self, items: &[Item]) -> Result<(), String> {
         let arr: Vec<Value> = items.iter().map(item_to_json).collect();
         let line = json!({"t": "reset", "items": arr});
-        let _ = writeln!(self.file, "{line}");
-        let _ = self.file.flush();
+        self.append(&line)
+    }
+
+    fn append(&mut self, line: &Value) -> Result<(), String> {
+        writeln!(self.file, "{line}")
+            .and_then(|_| self.file.flush())
+            .map_err(|e| format!("cannot append session {}: {e}", self.path.display()))
     }
 }
 
@@ -135,13 +141,16 @@ fn now_ms() -> u128 {
 }
 
 fn fresh_id() -> String {
-    format!("{:x}", now_ms())
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{:x}-{:x}-{serial:x}", now_ms(), std::process::id())
 }
 
-fn replay(text: &str) -> Vec<Item> {
+fn replay(reader: impl BufRead) -> Vec<Item> {
     let mut items = Vec::new();
-    for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+    for line in reader.lines() {
+        let Ok(line) = line else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
         match v.get("t").and_then(Value::as_str) {
             Some("item") => {
                 if let Some(item) = v.get("item").and_then(item_from_json) {
@@ -149,11 +158,10 @@ fn replay(text: &str) -> Vec<Item> {
                 }
             }
             Some("reset") => {
-                items = v
-                    .get("items")
-                    .and_then(Value::as_array)
-                    .map(|arr| arr.iter().filter_map(item_from_json).collect())
-                    .unwrap_or_default();
+                items.clear();
+                if let Some(reset) = v.get("items").and_then(Value::as_array) {
+                    items.extend(reset.iter().filter_map(item_from_json));
+                }
             }
             _ => {}
         }
@@ -232,13 +240,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (mut s, replayed) = Session::open(tmp.path(), Some("t1")).unwrap();
         assert!(replayed.is_empty());
-        s.log_item(&Item::User("hello".into()));
+        s.log_item(&Item::User("hello".into())).unwrap();
         s.log_item(&Item::Assistant {
             text: "hi".into(),
             tool_calls: vec![call()],
             raw_items: vec![json!({"type": "message"})],
-        });
-        s.log_item(&Item::ToolResult { call_id: "call_1".into(), content: "f lines".into() });
+        })
+        .unwrap();
+        s.log_item(&Item::ToolResult { call_id: "call_1".into(), content: "f lines".into() })
+            .unwrap();
         drop(s);
 
         let (_s2, items) = Session::open(tmp.path(), Some("t1")).unwrap();
@@ -257,10 +267,10 @@ mod tests {
     fn reset_replaces_earlier_items_on_replay() {
         let tmp = tempfile::tempdir().unwrap();
         let (mut s, _) = Session::open(tmp.path(), Some("t2")).unwrap();
-        s.log_item(&Item::User("one".into()));
-        s.log_item(&Item::User("two".into()));
-        s.log_reset(&[Item::User("[summary]".into())]);
-        s.log_item(&Item::User("three".into()));
+        s.log_item(&Item::User("one".into())).unwrap();
+        s.log_item(&Item::User("two".into())).unwrap();
+        s.log_reset(&[Item::User("[summary]".into())]).unwrap();
+        s.log_item(&Item::User("three".into())).unwrap();
         drop(s);
         let (_s, items) = Session::open(tmp.path(), Some("t2")).unwrap();
         assert_eq!(items.len(), 2);
@@ -272,7 +282,11 @@ mod tests {
     fn fresh_ids_are_hex_and_files_land_in_sessions_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let (s, _) = Session::open(tmp.path(), None).unwrap();
-        assert!(s.id().chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(
+            s.id()
+                .split('-')
+                .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_hexdigit()))
+        );
         assert!(s.path().starts_with(tmp.path().join("sessions")));
         assert!(s.path().is_file());
     }
@@ -293,7 +307,7 @@ mod tests {
     fn resume_repairs_dangling_tool_calls() {
         let tmp = tempfile::tempdir().unwrap();
         let (mut s, _) = Session::open(tmp.path(), Some("t4")).unwrap();
-        s.log_item(&Item::User("go".into()));
+        s.log_item(&Item::User("go".into())).unwrap();
         s.log_item(&Item::Assistant {
             text: String::new(),
             tool_calls: vec![
@@ -301,8 +315,10 @@ mod tests {
                 ToolCall { id: "c2".into(), name: "read".into(), arguments: "{}".into() },
             ],
             raw_items: vec![],
-        });
-        s.log_item(&Item::ToolResult { call_id: "c1".into(), content: "partial".into() });
+        })
+        .unwrap();
+        s.log_item(&Item::ToolResult { call_id: "c1".into(), content: "partial".into() })
+            .unwrap();
         drop(s); // killed before c2's result landed
 
         let (_s2, items) = Session::open(tmp.path(), Some("t4")).unwrap();
@@ -332,5 +348,17 @@ mod tests {
         .unwrap();
         let (_s, items) = Session::open(tmp.path(), Some("t3")).unwrap();
         assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn append_errors_are_reported_instead_of_silently_losing_the_session() {
+        let file = std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
+        let mut session = Session {
+            id: "full".into(),
+            path: PathBuf::from("/dev/full"),
+            file,
+        };
+        let error = session.log_item(&Item::User("important".into())).unwrap_err();
+        assert!(error.contains("cannot append session"), "{error}");
     }
 }

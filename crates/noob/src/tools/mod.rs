@@ -40,11 +40,11 @@ pub struct ToolCtx {
     /// Names of skills loaded this session, in load order, for the
     /// post-compaction re-listing.
     pub loaded_skills: Mutex<Vec<String>>,
-    /// Real target paths the user confirmed for a skills-dir write. The
-    /// agent gate inserts on grant; write/edit re-check membership at
-    /// execution time so a symlink created earlier in the same batch cannot
-    /// route a write into a skills dir past the confirmation.
-    pub approved_skill_writes: Mutex<std::collections::HashSet<PathBuf>>,
+    /// One execution grant per confirmed skills-dir write, counted by real
+    /// target path. Counts preserve two explicit approvals for two calls to
+    /// the same path while preventing either grant from leaking to a later
+    /// operation.
+    pub approved_skill_writes: Mutex<std::collections::HashMap<PathBuf, usize>>,
     /// MCP manager; Some only when mcp.json configured at least one server
     /// (and then mcp_connect/mcp_call are registered). Set at bootstrap.
     pub mcp: Option<crate::mcp::Mcp>,
@@ -63,7 +63,7 @@ impl ToolCtx {
             bash_warned: AtomicBool::new(false),
             skills: Vec::new(),
             loaded_skills: Mutex::new(Vec::new()),
-            approved_skill_writes: Mutex::new(std::collections::HashSet::new()),
+            approved_skill_writes: Mutex::new(std::collections::HashMap::new()),
             mcp: None,
             task: None,
         }
@@ -81,8 +81,14 @@ impl ToolCtx {
     /// gap a same-batch symlink would otherwise open.
     pub(crate) fn skills_write_refusal(&self, raw: &str) -> Option<String> {
         let target = guard::skill_write_target(&self.workspace, raw)?;
-        if self.approved_skill_writes.lock().unwrap().contains(&target) {
-            return None;
+        let mut approvals = self.approved_skill_writes.lock().unwrap();
+        if let std::collections::hash_map::Entry::Occupied(mut entry) = approvals.entry(target) {
+            if *entry.get() > 1 {
+                *entry.get_mut() -= 1;
+            } else {
+                entry.remove();
+            }
+            return None; // exactly one grant consumed for this operation
         }
         Some(
             "refused: writing into a skills directory needs the user's confirmation \
