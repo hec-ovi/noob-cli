@@ -12,6 +12,11 @@ use std::process::Command;
 use noob_testkit::MockServer;
 use serde_json::Value;
 
+// The test-only screen emulator (tests/vt.rs), included as a module so the
+// dock repro can render noob's captured bytes into a fixed rows x cols screen.
+#[path = "vt.rs"]
+mod vt;
+
 fn write_env(dir: &std::path::Path, base_url: &str) {
     std::fs::write(
         dir.join(".env"),
@@ -84,11 +89,29 @@ fn spawn_pty(rig: &Rig) -> Pty {
 /// Spawn with exactly the requested UI environment. An empty slice exercises
 /// the default dock; `NOOB_DOCK=0` is the classic escape hatch.
 fn spawn_pty_with(rig: &Rig, envs: &[(&str, &str)]) -> Pty {
+    spawn_pty_sized(rig, envs, None)
+}
+
+/// Spawn with a specific terminal size. `size = Some((rows, cols))` sets the
+/// pty winsize so scrolling behavior on a small screen is reproducible; noob
+/// reads only `cols` (via TIOCGWINSZ) and is otherwise row-agnostic, so the
+/// row count matters only to the emulator that replays the captured bytes.
+fn spawn_pty_sized(rig: &Rig, envs: &[(&str, &str)], size: Option<(u16, u16)>) -> Pty {
     let (master, slave) = unsafe {
         let mut m: libc::c_int = 0;
         let mut s: libc::c_int = 0;
+        let ws = size.map(|(rows, cols)| libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        });
+        let ws_ptr = ws
+            .as_ref()
+            .map(|w| w as *const libc::winsize)
+            .unwrap_or(std::ptr::null());
         assert_eq!(
-            libc::openpty(&mut m, &mut s, std::ptr::null_mut(), std::ptr::null(), std::ptr::null()),
+            libc::openpty(&mut m, &mut s, std::ptr::null_mut(), std::ptr::null(), ws_ptr),
             0,
             "openpty failed"
         );
@@ -125,7 +148,15 @@ fn spawn_pty_with(rig: &Rig, envs: &[(&str, &str)]) -> Pty {
         }
         unsafe { libc::kill(child_pid, libc::SIGKILL) };
     });
-    Pty { master, child: Some(child), done, watchdog: Some(watchdog), seen: String::new(), cursor: 0 }
+    Pty {
+        master,
+        child: Some(child),
+        done,
+        watchdog: Some(watchdog),
+        seen: String::new(),
+        raw: Vec::new(),
+        cursor: 0,
+    }
 }
 
 /// The sequence the editor writes right after `tcsetattr(raw)` succeeds.
@@ -140,6 +171,11 @@ struct Pty {
     done: std::sync::Arc<std::sync::atomic::AtomicBool>,
     watchdog: Option<std::thread::JoinHandle<()>>,
     seen: String,
+    /// The exact bytes read from the master, undecoded. `seen` is a lossy
+    /// UTF-8 view for substring waits; the screen emulator needs the real
+    /// bytes (a box-drawing glyph split across a read boundary would otherwise
+    /// become a replacement char).
+    raw: Vec<u8>,
     /// How far `wait_for` has consumed, so successive calls match successive
     /// occurrences (each prompt re-emits the same markers).
     cursor: usize,
@@ -161,10 +197,51 @@ impl Pty {
             }
             match self.master.read(&mut buf) {
                 Ok(0) => panic!("pty closed before {marker:?}; saw:\n{}", self.seen),
-                Ok(n) => self.seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+                Ok(n) => {
+                    self.raw.extend_from_slice(&buf[..n]);
+                    self.seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
                 Err(e) => panic!("pty read error: {e}; saw:\n{}", self.seen),
             }
         }
+    }
+
+    /// Pull whatever the child emits over `budget`, into `raw`/`seen`, without
+    /// blocking on a marker. Used to capture the trailing dock repaints (the
+    /// frame is redrawn after the last output, and the liveness comet repaints
+    /// it on a 120 ms cadence) before snapshotting the screen.
+    fn drain(&mut self, budget: std::time::Duration) {
+        use std::os::fd::AsRawFd;
+        let fd = self.master.as_raw_fd();
+        let deadline = std::time::Instant::now() + budget;
+        let mut buf = [0u8; 4096];
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let ms = (remaining.as_millis() as i32).min(40);
+            let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            let ready = unsafe { libc::poll(&mut pfd, 1, ms) };
+            if ready <= 0 {
+                continue; // timeout or EINTR: keep polling until the budget ends
+            }
+            match self.master.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    self.raw.extend_from_slice(&buf[..n]);
+                    self.seen.push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// Replay everything captured so far into a fresh rows x cols screen.
+    fn screen(&self, rows: u16, cols: u16) -> vt::Vt {
+        let mut vt = vt::Vt::new(rows as usize, cols as usize);
+        vt.feed(&self.raw);
+        vt
     }
 
     /// Wait for the child to exit and return its status, stopping the watchdog.
@@ -1092,4 +1169,257 @@ fn skills_remove_announces_and_the_tool_rejects_the_gone_skill() {
     );
     assert!(!rig.work.path().join(".noob/skills/demo").exists(), "the skill dir must be gone");
     rig.server.assert_clean();
+}
+
+// ---------------------------------------------------------------------------
+// Screen-level dock reproduction. The byte-only PTY tests above cannot see a
+// scroll-at-bottom cursor-math desync: they assert on the raw output bytes and
+// have no screen model. This one replays noob's exact captured bytes into a
+// small rows x cols emulator (tests/vt.rs) and inspects the dock the way a
+// human would, both mid-turn (frame live) and at idle (frame torn down).
+// ---------------------------------------------------------------------------
+
+/// The U+203A input marker the dock's input row always leads with.
+const MARKER: &str = "\u{203a}";
+
+/// Find the dock's three rows in a rendered screen: the "Working" top rule, the
+/// "Esc Esc to cancel" bottom rule, and the input row between them. Returns the
+/// row indices if the top and bottom rules are both present.
+fn dock_rows(screen: &[String]) -> Option<(usize, usize)> {
+    let top = screen.iter().rposition(|r| r.contains("Working"))?;
+    let bottom = screen.iter().rposition(|r| r.contains("Esc Esc to cancel"))?;
+    Some((top, bottom))
+}
+
+#[test]
+fn dock_input_row_survives_a_scrolling_stream_at_the_screen_level() {
+    // A small screen so the stream scrolls it several times over, and a width
+    // wide enough that no single short line wraps.
+    const ROWS: u16 = 12;
+    const COLS: u16 = 64;
+
+    let rig = rig();
+    // Twenty-four short, unique lines (one per stream delta, since
+    // `chat_stream_datas` cuts on whitespace and each line ends in `\n`), then a
+    // final ZZEND marker. Stream the first fourteen, stall long enough to snap a
+    // mid-turn screen, then stream the rest and finish.
+    let mut text = String::new();
+    for i in 1..=24 {
+        text.push_str(&format!("row-{i:02}-xyz\n"));
+    }
+    text.push_str("ZZEND");
+    // datas: [role, row-01..row-24, ZZEND, finish, usage, DONE]. Head = role +
+    // rows 1..14 => 15 deltas.
+    rig.server.enqueue_raw(stalled_stream(&text, 15, 1200, true));
+
+    let mut pty = spawn_pty_sized(&rig, &[], Some((ROWS, COLS)));
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"go\r");
+    pty.wait_for("Working"); // the dock is up and the stream is flowing
+    pty.wait_for("row-14-xyz"); // the last line before the stall has landed
+
+    // MID-TURN: drain the trailing frame repaints during the stall, then snap.
+    pty.drain(std::time::Duration::from_millis(500));
+    let mid = pty.screen(ROWS, COLS);
+    let mid_rows = mid.render();
+    println!("\n{}", mid.dump("MID-TURN (frame live, mid-stall)"));
+
+    // Let the stall lapse, the rest stream, and the turn finish.
+    pty.wait_for("ZZEND");
+    settle();
+    pty.drain(std::time::Duration::from_millis(300));
+    let end = pty.screen(ROWS, COLS);
+    println!("\n{}", end.dump("END-OF-TURN (idle prompt)"));
+
+    pty.send(&[0x04]);
+    pty.wait_for("resume with --session");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+
+    // ---- MID-TURN assertions: the dock must be intact and live. ----
+    let (top, bottom) = dock_rows(&mid_rows)
+        .unwrap_or_else(|| panic!("mid-turn dock rules missing entirely:\n{}", mid.dump("mid")));
+    assert_eq!(
+        bottom,
+        top + 2,
+        "the dock is not three contiguous rows (top {top}, bottom {bottom}):\n{}",
+        mid.dump("mid")
+    );
+    let input = &mid_rows[top + 1];
+    assert!(
+        input.contains(MARKER),
+        "MID-TURN the input row lost its `{MARKER}` marker (input disappeared during \
+         activity); input row = {input:?}\n{}",
+        mid.dump("mid")
+    );
+    // The input row must be the dock's own row, not a line of streamed output
+    // that scrolled into the marker's position.
+    assert!(
+        !input.contains("row-") && !input.contains("ZZEND"),
+        "MID-TURN streamed output bled into the input row: {input:?}\n{}",
+        mid.dump("mid")
+    );
+
+    // ---- END-OF-TURN assertions: frame gone, a bare idle marker remains. ----
+    let end_rows = end.render();
+    assert!(
+        dock_rows(&end_rows).is_none(),
+        "END-OF-TURN the live frame was not torn down:\n{}",
+        end.dump("end")
+    );
+    let last_marker = end_rows
+        .iter()
+        .rposition(|r| r.trim_start().starts_with(MARKER))
+        .unwrap_or_else(|| panic!("END-OF-TURN no idle `{MARKER}` prompt:\n{}", end.dump("end")));
+    // Nothing streamed should sit below the idle prompt.
+    for (i, r) in end_rows.iter().enumerate().skip(last_marker + 1) {
+        assert!(
+            r.is_empty(),
+            "END-OF-TURN row {i} below the idle prompt is not blank: {r:?}\n{}",
+            end.dump("end")
+        );
+    }
+}
+
+/// The input row is a visible affordance during a turn: while the draft is
+/// empty the dock shows a dim "type to queue a message" placeholder (so the row
+/// never reads as absent, the reported "input disappears during activity"), and
+/// the first keystroke replaces it with the draft rather than sitting beside it.
+#[test]
+fn dock_input_row_shows_a_placeholder_when_empty_and_replaces_it_on_typing() {
+    const ROWS: u16 = 12;
+    const COLS: u16 = 64;
+
+    let rig = rig();
+    // Newline-terminated lines so each flushes mid-stream (the markdown renderer
+    // holds an un-terminated line until turn end). Stream role + two lines, then
+    // stall long enough to snap twice, then finish.
+    let text = "aa-line\nbb-line\ncc-line\ndd-line\nZZEND";
+    rig.server.enqueue_raw(stalled_stream(text, 3, 4000, true));
+    rig.server.enqueue_stream_completion("second turn ran");
+
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)));
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"go\r");
+    pty.wait_for("Working");
+    pty.wait_for("bb-line"); // last head line flushed; inside the 4000 ms stall
+
+    // EMPTY DRAFT: the placeholder is the visible input affordance.
+    pty.drain(std::time::Duration::from_millis(500));
+    let empty = pty.screen(ROWS, COLS);
+    let empty_rows = empty.render();
+    let (top, _bottom) = dock_rows(&empty_rows)
+        .unwrap_or_else(|| panic!("dock rules missing:\n{}", empty.dump("empty")));
+    assert!(
+        empty_rows[top + 1].contains("type to queue a message"),
+        "the empty input row shows no placeholder affordance: {:?}\n{}",
+        empty_rows[top + 1],
+        empty.dump("empty")
+    );
+
+    // TYPED: the placeholder is replaced by the draft, never shown alongside it.
+    pty.send(b"my note");
+    pty.drain(std::time::Duration::from_millis(400));
+    let typed = pty.screen(ROWS, COLS);
+    let typed_rows = typed.render();
+    let (ttop, _) = dock_rows(&typed_rows)
+        .unwrap_or_else(|| panic!("dock rules missing after typing:\n{}", typed.dump("typed")));
+    let tinput = &typed_rows[ttop + 1];
+    assert!(
+        tinput.contains("my note") && !tinput.contains("type to queue a message"),
+        "typing did not replace the placeholder: {tinput:?}\n{}",
+        typed.dump("typed")
+    );
+
+    // The typed draft carries to the next prompt and submits whole (proving it
+    // is a real draft, not the display-only placeholder).
+    pty.wait_for("ZZEND");
+    settle();
+    pty.send(b"\r");
+    pty.wait_for("second turn ran");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with --session");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    let reqs = rig.api_requests();
+    assert_eq!(last_user(reqs.last().unwrap()), "my note");
+    rig.server.assert_clean();
+}
+
+/// The same guarantee for logical lines LONGER than the terminal width, which
+/// the terminal wraps into several physical rows. noob emits the whole line and
+/// relies on the terminal to wrap and scroll; its dock erase/redraw only knows
+/// three frame rows, so this is where a row-agnostic desync would surface.
+#[test]
+fn dock_input_row_survives_wrapping_lines_at_the_screen_level() {
+    const ROWS: u16 = 12;
+    const COLS: u16 = 64;
+
+    let rig = rig();
+    // Twelve lines of ~150 chars each: every one wraps to three physical rows at
+    // width 64. Interior spaces mean each wraps across many word deltas.
+    let mut text = String::new();
+    for i in 1..=12 {
+        text.push_str(&format!("para-{i:02} ").repeat(17));
+        text.push('\n');
+    }
+    text.push_str("ZZEND");
+    let datas = noob_testkit::chat_stream_datas(&text);
+    rig.server.enqueue_raw(stalled_stream(&text, datas.len() / 2, 1200, true));
+
+    let mut pty = spawn_pty_sized(&rig, &[], Some((ROWS, COLS)));
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"go\r");
+    pty.wait_for("Working");
+    pty.wait_for("para-05"); // several wrapped lines have scrolled past
+    pty.drain(std::time::Duration::from_millis(500));
+    let mid = pty.screen(ROWS, COLS);
+    let mid_rows = mid.render();
+    println!("\n{}", mid.dump("WRAP MID-TURN (frame live, mid-stall)"));
+
+    pty.wait_for("ZZEND");
+    settle();
+    pty.drain(std::time::Duration::from_millis(300));
+    let end = pty.screen(ROWS, COLS);
+    println!("\n{}", end.dump("WRAP END-OF-TURN (idle prompt)"));
+
+    pty.send(&[0x04]);
+    pty.wait_for("resume with --session");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+
+    // MID-TURN: the dock is three contiguous rows and the input row is present.
+    let (top, bottom) = dock_rows(&mid_rows)
+        .unwrap_or_else(|| panic!("mid-turn dock rules missing:\n{}", mid.dump("mid")));
+    assert_eq!(bottom, top + 2, "the dock is not three contiguous rows:\n{}", mid.dump("mid"));
+    let input = &mid_rows[top + 1];
+    assert!(
+        input.contains(MARKER),
+        "MID-TURN the input row lost its `{MARKER}` marker: {input:?}\n{}",
+        mid.dump("mid")
+    );
+    assert!(
+        !input.contains("para-"),
+        "MID-TURN wrapped output bled into the input row: {input:?}\n{}",
+        mid.dump("mid")
+    );
+
+    // END-OF-TURN: the live frame is gone and a bare idle marker remains.
+    let end_rows = end.render();
+    assert!(
+        dock_rows(&end_rows).is_none(),
+        "END-OF-TURN the live frame was not torn down:\n{}",
+        end.dump("end")
+    );
+    assert!(
+        end_rows.iter().any(|r| r.trim_start().starts_with(MARKER)),
+        "END-OF-TURN no idle `{MARKER}` prompt:\n{}",
+        end.dump("end")
+    );
 }

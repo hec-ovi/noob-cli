@@ -27,7 +27,7 @@ use std::sync::atomic::Ordering;
 
 use noob_provider::http::INTERRUPTED;
 
-use super::style::RESET;
+use super::style::{DIM, RESET};
 use super::{Mode, Ui};
 
 thread_local! {
@@ -238,11 +238,31 @@ impl Ui {
     /// exactly three rows and every in-place redraw (this, expand, refit,
     /// erase_frame) stays exact.
     pub(super) fn redraw_input_row(&mut self, ed: &Editor, width: usize) {
+        self.redraw_input_row_hint(ed, width, "");
+    }
+
+    /// Redraw the input line, showing a dim `hint` placeholder when the buffer is
+    /// empty so the input stays a visible affordance instead of a lone bare
+    /// marker that reads as "no input". The hint is display-only: it never enters
+    /// the buffer and is never submitted, and the first keystroke replaces it.
+    /// The clear-to-end-of-line (`\x1b[K`) is emitted AFTER the content, not
+    /// before, so each frame overwrites the row in place with no blank flash.
+    pub(super) fn redraw_input_row_hint(&mut self, ed: &Editor, width: usize, hint: &str) {
         let color = self.box_color();
         let reset = if color.is_empty() { "" } else { RESET };
         let avail = width.saturating_sub(PREFIX_CELLS).max(1);
+        if ed.is_empty() && !hint.is_empty() {
+            let shown: String = hint.chars().take(avail).collect();
+            let dim = if self.color { DIM } else { "" };
+            let dim_reset = if self.color { RESET } else { "" };
+            // Park the cursor right after the marker so typing lands there.
+            self.out(&format!(
+                "\r{color}{PREFIX}{reset}{dim}{shown}{dim_reset}\x1b[K\r\x1b[{PREFIX_CELLS}C"
+            ));
+            return;
+        }
         let (shown, cur) = input_window(&ed.buf, ed.cursor, avail);
-        let mut s = format!("\r\x1b[K{color}{PREFIX}{reset}{shown}");
+        let mut s = format!("\r{color}{PREFIX}{reset}{shown}\x1b[K");
         // Cursor column = the prefix width plus its offset within the window.
         let col = PREFIX_CELLS + cur;
         s.push('\r');

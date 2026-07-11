@@ -909,7 +909,7 @@ impl DockSession {
             let ed = Editor::from_line(&shown);
             ui.redraw_input_row(&ed, width);
         } else {
-            ui.redraw_input_row(&self.draft, width);
+            ui.redraw_input_row_hint(&self.draft, width, "type to queue a message");
         }
     }
 
