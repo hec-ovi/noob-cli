@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use noob_provider::types::Usage;
 
 pub(crate) mod prompt;
+mod scanner;
 mod style;
 mod theme;
 
@@ -56,6 +57,9 @@ pub struct Ui {
     /// unit-testable.
     out: Box<dyn Write>,
     err: Box<dyn Write>,
+    /// The thinking scanner while it is sweeping (themed REPL only). Torn down
+    /// by the first real output byte and as the end-of-turn bracket.
+    scanner: Option<scanner::Scanner>,
     /// Test seam for the confirmation flow: unit tests cannot own a tty.
     #[cfg(test)]
     pub forced_ask: Option<bool>,
@@ -78,6 +82,7 @@ impl Ui {
             mid_line: false,
             out: Box::new(std::io::stdout()),
             err: Box::new(std::io::stderr()),
+            scanner: None,
             #[cfg(test)]
             forced_ask: None,
         }
@@ -97,8 +102,37 @@ impl Ui {
     }
 
     fn out(&mut self, s: &str) {
+        // The first real output byte of a turn ends any thinking scanner: it
+        // joins the animation thread (which clears its line) before this writes,
+        // so the two never interleave. A no-op when none is running.
+        self.stop_scanner();
         let _ = self.out.write_all(s.as_bytes());
         let _ = self.out.flush();
+    }
+
+    /// Start the thinking scanner: a green square comet that sweeps on its own
+    /// line while the model works, until the first output arrives. Themed REPL
+    /// surface only, so piped, `exec`, `--json`, and child output are untouched.
+    /// Off the inference path: it animates on a side thread while the main
+    /// thread blocks on the request, and it is torn down before any reply byte.
+    pub fn thinking_start(&mut self) {
+        if self.styled() {
+            self.stop_scanner(); // never stack two
+            self.scanner = Some(scanner::Scanner::start(self.depth, self.theme.ramp));
+        }
+    }
+
+    /// Stop the scanner as the explicit end-of-turn bracket, covering a turn
+    /// that produced no output at all (nothing routed through `out`). A no-op
+    /// when none is running.
+    pub fn thinking_stop(&mut self) {
+        self.stop_scanner();
+    }
+
+    fn stop_scanner(&mut self) {
+        if let Some(mut scanner) = self.scanner.take() {
+            scanner.stop();
+        }
     }
 
     /// stderr is unbuffered; no flush, matching the prior direct writes.
@@ -388,6 +422,7 @@ mod tests {
             mid_line: false,
             out: Box::new(out.clone()),
             err: Box::new(err.clone()),
+            scanner: None,
             forced_ask: None,
         };
         (ui, out, err)
@@ -539,4 +574,31 @@ mod tests {
         assert!(s.contains("\"t\":\"text\"") || s.contains("\"text\""), "event missing: {s:?}");
         assert!(!s.contains('\x1b'), "JSONL protocol must carry no escapes: {s:?}");
     }
+
+    #[test]
+    fn thinking_scanner_never_starts_off_the_themed_surface() {
+        // Byte-identity guard: on every non-themed surface (a NO_COLOR or piped
+        // repl, exec, json, child) starting the scanner must be a no-op, so
+        // those streams gain no animation bytes. Structural: no scanner is
+        // created, and stopping one is safe.
+        for (mode, color, ansi) in [
+            (Mode::Repl, false, true),  // NO_COLOR at a tty
+            (Mode::Repl, false, false), // piped
+            (Mode::Exec, true, true),   // exec, even at a tty with color
+            (Mode::ExecJson, true, true),
+            (Mode::Child, true, true),
+        ] {
+            let (mut ui, _o, _e) = harness(mode, color, ansi);
+            ui.thinking_start();
+            assert!(ui.scanner.is_none(), "scanner started on a non-themed surface");
+            ui.thinking_stop();
+        }
+    }
+
+    // That the first output byte tears the scanner down (so the reply never
+    // interleaves with the comet) is proven end to end in a real pty by the e2e
+    // `raw_repl_shows_a_thinking_scanner_while_the_model_works`, which asserts no
+    // comet frame lands after the reply begins. It is not unit-tested here
+    // because starting a real scanner spawns a thread that writes to the process
+    // stdout, which cargo cannot capture and which would litter the runner.
 }

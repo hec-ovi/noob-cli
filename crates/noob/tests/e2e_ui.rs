@@ -87,7 +87,12 @@ fn spawn_pty(rig: &Rig) -> Pty {
         (std::fs::File::from_raw_fd(m), s)
     };
     let stdio = |fd: i32| unsafe { std::process::Stdio::from_raw_fd(libc::dup(fd)) };
+    // Force the themed color surface on regardless of the host's TERM, so the
+    // pty tests exercise the real interactive path (a color terminal) and the
+    // thinking scanner engages deterministically.
     let child = noob(rig.config.path(), rig.work.path())
+        .env("COLORTERM", "truecolor")
+        .env_remove("NO_COLOR")
         .stdin(stdio(slave))
         .stdout(stdio(slave))
         .stderr(stdio(slave))
@@ -282,10 +287,48 @@ fn raw_multiline_input_runs_one_turn_per_line() {
     rig.server.assert_clean();
 }
 
+/// The thinking scanner sweeps during the request-to-first-token gap: after a
+/// prompt is submitted, at least one comet frame reaches the terminal before the
+/// reply arrives. The assertion is that it rendered at all (a lifecycle fact),
+/// not how it looks; the piped test below is the byte-identity counterpart that
+/// proves a non-tty surface shows none of it.
+#[test]
+fn raw_repl_shows_a_thinking_scanner_while_the_model_works() {
+    let rig = rig();
+    rig.server.enqueue_stream_completion("scanned reply");
+
+    let mut pty = spawn_pty(&rig);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"work on it\r");
+    pty.wait_for("scanned reply");
+    pty.wait_for(RAW_READY); // back at a fresh prompt
+    pty.send(&[0x04]); // Ctrl-D exits
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    // The comet glyph appears before the reply and is then cleared; its bytes
+    // remain in the stream even though the line was wiped.
+    let last_comet = pty
+        .seen
+        .rfind('▪')
+        .unwrap_or_else(|| panic!("the thinking scanner never rendered a comet frame:\n{}", pty.seen));
+    // ...and it is torn down before the reply: no frame lands after the reply
+    // text begins, so the model's words never interleave with the animation
+    // (the first output byte joins the animation thread before it is written).
+    let reply_at = pty.seen.find("scanned reply").expect("reply never arrived");
+    assert!(
+        last_comet < reply_at,
+        "a comet frame rendered after the reply began (scanner not torn down):\n{}",
+        pty.seen
+    );
+    rig.server.assert_clean();
+}
+
 /// A piped REPL (stdin not a terminal) takes the cooked reader: the plain `> `
-/// marker prints, and neither the box frame nor the bracketed-paste toggles
-/// ever reach the output. This is the byte-identity guard for the non-tty
-/// surface.
+/// marker prints, and neither the box frame, the bracketed-paste toggles, nor
+/// the thinking scanner ever reach the output. This is the byte-identity guard
+/// for the non-tty surface.
 #[test]
 fn piped_repl_uses_cooked_reader_with_no_box() {
     let rig = rig();
@@ -314,5 +357,6 @@ fn piped_repl_uses_cooked_reader_with_no_box() {
         !stdout.contains("\x1b[?2004h") && !stdout.contains("\x1b[?2004l"),
         "bracketed paste toggled on a piped repl: {stdout}"
     );
+    assert!(!stdout.contains('▪'), "the thinking scanner leaked into a piped repl: {stdout}");
     rig.server.assert_clean();
 }

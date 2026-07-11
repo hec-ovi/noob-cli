@@ -91,7 +91,10 @@ impl Ui {
         };
         let mut ed = Editor::default();
         let mut dec = Decoder::default();
-        self.draw_box_top(plan);
+        // Seed `width` from the exact value the rule was drawn at (not a second
+        // ioctl), so a size that lands between the two reads cannot leave refit
+        // comparing against a width the rule was never drawn at.
+        let mut width = self.draw_box_top(plan);
 
         // Replay any keys carried over from a previous multi-line submit before
         // reading new input, so a pasted script runs one line per turn.
@@ -113,7 +116,14 @@ impl Ui {
                     }
                 }
             }
-            self.redraw_line(&ed);
+            // Snap the top rule to the current terminal width, then paint the
+            // input line. A freshly spawned pty reports width 0 for the first
+            // draw and its real size lands a moment later; re-fitting here means
+            // the box reaches full width on the first keystroke. Just a cheap
+            // ioctl per key on the read path already taken: no idle loop, no
+            // extra signal, nothing listening.
+            self.refit(plan, &mut width);
+            self.redraw_line(&ed, width);
             let n = unsafe {
                 libc::read(libc::STDIN_FILENO, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
             };
@@ -175,40 +185,64 @@ impl Ui {
         }
     }
 
-    /// The top rule, drawn once: a full-width `╭───...───╮`, no wordmark (the
-    /// banner already carries it). Plan mode is the only label. Leaves the
-    /// cursor at the start of the input line below it.
-    fn draw_box_top(&mut self, plan: bool) {
+    /// The top rule (`╭───...───╮`, no wordmark; the banner carries it, plan
+    /// mode is the only label), then a newline, leaving the cursor at column 0
+    /// of the input line below it. Returns the width it drew at so the caller can
+    /// track it without a second ioctl.
+    fn draw_box_top(&mut self, plan: bool) -> usize {
+        let width = term_width();
+        self.draw_rule(plan, width);
+        width
+    }
+
+    /// Emit the top rule at a given width plus the newline down to the input row.
+    fn draw_rule(&mut self, plan: bool, width: usize) {
         let color = self.box_color();
         let reset = if color.is_empty() { "" } else { RESET };
-        let width = term_width();
-        let head = if plan { "╭─ plan " } else { "╭" };
-        let mut rule = String::from(head);
-        for _ in head.chars().count()..width.saturating_sub(1) {
-            rule.push('─');
-        }
-        rule.push('╮');
+        let rule = box_top_rule(plan, width);
         self.out(&format!("{color}{rule}{reset}\r\n"));
     }
 
-    /// Redraw the single input line in place: return to column 0, clear it, and
-    /// print the framed prompt plus the buffer, then park the cursor. Only this
-    /// one row is ever rewritten, so there is no vertical cursor motion to lose
-    /// track of.
-    fn redraw_line(&mut self, ed: &Editor) {
+    /// Re-fit the box to the current terminal width, called once per keystroke
+    /// on the read path. A freshly spawned pty often reports width 0 for the
+    /// very first draw and only reports its real size a moment later; without
+    /// this the first box would stay stuck at the fallback width, so it snaps to
+    /// full width on the first keystroke (and tracks a later resize the same
+    /// way). When the width changed it repaints the box cleanly (erase both
+    /// rows, redraw the rule) and reports true so the caller repaints the input
+    /// line under it; otherwise a bare ioctl and nothing else. Sound because the
+    /// input line never wraps (redraw_line windows it to one row), so the box is
+    /// exactly two rows and erase_box targets them exactly. The one exception is
+    /// a terminal narrower than the 80-column fallback used before the pty
+    /// reports its size, where the fallback rule itself wraps for a moment; the
+    /// next key redraws it clean, and it only ever leaves a stray rule fragment
+    /// above the box (the input and the transcript stay correct). No timer, no
+    /// signal: the width is only re-read when a key is already being handled.
+    fn refit(&mut self, plan: bool, width: &mut usize) -> bool {
+        let now = term_width();
+        if now == *width {
+            return false;
+        }
+        *width = now;
+        self.erase_box();
+        self.draw_rule(plan, now);
+        true
+    }
+
+    /// Redraw the input line in place at the given width: return to column 0,
+    /// clear it, print the framed prompt plus a one-row window of the buffer,
+    /// then park the cursor. The window keeps the input to exactly one physical
+    /// row (a long line scrolls horizontally instead of wrapping), so there is
+    /// never more than one input row and every in-place redraw (this, erase_box,
+    /// refit) stays exact.
+    fn redraw_line(&mut self, ed: &Editor, width: usize) {
         let color = self.box_color();
         let reset = if color.is_empty() { "" } else { RESET };
-        // Pasted newlines live in the buffer literally; show them as spaces so
-        // the single line does not wrap. The submitted string keeps the real
-        // characters.
-        let shown: String = ed
-            .buf
-            .iter()
-            .map(|&c| if c.is_control() { ' ' } else { c })
-            .collect();
+        let avail = width.saturating_sub(PREFIX_CELLS).max(1);
+        let (shown, cur) = input_window(&ed.buf, ed.cursor, avail);
         let mut s = format!("\r\x1b[K{color}{PREFIX}{reset}{shown}");
-        // Cursor column = the prefix width plus how many chars precede it.
-        let col = PREFIX_CELLS + ed.cursor;
+        // Cursor column = the prefix width plus its offset within the window.
+        let col = PREFIX_CELLS + cur;
         s.push('\r');
         if col > 0 {
             s.push_str(&format!("\x1b[{col}C"));
@@ -252,6 +286,43 @@ fn raw_enabled_by_env() -> bool {
         Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
         Err(_) => true,
     }
+}
+
+/// The top border string at a given width: `╭───...───╮`, or `╭─ plan ──...─╮`
+/// in plan mode. Shared by the first draw and the resize re-fit so they never
+/// disagree.
+fn box_top_rule(plan: bool, width: usize) -> String {
+    let head = if plan { "╭─ plan " } else { "╭" };
+    let mut rule = String::from(head);
+    for _ in head.chars().count()..width.saturating_sub(1) {
+        rule.push('─');
+    }
+    rule.push('╮');
+    rule
+}
+
+/// A one-physical-row view of the input buffer: the visible slice (control
+/// chars, including any pasted newline, shown as spaces so nothing wraps or
+/// moves the cursor unexpectedly) and the cursor's column within it. `avail` is
+/// the number of columns available for text. The window holds the cursor: it
+/// stays left-anchored until the cursor would fall off the right edge, then
+/// scrolls so the cursor rides the right. Keeping the input to one row is what
+/// lets every in-place redraw assume a two-row box. Pure, so unit-testable.
+///
+/// Widths are counted in `char`s, i.e. one column per character: this carries no
+/// unicode-width table (a deliberate zero-dependency choice), so a run of
+/// double-width CJK or emoji glyphs is the one case that can still spill past the
+/// row and nudge the cursor. Plain single-width text (paths, code, prose) is
+/// exact, and the buffer and the submitted line are always correct regardless.
+fn input_window(buf: &[char], cursor: usize, avail: usize) -> (String, usize) {
+    let avail = avail.max(1);
+    let start = if cursor >= avail { cursor - avail + 1 } else { 0 };
+    let end = (start + avail).min(buf.len());
+    let shown: String = buf[start..end]
+        .iter()
+        .map(|&c| if c.is_control() { ' ' } else { c })
+        .collect();
+    (shown, cursor - start)
 }
 
 /// Terminal width in columns via the window-size ioctl; 80 when it is
@@ -978,6 +1049,48 @@ mod tests {
             }
         }
         assert_eq!(submitted.as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn box_top_rule_spans_the_width_and_is_bracketed() {
+        // The rule fills the terminal exactly: ╭ + dashes + ╮ == width glyphs.
+        let r = box_top_rule(false, 80);
+        assert!(r.starts_with('╭') && r.ends_with('╮'));
+        assert_eq!(r.chars().count(), 80, "rule must span the full width");
+        assert_eq!(r.chars().filter(|&c| c == '─').count(), 78);
+        // Plan mode keeps the label and still fills the width.
+        let p = box_top_rule(true, 120);
+        assert!(p.starts_with("╭─ plan "));
+        assert_eq!(p.chars().count(), 120);
+    }
+
+    #[test]
+    fn input_window_keeps_the_line_to_one_row_and_holds_the_cursor() {
+        // Short line: the whole buffer shows and the cursor is where it is.
+        let buf: Vec<char> = "hello world".chars().collect();
+        let (shown, cur) = input_window(&buf, 5, 20);
+        assert_eq!(shown, "hello world");
+        assert_eq!(cur, 5);
+        // Long line at any width never exceeds `avail` cells (so it cannot wrap),
+        // and the cursor stays inside the window at every position.
+        let long: Vec<char> = (0..200u32).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
+        for &avail in &[1usize, 5, 16, 40] {
+            for cursor in [0, 1, 50, 199, 200] {
+                let (shown, cur) = input_window(&long, cursor, avail);
+                assert!(shown.chars().count() <= avail, "window exceeds avail {avail}: {shown:?}");
+                assert!(cur < avail, "cursor {cur} not inside window (avail {avail})");
+                assert!(cur <= shown.chars().count(), "cursor past the shown text");
+            }
+        }
+    }
+
+    #[test]
+    fn input_window_shows_control_chars_as_spaces() {
+        // A pasted newline (or tab) in the buffer must render as a space so the
+        // single input row never wraps and the cursor math stays right.
+        let buf: Vec<char> = vec!['a', '\n', 'b', '\t', 'c'];
+        let (shown, _) = input_window(&buf, 5, 20);
+        assert_eq!(shown, "a b c");
     }
 
     #[test]

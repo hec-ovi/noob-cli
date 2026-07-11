@@ -10,7 +10,19 @@ wordmark; the banner already carries it), with real editing (insert, backspace
 across a multibyte char, Ctrl-A/E/U/K/W, left/right/Home/End, Delete, bracketed
 paste that holds newlines until a real Enter). On submit the box collapses to a
 compact `› message` line, so history reads as a list of sent messages, not a
-stack of frames. It is off the inference path: raw mode is entered only while
+stack of frames. The live input is shown as a one-row horizontal window of the
+buffer (a long line scrolls instead of wrapping), so the box stays two rows and
+every in-place redraw stays exact. Widths are counted one column per character
+(no unicode-width table, by design), so runs of double-width CJK or emoji are
+the one case that can still spill a row; the buffer and submitted line are always
+correct. The
+top rule re-fits to the terminal width on each keystroke (a bare ioctl on the
+read path already taken): a freshly spawned pty often reports width 0 for the
+first draw and its real size lands a moment later, so the box snaps to full width
+on the first keypress, and a later resize is tracked the same way. No timer, no
+idle loop, and no SIGWINCH handler (signals are left exactly as they were, so
+nothing new can touch the request path). It is off the inference path: raw mode
+is entered only while
 typing and restored to cooked before the agent runs, so keystrokes never reach
 the model (it sees the message once, on Enter). Three hooks restore the terminal
 so a crash never leaves the shell raw: the RAII guard on the normal return, a
@@ -31,6 +43,16 @@ a colored prompt marker, and a light tint on streamed assistant text so a human
 can tell the model's words from their own echoed input. The tint opens once per
 message and keeps the text contiguous (a streamed marker is never split by an
 escape); it is always reset before the next prompt.
+
+Thinking scanner (scanner.rs): on that same themed surface a small green square
+comet sweeps on its own line while a turn is in flight, from dispatch until the
+first output byte, so the request-to-first-token gap is not dead air. It is off
+the inference path by construction: the comet animates on a side thread that only
+writes to stdout while the main thread is blocked on the request, and it is torn
+down (the thread joined, its line cleared) before the first reply byte is
+written, so the two never interleave and throughput is untouched. It never reads
+or mutates any request, transcript, or model state. Themed REPL only: a piped
+REPL, `exec`, `--json`, and `child` never start it, so their bytes are unchanged.
 
 Every other surface stays byte-for-byte what it was: a piped REPL, `exec`,
 `exec --json`, and `child` stream model text raw, render tool activity as a

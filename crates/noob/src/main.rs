@@ -288,7 +288,10 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                 }
                 "go" => {
                     if agent.exit_plan(&mut ui) {
-                        match agent.run_input(agent::PLAN_APPROVED_MSG, &mut ui) {
+                        ui.thinking_start();
+                        let end = agent.run_input(agent::PLAN_APPROVED_MSG, &mut ui);
+                        ui.thinking_stop();
+                        match end {
                             RunEnd::Completed(_) | RunEnd::Interrupted => {}
                             RunEnd::Aborted(msg) => ui.error(&format!("error: {msg}")),
                         }
@@ -302,7 +305,13 @@ fn cmd_repl(args: &[String]) -> ExitCode {
             }
             continue;
         }
-        match agent.run_input(input, &mut ui) {
+        // The thinking scanner sweeps from here until the first reply byte, so
+        // the request-to-first-token gap is not dead air. thinking_stop is the
+        // end-of-turn bracket for a turn that streamed nothing at all.
+        ui.thinking_start();
+        let end = agent.run_input(input, &mut ui);
+        ui.thinking_stop();
+        match end {
             RunEnd::Completed(_) | RunEnd::Interrupted => {}
             RunEnd::Aborted(msg) => ui.error(&format!("error: {msg}")),
         }
