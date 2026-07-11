@@ -6,7 +6,12 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 DEV_IMG=noob-dev
-BIN=target/x86_64-unknown-linux-musl/release/noob
+case "$(uname -m)" in
+  x86_64) RUST_TARGET=x86_64-unknown-linux-musl ;;
+  aarch64|arm64) RUST_TARGET=aarch64-unknown-linux-musl ;;
+  *) echo "unsupported architecture: $(uname -m)" >&2; exit 2 ;;
+esac
+BIN="target/$RUST_TARGET/release/noob"
 UIDGID="$(id -u):$(id -g)"
 RUN=(docker run --rm --user "$UIDGID" -e CARGO_HOME=/src/.cargo-home
      -v "$PWD":/src -w /src "$DEV_IMG")
@@ -30,7 +35,8 @@ case "${1:-}" in
   build)
     dev_image
     "${RUN[@]}" env RUSTFLAGS="-C target-feature=+crt-static" \
-      cargo build --release --locked --target x86_64-unknown-linux-musl
+      sh -c 'rustup target add "$1" && cargo build --release --locked --target "$1"' \
+      sh "$RUST_TARGET"
     ;;
   # Live smoke suite against local endpoints (qwen at :8090 etc). Opt-in.
   # Serialized: parallel live tests share one llama-server and evict each
@@ -45,6 +51,10 @@ case "${1:-}" in
   # Build the runtime image without running it.
   docker)
     docker build -t noob -f docker/Dockerfile .
+    ;;
+  install)
+    shift
+    exec ./install.sh "$@"
     ;;
   # One-shot headless run through compose.
   exec)
@@ -69,9 +79,9 @@ case "${1:-}" in
   -h|--help|help)
     echo "usage:"
     echo "  ./dev.sh                    open the agent"
-    echo "  ./dev.sh --session <id>     resume a saved session"
+    echo "  ./dev.sh --restore <id>     restore a saved session"
     echo "  ./dev.sh --plan | --yolo    any noob flag is forwarded to the agent"
-    echo "  ./dev.sh test|build|docker|exec \"prompt\"|smoke|size-check|clean"
+    echo "  ./dev.sh install|test|build|docker|exec \"prompt\"|smoke|size-check|clean"
     ;;
   # Bare `./dev.sh`, or leading-dash noob flags (--session, --plan, ...): open
   # the agent. `repl` is kept as a silent alias for old muscle memory.

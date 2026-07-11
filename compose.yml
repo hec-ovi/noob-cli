@@ -11,6 +11,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+      target: runtime
     image: noob
     # Host networking so the agent reaches local model servers and MCP
     # endpoints on loopback (llama.cpp :8090, websearch MCP :8000, ...).
@@ -38,6 +39,10 @@ services:
       # the themed greens render as designed; a modern terminal is truecolor and a
       # rare non-truecolor host degrades gracefully terminal-side.
       - COLORTERM=${COLORTERM:-truecolor}
+      # An empty value keeps color enabled; any non-empty host value disables it.
+      - NO_COLOR=${NO_COLOR:-}
+      # Named display palette: matrix, ocean, amber, or violet.
+      - NOOB_THEME=${NOOB_THEME:-matrix}
     volumes:
       - ${WORKSPACE:-.}:/work
       - ${NOOB_CONFIG:-./config}:/config

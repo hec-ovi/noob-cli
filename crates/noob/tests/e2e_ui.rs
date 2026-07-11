@@ -253,7 +253,7 @@ fn repl_session_resume_extends_the_transcript() {
     assert!(out1.status.success(), "run 1 failed: {out1:?}");
 
     rig.server.enqueue_stream_completion("recalled");
-    let out2 = run_repl(&rig, &["--session", "reptest"], b"what did i say\n/quit\n");
+    let out2 = run_repl(&rig, &["--restore", "reptest"], b"what did i say\n/quit\n");
     assert!(out2.status.success(), "run 2 failed: {out2:?}");
 
     // Run 2's request replays run 1's user message: the transcript resumed and

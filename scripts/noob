@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# noob-cli managed Docker launcher. Installed by ./install.sh.
+set -euo pipefail
+
+if ! command -v docker >/dev/null 2>&1; then
+    echo "noob: Docker is required; install Docker Engine and retry" >&2
+    exit 127
+fi
+
+image="${NOOB_IMAGE:-noob:local}"
+workspace="${NOOB_WORKSPACE:-$PWD}"
+config_home="${NOOB_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/noob}"
+
+if [[ ! -d "$workspace" ]]; then
+    echo "noob: workspace does not exist: $workspace" >&2
+    exit 2
+fi
+workspace="$(cd "$workspace" && pwd -P)"
+mkdir -p "$config_home"
+config_home="$(cd "$config_home" && pwd -P)"
+
+args=(
+    run --rm -i
+    --network host
+    --user "$(id -u):$(id -g)"
+    --workdir /work
+    --volume "$workspace:/work"
+    --volume "$config_home:/config"
+    --env HOME=/tmp/noob-home
+)
+if [[ -t 0 && -t 1 ]]; then
+    args+=(-t)
+fi
+
+# Configuration files are preferred, but forwarding an explicitly exported
+# value makes one-off runs behave like a native CLI. NOOB_CONFIG_DIR and
+# NOOB_SANDBOX stay image-owned.
+forward=(
+    TERM COLORTERM NO_COLOR
+    NOOB_THEME NOOB_DOCK NOOB_RAW NOOB_AUTODETECT
+    NOOB_BASE_URL NOOB_MODEL NOOB_API_STYLE NOOB_API_KEY NOOB_CTX
+    NOOB_TASK_CONCURRENCY NOOB_TASK_MAX_TURNS NOOB_TASK_WALL_CLOCK_S
+    WEBSEARCH_SEARXNG_URL
+    HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY
+    http_proxy https_proxy no_proxy all_proxy
+)
+for name in "${forward[@]}"; do
+    if [[ -v "$name" ]]; then
+        args+=(--env "$name")
+    fi
+done
+
+exec docker "${args[@]}" "$image" "$@"

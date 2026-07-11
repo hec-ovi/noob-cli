@@ -197,7 +197,7 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
 // ---------------------------------------------------------------------------
 
 fn cmd_repl(args: &[String]) -> ExitCode {
-    const USAGE: &str = "usage: noob [--model <name>] [--base-url <url>] [--session <id>] \
+    const USAGE: &str = "usage: noob [--model <name>] [--base-url <url>] [--session <id> | --restore <id>] \
                          [--plan] [--verbose] [--yolo]";
     let mut ov = Overrides::default();
     let mut yolo = false;
@@ -209,7 +209,9 @@ fn cmd_repl(args: &[String]) -> ExitCode {
         let taken = match arg.as_str() {
             "--model" => value_for(arg, it.next(), USAGE).map(|v| ov.model = Some(v)),
             "--base-url" => value_for(arg, it.next(), USAGE).map(|v| ov.base_url = Some(v)),
-            "--session" => value_for(arg, it.next(), USAGE).map(|v| session_id = Some(v)),
+            "--session" | "--restore" => {
+                value_for(arg, it.next(), USAGE).map(|v| session_id = Some(v))
+            }
             "--yolo" => {
                 yolo = true;
                 Ok(())
@@ -367,7 +369,9 @@ fn cmd_repl(args: &[String]) -> ExitCode {
         && let Some(s) = agent.session.as_ref()
     {
         let id = s.id().to_string();
-        ui.note(&format!("session {id} saved · resume with --session {id}"));
+        ui.note(&format!(
+            "session {id} saved · resume with --session {id} · host install: noob --restore {id}"
+        ));
     }
     ExitCode::SUCCESS
 }

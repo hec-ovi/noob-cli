@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "websearch": {
+      "command": "websearch",
+      "args": ["mcp"],
+      "timeout_s": 60
+    }
+  }
+}

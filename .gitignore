@@ -9,3 +9,7 @@
 /config/*
 !/config/.env.example
 !/config/contract.md
+!/config/mcp.websearch.example.json
+!/config/skills/
+!/config/skills/web-search/
+!/config/skills/web-search/SKILL.md
