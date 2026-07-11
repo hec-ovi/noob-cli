@@ -67,6 +67,7 @@ fn installer_builds_image_installs_launcher_and_forwards_restore() {
         .env("HOME", tmp.path().join("home"))
         .env("NOOB_CONFIG_HOME", &config)
         .env("NOOB_MODEL", "mock-model")
+        .env("NOOB_API_KEY", "host-secret-must-not-be-forwarded")
         .env("DOCKER_LOG", &log)
         .output()
         .unwrap();
@@ -78,6 +79,10 @@ fn installer_builds_image_installs_launcher_and_forwards_restore() {
     assert!(calls.contains(&format!("{}:/work", workspace.display())), "{calls}");
     assert!(calls.contains(&format!("{}:/config", config.display())), "{calls}");
     assert!(calls.contains("--env\nNOOB_MODEL\n"), "{calls}");
+    assert!(
+        !calls.contains("NOOB_API_KEY"),
+        "the launcher must not expose a host API key to tools: {calls}"
+    );
     assert!(calls.contains("noob:local\n--restore\nsaved-session\n"), "{calls}");
 }
 
