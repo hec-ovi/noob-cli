@@ -45,6 +45,7 @@ case "${1:-}" in
     dev_image
     docker run --rm --network host --user "$UIDGID" \
       -e CARGO_HOME=/src/.cargo-home -e NOOB_LIVE=1 \
+      -e NOOB_LIVE_BASE_URL -e NOOB_LIVE_MCP_URL \
       -v "$PWD":/src -w /src "$DEV_IMG" \
       cargo test --workspace -- --ignored --test-threads=1
     ;;

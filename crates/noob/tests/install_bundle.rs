@@ -107,3 +107,31 @@ fn installer_refuses_to_replace_an_unmanaged_command_without_force() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("refusing to replace unmanaged"));
     assert!(!log.exists(), "the image must not build after a safety refusal");
 }
+
+#[test]
+fn live_runner_forwards_endpoint_overrides_to_docker() {
+    let tmp = tempfile::tempdir().unwrap();
+    let log = tmp.path().join("docker.log");
+    let path = fake_docker(tmp.path());
+
+    let output = Command::new("bash")
+        .arg(repo_root().join("dev.sh"))
+        .arg("smoke")
+        .env("PATH", path)
+        .env("DOCKER_LOG", &log)
+        .env("NOOB_LIVE_BASE_URL", "http://localhost:8080/v1")
+        .env("NOOB_LIVE_MCP_URL", "http://localhost:18000/mcp")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "live runner failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let calls = std::fs::read_to_string(log).unwrap();
+    assert!(calls.contains("build\n--target\ndev\n"), "{calls}");
+    assert!(calls.contains("-e\nNOOB_LIVE_BASE_URL\n"), "{calls}");
+    assert!(calls.contains("-e\nNOOB_LIVE_MCP_URL\n"), "{calls}");
+    assert!(calls.contains("--ignored\n--test-threads=1\n"), "{calls}");
+}
