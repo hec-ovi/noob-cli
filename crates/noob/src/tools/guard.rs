@@ -10,7 +10,12 @@ use std::sync::Mutex;
 
 /// fnv1a64: tiny, dependency-free, good enough to detect any edit.
 pub fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
+    fnv1a64_extend(0xcbf29ce484222325, bytes)
+}
+
+/// Continue an FNV-1a hash over another chunk. File tools use this to stamp
+/// large files without first allocating their entire contents.
+pub fn fnv1a64_extend(mut hash: u64, bytes: &[u8]) -> u64 {
     for &b in bytes {
         hash ^= b as u64;
         hash = hash.wrapping_mul(0x100000001b3);

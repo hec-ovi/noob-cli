@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use noob_provider::http::INTERRUPTED;
 
-use super::truncate::{BASH_HEAD, BASH_TAIL, head_tail};
+use super::truncate::{BASH_HEAD, BASH_TAIL, HeadTailBuffer};
 use super::{ToolCtx, ToolOutcome, need_str, opt_u64};
 
 const DEFAULT_TIMEOUT_S: u64 = 120;
@@ -23,6 +23,9 @@ const MAX_TIMEOUT_S: u64 = 600;
 pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     match run_inner(ctx, args) {
         Ok(out) => out,
+        Err(msg) if msg.starts_with("command canceled by user") => {
+            ToolOutcome::canceled_with(msg)
+        }
         Err(msg) => ToolOutcome::err(msg),
     }
 }
@@ -45,6 +48,16 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         return Err("cannot create a pipe for the command".to_string());
     }
     let (read_fd, write_fd) = (fds[0], fds[1]);
+    let read_flags = unsafe { libc::fcntl(read_fd, libc::F_GETFL) };
+    if read_flags < 0
+        || unsafe { libc::fcntl(read_fd, libc::F_SETFL, read_flags | libc::O_NONBLOCK) } < 0
+    {
+        unsafe {
+            libc::close(read_fd);
+            libc::close(write_fd);
+        }
+        return Err("cannot configure the command output pipe".to_string());
+    }
     let (stdout, stderr) = unsafe {
         let dup = libc::fcntl(write_fd, libc::F_DUPFD_CLOEXEC, 0);
         if dup < 0 {
@@ -88,7 +101,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     // survivor holds the pipe open past the grace window, the partial output
     // is still recoverable without joining.
     let mut reader = unsafe { std::fs::File::from_raw_fd(read_fd) };
-    let collected: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let collected = Arc::new(Mutex::new(HeadTailBuffer::new(BASH_HEAD, BASH_TAIL)));
     let eof_seen = Arc::new(AtomicBool::new(false));
     // Set when the tool gives up on the pipe (a setsid escapee can hold it
     // open forever): the collector then discards instead of buffering, so
@@ -98,14 +111,20 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     let collector = std::thread::spawn(move || {
         let mut chunk = [0u8; 8192];
         loop {
+            if t_gone.load(Ordering::SeqCst) {
+                break;
+            }
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
                     if !t_gone.load(Ordering::SeqCst) {
-                        t_buf.lock().unwrap().extend_from_slice(&chunk[..n]);
+                        t_buf.lock().unwrap().extend(&chunk[..n]);
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
                 Err(_) => break,
             }
         }
@@ -120,7 +139,11 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) => {}
-            Err(_) => break None,
+            Err(_) => {
+                unsafe { libc::kill(-pid, libc::SIGKILL) };
+                let _ = child.wait();
+                break None;
+            }
         }
         if INTERRUPTED.load(Ordering::SeqCst) {
             interrupted = true;
@@ -160,14 +183,13 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         let _ = collector.join();
     } else {
         // Something escaped the process group (setsid) and still holds the
-        // pipe. Detach: the collector discards from here on; the escapee
-        // was NOT killed and the result must say so honestly.
+        // pipe. Stop and join the non-blocking collector; the escapee was
+        // NOT killed and the result must say so honestly.
         abandoned.store(true, Ordering::SeqCst);
+        let _ = collector.join();
     }
 
-    let output = collected.lock().unwrap().clone();
-    let text = String::from_utf8_lossy(&output);
-    let mut body = head_tail(&text, BASH_HEAD, BASH_TAIL).into_owned();
+    let mut body = collected.lock().unwrap().render();
     if !eof {
         body.push_str(
             "\n[a background process started by the command is still running and holding \

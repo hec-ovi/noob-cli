@@ -2,21 +2,35 @@
 //! inside node_modules/target poisons a 131k window faster than anything
 //! else, so the walk respects .gitignore.
 
+use std::cmp::Ordering as CmpOrdering;
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
+use noob_provider::http::INTERRUPTED;
 use serde_json::Value;
 
 use super::truncate::{LIST_ENTRY_CAP, list_trailer};
 use super::{ToolCtx, ToolOutcome, need_str};
 
+const CANCELED: &str = "glob canceled by user";
+
 pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
-    match run_inner(ctx, args) {
+    run_with(ctx, args, || INTERRUPTED.load(Ordering::SeqCst))
+}
+
+fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> ToolOutcome {
+    match run_inner(ctx, args, interrupted) {
         Ok(out) => out,
+        Err(msg) if msg == CANCELED => ToolOutcome::canceled_with(msg),
         Err(msg) => ToolOutcome::err(msg),
     }
 }
 
-fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
+fn run_inner(
+    ctx: &ToolCtx,
+    args: &Value,
+    interrupted: impl Fn() -> bool,
+) -> Result<ToolOutcome, String> {
     let pattern = need_str(args, "pattern")?;
     let mut over = ignore::overrides::OverrideBuilder::new(&ctx.workspace);
     over.add(pattern).map_err(|e| {
@@ -26,7 +40,10 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         .build()
         .map_err(|e| format!("bad glob pattern {pattern:?}: {e}"))?;
 
-    let mut hits: Vec<(SystemTime, String)> = Vec::new();
+    // Retain only the entries that can be shown while still counting every
+    // match. This keeps a huge workspace from becoming a huge allocation.
+    let mut hits: Vec<(SystemTime, String)> = Vec::with_capacity(LIST_ENTRY_CAP);
+    let mut total = 0usize;
     let walk = ignore::WalkBuilder::new(&ctx.workspace)
         .overrides(over)
         .sort_by_file_path(|a, b| a.cmp(b))
@@ -35,6 +52,9 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         .require_git(false)
         .build();
     for entry in walk.flatten() {
+        if interrupted() {
+            return Err(CANCELED.to_string());
+        }
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
@@ -47,26 +67,36 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
             .path()
             .strip_prefix(&ctx.workspace)
             .unwrap_or(entry.path());
-        hits.push((mtime, rel.display().to_string()));
+        total = total.saturating_add(1);
+        let candidate = (mtime, rel.display().to_string());
+        if hits.len() < LIST_ENTRY_CAP {
+            hits.push(candidate);
+        } else if let Some((worst, _)) = hits
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| hit_order(a, b))
+            && hit_order(&candidate, &hits[worst]) == CmpOrdering::Less
+        {
+            hits[worst] = candidate;
+        }
     }
     // Newest first; equal mtimes fall back to the path order from the walk,
     // kept stable by the sort.
-    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    hits.sort_by(hit_order);
 
-    let total = hits.len();
     if total == 0 {
         return Ok(ToolOutcome::ok(
             format!("no files match {pattern:?}; try a broader pattern or ls"),
             format!("glob {pattern} (0 files)"),
         ));
     }
-    let cut = total.min(LIST_ENTRY_CAP);
-    let mut content = hits[..cut]
+    let shown = hits.len();
+    let mut content = hits
         .iter()
         .map(|(_, p)| p.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    if let Some(trailer) = list_trailer("files", total, cut) {
+    if let Some(trailer) = list_trailer("files", total, shown) {
         content.push('\n');
         content.push_str(&trailer);
     }
@@ -74,6 +104,10 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         content,
         format!("glob {pattern} ({total} files)"),
     ))
+}
+
+fn hit_order(a: &(SystemTime, String), b: &(SystemTime, String)) -> CmpOrdering {
+    b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1))
 }
 
 #[cfg(test)]
@@ -128,12 +162,30 @@ mod tests {
     }
 
     #[test]
+    fn walk_cancellation_is_structural() {
+        let (_t, ctx) = test_ctx();
+        std::fs::write(ctx.workspace.join("a.txt"), "").unwrap();
+        let out = run_with(&ctx, &json!({"pattern": "*.txt"}), || true);
+        assert!(out.canceled);
+        assert!(out.is_error);
+    }
+
+    #[test]
     fn entry_cap_with_trailer() {
         let (_t, ctx) = test_ctx();
+        let same_time = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
         for i in 0..230 {
-            std::fs::write(ctx.workspace.join(format!("f{i:03}.txt")), "").unwrap();
+            let path = ctx.workspace.join(format!("f{i:03}.txt"));
+            std::fs::write(&path, "").unwrap();
+            std::fs::File::open(path)
+                .unwrap()
+                .set_modified(same_time)
+                .unwrap();
         }
         let out = run(&ctx, &json!({"pattern": "*.txt"}));
         assert!(out.content.ends_with("230 files, showing 200; narrow the pattern"));
+        assert!(out.content.starts_with("f000.txt\n"));
+        assert!(out.content.contains("f199.txt\n230 files"));
+        assert!(!out.content.contains("f200.txt"));
     }
 }

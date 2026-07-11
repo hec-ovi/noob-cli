@@ -1,11 +1,9 @@
 # noob/src/task
 
-Multi-agent (P6): the `task` tool spawns the binary itself
-(`current_exe() child`) with a JSON task on stdin; the child runs a fresh
-scoped context and writes exactly one JSON result line to stdout, progress to
-stderr. Only the result string enters the parent transcript.
+The task tool spawns `current_exe() child` with one JSON task on stdin. The child gets a fresh context, sends progress to stderr, and writes exactly one JSON result line to stdout. Only its result field enters the parent transcript.
 
-Caps, enforced by both sides: concurrency (default 4), per-child turn cap
-(default 25), 300 s wall clock, recursion depth 2. Children default to
-read-only tools and have no TTY, so ask-gated actions degrade to deny.
-argv + stdin + stdout is the whole IPC surface.
+Defaults are four concurrent children, 25 inference rounds, 300 seconds, and recursion depth two. Children default to read-only tools and have no TTY.
+
+The parent starts the wall clock before sending input. Child stdin is nonblocking, checks cancellation and deadline while writing, and closes on completion. The child result is read without an output-length cap. Optional progress retention is bounded at 64 KiB while stderr continues to drain. Timeout and cancellation kill and reap the process group.
+
+These are execution budgets, not model output-token limits.

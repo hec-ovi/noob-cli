@@ -3,6 +3,9 @@
 //! the prompt head never mutates when a skill loads. Registered only when
 //! discovery found at least one skill. Skill bodies are untrusted input.
 
+use std::sync::atomic::Ordering;
+
+use noob_provider::http::INTERRUPTED;
 use serde_json::{Value, json};
 
 use noob_provider::types::ToolSpec;
@@ -22,6 +25,13 @@ pub fn spec() -> ToolSpec {
 }
 
 pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
+    run_with(ctx, args, || INTERRUPTED.load(Ordering::SeqCst))
+}
+
+fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> ToolOutcome {
+    if interrupted() {
+        return ToolOutcome::canceled();
+    }
     let name = match need_str(args, "name") {
         Ok(n) => n,
         Err(e) => return ToolOutcome::err(e),
@@ -42,6 +52,9 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
             ));
         }
     };
+    if interrupted() {
+        return ToolOutcome::canceled();
+    }
     let (body, frontmatter_lines) = crate::skills::body_of(&text);
     let body = body.as_ref();
 
@@ -134,6 +147,16 @@ mod tests {
         assert!(out.is_error);
         assert!(out.content.contains("unknown skill \"gamma\""));
         assert!(out.content.contains("alpha, beta"));
+        assert!(ctx.loaded_skills.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn load_cancellation_is_structural() {
+        let (_tmp, mut ctx) = test_ctx();
+        install_skill(&mut ctx, "alpha", "body\n");
+        let out = run_with(&ctx, &json!({"name": "alpha"}), || true);
+        assert!(out.canceled);
+        assert!(out.is_error);
         assert!(ctx.loaded_skills.lock().unwrap().is_empty());
     }
 

@@ -288,8 +288,8 @@ fn line_spans(text: &str) -> Vec<(usize, usize, usize)> {
     let mut spans = Vec::new();
     let mut start = 0;
     let bytes = text.as_bytes();
-    for i in 0..bytes.len() {
-        if bytes[i] == b'\n' {
+    for (i, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' {
             spans.push((start, i, i + 1));
             start = i + 1;
         }
@@ -516,10 +516,10 @@ fn best_window(file_lines: &[&str], old_lines: &[&str]) -> Option<(usize, usize)
             if o.is_empty() {
                 continue;
             }
-            if let Some(f) = file_lines.get(i + j) {
-                if trim(f) == *o {
-                    score += 1;
-                }
+            if let Some(f) = file_lines.get(i + j)
+                && trim(f) == *o
+            {
+                score += 1;
             }
         }
         if score > best.map(|(_, s)| s).unwrap_or(0) {

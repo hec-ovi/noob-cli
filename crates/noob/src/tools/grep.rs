@@ -3,20 +3,33 @@
 //! prefixes contaminate small-model edit strings).
 
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
+use noob_provider::http::INTERRUPTED;
 use serde_json::Value;
 
 use super::truncate::{GREP_BYTE_CAP, GREP_MATCH_CAP, clip_line, grep_trailer};
 use super::{ToolCtx, ToolOutcome, display_path, need_str, opt_bool, opt_str};
 
+const CANCELED: &str = "grep canceled by user";
+
 pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
-    match run_inner(ctx, args) {
+    run_with(ctx, args, || INTERRUPTED.load(Ordering::SeqCst))
+}
+
+fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> ToolOutcome {
+    match run_inner(ctx, args, &interrupted) {
         Ok(out) => out,
+        Err(msg) if msg == CANCELED => ToolOutcome::canceled_with(msg),
         Err(msg) => ToolOutcome::err(msg),
     }
 }
 
-fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
+fn run_inner(
+    ctx: &ToolCtx,
+    args: &Value,
+    interrupted: &impl Fn() -> bool,
+) -> Result<ToolOutcome, String> {
     let pattern = need_str(args, "pattern")?;
     let ignore_case = opt_bool(args, "ignore_case")?.unwrap_or(false);
     let re = regex::RegexBuilder::new(pattern)
@@ -55,11 +68,24 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     let mut shown = 0usize;
     let mut out = String::new();
     for entry in walk.build().flatten() {
+        if interrupted() {
+            return Err(CANCELED.to_string());
+        }
         // An explicitly named file is searched even when gitignored.
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
-        scan_file(ctx, entry.path(), &re, &mut total, &mut shown, &mut out);
+        if !scan_file(
+            ctx,
+            entry.path(),
+            &re,
+            &mut total,
+            &mut shown,
+            &mut out,
+            interrupted,
+        ) {
+            return Err(CANCELED.to_string());
+        }
     }
 
     let trailer = grep_trailer(total, shown);
@@ -81,14 +107,20 @@ fn scan_file(
     total: &mut usize,
     shown: &mut usize,
     out: &mut String,
-) {
-    let Ok(bytes) = std::fs::read(path) else { return };
+    interrupted: &impl Fn() -> bool,
+) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return true;
+    };
     if bytes[..bytes.len().min(8192)].contains(&0) {
-        return; // binary
+        return true; // binary
     }
     let text = String::from_utf8_lossy(&bytes);
     let rel = display_path(ctx, path);
     for line in text.lines() {
+        if interrupted() {
+            return false;
+        }
         if !re.is_match(line) {
             continue;
         }
@@ -101,6 +133,7 @@ fn scan_file(
             *shown += 1;
         }
     }
+    true
 }
 
 #[cfg(test)]
@@ -188,5 +221,14 @@ mod tests {
         let out = run(&ctx, &json!({"pattern": "does_not_exist_anywhere"}));
         assert!(!out.is_error);
         assert!(out.content.contains("no matches"));
+    }
+
+    #[test]
+    fn search_cancellation_is_structural() {
+        let (_t, ctx) = test_ctx();
+        std::fs::write(ctx.workspace.join("a.txt"), "needle\n").unwrap();
+        let out = run_with(&ctx, &json!({"pattern": "needle"}), || true);
+        assert!(out.canceled);
+        assert!(out.is_error);
     }
 }
