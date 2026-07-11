@@ -85,6 +85,26 @@ fn json_answer_to_streamed_request_is_parsed_not_fed_to_sse() {
 }
 
 #[test]
+fn whole_json_completion_is_not_length_capped() {
+    let server = MockServer::start();
+    let answer = "x".repeat(8 * 1024 * 1024 + 1);
+    server.enqueue_completion(&answer);
+    let client = Client::new(Timeouts::default());
+
+    let turn = chat::stream(
+        &client,
+        &endpoint(&server, ApiStyle::Chat),
+        &user_turn("go"),
+        &mut |_| {},
+    )
+    .unwrap();
+
+    assert_eq!(turn.text.len(), answer.len());
+    assert_eq!(turn.text, answer);
+    server.assert_clean();
+}
+
+#[test]
 fn retryable_5xx_retries_then_succeeds() {
     let server = MockServer::start();
     server.enqueue_json(500, json!({"error": "transient"}));
@@ -168,9 +188,7 @@ fn retry_after_header_wins_over_the_backoff_schedule() {
 #[test]
 fn no_retry_after_the_first_content_byte() {
     let server = MockServer::start();
-    let delta = concat!(
-        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"par\"}}]}\n\n"
-    );
+    let delta = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"par\"}}]}\n\n";
     server.enqueue_raw(vec![
         RawStep::Bytes(sse_headers()),
         RawStep::Bytes(delta.as_bytes().to_vec()),

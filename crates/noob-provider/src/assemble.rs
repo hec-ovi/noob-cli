@@ -170,20 +170,19 @@ impl Assembler {
         let call = &mut self.calls[pos].1;
 
         // Repeated id/name in every delta: ignore after first.
-        if call.id.is_empty() {
-            if let Some(id) = entry.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-                call.id = id.to_string();
-            }
+        if call.id.is_empty()
+            && let Some(id) = entry.get("id").and_then(Value::as_str).filter(|s| !s.is_empty())
+        {
+            call.id = id.to_string();
         }
         let f = entry.get("function");
-        if call.name.is_empty() {
-            if let Some(name) = f
-                .and_then(|f| f.get("name"))
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            {
-                call.name = name.to_string();
-            }
+        if call.name.is_empty()
+            && let Some(name) = f
+            .and_then(|f| f.get("name"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            call.name = name.to_string();
         }
         if !started {
             // Absent or empty id: synthesize one; a tool result requires it.

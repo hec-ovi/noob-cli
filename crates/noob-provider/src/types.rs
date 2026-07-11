@@ -104,6 +104,26 @@ pub struct TurnRequest {
     pub tools: Vec<ToolSpec>,
 }
 
+/// Borrowed request view for the agent hot path. The transcript and tool
+/// schemas are serialized directly from their session-owned storage instead
+/// of cloning the full conversation before every model round.
+#[derive(Clone, Copy, Debug)]
+pub struct TurnRequestRef<'a> {
+    pub system: Option<&'a str>,
+    pub items: &'a [Item],
+    pub tools: &'a [ToolSpec],
+}
+
+impl TurnRequest {
+    pub fn borrowed(&self) -> TurnRequestRef<'_> {
+        TurnRequestRef {
+            system: self.system.as_deref(),
+            items: &self.items,
+            tools: &self.tools,
+        }
+    }
+}
+
 /// Stream events, delivered in arrival order. P0 uses only the assembled
 /// `Turn`; P1 wires these through SSE streaming.
 #[derive(Clone, Debug)]

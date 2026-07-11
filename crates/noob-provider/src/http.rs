@@ -213,17 +213,50 @@ impl Transport for TickTransport {
     }
 
     fn transmit_output(&mut self, amount: usize, _timeout: NextTimeout) -> Result<(), ureq::Error> {
-        let output = &self.buffers.output()[..amount];
-        self.stream.write_all(output).map_err(|e| {
-            if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) {
-                // Record the phase so the error maps to a send-stall remedy,
-                // never to "timed out connecting" (the connect succeeded).
-                self.ctl.set_trip(Trip::SendStall);
-                ureq::Error::Io(io::Error::new(io::ErrorKind::TimedOut, "request send stalled"))
-            } else {
-                ureq::Error::Io(e)
+        let mut written = 0;
+        // The socket wakes us every tick while the peer is not reading. The
+        // stall deadline moves only when bytes make progress, so a healthy
+        // large upload is not confused with a wedged send.
+        let mut stall_deadline = Instant::now() + WRITE_TIMEOUT;
+        while written < amount {
+            if let Some(trip) = self.ctl.check() {
+                return Err(ureq::Error::Io(trip_io_error(trip)));
             }
-        })
+            let result = {
+                let output = &self.buffers.output()[written..amount];
+                self.stream.write(output)
+            };
+            match result {
+                Ok(0) => {
+                    return Err(ureq::Error::Io(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "connection closed while sending request",
+                    )));
+                }
+                Ok(n) => {
+                    written += n;
+                    stall_deadline = Instant::now() + WRITE_TIMEOUT;
+                }
+                Err(e)
+                    if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) =>
+                {
+                    if Instant::now() >= stall_deadline {
+                        // Record the phase so the error maps to a send-stall
+                        // remedy, never to "timed out connecting".
+                        self.ctl.set_trip(Trip::SendStall);
+                        return Err(ureq::Error::Io(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "request send stalled",
+                        )));
+                    }
+                }
+                // A signal can interrupt the syscall independently of noob's
+                // flag. Loop so the watchdog decides whether this was Ctrl-C.
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(ureq::Error::Io(e)),
+            }
+        }
+        Ok(())
     }
 
     fn await_input(&mut self, _timeout: NextTimeout) -> Result<bool, ureq::Error> {
@@ -292,7 +325,9 @@ impl<In: Transport> Connector<In> for TickTcpConnector {
                 Ok(stream) => {
                     stream.set_nodelay(true)?;
                     stream.set_read_timeout(Some(TICK))?;
-                    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+                    // Short writes are watchdog ticks. `transmit_output`
+                    // preserves the independent 30 s no-progress ceiling.
+                    stream.set_write_timeout(Some(TICK))?;
                     let buffers = LazyBuffers::new(
                         details.config.input_buffer_size(),
                         details.config.output_buffer_size(),
@@ -485,6 +520,7 @@ impl Client {
     /// - a 400 naming a strippable top-level field we sent (in practice
     ///   `stream_options`): field removed from `body`, remembered for the
     ///   process lifetime, one immediate retry.
+    ///
     /// Non-2xx after all that surfaces as `ProviderError::Http` with the
     /// (bounded) body already read.
     pub fn post_json_stream(
@@ -521,7 +557,7 @@ impl Client {
         let mut compat_retried = false;
         loop {
             self.ctl.begin(&self.timeouts);
-            let sent = (|| {
+            let sent = {
                 let mut req = self
                     .agent
                     .post(url)
@@ -531,24 +567,24 @@ impl Client {
                 }
                 req.send(body.to_string().as_str())
                     .map_err(|e| map_ureq_error(&self.ctl, url, e))
-            })();
+            };
 
             let resp = match sent {
                 Ok(resp) => resp,
                 Err(e) => {
                     self.ctl.finish();
-                    if retryable_error(&e) {
-                        if let Some(&delay) = backoff.next() {
-                            // Same full jitter as the status branch: a fleet
-                            // reconnecting to a restarted server must not
-                            // stampede in lockstep.
-                            self.sleep_interruptible(if self.retry.jitter {
-                                jittered(delay)
-                            } else {
-                                delay
-                            })?;
-                            continue;
-                        }
+                    if retryable_error(&e)
+                        && let Some(&delay) = backoff.next()
+                    {
+                        // Same full jitter as the status branch: a fleet
+                        // reconnecting to a restarted server must not
+                        // stampede in lockstep.
+                        self.sleep_interruptible(if self.retry.jitter {
+                            jittered(delay)
+                        } else {
+                            delay
+                        })?;
+                        continue;
                     }
                     return Err(e);
                 }
@@ -567,29 +603,30 @@ impl Client {
             let wait = retry_after(&resp);
             self.ctl.body_started(&self.timeouts);
             let mut stream = StreamBody::new(self.ctl.clone(), url, resp);
-            let text = match stream.read_to_end() {
+            let text = match stream.read_to_end_bounded(MAX_AUX_BODY) {
                 Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                 Err(e) => return Err(e),
             };
             drop(stream);
 
-            if status == 400 && !compat_retried {
-                if let Some(field) = compat_field(body, &text) {
-                    self.compat_stripped.lock().unwrap().insert(field.clone());
-                    if let Some(map) = body.as_object_mut() {
-                        map.remove(&field);
-                    }
-                    compat_retried = true;
-                    continue; // immediate, does not consume a backoff slot
+            if status == 400
+                && !compat_retried
+                && let Some(field) = compat_field(body, &text)
+            {
+                self.compat_stripped.lock().unwrap().insert(field.clone());
+                if let Some(map) = body.as_object_mut() {
+                    map.remove(&field);
                 }
+                compat_retried = true;
+                continue; // immediate, does not consume a backoff slot
             }
-            if retryable_status(status) {
-                if let Some(&delay) = backoff.next() {
-                    self.sleep_interruptible(wait.unwrap_or_else(|| {
-                        if self.retry.jitter { jittered(delay) } else { delay }
-                    }))?;
-                    continue;
-                }
+            if retryable_status(status)
+                && let Some(&delay) = backoff.next()
+            {
+                self.sleep_interruptible(wait.unwrap_or_else(|| {
+                    if self.retry.jitter { jittered(delay) } else { delay }
+                }))?;
+                continue;
             }
             return Err(ProviderError::Http { status, body: text });
         }
@@ -624,9 +661,9 @@ pub struct StreamBody {
     reader: ureq::BodyReader<'static>,
 }
 
-/// Bound on non-SSE whole-body reads (error bodies, the content-type-guard
-/// path). SSE streams are unbounded by design; completions are not.
-const MAX_WHOLE_BODY: u64 = 8 * 1024 * 1024;
+/// Bound on auxiliary whole bodies such as HTTP errors. Model completions use
+/// the unbounded `read_to_end` path below and are never length-capped.
+const MAX_AUX_BODY: usize = 8 * 1024 * 1024;
 
 impl StreamBody {
     fn new(ctl: WatchdogCtl, url: &str, resp: ureq::http::Response<ureq::Body>) -> StreamBody {
@@ -727,7 +764,8 @@ impl StreamBody {
         }
     }
 
-    /// Read the whole remaining body (bounded; not for SSE streams).
+    /// Read the whole remaining body without imposing an output-length cap.
+    /// The watchdog still enforces interruption and no-progress deadlines.
     pub fn read_to_end(&mut self) -> Result<Vec<u8>, ProviderError> {
         let mut bytes = Vec::new();
         let mut buf = [0u8; 16 * 1024];
@@ -737,10 +775,23 @@ impl StreamBody {
                 return Ok(bytes);
             }
             bytes.extend_from_slice(&buf[..n]);
-            if bytes.len() as u64 > MAX_WHOLE_BODY {
+        }
+    }
+
+    /// Read a non-model auxiliary body while bounding hostile server data.
+    pub fn read_to_end_bounded(&mut self, limit: usize) -> Result<Vec<u8>, ProviderError> {
+        let mut bytes = Vec::new();
+        let mut buf = [0u8; 16 * 1024];
+        loop {
+            let n = self.read(&mut buf)?;
+            if n == 0 {
+                return Ok(bytes);
+            }
+            bytes.extend_from_slice(&buf[..n]);
+            if bytes.len() > limit {
                 return Err(ProviderError::Wire(format!(
                     "response body exceeded {} bytes without ending",
-                    MAX_WHOLE_BODY
+                    limit
                 )));
             }
         }

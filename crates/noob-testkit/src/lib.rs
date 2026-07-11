@@ -509,10 +509,10 @@ fn run_assertions(shared: &Shared, req: &Recorded) {
             prev.and_then(|prev| {
                 let prev_raw = raw_top_level_value(&prev.body, array_key);
                 let next_raw = raw_top_level_value(&req.body, array_key);
-                if let (Some(p), Some(n)) = (&prev_raw, &next_raw) {
-                    if let Some(v) = check_byte_prefix(p, n, idx) {
-                        return Some(v);
-                    }
+                if let (Some(p), Some(n)) = (&prev_raw, &next_raw)
+                    && let Some(v) = check_byte_prefix(p, n, idx)
+                {
+                    return Some(v);
                 }
                 // Structural fallback for a readable message when the raw
                 // scan is unavailable.
@@ -556,10 +556,10 @@ fn run_assertions(shared: &Shared, req: &Recorded) {
                     })
             })
         };
-        if let Some(v) = tools_drift {
-            if !self_dec(&shared.allowed_tools_changes) {
-                violations.push(v);
-            }
+        if let Some(v) = tools_drift
+            && !self_dec(&shared.allowed_tools_changes)
+        {
+            violations.push(v);
         }
         if array_key == "messages" {
             check_chat_transcript(items, idx, &mut violations);
@@ -774,17 +774,17 @@ fn check_chat_transcript(messages: &[Value], idx: usize, violations: &mut Vec<St
             ));
             pending.clear();
         }
-        if role == "assistant" {
-            if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
-                for call in calls {
-                    let id = call.get("id").and_then(Value::as_str).unwrap_or("");
-                    if id.is_empty() {
-                        violations.push(format!(
-                            "request #{idx}: messages[{i}] has a tool call without an id"
-                        ));
-                    }
-                    pending.push_back(id.to_string());
+        if role == "assistant"
+            && let Some(calls) = msg.get("tool_calls").and_then(Value::as_array)
+        {
+            for call in calls {
+                let id = call.get("id").and_then(Value::as_str).unwrap_or("");
+                if id.is_empty() {
+                    violations.push(format!(
+                        "request #{idx}: messages[{i}] has a tool call without an id"
+                    ));
                 }
+                pending.push_back(id.to_string());
             }
         }
     }

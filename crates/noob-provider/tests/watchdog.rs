@@ -161,6 +161,48 @@ fn interrupt_aborts_within_a_tick() {
     assert!(elapsed < Duration::from_millis(2600), "took {elapsed:?}");
 }
 
+/// A peer that accepts but never reads can fill the client's send buffer.
+/// The write side must tick too, rather than hiding Ctrl-C in a 30 s write.
+#[test]
+fn interrupt_aborts_a_blocked_request_send_within_a_tick() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (_socket, _) = listener.accept().unwrap();
+        accepted_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_secs(8));
+    });
+
+    let client = Client::with_retry(
+        Timeouts {
+            connect: Duration::from_secs(5),
+            first_byte: Duration::from_secs(60),
+            idle: Duration::from_secs(60),
+        },
+        RetryPolicy::none(),
+    );
+    let ctl = client.ctl();
+    let interrupter = std::thread::spawn(move || {
+        accepted_rx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        ctl.interrupt();
+    });
+    // Far larger than a normal kernel socket send buffer, so the peer's
+    // refusal to read deterministically reaches the write-timeout path.
+    let body = json!({"blob": "x".repeat(32 * 1024 * 1024)});
+    let start = Instant::now();
+    let err = client
+        .post_json(&format!("http://{addr}/x"), "", &body)
+        .unwrap_err();
+    interrupter.join().unwrap();
+    assert!(
+        matches!(err, ProviderError::Interrupted),
+        "expected Interrupted, got {err:?}"
+    );
+    assert!(start.elapsed() < Duration::from_millis(2600), "took {:?}", start.elapsed());
+}
+
 /// Nobody listening: typed connect error naming the URL. Connect errors are
 /// retryable, so this uses a no-retry policy to assert the raw outcome.
 #[test]

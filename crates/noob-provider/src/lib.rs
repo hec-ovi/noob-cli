@@ -13,7 +13,9 @@ pub mod types;
 
 use std::path::Path;
 
-use types::{ApiStyle, Endpoint, Event, Overrides, ProviderError, Turn, TurnRequest};
+use types::{
+    ApiStyle, Endpoint, Event, Overrides, ProviderError, Turn, TurnRequest, TurnRequestRef,
+};
 
 /// Resolve the endpoint for one request. Called inside every request build:
 /// the `.env` file is opened, parsed, and dropped here, which is what makes
@@ -95,9 +97,21 @@ pub fn run_turn(
     req: &TurnRequest,
     on: &mut dyn FnMut(Event),
 ) -> Result<Turn, ProviderError> {
+    run_turn_ref(client, config_dir, ov, req.borrowed(), on)
+}
+
+/// Borrowed variant used by the agent loop so a long transcript is not cloned
+/// once per inference round. `run_turn` remains the owned convenience API.
+pub fn run_turn_ref(
+    client: &http::Client,
+    config_dir: &Path,
+    ov: &Overrides,
+    req: TurnRequestRef<'_>,
+    on: &mut dyn FnMut(Event),
+) -> Result<Turn, ProviderError> {
     let ep = resolve_endpoint(config_dir, ov)?;
     match ep.style {
-        ApiStyle::Chat => chat::stream(client, &ep, req, on),
-        ApiStyle::Responses => responses::stream(client, &ep, req, on),
+        ApiStyle::Chat => chat::stream_ref(client, &ep, req, on),
+        ApiStyle::Responses => responses::stream_ref(client, &ep, req, on),
     }
 }

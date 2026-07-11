@@ -145,10 +145,10 @@ fn handle(mut stream: TcpStream, shared: Arc<Shared>) {
         // Session enforcement per the spec: a request against an unknown
         // session gets 404 (the client should re-initialize).
         if method != "initialize" {
-            if shared.drop_session_once.swap(false, Ordering::SeqCst) {
-                if let Some(s) = &session {
-                    shared.sessions.lock().unwrap().remove(s);
-                }
+            if shared.drop_session_once.swap(false, Ordering::SeqCst)
+                && let Some(s) = &session
+            {
+                shared.sessions.lock().unwrap().remove(s);
             }
             let known = session
                 .as_ref()

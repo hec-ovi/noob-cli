@@ -10,13 +10,23 @@ use crate::assemble::Assembler;
 use crate::http::Client;
 use crate::sse::SseParser;
 use crate::types::{
-    Endpoint, Event, Finish, Item, ProviderError, ToolCall, Turn, TurnRequest, Usage,
+    Endpoint, Event, Finish, Item, ProviderError, ToolCall, Turn, TurnRequest, TurnRequestRef,
+    Usage,
 };
 
 pub fn stream(
     client: &Client,
     ep: &Endpoint,
     req: &TurnRequest,
+    on: &mut dyn FnMut(Event),
+) -> Result<Turn, ProviderError> {
+    stream_ref(client, ep, req.borrowed(), on)
+}
+
+pub fn stream_ref(
+    client: &Client,
+    ep: &Endpoint,
+    req: TurnRequestRef<'_>,
     on: &mut dyn FnMut(Event),
 ) -> Result<Turn, ProviderError> {
     let url = format!("{}/chat/completions", ep.base_url);
@@ -30,7 +40,7 @@ pub fn stream(
         "stream_options": {"include_usage": true},
     });
     if !req.tools.is_empty() {
-        body["tools"] = wire_tools(&req.tools);
+        body["tools"] = wire_tools(req.tools);
     }
 
     let mut resp = client.post_json_stream(&url, &ep.api_key, &mut body)?;
@@ -97,12 +107,12 @@ pub fn wire_tools(tools: &[crate::types::ToolSpec]) -> Value {
     )
 }
 
-fn build_messages(req: &TurnRequest) -> Vec<Value> {
+fn build_messages(req: TurnRequestRef<'_>) -> Vec<Value> {
     let mut messages = Vec::new();
     if let Some(system) = &req.system {
         messages.push(json!({"role": "system", "content": system}));
     }
-    for item in &req.items {
+    for item in req.items {
         match item {
             Item::User(text) => messages.push(json!({"role": "user", "content": text})),
             Item::Assistant { text, tool_calls, .. } => {
@@ -287,7 +297,7 @@ mod tests {
             ],
             tools: vec![],
         };
-        let messages = build_messages(&req);
+        let messages = build_messages(req.borrowed());
         assert_eq!(messages[0], json!({"role": "system", "content": "be noob"}));
         assert_eq!(messages[1], json!({"role": "user", "content": "read a"}));
         assert_eq!(messages[2]["role"], "assistant");
@@ -307,8 +317,8 @@ mod tests {
             items: vec![Item::User("u".into())],
             tools: vec![],
         };
-        let a = serde_json::to_string(&build_messages(&req)).unwrap();
-        let b = serde_json::to_string(&build_messages(&req)).unwrap();
+        let a = serde_json::to_string(&build_messages(req.borrowed())).unwrap();
+        let b = serde_json::to_string(&build_messages(req.borrowed())).unwrap();
         assert_eq!(a, b);
     }
 }

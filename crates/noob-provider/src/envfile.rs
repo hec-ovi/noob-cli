@@ -41,10 +41,10 @@ fn clean_value(raw: &str) -> String {
     // only starts_with/ends_with would keep the quotes whenever a comment
     // follows the closing quote, silently corrupting API keys.
     for quote in ['"', '\''] {
-        if let Some(rest) = v.strip_prefix(quote) {
-            if let Some(end) = rest.find(quote) {
-                return rest[..end].to_string();
-            }
+        if let Some(rest) = v.strip_prefix(quote)
+            && let Some(end) = rest.find(quote)
+        {
+            return rest[..end].to_string();
         }
     }
     // Unquoted values may carry a trailing comment: KEY=value  # note

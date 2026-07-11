@@ -11,13 +11,23 @@ use serde_json::{Value, json};
 use crate::http::Client;
 use crate::sse::SseParser;
 use crate::types::{
-    Endpoint, Event, Finish, Item, ProviderError, ToolCall, Turn, TurnRequest, Usage,
+    Endpoint, Event, Finish, Item, ProviderError, ToolCall, Turn, TurnRequest, TurnRequestRef,
+    Usage,
 };
 
 pub fn stream(
     client: &Client,
     ep: &Endpoint,
     req: &TurnRequest,
+    on: &mut dyn FnMut(Event),
+) -> Result<Turn, ProviderError> {
+    stream_ref(client, ep, req.borrowed(), on)
+}
+
+pub fn stream_ref(
+    client: &Client,
+    ep: &Endpoint,
+    req: TurnRequestRef<'_>,
     on: &mut dyn FnMut(Event),
 ) -> Result<Turn, ProviderError> {
     let url = format!("{}/responses", ep.base_url);
@@ -73,7 +83,7 @@ pub fn stream(
 /// The full request body. Stateless replay: `store: false` always, never
 /// `previous_response_id`. Only api.openai.com gets the encrypted-reasoning
 /// include (other servers 400 on it, and only OpenAI returns it anyway).
-fn build_body(ep: &Endpoint, req: &TurnRequest) -> Value {
+fn build_body(ep: &Endpoint, req: TurnRequestRef<'_>) -> Value {
     let mut body = json!({
         "model": ep.model,
         "input": build_input(req),
@@ -101,9 +111,9 @@ fn build_body(ep: &Endpoint, req: &TurnRequest) -> Value {
 }
 
 /// Serialize the neutral transcript into Responses `input` items.
-fn build_input(req: &TurnRequest) -> Vec<Value> {
+fn build_input(req: TurnRequestRef<'_>) -> Vec<Value> {
     let mut input = Vec::new();
-    for item in &req.items {
+    for item in req.items {
         match item {
             Item::User(text) => {
                 input.push(json!({"type": "message", "role": "user", "content": text}));
@@ -196,10 +206,10 @@ impl State {
             }
             "response.function_call_arguments.done" => {
                 // Authoritative full arguments; replaces accumulated deltas.
-                if let Some(args) = payload.get("arguments").and_then(Value::as_str) {
-                    if let Some(pos) = self.call_pos(payload) {
-                        self.calls[pos].1.arguments = args.to_string();
-                    }
+                if let Some(args) = payload.get("arguments").and_then(Value::as_str)
+                    && let Some(pos) = self.call_pos(payload)
+                {
+                    self.calls[pos].1.arguments = args.to_string();
                 }
             }
             "response.output_text.delta" => {
@@ -270,10 +280,10 @@ impl State {
     /// Resolve which call an arguments event belongs to. `item_id` when
     /// present; otherwise the last opened call.
     fn call_pos(&self, payload: &Value) -> Option<usize> {
-        if let Some(item_id) = payload.get("item_id").and_then(Value::as_str) {
-            if let Some(pos) = self.calls.iter().position(|(iid, _)| iid == item_id) {
-                return Some(pos);
-            }
+        if let Some(item_id) = payload.get("item_id").and_then(Value::as_str)
+            && let Some(pos) = self.calls.iter().position(|(iid, _)| iid == item_id)
+        {
+            return Some(pos);
         }
         self.calls.len().checked_sub(1)
     }
@@ -325,19 +335,15 @@ impl State {
                             self.calls.push((item_id.to_string(), call));
                         }
                     }
-                    "message" => {
-                        if self.text.is_empty() {
-                            if let Some(parts) = item.get("content").and_then(Value::as_array) {
-                                for part in parts {
-                                    if let Some(t) =
-                                        part.get("text").and_then(Value::as_str)
-                                    {
-                                        self.text.push_str(t);
-                                    }
+                    "message" if self.text.is_empty() => {
+                        if let Some(parts) = item.get("content").and_then(Value::as_array) {
+                            for part in parts {
+                                if let Some(t) = part.get("text").and_then(Value::as_str) {
+                                    self.text.push_str(t);
                                 }
-                                if !self.text.is_empty() {
-                                    on(Event::Text(self.text.clone()));
-                                }
+                            }
+                            if !self.text.is_empty() {
+                                on(Event::Text(self.text.clone()));
                             }
                         }
                     }
@@ -633,13 +639,13 @@ mod tests {
             model: "m".into(),
             style: crate::types::ApiStyle::Responses,
         };
-        let body = build_body(&openai, &req);
+        let body = build_body(&openai, req.borrowed());
         assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
         assert_eq!(body["store"], false);
         assert_eq!(body["stream"], true);
 
         let local = Endpoint { base_url: "http://localhost:8090/v1".into(), ..openai };
-        let body = build_body(&local, &req);
+        let body = build_body(&local, req.borrowed());
         assert!(body.get("include").is_none(), "include only for api.openai.com");
     }
 
@@ -716,7 +722,7 @@ mod tests {
             ],
             tools: vec![],
         };
-        let input = build_input(&req);
+        let input = build_input(req.borrowed());
         assert_eq!(input[0], json!({"type": "message", "role": "user", "content": "go"}));
         assert_eq!(input[1], raw[0]);
         assert_eq!(input[2], raw[1]);
@@ -741,7 +747,7 @@ mod tests {
             }],
             tools: vec![],
         };
-        let input = build_input(&req);
+        let input = build_input(req.borrowed());
         assert_eq!(input[0]["type"], "message");
         assert_eq!(input[0]["role"], "assistant");
         assert_eq!(input[1]["type"], "function_call");
