@@ -189,15 +189,14 @@ fn check_mcp(workspace: &Path, config_dir: &Path) -> Vec<Check> {
     // Invalid JSON is a FAIL (the user wrote it wanting servers); per-entry
     // skips are warns (the rest of the file still works).
     for path in [&global, &project] {
-        if path.is_file() {
-            if let Ok(text) = std::fs::read_to_string(path) {
-                if serde_json::from_str::<serde_json::Value>(&text).is_err() {
-                    checks.push(Check::Fail(format!(
-                        "{} is not valid JSON; fix: correct it or remove it",
-                        path.display()
-                    )));
-                }
-            }
+        if path.is_file()
+            && let Ok(text) = std::fs::read_to_string(path)
+            && serde_json::from_str::<serde_json::Value>(&text).is_err()
+        {
+            checks.push(Check::Fail(format!(
+                "{} is not valid JSON; fix: correct it or remove it",
+                path.display()
+            )));
         }
     }
     let (servers, warnings) = mcp::config::load(workspace, config_dir);

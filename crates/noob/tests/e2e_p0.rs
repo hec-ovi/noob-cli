@@ -23,7 +23,8 @@ fn noob(config_dir: &std::path::Path) -> Command {
     // Keep host/process env from leaking settings into assertions.
     cmd.env_remove("NOOB_BASE_URL")
         .env_remove("NOOB_MODEL")
-        .env_remove("NOOB_API_STYLE");
+        .env_remove("NOOB_API_STYLE")
+        .env_remove("NOOB_AUTODETECT");
     cmd
 }
 
@@ -69,7 +70,11 @@ fn missing_base_url_fails_with_remedy() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join(".env"), "# nothing configured\n").unwrap();
 
-    let out = noob(dir.path()).args(["exec", "-p", "hi"]).output().unwrap();
+    let out = noob(dir.path())
+        .env("NOOB_AUTODETECT", "0")
+        .args(["exec", "-p", "hi"])
+        .output()
+        .unwrap();
 
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);

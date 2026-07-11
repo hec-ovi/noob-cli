@@ -14,7 +14,8 @@ fn live_base_url() -> String {
 }
 
 fn websearch_url() -> String {
-    std::env::var("NOOB_LIVE_MCP_URL").unwrap_or_else(|_| "http://localhost:8000".to_string())
+    std::env::var("NOOB_LIVE_MCP_URL")
+        .unwrap_or_else(|_| "http://localhost:8000/mcp".to_string())
 }
 
 #[test]

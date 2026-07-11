@@ -210,7 +210,7 @@ fn exec_json() {
     let kinds: Vec<&str> = events.iter().map(|e| e["t"].as_str().unwrap()).collect();
     assert_eq!(kinds.iter().filter(|k| **k == "tool").count(), 1);
     assert_eq!(kinds.iter().filter(|k| **k == "result").count(), 1);
-    assert!(kinds.iter().any(|k| *k == "text"));
+    assert!(kinds.contains(&"text"));
     assert_eq!(*kinds.last().unwrap(), "done");
 
     let tool = events.iter().find(|e| e["t"] == "tool").unwrap();

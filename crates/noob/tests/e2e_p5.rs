@@ -20,6 +20,9 @@ fn noob(config_dir: &std::path::Path, workspace: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_noob"));
     cmd.env("NOOB_CONFIG_DIR", config_dir)
         .current_dir(workspace)
+        // This suite validates plan semantics. Dock interaction and command
+        // queueing have dedicated PTY coverage in e2e_ui.
+        .env("NOOB_DOCK", "0")
         .env_remove("NOOB_BASE_URL")
         .env_remove("NOOB_MODEL")
         .env_remove("NOOB_API_STYLE")
@@ -236,15 +239,42 @@ fn repl_plan_then_go_flow() {
             }
         }
     };
+    let wait_for_after =
+        |master: &mut std::fs::File, marker: &str, offset: usize, seen: &mut String| {
+            let mut buf = [0u8; 4096];
+            while !seen[offset..].contains(marker) {
+                match master.read(&mut buf) {
+                    Ok(0) => panic!("pty closed before {marker:?}; saw:\n{seen}"),
+                    Ok(n) => seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+                    Err(e) => panic!("pty read error: {e}; saw:\n{seen}"),
+                }
+            }
+    };
+    let prompt_ready = "\x1b[?2004h";
     wait_for(&mut master, "type a task", &mut seen);
+    wait_for(&mut master, prompt_ready, &mut seen);
+    let turn_start = seen.len();
     master.write_all(b"say hello\n").unwrap();
-    wait_for(&mut master, "hello", &mut seen);
+    // Wait for the next editor, not the word "hello": that word is also in
+    // the submitted prompt and would race the terminal's raw-mode transition.
+    wait_for_after(&mut master, prompt_ready, turn_start, &mut seen);
+    assert!(seen[turn_start..].contains("hello"));
+    let plan_start = seen.len();
     master.write_all(b"/plan\n").unwrap();
-    wait_for(&mut master, "plan mode", &mut seen);
+    wait_for_after(&mut master, "plan mode", plan_start, &mut seen);
+    wait_for_after(&mut master, prompt_ready, plan_start, &mut seen);
+    let planning_turn = seen.len();
     master.write_all(b"plan writing a greeting\n").unwrap();
-    wait_for(&mut master, "1. write greeting.txt", &mut seen);
+    wait_for_after(&mut master, prompt_ready, planning_turn, &mut seen);
+    assert!(
+        seen[planning_turn..].contains("write greeting.txt"),
+        "planning turn ended without the expected response: {}",
+        &seen[planning_turn..]
+    );
+    let execution_turn = seen.len();
     master.write_all(b"/go\n").unwrap();
-    wait_for(&mut master, "plan executed", &mut seen);
+    wait_for_after(&mut master, "plan executed", execution_turn, &mut seen);
+    wait_for_after(&mut master, prompt_ready, execution_turn, &mut seen);
     master.write_all(b"/quit\n").unwrap();
     let status = child.wait().unwrap();
     done.store(true, Ordering::SeqCst);

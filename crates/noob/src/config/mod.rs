@@ -11,10 +11,10 @@ use crate::tools::guard::Sandbox;
 /// ~/.config/noob outside Docker. The directory does not have to exist yet;
 /// `noob doctor` (P7) reports on it.
 pub fn config_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("NOOB_CONFIG_DIR") {
-        if !dir.is_empty() {
-            return PathBuf::from(dir);
-        }
+    if let Ok(dir) = std::env::var("NOOB_CONFIG_DIR")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
     }
     let container_default = PathBuf::from("/config");
     if container_default.is_dir() {
@@ -28,10 +28,10 @@ pub fn config_dir() -> PathBuf {
 /// Read fresh on every call (the .env parse is cheap and hot reload is the
 /// whole point of the flat file).
 pub fn setting(config_dir: &Path, key: &str) -> Option<String> {
-    if let Ok(v) = std::env::var(key) {
-        if !v.is_empty() {
-            return Some(v);
-        }
+    if let Ok(v) = std::env::var(key)
+        && !v.is_empty()
+    {
+        return Some(v);
     }
     let env_path = config_dir.join(".env");
     if !env_path.is_file() {
@@ -107,6 +107,15 @@ pub fn detect_sandbox(config_dir: &Path, yolo: bool) -> (Sandbox, String) {
 /// localhost ports with a short timeout. Loopback only, only when
 /// unconfigured, never a remote call.
 pub fn autodetect_base_url() -> Option<String> {
+    // An explicit off switch is useful for deterministic automation and for
+    // hosts where another user's local model must not be selected. Normal
+    // interactive behavior remains zero-configuration.
+    if std::env::var("NOOB_AUTODETECT")
+        .ok()
+        .is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+    {
+        return None;
+    }
     let candidates = [
         "http://localhost:8090/v1", // llama.cpp (this project's default)
         "http://localhost:8080/v1", // llama.cpp default port

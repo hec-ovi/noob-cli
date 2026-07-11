@@ -183,8 +183,7 @@ fn connect_and_call_stdio_through_the_loop() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|m| m["role"] == "tool")
-        .last()
+        .rfind(|m| m["role"] == "tool")
         .unwrap()["content"]
         .as_str()
         .unwrap()
@@ -223,8 +222,7 @@ fn connect_and_call_http_through_the_loop() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|m| m["role"] == "tool")
-        .last()
+        .rfind(|m| m["role"] == "tool")
         .unwrap()["content"]
         .as_str()
         .unwrap()

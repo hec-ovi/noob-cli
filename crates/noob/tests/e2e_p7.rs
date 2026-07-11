@@ -174,9 +174,7 @@ fn compaction_prune_path_skips_the_summarizer() {
 fn plant_medium_files(work: &std::path::Path, names: &[&str]) {
     for name in names {
         let marker = format!("{name} content padding\n");
-        let body: String = std::iter::repeat(marker.as_str())
-            .take(1900 / marker.len())
-            .collect();
+        let body = marker.repeat(1900 / marker.len());
         std::fs::write(work.join(name), body).unwrap();
     }
 }
