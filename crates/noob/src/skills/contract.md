@@ -1,29 +1,13 @@
 # noob/src/skills
 
-SKILL.md discovery and the L1 resolver index (agentskills.io standard).
-Four discovery paths at session start, first hit per name wins:
-`/work/.noob/skills`, `/work/.claude/skills`, `/work/.agents/skills`,
-`/config/skills`; alphabetical within a root, so discovery is
-deterministic. Frontmatter (required `name` <= 64 chars lowercase+digits+
-hyphens, `description` <= 1024 chars) is parsed by the hand-rolled scanner
-(plain scalars, quoted strings, `|`/`>` blocks, nested keys ignored);
-malformed skills are skipped with a stderr warning, never a crash.
+SKILL.md discovery, parsing, resolver indexing, and user-driven installation.
 
-Disclosure (GBrain resolver / thin-harness-fat-skills pattern: the index
-is the dispatcher, descriptions are the triggers, bodies cost zero tokens
-until loaded): L1 is the `# Skills (resolver)` section in the prompt (one
-line per skill, description clipped at 200 chars, section capped at 4,000
-chars ~ 1,000 tokens, overflow degrades to name-only lines then a count
-note). L2 is the `skill` tool (tools/skill.rs) returning `body_of()`: the
-byte-exact SKILL.md suffix after the frontmatter. L3 is ordinary `read` of
-bundled files.
+Discovery order is project `.noob/skills`, `.claude/skills`, `.agents/skills`, then `<config>/skills`. First name wins, roots are sorted, and malformed entries warn without stopping discovery.
 
-Invariants: the prompt head never mutates when a skill loads; skill bodies
-are untrusted input and never granted authority; the agent never authors
-skills (write/edit whose real target is inside `**/skills/**` is
-confirmation-gated; the loop asks at plan time and records the confirmed
-target, write/edit re-check at execution time so a same-batch symlink
-cannot slip past; headless and non-tty REPLs deny). This is a guardrail
-on the write/edit tools, not a boundary: bash is unrestricted, the
-container is the wall. `body_of` is lenient at call time (an unparseable
-file degrades to the whole text, it never errors).
+Required frontmatter is a lowercase name of at most 64 characters and a description of at most 1024 characters. The prompt receives a bounded name and description index. The `skill` tool loads the body, and `read` loads bundled files.
+
+`/skills add` accepts a skill directory, bare `SKILL.md`, or Git URL. Frontmatter is validated first. Local content is copied into hidden staging and published with one rename. Git clone uses hidden staging, a process group, bounded diagnostics, a 120-second timeout, and interrupt checks. Partial installs never enter the discovery root.
+
+`/skills remove` only deletes workspace-contained skill directories. Reload swaps the live index, updates tool registration if needed, and appends an in-band resolver correction.
+
+Agent write/edit operations inside skills directories still require real-terminal confirmation. Headless and child modes deny them.

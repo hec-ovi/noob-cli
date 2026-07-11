@@ -7,13 +7,23 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use noob_provider::http::INTERRUPTED;
 
 /// Index section budget in chars (~1,000 tokens at chars/4).
 pub const INDEX_CHAR_BUDGET: usize = 4_000;
 /// Per-skill description clip in the index, in chars.
 pub const INDEX_DESC_CLIP: usize = 200;
+const GIT_CLONE_TIMEOUT: Duration = Duration::from_secs(120);
+const GIT_ERROR_CAP: usize = 64 * 1024;
+const FRONTMATTER_BYTE_CAP: usize = 64 * 1024;
+static STAGING_SERIAL: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 pub struct Skill {
@@ -42,14 +52,15 @@ pub fn discover(workspace: &Path, config_dir: &Path) -> Vec<Skill> {
             continue;
         };
         let mut dirs: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                entry.file_type().ok()?.is_dir().then(|| entry.path())
+            })
             .collect();
         dirs.sort();
         for dir in dirs {
             let file = dir.join("SKILL.md");
-            let text = match std::fs::read_to_string(&file) {
+            let text = match read_frontmatter_file(&file) {
                 Ok(t) => t,
                 // No SKILL.md: not a skill dir, and not worth a warning.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -148,18 +159,30 @@ pub fn install(workspace: &Path, source: &str) -> Result<String, String> {
 }
 
 fn install_path(workspace: &Path, source: &Path) -> Result<String, String> {
+    let source_type = std::fs::symlink_metadata(source)
+        .map_err(|e| format!("cannot inspect {}: {e}", source.display()))?
+        .file_type();
+    if source_type.is_symlink() {
+        return Err(format!(
+            "{}: the skill source must not be a symlink",
+            source.display()
+        ));
+    }
+    let source = source
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve {}: {e}", source.display()))?;
     let is_bare_md = source.file_name() == Some(OsStr::new("SKILL.md")) && source.is_file();
     let skill_md = if source.is_dir() {
         source.join("SKILL.md")
     } else if is_bare_md {
-        source.to_path_buf()
+        source.clone()
     } else {
         return Err(format!(
             "{}: expected a skill directory containing SKILL.md, or a SKILL.md file",
             source.display()
         ));
     };
-    let text = std::fs::read_to_string(&skill_md)
+    let text = read_frontmatter_file(&skill_md)
         .map_err(|e| format!("cannot read {}: {e}", skill_md.display()))?;
     // Validate the frontmatter up front: a bad skill is rejected before any
     // file is written, so a failed install never leaves a partial dir.
@@ -172,40 +195,134 @@ fn install_path(workspace: &Path, source: &Path) -> Result<String, String> {
             "a skill named {name:?} is already installed; remove it first with /skills remove {name}"
         ));
     }
-    if source.is_dir() {
-        copy_dir(source, &dest).map_err(|e| format!("copying the skill failed: {e}"))?;
+    // Build beside the skills root and publish with one rename. Discovery can
+    // never observe half a skill, and a failed copy only leaves hidden staging
+    // data that this invocation removes before returning.
+    let staging = staging_path(workspace, "install");
+    let copied = if source.is_dir() {
+        copy_dir(&source, &staging)
     } else {
-        std::fs::create_dir_all(&dest)
-            .and_then(|_| std::fs::copy(&skill_md, dest.join("SKILL.md")).map(|_| ()))
-            .map_err(|e| format!("copying the skill failed: {e}"))?;
+        std::fs::create_dir_all(&staging)
+            .and_then(|_| copy_file(&skill_md, &staging.join("SKILL.md")))
+    };
+    if let Err(error) = copied {
+        let _ = std::fs::remove_dir_all(&staging);
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            return Err("skill installation canceled by user".to_string());
+        }
+        return Err(format!("copying the skill failed: {error}"));
+    }
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err("skill installation canceled by user".to_string());
+    }
+    if let Err(error) = std::fs::create_dir_all(install_root(workspace)) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("cannot create the skills dir: {error}"));
+    }
+    if dest.exists() {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!(
+            "a skill named {name:?} was installed concurrently; remove it first with /skills remove {name}"
+        ));
+    }
+    if let Err(error) = std::fs::rename(&staging, &dest) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("publishing the skill failed: {error}"));
     }
     Ok(name)
 }
 
 fn install_git(workspace: &Path, url: &str) -> Result<String, String> {
-    // Shallow-clone into a staging dir under the install root; the `git`
-    // binary does the fetching, so noob itself opens no new sockets and the
-    // egress invariant holds. Staging is always cleaned up.
-    let staging = install_root(workspace).join(format!(".staging-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&staging);
+    // Clone into a hidden sibling of the install root. It is never a discovery
+    // candidate, even if the process dies before cleanup.
+    let staging = staging_path(workspace, "git");
     if let Some(parent) = staging.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("cannot create the skills dir: {e}"))?;
     }
-    let out = Command::new("git")
-        .args(["clone", "--depth", "1", url])
+    let mut child = Command::new("git")
+        .args(["clone", "--quiet", "--depth", "1", "--", url])
         .arg(&staging)
-        .output();
-    let result = match out {
-        Ok(o) if o.status.success() => find_skill_dir(&staging)
-            .and_then(|dir| install_path(workspace, &dir)),
-        Ok(o) => Err(format!(
-            "git clone failed: {}",
-            String::from_utf8_lossy(&o.stderr).trim()
-        )),
-        Err(e) => Err(format!("could not run git (is it installed?): {e}")),
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| format!("could not run git (is it installed?): {e}"))?;
+    let stderr = child.stderr.take().expect("piped stderr");
+    let error_reader = std::thread::spawn(move || read_capped(stderr, GIT_ERROR_CAP));
+    let deadline = Instant::now() + GIT_CLONE_TIMEOUT;
+    let result = loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                break find_skill_dir(&staging).and_then(|dir| install_path(workspace, &dir));
+            }
+            Ok(Some(_)) => {
+                let detail = error_reader.join().unwrap_or_default();
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(format!("git clone failed: {}", detail.trim()));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                kill_group(&mut child);
+                break Err(format!("cannot wait for git clone: {error}"));
+            }
+        }
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            kill_group(&mut child);
+            break Err("skill installation canceled by user".to_string());
+        }
+        if Instant::now() >= deadline {
+            kill_group(&mut child);
+            break Err(format!(
+                "git clone timed out after {}s; check the repository URL and network",
+                GIT_CLONE_TIMEOUT.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
     };
+    let _ = error_reader.join();
     let _ = std::fs::remove_dir_all(&staging);
     result
+}
+
+fn staging_path(workspace: &Path, kind: &str) -> PathBuf {
+    let serial = STAGING_SERIAL.fetch_add(1, Ordering::Relaxed);
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    workspace.join(".noob").join(format!(
+        ".skill-{kind}-{}-{stamp:x}-{serial:x}",
+        std::process::id(),
+    ))
+}
+
+fn kill_group(child: &mut std::process::Child) {
+    let pid = child.id() as libc::pid_t;
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn read_capped(mut stream: impl Read, cap: usize) -> String {
+    let mut kept = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                let take = n.min(cap.saturating_sub(kept.len()));
+                kept.extend_from_slice(&chunk[..take]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&kept).into_owned()
 }
 
 /// The skill directory inside a freshly cloned repo: the root when it holds a
@@ -249,18 +366,116 @@ pub fn remove(workspace: &Path, skill_dir: &Path) -> Result<(), String> {
 /// Recursively copy a directory's regular files and subdirectories (symlinks
 /// and special files are skipped, so a skill cannot smuggle one in).
 fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    copy_dir_avoiding(src, dst, dst)
+}
+
+fn copy_dir_avoiding(src: &Path, dst: &Path, excluded: &Path) -> std::io::Result<()> {
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "skill installation canceled by user",
+        ));
+    }
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "skill installation canceled by user",
+            ));
+        }
         let entry = entry?;
+        // A user may install a skill whose source is the workspace root. The
+        // hidden staging directory then sits inside the source tree and must
+        // not recursively copy itself.
+        if entry.path().starts_with(excluded) || entry.file_name() == OsStr::new(".git") {
+            continue;
+        }
         let ty = entry.file_type()?;
         let to = dst.join(entry.file_name());
         if ty.is_dir() {
-            copy_dir(&entry.path(), &to)?;
+            copy_dir_avoiding(&entry.path(), &to, excluded)?;
         } else if ty.is_file() {
-            std::fs::copy(entry.path(), to)?;
+            copy_file(&entry.path(), &to)?;
         }
     }
     Ok(())
+}
+
+fn copy_file(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let mut input = std::fs::File::open(src)?;
+    let mut output = std::fs::File::create(dst)?;
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "skill installation canceled by user",
+            ));
+        }
+        let n = input.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        output.write_all(&chunk[..n])?;
+    }
+    output.flush()?;
+    std::fs::set_permissions(dst, input.metadata()?.permissions())
+}
+
+/// Read only the fenced metadata needed for discovery and validation. The
+/// file must be a real regular file: following a FIFO, device, or symlink here
+/// could block startup or consume unbounded memory before cancellation exists.
+fn read_frontmatter_file(path: &Path) -> std::io::Result<String> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "SKILL.md must be a regular non-symlink file",
+        ));
+    }
+
+    let mut file = std::fs::File::open(path)?;
+    let mut kept = Vec::with_capacity(8 * 1024);
+    let mut chunk = [0u8; 8 * 1024];
+    let mut line_start = 0usize;
+    let mut line_count = 0usize;
+    loop {
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        for &byte in &chunk[..n] {
+            if kept.len() >= FRONTMATTER_BYTE_CAP {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "frontmatter exceeds 64 KiB or has no closing `---` fence",
+                ));
+            }
+            kept.push(byte);
+            if byte != b'\n' {
+                continue;
+            }
+            line_count += 1;
+            if line_count > 1 && fence_line(&kept[line_start..kept.len() - 1])? {
+                return String::from_utf8(kept)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e));
+            }
+            line_start = kept.len();
+        }
+    }
+    if line_start < kept.len() && fence_line(&kept[line_start..])? {
+        return String::from_utf8(kept)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e));
+    }
+    String::from_utf8(kept)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+fn fence_line(bytes: &[u8]) -> std::io::Result<bool> {
+    let line = std::str::from_utf8(bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok(line.trim_end() == "---")
 }
 
 /// One clipped description line for the in-band `[skills updated]` note, the
@@ -291,18 +506,20 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
     // is not a newline), so body_of's byte math over the original text
     // stays exact.
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let lines: Vec<&str> = text.split('\n').collect();
-    if lines.first().map(|l| l.trim_end()) != Some("---") {
+    let mut lines = text.split('\n').enumerate().peekable();
+    if lines.next().map(|(_, line)| line.trim_end()) != Some("---") {
         return Err("no frontmatter: the file must start with a `---` line".to_string());
     }
     let mut fields = HashMap::new();
-    let mut i = 1;
-    while i < lines.len() {
-        let line = lines[i].trim_end();
+    while let Some((index, raw_line)) = lines.next() {
+        let line = raw_line.trim_end();
         if line == "---" {
-            return Ok(Parsed { fields, body_start: i + 1 });
+            return Ok(Parsed {
+                fields,
+                body_start: index + 1,
+            });
         }
-        i += 1;
+        let line_number = index + 1;
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
@@ -311,7 +528,9 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
             continue; // nested content under an ignored key
         }
         let Some(colon) = line.find(':') else {
-            return Err(format!("line {i}: expected `key: value`, got {line:?}"));
+            return Err(format!(
+                "line {line_number}: expected `key: value`, got {line:?}"
+            ));
         };
         let key = line[..colon].trim_end();
         if key.is_empty()
@@ -319,16 +538,14 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         {
-            return Err(format!("line {i}: invalid key {key:?}"));
+            return Err(format!("line {line_number}: invalid key {key:?}"));
         }
         let value = line[colon + 1..].trim();
         // A block header may carry a trailing YAML comment (`description: | #
         // keep newlines`), so test only the first token for the indicator.
         let indicator = value.split_whitespace().next().unwrap_or("");
         let parsed = if is_block_indicator(indicator) {
-            let (block, next) = scan_block(&lines, i, indicator.starts_with('>'));
-            i = next;
-            block
+            scan_block(&mut lines, indicator.starts_with('>'))
         } else {
             scalar(value)?
         };
@@ -352,57 +569,62 @@ fn is_block_indicator(value: &str) -> bool {
 /// joined text and the index of the first line after the block. Literal
 /// (`|`) keeps line breaks; folded (`>`) joins lines with spaces and keeps
 /// blank lines as breaks. Chomping is irrelevant here: values are trimmed.
-fn scan_block(lines: &[&str], mut i: usize, folded: bool) -> (String, usize) {
-    let mut block: Vec<&str> = Vec::new();
-    while i < lines.len() {
-        let line = lines[i].trim_end();
+fn scan_block<'a>(
+    lines: &mut std::iter::Peekable<impl Iterator<Item = (usize, &'a str)>>,
+    folded: bool,
+) -> String {
+    let mut out = String::new();
+    let mut indent = None;
+    let mut first = true;
+    while let Some((_, raw_line)) = lines.peek() {
+        let line = raw_line.trim_end();
         if line == "---" {
             break;
         }
         if !line.is_empty() && !line.starts_with(' ') && !line.starts_with('\t') {
             break;
         }
-        block.push(line);
-        i += 1;
-    }
-    // Indentation is ASCII space/tab BYTES only, and the strip below
-    // consumes only such bytes: a continuation line less indented than the
-    // first (or indented with exotic whitespace) can never split a
-    // multi-byte character, so this cannot panic on any input.
-    let indent = block
-        .iter()
-        .find(|l| !l.trim().is_empty())
-        .map(|l| l.bytes().take_while(|&b| b == b' ' || b == b'\t').count())
-        .unwrap_or(0);
-    let stripped: Vec<&str> = block
-        .iter()
-        .map(|l| {
-            let bytes = l.as_bytes();
-            let mut cut = 0;
-            while cut < indent && cut < bytes.len() && (bytes[cut] == b' ' || bytes[cut] == b'\t')
-            {
-                cut += 1;
+        let (_, raw_line) = lines.next().expect("peeked line exists");
+        let line = raw_line.trim_end();
+        let line_indent = line
+            .bytes()
+            .take_while(|&byte| byte == b' ' || byte == b'\t')
+            .count();
+        let indent = match indent {
+            Some(indent) => indent,
+            None if !line.trim().is_empty() => {
+                indent = Some(line_indent);
+                line_indent
             }
-            &l[cut..]
-        })
-        .collect();
-    let text = if folded {
-        let mut out = String::new();
-        for l in &stripped {
-            if l.trim().is_empty() {
+            None => 0,
+        };
+        let bytes = line.as_bytes();
+        let mut cut = 0;
+        while cut < indent
+            && cut < bytes.len()
+            && matches!(bytes[cut], b' ' | b'\t')
+        {
+            cut += 1;
+        }
+        let stripped = &line[cut..];
+        if folded {
+            if stripped.trim().is_empty() {
                 out.push('\n');
             } else {
                 if !out.is_empty() && !out.ends_with('\n') {
                     out.push(' ');
                 }
-                out.push_str(l.trim_end());
+                out.push_str(stripped.trim_end());
             }
+        } else {
+            if !first {
+                out.push('\n');
+            }
+            out.push_str(stripped);
         }
-        out
-    } else {
-        stripped.join("\n")
-    };
-    (text, i)
+        first = false;
+    }
+    out
 }
 
 /// One-line scalar: double-quoted (with `\"` `\\` `\n` `\t` escapes),
@@ -663,16 +885,43 @@ mod tests {
         // A source dir whose folder name differs from the skill name: the
         // install must key off the frontmatter, and carry bundled files.
         let src = ws.path().join("some-folder");
-        write_skill(&src.parent().unwrap().to_path_buf(), "some-folder", &skill_md("installed", "d"));
+        write_skill(src.parent().unwrap(), "some-folder", &skill_md("installed", "d"));
         std::fs::write(src.join("helper.sh"), "echo hi\n").unwrap();
+        std::fs::create_dir_all(src.join(".git")).unwrap();
+        std::fs::write(src.join(".git/config"), "private clone metadata").unwrap();
         let name = install(ws.path(), src.to_str().unwrap()).unwrap();
         assert_eq!(name, "installed");
         let dest = ws.path().join(".noob/skills/installed");
         assert!(dest.join("SKILL.md").is_file(), "SKILL.md must be copied");
         assert!(dest.join("helper.sh").is_file(), "bundled files must be copied");
+        assert!(!dest.join(".git").exists(), "VCS metadata must not be installed");
+        assert!(
+            std::fs::read_dir(ws.path().join(".noob"))
+                .unwrap()
+                .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".skill-")),
+            "a completed install must not leave staging data"
+        );
         // It is now discoverable.
         let cfg = tempfile::tempdir().unwrap();
         assert!(discover(ws.path(), cfg.path()).iter().any(|s| s.name == "installed"));
+    }
+
+    #[test]
+    fn installing_from_the_workspace_root_does_not_copy_staging_into_itself() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("SKILL.md"), skill_md("root-skill", "d")).unwrap();
+        std::fs::create_dir_all(ws.path().join("bundle")).unwrap();
+        std::fs::write(ws.path().join("bundle/note.txt"), "note").unwrap();
+
+        let name = install(ws.path(), ws.path().to_str().unwrap()).unwrap();
+        assert_eq!(name, "root-skill");
+        let dest = ws.path().join(".noob/skills/root-skill");
+        assert_eq!(std::fs::read_to_string(dest.join("bundle/note.txt")).unwrap(), "note");
+        assert_eq!(
+            std::fs::read_dir(dest.join(".noob")).unwrap().count(),
+            0,
+            "the destination must not contain its own staging directory"
+        );
     }
 
     #[test]
@@ -686,10 +935,45 @@ mod tests {
         assert!(!ws.path().join(".noob/skills").exists(), "a rejected install must write nothing");
         // A valid install, then a duplicate is refused.
         let src = ws.path().join("src");
-        write_skill(&ws.path().to_path_buf(), "src", &skill_md("dup", "d"));
+        write_skill(ws.path(), "src", &skill_md("dup", "d"));
         assert_eq!(install(ws.path(), src.to_str().unwrap()).unwrap(), "dup");
         let err = install(ws.path(), src.to_str().unwrap()).unwrap_err();
         assert!(err.contains("already installed"), "{err}");
+    }
+
+    #[test]
+    fn special_or_symlinked_skill_files_are_rejected_without_opening_them() {
+        use std::os::unix::fs::symlink;
+
+        let ws = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        let fifo_dir = ws.path().join(".noob/skills/fifo");
+        std::fs::create_dir_all(&fifo_dir).unwrap();
+        let fifo = fifo_dir.join("SKILL.md");
+        let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        assert!(discover(ws.path(), cfg.path()).is_empty());
+        let err = install(ws.path(), fifo_dir.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("regular non-symlink"), "{err}");
+
+        let real = ws.path().join("real-SKILL.md");
+        std::fs::write(&real, skill_md("linked", "d")).unwrap();
+        let linked = ws.path().join("linked-SKILL.md");
+        symlink(&real, &linked).unwrap();
+        let err = install(ws.path(), linked.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("must not be a symlink"), "{err}");
+    }
+
+    #[test]
+    fn validation_reads_only_bounded_frontmatter_not_the_skill_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("SKILL.md");
+        let mut text = skill_md("large-body", "d");
+        text.push_str(&"x".repeat(FRONTMATTER_BYTE_CAP * 4));
+        std::fs::write(&path, text).unwrap();
+        let frontmatter = read_frontmatter_file(&path).unwrap();
+        assert!(frontmatter.len() < 1024);
+        assert_eq!(validate(&parse(&frontmatter).unwrap().fields).unwrap().0, "large-body");
     }
 
     #[test]
