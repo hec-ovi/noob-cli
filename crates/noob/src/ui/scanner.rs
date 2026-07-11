@@ -95,7 +95,7 @@ fn run(stop: &AtomicBool, depth: ColorDepth, ramp: [Rgb; 6]) {
 /// track with a bright head bouncing across a fading tail. Every colored cell
 /// carries its own reset, so nothing bleeds past the line. A pure function of
 /// its inputs, so it is unit-testable without a terminal.
-fn frame(t: usize, depth: ColorDepth, ramp: &[Rgb; 6]) -> String {
+pub(super) fn frame(t: usize, depth: ColorDepth, ramp: &[Rgb; 6]) -> String {
     let period = 2 * (TRACK - 1);
     let phase = t % period;
     // Head bounces 0 -> TRACK-1 -> 0; the tail trails behind it.

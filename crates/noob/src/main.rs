@@ -246,6 +246,10 @@ fn cmd_repl(args: &[String]) -> ExitCode {
         }
     };
     greet(&agent, &mut ui);
+    // The dock (fable.md, opt-in via NOOB_DOCK=1): raw mode held for the
+    // session, a live input frame during turns, output above it. None keeps
+    // the exact per-prompt editor and blocking turn below.
+    let mut dock = ui.dock_session();
 
     loop {
         ui.end_line();
@@ -254,7 +258,11 @@ fn cmd_repl(args: &[String]) -> ExitCode {
         // a Ctrl-C at the prompt reprompts, kept distinct from EOF. In cooked
         // mode a second Ctrl-C before any input still hard-exits via the signal
         // handler; in raw mode Ctrl-C cancels the line and Ctrl-D or /quit exit.
-        let line = match ui.read_prompt(agent.plan) {
+        let line = match dock.as_mut() {
+            Some(d) => d.read_prompt(&mut ui, agent.plan),
+            None => ui.read_prompt(agent.plan),
+        };
+        let line = match line {
             ui::Input::Eof => break,
             ui::Input::Interrupted => {
                 ui.note("(interrupted; /quit to exit)");
@@ -276,7 +284,21 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                 "quit" | "q" | "exit" => break,
                 "status" => status(&agent, &mut ui),
                 "compact" => {
-                    agent.compact(&mut ui);
+                    // Compaction makes a blocking summarizer request, so in
+                    // dock mode it must run through the render loop like a
+                    // turn: the tty is raw (ISIG off), so a keyboard Ctrl-C is
+                    // a byte only the render loop turns into INTERRUPTED. Run
+                    // straight on the main thread otherwise (the tty is cooked
+                    // between prompts, so SIGINT still reaches the watchdog).
+                    match dock.as_mut() {
+                        Some(d) => {
+                            let plan = agent.plan;
+                            d.run_turn(&mut ui, plan, |tui| agent.compact(tui));
+                        }
+                        None => {
+                            agent.compact(&mut ui);
+                        }
+                    }
                     // A Ctrl-C during a manual compaction was consumed by
                     // it; a stale flag would phantom-cancel the next input.
                     INTERRUPTED.store(false, Ordering::SeqCst);
@@ -288,9 +310,8 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                 }
                 "go" => {
                     if agent.exit_plan(&mut ui) {
-                        ui.thinking_start();
-                        let end = agent.run_input(agent::PLAN_APPROVED_MSG, &mut ui);
-                        ui.thinking_stop();
+                        let end =
+                            run_repl_turn(&mut agent, &mut ui, &mut dock, agent::PLAN_APPROVED_MSG);
                         match end {
                             RunEnd::Completed(_) | RunEnd::Interrupted => {}
                             RunEnd::Aborted(msg) => ui.error(&format!("error: {msg}")),
@@ -299,23 +320,24 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                         ui.note("not in plan mode; /plan enters it");
                     }
                 }
+                s if s == "skills" || s.starts_with("skills ") => {
+                    let args = s.strip_prefix("skills").unwrap_or("").trim();
+                    handle_skills(args, &mut agent, &mut ui);
+                }
                 other => ui.note(&format!(
-                    "unknown command /{other}; available: /plan /go /status /compact /quit"
+                    "unknown command /{other}; available: /plan /go /status /compact /skills /quit"
                 )),
             }
             continue;
         }
-        // The thinking scanner sweeps from here until the first reply byte, so
-        // the request-to-first-token gap is not dead air. thinking_stop is the
-        // end-of-turn bracket for a turn that streamed nothing at all.
-        ui.thinking_start();
-        let end = agent.run_input(input, &mut ui);
-        ui.thinking_stop();
+        let end = run_repl_turn(&mut agent, &mut ui, &mut dock, input);
         match end {
             RunEnd::Completed(_) | RunEnd::Interrupted => {}
             RunEnd::Aborted(msg) => ui.error(&format!("error: {msg}")),
         }
     }
+    // Leave raw mode before the exit hint so it prints on a cooked terminal.
+    drop(dock);
     // On the way out, tell the human how to pick this session back up. Only at
     // an interactive terminal, so a piped REPL stays byte-identical.
     if ui.is_interactive() {
@@ -325,6 +347,122 @@ fn cmd_repl(args: &[String]) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// One REPL turn through the right driver: the dock (worker thread, live
+/// input frame, output above it) when the session runs docked, else the
+/// classic blocking turn bracketed by the thinking scanner. The scanner
+/// brackets only the classic path; the dock draws its own liveness.
+fn run_repl_turn(
+    agent: &mut Agent,
+    ui: &mut Ui,
+    dock: &mut Option<ui::DockSession>,
+    input: &str,
+) -> RunEnd {
+    match dock.as_mut() {
+        Some(d) => {
+            let plan = agent.plan;
+            let end = d.run_turn(ui, plan, |tui| agent.run_input(input, tui));
+            // A canceled turn hands any type-ahead back to the editor instead
+            // of firing it: an interrupt means the human wants to steer.
+            if matches!(end, RunEnd::Interrupted) {
+                d.drain_queue_to_draft();
+            }
+            end
+        }
+        None => {
+            // The thinking scanner sweeps from here until the first reply
+            // byte, so the request-to-first-token gap is not dead air.
+            // thinking_stop is the end-of-turn bracket for a turn that
+            // streamed nothing at all.
+            ui.thinking_start();
+            let end = agent.run_input(input, ui);
+            ui.thinking_stop();
+            end
+        }
+    }
+}
+
+/// The `/skills` command family (REPL only): list, reload, add a skill from a
+/// local path or git URL, or remove an installed one. Each mutation re-runs
+/// discovery through `reload_skills`, which registers the tool if needed and
+/// announces the change in-band. Runs between turns on the main thread, so it
+/// never contends with the dock's stdin reader (no confirmation prompt: a
+/// user-run install is the trust signal; the agent-authoring gate is separate).
+fn handle_skills(args: &str, agent: &mut Agent, ui: &mut Ui) {
+    let mut parts = args.splitn(2, char::is_whitespace);
+    let verb = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("").trim();
+    match verb {
+        "" | "list" => {
+            if agent.tool_ctx.skills.is_empty() {
+                ui.note("no skills installed; /skills add <path|git-url> to install one");
+                return;
+            }
+            let lines: Vec<String> = agent
+                .tool_ctx
+                .skills
+                .iter()
+                .map(|s| format!("  {}: {}", s.name, skills::clip_description(&s.description)))
+                .collect();
+            ui.note(&format!("skills ({}):\n{}", agent.tool_ctx.skills.len(), lines.join("\n")));
+        }
+        "reload" => {
+            let (added, removed) = agent.reload_skills(ui);
+            skills_delta(ui, &added, &removed);
+        }
+        "add" => {
+            if rest.is_empty() {
+                ui.error("usage: /skills add <path|git-url>");
+                return;
+            }
+            match skills::install(&agent.tool_ctx.workspace, rest) {
+                Ok(name) => {
+                    ui.note(&format!("installed skill {name}"));
+                    let (added, removed) = agent.reload_skills(ui);
+                    skills_delta(ui, &added, &removed);
+                }
+                Err(e) => ui.error(&format!("skill add failed: {e}")),
+            }
+        }
+        "remove" | "rm" => {
+            if rest.is_empty() {
+                ui.error("usage: /skills remove <name>");
+                return;
+            }
+            let dir = agent.tool_ctx.skills.iter().find(|s| s.name == rest).map(|s| s.dir.clone());
+            match dir {
+                None => ui.error(&format!("no installed skill named {rest:?}; /skills lists them")),
+                Some(dir) => match skills::remove(&agent.tool_ctx.workspace, &dir) {
+                    Ok(()) => {
+                        let (added, removed) = agent.reload_skills(ui);
+                        skills_delta(ui, &added, &removed);
+                    }
+                    Err(e) => ui.error(&format!("skill remove failed: {e}")),
+                },
+            }
+        }
+        other => ui.error(&format!(
+            "unknown /skills subcommand {other:?}; use: list, add, remove, reload"
+        )),
+    }
+}
+
+/// One line summarizing what a reload changed, so the human sees it even when
+/// the in-band model note scrolled by.
+fn skills_delta(ui: &mut Ui, added: &[String], removed: &[String]) {
+    if added.is_empty() && removed.is_empty() {
+        ui.note("skills: no change");
+        return;
+    }
+    let mut parts = Vec::new();
+    if !added.is_empty() {
+        parts.push(format!("added {}", added.join(", ")));
+    }
+    if !removed.is_empty() {
+        parts.push(format!("removed {}", removed.join(", ")));
+    }
+    ui.note(&format!("skills: {}", parts.join("; ")));
 }
 
 fn greet(agent: &Agent, ui: &mut Ui) {
@@ -337,7 +475,7 @@ fn greet(agent: &Agent, ui: &mut Ui) {
         .map(|s| format!(" · session {}", s.id()))
         .unwrap_or_default();
     ui.greeting(&format!(
-        "noob {} · {endpoint}{session}\ntype a task; /plan /go /status /compact /quit",
+        "noob {} · {endpoint}{session}\ntype a task; /plan /go /status /compact /skills /quit",
         env!("CARGO_PKG_VERSION")
     ));
 }

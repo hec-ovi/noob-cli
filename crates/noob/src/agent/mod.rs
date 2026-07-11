@@ -59,6 +59,10 @@ pub struct Agent {
     pub read_only: bool,
     pub items: Vec<Item>,
     pub tool_ctx: ToolCtx,
+    /// Skill names present at session start (the set the frozen prompt-head
+    /// index lists). Compared against the live set after an on-the-fly
+    /// `/skills` change so compaction can pin the drift.
+    initial_skills: Vec<String>,
     pub session: Option<Session>,
     /// NOOB_CTX: the context window compaction budgets against.
     pub ctx_tokens: u64,
@@ -110,6 +114,7 @@ impl Agent {
                 .sum::<usize>();
         let replayed_chars: usize = items.iter().map(compact::item_chars).sum();
         recover_loaded_skills(&tool_ctx, &items);
+        let initial_skills = tool_ctx.skills.iter().map(|s| s.name.clone()).collect();
         Agent {
             client,
             config_dir,
@@ -121,6 +126,7 @@ impl Agent {
             read_only: false,
             items,
             tool_ctx,
+            initial_skills,
             session,
             ctx_tokens,
             max_rounds: TURN_CAP,
@@ -169,6 +175,93 @@ impl Agent {
         self.tools = self.full_tools.clone();
         ui.note("cache prefix reset: plan approved (full tools restored)");
         true
+    }
+
+    /// Re-discover skills from disk (the user ran a `/skills` command) and
+    /// reconcile the live session with them: swap in the fresh set, register
+    /// the `skill` tool if it was absent (the zero-skills-to-some transition,
+    /// one sanctioned cache break), and append an in-band `[skills updated]`
+    /// message. The frozen prompt-head index cannot change mid-session, so
+    /// this message is what corrects the model's working set: it lists the
+    /// newly available skills (with descriptions, the resolver triggers) and
+    /// names the removed ones so the model stops offering a skill that is gone
+    /// (the `skill` tool also rejects it structurally). Returns (added,
+    /// removed) names for the caller's summary line.
+    pub fn reload_skills(&mut self, ui: &mut Ui) -> (Vec<String>, Vec<String>) {
+        let fresh = crate::skills::discover(&self.tool_ctx.workspace, &self.config_dir);
+        let old: std::collections::HashSet<&str> =
+            self.tool_ctx.skills.iter().map(|s| s.name.as_str()).collect();
+        let new: std::collections::HashSet<&str> =
+            fresh.iter().map(|s| s.name.as_str()).collect();
+        let added: Vec<String> = fresh
+            .iter()
+            .filter(|s| !old.contains(s.name.as_str()))
+            .map(|s| s.name.clone())
+            .collect();
+        let removed: Vec<String> = self
+            .tool_ctx
+            .skills
+            .iter()
+            .filter(|s| !new.contains(s.name.as_str()))
+            .map(|s| s.name.clone())
+            .collect();
+
+        // The resolver line for each newly available skill, built before the
+        // set is moved into the context.
+        let added_lines: Vec<String> = added
+            .iter()
+            .filter_map(|n| fresh.iter().find(|s| &s.name == n))
+            .map(|s| format!("{}: {}", s.name, crate::skills::clip_description(&s.description)))
+            .collect();
+
+        let had_none = self.tool_ctx.skills.is_empty();
+        self.tool_ctx.skills = fresh;
+
+        // Register the skill tool once, on the transition from no skills to
+        // some: an absent schema cannot be called, so a first-ever skill needs
+        // the tool added. This changes the tools array (one accepted cache
+        // break, like plan mode); a session that already had skills keeps the
+        // exact same wire tools and breaks nothing.
+        if had_none
+            && !self.tool_ctx.skills.is_empty()
+            && !self.tools.iter().any(|t| t.name == "skill")
+        {
+            let spec = tools::skill::spec();
+            if !self.full_tools.iter().any(|t| t.name == "skill") {
+                self.full_tools.push(spec.clone());
+            }
+            self.tools.push(spec);
+            ui.note("cache prefix reset: skill tool registered (skills are now available)");
+        }
+
+        if !added.is_empty() || !removed.is_empty() {
+            let mut msg = String::from("[skills updated]");
+            if !added_lines.is_empty() {
+                msg.push_str(&format!(" now available: {}.", added_lines.join("; ")));
+            }
+            if !removed.is_empty() {
+                msg.push_str(&format!(
+                    " no longer available (do not use): {}.",
+                    removed.join(", ")
+                ));
+            }
+            self.push_item(Item::User(msg));
+        }
+        (added, removed)
+    }
+
+    /// Whether the live skill set has drifted from the session-start set (an
+    /// on-the-fly `/skills` change). Compaction pins the current set when so,
+    /// so the correction survives even after the announcement is summarized.
+    pub(crate) fn skills_drifted(&self) -> Option<Vec<String>> {
+        let current: std::collections::HashSet<&str> =
+            self.tool_ctx.skills.iter().map(|s| s.name.as_str()).collect();
+        let initial: std::collections::HashSet<&str> =
+            self.initial_skills.iter().map(String::as_str).collect();
+        if current == initial {
+            return None;
+        }
+        Some(self.tool_ctx.skills.iter().map(|s| s.name.clone()).collect())
     }
 
     /// Estimated tokens currently in the context: the last server-reported
@@ -911,6 +1004,62 @@ mod tests {
             sched::Planned::Run { .. } => {}
             sched::Planned::Canned(_) => panic!("write must run again after /go"),
         }
+    }
+
+    #[test]
+    fn reload_skills_diffs_registers_the_tool_and_announces() {
+        // A workspace that starts with one skill on disk; the agent boots with
+        // no skill tool (simulating a session that had none at first). A reload
+        // after the disk changed must diff, register the tool, and announce.
+        let write_skill = |ws: &std::path::Path, name: &str, desc: &str| {
+            let dir = ws.join(".noob/skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {desc}\n---\nbody\n"),
+            )
+            .unwrap();
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        write_skill(&ws, "alpha", "the alpha skill");
+        let tool_ctx = ToolCtx::new(ws.clone(), crate::tools::guard::Sandbox::Container);
+        // Booted with no skills discovered, so no skill tool and no initial set.
+        let mut agent = Agent::new(
+            Client::new(Timeouts::default()),
+            tmp.path().to_path_buf(),
+            Overrides::default(),
+            "sys".into(),
+            vec![],
+            vec![],
+            tool_ctx,
+            None,
+            131_072,
+        );
+        let mut ui = crate::ui::Ui::new(crate::ui::Mode::Exec);
+        assert!(agent.skills_drifted().is_none(), "no drift before a reload");
+
+        let (added, removed) = agent.reload_skills(&mut ui);
+        assert_eq!(added, vec!["alpha".to_string()]);
+        assert!(removed.is_empty());
+        assert!(agent.tools.iter().any(|t| t.name == "skill"), "skill tool registered");
+        assert!(agent.skills_drifted().is_some(), "the set drifted from the empty start");
+        assert!(
+            matches!(agent.items.last(), Some(Item::User(m)) if m.contains("[skills updated]") && m.contains("alpha")),
+            "an in-band announcement must be appended"
+        );
+
+        // Now remove alpha and add beta on disk; the next reload reports both.
+        std::fs::remove_dir_all(ws.join(".noob/skills/alpha")).unwrap();
+        write_skill(&ws, "beta", "the beta skill");
+        let (added, removed) = agent.reload_skills(&mut ui);
+        assert_eq!(added, vec!["beta".to_string()]);
+        assert_eq!(removed, vec!["alpha".to_string()]);
+        let last = match agent.items.last() {
+            Some(Item::User(m)) => m.clone(),
+            _ => panic!("expected an announcement"),
+        };
+        assert!(last.contains("beta") && last.contains("no longer available") && last.contains("alpha"), "{last}");
     }
 
     #[test]

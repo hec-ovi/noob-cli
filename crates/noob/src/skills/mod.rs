@@ -6,7 +6,9 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Index section budget in chars (~1,000 tokens at chars/4).
 pub const INDEX_CHAR_BUDGET: usize = 4_000;
@@ -117,6 +119,154 @@ fn clip_one_line(desc: &str) -> String {
     }
     let cut: String = one.chars().take(INDEX_DESC_CLIP).collect();
     format!("{cut}…")
+}
+
+// ---------------------------------------------------------------------------
+// On-the-fly install / remove (the /skills command family; REPL only)
+// ---------------------------------------------------------------------------
+
+/// The workspace root a user-installed skill lands under, so it is picked up
+/// by the highest-priority discovery path on the next reload.
+fn install_root(workspace: &Path) -> PathBuf {
+    workspace.join(".noob/skills")
+}
+
+/// Install a skill from a local path (a skill directory or a bare SKILL.md)
+/// or a git URL into `<workspace>/.noob/skills/<name>`. The source is parsed
+/// and validated before anything is committed, so a malformed skill is
+/// rejected with a reason and nothing is copied. Returns the installed name.
+pub fn install(workspace: &Path, source: &str) -> Result<String, String> {
+    let looks_git = source.starts_with("http://")
+        || source.starts_with("https://")
+        || source.starts_with("git@")
+        || source.ends_with(".git");
+    if looks_git {
+        install_git(workspace, source)
+    } else {
+        install_path(workspace, Path::new(source))
+    }
+}
+
+fn install_path(workspace: &Path, source: &Path) -> Result<String, String> {
+    let is_bare_md = source.file_name() == Some(OsStr::new("SKILL.md")) && source.is_file();
+    let skill_md = if source.is_dir() {
+        source.join("SKILL.md")
+    } else if is_bare_md {
+        source.to_path_buf()
+    } else {
+        return Err(format!(
+            "{}: expected a skill directory containing SKILL.md, or a SKILL.md file",
+            source.display()
+        ));
+    };
+    let text = std::fs::read_to_string(&skill_md)
+        .map_err(|e| format!("cannot read {}: {e}", skill_md.display()))?;
+    // Validate the frontmatter up front: a bad skill is rejected before any
+    // file is written, so a failed install never leaves a partial dir.
+    let parsed = parse(&text)?;
+    let (name, _desc) = validate(&parsed.fields)?;
+
+    let dest = install_root(workspace).join(&name);
+    if dest.exists() {
+        return Err(format!(
+            "a skill named {name:?} is already installed; remove it first with /skills remove {name}"
+        ));
+    }
+    if source.is_dir() {
+        copy_dir(source, &dest).map_err(|e| format!("copying the skill failed: {e}"))?;
+    } else {
+        std::fs::create_dir_all(&dest)
+            .and_then(|_| std::fs::copy(&skill_md, dest.join("SKILL.md")).map(|_| ()))
+            .map_err(|e| format!("copying the skill failed: {e}"))?;
+    }
+    Ok(name)
+}
+
+fn install_git(workspace: &Path, url: &str) -> Result<String, String> {
+    // Shallow-clone into a staging dir under the install root; the `git`
+    // binary does the fetching, so noob itself opens no new sockets and the
+    // egress invariant holds. Staging is always cleaned up.
+    let staging = install_root(workspace).join(format!(".staging-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&staging);
+    if let Some(parent) = staging.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create the skills dir: {e}"))?;
+    }
+    let out = Command::new("git")
+        .args(["clone", "--depth", "1", url])
+        .arg(&staging)
+        .output();
+    let result = match out {
+        Ok(o) if o.status.success() => find_skill_dir(&staging)
+            .and_then(|dir| install_path(workspace, &dir)),
+        Ok(o) => Err(format!(
+            "git clone failed: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Err(format!("could not run git (is it installed?): {e}")),
+    };
+    let _ = std::fs::remove_dir_all(&staging);
+    result
+}
+
+/// The skill directory inside a freshly cloned repo: the root when it holds a
+/// SKILL.md, else a single immediate subdirectory that does.
+fn find_skill_dir(root: &Path) -> Result<PathBuf, String> {
+    if root.join("SKILL.md").is_file() {
+        return Ok(root.to_path_buf());
+    }
+    let mut hits: Vec<PathBuf> = std::fs::read_dir(root)
+        .map_err(|e| format!("cannot read the cloned repo: {e}"))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir() && p.join("SKILL.md").is_file())
+        .collect();
+    hits.sort();
+    match hits.len() {
+        1 => Ok(hits.into_iter().next().unwrap()),
+        0 => Err("the repo has no SKILL.md at its root or in a subdirectory".to_string()),
+        _ => Err("the repo has several skills; clone it and add one subdirectory".to_string()),
+    }
+}
+
+/// Remove an installed skill's directory. Confined to the workspace tree: a
+/// global or ecosystem skill (outside the workspace) is refused rather than
+/// deleted, so `/skills remove` can never nuke a shared install.
+pub fn remove(workspace: &Path, skill_dir: &Path) -> Result<(), String> {
+    let ws = workspace
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve the workspace: {e}"))?;
+    let dir = skill_dir
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", skill_dir.display()))?;
+    if !dir.starts_with(&ws) {
+        return Err(format!(
+            "{} is outside the workspace (a global or ecosystem skill); remove it by hand",
+            skill_dir.display()
+        ));
+    }
+    std::fs::remove_dir_all(&dir).map_err(|e| format!("removing the skill failed: {e}"))
+}
+
+/// Recursively copy a directory's regular files and subdirectories (symlinks
+/// and special files are skipped, so a skill cannot smuggle one in).
+fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir(&entry.path(), &to)?;
+        } else if ty.is_file() {
+            std::fs::copy(entry.path(), to)?;
+        }
+    }
+    Ok(())
+}
+
+/// One clipped description line for the in-band `[skills updated]` note, the
+/// same shape as the L1 index so the model reads it as a resolver entry.
+pub fn clip_description(desc: &str) -> String {
+    clip_one_line(desc)
 }
 
 // ---------------------------------------------------------------------------
@@ -504,6 +654,59 @@ mod tests {
     }
 
     // --- discovery ---
+
+    // --- on-the-fly install / remove ---
+
+    #[test]
+    fn install_local_copies_the_skill_and_names_it_from_frontmatter() {
+        let ws = tempfile::tempdir().unwrap();
+        // A source dir whose folder name differs from the skill name: the
+        // install must key off the frontmatter, and carry bundled files.
+        let src = ws.path().join("some-folder");
+        write_skill(&src.parent().unwrap().to_path_buf(), "some-folder", &skill_md("installed", "d"));
+        std::fs::write(src.join("helper.sh"), "echo hi\n").unwrap();
+        let name = install(ws.path(), src.to_str().unwrap()).unwrap();
+        assert_eq!(name, "installed");
+        let dest = ws.path().join(".noob/skills/installed");
+        assert!(dest.join("SKILL.md").is_file(), "SKILL.md must be copied");
+        assert!(dest.join("helper.sh").is_file(), "bundled files must be copied");
+        // It is now discoverable.
+        let cfg = tempfile::tempdir().unwrap();
+        assert!(discover(ws.path(), cfg.path()).iter().any(|s| s.name == "installed"));
+    }
+
+    #[test]
+    fn install_rejects_malformed_and_duplicate_without_writing() {
+        let ws = tempfile::tempdir().unwrap();
+        // Malformed frontmatter: rejected, nothing written.
+        let bad = ws.path().join("bad");
+        std::fs::create_dir_all(&bad).unwrap();
+        std::fs::write(bad.join("SKILL.md"), "no frontmatter here\n").unwrap();
+        assert!(install(ws.path(), bad.to_str().unwrap()).is_err());
+        assert!(!ws.path().join(".noob/skills").exists(), "a rejected install must write nothing");
+        // A valid install, then a duplicate is refused.
+        let src = ws.path().join("src");
+        write_skill(&ws.path().to_path_buf(), "src", &skill_md("dup", "d"));
+        assert_eq!(install(ws.path(), src.to_str().unwrap()).unwrap(), "dup");
+        let err = install(ws.path(), src.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("already installed"), "{err}");
+    }
+
+    #[test]
+    fn remove_refuses_paths_outside_the_workspace() {
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let global = outside.path().join("skills/demo");
+        std::fs::create_dir_all(&global).unwrap();
+        let err = remove(ws.path(), &global).unwrap_err();
+        assert!(err.contains("outside the workspace"), "{err}");
+        assert!(global.exists(), "an outside skill must not be deleted");
+        // A workspace skill is removed.
+        let inside = ws.path().join(".noob/skills/demo");
+        std::fs::create_dir_all(&inside).unwrap();
+        assert!(remove(ws.path(), &inside).is_ok());
+        assert!(!inside.exists());
+    }
 
     #[test]
     fn discovery_covers_all_four_roots_in_priority_order() {

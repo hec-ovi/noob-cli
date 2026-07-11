@@ -1,6 +1,6 @@
 # noob-cli: project plan
 
-An extremely lightweight, friendly agentic coding CLI. Rust, single static binary, built to live inside a Docker sandbox and work on a mounted host folder. Provider-agnostic (Chat Completions and Responses APIs), skills, MCP, plan mode, parallel tool calls, and dynamic multi-agent workflows. Ideas are learned from the best existing harnesses (Pi, OpenCode, Codex CLI, Hermes Agent, Agent Zero, and the small Rust/Go ones); no code is copied from any of them.
+An extremely lightweight, friendly agentic CLI. Rust, single static binary, built to live inside a Docker sandbox and work on a mounted host folder. Provider-agnostic (Chat Completions and Responses APIs), skills, MCP, plan mode, parallel tool calls, and dynamic multi-agent workflows. Ideas are learned from the best existing harnesses (Pi, OpenCode, Codex CLI, Hermes Agent, Agent Zero, and the small Rust/Go ones); no code is copied from any of them.
 
 ## Hard requirements
 
@@ -11,7 +11,7 @@ An extremely lightweight, friendly agentic coding CLI. Rust, single static binar
 - Config lives in a bind-mounted directory containing an easy `.env`. Keys are read lazily on each API request, never cached at startup, so editing `.env` on the host applies on the next call with no container restart. Container env vars are not used for secrets (they freeze at `docker run`).
 - Provider-agnostic: speaks both OpenAI Chat Completions and Responses APIs against any base URL (llama.cpp, vLLM, OpenAI, OpenRouter, etc.). Anthropic-style APIs can come later behind the same trait.
 - Minimal instruction overhead: the system prompt has a measured token budget (target well under 1k tokens; the exact number gets locked in the design phase). Small local models are first-class citizens.
-- Best-in-class file tools: read, write, edit (exact string replace), grep, glob, ls, bash. Multiple tool calls in a single inference, executed in parallel where independent.
+- File tools: read, write, edit (exact string replace), grep, glob, ls, bash. Multiple tool calls in a single inference, executed in parallel where independent.
 - Skills: SKILL.md standard with progressive disclosure (only name + description in context until a skill is actually used).
 - MCP client: stdio and streamable HTTP transports, tools first.
 - Plan mode: read-only exploration, then an approved plan before writes.
@@ -30,13 +30,13 @@ An extremely lightweight, friendly agentic coding CLI. Rust, single static binar
 
 ## Process
 
-1. **Research** (running): three parallel investigations covering (a) minimal harnesses: Pi, Zap, zot, Zerostack, QQCode, (b) OpenCode and Codex CLI, (c) Hermes Agent, Agent Zero, multi-agent patterns, the SKILL.md standard, and the current MCP spec. Findings land in the local research store and get distilled into `docs/RESEARCH.md` (committed).
+1. **Research**: three parallel investigations covering (a) minimal harnesses: Pi, Zap, zot, Zerostack, QQCode, (b) OpenCode and Codex CLI, (c) Hermes Agent, Agent Zero, multi-agent patterns, the SKILL.md standard, and the current MCP spec. Findings land in the local research store and get distilled into `docs/RESEARCH.md` (committed).
 2. **Design** (multi-agent workflow): four independent architecture proposals under different lenses (minimal footprint, provider abstraction, agentic loop quality, extensibility and UX), scored by a judge panel, synthesized into `ARCHITECTURE.md` plus the initial `contract.md` set. Design locks: async runtime choice, HTTP client, TUI vs plain REPL, crate layout, exact system prompt budget.
 3. **Build** in the phases below. A phase is done when its tests pass locally. Commits are small and frequent (conventional style), pushed to `origin main` as they land.
 
 ## Build phases
 
-- **P0 scaffold**: cargo workspace, per-crate `contract.md`, Dockerfile (musl builder stage, minimal runtime stage), `docker-compose.yml` with the `/work` + config mounts, task runner, e2e test harness with an in-process mock OpenAI server.
+- **P0 scaffold**: cargo workspace, per-crate `contract.md`, Dockerfile (musl builder stage, minimal runtime stage), `compose.yml` with the `/work` + config mounts, task runner, e2e test harness with an in-process mock OpenAI server.
 - **P1 provider layer**: Chat Completions adapter with SSE streaming and tool-call parsing, Responses API adapter behind the same trait, parallel tool-call support, retry/backoff, lazy `.env` resolution per request.
 - **P2 core loop + tools**: the agent loop, the file/shell tool set, tool result truncation, the minimal system prompt (token-counted in tests), context compaction.
 - **P3 skills**: SKILL.md discovery and progressive disclosure, compatible with the existing skills ecosystem.

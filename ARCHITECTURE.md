@@ -26,7 +26,7 @@ The base is the ruthless-minimalist proposal (ranked first by judges 1 and 2). T
 | 2 | Async runtime | None; blocking IO + `std::thread` | One inference at a time; threads cover tool fan-out and children; tokio would be the largest shipped subtree for work we do not have |
 | 3 | HTTP client + TLS | ureq 3.x (default-features off) + rustls with the ring provider + compiled-in webpki-roots | Cleanest musl story (no cmake, no system cert store); feature wiring pinned first thing in P0 |
 | 4 | Timeouts | connect 10 s, first-byte 300 s, inter-chunk idle 90 s, via a 1 s tick-read watchdog | A single read timeout either kills legitimate 131k-ctx llama.cpp prompt processing or never catches a stalled stream (all judges) |
-| 5 | UI | Opt-in termios line editor at an interactive tty (boxed prompt, real editing); cooked `read_line` when piped; no ratatui, no rustyline | Zero-dep editor over libc, restored by three hooks; TUIs add a redraw bug class; piped/exec/child stay byte-identical |
+| 5 | UI | Termios line editor at an interactive tty (default-on, `NOOB_RAW=0` opts out; boxed prompt, real editing); cooked `read_line` when piped; no ratatui, no rustyline | Zero-dep editor over libc, restored by three hooks; TUIs add a redraw bug class; piped/exec/child stay byte-identical |
 | 6 | Tool set | read, write, edit, bash, grep, glob, ls + skill + mcp_connect/mcp_call + task | PLAN's seven plus fixed infra tools that keep the tools array byte-stable for the whole session |
 | 7 | Edit engine | Exact string replace + 3-stage ladder (trailing whitespace, unicode punctuation, uniform indent shift), hard ambiguity rejection, fnv1a64 check-and-set | Indent shift is the dominant qwen edit failure; no similarity-score fuzzing ever (silent corruption is unrecoverable) |
 | 8 | Parallel tool semantics | Consecutive read-only calls run concurrently (cap 8); any mutating call is a sequential barrier; results appended in emission order | Fixes the winner's unguarded all-N-concurrent race (judge 2: disqualifying if unfixed) |
@@ -37,7 +37,7 @@ The base is the ruthless-minimalist proposal (ranked first by judges 1 and 2). T
 | 13 | MCP | Two fixed tools `mcp_connect`/`mcp_call`; stdio + Streamable HTTP through noob-provider's http/sse modules | Tools array never changes mid-session; lazy to the bone (Zap); egress invariant holds mechanically |
 | 14 | Plan mode | Structural removal of mutating schemas + injected user-role mode message; explicit `/go` approval | Absent schemas cannot tempt small models; one accepted cache bust on entry and exit |
 | 15 | Multi-agent | Self-spawn via `current_exe() child`; JSON task on stdin, one JSON result line on stdout, progress on stderr; caps 4 concurrent / 25 turns / 300 s / depth 2 | The process boundary is the context boundary; argv+pipes survive being wrapped by anything |
-| 16 | Docker | 2-stage alpine musl build; runtime = alpine + bash + git + ca-certificates; non-root compose user; `network_mode: host` | Non-root fixes root-owned bind-mount files (judge 2: real daily pain); host network reaches llama.cpp :8090 and MCP :8000 |
+| 16 | Docker | 3-stage alpine musl build (dev toolchain, static musl builder, alpine runtime); runtime = alpine + bash + git + ca-certificates; non-root compose user; `network_mode: host` | Non-root fixes root-owned bind-mount files (judge 2: real daily pain); host network reaches llama.cpp :8090 and MCP :8000 |
 | 17 | Headless surface | `noob exec -p ... [--json] [--session <id>]` JSONL event protocol; `noob debug prompt --json`; `noob doctor` | The concrete integration surface telegram-bot-skill needs (PLAN names it); budget tests measure the shipped artifact |
 | 18 | Onboarding | No wizard; localhost endpoint autodetect when unconfigured; committed commented `.env.example` | PLAN hard requirement: compose run lands in a working chat with no mandatory config step |
 
@@ -53,7 +53,7 @@ noob-cli/
 ├── config/
 │   └── contract.md          # committed .env.example (commented) and default compose mount target; never real secrets
 ├── docker/
-│   └── contract.md          # Dockerfile (2-stage musl) + compose.yml; the image contains zero state, config, or keys
+│   └── contract.md          # Dockerfile (3-stage musl); the compose.yml lives at the repo root; the image contains zero state, config, or keys
 ├── docs/
 │   └── contract.md          # RESEARCH.md, ARCHITECTURE.md; design record, not runtime input
 └── crates/
@@ -69,14 +69,15 @@ noob-cli/
     │   │   ├── task/        # contract.md: task tool, child stdin/stdout protocol, caps
     │   │   ├── config/      # contract.md: precedence, endpoint autodetect, mcp.json, hot-reload semantics
     │   │   ├── session/     # contract.md: append-only JSONL transcripts under /config/sessions/; resume
-    │   │   └── ui/          # contract.md: REPL input (cooked when piped, opt-in termios line editor at a tty), streaming stdout writer, ANSI, y/N prompts, JSONL event emitter
+    │   │   └── ui/          # contract.md: REPL input (cooked when piped, termios line editor at a tty by default), streaming stdout writer, ANSI, y/N prompts, JSONL event emitter
     │   └── tests/           # contract.md: e2e through the compiled binary vs noob-testkit; live smoke opt-in (NOOB_LIVE=1)
     ├── noob-provider/
     │   ├── contract.md      # transcript in, event stream out; both wire shapes; sole owner of ureq; .env parser; no fs/tool knowledge
-    │   └── src/             # types.rs http.rs sse.rs chat.rs responses.rs assemble.rs retry.rs envfile.rs
+    │   ├── src/             # types.rs http.rs sse.rs chat.rs responses.rs assemble.rs envfile.rs (retry/backoff lives in http.rs)
+    │   └── testdata/sse/    # SSE byte transcripts with %%CHUNK%% split sentinels (provenance in its contract.md)
     └── noob-testkit/
         ├── contract.md      # dev-only; hand-rolled mock OpenAI server (both shapes), scripted turns, request recorder, automatic assertions
-        └── testdata/sse/    # SSE byte transcripts with %%CHUNK%% split sentinels (provenance in its contract.md)
+        └── src/             # lib.rs (the mock server) + mcp.rs (a mock MCP server)
 ```
 
 ## Dependencies
@@ -99,13 +100,13 @@ Footprint budgets, enforced by `make size-check`: runtime crate graph <= 45, str
 
 The wire-protocol proposal's provider design, ported to blocking IO.
 
-### Trait and types
+### Streaming functions and types
+
+Streaming is two free functions, one per wire shape (no `Provider` trait): `chat::stream` and `responses::stream`, each with the same signature.
 
 ```rust
-pub trait Provider {
-    /// Blocking; invokes `on` for each stream event; returns the assembled assistant turn.
-    fn stream(&self, req: &TurnRequest, on: &mut dyn FnMut(Event)) -> Result<Turn, ProviderError>;
-}
+// Blocking; invokes `on` for each stream event; returns the assembled assistant turn.
+pub fn stream(client: &Client, ep: &Endpoint, req: &TurnRequest, on: &mut dyn FnMut(Event)) -> Result<Turn, ProviderError>;
 pub enum Event {
     Text(String), Reasoning(String),
     ToolCallStart { index: u32, id: String, name: String },
@@ -113,7 +114,7 @@ pub enum Event {
     Usage(Usage),                    // prompt, completion, cached_prompt
     Done(Finish),                    // Stop | ToolCalls | Length | ContentFilter | Error
 }
-pub struct Turn { pub text: String, pub reasoning: Option<Reasoning>, pub tool_calls: Vec<ToolCall>, pub usage: Option<Usage>, pub finish: Finish }
+pub struct Turn { pub text: String, pub reasoning: Option<String>, pub tool_calls: Vec<ToolCall>, pub usage: Option<Usage>, pub finish: Finish, pub raw_items: Vec<Value> }
 ```
 
 `ProviderError` is a hand-rolled enum (typed wire errors, never stringly). Adapters are pure functions of (transcript, SSE bytes): fixture-replayable with zero mocks. Each adapter has a `finish()` pass because several backends end streams without `[DONE]` or without closing tool-call state: every started call must have complete, parseable args; `ToolCallDone` is synthesized if the server never signaled it.
@@ -179,14 +180,14 @@ Lazy mechanics: the ~60-line parser in `noob-provider::envfile` opens and parses
 
 Precedence (highest wins): CLI flag (`--model`, `--base-url`) > process env var (non-secret settings only) > `/config/.env`. No project-local env overlay in v0.1.
 
-Endpoint autodetect (PLAN zero-friction requirement): when `NOOB_BASE_URL` is unset, probe localhost candidates in order with a 500 ms connect timeout and `GET /v1/models`: `:8090`, `:8080` (llama.cpp), `:11434/v1` (Ollama), `:1234/v1` (LM Studio), `:8000/v1` (vLLM). First responder wins; one line printed naming it. Loopback only, only when unconfigured; never a remote call.
+Endpoint autodetect (PLAN zero-friction requirement): when `NOOB_BASE_URL` is unset, probe localhost candidates in order with a 500 ms connect timeout and `GET /v1/models`: `:8090/v1`, `:8080/v1` (llama.cpp), `:11434/v1` (Ollama), `:1234/v1` (LM Studio), `:8000/v1` (vLLM). First responder wins; one line printed naming it. Loopback only, only when unconfigured; never a remote call.
 
 `noob doctor`: checks config dir presence and writability, `.env` parse, endpoint reachability (`GET {base}/models`, 2 s timeout), api_style sanity, `mcp.json` parse, `/work` writability; each failure prints one line stating the fix. Every error message in the binary states its remedy (PLAN requirement).
 
 ## System prompt (crates/noob/prompts + agent/prompt assembly)
 
 Assembled once per session in fixed order (order is a cache invariant):
-1. `prompts/base.md` via `include_str!`: identity ("noob, a coding agent running inside a sandbox container, cwd /work"), edit discipline (read before edit; make `old` unique with 3-8 lines of context; prefer edit over write), parallel-call encouragement (batch independent reads in one message), verification norm (run tests/build after changes). No word/sentence/length caps anywhere in the text; output is shaped by content instruction only. Budget <= 500 tokens.
+1. `prompts/base.md` via `include_str!`: identity ("noob, an agent working in your working directory ... whatever the task is"; deliberately general-purpose, not coding-specific), edit discipline (read before edit; copy `old` exactly with enough surrounding lines to make it unique; prefer edit over write), parallel-call encouragement (batch independent reads in one message), verification norm (run tests/build after changes). No word/sentence/length caps anywhere in the text; output is shaped by content instruction only. Budget <= 500 tokens.
 2. Environment block: cwd, platform, date, model, sandbox flag; computed once at session start. <= 60 tokens.
 3. AGENTS.md: `/config/AGENTS.md` (global) then `/work/AGENTS.md` (project), each hard-capped at 16 KiB with a truncation notice.
 4. Skills index: a `# Skills (resolver)` section opening with the dispatcher instruction ("Match the task against these skills. Load a matching skill with the skill tool and follow it before acting; if two match, load both."), then one `- name: description` line per discovered skill (description clipped at 200 chars); section capped at 1,000 tokens; overflow skills get name-only lines, then a count note. The index is the resolver (GBrain RESOLVER.md / thin-harness-fat-skills pattern): descriptions are the triggers, bodies cost zero tokens until loaded.
@@ -261,7 +262,9 @@ Discovery at session start, first hit per name wins: `/work/.noob/skills/`, `/wo
 
 Disclosure: L1 is the one-line-per-skill index in the prompt (capped, see System prompt). L2 is the `skill {name}` tool returning the SKILL.md body (frontmatter stripped) plus the skill's directory path as a tool result, capped at 24 KiB, with the standard's ~5k-token recommendation echoed as a warning on oversize bodies. L3 is ordinary `read` of bundled files. Skill bodies are untrusted input and never granted authority.
 
-Loaded-skill names are tracked and re-listed (names only) after compaction. The agent never authors skills in v0.1; as defense in depth, any write/edit whose real target resolves inside a `**/skills/**` directory requires confirmation in every mode including auto (agent-created skills are persistent injection vectors; in headless/child contexts where there is no TTY, and for any REPL not attached to a real terminal, this ask degrades to deny). This is a guardrail against the write/edit tools authoring skills, not a sandbox boundary: bash is unrestricted (the container is the wall). The gate has two halves so a symlink created earlier in the same tool batch cannot route a write past it: the loop asks at plan time and records the confirmed real target; write/edit re-resolve the real target at execution time and refuse it unless it was the confirmed one.
+Loaded-skill names are tracked and re-listed (names only) after compaction. The agent never authors skills in v0.1; as defense in depth, any write/edit whose real target resolves inside a `**/skills/**` directory requires confirmation in every mode including auto (agent-created skills are persistent injection vectors; in headless/child contexts where there is no TTY, and for any REPL not attached to a real terminal, this ask degrades to deny).
+
+On-the-fly install (user-driven, REPL only): `/skills add <path|git-url>` copies a validated skill into `/work/.noob/skills/`, `/skills remove <name>` deletes a workspace-installed one, and `/skills reload` re-runs discovery; each reconciles the live session. Because the prompt head (and its L1 index) is frozen at session start, the reconciliation is in-band: the live skill set and `ToolCtx.skills` are swapped, the `skill` tool is registered if it was absent (the zero-skills-to-some transition, one accepted cache break, like plan mode), and a user-role `[skills updated]` message names the now-available skills (with descriptions, the resolver triggers) and the removed ones, so the model's working set is corrected even though the head cannot change; a removed skill is also rejected structurally by the `skill` tool, and compaction pins the current set when it drifted so the correction survives summarization. Git URLs are fetched by the `git` binary, so the noob process opens no new sockets and the egress invariant holds. This is user-initiated (the trust signal); the agent-authoring gate above is unchanged. A local `.noob/skills/` install is not committed to the user's repo unless they choose to. This is a guardrail against the write/edit tools authoring skills, not a sandbox boundary: bash is unrestricted (the container is the wall). The gate has two halves so a symlink created earlier in the same tool batch cannot route a write past it: the loop asks at plan time and records the confirmed real target; write/edit re-resolve the real target at execution time and refuse it unless it was the confirmed one.
 
 ## MCP client (crates/noob/src/mcp)
 
@@ -288,13 +291,15 @@ The plan is plain assistant text; there is no plan tool and no end-of-turn heuri
 
 ## Multi-agent (crates/noob/src/task)
 
-The binary spawns itself: parent runs `current_exe() child` with env `NOOB_DEPTH=n+1`. The task payload goes to the child's stdin as one JSON object `{"prompt", "tools": "read-only"|"all", "max_turns"}`. The child builds a fresh context (base prompt + AGENTS.md, no parent history, no skills index unless it uses `skill` itself), runs its own loop, resolves `/config/.env` lazily itself (key rotation applies to running children), streams progress to stderr (parent relays as dim `[task] ...` lines under `--verbose`, otherwise discards), and writes exactly one JSON line to stdout: `{"status": "ok"|"error", "result": "...", "turns": N, "usage": {...}}`. The fd separation makes single-message result return a mechanical guarantee. Only `result` enters the parent transcript, as the `task` call's tool result.
+The binary spawns itself: parent runs `current_exe() child` with env `NOOB_DEPTH=n+1`. The task payload goes to the child's stdin as one JSON object `{"prompt", "tools": "read-only"|"all", "max_turns"}`. The child builds a fresh context (base prompt + AGENTS.md + the skills index, no parent history), runs its own loop, resolves `/config/.env` lazily itself (key rotation applies to running children), streams progress to stderr (parent relays as dim `[task] ...` lines under `--verbose`, otherwise discards), and writes exactly one JSON line to stdout: `{"status": "ok"|"error", "result": "...", "turns": N, "usage": {...}}`. The fd separation makes single-message result return a mechanical guarantee. Only `result` enters the parent transcript, as the `task` call's tool result.
 
 `task` defaults to `tools: "read-only"` (children are research agents unless the model explicitly asks for a mutating child). Caps, enforced by both parent and child: concurrency `NOOB_TASK_CONCURRENCY` (default 4; fan-out beyond it queues), per-child turn cap `NOOB_TASK_MAX_TURNS` (default 25; child exits with status error at the cap), per-child wall clock 300 s (parent kills the process group on expiry), recursion depth max 2 via `NOOB_DEPTH` (the child's `task` tool is simply not registered at max depth). Children have no TTY, so any ask-gated action (skills-dir writes) degrades to deny. Turn and wall-clock caps bound spend; they are loop budgets, never output-token caps, and no request ever carries a max_tokens-family field. No sockets, no shared memory, no scratch files: argv + stdin + stdout is the whole IPC surface, and tests spawn children exactly the way the parent does.
 
 ## UI and headless surface (crates/noob/src/ui)
 
-Interactive REPL: at a terminal `noob` runs an opt-in zero-dependency termios line editor (a boxed green prompt with real editing: insert, backspace across a multibyte char, word and line kills, cursor moves, bracketed paste), restored to cooked on every exit by three hooks (RAII guard, panic hook, and the SIGINT handler before `_exit(130)`, since release is `panic = abort`); piped or headless it falls back to cooked `read_line`, byte-identical. It streams model text raw to stdout as it arrives (no markdown rendering; small local models produce cleaner plain text when nothing reformats them), renders reasoning deltas dim, and renders tool activity as single dim ANSI lines: `* read src/main.rs (312 lines)`, `* bash cargo test (4.1s, exit 0)`. `IsTerminal` disables ANSI when piped. Slash commands, the complete v0.1 set: `/plan`, `/go`, `/status` (usage, cache-hit tokens, endpoint), `/compact`, `/quit`. Approval prompts are one-line y/N questions. The termios editor landed in v0.2.1 (a full-width top rule over the input line, collapsing to a `› message` record on submit); the REPL persists its session and `--session <id>` resumes a closed one, with a resume hint printed on exit. Arrow-key history follows in v0.2.2.
+Interactive REPL: at a terminal `noob` runs a zero-dependency termios line editor by default (`NOOB_RAW=0` opts out to the cooked reader): a green input frame with real editing (insert, backspace across a multibyte char, word and line kills, cursor moves, bracketed paste) that collapses to a `› message` record on submit, restored to cooked on every exit by three hooks (RAII guard, panic hook, and the SIGINT handler before `_exit(130)`, since release is `panic = abort`); piped or headless it falls back to cooked `read_line`, byte-identical. It streams model text raw to stdout as it arrives (no markdown rendering; small local models produce cleaner plain text when nothing reformats them), renders reasoning deltas dim, and renders tool activity as one line per call: `* read src/main.rs (312 lines)`, `* bash cargo test (4.1s, exit 0)`, per-tool-colored and column-aligned at an interactive color terminal, a single dim `* ...` line when piped or in exec/child. `IsTerminal` disables ANSI when piped. Slash commands: `/plan`, `/go`, `/status` (usage, cache-hit tokens, endpoint), `/compact`, `/skills` (list, or `add <path|git-url>` / `remove <name>` / `reload` to manage skills without a restart, see Skills), `/quit`. Approval prompts are one-line y/N questions. The REPL persists its session and `--session <id>` resumes a closed one, with a resume hint printed on exit. Arrow-key history is not yet bound (planned for v0.2.2). The interactive surface is under active theming (docs/UI_PLAN.md); its display details are display-only and never change request bytes.
+
+Persistent-input dock (opt-in, `NOOB_DOCK=1`; docs/UI_PLAN.md v0.3.x and fable.md): the two-writers-one-terminal mode. The input frame stays live while the model streams (output scrolls above it into native scrollback); typing during a turn edits a draft that never reaches the model until Enter, and Enter queues it to run as the next turn; a double-tap ESC or a single Ctrl-C cancels the running turn through the existing `INTERRUPTED` watchdog; an interrupt drains the queue back into the editor. It holds raw mode for the whole turn and runs the turn on a worker thread whose `Ui` renders byte-identically over an `mpsc` channel to a single-owner render loop, so the agent loop and the rendering are unchanged. When `NOOB_DOCK` is unset the REPL uses the per-prompt editor above; every non-interactive surface is byte-identical in either mode.
 
 Headless: `noob exec -p "<prompt>" [--json] [--session <id>]`. Default prints the final assistant text to stdout, progress to stderr, nonzero exit on failure. `--json` emits one JSONL event per loop step (`{"t":"text","d":...}`, `{"t":"tool","name":...,"args":...}`, `{"t":"result","id":...,"err":...}`, `{"t":"done","usage":...}`) so wrappers stream progress; `--session` persists and resumes a JSONL session under `/config/sessions/`. This is the telegram-bot-skill surface: streaming multi-turn chats with zero daemon.
 
@@ -302,9 +307,10 @@ Debug surface: `noob debug prompt --json` prints the exact assembled system prom
 
 ## Docker and sandbox (docker/)
 
-Dockerfile, two stages:
-1. `rust:alpine` + `musl-dev` (C compiler for ring), `cargo build --release --locked --target x86_64-unknown-linux-musl`, strip.
-2. `alpine:3.22` + `apk add --no-cache bash git ca-certificates` (the bash tool needs a real shell; git needs system roots for https clones; noob itself uses compiled-in webpki-roots), binary at `/usr/local/bin/noob`, `ENV NOOB_SANDBOX=container`, `WORKDIR /work`, `ENTRYPOINT ["noob"]`. No config, no state, no keys in the image, ever. Image lands around 40 MB.
+Dockerfile, three stages:
+1. `dev` (`rust:1.96-alpine` + `build-base` (the C toolchain ring needs), plus jq, bash, git): the toolchain used by `dev.sh` for build and test.
+2. `builder` (`FROM dev`): `cargo build --release --locked --target x86_64-unknown-linux-musl`, strip.
+3. `alpine:3.22` + `apk add --no-cache bash git ca-certificates` (the bash tool needs a real shell; git needs system roots for https clones; noob itself uses compiled-in webpki-roots), binary at `/usr/local/bin/noob`, `ENV NOOB_SANDBOX=container`, `WORKDIR /work`, `ENTRYPOINT ["noob"]`. No config, no state, no keys in the image, ever. Image lands around 40 MB.
 
 ```yaml
 services:

@@ -16,7 +16,7 @@ Distilled 2026-07-09 from a three-track investigation of the agentic CLI field (
 | Agent Zero | Python | ~18k stars | Docker-native runtime split, superior/subordinate agents with fresh contexts |
 | Zero (Gitlawb/zero) | Go | ~1k stars | Stream-JSON headless protocol, incremental write-root grants, bubblewrap+seccomp helper binary |
 
-Corrections to the initial list we started from: Pi moved from badlogic/pi-mono to earendil-works/pi. QQCode is Python (not Rust) and stale since 2026-01, dropped as a reference. Agent Zero is by Jan Tomasek, unrelated to the OpenCode team. OpenCode's canonical repo really is anomalyco/opencode (SST rebranded to Anomaly).
+Attribution notes: Pi's repo is earendil-works/pi. QQCode (Python, stale since 2026-01) is not a reference here. Agent Zero is by Jan Tomasek, unrelated to the OpenCode team. OpenCode's canonical repo is anomalyco/opencode (SST rebranded to Anomaly).
 
 ## What we take from each
 
@@ -36,7 +36,7 @@ Corrections to the initial list we started from: Pi moved from badlogic/pi-mono 
 
 **Zero (Gitlawb/zero)**: the ops surface. Added late to the survey (same org as OpenClaude, part of Gitlawb's agent stack; Go, created 2026-05, very active). A documented stream-JSON stdin/stdout protocol for headless runs (`zero exec --input-format stream-json --output-format stream-json`), which is exactly the integration surface a Telegram bridge or another agent needs. Incremental write-root grants (`--add-dir`) instead of whole-filesystem access. Instruction files capped at 8 KiB each / 32 KiB total, injected general-to-specific from git root down to cwd. A `doctor` command for setup/key/connectivity checks and provider autodetection for Ollama/LM Studio. The delegation section only enters the system prompt when subagents are actually configured. Notably it speaks the Responses API only against the ChatGPT codex backend, not generically, so full dual-API support stays a noob-cli differentiator.
 
-**Agent Zero**: Docker-native done right. Framework/execution runtime split so agent-installed packages cannot destabilize the harness. Volume-mount only user data, never application code. Prompts as user-editable markdown fragments assembled at runtime, per-tool prompt files included. `call_subordinate` spawns a child with a fresh context cloned from parent config plus a profile; only the child's return value reaches the parent. MCP client calls run in disposable workers with timeouts so a wedged server cannot block the loop; resource payloads capped. A skill-reattachment token budget re-injects loaded skills after compaction.
+**Agent Zero**: the framework/execution runtime split, so agent-installed packages cannot destabilize the harness. Volume-mount only user data, never application code. Prompts as user-editable markdown fragments assembled at runtime, per-tool prompt files included. `call_subordinate` spawns a child with a fresh context cloned from parent config plus a profile; only the child's return value reaches the parent. MCP client calls run in disposable workers with timeouts so a wedged server cannot block the loop; resource payloads capped. A skill-reattachment token budget re-injects loaded skills after compaction.
 
 ## Standards to target
 

@@ -18,6 +18,26 @@ services:
     working_dir: /work
     # Files written to /work must never be root-owned on the host.
     user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      # Defaults are baked in so a bare `./dev.sh` is plug-and-play: the dock and
+      # truecolor are on with no host setup and no manual env editing. Each var
+      # takes the host value if you export one, else the default here; the
+      # repo-root `.env` (auto-loaded by compose) is the place to change a
+      # default without touching this file. Escape hatches per run:
+      # `NOOB_DOCK=0 ./dev.sh` (classic per-prompt editor),
+      # `NOOB_RAW=0 ./dev.sh` (cooked reader).
+      #
+      # Persistent-input dock: live input while streaming, message queue,
+      # double-ESC cancel. On by default.
+      - NOOB_DOCK=${NOOB_DOCK:-1}
+      # Raw-mode line editor (0 => plain cooked read_line). On by default.
+      - NOOB_RAW=${NOOB_RAW:-1}
+      # Docker gives the container TERM=xterm and no COLORTERM, so noob's color
+      # detection would fall back to 16 colors (the prompt marker reads white and
+      # the scanner comet collapses to white-and-green). Declaring truecolor makes
+      # the themed greens render as designed; a modern terminal is truecolor and a
+      # rare non-truecolor host degrades gracefully terminal-side.
+      - COLORTERM=${COLORTERM:-truecolor}
     volumes:
       - ${WORKSPACE:-.}:/work
       - ${NOOB_CONFIG:-./config}:/config

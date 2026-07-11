@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/tests-372%20offline%20%2B%208%20live-brightgreen" alt="Tests" />
+  <img src="https://img.shields.io/badge/tests-427%20offline%20%2B%208%20live-brightgreen" alt="Tests" />
   <img src="https://img.shields.io/badge/async%20runtime-none-success" alt="No async runtime" />
   <img src="https://img.shields.io/badge/runtime%20crates-40%20of%2045%20budget-blueviolet" alt="Crate count" />
   <img src="https://img.shields.io/badge/APIs-Chat%20Completions%20%2B%20Responses-7B3FA0" alt="Both OpenAI wire shapes" />
@@ -45,7 +45,7 @@ P0 through P6 are done plus most of P7's hardening: noob is a working agent with
 - Endpoint autodetect: with an empty config, noob probes llama.cpp/Ollama/LM Studio/vLLM on localhost and uses the first that answers.
 - The system prompt plus all tool schemas fit in 1,500 tokens, enforced by tests against both tiktoken and the live qwen tokenizer.
 - Both OpenAI wire shapes (Chat Completions + Responses) against any base URL; SSE parsing that survives every TCP split; retries with backoff; hot `.env` reload on every request; Ctrl-C responsive within a second at every point, including mid-tool-batch and mid-fan-out (pending calls are canceled, children are killed, the session stays valid).
-- 372 offline tests via `./dev.sh test`, 8 live smokes via `./dev.sh smoke` (serialized: parallel live tests would evict each other's llama.cpp cache slots).
+- 427 offline tests via `./dev.sh test`, 8 live smokes via `./dev.sh smoke` (serialized: parallel live tests would evict each other's llama.cpp cache slots).
 
 What remains before v0.1 is the live all-terrain gauntlet (PLAN.md, Testing) and release packaging; the roadmap below marks exactly what exists.
 
@@ -109,7 +109,7 @@ The opinionated bits. Where a rule says "test-enforced" that is literal: the moc
 | The container is the sandbox | No permission-rule DSL: isolation comes from Docker; outside a container the binary falls back to a restricted workspace mode |
 | No telemetry: the binary talks only to the configured endpoints | No update checks, no phoning home; only `noob-provider` may touch the network stack, checked against the crate graph |
 | State lives in the mounts, never in the image | The image contains zero config, keys, or sessions; `docker rmi` loses nothing of yours |
-| No async runtime, no tokio, no clap, no serde derive; ureq pinned at 3.3.0 | 28 runtime crates against a hard budget of 45; one inference at a time needs threads, not a reactor |
+| No async runtime, no tokio, no clap, no serde derive; ureq pinned at 3.3.0 | 40 runtime crates against a hard budget of 45; one inference at a time needs threads, not a reactor |
 
 ## Roadmap
 
@@ -153,7 +153,7 @@ Everything runs inside Docker; nothing is installed on the host. `./dev.sh` is t
 
 | Target | What it does |
 |---|---|
-| `./dev.sh test` | The offline suite: 372 unit + e2e tests against the in-process mock servers, run in a dev container |
+| `./dev.sh test` | The offline suite: 427 unit + e2e tests against the in-process mock servers, run in a dev container |
 | `./dev.sh build` | The static musl release binary |
 | `./dev.sh docker` | The runtime image |
 | `./dev.sh` / `./dev.sh --session <id>` / `./dev.sh exec "..."` | Open the agent, resume a saved session, or run one-shot; Compose passes your uid:gid explicitly so files under `/work` keep your ownership |

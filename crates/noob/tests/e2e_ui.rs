@@ -76,6 +76,12 @@ fn last_user(req: &Value) -> String {
 /// flag + watchdog handle). The child's stdin/stdout/stderr are the slave, so
 /// `is_terminal()` is true and the raw editor engages.
 fn spawn_pty(rig: &Rig) -> Pty {
+    spawn_pty_with(rig, &[])
+}
+
+/// Like `spawn_pty`, with extra environment variables (the dock tests opt
+/// into the driver with `NOOB_DOCK=1`).
+fn spawn_pty_with(rig: &Rig, envs: &[(&str, &str)]) -> Pty {
     let (master, slave) = unsafe {
         let mut m: libc::c_int = 0;
         let mut s: libc::c_int = 0;
@@ -90,9 +96,12 @@ fn spawn_pty(rig: &Rig) -> Pty {
     // Force the themed color surface on regardless of the host's TERM, so the
     // pty tests exercise the real interactive path (a color terminal) and the
     // thinking scanner engages deterministically.
-    let child = noob(rig.config.path(), rig.work.path())
-        .env("COLORTERM", "truecolor")
-        .env_remove("NO_COLOR")
+    let mut cmd = noob(rig.config.path(), rig.work.path());
+    cmd.env("COLORTERM", "truecolor").env_remove("NO_COLOR");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let child = cmd
         .stdin(stdio(slave))
         .stdout(stdio(slave))
         .stderr(stdio(slave))
@@ -190,6 +199,45 @@ fn raw_editor_edits_then_submits_the_clean_line() {
     let reqs = rig.api_requests();
     assert_eq!(reqs.len(), 1, "only the edited line should have run");
     assert_eq!(last_user(&reqs[0]), "say hi", "the killed draft leaked into the message");
+    rig.server.assert_clean();
+}
+
+/// The idle prompt is a bare marker; the first keystroke expands it into a
+/// framed box, so a horizontal rule (the frame's top/bottom line) only appears
+/// once the human starts typing. The assertion is behavioral, not cosmetic: the
+/// rule glyph is present after typing (the frame drew) and the edited line still
+/// reaches the agent. Colors are never asserted.
+#[test]
+fn raw_editor_expands_a_framed_box_when_typing_starts() {
+    let rig = rig();
+    rig.server.enqueue_stream_completion("framed reply");
+
+    let mut pty = spawn_pty(&rig);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY); // raw mode: the bare marker is drawn, no frame yet
+    let before_typing = pty.seen.len();
+    pty.send(b"hello frame");
+    // Typing expands the box, so the frame's rule (a run of the horizontal line
+    // glyph) is emitted; the banner's own rule is already behind the cursor.
+    pty.wait_for("──");
+    // The rule must appear after the point where typing began (the banner's own
+    // rule is earlier, already behind the cursor when raw mode started).
+    assert!(
+        pty.seen[before_typing..].contains("──"),
+        "the frame rule must be drawn only after typing:\n{}",
+        pty.seen
+    );
+    pty.send(b"\r"); // submit
+    pty.wait_for("framed reply");
+    pty.wait_for(RAW_READY);
+    pty.send(&[0x04]); // Ctrl-D exits
+    pty.wait_for("resume with --session");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    let reqs = rig.api_requests();
+    assert_eq!(reqs.len(), 1, "only the submitted line should have run");
+    assert_eq!(last_user(&reqs[0]), "hello frame", "the framed line must reach the agent intact");
     rig.server.assert_clean();
 }
 
@@ -352,11 +400,505 @@ fn piped_repl_uses_cooked_reader_with_no_box() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("piped answer"), "turn did not run: {stdout}");
     assert!(stdout.contains("> "), "cooked prompt marker missing: {stdout}");
-    assert!(!stdout.contains('╭'), "the box frame leaked into a piped repl: {stdout}");
+    assert!(!stdout.contains('›'), "the box marker leaked into a piped repl: {stdout}");
     assert!(
         !stdout.contains("\x1b[?2004h") && !stdout.contains("\x1b[?2004l"),
         "bracketed paste toggled on a piped repl: {stdout}"
     );
     assert!(!stdout.contains('▪'), "the thinking scanner leaked into a piped repl: {stdout}");
+    rig.server.assert_clean();
+}
+
+// ---------------------------------------------------------------------------
+// The dock driver (opt-in NOOB_DOCK=1): the persistent-input REPL where the
+// input frame stays live during a turn (fable.md v0.3.0). These prove the
+// driver against the same bar as the classic editor: what reaches the agent,
+// never how it looks.
+// ---------------------------------------------------------------------------
+
+const DOCK: &[(&str, &str)] = &[("NOOB_DOCK", "1")];
+
+/// Cross a boundary that has no byte marker (turn teardown to the next
+/// prompt's reader). Generous next to the epilogue's sub-millisecond cost.
+fn settle() {
+    std::thread::sleep(std::time::Duration::from_millis(400));
+}
+
+/// Chunked-transfer frames for a run of SSE `data:` payloads (one frame per
+/// event, no terminator), for scripting a stream that stalls mid-reply.
+fn sse_frames(datas: &[String]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for d in datas {
+        let event = format!("data: {d}\n\n");
+        out.extend_from_slice(format!("{:x}\r\n", event.len()).as_bytes());
+        out.extend_from_slice(event.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out
+}
+
+/// Dock parity with the classic editor: editing keys shape the line, only
+/// the edited line reaches the agent, Ctrl-D exits with the session hint.
+#[test]
+fn dock_edits_and_submits_like_the_classic_editor() {
+    let rig = rig();
+    rig.server.enqueue_stream_completion("docked reply");
+
+    let mut pty = spawn_pty_with(&rig, DOCK);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY); // the session guard went raw (once per session)
+    pty.send(b"garbage draft");
+    pty.send(&[0x15]); // Ctrl-U kills the line
+    pty.send(b"say hi\r");
+    // Streamed words arrive as separate deltas with dock repaints between
+    // them, so multi-word markers would never match contiguously.
+    pty.wait_for("docked");
+    pty.wait_for("reply");
+    settle(); // the next prompt has no raw-toggle marker: raw spans the session
+    pty.send(&[0x04]); // Ctrl-D at the empty prompt exits
+    pty.wait_for("resume with --session");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    let reqs = rig.api_requests();
+    assert_eq!(reqs.len(), 1, "only the edited line should have run");
+    assert_eq!(last_user(&reqs[0]), "say hi", "the killed draft leaked into the message");
+    rig.server.assert_clean();
+}
+
+/// The root corruption the dock exists to fix: keystrokes during a streaming
+/// turn are captured into the live draft (nothing echoes into the model's
+/// output), survive the turn, and submit as the NEXT message. The reply text
+/// itself arrives intact around the stall.
+#[test]
+fn dock_captures_typing_during_a_slow_stream() {
+    let rig = rig();
+    let datas = noob_testkit::chat_stream_datas("Alpha waits then finishes cleanly.");
+    // Stall the stream after the first content word, long enough to type.
+    let mut steps = vec![noob_testkit::RawStep::Bytes({
+        let mut b = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n".to_vec();
+        b.extend_from_slice(&sse_frames(&datas[..2])); // role delta + "Alpha "
+        b
+    })];
+    steps.push(noob_testkit::RawStep::SleepMs(900));
+    steps.push(noob_testkit::RawStep::Bytes({
+        let mut b = sse_frames(&datas[2..]);
+        b.extend_from_slice(b"0\r\n\r\n");
+        b
+    }));
+    rig.server.enqueue_raw(steps);
+    rig.server.enqueue_stream_completion("second turn ran");
+
+    let mut pty = spawn_pty_with(&rig, DOCK);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"start\r");
+    pty.wait_for("Alpha"); // the stream is up, now inside the 900 ms stall
+    pty.send(b"queued while busy"); // typed mid-turn: must land in the draft
+    pty.wait_for("finishes");
+    pty.wait_for("cleanly.");
+    settle(); // back at the prompt, the draft already in the input row
+    pty.send(b"\r"); // submit the captured draft as the next message
+    pty.wait_for("second");
+    pty.wait_for("ran");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with --session");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    let reqs = rig.api_requests();
+    assert_eq!(reqs.len(), 2, "the mid-turn typing must not fire its own request");
+    assert_eq!(last_user(&reqs[0]), "start");
+    assert_eq!(
+        last_user(&reqs[1]),
+        "queued while busy",
+        "the mid-turn draft must submit whole as the next message"
+    );
+    rig.server.assert_clean();
+}
+
+/// A confirmation raised by agent code mid-turn (the skills-dir write gate)
+/// is answered from the keyboard through the dock's modal: the reader thread
+/// owns stdin, so the ask must travel the event channel and back.
+#[test]
+fn dock_answers_a_mid_turn_confirmation() {
+    let rig = rig();
+    rig.server.enqueue_stream_toolcalls(
+        &[(
+            "call_1",
+            "write",
+            r#"{"path": ".claude/skills/made/SKILL.md", "content": "---\nname: made\ndescription: test\n---\nbody\n"}"#,
+        )],
+        None,
+    );
+    rig.server.enqueue_stream_completion("skill written");
+
+    let mut pty = spawn_pty_with(&rig, DOCK);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"make a skill\r");
+    pty.wait_for("[y/N]"); // the gate's question, rendered by the dock modal
+    pty.send(b"y\r");
+    pty.wait_for("skill");
+    pty.wait_for("written");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with --session");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    let written = rig.work.path().join(".claude/skills/made/SKILL.md");
+    assert!(written.is_file(), "the granted write must have executed");
+    let reqs = rig.api_requests();
+    assert_eq!(reqs.len(), 2, "toolcall turn + result turn");
+    rig.server.assert_clean();
+}
+
+/// Review fix (high): in dock mode /compact runs its summarizer request
+/// through the render loop, so a keyboard Ctrl-C (a raw byte, not SIGINT)
+/// still cancels it. Without the fix the byte is captured by the reader and
+/// never sets INTERRUPTED, so the request is uninterruptible for up to 300s.
+/// Here the summarizer stalls; Ctrl-C must cancel within ~1 watchdog tick.
+#[test]
+fn dock_compact_is_cancelable_with_ctrl_c() {
+    let rig = rig();
+    // One bulky text reply (no tool result, so pruning saves nothing) gives
+    // compaction a middle and forces the summarizer LLM call. The END marker
+    // lets the test wait for the whole reply to stream so it is back at an idle
+    // prompt before /compact; the mock reports tiny usage, so auto-compaction
+    // never fires on its own.
+    // The reply must exceed the tail budget (NOOB_CTX/4 = 1024 tokens ≈ 4 KiB)
+    // on its own so it does not all fit in the retained tail, leaving a middle
+    // of >= 2 items for the summarizer.
+    rig.server.enqueue_stream_completion(&format!("reply {} END-ONE", "x".repeat(6000)));
+    // The summarizer request: 200 headers, then a long silence. The watchdog
+    // first-byte budget is 300s, so only INTERRUPTED can end this early.
+    rig.server.enqueue_raw(vec![
+        noob_testkit::RawStep::Bytes(noob_testkit::sse_headers()),
+        noob_testkit::RawStep::SleepMs(8000),
+    ]);
+    // The summarizer request is the sanctioned compaction prefix break.
+    rig.server.expect_prefix_break();
+
+    // NOOB_CTX floors at 4096; a smaller value silently reverts to the default.
+    let mut pty = spawn_pty_with(&rig, &[("NOOB_DOCK", "1"), ("NOOB_CTX", "4096")]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"start\r");
+    pty.wait_for("END-ONE"); // the whole reply has streamed; the turn is ending
+    settle(); // back at the idle prompt (a mid-turn Enter is inert pre-queue)
+    pty.send(b"/compact\r");
+    pty.wait_for("compacting"); // the summarizer request is now in flight, stalled
+    pty.send(&[0x03]); // Ctrl-C: a raw byte in dock mode, must still cancel
+    pty.wait_for("compaction canceled"); // the watchdog tripped via INTERRUPTED
+    pty.send(&[0x04]); // Ctrl-D exits
+    pty.wait_for("resume with --session");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    let reqs = rig.api_requests();
+    assert_eq!(reqs.len(), 2, "the driving turn + the canceled summarizer");
+    // The 2nd request is the summarizer (compact.md system prompt), proving
+    // the cancel hit the compaction request, not a normal turn.
+    let sys = reqs[1]["messages"][0]["content"].as_str().unwrap_or("");
+    assert!(sys.contains("summarize an agent session"), "2nd req not the summarizer: {sys}");
+    rig.server.assert_clean();
+}
+
+/// Review fix (medium): Ctrl-D at a mid-turn y/N confirmation denies (the
+/// contract: anything but an explicit yes is No) instead of being swallowed.
+/// The same Key::Eof path also unblocks the worker if the reader dies while a
+/// modal is open, which would otherwise hang the render loop forever.
+#[test]
+fn dock_ctrl_d_at_a_confirmation_denies_and_continues() {
+    let rig = rig();
+    rig.server.enqueue_stream_toolcalls(
+        &[(
+            "call_1",
+            "write",
+            r#"{"path": ".claude/skills/nope/SKILL.md", "content": "---\nname: nope\ndescription: t\n---\nb\n"}"#,
+        )],
+        None,
+    );
+    // After the denial the tool result is a refusal; the agent continues and
+    // the mock answers the follow-up turn.
+    rig.server.enqueue_stream_completion("left it alone");
+
+    let mut pty = spawn_pty_with(&rig, DOCK);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"make a skill\r");
+    pty.wait_for("[y/N]");
+    pty.send(&[0x04]); // Ctrl-D at the confirmation: deny
+    pty.wait_for("left");
+    pty.wait_for("alone");
+    settle();
+    pty.send(&[0x04]); // Ctrl-D at the empty prompt: exit
+    pty.wait_for("resume with --session");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    let denied = rig.work.path().join(".claude/skills/nope/SKILL.md");
+    assert!(!denied.is_file(), "the write must have been denied, not executed");
+    rig.server.assert_clean();
+}
+
+/// A run whose stream sends `head_words` deltas, then holds `stall_ms`, then
+/// (optionally) sends the rest and closes. `chat_stream_datas` splits on
+/// whitespace, so head_words counts role delta + that many words.
+fn stalled_stream(text: &str, head_deltas: usize, stall_ms: u64, resume: bool) -> Vec<noob_testkit::RawStep> {
+    let datas = noob_testkit::chat_stream_datas(text);
+    let mut head = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n".to_vec();
+    head.extend_from_slice(&sse_frames(&datas[..head_deltas]));
+    let mut steps = vec![
+        noob_testkit::RawStep::Bytes(head),
+        noob_testkit::RawStep::SleepMs(stall_ms),
+    ];
+    if resume {
+        let mut tail = sse_frames(&datas[head_deltas..]);
+        tail.extend_from_slice(b"0\r\n\r\n");
+        steps.push(noob_testkit::RawStep::Bytes(tail));
+    }
+    steps
+}
+
+/// M5 (double-ESC cancel): a first ESC during a turn arms a red hint; a second
+/// ESC inside the window commits, setting INTERRUPTED so the watchdog trips the
+/// in-flight read and the agent finalizes the turn with `[interrupted]`.
+#[test]
+fn dock_double_esc_cancels_a_running_turn() {
+    let rig = rig();
+    // Stream one word then stall indefinitely; only a cancel ends it.
+    rig.server.enqueue_raw(stalled_stream("Working END-NEVER", 2, 8000, false));
+
+    let mut pty = spawn_pty_with(&rig, DOCK);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"go\r");
+    pty.wait_for("Working"); // the turn is streaming, now stalled
+    pty.send(&[0x1b]); // first ESC: arm
+    pty.wait_for("press ESC again to cancel"); // the red hint appears
+    pty.send(&[0x1b]); // second ESC: commit the cancel
+    pty.wait_for("[interrupted]"); // the agent finalized the canceled turn
+    settle();
+    pty.send(&[0x04]); // Ctrl-D exits
+    pty.wait_for("resume with --session");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    assert!(!pty.seen.contains("END-NEVER"), "the stalled tail must never have streamed");
+    rig.server.assert_clean();
+}
+
+/// M5: a single ESC only arms; if no second ESC lands the turn runs to
+/// completion. Here the stream resumes after the arm and the reply finishes
+/// normally, with no interrupt.
+#[test]
+fn dock_single_esc_does_not_cancel() {
+    let rig = rig();
+    // One word, a short stall, then the rest of the reply and a clean close.
+    rig.server.enqueue_raw(stalled_stream("Working through it END-OK", 2, 1500, true));
+
+    let mut pty = spawn_pty_with(&rig, DOCK);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"go\r");
+    pty.wait_for("Working");
+    pty.send(&[0x1b]); // a lone ESC: arms only
+    pty.wait_for("press ESC again to cancel");
+    // No second ESC. The stall lapses, the rest streams, the turn completes.
+    pty.wait_for("END-OK");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with --session");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    assert!(!pty.seen.contains("[interrupted]"), "one ESC must not cancel the turn");
+    let reqs = rig.api_requests();
+    assert_eq!(reqs.len(), 1, "exactly the one turn ran to completion");
+    rig.server.assert_clean();
+}
+
+/// M6 (queue): typing a message and pressing Enter WHILE a turn runs queues it
+/// (the "N queued" indicator shows) instead of firing it; when the turn ends it
+/// dispatches as the next turn, in order.
+#[test]
+fn dock_queues_a_message_and_dispatches_after_the_turn() {
+    let rig = rig();
+    // Turn 1 streams a word, holds long enough to type ahead, then finishes.
+    rig.server.enqueue_raw(stalled_stream("Working END-ONE", 2, 3000, true));
+    // Turn 2 is the dispatched queued message.
+    rig.server.enqueue_stream_completion("second done");
+
+    let mut pty = spawn_pty_with(&rig, DOCK);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"go\r");
+    pty.wait_for("Working"); // turn 1 is streaming, now stalled
+    pty.send(b"queued msg\r"); // typed + Enter mid-turn: queues, does not fire
+    pty.wait_for("1 queued"); // the queue indicator confirms it landed
+    pty.wait_for("END-ONE"); // turn 1 finishes
+    pty.wait_for("second"); // turn 2 = the dispatched queued message's reply
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with --session");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    let reqs = rig.api_requests();
+    assert_eq!(reqs.len(), 2, "the driving turn + the dispatched queued message");
+    assert_eq!(last_user(&reqs[0]), "go");
+    assert_eq!(last_user(&reqs[1]), "queued msg", "the queued message must run as the next turn");
+    rig.server.assert_clean();
+}
+
+/// M6: interrupting a turn with a queued message drains it back into the editor
+/// (an interrupt means "stop, I will steer") rather than firing it. The message
+/// reappears at the prompt as an editable draft and no second request is made.
+#[test]
+fn dock_interrupt_drains_the_queue_to_the_draft() {
+    let rig = rig();
+    rig.server.enqueue_raw(stalled_stream("Working END-NEVER", 2, 8000, false));
+
+    let mut pty = spawn_pty_with(&rig, DOCK);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"go\r");
+    pty.wait_for("Working");
+    pty.send(b"hold me\r"); // queue a message mid-turn
+    pty.wait_for("1 queued");
+    pty.send(&[0x1b]); // ESC ESC cancels the turn
+    pty.wait_for("press ESC again to cancel");
+    pty.send(&[0x1b]);
+    pty.wait_for("[interrupted]");
+    // The queued message is restored to the editor, not dispatched.
+    pty.wait_for("hold me");
+    pty.send(&[0x15]); // Ctrl-U clears the restored draft
+    pty.send(&[0x04]); // Ctrl-D on the now-empty line exits
+    pty.wait_for("resume with --session");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    let reqs = rig.api_requests();
+    assert_eq!(reqs.len(), 1, "the queued message must NOT have been dispatched after the cancel");
+    rig.server.assert_clean();
+}
+
+/// Write a SKILL.md (name + description + body) at `dir`.
+fn write_skill_md(dir: &std::path::Path, name: &str, desc: &str, body: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {desc}\n---\n{body}\n"),
+    )
+    .unwrap();
+}
+
+/// Every message's content across a recorded request, joined, for substring
+/// assertions on what the model was actually sent.
+fn all_content(req: &Value) -> String {
+    req["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["content"].as_str().unwrap_or("").to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// M8 (skills on the fly): a session that started with NO skills installs one
+/// with `/skills add` and immediately uses it. The `skill` tool must be
+/// registered mid-session (absent at bootstrap), and the skill body must load.
+#[test]
+fn skills_add_registers_the_tool_and_the_skill_loads() {
+    let rig = rig();
+    // A source skill outside every discovery path, so it is not present until
+    // it is installed.
+    write_skill_md(
+        &rig.work.path().join("src-demo"),
+        "demo",
+        "demo skill for the test",
+        "STEP-ONE: do the demo thing.",
+    );
+    // The "use demo" turn: the model loads the skill, then answers.
+    rig.server.enqueue_stream_toolcalls(&[("c1", "skill", r#"{"name":"demo"}"#)], None);
+    rig.server.enqueue_stream_completion("used the demo skill");
+
+    let mut pty = spawn_pty(&rig); // classic REPL: per-prompt RAW_READY sync
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"/skills add src-demo\r");
+    pty.wait_for("installed skill demo");
+    pty.wait_for(RAW_READY); // back at the prompt, skill now registered
+    pty.send(b"use demo\r");
+    pty.wait_for("used the demo skill");
+    pty.wait_for(RAW_READY);
+    pty.send(&[0x04]);
+    pty.wait_for("resume with --session");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    let reqs = rig.api_requests();
+    assert_eq!(reqs.len(), 2, "the tool-call round and the completion round");
+    // The skill tool was registered mid-session: the first request already
+    // carries it, though the session booted with no skills.
+    let tools = reqs[0]["tools"].as_array().expect("tools array");
+    assert!(
+        tools.iter().any(|t| t["function"]["name"] == "skill"),
+        "the skill tool must be registered after /skills add"
+    );
+    // The in-band announcement reached the model, and the skill body loaded.
+    assert!(all_content(&reqs[0]).contains("[skills updated]"), "missing the in-band note");
+    assert!(all_content(&reqs[1]).contains("STEP-ONE"), "the skill body did not load");
+    rig.server.assert_clean();
+}
+
+/// M8: removing a skill mid-session announces it and the `skill` tool then
+/// rejects loading it (the staleness backstop: the frozen prompt-head index
+/// still lists it, but the in-band note and the tool's own check correct that).
+#[test]
+fn skills_remove_announces_and_the_tool_rejects_the_gone_skill() {
+    let rig = rig();
+    // Boot WITH the skill installed (a discovery path), so the tool exists.
+    write_skill_md(
+        &rig.work.path().join(".noob/skills/demo"),
+        "demo",
+        "demo skill for the test",
+        "STEP-ONE: do the demo thing.",
+    );
+    // After removal the model still tries to load it (the head is stale); the
+    // tool must reject, and the model then answers.
+    rig.server.enqueue_stream_toolcalls(&[("c1", "skill", r#"{"name":"demo"}"#)], None);
+    rig.server.enqueue_stream_completion("the skill is gone");
+
+    let mut pty = spawn_pty(&rig);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"/skills remove demo\r");
+    pty.wait_for("removed demo");
+    pty.wait_for(RAW_READY);
+    pty.send(b"use demo\r");
+    pty.wait_for("the skill is gone");
+    pty.wait_for(RAW_READY);
+    pty.send(&[0x04]);
+    pty.wait_for("resume with --session");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    let reqs = rig.api_requests();
+    assert_eq!(reqs.len(), 2);
+    // The removal was announced in-band so the model's working set is corrected.
+    assert!(
+        all_content(&reqs[0]).contains("no longer available"),
+        "the removal must be announced to the model"
+    );
+    // The tool structurally rejected the gone skill (the hard backstop).
+    assert!(
+        all_content(&reqs[1]).contains("unknown skill"),
+        "the skill tool must reject a removed skill"
+    );
+    assert!(!rig.work.path().join(".noob/skills/demo").exists(), "the skill dir must be gone");
     rig.server.assert_clean();
 }

@@ -1,8 +1,10 @@
 //! The REPL line reader. At an interactive terminal it runs a small termios
-//! line editor that draws a two-line green input box and offers real editing
-//! (insert, backspace across a multibyte char, word/line kills, cursor moves,
-//! bracketed paste). Piped or headless, it falls back to the exact cooked
-//! `read_line` so those surfaces stay byte-for-byte what they were.
+//! line editor: an idle prompt is a bare green marker, and the first keystroke
+//! expands it into a green input line framed by a top and a bottom rule (no
+//! corners, no side borders), with real editing (insert, backspace across a
+//! multibyte char, word/line kills, cursor moves, bracketed paste). Piped or
+//! headless, it falls back to the exact cooked `read_line` so those surfaces
+//! stay byte-for-byte what they were.
 //!
 //! The editor is off the inference path: raw mode is entered only while the
 //! human is typing and restored to cooked before the agent runs, so keystrokes
@@ -57,7 +59,7 @@ impl Ui {
     /// The raw editor is for an interactive REPL only: both ends must be a
     /// terminal (you cannot line-edit a pipe), and `NOOB_RAW=0` forces the
     /// cooked reader as an escape hatch if a terminal misbehaves.
-    fn use_raw_editor(&self) -> bool {
+    pub(super) fn use_raw_editor(&self) -> bool {
         self.mode == Mode::Repl
             && std::io::stdin().is_terminal()
             && std::io::stdout().is_terminal()
@@ -91,10 +93,13 @@ impl Ui {
         };
         let mut ed = Editor::default();
         let mut dec = Decoder::default();
-        // Seed `width` from the exact value the rule was drawn at (not a second
-        // ioctl), so a size that lands between the two reads cannot leave refit
-        // comparing against a width the rule was never drawn at.
-        let mut width = self.draw_box_top(plan);
+        let mut width = term_width();
+        // The frame (a top and a bottom green line, no corners and no side
+        // borders) is not drawn until the first keystroke: an idle prompt is just
+        // the bare marker, and typing expands it. So the box appears only once the
+        // human is actually entering a line, and it is first drawn when the pty
+        // has reported its real width, so there is no narrow first box to snap.
+        let mut expanded = false;
 
         // Replay any keys carried over from a previous multi-line submit before
         // reading new input, so a pasted script runs one line per turn.
@@ -102,28 +107,34 @@ impl Ui {
 
         let mut buf = [0u8; 1024];
         loop {
+            let mut acted = false;
             while let Some(key) = queue.pop_front() {
+                acted = true;
                 match ed.apply(key) {
                     Step::Continue => {}
-                    Step::Submit => return self.submit(&ed, queue),
+                    Step::Submit => return self.submit(&ed, queue, expanded),
                     Step::Interrupt => {
-                        self.erase_box();
+                        self.erase(expanded);
                         return self.interrupted();
                     }
                     Step::Eof => {
-                        self.erase_box();
+                        self.erase(expanded);
                         return Input::Eof;
                     }
                 }
             }
-            // Snap the top rule to the current terminal width, then paint the
-            // input line. A freshly spawned pty reports width 0 for the first
-            // draw and its real size lands a moment later; re-fitting here means
-            // the box reaches full width on the first keystroke. Just a cheap
-            // ioctl per key on the read path already taken: no idle loop, no
-            // extra signal, nothing listening.
-            self.refit(plan, &mut width);
-            self.redraw_line(&ed, width);
+            // Grow the bare marker into the framed box on the first keystroke, at
+            // the width the pty now reports; afterwards snap the frame to the
+            // terminal width if it changed. A cheap ioctl on the read path already
+            // taken: no idle loop, no extra signal, nothing listening.
+            if acted && !expanded {
+                expanded = true;
+                width = term_width();
+                self.expand(plan, width);
+            } else if expanded {
+                self.refit(plan, &mut width);
+            }
+            self.redraw_input_row(&ed, width);
             let n = unsafe {
                 libc::read(libc::STDIN_FILENO, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
             };
@@ -133,16 +144,16 @@ impl Ui {
                 // Ctrl-C already exited via the handler.
                 if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
                     if INTERRUPTED.swap(false, Ordering::SeqCst) {
-                        self.erase_box();
+                        self.erase(expanded);
                         return Input::Interrupted;
                     }
                     continue;
                 }
-                self.erase_box();
+                self.erase(expanded);
                 return Input::Eof;
             }
             if n == 0 {
-                self.erase_box();
+                self.erase(expanded);
                 return Input::Eof;
             }
             for key in dec.feed(&buf[..n as usize]) {
@@ -156,12 +167,12 @@ impl Ui {
     /// INTERRUPTED without exiting, and would otherwise phantom-cancel the
     /// fresh turn, so consume it and reprompt instead. Otherwise show the final
     /// line and carry any keys decoded past the Enter to the next prompt.
-    fn submit(&mut self, ed: &Editor, rest: VecDeque<Key>) -> Input {
+    fn submit(&mut self, ed: &Editor, rest: VecDeque<Key>, expanded: bool) -> Input {
         if INTERRUPTED.swap(false, Ordering::SeqCst) {
-            self.erase_box();
+            self.erase(expanded);
             return Input::Interrupted;
         }
-        self.collapse_to_message(ed);
+        self.collapse_to_message(ed, expanded);
         if !rest.is_empty() {
             CARRYOVER.with(|c| *c.borrow_mut() = rest);
         }
@@ -177,7 +188,7 @@ impl Ui {
 
     /// The border/prompt SGR, empty when color is off (a raw editor still runs
     /// at a `NO_COLOR` or depthless terminal, just without the green).
-    fn box_color(&self) -> String {
+    pub(super) fn box_color(&self) -> String {
         if self.color {
             self.theme.prompt.sgr(self.depth)
         } else {
@@ -185,57 +196,48 @@ impl Ui {
         }
     }
 
-    /// The top rule (`╭───...───╮`, no wordmark; the banner carries it, plan
-    /// mode is the only label), then a newline, leaving the cursor at column 0
-    /// of the input line below it. Returns the width it drew at so the caller can
-    /// track it without a second ioctl.
-    fn draw_box_top(&mut self, plan: bool) -> usize {
-        let width = term_width();
-        self.draw_rule(plan, width);
-        width
-    }
-
-    /// Emit the top rule at a given width plus the newline down to the input row.
-    fn draw_rule(&mut self, plan: bool, width: usize) {
+    /// Grow the bare marker into the framed box on the first keystroke: overwrite
+    /// the marker row with the top rule, open a fresh input row below it, then the
+    /// bottom rule, and step back up to the input row (the caller then fills it).
+    /// The frame is a top and a bottom green line only, no corners and no side
+    /// borders.
+    pub(super) fn expand(&mut self, plan: bool, width: usize) {
         let color = self.box_color();
         let reset = if color.is_empty() { "" } else { RESET };
-        let rule = box_top_rule(plan, width);
-        self.out(&format!("{color}{rule}{reset}\r\n"));
+        let top = box_rule(plan, width);
+        let bottom = box_rule(false, width);
+        self.out(&format!("\r\x1b[2K{color}{top}{reset}\r\n\r\n{color}{bottom}{reset}\x1b[1A"));
     }
 
-    /// Re-fit the box to the current terminal width, called once per keystroke
-    /// on the read path. A freshly spawned pty often reports width 0 for the
-    /// very first draw and only reports its real size a moment later; without
-    /// this the first box would stay stuck at the fallback width, so it snaps to
-    /// full width on the first keystroke (and tracks a later resize the same
-    /// way). When the width changed it repaints the box cleanly (erase both
-    /// rows, redraw the rule) and reports true so the caller repaints the input
-    /// line under it; otherwise a bare ioctl and nothing else. Sound because the
-    /// input line never wraps (redraw_line windows it to one row), so the box is
-    /// exactly two rows and erase_box targets them exactly. The one exception is
-    /// a terminal narrower than the 80-column fallback used before the pty
-    /// reports its size, where the fallback rule itself wraps for a moment; the
-    /// next key redraws it clean, and it only ever leaves a stray rule fragment
-    /// above the box (the input and the transcript stay correct). No timer, no
-    /// signal: the width is only re-read when a key is already being handled.
-    fn refit(&mut self, plan: bool, width: &mut usize) -> bool {
+    /// Snap the frame to the current terminal width when it changed: a freshly
+    /// spawned pty may report width 0 for the first draw and its real size a
+    /// moment later, and a live resize changes it again. Either way the box
+    /// repaints cleanly (erase the three rows, redraw both rules), so it always
+    /// spans the full width. Sound because the input line never wraps
+    /// (redraw_input_row windows it to one row), so the frame is exactly three
+    /// rows and erase_frame targets them exactly. No timer, no signal: the width
+    /// is only re-read when a key is already being handled.
+    pub(super) fn refit(&mut self, plan: bool, width: &mut usize) {
         let now = term_width();
         if now == *width {
-            return false;
+            return;
         }
         *width = now;
-        self.erase_box();
-        self.draw_rule(plan, now);
-        true
+        self.erase_frame();
+        let color = self.box_color();
+        let reset = if color.is_empty() { "" } else { RESET };
+        let top = box_rule(plan, now);
+        let bottom = box_rule(false, now);
+        self.out(&format!("{color}{top}{reset}\r\n\r\n{color}{bottom}{reset}\x1b[1A"));
     }
 
     /// Redraw the input line in place at the given width: return to column 0,
-    /// clear it, print the framed prompt plus a one-row window of the buffer,
-    /// then park the cursor. The window keeps the input to exactly one physical
-    /// row (a long line scrolls horizontally instead of wrapping), so there is
-    /// never more than one input row and every in-place redraw (this, erase_box,
-    /// refit) stays exact.
-    fn redraw_line(&mut self, ed: &Editor, width: usize) {
+    /// clear it, print the marker plus a one-row window of the buffer, then park
+    /// the cursor. The window keeps the input to exactly one physical row (a long
+    /// line scrolls horizontally instead of wrapping), so the frame is always
+    /// exactly three rows and every in-place redraw (this, expand, refit,
+    /// erase_frame) stays exact.
+    pub(super) fn redraw_input_row(&mut self, ed: &Editor, width: usize) {
         let color = self.box_color();
         let reset = if color.is_empty() { "" } else { RESET };
         let avail = width.saturating_sub(PREFIX_CELLS).max(1);
@@ -250,19 +252,30 @@ impl Ui {
         self.out(&s);
     }
 
-    /// Wipe the two box lines, leaving the cursor at the box's origin so the
-    /// next output takes its place. `2K` clears each whole line irrespective of
-    /// the cursor column.
-    fn erase_box(&mut self) {
-        self.out("\r\x1b[2K\x1b[1A\x1b[2K\r");
+    /// Wipe the three frame rows (the input line, the bottom rule below it, the
+    /// top rule above it), leaving the cursor at column 0 of the top row so the
+    /// next output takes the frame's place. Cursor is assumed to be on the input
+    /// row; `2K` clears each whole line irrespective of the cursor column.
+    fn erase_frame(&mut self) {
+        self.out("\r\x1b[2K\x1b[1B\r\x1b[2K\x1b[2A\r\x1b[2K\r");
+    }
+
+    /// Wipe whatever the prompt drew: the whole frame once expanded, or just the
+    /// bare marker row before the first keystroke.
+    pub(super) fn erase(&mut self, expanded: bool) {
+        if expanded {
+            self.erase_frame();
+        } else {
+            self.out("\r\x1b[2K\r");
+        }
     }
 
     /// On submit, collapse the box to a compact record of the message: a green
-    /// arrow and the text, then a newline so the reply flows below. The box
-    /// frame is not left behind, so history reads as `› message` lines, not a
-    /// stack of frames.
-    fn collapse_to_message(&mut self, ed: &Editor) {
-        self.erase_box();
+    /// arrow and the text, then a newline so the reply flows below. The frame is
+    /// not left behind, so history reads as `› message` lines, not a stack of
+    /// frames.
+    pub(super) fn collapse_to_message(&mut self, ed: &Editor, expanded: bool) {
+        self.erase(expanded);
         let shown: String = ed
             .buf
             .iter()
@@ -274,10 +287,11 @@ impl Ui {
     }
 }
 
-/// The framed prompt: left border, a space, the marker glyph, a space.
-const PREFIX: &str = "│ › ";
-/// Its display width in columns (each of the four glyphs is single-width).
-const PREFIX_CELLS: usize = 4;
+/// The prompt marker: the arrow and a space. No side border; the frame is a top
+/// and a bottom line only.
+const PREFIX: &str = "› ";
+/// Its display width in columns (arrow and space, each single-width).
+const PREFIX_CELLS: usize = 2;
 
 /// `NOOB_RAW=0|false|off|no` forces the cooked reader; anything else (including
 /// unset) leaves the editor on. A rebuild-free escape hatch for odd terminals.
@@ -288,16 +302,16 @@ fn raw_enabled_by_env() -> bool {
     }
 }
 
-/// The top border string at a given width: `╭───...───╮`, or `╭─ plan ──...─╮`
-/// in plan mode. Shared by the first draw and the resize re-fit so they never
-/// disagree.
-fn box_top_rule(plan: bool, width: usize) -> String {
-    let head = if plan { "╭─ plan " } else { "╭" };
+/// A horizontal rule spanning the full width, `─────...─────`, or
+/// `── plan ──...──` in plan mode. No corners and no side borders: the frame is
+/// just a top and a bottom line. Shared by both rules and the resize re-fit so
+/// they never disagree.
+fn box_rule(plan: bool, width: usize) -> String {
+    let head = if plan { "── plan " } else { "" };
     let mut rule = String::from(head);
-    for _ in head.chars().count()..width.saturating_sub(1) {
+    for _ in head.chars().count()..width {
         rule.push('─');
     }
-    rule.push('╮');
     rule
 }
 
@@ -328,7 +342,7 @@ fn input_window(buf: &[char], cursor: usize, avail: usize) -> (String, usize) {
 /// Terminal width in columns via the window-size ioctl; 80 when it is
 /// unavailable (a startup pty that has not been sized yet reports 0). The box
 /// spans the full width, so no upper clamp.
-fn term_width() -> usize {
+pub(super) fn term_width() -> usize {
     unsafe {
         let mut ws: libc::winsize = std::mem::zeroed();
         if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 {
@@ -346,7 +360,7 @@ fn term_width() -> usize {
 
 /// One editing action, already decoded from the raw byte stream.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Key {
+pub(crate) enum Key {
     Char(char),
     Backspace,
     Delete,
@@ -360,10 +374,15 @@ enum Key {
     Enter,
     Interrupt,
     Eof,
+    /// A lone ESC press (not the start of a sequence). Only ever produced
+    /// by [`Decoder::flush_dangling_esc`], because the byte stream alone
+    /// cannot distinguish it from an escape sequence still in flight; the
+    /// dock's cancel state machine consumes it, the line editor ignores it.
+    Esc,
 }
 
 /// What the loop should do after applying a key.
-enum Step {
+pub(super) enum Step {
     Continue,
     Submit,
     Interrupt,
@@ -373,18 +392,33 @@ enum Step {
 /// The line buffer as `char`s (not bytes) so the cursor and backspace operate
 /// on whole codepoints: one backspace deletes a whole multibyte character.
 #[derive(Default)]
-struct Editor {
+pub(super) struct Editor {
     buf: Vec<char>,
     /// Cursor position in chars, `0..=buf.len()`.
     cursor: usize,
 }
 
 impl Editor {
-    fn line(&self) -> String {
+    pub(super) fn line(&self) -> String {
         self.buf.iter().collect()
     }
 
-    fn apply(&mut self, key: Key) -> Step {
+    /// True when nothing is typed; the dock uses it to decide whether a
+    /// carried draft should re-expand the frame.
+    pub(super) fn is_empty(&self) -> bool {
+        self.buf.is_empty()
+    }
+
+    /// An editor pre-filled with a line, cursor at its end. The dock's ask
+    /// modal renders its question through the same one-row window as any
+    /// input, so a long question scrolls instead of wrapping the frame.
+    pub(super) fn from_line(line: &str) -> Editor {
+        let buf: Vec<char> = line.chars().collect();
+        let cursor = buf.len();
+        Editor { buf, cursor }
+    }
+
+    pub(super) fn apply(&mut self, key: Key) -> Step {
         match key {
             Key::Char(c) => {
                 self.buf.insert(self.cursor, c);
@@ -417,6 +451,9 @@ impl Editor {
             Key::KillWord => self.kill_word(),
             Key::Enter => return Step::Submit,
             Key::Interrupt => return Step::Interrupt,
+            // A lone ESC has no editing meaning; the dock consumes it
+            // before the editor ever sees one.
+            Key::Esc => {}
             // Ctrl-D exits only on an empty line; with text it is a no-op, so a
             // stray Ctrl-D never truncates a message mid-edit.
             Key::Eof => {
@@ -449,7 +486,7 @@ impl Editor {
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
-struct Decoder {
+pub(crate) struct Decoder {
     /// An incomplete escape or UTF-8 sequence carried to the next feed.
     pending: Vec<u8>,
     /// Inside a bracketed paste: newlines are literal text, not Enter.
@@ -473,7 +510,26 @@ enum Decoded {
 }
 
 impl Decoder {
-    fn feed(&mut self, bytes: &[u8]) -> Vec<Key> {
+    /// True when the carried bytes are exactly one bare ESC: the reader
+    /// cannot tell a human ESC press from a sequence whose tail is still
+    /// in flight, so it polls stdin briefly and, on silence, flushes.
+    pub(crate) fn has_dangling_esc(&self) -> bool {
+        self.pending == [0x1b]
+    }
+
+    /// Resolve a dangling lone ESC after the reader's grace poll timed
+    /// out: outside a paste it is the ESC key; inside a paste it is
+    /// literal content (escape bytes in a paste are always kept).
+    /// A no-op unless [`Self::has_dangling_esc`].
+    pub(crate) fn flush_dangling_esc(&mut self) -> Option<Key> {
+        if !self.has_dangling_esc() {
+            return None;
+        }
+        self.pending.clear();
+        Some(if self.paste { Key::Char('\u{1b}') } else { Key::Esc })
+    }
+
+    pub(super) fn feed(&mut self, bytes: &[u8]) -> Vec<Key> {
         let mut data = std::mem::take(&mut self.pending);
         data.extend_from_slice(bytes);
         let mut keys = Vec::new();
@@ -690,10 +746,10 @@ pub fn restore_terminal() {
     raw_state::restore();
 }
 
-struct RawGuard;
+pub(super) struct RawGuard;
 
 impl RawGuard {
-    fn enter() -> Option<RawGuard> {
+    pub(super) fn enter() -> Option<RawGuard> {
         install_panic_hook();
         let mut saved: libc::termios = unsafe { std::mem::zeroed() };
         if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut saved) } != 0 {
@@ -1017,6 +1073,41 @@ mod tests {
     }
 
     #[test]
+    fn a_lone_esc_is_flushed_as_the_esc_key_but_never_prematurely() {
+        // A bare ESC press leaves one dangling byte the decoder cannot
+        // classify; the reader's grace poll resolves it via the flush.
+        let mut dec = Decoder::default();
+        assert_eq!(dec.feed(b"\x1b"), vec![]);
+        assert!(dec.has_dangling_esc());
+        assert_eq!(dec.flush_dangling_esc(), Some(Key::Esc));
+        assert!(!dec.has_dangling_esc());
+        assert_eq!(dec.flush_dangling_esc(), None, "flush is one-shot");
+        // The same dangling byte followed by a sequence tail is still a
+        // real escape sequence, not an ESC key.
+        let mut dec = Decoder::default();
+        assert_eq!(dec.feed(b"\x1b"), vec![]);
+        assert_eq!(dec.feed(b"[C"), vec![Key::Right]);
+        // A dangling CSI intro is not a lone ESC.
+        let mut dec = Decoder::default();
+        assert_eq!(dec.feed(b"\x1b["), vec![]);
+        assert!(!dec.has_dangling_esc());
+        assert_eq!(dec.flush_dangling_esc(), None);
+        // Inside a paste the flushed ESC is literal content.
+        let mut dec = Decoder::default();
+        dec.feed(b"\x1b[200~ab\x1b");
+        assert!(dec.has_dangling_esc());
+        assert_eq!(dec.flush_dangling_esc(), Some(Key::Char('\u{1b}')));
+        // The ESC key is an editor no-op: buffer and cursor untouched.
+        let mut ed = Editor::default();
+        for k in keys(b"hi") {
+            ed.apply(k);
+        }
+        assert!(matches!(ed.apply(Key::Esc), Step::Continue));
+        assert_eq!(ed.line(), "hi");
+        assert_eq!(ed.cursor, 2);
+    }
+
+    #[test]
     fn split_escape_across_feeds_is_reassembled() {
         let mut dec = Decoder::default();
         assert_eq!(dec.feed(b"\x1b["), vec![]); // incomplete, carried
@@ -1052,16 +1143,16 @@ mod tests {
     }
 
     #[test]
-    fn box_top_rule_spans_the_width_and_is_bracketed() {
-        // The rule fills the terminal exactly: ╭ + dashes + ╮ == width glyphs.
-        let r = box_top_rule(false, 80);
-        assert!(r.starts_with('╭') && r.ends_with('╮'));
+    fn box_rule_spans_the_width_with_no_corners() {
+        // The rule fills the terminal exactly, in plain dashes: no rounded
+        // corners and no side borders (the frame is a top and a bottom line).
+        let r = box_rule(false, 80);
+        assert!(r.chars().all(|c| c == '─'), "rule must be plain dashes: {r:?}");
         assert_eq!(r.chars().count(), 80, "rule must span the full width");
-        assert_eq!(r.chars().filter(|&c| c == '─').count(), 78);
         // Plan mode keeps the label and still fills the width.
-        let p = box_top_rule(true, 120);
-        assert!(p.starts_with("╭─ plan "));
-        assert_eq!(p.chars().count(), 120);
+        let p = box_rule(true, 120);
+        assert!(p.starts_with("── plan "), "plan rule must carry the label: {p:?}");
+        assert_eq!(p.chars().count(), 120, "plan rule must still span the width");
     }
 
     #[test]

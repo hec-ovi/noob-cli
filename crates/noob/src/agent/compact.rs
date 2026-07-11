@@ -354,6 +354,15 @@ impl Agent {
         if !loaded.is_empty() {
             spliced.push_str(&format!("\n[loaded skills: {loaded}]"));
         }
+        // If the live skill set drifted from session start (an on-the-fly
+        // /skills add or remove), pin the current set so it outlives the
+        // summarized [skills updated] note: the frozen head index still lists
+        // the original skills, and this is what keeps the model from offering
+        // a removed one after a compaction.
+        if let Some(current) = self.skills_drifted() {
+            let listed = if current.is_empty() { "none".to_string() } else { current.join(", ") };
+            spliced.push_str(&format!("\n[skills available now: {listed}]"));
+        }
 
         let mut new_items = vec![Item::User(spliced)];
         new_items.extend_from_slice(&self.items[cut..]);

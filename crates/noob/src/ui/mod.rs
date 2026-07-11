@@ -1,11 +1,15 @@
 //! Rendering for the four surfaces. An interactive REPL at a color terminal
 //! gets a themed, display-only surface: a green banner, role-colored activity
 //! and notes, and a light tint on streamed assistant text so a human can tell
-//! the model's words from their own echoed input. Every other surface, the
-//! piped REPL, `exec`, `exec --json`, and `child`, stays byte-for-byte what it
-//! was before any of this: model text streams raw, tool activity is a single
-//! dim line, and no escape reaches a non-terminal. Rendering is display-only:
-//! it never rewrites request bodies, the session log, or the JSONL protocol.
+//! the model's words from their own echoed input. On that surface each tool
+//! activity line tints its leading word (`bash`, `read`, `edit`, a loaded
+//! `skill`, ...) its own per-tool accent and pads it to a column, so a scan
+//! reads by color before the eye parses a word; a failed line stays red end to
+//! end. Every other surface, the piped REPL, `exec`, `exec --json`, and
+//! `child`, stays byte-for-byte what it was before any of this: model text
+//! streams raw, tool activity is a single dim line, and no escape reaches a
+//! non-terminal. Rendering is display-only: it never rewrites request bodies,
+//! the session log, or the JSONL protocol.
 
 use std::io::{IsTerminal, Write};
 
@@ -13,14 +17,21 @@ use serde_json::{Value, json};
 
 use noob_provider::types::Usage;
 
+mod dock;
 pub(crate) mod prompt;
 mod scanner;
 mod style;
 mod theme;
 
+pub use dock::DockSession;
 pub use prompt::Input;
 use style::{ColorDepth, DIM, RESET};
 use theme::Theme;
+
+/// The column the label is padded to on the themed activity line, so the brief
+/// after it lines up. Sized to the longest label a summary leads with
+/// (`edited`, six columns) plus a trailing space.
+const ACTIVITY_LABEL_COL: usize = 7;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -54,12 +65,18 @@ pub struct Ui {
     mid_line: bool,
     /// Output sinks. Real stdout/stderr in production; in-memory in tests so
     /// the styled path (which the piped suite would otherwise never reach) is
-    /// unit-testable.
-    out: Box<dyn Write>,
-    err: Box<dyn Write>,
+    /// unit-testable. `Send` because a turn `Ui` (channel sinks) crosses into
+    /// the dock's worker thread.
+    out: Box<dyn Write + Send>,
+    err: Box<dyn Write + Send>,
     /// The thinking scanner while it is sweeping (themed REPL only). Torn down
     /// by the first real output byte and as the end-of-turn bracket.
     scanner: Option<scanner::Scanner>,
+    /// Set on a turn `Ui` (see `for_turn`): the dock's render loop owns the
+    /// terminal and stdin, so confirmations travel this channel instead of
+    /// reading stdin, and the scanner thread never starts (the dock draws
+    /// its own liveness). None on every directly-writing `Ui`.
+    turn_tx: Option<std::sync::mpsc::SyncSender<dock::Ev>>,
     /// Test seam for the confirmation flow: unit tests cannot own a tty.
     #[cfg(test)]
     pub forced_ask: Option<bool>,
@@ -83,6 +100,30 @@ impl Ui {
             out: Box::new(std::io::stdout()),
             err: Box::new(std::io::stderr()),
             scanner: None,
+            turn_tx: None,
+            #[cfg(test)]
+            forced_ask: None,
+        }
+    }
+
+    /// A `Ui` for one dock-managed turn: it renders exactly like this one
+    /// (same mode, color, depth, theme) but its sinks ship every styled byte
+    /// over the dock channel instead of touching the terminal, so the render
+    /// loop stays the terminal's only writer. Confirmations reroute through
+    /// the channel too (`ask`), and the scanner thread never starts.
+    pub(crate) fn for_turn(&self, tx: std::sync::mpsc::SyncSender<dock::Ev>) -> Ui {
+        Ui {
+            mode: self.mode,
+            ansi: self.ansi,
+            color: self.color,
+            depth: self.depth,
+            theme: self.theme,
+            tinted: false,
+            mid_line: false,
+            out: Box::new(dock::ChannelWriter(tx.clone())),
+            err: Box::new(dock::ChannelWriter(tx.clone())),
+            scanner: None,
+            turn_tx: Some(tx),
             #[cfg(test)]
             forced_ask: None,
         }
@@ -110,15 +151,38 @@ impl Ui {
         let _ = self.out.flush();
     }
 
+    /// Raw bytes to the sink, for the dock's relay of a turn's coalesced
+    /// output (whole styled chunks, so the batch is valid UTF-8; bytes here
+    /// avoids a pointless lossy round trip).
+    pub(super) fn out_raw(&mut self, bytes: &[u8]) {
+        self.stop_scanner();
+        let _ = self.out.write_all(bytes);
+        let _ = self.out.flush();
+    }
+
+    /// Open a dock session: the persistent-input REPL driver (fable.md).
+    /// Engages only where the raw editor would (interactive REPL, both ends
+    /// ttys, `NOOB_RAW` on) AND `NOOB_DOCK=1` opts in while the driver is
+    /// being proven; every other surface keeps the exact existing readers.
+    pub fn dock_session(&mut self) -> Option<dock::DockSession> {
+        if self.use_raw_editor() && dock::enabled_by_env() {
+            dock::DockSession::start()
+        } else {
+            None
+        }
+    }
+
     /// Start the thinking scanner: a green square comet that sweeps on its own
     /// line while the model works, until the first output arrives. Themed REPL
     /// surface only, so piped, `exec`, `--json`, and child output are untouched.
     /// Off the inference path: it animates on a side thread while the main
     /// thread blocks on the request, and it is torn down before any reply byte.
     pub fn thinking_start(&mut self) {
-        if self.styled() {
+        // A turn Ui never spawns the scanner thread: it would be a second
+        // writer racing the render loop; the dock draws its own liveness.
+        if self.styled() && self.turn_tx.is_none() {
             self.stop_scanner(); // never stack two
-            self.scanner = Some(scanner::Scanner::start(self.depth, self.theme.ramp));
+            self.scanner = Some(scanner::Scanner::start(self.depth, self.theme.scanner));
         }
     }
 
@@ -152,6 +216,50 @@ impl Ui {
             format!("{DIM}{line}{RESET}\n")
         } else {
             format!("{line}\n")
+        };
+        match self.mode {
+            Mode::Repl => self.out(&rendered),
+            Mode::Exec | Mode::ExecJson | Mode::Child => self.err_out(&rendered),
+        }
+    }
+
+    /// One tool-activity line, `* label rest`. On the themed surface the leading
+    /// word is tinted its own per-tool accent and padded to a fixed column so
+    /// the briefs align down the transcript; a scan then reads by color and by
+    /// column before the eye parses a word. Every other surface keeps the exact
+    /// prior bytes: `{DIM}* line{RESET}\n` at a plain tty, `* line\n` piped, so
+    /// no non-terminal surface gains a byte. `is_error` paints the whole line
+    /// the error accent instead of splitting a label, so red stays the single
+    /// reserved failure color and a failed line reads red end to end.
+    fn activity_line(&mut self, line: &str, is_error: bool) {
+        self.end_line();
+        let rendered = if self.styled() {
+            // styled() implies a real depth, so every opener below is non-empty.
+            if is_error {
+                let open = self.theme.error.sgr(self.depth);
+                format!("{open}* {line}{RESET}\n")
+            } else {
+                let (label, rest) = match line.split_once(' ') {
+                    Some((l, r)) => (l, r),
+                    None => (line, ""),
+                };
+                let base = self.theme.activity.sgr(self.depth);
+                let label_open = self.theme.label_style(label).sgr(self.depth);
+                if rest.is_empty() {
+                    format!("{base}* {label_open}{label}{RESET}\n")
+                } else {
+                    // Left-justify the label to a column so the rest lines up; a
+                    // label longer than the column keeps a single trailing space
+                    // rather than being truncated (never hide the tool name).
+                    let width = label.chars().count();
+                    let pad = " ".repeat(ACTIVITY_LABEL_COL.saturating_sub(width).max(1));
+                    format!("{base}* {label_open}{label}{RESET}{base}{pad}{rest}{RESET}\n")
+                }
+            }
+        } else if self.ansi {
+            format!("{DIM}* {line}{RESET}\n")
+        } else {
+            format!("* {line}\n")
         };
         match self.mode {
             Mode::Repl => self.out(&rendered),
@@ -237,12 +345,11 @@ impl Ui {
                 if !read_only {
                     let brief = brief_args(name, args);
                     let line = if brief.is_empty() {
-                        format!("* {name}")
+                        name.to_string()
                     } else {
-                        format!("* {name} {brief}")
+                        format!("{name} {brief}")
                     };
-                    let opener = self.theme.activity.sgr(self.depth);
-                    self.styled_line(&line, &opener);
+                    self.activity_line(&line, false);
                 }
             }
         }
@@ -252,11 +359,7 @@ impl Ui {
     pub fn tool_done(&mut self, id: &str, summary: &str, is_error: bool) {
         match self.mode {
             Mode::ExecJson => self.event(json!({"t": "result", "id": id, "err": is_error})),
-            _ => {
-                let token = if is_error { self.theme.error } else { self.theme.activity };
-                let opener = token.sgr(self.depth);
-                self.styled_line(&format!("* {summary}"), &opener);
-            }
+            _ => self.activity_line(summary, is_error),
         }
     }
 
@@ -320,6 +423,17 @@ impl Ui {
         if let Some(forced) = self.forced_ask {
             return forced;
         }
+        // A turn Ui: the render loop owns stdin, so the question travels
+        // the event channel and this worker blocks for the human's answer.
+        // A closed channel means the turn is being torn down: deny, the
+        // same degradation as every other unanswerable surface.
+        if let Some(tx) = &self.turn_tx {
+            let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+            if tx.send(dock::Ev::Ask(question.to_string(), reply_tx)).is_err() {
+                return false;
+            }
+            return reply_rx.recv().unwrap_or(false);
+        }
         if self.mode != Mode::Repl || !std::io::stdin().is_terminal() {
             return false;
         }
@@ -382,16 +496,17 @@ fn brief_args(name: &str, args: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
     /// A `Write` sink that keeps its bytes so a test can read them back.
+    /// Arc+Mutex (not Rc+RefCell) because the sink type must be `Send` now
+    /// that a turn `Ui` crosses into the dock's worker thread.
     #[derive(Clone, Default)]
-    struct Buf(Rc<RefCell<Vec<u8>>>);
+    struct Buf(Arc<Mutex<Vec<u8>>>);
 
     impl Write for Buf {
         fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-            self.0.borrow_mut().extend_from_slice(b);
+            self.0.lock().unwrap().extend_from_slice(b);
             Ok(b.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -401,7 +516,7 @@ mod tests {
 
     impl Buf {
         fn text(&self) -> String {
-            String::from_utf8(self.0.borrow().clone()).unwrap()
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
         }
     }
 
@@ -423,6 +538,7 @@ mod tests {
             out: Box::new(out.clone()),
             err: Box::new(err.clone()),
             scanner: None,
+            turn_tx: None,
             forced_ask: None,
         };
         (ui, out, err)
@@ -458,6 +574,25 @@ mod tests {
 
     // --- the styled surface (only reachable through the seam) --------------
 
+    /// Drop every SGR escape so a test can assert on the plain text a human
+    /// sees, without keying on any color value.
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
     #[test]
     fn styled_activity_line_is_wrapped_and_reset() {
         // Not "is it the right green" (a theme choice tuned live in the REPL);
@@ -466,9 +601,49 @@ mod tests {
         let (mut ui, out, _) = harness(Mode::Repl, true, true);
         ui.tool_done("id", "done", false);
         let s = out.text();
-        assert!(s.contains("* done"), "summary text missing: {s:?}");
+        assert_eq!(strip_ansi(&s), "* done\n", "content or marker changed under the color");
         assert!(s.ends_with("\x1b[0m\n"), "line not reset-terminated (bleed risk): {s:?}");
         assert_ne!(s, "* done\n", "styled line must differ from the plain form");
+    }
+
+    #[test]
+    fn styled_activity_label_is_padded_to_a_column() {
+        // The alignment contract: whatever the label's length, the brief after
+        // it starts at the same column, so a column of lines reads cleanly.
+        let (mut ui, out, _) = harness(Mode::Repl, true, true);
+        ui.tool_start("bash", &json!({"cmd": "cargo test"}), false); // 4-char label
+        ui.tool_done("t", "task done (2 turns)", false); //                4-char label
+        ui.tool_done("l", "ls . (3 entries)", false); //                  2-char label
+        let lines: Vec<String> = strip_ansi(&out.text()).lines().map(str::to_string).collect();
+        // Each brief starts at the same column: "* " (2) + the 7-column label.
+        assert_eq!(lines, ["* bash   cargo test", "* task   done (2 turns)", "* ls     . (3 entries)"]);
+    }
+
+    #[test]
+    fn styled_activity_error_stays_red_end_to_end() {
+        // A failure must read red the whole line, not split a colored label off
+        // a green brief; red is the one reserved accent. Structurally: the
+        // marker and text are one contiguous run (no escape between "* " and the
+        // word), unlike a normal label line.
+        let (mut ui, out, _) = harness(Mode::Repl, true, true);
+        ui.tool_done("id", "boom failed", true);
+        let s = out.text();
+        assert!(s.contains("* boom failed"), "error line must not split a label out: {s:?}");
+        assert!(s.ends_with("\x1b[0m\n"), "error line must reset: {s:?}");
+        // A non-error line of the same text does split the label, proving the
+        // two paths differ (and that the split is what error suppresses).
+        let (mut ui2, out2, _) = harness(Mode::Repl, true, true);
+        ui2.tool_done("id", "boom failed", false);
+        assert!(!out2.text().contains("* boom failed"), "non-error line should isolate the label");
+    }
+
+    #[test]
+    fn piped_tool_start_is_plain_and_unpadded() {
+        // Byte-identity for the start line too: piped surfaces get no padding,
+        // no color, exactly the pre-v0.2.4 single-space form.
+        let (mut ui, out, _) = harness(Mode::Repl, false, false);
+        ui.tool_start("bash", &json!({"cmd": "ls -a"}), false);
+        assert_eq!(out.text(), "* bash ls -a\n");
     }
 
     #[test]
@@ -593,6 +768,88 @@ mod tests {
             assert!(ui.scanner.is_none(), "scanner started on a non-themed surface");
             ui.thinking_stop();
         }
+    }
+
+    // --- the turn Ui (dock plumbing) ---------------------------------------
+
+    /// Drain every pending Out event into one byte string.
+    fn drain_out(rx: &std::sync::mpsc::Receiver<dock::Ev>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let dock::Ev::Out(b) = ev {
+                bytes.extend_from_slice(&b);
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn turn_ui_ships_the_exact_styled_bytes_over_the_channel() {
+        // The relay contract: a turn Ui produces byte-for-byte what the
+        // direct Ui would have written, just over the channel. This is what
+        // keeps agent/ and the rendering untouched by the inversion.
+        let (mut direct, refout, _) = harness(Mode::Repl, true, true);
+        let (tx, rx) = std::sync::mpsc::sync_channel(64);
+        let mut turn = direct.for_turn(tx);
+        for ui in [&mut direct, &mut turn] {
+            ui.text_delta("1. write ");
+            ui.text_delta("greeting.txt");
+            ui.tool_done("id", "done", false);
+            ui.note("a note");
+            ui.end_line();
+        }
+        assert_eq!(
+            String::from_utf8_lossy(&drain_out(&rx)),
+            refout.text(),
+            "turn Ui bytes drifted from the direct Ui"
+        );
+    }
+
+    #[test]
+    fn turn_ui_ask_travels_the_channel_and_denies_on_teardown() {
+        let (direct, _, _) = harness(Mode::Repl, true, true);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        let mut turn = direct.for_turn(tx);
+        // A render loop answering "yes".
+        let answerer = std::thread::spawn(move || {
+            for ev in rx.iter() {
+                if let dock::Ev::Ask(q, reply) = ev {
+                    assert!(q.contains("proceed"));
+                    reply.send(true).unwrap();
+                    break;
+                }
+            }
+            rx
+        });
+        assert!(turn.ask("proceed?"), "channel ask must return the answer");
+        let rx = answerer.join().unwrap();
+        // "No" travels too.
+        let answerer = std::thread::spawn(move || {
+            for ev in rx.iter() {
+                if let dock::Ev::Ask(_, reply) = ev {
+                    reply.send(false).unwrap();
+                    break;
+                }
+            }
+            rx
+        });
+        assert!(!turn.ask("proceed?"));
+        let rx = answerer.join().unwrap();
+        // Render loop gone entirely: degrade to deny, never hang or panic.
+        drop(rx);
+        assert!(!turn.ask("proceed?"), "a closed channel must deny");
+    }
+
+    #[test]
+    fn turn_ui_never_spawns_the_scanner_thread() {
+        // The scanner is a second terminal writer; on a turn Ui it must be
+        // structurally impossible even on the fully styled surface.
+        let (direct, _, _) = harness(Mode::Repl, true, true);
+        let (tx, _rx) = std::sync::mpsc::sync_channel(4);
+        let mut turn = direct.for_turn(tx);
+        turn.thinking_start();
+        assert!(turn.scanner.is_none(), "turn Ui must not start a scanner");
+        turn.thinking_stop();
     }
 
     // That the first output byte tears the scanner down (so the reply never

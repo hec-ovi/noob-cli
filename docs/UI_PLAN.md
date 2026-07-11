@@ -37,7 +37,7 @@ At each version checkpoint:
 
 No performance or throughput cost, in any direction, proven per version:
 - Keystrokes never reach the LLM. The model sees the message once, on Enter.
-- Slash autocomplete is a local string-match over a ~7-item static command list:
+- Slash autocomplete is a local string-match over a ~5-item static command list:
   no model, no network, no tokens.
 - Raw-mode input is restored to cooked BEFORE the agent runs, so it is off the
   inference path. Prefill/decode tokens-per-second are GPU/llama.cpp bound and
@@ -91,17 +91,12 @@ Standing priority Hector reaffirmed: stability, speed, and efficiency of the
 harness itself come first; visuals never cost throughput (the zero-overhead law).
 
 Observations from a live session, mapped to where each is fixed:
-- v0.2.1 polish (not sign-off blockers, fix in the next round):
-  - The very first input box after the banner renders narrow, not full width:
-    the compose pty reports winsize 0 at startup, so `term_width()` falls back to
-    80 for that one draw; later prompts are correct. Fix: a SIGWINCH-driven
-    redraw of the live box, or re-query width and redraw the top rule on the
-    first keystroke.
-  - The input box "disappears" while the agent is thinking/writing. This is the
-    collapse design (no frame during processing), but it reads as empty. The
-    v0.2.3 scanner fills the request-to-first-token gap; open question for Hector
-    is whether he also wants a persistent input to queue the next message while
-    the agent runs (a scroll-region change, heavier; defer unless he asks).
+- The input box "disappears" while the agent is thinking/writing. This is the
+  collapse design (no frame during processing), but it reads as empty. Hector has
+  since asked for a persistent input dock that stays visible during a turn so the
+  next message can be QUEUED while the agent runs, with double-ESC to cancel; that
+  is the two-writers-one-terminal work tracked in the repl-architecture memory and
+  `.research/rust-cli-concurrent-io-2026/`.
 - Already-planned phases the session confirmed we need:
   - v0.2.3 thinking scanner (green squares): "no thinking animation".
   - v0.2.4 per-tool colors + padding: "each skill and command its own style and
@@ -112,12 +107,56 @@ Observations from a live session, mapped to where each is fixed:
   - v0.2.8 tables: "check the tables how awful it looks"; a markdown table asked
     of the model renders as raw pipes and wraps badly.
 
+## v0.3.x mechanics series (dock: queue, cancel, skills-on-the-fly)
+
+Separate from the 0.2.x cosmetic series: this is the two-writers-one-terminal
+work (architecture in `fable.md`, research in
+`.research/rust-cli-concurrent-io-2026/`). One terminal owner (the render loop
+on main), a per-turn worker rendering through a channel-backed `Ui`, a stdin
+reader thread, all over one `std::sync::mpsc`. Zero new crates. Built behind
+`NOOB_DOCK=1` (opt-in) until M7 flips the default, so the shipped REPL never
+changes while the driver is proven. Mini-milestones so each is a green,
+self-contained deliverable (Hector is credit-constrained and compacts often).
+
+- M1-M6, M8 BUILT + Docker-green + LIVE-validated (behind `NOOB_DOCK=1`, NOT
+  committed). `ui/dock.rs`: the Ev channel, the `OutTracker` column tracker, and
+  `DockSession` = a session-lifetime `RawGuard` + a stdin reader thread + an
+  event-driven `read_prompt` + a `run_turn` scoped worker + a coalesced render
+  loop that owns the terminal. `Ui::for_turn` renders a turn through channel
+  sinks (byte-identical to the direct `Ui`), so `agent/` is untouched; `ask`
+  reroutes over the channel; the scanner thread is retired (the dock row shows
+  the comet).
+  - M5 double-ESC cancel: a first ESC arms a 5 s window (the input row turns a
+    red "press ESC again to cancel"); a second ESC commits via `INTERRUPTED`;
+    Ctrl-C commits immediately; any other key or the window lapsing disarms.
+  - M6 message queue: Enter during a turn queues the draft (a dim "N queued"
+    row) and it dispatches as the next turn; an interrupt drains the queue back
+    into the editor instead of firing it.
+  - M8 skills on the fly: `/skills list|reload|add <path|git-url>|remove <name>`.
+    A reload re-discovers, swaps the live set, registers the `skill` tool on the
+    zero-skills-to-some transition (one accepted cache break), and appends an
+    in-band `[skills updated]` message that supersedes the frozen head index
+    (naming added skills with descriptions and removed ones); a removed skill is
+    also rejected structurally by the `skill` tool. Compaction pins the current
+    set when it drifted, so the correction outlives the summarized note.
+  - An adversarial review of the foundation found and fixed three real bugs
+    (uninterruptible `/compact`, an ask-modal EOF deadlock, and an exact-fill
+    deferred-wrap line erase). A live drive against qwen3.6 at :8090 exercised
+    queue, ESC-cancel, and the full skill add/use/remove/staleness loop; the
+    reconstructed terminal screen is clean.
+- M7 REMAINING (Hector's call): flipping `NOOB_DOCK` to default-on stays for
+  Hector's own real-REPL drive (the per-version sign-off protocol, his stability
+  zone). On his OK: flip the default and rewrite the prose the dock makes false
+  in that mode (raw mode spans the turn, `ui/` is on the render path, a per-turn
+  worker thread exists). Until then the dock is opt-in and the default per-prompt
+  editor is unchanged.
+
 ## Pending versions
 
 ### v0.2.1 - Boxed raw-mode input (the strong two-line prompt)  (risk: high)
-Goal: replace cooked input with an opt-in termios editor that draws a two-line
-framed green input box, real line editing, restored on every exit; cooked
-fallback when piped/headless. Includes extracting the prompt reader into its own
+Goal: replace cooked input with a default-on termios editor (`NOOB_RAW=0` opts
+out) that draws a framed green input box, real line editing, restored on every
+exit; cooked fallback when piped/headless. Includes extracting the prompt reader into its own
 `ui/prompt.rs` component first.
 Files: `ui/prompt.rs` (new), `ui/mod.rs`, `main.rs`.
 Arch: amends row 5 ("cooked-mode; no line editor"); pulls the v0.2 termios editor
@@ -158,7 +197,7 @@ piped shows no completion and is byte-identical.
 
 ### v0.2.3 - Thinking scanner (square green comet)  (risk: low)
 Goal: cover the request-sent-to-first-token wait with a background-thread scanner
-(small square head, green-ramp tail) on a bracketed track, erased cleanly before
+(small square head, faded-green tail) on an indented track, erased cleanly before
 the first byte; strict no-op in every non-interactive mode; never wired to
 `event()`.
 Files: `ui/scanner.rs` (new), `ui/mod.rs`, `main.rs`.
@@ -167,10 +206,32 @@ idempotent and prompt; erase precedes the first delta byte.
 Manual: scanner sweeps then vanishes with no residue; clears before a tool line;
 Ctrl-C mid-wait clears cleanly; `exec`/`--json` byte-identical.
 
-### v0.2.4 - Per-tool colored activity lines  (risk: low)
-Goal: stable per-tool color/glyph on the `* tool ...` line, error lines flagged;
-same single-line shape; byte-identical when not styled.
-Files: `ui/mod.rs`, `ui/style.rs`.
+### v0.2.4 - Per-tool colored activity lines  (BUILT, awaiting Hector's REPL test)
+Goal: stable per-tool color on the `* tool ...` line, error lines flagged; same
+single-line shape; byte-identical when not styled.
+Built: on the themed surface each activity line tints its leading word (the tool
+name) a distinct muted accent from a 10-color palette and pads it to a 7-column
+field so the briefs line up down the transcript. Color is keyed off the line's
+leading word, so the render stays inside `ui/` with no change to what the agent
+passes (no `agent/`, no `main.rs`); a summary's past-tense word (`edited`,
+`wrote`) folds back onto its tool so a done line matches its start line, and an
+unplaced word hashes to a stable palette slot. A failed line stays the error
+accent end to end (red reserved for failures, no label split). Palette is a
+theme token; no test keys on a value.
+Files: `ui/theme.rs` (palette + `label_style`), `ui/mod.rs` (`activity_line`),
+`ui/contract.md`.
+Tests: label mapping is stable, distinct across the core tools, and normalizes
+past tense; styled line isolates + pads + resets the label; error line stays
+whole-line red (no split); piped and NO_COLOR/dim and exec bytes byte-identical
+to pre-v0.2.4 (no padding, no palette off the themed surface). Full offline suite
+green, zero warnings, no new crate.
+Manual for Hector: run a task that touches several tools (a `read`, a `bash`, an
+`edit`, a `grep`, load a `skill`); each `* tool` word should read in its own hue
+with the briefs aligned in a column; a failing tool line should read red end to
+end; `noob exec ... 2>&1 | cat` and a piped REPL should look exactly as before.
+Open sub-item to weigh at the checkpoint: whether slash commands (`/plan`, `/go`,
+...) should also get a colored, aligned echo line, or stay as note-colored
+feedback (they already read distinct from tool activity today).
 
 ### v0.2.5 - Pretty colored JSON for tool/MCP result bodies  (risk: medium)
 Goal: show mcp_* result bodies as pretty colored JSON in the REPL (net-new
