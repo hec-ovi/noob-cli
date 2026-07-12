@@ -317,7 +317,7 @@ fn fanout_panel_is_absent_on_the_exec_surface() {
     assert!(stderr.contains("* subagent helper alpha"), "missing start line:\n{stderr}");
     assert!(stderr.contains("* subagent helper beta"), "missing start line:\n{stderr}");
     assert!(stderr.contains("* subagent helper gamma"), "missing start line:\n{stderr}");
-    assert!(stderr.contains("* task done (1 turns)"), "missing completion line:\n{stderr}");
+    assert!(stderr.contains("* done (1 turns)"), "missing completion line:\n{stderr}");
     // None of the panel bytes reach a headless surface.
     assert!(!stderr.contains("agents ("), "the panel header leaked into exec:\n{stderr}");
     assert!(!stderr.contains("agent 1:"), "a panel row leaked into exec:\n{stderr}");

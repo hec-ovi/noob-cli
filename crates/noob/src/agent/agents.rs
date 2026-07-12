@@ -180,7 +180,7 @@ fn prompt_slice(prompt: &str) -> String {
     format!("{head}…{tail}")
 }
 
-/// `(M turns)` lifted out of a `task done (M turns)` summary, if present.
+/// `(M turns)` lifted out of a `done (M turns)` summary, if present.
 fn turns_of(summary: &str) -> Option<String> {
     let open = summary.find('(')?;
     let close = summary[open..].find(')')? + open;

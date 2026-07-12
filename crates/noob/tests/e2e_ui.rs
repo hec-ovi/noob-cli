@@ -1652,6 +1652,60 @@ fn dock_pins_the_plan_as_one_in_place_region() {
     );
 }
 
+/// When a turn ends, the finished plan is left as a static record directly above
+/// the idle input box instead of being torn down with the live frame, so a
+/// completed checklist stays visible at the bottom. A turn with no plan tears
+/// down exactly as before (covered by the scrolling test's end-of-turn assertion).
+#[test]
+fn dock_leaves_the_finished_plan_visible_above_the_idle_box() {
+    const ROWS: u16 = 16;
+    const COLS: u16 = 64;
+
+    let rig = rig();
+    let a = r#"{"todos":[{"content":"alpha","status":"pending"},{"content":"beta","status":"pending"}]}"#;
+    let b = r#"{"todos":[{"content":"alpha","status":"completed"},{"content":"beta","status":"completed"}]}"#;
+    rig.server.enqueue_stream_toolcalls(&[("p1", "todo", a)], None);
+    rig.server.enqueue_stream_toolcalls(&[("p2", "todo", b)], None);
+    rig.server.enqueue_stream_completion("PLAN-COMPLETE-ZZ");
+
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)), &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"do the plan\r");
+    pty.wait_for("PLAN-COMPLETE-ZZ"); // the turn's final text landed
+    settle();
+    pty.drain(std::time::Duration::from_millis(400));
+    let screen = pty.screen(ROWS, COLS);
+    let rows = screen.render();
+    println!("\n{}", screen.dump("FINISHED PLAN PERSISTS ABOVE IDLE BOX"));
+
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+
+    // The live turn frame (Working/cancel) is gone, but the finished plan block
+    // remains, sitting above the idle input box.
+    assert!(dock_rows(&rows).is_none(), "the live turn frame must be gone at idle");
+    let marker = rows.iter().rposition(|r| r.contains(MARKER)).expect("idle input box");
+    let header = rows
+        .iter()
+        .position(|r| r.contains("plan (2/2 done):"))
+        .unwrap_or_else(|| panic!("finished plan did not persist:\n{}", screen.dump("end")));
+    assert!(
+        header < marker,
+        "the finished plan must sit above the idle input box (header {header}, marker {marker}):\n{}",
+        screen.dump("end")
+    );
+    let joined = rows.join("\n");
+    assert!(
+        joined.contains("[x] alpha") && joined.contains("[x] beta"),
+        "the completed checklist items are not shown at idle:\n{}",
+        screen.dump("end")
+    );
+}
+
 /// A pinned region row longer than the terminal is clamped to exactly one
 /// physical row ending in an ellipsis. The in-place refresh (comet cadence,
 /// keystrokes) must not erase that trailing glyph: a full-width row parks the

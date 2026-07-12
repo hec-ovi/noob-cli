@@ -189,7 +189,7 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     let result = parsed.get("result").and_then(Value::as_str).unwrap_or("");
     let turns = parsed.get("turns").and_then(Value::as_u64).unwrap_or(0);
     let outcome = if parsed.get("status").and_then(Value::as_str) == Some("ok") {
-        ToolOutcome::ok(result, format!("task done ({turns} turns)"))
+        ToolOutcome::ok(result, format!("done ({turns} turns)"))
     } else {
         ToolOutcome::err(format!("sub-agent error: {result}"))
     };
@@ -388,7 +388,7 @@ mod tests {
         assert!(progress.len() < STDERR_CAP + 100);
         assert!(progress.contains("[task progress truncated: 123 bytes omitted]"));
 
-        let out = with_progress(ToolOutcome::ok("done", "task done"), true, progress);
+        let out = with_progress(ToolOutcome::ok("done", "done"), true, progress);
         let warning = out.warning.unwrap();
         assert!(warning.starts_with("[subagent] "));
         assert!(warning.contains("123 bytes omitted"));

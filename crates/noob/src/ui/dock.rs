@@ -918,10 +918,22 @@ impl DockSession {
                     );
                 }
                 Ev::End => {
-                    // Tear the whole frame down, regions and all, so the exact
+                    // Tear the live frame down, regions and all, so the exact
                     // height that was on screen is cleared (not a fixed three
-                    // rows). The idle prompt takes its place.
+                    // rows). Then leave the final plan/panel as a static record
+                    // above the idle prompt, so a finished plan stays visible at
+                    // the bottom instead of vanishing with the frame. A turn with
+                    // no region tears down exactly as before (byte-identical).
                     self.erase_dock(ui, drawn_r);
+                    if !region_rows.is_empty() {
+                        let mut block = String::new();
+                        for row in &region_rows {
+                            block.push_str("\r\x1b[2K");
+                            block.push_str(row);
+                            block.push_str("\r\n");
+                        }
+                        ui.out_raw(block.as_bytes());
+                    }
                     return;
                 }
                 // A resize just needs to wake the loop: the width re-check at the
