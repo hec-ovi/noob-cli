@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
@@ -42,7 +42,19 @@ pub(crate) enum Ev {
     /// The worker's final event: the turn is over, its result is parked in
     /// the run wrapper. Carries no payload so this module stays agent-free.
     End,
+    /// The terminal was resized (SIGWINCH). Injected by the reader thread when
+    /// its blocked read is interrupted by the signal, so an idle prompt (which
+    /// otherwise blocks forever on input) reflows its box to the new width
+    /// without waiting for a keystroke. During a turn the render loop already
+    /// re-reads the width each tick; this just makes it instant.
+    Resize,
 }
+
+/// Set by the SIGWINCH handler (installed in `main`), consumed by the reader
+/// thread when its read returns EINTR. The signal is blocked in every thread
+/// except the reader, so it always interrupts the read and never races another
+/// blocking call. Async-signal-safe: the handler only stores this flag.
+pub(crate) static WINCH: AtomicBool = AtomicBool::new(false);
 
 /// `NOOB_DOCK=0|false|off|no` opts out of the dock. Unset and every other
 /// value leave the default interactive driver enabled.
@@ -246,6 +258,15 @@ impl OutTracker {
 /// lone ESC is resolved by a single bounded poll: if no sequence tail
 /// arrives within the grace window, it was a human ESC press.
 fn reader(tx: SyncSender<Ev>) {
+    // SIGWINCH is blocked in every other thread (see `install_sigwinch_handler`),
+    // so unblock it here: this thread's blocking read is the one that must catch
+    // the resize as EINTR and turn it into a `Resize` event.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGWINCH);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+    }
     let mut dec = Decoder::default();
     let mut buf = [0u8; 1024];
     loop {
@@ -254,6 +275,12 @@ fn reader(tx: SyncSender<Ev>) {
         };
         if n < 0 {
             if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                // A terminal resize: reflow the prompt to the new width even
+                // while idle (the read that just unblocked was the only thing
+                // waiting). Checked first because a resize is the common EINTR.
+                if WINCH.swap(false, Ordering::SeqCst) && tx.send(Ev::Resize).is_err() {
+                    return;
+                }
                 // An external SIGINT (kill -INT; the keyboard's Ctrl-C is a
                 // byte in raw mode). The handler set the flag; surface it as
                 // the interrupt key so the loop reacts without a keystroke.
@@ -897,6 +924,10 @@ impl DockSession {
                     self.erase_dock(ui, drawn_r);
                     return;
                 }
+                // A resize just needs to wake the loop: the width re-check at the
+                // top of the next iteration erases and redraws the frame at the
+                // new width. Nothing to do here.
+                Ev::Resize => {}
             }
         }
     }

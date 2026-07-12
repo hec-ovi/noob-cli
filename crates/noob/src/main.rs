@@ -26,6 +26,7 @@ use ui::{Mode, Ui};
 
 fn main() -> ExitCode {
     install_sigint_handler();
+    install_sigwinch_handler();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--version") | Some("-V") => {
@@ -846,5 +847,30 @@ fn install_sigint_handler() {
         sa.sa_flags = 0;
         libc::sigemptyset(&mut sa.sa_mask);
         libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+    }
+}
+
+/// A terminal resize flips a flag the dock's stdin reader consumes on EINTR, so
+/// an idle prompt reflows its box to the new width without a keystroke. SIGWINCH
+/// is blocked in this (main) thread and therefore in every thread spawned after
+/// this call, so the only thread that can catch it is the reader, which unblocks
+/// it for itself: that guarantees the signal interrupts the read rather than
+/// racing an unrelated blocking call. Cheap and event-driven: no idle polling.
+fn install_sigwinch_handler() {
+    extern "C" fn on_sigwinch(_: libc::c_int) {
+        ui::WINCH.store(true, Ordering::SeqCst);
+    }
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = on_sigwinch as *const () as usize;
+        // No SA_RESTART: the reader's blocked read returns EINTR and injects the
+        // resize event instead of resuming as if nothing happened.
+        sa.sa_flags = 0;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGWINCH, &sa, std::ptr::null_mut());
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGWINCH);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
     }
 }

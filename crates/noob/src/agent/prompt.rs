@@ -172,6 +172,22 @@ mod tests {
     }
 
     #[test]
+    fn base_prompt_tells_the_agent_to_execute_the_plan_not_propose_it() {
+        // Guards the autonomy directive: local models were laying out a plan and
+        // waiting for approval, or asking where files are, instead of proceeding.
+        let b = BASE_MD.to_lowercase();
+        assert!(b.contains("carry it out"), "base.md must tell the agent to execute its plan");
+        assert!(
+            b.contains("do not stop to ask"),
+            "base.md must forbid stopping to ask for plan approval"
+        );
+        assert!(
+            b.contains("never ask the user for something you can find"),
+            "base.md must forbid asking for what the agent can discover itself"
+        );
+    }
+
+    #[test]
     fn agents_md_layers_append_in_order_global_then_project() {
         let mut i = inputs();
         i.global_agents = Some("be global".into());

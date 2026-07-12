@@ -250,6 +250,23 @@ impl Pty {
         vt
     }
 
+    /// Resize the pty (TIOCSWINSZ updates the winsize the child reads) and raise
+    /// SIGWINCH in the child. The child here is not a controlling-tty session
+    /// leader, so TIOCSWINSZ alone does not auto-deliver the signal the way a
+    /// real terminal does; sending it explicitly exercises noob's reflow path
+    /// against the freshly updated width. Used to prove the dock reflows without
+    /// a keystroke.
+    fn resize(&mut self, rows: u16, cols: u16) {
+        use std::os::fd::AsRawFd;
+        let ws = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
+        unsafe {
+            libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &ws);
+            if let Some(child) = &self.child {
+                libc::kill(child.id() as i32, libc::SIGWINCH);
+            }
+        }
+    }
+
     /// Wait for the child to exit and return its status, stopping the watchdog.
     fn finish(&mut self) -> std::process::ExitStatus {
         let status = self.child.take().unwrap().wait().unwrap();
@@ -1794,6 +1811,45 @@ fn dock_idle_input_is_a_persistent_framed_box() {
         "no bottom rule below the idle input:\n{}",
         screen.dump("idle")
     );
+}
+
+/// A terminal resize (SIGWINCH) reflows the idle box to the new width WITHOUT a
+/// keystroke. The dock reads the width once and then blocks on input, so without
+/// the signal the box would keep its startup width (the "first appearance width
+/// is wrong" report, seen when a Docker pty is sized a beat after noob starts)
+/// until the user typed. The box rules span the full terminal width, so their
+/// dash count tracks the resize.
+#[test]
+fn dock_idle_box_reflows_on_resize_without_a_keystroke() {
+    const ROWS: u16 = 12;
+
+    let rig = rig();
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, 50)), &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.drain(std::time::Duration::from_millis(300));
+
+    let rule_dashes = |pty: &Pty, cols: u16| -> usize {
+        let rows = pty.screen(ROWS, cols).render();
+        let marker = rows.iter().rposition(|r| r.contains(MARKER)).expect("idle box marker");
+        // The rule directly under the input row is the box bottom.
+        rows.get(marker + 1).map(|r| r.chars().filter(|&c| c == '─').count()).unwrap_or(0)
+    };
+
+    let narrow = rule_dashes(&pty, 50);
+    assert_eq!(narrow, 50, "the initial idle box rule should span the 50-col terminal");
+
+    // Resize wider with NO keystroke: SIGWINCH must reflow the box.
+    pty.resize(ROWS, 100);
+    pty.drain(std::time::Duration::from_millis(500));
+    let wide = rule_dashes(&pty, 100);
+    assert_eq!(wide, 100, "the idle box did not reflow to 100 cols on resize (SIGWINCH ignored)");
+
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
 }
 
 /// The same guarantee for logical lines LONGER than the terminal width, which

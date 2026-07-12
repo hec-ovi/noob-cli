@@ -28,6 +28,7 @@ mod table;
 mod theme;
 
 pub use dock::DockSession;
+pub(crate) use dock::WINCH;
 pub use prompt::Input;
 use style::{ColorDepth, DIM, RESET};
 use markdown::Markdown;
