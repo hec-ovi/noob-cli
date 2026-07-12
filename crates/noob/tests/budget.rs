@@ -15,7 +15,7 @@ const TOOLS_CEILING: usize = 940; // serialized wire tools array
 const TOTAL_CEILING: usize = 1500; // total fixed first-request overhead
 
 /// `with_skill` plants one skill in the workspace and `with_mcp` one
-/// configured server, so the artifact carries the FULL registered set (7
+/// configured server, so the artifact carries the FULL registered set (8
 /// core + skill + mcp_connect + mcp_call) plus the resolver section and the
 /// MCP line: the ceilings must hold with everything registered, not just
 /// the bare core.
@@ -69,7 +69,8 @@ fn no_output_cap_budget_and_phrasing() {
 
     // With no AGENTS.md, skills, or MCP, the system prompt IS the head.
     assert_eq!(system, head);
-    assert_eq!(artifact["tools"].as_array().unwrap().len(), 8);
+    // 8 core (7 file/shell + todo) + task.
+    assert_eq!(artifact["tools"].as_array().unwrap().len(), 9);
 
     let head_tokens = tokens(head);
     let tools_tokens = tokens(&tools);
@@ -104,9 +105,9 @@ fn no_output_cap_budget_and_phrasing() {
 }
 
 /// The ceilings hold for the full registered set: with a skill discovered
-/// and MCP configured the tools array grows to 11 (task, skill, the MCP pair),
-/// the system prompt gains the resolver section and the MCP line; the head
-/// itself must stay byte-identical.
+/// and MCP configured the tools array grows to 12 (8 core, task, skill, the
+/// MCP pair), the system prompt gains the resolver section and the MCP line;
+/// the head itself must stay byte-identical.
 #[test]
 fn budget_holds_with_everything_registered() {
     let artifact = debug_prompt(true, true);
@@ -114,7 +115,7 @@ fn budget_holds_with_everything_registered() {
     let head = artifact["head"].as_str().unwrap();
 
     let tools = artifact["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 11);
+    assert_eq!(tools.len(), 12);
     for name in ["skill", "mcp_connect", "mcp_call", "task"] {
         assert!(
             tools.iter().any(|t| t["function"]["name"] == name),
@@ -143,7 +144,7 @@ fn budget_holds_with_everything_registered() {
 fn tool_descriptions_stay_terse() {
     let artifact = debug_prompt(true, true);
     let tools = artifact["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 11);
+    assert_eq!(tools.len(), 12);
     for t in tools {
         let f = &t["function"];
         let desc = f["description"].as_str().unwrap();

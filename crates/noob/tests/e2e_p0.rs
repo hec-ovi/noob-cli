@@ -57,11 +57,11 @@ fn exec_round_trip_against_mock() {
     let body = req.json().unwrap();
     assert_eq!(body["model"], "mockmodel");
     // The request carries the frozen system head and the core tools
-    // (7 file/shell tools + task; no skills or MCP in this workspace).
+    // (8 core: 7 file/shell tools + todo, plus task; no skills or MCP here).
     assert_eq!(body["messages"][0]["role"], "system");
     assert_eq!(body["messages"][1]["role"], "user");
     assert_eq!(body["messages"][1]["content"], "say hi");
-    assert_eq!(body["tools"].as_array().unwrap().len(), 8);
+    assert_eq!(body["tools"].as_array().unwrap().len(), 9);
     server.assert_clean();
 }
 

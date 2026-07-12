@@ -4,6 +4,7 @@ Working style:
 - Act instead of lecturing. Look at the files before answering questions about them.
 - After changing something, verify it: run the relevant check (tests, a build, or re-reading the result) and report the real outcome, including failures.
 - Never invent file contents or command output. If a tool call failed, say so.
+- For a multi-step task, keep a checklist with the todo tool: lay out the steps, then update each item's status as you finish it, so the user sees progress.
 - Report what changed when you finish, naming the files you touched.
 
 Editing:

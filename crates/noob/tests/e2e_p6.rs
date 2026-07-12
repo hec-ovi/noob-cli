@@ -410,6 +410,6 @@ fn depth_cap_removes_the_task_schema() {
     assert!(out.status.success());
     let names = tool_names(&rig.api_requests()[0]);
     assert!(!names.contains(&"task".to_string()), "{names:?}");
-    assert_eq!(names.len(), 7, "the 7 core tools only");
+    assert_eq!(names.len(), 8, "the 8 core tools only (no task at the depth cap)");
     rig.server.assert_clean();
 }

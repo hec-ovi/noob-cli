@@ -485,6 +485,11 @@ impl Agent {
                     }
                     let call = &turn.tool_calls[index];
                     ui.tool_done(&call.id, &outcome.summary, outcome.is_error);
+                    // The todo tool's result is a checklist; show it as a
+                    // visible block on the themed REPL (a no-op elsewhere).
+                    if call.name == "todo" && !outcome.is_error {
+                        ui.checklist(&outcome.content);
+                    }
                 }
             });
             // Approvals belong to this one planned batch. Successful tools

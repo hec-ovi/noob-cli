@@ -11,6 +11,7 @@ pub mod ls;
 pub mod mcp;
 pub mod read;
 pub mod skill;
+pub mod todo;
 pub mod truncate;
 pub mod write;
 
@@ -22,6 +23,43 @@ use serde_json::{Value, json};
 
 use guard::{Sandbox, SeenFiles};
 use noob_provider::types::ToolSpec;
+
+/// One line of the agentic checklist the `todo` tool maintains. The model
+/// sends the whole list each call (overwrite semantics); the rendered list is
+/// the tool result, so every surface and the model see the same plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TodoItem {
+    pub content: String,
+    pub status: TodoStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+impl TodoStatus {
+    /// ASCII-safe status glyph, identical on every surface; the themed REPL
+    /// only recolors it, never changes the characters.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            TodoStatus::Completed => "[x]",
+            TodoStatus::InProgress => "[~]",
+            TodoStatus::Pending => "[ ]",
+        }
+    }
+
+    fn parse(s: &str) -> Option<TodoStatus> {
+        match s {
+            "pending" => Some(TodoStatus::Pending),
+            "in_progress" => Some(TodoStatus::InProgress),
+            "completed" => Some(TodoStatus::Completed),
+            _ => None,
+        }
+    }
+}
 
 /// Session-scoped state the tools share. Interior mutability because
 /// read-only tools run concurrently on scoped threads.
@@ -51,6 +89,9 @@ pub struct ToolCtx {
     /// Sub-agent settings; Some only when the task tool is registered
     /// (depth below the ceiling, full tool set). Set at bootstrap.
     pub task: Option<crate::task::TaskCfg>,
+    /// The agentic checklist the `todo` tool maintains for this session.
+    /// Overwritten wholesale on each `todo` call; starts empty.
+    pub todos: Mutex<Vec<TodoItem>>,
 }
 
 impl ToolCtx {
@@ -66,6 +107,7 @@ impl ToolCtx {
             approved_skill_writes: Mutex::new(std::collections::HashMap::new()),
             mcp: None,
             task: None,
+            todos: Mutex::new(Vec::new()),
         }
     }
 
@@ -174,6 +216,7 @@ pub fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
         "glob" => glob::run(ctx, args),
         "ls" => ls::run(ctx, args),
         "skill" => skill::run(ctx, args),
+        "todo" => todo::run(ctx, args),
         "mcp_connect" => mcp::run_connect(ctx, args),
         "mcp_call" => mcp::run_call(ctx, args),
         "task" => crate::task::run(ctx, args),
@@ -183,9 +226,10 @@ pub fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
     }
 }
 
-/// The 7 core tool schemas, registered at session start and byte-stable for
-/// the whole session. Descriptions <= 20 words each; the serialized array is
-/// budget-tested against the 940-token ceiling.
+/// The 8 core tool schemas, registered at session start and byte-stable for
+/// the whole session (both bootstrap sites start from this set). Descriptions
+/// <= 20 words each; the serialized array is budget-tested against the
+/// 940-token ceiling.
 pub fn specs() -> Vec<ToolSpec> {
     fn spec(name: &str, description: &str, parameters: Value) -> ToolSpec {
         ToolSpec {
@@ -254,6 +298,7 @@ pub fn specs() -> Vec<ToolSpec> {
                 "path": {"type": "string", "description": "default: working directory"}
             }}),
         ),
+        todo::spec(),
     ]
 }
 
@@ -337,15 +382,18 @@ mod tests {
         for t in ["read", "grep", "glob", "ls", "skill", "mcp_connect"] {
             assert!(is_read_only(t), "{t} must be read-only");
         }
-        for t in ["write", "edit", "bash", "mcp_call", "task"] {
+        // todo mutates shared state, so it is a sequential barrier, never a
+        // concurrent read-only call.
+        for t in ["write", "edit", "bash", "mcp_call", "task", "todo"] {
             assert!(!is_read_only(t), "{t} must be a barrier");
         }
     }
 
     #[test]
-    fn seven_core_specs_with_short_descriptions() {
+    fn eight_core_specs_with_short_descriptions() {
         let specs = specs();
-        assert_eq!(specs.len(), 7);
+        assert_eq!(specs.len(), 8);
+        assert!(specs.iter().any(|s| s.name == "todo"), "todo must be a core spec");
         for s in &specs {
             let words = s.description.split_whitespace().count();
             assert!(words <= 20, "{} description has {words} words", s.name);

@@ -125,7 +125,7 @@ fn mcp_line_and_tool_registration() {
     // Nothing was probed at session start: both URLs are dead ports and the
     // run still succeeded (lazy to the bone).
     let tools = reqs[0]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 10, "7 core + task + mcp_connect + mcp_call");
+    assert_eq!(tools.len(), 11, "8 core + task + mcp_connect + mcp_call");
     assert!(tools.iter().any(|t| t["function"]["name"] == "mcp_connect"));
     assert!(tools.iter().any(|t| t["function"]["name"] == "mcp_call"));
     rig.server.assert_clean();
@@ -139,7 +139,7 @@ fn no_mcp_config_means_no_line_and_no_tools() {
     let reqs = rig.api_requests();
     let system = reqs[0]["messages"][0]["content"].as_str().unwrap();
     assert!(!system.contains("MCP servers"));
-    assert_eq!(reqs[0]["tools"].as_array().unwrap().len(), 8);
+    assert_eq!(reqs[0]["tools"].as_array().unwrap().len(), 9);
     rig.server.assert_clean();
 }
 
@@ -277,7 +277,7 @@ fn broken_config_warns_and_project_overrides_global() {
     ok(&out);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("not valid JSON"), "stderr: {stderr}");
-    assert_eq!(rig.api_requests()[0]["tools"].as_array().unwrap().len(), 8);
+    assert_eq!(rig.api_requests()[0]["tools"].as_array().unwrap().len(), 9);
 
     // Second run: valid global + project override for the same name.
     rig.mcp_json(

@@ -164,7 +164,7 @@ fn plan_session_resume_restores_full_tools() {
     let reqs = rig.api_requests();
     assert_eq!(reqs.len(), 3);
     assert_eq!(tool_names(&reqs[0]), ["read", "grep", "glob", "ls"]);
-    assert_eq!(tool_names(&reqs[1]).len(), 8, "full set after resume");
+    assert_eq!(tool_names(&reqs[1]).len(), 9, "full set after resume");
     // The resumed request byte-extends the plan-mode transcript (the mock's
     // automatic prefix assertion saw no unsanctioned break), and the write
     // actually executed this time.
@@ -287,9 +287,9 @@ fn repl_plan_then_go_flow() {
     );
     let reqs = rig.api_requests();
     assert_eq!(reqs.len(), 4);
-    assert_eq!(tool_names(&reqs[0]).len(), 8, "normal turn: full set");
+    assert_eq!(tool_names(&reqs[0]).len(), 9, "normal turn: full set");
     assert_eq!(tool_names(&reqs[1]), ["read", "grep", "glob", "ls"]);
-    assert_eq!(tool_names(&reqs[2]).len(), 8, "after /go: full set");
+    assert_eq!(tool_names(&reqs[2]).len(), 9, "after /go: full set");
     // The approval message /go appends is the last user message before the
     // execution turn.
     let msgs = reqs[2]["messages"].as_array().unwrap();

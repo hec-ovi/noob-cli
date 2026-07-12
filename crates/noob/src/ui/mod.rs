@@ -63,6 +63,9 @@ pub(crate) enum TurnEvent {
     EndLine,
     ToolStart { id: String, name: String, brief: String, read_only: bool },
     ToolDone { id: String, summary: String, is_error: bool },
+    /// The `todo` tool's rendered checklist text (header + one glyph line per
+    /// item), for the themed REPL's visible block. Off the token path.
+    Todos(String),
     Note(String),
     Error(String),
     Done(Option<Usage>),
@@ -113,6 +116,7 @@ impl BufferedTurnRenderer {
             TurnEvent::ToolDone { id, summary, is_error } => {
                 self.ui.tool_done(&id, &summary, is_error);
             }
+            TurnEvent::Todos(text) => self.ui.render_checklist(&text),
             TurnEvent::Note(line) => self.ui.note(&line),
             TurnEvent::Error(line) => self.ui.error(&line),
             TurnEvent::Done(usage) => self.ui.done(usage),
@@ -557,6 +561,49 @@ impl Ui {
         }
     }
 
+    /// Show the `todo` tool's checklist as a visible block. `text` is the
+    /// tool's own plain result (header + one glyph line per item), the exact
+    /// bytes the model receives. On a dock turn it ships over the channel; the
+    /// main-thread renderer replays it through `render_checklist`.
+    pub fn checklist(&mut self, text: &str) {
+        if self.send_turn(TurnEvent::Todos(text.to_string())) {
+            return;
+        }
+        self.render_checklist(text);
+    }
+
+    /// Paint the checklist block on the themed REPL: completed and in-progress
+    /// lines in the activity accent, pending lines dim, the header in the note
+    /// hue, over the exact same characters. Every byte-identity surface (piped
+    /// REPL, exec, exec --json, child) shows nothing here on purpose: the tool
+    /// summary line and the transcript already carry the plan, so those
+    /// surfaces stay byte-for-byte what they were.
+    fn render_checklist(&mut self, text: &str) {
+        if !self.styled() {
+            return;
+        }
+        self.end_line();
+        // styled() implies a real depth, so every opener below is non-empty.
+        let activity = self.theme.activity.sgr(self.depth);
+        let note = self.theme.note.sgr(self.depth);
+        let mut block = String::new();
+        for line in text.lines() {
+            let safe = safe_terminal_text(line);
+            let open: &str = if safe.starts_with("[ ]") {
+                DIM
+            } else if safe.starts_with("[x]") || safe.starts_with("[~]") {
+                &activity
+            } else {
+                &note
+            };
+            block.push_str(open);
+            block.push_str(&safe);
+            block.push_str(RESET);
+            block.push('\n');
+        }
+        self.out(&block);
+    }
+
     /// Loop / lifecycle note ("cache prefix reset: compaction", nudges).
     pub fn note(&mut self, line: &str) {
         if self.send_turn(TurnEvent::Note(line.to_string())) {
@@ -916,6 +963,46 @@ mod tests {
         let (mut ui, out, _) = harness(Mode::Repl, false, false);
         ui.tool_done("id", "done", false);
         assert_eq!(out.text(), "* done\n");
+    }
+
+    #[test]
+    fn styled_checklist_shows_every_glyph_and_item() {
+        // The visible block: the header and each glyph line survive under the
+        // color, so a human reads the plan and its progress. Not "which green":
+        // the invariant is the content and glyphs are intact and each line
+        // resets so nothing bleeds.
+        let (mut ui, out, _) = harness(Mode::Repl, true, true);
+        let checklist = "plan (1/3 done):\n[x] research\n[~] build\n[ ] test";
+        ui.checklist(checklist);
+        let s = out.text();
+        let plain = strip_ansi(&s);
+        for line in ["plan (1/3 done):", "[x] research", "[~] build", "[ ] test"] {
+            assert!(plain.contains(line), "checklist line {line:?} missing from: {plain:?}");
+        }
+        assert!(s.contains('\x1b'), "themed checklist must carry styling");
+        assert_ne!(s, format!("{checklist}\n"), "styled block must differ from plain");
+        // Every opener is reset (paired escapes), so no color leaks past a line.
+        assert_eq!(s.matches("\x1b[0m").count() * 2, s.matches("\x1b[").count());
+    }
+
+    #[test]
+    fn checklist_is_silent_on_byte_identity_surfaces() {
+        // The block is a themed-REPL affordance only. Piped REPL, exec, JSON,
+        // and child must gain zero bytes here: the tool summary line and the
+        // transcript already carry the plan, so those surfaces stay identical.
+        let checklist = "plan (0/1 done):\n[ ] test";
+        for (label, mode, color, ansi) in [
+            ("no_color_repl", Mode::Repl, false, true), // NO_COLOR at a tty
+            ("piped_repl", Mode::Repl, false, false),   // piped
+            ("exec", Mode::Exec, true, true),           // exec, even at a color tty
+            ("exec_json", Mode::ExecJson, true, true),
+            ("child", Mode::Child, true, true),
+        ] {
+            let (mut ui, out, err) = harness(mode, color, ansi);
+            ui.checklist(checklist);
+            assert!(out.text().is_empty(), "{label} stdout gained checklist bytes");
+            assert!(err.text().is_empty(), "{label} stderr gained checklist bytes");
+        }
     }
 
     #[test]
