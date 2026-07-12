@@ -295,7 +295,7 @@ impl Vt {
         for (i, line) in self.render().iter().enumerate() {
             s.push_str(&format!("{i:>2}│{line}│\n"));
         }
-        s.push_str("└");
+        s.push('└');
         for _ in 0..self.cols + 5 {
             s.push('─');
         }
