@@ -116,7 +116,8 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
     // request (flag > env > .env) but is independent of base-url resolution,
     // so `debug prompt` and a live session print the identical head.
     let model = model_label(&config_dir, &ov);
-    let discovered = skills::discover(&workspace, &config_dir);
+    let skill_paths = config::skill_paths(&config_dir, &workspace);
+    let discovered = skills::discover(&workspace, &config_dir, &skill_paths);
     let (mcp_servers, mcp_warnings) = mcp::config::load(&workspace, &config_dir);
     for warning in &mcp_warnings {
         ui.note(&format!("mcp: {warning}"));
@@ -780,7 +781,8 @@ fn cmd_debug(args: &[String]) -> ExitCode {
     let model = model_label(&config_dir, &ov);
     // Same discovery as bootstrap: the printed artifact must match what a
     // real session sends, byte for byte.
-    let discovered = skills::discover(&workspace, &config_dir);
+    let skill_paths = config::skill_paths(&config_dir, &workspace);
+    let discovered = skills::discover(&workspace, &config_dir, &skill_paths);
     let (mcp_servers, mcp_warnings) = mcp::config::load(&workspace, &config_dir);
     for warning in &mcp_warnings {
         eprintln!("noob: mcp: {warning}");

@@ -1,5 +1,6 @@
 //! SKILL.md discovery and the L1 index (agentskills.io standard). Four
-//! discovery paths at session start, first hit per name wins; a hand-rolled
+//! discovery roots at session start plus any explicitly configured resolver
+//! paths (NOOB_SKILL_PATHS), first hit per name wins; a hand-rolled
 //! frontmatter scanner (plain scalars, quoted strings, `|`/`>` blocks);
 //! malformed skills are skipped with a stderr warning, never a crash.
 //! Level 2 (the `skill` tool) lives in tools/skill.rs; level 3 is plain read.
@@ -35,11 +36,22 @@ pub struct Skill {
     pub file: PathBuf,
 }
 
-/// Discovery at session start, first hit per NAME wins across the four
-/// roots in priority order; alphabetical within a root so the result is
-/// deterministic. A directory without SKILL.md is silently not a skill;
-/// a SKILL.md that fails to parse is skipped with a stderr warning.
-pub fn discover(workspace: &Path, config_dir: &Path) -> Vec<Skill> {
+/// Discovery at session start. First hit per NAME wins across the four
+/// default roots in priority order (alphabetical within a root so the result
+/// is deterministic), then across the explicitly configured resolver paths in
+/// the order they were listed. `extra_paths` are additional and lowest
+/// priority: a default-root skill wins a name clash against a configured one.
+/// A directory without SKILL.md is silently not a skill; a SKILL.md that fails
+/// to parse is skipped with a stderr warning.
+///
+/// Each `extra_paths` entry is treated as ONE skill directory, not a root:
+/// discovery registers a single Skill whose `dir` is that path and never
+/// recurses into it, so a dispatcher like `cli/SKILL.md` (whose body routes to
+/// `cli/skills/*` sub-skills via `read`) is indexed once and its sub-skills
+/// are not separately surfaced. The same guards as the default roots apply: a
+/// symlinked directory is skipped, and a symlinked/FIFO/special SKILL.md is
+/// rejected rather than opened.
+pub fn discover(workspace: &Path, config_dir: &Path, extra_paths: &[PathBuf]) -> Vec<Skill> {
     let roots = [
         workspace.join(".noob/skills"),
         workspace.join(".claude/skills"),
@@ -59,32 +71,51 @@ pub fn discover(workspace: &Path, config_dir: &Path) -> Vec<Skill> {
             .collect();
         dirs.sort();
         for dir in dirs {
-            let file = dir.join("SKILL.md");
-            let text = match read_frontmatter_file(&file) {
-                Ok(t) => t,
-                // No SKILL.md: not a skill dir, and not worth a warning.
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                // Present but unreadable (permissions, invalid UTF-8): the
-                // mandated stderr warning, not a silent disappearance.
-                Err(e) => {
-                    eprintln!("noob: skipping skill {}: cannot read: {e}", file.display());
-                    continue;
-                }
-            };
-            match parse(&text).and_then(|p| validate(&p.fields)) {
-                Ok((name, description)) => {
-                    if out.iter().any(|s| s.name == name) {
-                        continue; // shadowed by a higher-priority root
-                    }
-                    out.push(Skill { name, description, dir, file });
-                }
-                Err(reason) => {
-                    eprintln!("noob: skipping skill {}: {reason}", file.display());
-                }
-            }
+            register_skill(dir, &mut out);
+        }
+    }
+    // Explicitly configured resolver paths, in listed order, after the default
+    // roots. Each entry is a single skill directory; a symlinked directory is
+    // skipped, mirroring the symlink-aware `is_dir()` guard the roots get from
+    // read_dir's non-following file type.
+    for dir in extra_paths {
+        match std::fs::symlink_metadata(dir) {
+            Ok(meta) if meta.file_type().is_dir() => register_skill(dir.clone(), &mut out),
+            _ => continue,
         }
     }
     out
+}
+
+/// Register the skill at `dir` (from `dir/SKILL.md`) into `out`, or skip it:
+/// silently if there is no SKILL.md, with a stderr warning if the file is
+/// present but unreadable/unparseable, and not at all if a skill of the same
+/// name was already registered by a higher-priority location (first wins).
+fn register_skill(dir: PathBuf, out: &mut Vec<Skill>) {
+    let file = dir.join("SKILL.md");
+    let text = match read_frontmatter_file(&file) {
+        Ok(t) => t,
+        // No SKILL.md: not a skill dir, and not worth a warning.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        // Present but unreadable (permissions, invalid UTF-8, a symlink or
+        // FIFO in place of a regular file): the mandated stderr warning, not a
+        // silent disappearance.
+        Err(e) => {
+            eprintln!("noob: skipping skill {}: cannot read: {e}", file.display());
+            return;
+        }
+    };
+    match parse(&text).and_then(|p| validate(&p.fields)) {
+        Ok((name, description)) => {
+            if out.iter().any(|s| s.name == name) {
+                return; // shadowed by a higher-priority location
+            }
+            out.push(Skill { name, description, dir, file });
+        }
+        Err(reason) => {
+            eprintln!("noob: skipping skill {}: {reason}", file.display());
+        }
+    }
 }
 
 /// The L1 index: one `- name: description` line per skill (description
@@ -830,7 +861,7 @@ mod tests {
         std::fs::create_dir_all(root.join("binary")).unwrap();
         let mut f = std::fs::File::create(root.join("binary/SKILL.md")).unwrap();
         f.write_all(&[0xff, 0xfe, 0x00, 0x80]).unwrap();
-        let skills = discover(ws.path(), cfg.path());
+        let skills = discover(ws.path(), cfg.path(), &[]);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "good");
     }
@@ -903,7 +934,7 @@ mod tests {
         );
         // It is now discoverable.
         let cfg = tempfile::tempdir().unwrap();
-        assert!(discover(ws.path(), cfg.path()).iter().any(|s| s.name == "installed"));
+        assert!(discover(ws.path(), cfg.path(), &[]).iter().any(|s| s.name == "installed"));
     }
 
     #[test]
@@ -952,7 +983,7 @@ mod tests {
         let fifo = fifo_dir.join("SKILL.md");
         let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
-        assert!(discover(ws.path(), cfg.path()).is_empty());
+        assert!(discover(ws.path(), cfg.path(), &[]).is_empty());
         let err = install(ws.path(), fifo_dir.to_str().unwrap()).unwrap_err();
         assert!(err.contains("regular non-symlink"), "{err}");
 
@@ -1000,7 +1031,7 @@ mod tests {
         write_skill(&ws.path().join(".claude/skills"), "b", &skill_md("beta", "from claude"));
         write_skill(&ws.path().join(".agents/skills"), "c", &skill_md("gamma", "from agents"));
         write_skill(&cfg.path().join("skills"), "d", &skill_md("delta", "from config"));
-        let skills = discover(ws.path(), cfg.path());
+        let skills = discover(ws.path(), cfg.path(), &[]);
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["alpha", "beta", "gamma", "delta"]);
     }
@@ -1011,7 +1042,7 @@ mod tests {
         let cfg = tempfile::tempdir().unwrap();
         write_skill(&ws.path().join(".noob/skills"), "s", &skill_md("dup", "project wins"));
         write_skill(&cfg.path().join("skills"), "s", &skill_md("dup", "global loses"));
-        let skills = discover(ws.path(), cfg.path());
+        let skills = discover(ws.path(), cfg.path(), &[]);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].description, "project wins");
         assert!(skills[0].dir.starts_with(ws.path()));
@@ -1026,7 +1057,7 @@ mod tests {
         write_skill(&root, "good", &skill_md("good", "works"));
         // A directory without SKILL.md is not a skill and not a warning.
         std::fs::create_dir_all(root.join("not-a-skill")).unwrap();
-        let skills = discover(ws.path(), cfg.path());
+        let skills = discover(ws.path(), cfg.path(), &[]);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "good");
     }
@@ -1038,11 +1069,118 @@ mod tests {
         let root = ws.path().join(".noob/skills");
         write_skill(&root, "zeta-dir", &skill_md("zeta", "z"));
         write_skill(&root, "alpha-dir", &skill_md("alpha", "a"));
-        let names: Vec<String> = discover(ws.path(), cfg.path())
+        let names: Vec<String> = discover(ws.path(), cfg.path(), &[])
             .into_iter()
             .map(|s| s.name)
             .collect();
         assert_eq!(names, ["alpha", "zeta"]);
+    }
+
+    // --- configured resolver paths (NOOB_SKILL_PATHS) ---
+
+    #[test]
+    fn configured_path_registers_one_resolver_skill_not_its_sub_skills() {
+        let ws = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        // A censurado-style dispatcher at a non-root path: `cli/SKILL.md`
+        // routes to sub-skills under `cli/skills/*/SKILL.md`.
+        write_skill(ws.path(), "cli", &skill_md("censurado", "dispatcher that routes verbs"));
+        write_skill(&ws.path().join("cli/skills"), "walk", &skill_md("walk", "sub-skill a"));
+        write_skill(&ws.path().join("cli/skills"), "build", &skill_md("build", "sub-skill b"));
+
+        let extra = vec![ws.path().join("cli")];
+        let skills = discover(ws.path(), cfg.path(), &extra);
+
+        // Exactly one skill: the dispatcher, named from its frontmatter, with
+        // `dir` pointing at the configured path. Sub-skills are NOT indexed
+        // (the dispatcher loads them by `read`).
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "censurado");
+        assert_eq!(skills[0].dir, ws.path().join("cli"));
+        assert_eq!(skills[0].file, ws.path().join("cli/SKILL.md"));
+        assert!(!skills.iter().any(|s| s.name == "walk" || s.name == "build"));
+    }
+
+    #[test]
+    fn configured_paths_coexist_with_default_roots_after_them() {
+        let ws = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        write_skill(&ws.path().join(".noob/skills"), "foo-dir", &skill_md("foo", "a default root"));
+        write_skill(ws.path(), "cli", &skill_md("censurado", "a configured resolver"));
+
+        let extra = vec![ws.path().join("cli")];
+        let skills = discover(ws.path(), cfg.path(), &extra);
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        // Both present; configured paths come after the four default roots.
+        assert_eq!(names, ["foo", "censurado"]);
+    }
+
+    #[test]
+    fn default_roots_win_a_name_clash_against_configured_paths() {
+        let ws = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        write_skill(&ws.path().join(".noob/skills"), "dup-dir", &skill_md("dup", "default wins"));
+        write_skill(ws.path(), "cli", &skill_md("dup", "configured loses"));
+
+        let extra = vec![ws.path().join("cli")];
+        let skills = discover(ws.path(), cfg.path(), &extra);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].description, "default wins");
+        assert!(skills[0].dir.starts_with(ws.path().join(".noob/skills")));
+    }
+
+    #[test]
+    fn configured_path_rejects_symlinked_or_special_skill_md() {
+        use std::os::unix::fs::symlink;
+
+        let ws = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+
+        // A symlinked SKILL.md at the configured dir is rejected, same as the
+        // default roots reject one (the file must be a regular non-symlink).
+        let cli = ws.path().join("cli");
+        std::fs::create_dir_all(&cli).unwrap();
+        let real = ws.path().join("real-SKILL.md");
+        std::fs::write(&real, skill_md("censurado", "d")).unwrap();
+        symlink(&real, cli.join("SKILL.md")).unwrap();
+        assert!(discover(ws.path(), cfg.path(), std::slice::from_ref(&cli)).is_empty());
+
+        // A FIFO in place of SKILL.md is likewise refused without opening it.
+        let fifo_dir = ws.path().join("fifo-cli");
+        std::fs::create_dir_all(&fifo_dir).unwrap();
+        let fifo = fifo_dir.join("SKILL.md");
+        let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        assert!(discover(ws.path(), cfg.path(), &[fifo_dir]).is_empty());
+    }
+
+    #[test]
+    fn configured_path_that_is_a_symlinked_directory_is_skipped() {
+        use std::os::unix::fs::symlink;
+
+        let ws = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        // A real skill dir, and a symlink pointing at it. Configuring the
+        // symlink (not the real dir) is refused: a mounted workspace cannot
+        // smuggle a skill in via a directory symlink.
+        write_skill(ws.path(), "real-cli", &skill_md("censurado", "d"));
+        let linked = ws.path().join("linked-cli");
+        symlink(ws.path().join("real-cli"), &linked).unwrap();
+        assert!(discover(ws.path(), cfg.path(), &[linked]).is_empty());
+        // The real directory still resolves, proving only the symlink is the issue.
+        let real = vec![ws.path().join("real-cli")];
+        assert_eq!(discover(ws.path(), cfg.path(), &real).len(), 1);
+    }
+
+    #[test]
+    fn configured_path_without_a_skill_md_is_silently_not_a_skill() {
+        let ws = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        // A plain directory (no SKILL.md) and a nonexistent path: neither is a
+        // skill and neither aborts discovery.
+        std::fs::create_dir_all(ws.path().join("cli")).unwrap();
+        let extra = vec![ws.path().join("cli"), ws.path().join("does-not-exist")];
+        assert!(discover(ws.path(), cfg.path(), &extra).is_empty());
     }
 
     // --- index ---

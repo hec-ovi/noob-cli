@@ -225,7 +225,10 @@ impl Agent {
     /// (the `skill` tool also rejects it structurally). Returns (added,
     /// removed) names for the caller's summary line.
     pub fn reload_skills(&mut self, ui: &mut Ui) -> (Vec<String>, Vec<String>) {
-        let fresh = crate::skills::discover(&self.tool_ctx.workspace, &self.config_dir);
+        let skill_paths =
+            crate::config::skill_paths(&self.config_dir, &self.tool_ctx.workspace);
+        let fresh =
+            crate::skills::discover(&self.tool_ctx.workspace, &self.config_dir, &skill_paths);
         let old: std::collections::HashSet<&str> =
             self.tool_ctx.skills.iter().map(|s| s.name.as_str()).collect();
         let new: std::collections::HashSet<&str> =

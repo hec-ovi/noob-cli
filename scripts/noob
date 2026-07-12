@@ -40,6 +40,7 @@ forward=(
     NOOB_THEME NOOB_DOCK NOOB_RAW NOOB_AUTODETECT
     NOOB_BASE_URL NOOB_MODEL NOOB_API_STYLE NOOB_CTX
     NOOB_TASK_CONCURRENCY NOOB_TASK_MAX_TURNS NOOB_TASK_WALL_CLOCK_S
+    NOOB_SKILL_PATHS
     WEBSEARCH_SEARXNG_URL
     HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY
     http_proxy https_proxy no_proxy all_proxy
@@ -49,5 +50,22 @@ for name in "${forward[@]}"; do
         args+=(--env "$name")
     fi
 done
+
+# Opt-in workflow env passthrough. A workflow skill (e.g. the censurado
+# dispatcher) may need its own variable, like CENSURADO_WORK (its gated-walk
+# scratch dir), to reach bash inside the container. NOOB_ENV is a
+# comma-separated ALLOWLIST of extra variable NAMES to forward; only names you
+# list and that are actually set are forwarded, so the host env is never
+# forwarded wholesale and isolation is not broadened. Example:
+#   NOOB_ENV=CENSURADO_WORK CENSURADO_WORK=/work/.censurado noob
+if [[ -n "${NOOB_ENV:-}" ]]; then
+    IFS=',' read -ra extra_env <<<"$NOOB_ENV"
+    for name in "${extra_env[@]}"; do
+        name="${name//[[:space:]]/}"   # tolerate "A, B" spacing
+        if [[ -n "$name" && -v "$name" ]]; then
+            args+=(--env "$name")
+        fi
+    done
+fi
 
 exec docker "${args[@]}" "$image" "$@"

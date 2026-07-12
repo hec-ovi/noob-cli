@@ -44,6 +44,33 @@ pub fn setting(config_dir: &Path, key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// NOOB_SKILL_PATHS: extra resolver/dispatcher skill directories to index, on
+/// top of the four default roots. Colon-separated (PATH style). Each entry is
+/// resolved against the workspace, so `cli` means `<workspace>/cli`; an
+/// absolute entry is used as-is. Every entry points at ONE skill directory
+/// (the dir must contain a `SKILL.md`); discovery does not scan it as a root.
+/// Empty/whitespace entries are ignored. Order is preserved. This lets the
+/// agent pick up a workflow skill that lives at a non-root path inside the
+/// mounted workspace (e.g. a `cli/SKILL.md` dispatcher) without copying it
+/// into a discovery root.
+pub fn skill_paths(config_dir: &Path, workspace: &Path) -> Vec<PathBuf> {
+    let Some(raw) = setting(config_dir, "NOOB_SKILL_PATHS") else {
+        return Vec::new();
+    };
+    raw.split(':')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let p = Path::new(entry);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                workspace.join(p)
+            }
+        })
+        .collect()
+}
+
 /// NOOB_CTX: the context window compaction budgets against.
 pub fn ctx_tokens(config_dir: &Path) -> u64 {
     setting(config_dir, "NOOB_CTX")
@@ -151,6 +178,32 @@ mod tests {
         assert_eq!(ctx_tokens(tmp.path()), 131_072);
         std::fs::write(tmp.path().join(".env"), "NOOB_CTX=100\n").unwrap();
         assert_eq!(ctx_tokens(tmp.path()), 131_072);
+    }
+
+    #[test]
+    fn skill_paths_split_on_colon_and_resolve_against_workspace() {
+        let cfg = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        // Unset: no extra paths.
+        assert!(skill_paths(cfg.path(), ws.path()).is_empty());
+        // Relative entries resolve against the workspace; an absolute entry is
+        // kept as-is; order is preserved.
+        std::fs::write(
+            cfg.path().join(".env"),
+            "NOOB_SKILL_PATHS=cli:tools/agent:/opt/shared/skill\n",
+        )
+        .unwrap();
+        assert_eq!(
+            skill_paths(cfg.path(), ws.path()),
+            vec![
+                ws.path().join("cli"),
+                ws.path().join("tools/agent"),
+                PathBuf::from("/opt/shared/skill"),
+            ]
+        );
+        // Empty and whitespace-only entries are ignored.
+        std::fs::write(cfg.path().join(".env"), "NOOB_SKILL_PATHS=: cli : :\n").unwrap();
+        assert_eq!(skill_paths(cfg.path(), ws.path()), vec![ws.path().join("cli")]);
     }
 
     #[test]
