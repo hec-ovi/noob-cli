@@ -144,9 +144,9 @@ fn child_tool_sets_by_mode_and_depth() {
     let reqs = rig.api_requests();
     let depth1 = tool_names(&reqs[0]);
     let depth2 = tool_names(&reqs[1]);
-    assert!(depth1.contains(&"task".to_string()), "depth 1 may spawn: {depth1:?}");
+    assert!(depth1.contains(&"subagent".to_string()), "depth 1 may spawn: {depth1:?}");
     assert!(depth1.contains(&"bash".to_string()));
-    assert!(!depth2.contains(&"task".to_string()), "depth 2 must not spawn: {depth2:?}");
+    assert!(!depth2.contains(&"subagent".to_string()), "depth 2 must not spawn: {depth2:?}");
     assert!(depth2.contains(&"bash".to_string()));
     rig.server.assert_clean();
 }
@@ -233,9 +233,9 @@ fn child_fanout() {
     rig.server.allow_interleaving();
     rig.server.enqueue_stream_toolcalls(
         &[
-            ("f1", "task", r#"{"prompt":"helper alpha"}"#),
-            ("f2", "task", r#"{"prompt":"helper beta"}"#),
-            ("f3", "task", r#"{"prompt":"helper gamma"}"#),
+            ("f1", "subagent", r#"{"prompt":"helper alpha"}"#),
+            ("f2", "subagent", r#"{"prompt":"helper beta"}"#),
+            ("f3", "subagent", r#"{"prompt":"helper gamma"}"#),
         ],
         None,
     );
@@ -295,9 +295,9 @@ fn fanout_panel_is_absent_on_the_exec_surface() {
     rig.server.allow_interleaving();
     rig.server.enqueue_stream_toolcalls(
         &[
-            ("f1", "task", r#"{"prompt":"helper alpha"}"#),
-            ("f2", "task", r#"{"prompt":"helper beta"}"#),
-            ("f3", "task", r#"{"prompt":"helper gamma"}"#),
+            ("f1", "subagent", r#"{"prompt":"helper alpha"}"#),
+            ("f2", "subagent", r#"{"prompt":"helper beta"}"#),
+            ("f3", "subagent", r#"{"prompt":"helper gamma"}"#),
         ],
         None,
     );
@@ -314,9 +314,9 @@ fn fanout_panel_is_absent_on_the_exec_surface() {
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     // The classic per-task lines are intact for every agent.
-    assert!(stderr.contains("* task helper alpha"), "missing start line:\n{stderr}");
-    assert!(stderr.contains("* task helper beta"), "missing start line:\n{stderr}");
-    assert!(stderr.contains("* task helper gamma"), "missing start line:\n{stderr}");
+    assert!(stderr.contains("* subagent helper alpha"), "missing start line:\n{stderr}");
+    assert!(stderr.contains("* subagent helper beta"), "missing start line:\n{stderr}");
+    assert!(stderr.contains("* subagent helper gamma"), "missing start line:\n{stderr}");
     assert!(stderr.contains("* task done (1 turns)"), "missing completion line:\n{stderr}");
     // None of the panel bytes reach a headless surface.
     assert!(!stderr.contains("agents ("), "the panel header leaked into exec:\n{stderr}");
@@ -339,9 +339,9 @@ fn fanout_respects_the_concurrency_cap() {
     rig.server.allow_interleaving();
     rig.server.enqueue_stream_toolcalls(
         &[
-            ("c1", "task", r#"{"prompt":"helper one"}"#),
-            ("c2", "task", r#"{"prompt":"helper two"}"#),
-            ("c3", "task", r#"{"prompt":"helper three"}"#),
+            ("c1", "subagent", r#"{"prompt":"helper one"}"#),
+            ("c2", "subagent", r#"{"prompt":"helper two"}"#),
+            ("c3", "subagent", r#"{"prompt":"helper three"}"#),
         ],
         None,
     );
@@ -404,7 +404,7 @@ fn task_wall_clock_kills_a_wedged_child() {
     let rig = rig();
     rig.server.allow_interleaving();
     rig.server
-        .enqueue_stream_toolcalls(&[("w1", "task", r#"{"prompt":"never finishes"}"#)], None);
+        .enqueue_stream_toolcalls(&[("w1", "subagent", r#"{"prompt":"never finishes"}"#)], None);
     // The child's model response never arrives within its watchdog window;
     // the PARENT's 1s wall clock fires first and kills the child.
     rig.server.enqueue_raw(vec![
@@ -455,7 +455,7 @@ fn depth_cap_removes_the_task_schema() {
         .unwrap();
     assert!(out.status.success());
     let names = tool_names(&rig.api_requests()[0]);
-    assert!(!names.contains(&"task".to_string()), "{names:?}");
+    assert!(!names.contains(&"subagent".to_string()), "{names:?}");
     assert_eq!(names.len(), 8, "the 8 core tools only (no task at the depth cap)");
     rig.server.assert_clean();
 }

@@ -85,7 +85,7 @@ pub fn task_concurrency(config_dir: &Path) -> usize {
     setting(config_dir, "NOOB_TASK_CONCURRENCY")
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|&n| n >= 1)
-        .unwrap_or(crate::task::DEFAULT_CONCURRENCY)
+        .unwrap_or(crate::subagent::DEFAULT_CONCURRENCY)
         .min(16)
 }
 
@@ -95,7 +95,7 @@ pub fn task_max_turns(config_dir: &Path) -> u32 {
     setting(config_dir, "NOOB_TASK_MAX_TURNS")
         .and_then(|v| v.trim().parse::<u32>().ok())
         .filter(|&n| n >= 1)
-        .unwrap_or(crate::task::DEFAULT_MAX_TURNS)
+        .unwrap_or(crate::subagent::DEFAULT_MAX_TURNS)
         .min(50)
 }
 
@@ -105,7 +105,7 @@ pub fn task_wall_clock(config_dir: &Path) -> std::time::Duration {
     let secs = setting(config_dir, "NOOB_TASK_WALL_CLOCK_S")
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|&n| n >= 1)
-        .unwrap_or(crate::task::DEFAULT_WALL_CLOCK_S)
+        .unwrap_or(crate::subagent::DEFAULT_WALL_CLOCK_S)
         .min(3_600);
     std::time::Duration::from_secs(secs)
 }

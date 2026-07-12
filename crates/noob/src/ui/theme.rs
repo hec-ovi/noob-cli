@@ -215,7 +215,7 @@ impl Theme {
             "bash" => 4,
             "edit" => 5,
             "write" => 6,
-            "task" => 7,
+            "subagent" => 7,
             "skill" => 8,
             "mcp" | "mcp_call" | "mcp_connect" => 9,
             other => (fnv1a(other) % self.activity_palette.len() as u64) as usize,
@@ -280,7 +280,7 @@ mod tests {
         let t = Theme::matrix();
         // The contract is not "which green": it is that each core tool reads as
         // its own color, so distinct tools must not collide on one hue.
-        let core = ["read", "grep", "glob", "ls", "bash", "edit", "write", "task", "skill", "mcp"];
+        let core = ["read", "grep", "glob", "ls", "bash", "edit", "write", "subagent", "skill", "mcp"];
         for (i, a) in core.iter().enumerate() {
             for b in &core[i + 1..] {
                 assert_ne!(

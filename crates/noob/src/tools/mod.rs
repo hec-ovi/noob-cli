@@ -88,7 +88,7 @@ pub struct ToolCtx {
     pub mcp: Option<crate::mcp::Mcp>,
     /// Sub-agent settings; Some only when the task tool is registered
     /// (depth below the ceiling, full tool set). Set at bootstrap.
-    pub task: Option<crate::task::TaskCfg>,
+    pub task: Option<crate::subagent::TaskCfg>,
     /// The agentic checklist the `todo` tool maintains for this session.
     /// Overwritten wholesale on each `todo` call; starts empty.
     pub todos: Mutex<Vec<TodoItem>>,
@@ -219,7 +219,7 @@ pub fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
         "todo" => todo::run(ctx, args),
         "mcp_connect" => mcp::run_connect(ctx, args),
         "mcp_call" => mcp::run_call(ctx, args),
-        "task" => crate::task::run(ctx, args),
+        "subagent" => crate::subagent::run(ctx, args),
         other => ToolOutcome::err(format!(
             "unknown tool {other:?}; the available tools are listed in your tool schemas"
         )),
@@ -384,7 +384,7 @@ mod tests {
         }
         // todo mutates shared state, so it is a sequential barrier, never a
         // concurrent read-only call.
-        for t in ["write", "edit", "bash", "mcp_call", "task", "todo"] {
+        for t in ["write", "edit", "bash", "mcp_call", "subagent", "todo"] {
             assert!(!is_read_only(t), "{t} must be a barrier");
         }
     }

@@ -997,7 +997,7 @@ fn replay_result_digest(content: &str) -> String {
 pub(crate) fn brief_args(name: &str, args: &Value) -> String {
     let s = match name {
         "bash" => args.get("cmd").and_then(Value::as_str).unwrap_or(""),
-        "task" => args.get("prompt").and_then(Value::as_str).unwrap_or(""),
+        "subagent" => args.get("prompt").and_then(Value::as_str).unwrap_or(""),
         _ => args
             .get("path")
             .or_else(|| args.get("pattern"))
@@ -1344,7 +1344,7 @@ mod tests {
             "agents (0/1 done, up to 4 at once):\n[~] agent 1: solo",
             &["f1".to_string()],
         );
-        ui.tool_start("f1", "task", "some prompt", false); // covered: suppressed
+        ui.tool_start("f1", "subagent", "some prompt", false); // covered: suppressed
         ui.tool_done("f1", "task done (2 turns)", false); //  covered: suppressed
         ui.tool_done("b", "ls . (3 entries)", false); //      unrelated: shown
         let plain = strip_ansi(&out.text());
@@ -1354,17 +1354,17 @@ mod tests {
     }
 
     #[test]
-    fn piped_task_lines_are_unchanged_when_a_panel_is_emitted() {
+    fn piped_subagent_lines_are_unchanged_when_a_panel_is_emitted() {
         // Byte-identity guard: on a piped REPL the panel emits nothing and the
-        // task calls render the exact `* task ...` lines they always did.
+        // subagent calls render their plain `* subagent ...` / summary lines.
         let (mut ui, out, _) = harness(Mode::Repl, false, false);
         ui.agents(
             "agents (0/2 done, up to 4 at once):\n[~] agent 1: a\n[~] agent 2: b",
             &["f1".to_string(), "f2".to_string()],
         );
-        ui.tool_start("f1", "task", "helper a", false);
+        ui.tool_start("f1", "subagent", "helper a", false);
         ui.tool_done("f1", "task done (3 turns)", false);
-        assert_eq!(out.text(), "* task helper a\n* task done (3 turns)\n");
+        assert_eq!(out.text(), "* subagent helper a\n* task done (3 turns)\n");
     }
 
     #[test]

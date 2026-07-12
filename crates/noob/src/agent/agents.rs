@@ -69,12 +69,12 @@ impl Panels {
         let mut groups: Vec<Group> = Vec::new();
         let mut i = 0;
         while i < calls.len() {
-            if calls[i].name != "task" {
+            if calls[i].name != "subagent" {
                 i += 1;
                 continue;
             }
             let start = i;
-            while i < calls.len() && calls[i].name == "task" {
+            while i < calls.len() && calls[i].name == "subagent" {
                 i += 1;
             }
             if i - start < 2 {
@@ -211,7 +211,7 @@ mod tests {
     fn task(id: &str, prompt: &str) -> ToolCall {
         ToolCall {
             id: id.into(),
-            name: "task".into(),
+            name: "subagent".into(),
             arguments: json!({ "prompt": prompt }).to_string(),
         }
     }

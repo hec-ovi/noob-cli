@@ -1,4 +1,4 @@
-//! Multi-agent (P6): the `task` tool spawns the binary itself
+//! Multi-agent (P6): the `subagent` tool spawns the binary itself
 //! (`current_exe() child`). The process boundary is the context boundary:
 //! the payload goes to the child's stdin as one JSON object, exactly one
 //! JSON result line comes back on stdout, progress flows on stderr, and
@@ -19,7 +19,7 @@ use noob_provider::types::ToolSpec;
 use crate::tools::{ToolCtx, ToolOutcome, need_str, opt_str, opt_u64};
 
 /// Recursion ceiling: depth 0 (the user's agent) and depth 1 children may
-/// spawn; at depth 2 the task tool is simply not registered.
+/// spawn; at depth 2 the subagent tool is simply not registered.
 pub const MAX_DEPTH: u32 = 2;
 pub const DEFAULT_CONCURRENCY: usize = 4;
 pub const DEFAULT_MAX_TURNS: u32 = 25;
@@ -38,15 +38,15 @@ pub struct TaskCfg {
     pub concurrency: usize,
     pub max_turns: u32,
     pub wall_clock: Duration,
-    /// Surface bounded child stderr as `[task] ...` after the child exits.
+    /// Surface bounded child stderr as `[subagent] ...` after the child exits.
     pub verbose: bool,
 }
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
-        name: "task".to_string(),
-        description: "Spawn a sub-agent with a fresh context; it works alone and returns \
-                      one result message."
+        name: "subagent".to_string(),
+        description: "Spawn an independent sub-agent with its own context and tools that returns \
+                      one result; call several times to fan out."
             .to_string(),
         parameters: json!({"type": "object", "properties": {
             "prompt": {"type": "string", "description": "complete standalone instructions"},
@@ -325,7 +325,7 @@ fn with_progress(mut outcome: ToolOutcome, verbose: bool, progress: String) -> T
         outcome.warning = Some(
             progress
                 .lines()
-                .map(|line| format!("[task] {line}"))
+                .map(|line| format!("[subagent] {line}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
@@ -390,7 +390,7 @@ mod tests {
 
         let out = with_progress(ToolOutcome::ok("done", "task done"), true, progress);
         let warning = out.warning.unwrap();
-        assert!(warning.starts_with("[task] "));
+        assert!(warning.starts_with("[subagent] "));
         assert!(warning.contains("123 bytes omitted"));
     }
 

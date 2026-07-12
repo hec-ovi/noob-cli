@@ -1176,9 +1176,9 @@ fn dock_renders_a_multi_agent_fanout_panel() {
     rig.server.allow_interleaving();
     rig.server.enqueue_stream_toolcalls(
         &[
-            ("f1", "task", r#"{"prompt":"Read the article at http://x/ALPHATAIL"}"#),
-            ("f2", "task", r#"{"prompt":"Read the article at http://x/BETATAIL"}"#),
-            ("f3", "task", r#"{"prompt":"Read the article at http://x/GAMMATAIL"}"#),
+            ("f1", "subagent", r#"{"prompt":"Read the article at http://x/ALPHATAIL"}"#),
+            ("f2", "subagent", r#"{"prompt":"Read the article at http://x/BETATAIL"}"#),
+            ("f3", "subagent", r#"{"prompt":"Read the article at http://x/GAMMATAIL"}"#),
         ],
         None,
     );

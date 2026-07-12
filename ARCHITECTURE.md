@@ -120,7 +120,7 @@ The user-facing agent permits at most 50 inference rounds per input. Doom-loop c
 The scheduler partitions one assistant tool batch in emission order:
 
 - Consecutive read-only calls run on scoped threads, up to eight at once.
-- Consecutive `task` calls form one fan-out group limited by child concurrency.
+- Consecutive `subagent` calls form one fan-out group limited by child concurrency.
 - Every other mutation is a sequential barrier.
 - Results are returned and appended in emission order.
 - Start events are emitted immediately before real execution.
@@ -145,7 +145,7 @@ The head and recent tail stay verbatim, and call/result pairs are never split. A
 
 ## Tools and bounded I/O
 
-The core tools are `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, and `todo`. Conditional tools are `skill`, `mcp_connect`, `mcp_call`, and `task`.
+The core tools are `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, and `todo`. Conditional tools are `skill`, `mcp_connect`, `mcp_call`, and `subagent`.
 
 Important mechanics:
 
@@ -204,7 +204,7 @@ Server catalogs and results are wrapped as untrusted content before transcript i
 
 ## Child agents
 
-The `task` tool spawns `current_exe() child` with a JSON task on stdin. The child gets a fresh prompt and no parent history. It writes progress to stderr and exactly one JSON result line to stdout. Only the result field enters the parent transcript.
+The `subagent` tool spawns `current_exe() child` with a JSON task on stdin. The child gets a fresh prompt and no parent history. It writes progress to stderr and exactly one JSON result line to stdout. Only the result field enters the parent transcript.
 
 Defaults are four concurrent children, 25 rounds, 300 seconds, and recursion depth two. The parent starts the wall clock before sending the task. Child stdin is nonblocking and cancellation-aware, the final result line is read without an output-length cap, and optional progress retention is bounded at 64 KiB while both streams continue to drain.
 
@@ -237,7 +237,7 @@ Reader loss is an ordering barrier. Keys accepted before EOF are processed first
 
 Assistant Markdown is parsed only for the interactive REPL. The line-streaming renderer supports headings, emphasis, code spans, lists, quotes, fenced code, JSON accents, and GFM-style tables. Tables switch to stacked records on narrow terminals and size their cells by terminal display width so wide glyphs keep the borders aligned. Parser buffers are bounded, but overflow degrades to literal streaming and never drops model output.
 
-Two display-only artifacts reuse the checklist glyphs: the `todo` tool's `[x]`/`[~]`/`[ ]` plan, and an agents panel that folds a `task` fan-out of two or more parallel sub-agents into one checklist with per-agent status, a one-line result and turn count, and the concurrency cap in the header. The input editor completes a `/`-prefixed command on Tab (a dim hint lists candidates for an ambiguous prefix) and shows a dim placeholder while a turn runs and the buffer is empty. None of these alter the transcript or the headless bytes.
+Two display-only artifacts reuse the checklist glyphs: the `todo` tool's `[x]`/`[~]`/`[ ]` plan, and an agents panel that folds a `subagent` fan-out of two or more parallel sub-agents into one checklist with per-agent status, a one-line result and turn count, and the concurrency cap in the header. The input editor completes a `/`-prefixed command on Tab (a dim hint lists candidates for an ambiguous prefix) and shows a dim placeholder while a turn runs and the buffer is empty. None of these alter the transcript or the headless bytes.
 
 Model text and all untrusted summaries are sanitized so control bytes cannot execute terminal commands. `NO_COLOR` removes color without removing structure, liveness, or reasoning text.
 

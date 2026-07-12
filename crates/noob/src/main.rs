@@ -7,7 +7,7 @@ mod doctor;
 mod mcp;
 mod session;
 mod skills;
-mod task;
+mod subagent;
 mod tools;
 mod ui;
 
@@ -148,9 +148,9 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
         tool_specs.push(tools::mcp::connect_spec());
         tool_specs.push(tools::mcp::call_spec());
     }
-    let with_task = depth < task::MAX_DEPTH && !boot.read_only;
+    let with_task = depth < subagent::MAX_DEPTH && !boot.read_only;
     if with_task {
-        tool_specs.push(task::spec());
+        tool_specs.push(subagent::spec());
     }
     if boot.read_only {
         tool_specs.retain(|t| tools::READ_ONLY_SET.contains(&t.name.as_str()));
@@ -161,7 +161,7 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
         tool_ctx.mcp = Some(mcp::Mcp::new(mcp_servers));
     }
     if with_task {
-        tool_ctx.task = Some(task::TaskCfg {
+        tool_ctx.task = Some(subagent::TaskCfg {
             depth,
             concurrency: config::task_concurrency(&config_dir),
             max_turns: config::task_max_turns(&config_dir),
@@ -812,8 +812,8 @@ fn cmd_debug(args: &[String]) -> ExitCode {
             tool_specs.push(tools::mcp::connect_spec());
             tool_specs.push(tools::mcp::call_spec());
         }
-        if current_depth() < task::MAX_DEPTH {
-            tool_specs.push(task::spec());
+        if current_depth() < subagent::MAX_DEPTH {
+            tool_specs.push(subagent::spec());
         }
         let out = json!({
             "system": system,

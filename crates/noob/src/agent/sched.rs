@@ -41,7 +41,7 @@ fn kind(planned: &Planned) -> Kind {
         Planned::Canned(_) => Kind::Free,
         #[cfg(test)]
         Planned::Run { name, .. } if name == "__test_wait" => Kind::Read,
-        Planned::Run { name, .. } if name == "task" => Kind::Task,
+        Planned::Run { name, .. } if name == "subagent" => Kind::Task,
         Planned::Run { name, .. } if tools::is_read_only(name) => Kind::Read,
         Planned::Run { .. } => Kind::Mutating,
     }
@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn task_calls_classify_as_task_and_everything_else_keeps_its_class() {
-        let task = Planned::Run { name: "task".into(), args: json!({"prompt": "x"}) };
+        let task = Planned::Run { name: "subagent".into(), args: json!({"prompt": "x"}) };
         assert_eq!(kind(&task), Kind::Task);
         assert_eq!(kind(&read("f")), Kind::Read);
         assert_eq!(kind(&bash("ls")), Kind::Mutating);

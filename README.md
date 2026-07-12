@@ -87,7 +87,7 @@ During a turn, typing edits the next draft. Enter queues one message. Escape twi
 - Eight core tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, and `todo` (a live `[x]`/`[~]`/`[ ]` checklist the model updates as it works, with no approval step).
 - Conditional SKILL.md, MCP, and self-spawned child-agent tools.
 - Parallel read-only calls with sequential mutation barriers and actual lifecycle timing.
-- A live agents panel for `task` fan-out: one checklist of the parallel sub-agents with running or done status, a one-line result each, and the concurrency cap (`NOOB_TASK_CONCURRENCY`).
+- A live agents panel for `subagent` fan-out: one checklist of the parallel sub-agents with running or done status, a one-line result each, and the concurrency cap (`NOOB_TASK_CONCURRENCY`).
 - Read-before-write stamps, atomic writes, deterministic edit fallbacks, and ambiguity rejection.
 - JSONL sessions, `--resume` with on-screen replay of the prior conversation, context compaction, cache-prefix checks, and dangling-call repair.
 - Read-only plan mode through `/plan`, followed by `/go`.

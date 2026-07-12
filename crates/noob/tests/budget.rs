@@ -116,7 +116,7 @@ fn budget_holds_with_everything_registered() {
 
     let tools = artifact["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 12);
-    for name in ["skill", "mcp_connect", "mcp_call", "task"] {
+    for name in ["skill", "mcp_connect", "mcp_call", "subagent"] {
         assert!(
             tools.iter().any(|t| t["function"]["name"] == name),
             "{name} must be registered"
