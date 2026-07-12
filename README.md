@@ -25,13 +25,13 @@ noob
 
 The installed command mounts the current directory at `/work`, mounts `${XDG_CONFIG_HOME:-$HOME/.config}/noob` at `/config`, uses the caller's UID and GID, and removes the container when the command exits.
 
-Restore a saved session:
+Resume a saved session:
 
 ```bash
-noob --restore <session>
+noob --resume <session>
 ```
 
-`--session <session>` remains an alias. The exit message prints the current session ID.
+`--resume` is the canonical recovery flag; `--restore` and `--session` are aliases. On an interactive resume noob redisplays the prior conversation, and resuming an unknown id prints `no saved session <id>; starting fresh`. The exit line prints the session ID and the `noob --resume <id>` command that reopens it.
 
 Installer options:
 
@@ -60,8 +60,8 @@ cp config/.env.example config/.env
 ## Commands
 
 ```text
-noob [--model <name>] [--base-url <url>] [--session <id> | --restore <id>] [--plan] [--verbose] [--yolo]
-noob exec -p "<prompt>" [--json] [--session <id>] [--plan] [--verbose] [--model <name>] [--base-url <url>] [--yolo]
+noob [--model <name>] [--base-url <url>] [--resume <id>] [--plan] [--verbose] [--yolo]
+noob exec -p "<prompt>" [--json] [--resume <id>] [--plan] [--verbose] [--model <name>] [--base-url <url>] [--yolo]
 noob doctor
 noob --version
 ```
@@ -84,16 +84,17 @@ During a turn, typing edits the next draft. Enter queues one message. Escape twi
 
 ## Features
 
-- Seven core tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`, and `ls`.
+- Eight core tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, and `todo` (a live `[x]`/`[~]`/`[ ]` checklist the model updates as it works, with no approval step).
 - Conditional SKILL.md, MCP, and self-spawned child-agent tools.
 - Parallel read-only calls with sequential mutation barriers and actual lifecycle timing.
+- A live agents panel for `task` fan-out: one checklist of the parallel sub-agents with running or done status, a one-line result each, and the concurrency cap (`NOOB_TASK_CONCURRENCY`).
 - Read-before-write stamps, atomic writes, deterministic edit fallbacks, and ambiguity rejection.
-- JSONL sessions, `--restore`, context compaction, cache-prefix checks, and dangling-call repair.
+- JSONL sessions, `--resume` with on-screen replay of the prior conversation, context compaction, cache-prefix checks, and dangling-call repair.
 - Read-only plan mode through `/plan`, followed by `/go`.
 - Lazy MCP over stdio and Streamable HTTP. Server schemas enter context only after connection.
 - Runtime skill discovery and atomic `/skills add`, `remove`, and `reload`.
-- A default terminal dock with elapsed status, active tools, editable typeahead, queueing, confirmations, and cancellation.
-- Interactive Markdown for headings, emphasis, lists, fenced code, JSON, and responsive tables.
+- A default terminal dock with elapsed status, active tools, editable typeahead, queueing, confirmations, cancellation, and Tab completion for slash commands.
+- Interactive Markdown for headings, emphasis, lists, fenced code, JSON, and width-aware tables.
 - Matrix, ocean, amber, and violet display themes.
 
 ## Python and web search
@@ -132,8 +133,10 @@ The mounted config directory contains `.env`, optional `AGENTS.md`, `mcp.json`, 
 | `NOOB_TASK_CONCURRENCY` | `4` | Concurrent child limit | process start |
 | `NOOB_TASK_MAX_TURNS` | `25` | Child inference-round limit | process start |
 | `NOOB_TASK_WALL_CLOCK_S` | `300` | Child wall-clock limit | process start |
+| `NOOB_SKILL_PATHS` | none | Colon-separated skill directories, each resolved against the workspace and registered as one resolver skill (so a `cli/SKILL.md` dispatcher is discovered without copying it into a skills root) | `.env`: `/skills reload`; environment: process start |
+| `NOOB_ENV` | none | Comma-separated allowlist of extra environment variable names the host launcher forwards into the container (for a workflow's own variables) | process start (launcher) |
 
-If startup autodetection selects an endpoint, that selection is fixed for the process. Restart noob to switch from an autodetected endpoint to a newly added `.env` URL. The launcher does not forward `NOOB_API_KEY`; put secrets in the mounted config `.env` and protect that directory with normal file permissions. `/skills reload` and a new process reload skills and MCP configuration respectively.
+If startup autodetection selects an endpoint, that selection is fixed for the process. Restart noob to switch from an autodetected endpoint to a newly added `.env` URL. The launcher forwards a fixed set of `NOOB_*` and proxy variables plus any names listed in `NOOB_ENV`, and never forwards `NOOB_API_KEY`; put secrets in the mounted config `.env` and protect that directory with normal file permissions. `/skills reload` and a new process reload skills and MCP configuration respectively.
 
 Display variables can be set in the shell or the checkout's root `.env` for Compose:
 

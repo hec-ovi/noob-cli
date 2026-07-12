@@ -49,7 +49,7 @@ The builder selects `x86_64-unknown-linux-musl` for amd64 or `aarch64-unknown-li
 
 ## Distribution
 
-`install.sh` builds the `noob:local` runtime image and installs a managed host launcher at `${NOOB_INSTALL_PREFIX:-$HOME/.local}/bin/noob`. The launcher bind-mounts the selected workspace and config directory, uses the caller's UID and GID, joins the host network, and removes the container on exit. `noob --restore <id>` forwards directly to the binary's session resume path.
+`install.sh` builds the `noob:local` runtime image and installs a managed host launcher at `${NOOB_INSTALL_PREFIX:-$HOME/.local}/bin/noob`. The launcher bind-mounts the selected workspace and config directory, uses the caller's UID and GID, joins the host network, and removes the container on exit. `noob --resume <id>` (aliases `--restore` and `--session`) forwards directly to the binary's session resume path. The launcher forwards a fixed set of `NOOB_*` and proxy variables plus any names listed in `NOOB_ENV`, an opt-in allowlist for a workflow's own variables; it never forwards `NOOB_API_KEY`.
 
 The installer seeds a global `web-search` skill and stdio MCP entry without overwriting existing files. Both invoke the same bundled Python package: standalone commands run as `websearch web-search`, `websearch web-fetch`, and related subcommands, while MCP runs as `websearch mcp`.
 
@@ -71,7 +71,7 @@ Sandbox selection is explicit `NOOB_SANDBOX` first, then container detection. Co
 
 `noob-provider` accepts a neutral transcript and returns semantic events plus a complete `Turn`.
 
-The agent uses `TurnRequestRef` to borrow the system prompt, transcript items, and tool schemas for each round. The owned `TurnRequest` remains as a compatibility wrapper. This avoids cloning the full transcript on every request.
+The agent builds a `TurnRequestRef` each round to borrow the system prompt, transcript items, and tool schemas directly from their session-owned storage, so no round clones the full transcript. The owned `TurnRequest` carries the same three fields and exposes `.borrowed()` for callers that hold an owned request.
 
 Both adapters share these rules:
 
@@ -145,9 +145,11 @@ The head and recent tail stay verbatim, and call/result pairs are never split. A
 
 ## Tools and bounded I/O
 
-The core tools are `read`, `write`, `edit`, `bash`, `grep`, `glob`, and `ls`. Conditional tools are `skill`, `mcp_connect`, `mcp_call`, and `task`.
+The core tools are `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, and `todo`. Conditional tools are `skill`, `mcp_connect`, `mcp_call`, and `task`.
 
 Important mechanics:
+
+- `todo` maintains a visible checklist the model overwrites wholesale on each call. The rendered `[x]`/`[~]`/`[ ]` text is the tool result, so every surface and the model transcript see the same plan. It mutates shared state, so it is a sequential barrier and is not a plan-mode tool.
 
 - `read` opens with `O_NONBLOCK`, validates the opened handle with `fstat`, rejects non-regular files, and drains the full file in 64 KiB chunks. It hashes and counts all bytes while retaining only the requested page and line previews.
 - `write` and `edit` use read-before-write stamps, same-directory temporary files, `fsync`, and rename. Existing mode bits are preserved.
@@ -164,11 +166,11 @@ Sessions are append-only JSONL files under `<config>/sessions`. Fresh IDs contai
 
 Every append, flush, reset, and repair error is propagated. If persistence fails during a live run, the agent detaches the broken session, keeps the valid in-memory transcript, and shows one ordered warning. It never silently claims that an item was saved.
 
-Resume streams the JSONL through a buffered reader, skips corrupt lines, repairs dangling tool calls with synthetic results, reconstructs compaction pins, and restores a provider-valid transcript without retaining stale pre-reset history.
+Resume streams the JSONL through a buffered reader, skips corrupt lines, repairs dangling tool calls with synthetic results, reconstructs compaction pins, and restores a provider-valid transcript without retaining stale pre-reset history. `--resume <id>` is the recovery flag, with `--restore` and `--session` as aliases; resuming an unknown id starts a fresh session with a note. At an interactive terminal a resumed conversation is also redisplayed before the first prompt (human turns, assistant Markdown, and one-line tool digests, with synthetic bookkeeping items filtered). The redisplay is display-only and does not touch the request body, the transcript, or the session log.
 
 ## Skills
 
-Discovery checks project `.noob/skills`, `.claude/skills`, `.agents/skills`, then global `<config>/skills`. First name wins and each root is sorted.
+Discovery checks project `.noob/skills`, `.claude/skills`, `.agents/skills`, then global `<config>/skills`. First name wins and each root is sorted. Directories listed in `NOOB_SKILL_PATHS` (colon-separated, resolved against the workspace) are indexed after the four roots, each registered as one resolver skill; the default roots win a name clash. This lets a workspace's own dispatcher at a non-root path such as `cli/SKILL.md` be discovered without copying it into a skills root.
 
 The prompt contains a bounded name and description index. The `skill` tool loads the body on demand, and ordinary `read` loads referenced files.
 
@@ -233,7 +235,9 @@ Entering a message during a turn immediately records it above the frame as queue
 
 Reader loss is an ordering barrier. Keys accepted before EOF are processed first, pending confirmations are denied, and the REPL exits once queued work is drained rather than waiting on an input thread that can no longer answer.
 
-Assistant Markdown is parsed only for the interactive REPL. The line-streaming renderer supports headings, emphasis, code spans, lists, quotes, fenced code, JSON accents, and GFM-style tables. Tables switch to stacked records on narrow terminals. Parser buffers are bounded, but overflow degrades to literal streaming and never drops model output.
+Assistant Markdown is parsed only for the interactive REPL. The line-streaming renderer supports headings, emphasis, code spans, lists, quotes, fenced code, JSON accents, and GFM-style tables. Tables switch to stacked records on narrow terminals and size their cells by terminal display width so wide glyphs keep the borders aligned. Parser buffers are bounded, but overflow degrades to literal streaming and never drops model output.
+
+Two display-only artifacts reuse the checklist glyphs: the `todo` tool's `[x]`/`[~]`/`[ ]` plan, and an agents panel that folds a `task` fan-out of two or more parallel sub-agents into one checklist with per-agent status, a one-line result and turn count, and the concurrency cap in the header. The input editor completes a `/`-prefixed command on Tab (a dim hint lists candidates for an ambiguous prefix) and shows a dim placeholder while a turn runs and the buffer is empty. None of these alter the transcript or the headless bytes.
 
 Model text and all untrusted summaries are sanitized so control bytes cannot execute terminal commands. `NO_COLOR` removes color without removing structure, liveness, or reasoning text.
 
@@ -248,7 +252,7 @@ The enforced release budgets are:
 | Static release binary | 8 MiB | Re-measured by `./dev.sh size-check` |
 | Runtime dependency graph | 45 crates | 40 crates |
 | Fixed prompt plus schemas | 1,500 tokens | Offline and live tokenizer checks |
-| Offline tests | None | 522 tests, plus 8 opt-in live tests |
+| Offline tests | None | 586 tests, plus 8 opt-in live tests |
 
 The required local gates are:
 

@@ -17,11 +17,15 @@ The active frame always shows status, editable draft or question, and queue/canc
 
 Typeahead received before a question cannot answer it. EOF and reader errors persist as closed-input state and deny questions without deadlock.
 
+Tab completes a `/`-prefixed command in the input editor; a dim hint lists candidates for an ambiguous prefix and never enters the buffer. While a turn runs and the buffer is empty, the input row shows a dim placeholder. Completion and the placeholder are input-side only: the model receives a draft only on submission.
+
 ## Semantic rendering
 
 `Ui::for_turn` emits `TurnEvent` values for text, reasoning, line ends, actual tool starts, tool finishes, notes, errors, and completion. The main renderer replays those semantics through the normal byte renderer. Only adjacent render events may be coalesced; questions, keys, reader loss, and end are ordering barriers.
 
 Tool requests remain JSONL planning events. Interactive tool start lines are emitted only when the scheduler begins execution, and finish lines follow real completion order.
+
+The `todo` tool's checklist and a `task` fan-out agents panel render as `[x]`/`[~]`/`[ ]` glyph blocks on the themed REPL. The plain block text is byte-identical on non-interactive surfaces, and the agents panel suppresses the now-redundant per-task activity lines it covers. On resume, `replay_transcript` redraws the prior conversation (human turns, assistant Markdown, and one-line tool digests) before the first prompt, filtering synthetic bookkeeping items; it never mutates the transcript or session.
 
 ## Markdown and tables
 
