@@ -284,6 +284,52 @@ fn child_fanout() {
     rig.server.assert_clean();
 }
 
+/// Byte-identity guard for the agents fan-out panel: a headless surface (exec)
+/// shows the exact per-task `* task ...` / `* task done` activity lines it
+/// always did and NOTHING from the panel (no `agents (` header, no `agent N:`
+/// rows). The panel is a themed-REPL-only affordance; non-tty surfaces must
+/// stay byte-for-byte unchanged.
+#[test]
+fn fanout_panel_is_absent_on_the_exec_surface() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    rig.server.enqueue_stream_toolcalls(
+        &[
+            ("f1", "task", r#"{"prompt":"helper alpha"}"#),
+            ("f2", "task", r#"{"prompt":"helper beta"}"#),
+            ("f3", "task", r#"{"prompt":"helper gamma"}"#),
+        ],
+        None,
+    );
+    rig.server.enqueue_stream_completion("alpha done");
+    rig.server.enqueue_stream_completion("beta done");
+    rig.server.enqueue_stream_completion("gamma done");
+    rig.server.enqueue_stream_completion("collected");
+
+    let out = noob(rig.config.path(), rig.work.path())
+        .args(["exec", "-p", "spawn three helpers"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The classic per-task lines are intact for every agent.
+    assert!(stderr.contains("* task helper alpha"), "missing start line:\n{stderr}");
+    assert!(stderr.contains("* task helper beta"), "missing start line:\n{stderr}");
+    assert!(stderr.contains("* task helper gamma"), "missing start line:\n{stderr}");
+    assert!(stderr.contains("* task done (1 turns)"), "missing completion line:\n{stderr}");
+    // None of the panel bytes reach a headless surface.
+    assert!(!stderr.contains("agents ("), "the panel header leaked into exec:\n{stderr}");
+    assert!(!stderr.contains("agent 1:"), "a panel row leaked into exec:\n{stderr}");
+    assert!(!stdout_has_panel(&out.stdout), "the panel leaked into exec stdout");
+    rig.server.assert_clean();
+}
+
+fn stdout_has_panel(stdout: &[u8]) -> bool {
+    let s = String::from_utf8_lossy(stdout);
+    s.contains("agents (") || s.contains("agent 1:")
+}
+
 /// Cap exhaustion: with concurrency 2, the first two children run together
 /// (their requests arrive before either response lands) and the third
 /// queues until a slot frees. All three still complete.

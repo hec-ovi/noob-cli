@@ -66,6 +66,10 @@ pub(crate) enum TurnEvent {
     /// The `todo` tool's rendered checklist text (header + one glyph line per
     /// item), for the themed REPL's visible block. Off the token path.
     Todos(String),
+    /// A multi-agent fan-out panel re-render: the plain checklist block and the
+    /// task call ids it covers (so the themed REPL suppresses their redundant
+    /// `* task` activity lines). Themed REPL only; off the token path.
+    Agents { block: String, ids: Vec<String> },
     Note(String),
     Error(String),
     Done(Option<Usage>),
@@ -110,13 +114,14 @@ impl BufferedTurnRenderer {
             TurnEvent::Text(s) => self.ui.text_delta(&s),
             TurnEvent::Reasoning(s) => self.ui.reasoning_delta(&s),
             TurnEvent::EndLine => self.ui.end_line(),
-            TurnEvent::ToolStart { name, brief, read_only, .. } => {
-                self.ui.render_tool_start(&name, &brief, read_only);
+            TurnEvent::ToolStart { id, name, brief, read_only } => {
+                self.ui.render_tool_start(&id, &name, &brief, read_only);
             }
             TurnEvent::ToolDone { id, summary, is_error } => {
                 self.ui.tool_done(&id, &summary, is_error);
             }
             TurnEvent::Todos(text) => self.ui.render_checklist(&text),
+            TurnEvent::Agents { block, ids } => self.ui.render_agents(&block, &ids),
             TurnEvent::Note(line) => self.ui.note(&line),
             TurnEvent::Error(line) => self.ui.error(&line),
             TurnEvent::Done(usage) => self.ui.done(usage),
@@ -162,6 +167,13 @@ pub struct Ui {
     /// reading stdin, and the scanner thread never starts (the dock draws
     /// its own liveness). None on every directly-writing `Ui`.
     turn_tx: Option<std::sync::mpsc::SyncSender<dock::Ev>>,
+    /// Call ids covered by an open agents fan-out panel. On the themed surface
+    /// their per-task `* task` activity lines are suppressed in favor of the
+    /// block; consulted only when `styled()`, so byte-identity surfaces still
+    /// print the exact `* task ...` lines they always did. Populated as each
+    /// panel paints; discarded at the end of the input (per-turn renderers get
+    /// a fresh set, and `done` clears the persistent one).
+    panel_task_ids: std::collections::HashSet<String>,
     /// Test seam for the confirmation flow: unit tests cannot own a tty.
     #[cfg(test)]
     pub forced_ask: Option<bool>,
@@ -187,6 +199,7 @@ impl Ui {
             err: Box::new(std::io::stderr()),
             scanner: None,
             turn_tx: None,
+            panel_task_ids: std::collections::HashSet::new(),
             #[cfg(test)]
             forced_ask: None,
         }
@@ -210,6 +223,7 @@ impl Ui {
             err: Box::new(std::io::sink()),
             scanner: None,
             turn_tx: Some(tx),
+            panel_task_ids: std::collections::HashSet::new(),
             #[cfg(test)]
             forced_ask: None,
         }
@@ -234,6 +248,7 @@ impl Ui {
                 err: Box::new(buffer.clone()),
                 scanner: None,
                 turn_tx: None,
+                panel_task_ids: std::collections::HashSet::new(),
                 #[cfg(test)]
                 forced_ask: None,
             },
@@ -529,11 +544,17 @@ impl Ui {
         }
         match self.mode {
             Mode::ExecJson => {}
-            _ => self.render_tool_start(name, brief, read_only),
+            _ => self.render_tool_start(id, name, brief, read_only),
         }
     }
 
-    fn render_tool_start(&mut self, name: &str, brief: &str, read_only: bool) {
+    fn render_tool_start(&mut self, id: &str, name: &str, brief: &str, read_only: bool) {
+        // A fan-out agent's activity line is redundant once the agents panel
+        // names it, so the themed surface suppresses it (styled-only: every
+        // byte-identity surface still prints the exact `* task ...` line).
+        if self.styled() && self.panel_task_ids.contains(id) {
+            return;
+        }
         // Barrier calls may run long; read-only groups keep their compact
         // completion-only transcript while the dock still names them live.
         if !read_only {
@@ -557,7 +578,14 @@ impl Ui {
         }
         match self.mode {
             Mode::ExecJson => self.event(json!({"t": "result", "id": id, "err": is_error})),
-            _ => self.activity_line(summary, is_error),
+            _ => {
+                // A fan-out agent's completion line is redundant with its
+                // panel row on the themed surface; suppress it there only.
+                if self.styled() && self.panel_task_ids.contains(id) {
+                    return;
+                }
+                self.activity_line(summary, is_error);
+            }
         }
     }
 
@@ -602,6 +630,35 @@ impl Ui {
             block.push('\n');
         }
         self.out(&block);
+    }
+
+    /// Show a multi-agent fan-out panel: a checklist of the sub-agents a `task`
+    /// batch spawned (header + one glyph line per agent), re-rendered as they
+    /// run and finish. `ids` are the task call ids the panel covers, so the
+    /// themed surface can suppress their redundant per-task activity lines. On
+    /// a dock turn it ships over the channel; the main-thread renderer replays
+    /// it through `render_agents`.
+    pub fn agents(&mut self, block: &str, ids: &[String]) {
+        if self.send_turn(TurnEvent::Agents { block: block.to_string(), ids: ids.to_vec() }) {
+            return;
+        }
+        self.render_agents(block, ids);
+    }
+
+    /// Paint the fan-out panel on the themed REPL, reusing the checklist glyph
+    /// styling, and register the covered call ids so the redundant `* task`
+    /// lines are suppressed. Every byte-identity surface (piped REPL, exec,
+    /// exec --json, child) shows nothing here and keeps its exact `* task`
+    /// lines: the panel is a themed-REPL affordance, and the sub-agent result
+    /// string still enters the transcript unchanged.
+    fn render_agents(&mut self, block: &str, ids: &[String]) {
+        if !self.styled() {
+            return;
+        }
+        for id in ids {
+            self.panel_task_ids.insert(id.clone());
+        }
+        self.render_checklist(block);
     }
 
     /// Loop / lifecycle note ("cache prefix reset: compaction", nudges).
@@ -699,6 +756,10 @@ impl Ui {
         if self.send_turn(TurnEvent::Done(usage)) {
             return;
         }
+        // Fan-out panels belong to the input that spawned them; clear the
+        // suppression set so a later input's call ids can never inherit it (a
+        // dock turn already gets a fresh renderer per input).
+        self.panel_task_ids.clear();
         if self.mode == Mode::ExecJson {
             let u = usage.map(|u| {
                 json!({
@@ -839,6 +900,7 @@ mod tests {
             err: Box::new(err.clone()),
             scanner: None,
             turn_tx: None,
+            panel_task_ids: std::collections::HashSet::new(),
             forced_ask: None,
         };
         (ui, out, err)
@@ -1003,6 +1065,87 @@ mod tests {
             assert!(out.text().is_empty(), "{label} stdout gained checklist bytes");
             assert!(err.text().is_empty(), "{label} stderr gained checklist bytes");
         }
+    }
+
+    #[test]
+    fn styled_agents_panel_shows_every_row_and_differs_from_plain() {
+        // The visible fan-out block: the header (with the concurrency cap) and
+        // each glyph row survive under the color, so a human reads which agent
+        // is doing what and whether it finished. Not "which green": the content
+        // and glyphs are intact and each line resets so nothing bleeds.
+        let (mut ui, out, _) = harness(Mode::Repl, true, true);
+        let block = "agents (1/3 done, up to 4 at once):\n\
+                     [x] agent 1: fetch alpha  (7 turns) · Alpha summary line\n\
+                     [~] agent 2: fetch beta\n\
+                     [~] agent 3: fetch gamma";
+        ui.agents(block, &["f1".to_string(), "f2".to_string(), "f3".to_string()]);
+        let s = out.text();
+        let plain = strip_ansi(&s);
+        for line in [
+            "agents (1/3 done, up to 4 at once):",
+            "[x] agent 1: fetch alpha  (7 turns) · Alpha summary line",
+            "[~] agent 2: fetch beta",
+            "[~] agent 3: fetch gamma",
+        ] {
+            assert!(plain.contains(line), "agents line {line:?} missing from: {plain:?}");
+        }
+        assert!(s.contains('\x1b'), "themed agents panel must carry styling");
+        assert_ne!(s, format!("{block}\n"), "styled block must differ from plain");
+        assert_eq!(s.matches("\x1b[0m").count() * 2, s.matches("\x1b[").count());
+    }
+
+    #[test]
+    fn agents_panel_is_silent_on_byte_identity_surfaces() {
+        // The panel is a themed-REPL affordance only. Piped REPL, exec, JSON,
+        // and child must gain zero bytes here: the `* task` activity lines and
+        // the transcript already carry the fan-out, so those surfaces stay
+        // byte-for-byte what they were.
+        let block = "agents (0/2 done, up to 4 at once):\n[~] agent 1: a\n[~] agent 2: b";
+        for (label, mode, color, ansi) in [
+            ("no_color_repl", Mode::Repl, false, true),
+            ("piped_repl", Mode::Repl, false, false),
+            ("exec", Mode::Exec, true, true),
+            ("exec_json", Mode::ExecJson, true, true),
+            ("child", Mode::Child, true, true),
+        ] {
+            let (mut ui, out, err) = harness(mode, color, ansi);
+            ui.agents(block, &["f1".to_string(), "f2".to_string()]);
+            assert!(out.text().is_empty(), "{label} stdout gained panel bytes");
+            assert!(err.text().is_empty(), "{label} stderr gained panel bytes");
+        }
+    }
+
+    #[test]
+    fn styled_panel_suppresses_covered_task_lines_but_not_others() {
+        // On the themed surface the panel replaces the redundant `* task` start
+        // and `* task done` lines for the agents it covers, while an unrelated
+        // tool call still prints its line.
+        let (mut ui, out, _) = harness(Mode::Repl, true, true);
+        ui.agents(
+            "agents (0/1 done, up to 4 at once):\n[~] agent 1: solo",
+            &["f1".to_string()],
+        );
+        ui.tool_start("f1", "task", "some prompt", false); // covered: suppressed
+        ui.tool_done("f1", "task done (2 turns)", false); //  covered: suppressed
+        ui.tool_done("b", "ls . (3 entries)", false); //      unrelated: shown
+        let plain = strip_ansi(&out.text());
+        assert!(!plain.contains("* task"), "a covered task line leaked past the panel:\n{plain}");
+        assert!(plain.contains("agent 1: solo"), "the panel itself must render:\n{plain}");
+        assert!(plain.contains("* ls"), "an unrelated tool line must still render:\n{plain}");
+    }
+
+    #[test]
+    fn piped_task_lines_are_unchanged_when_a_panel_is_emitted() {
+        // Byte-identity guard: on a piped REPL the panel emits nothing and the
+        // task calls render the exact `* task ...` lines they always did.
+        let (mut ui, out, _) = harness(Mode::Repl, false, false);
+        ui.agents(
+            "agents (0/2 done, up to 4 at once):\n[~] agent 1: a\n[~] agent 2: b",
+            &["f1".to_string(), "f2".to_string()],
+        );
+        ui.tool_start("f1", "task", "helper a", false);
+        ui.tool_done("f1", "task done (3 turns)", false);
+        assert_eq!(out.text(), "* task helper a\n* task done (3 turns)\n");
     }
 
     #[test]

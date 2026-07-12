@@ -3,6 +3,7 @@
 //! calls or a breaker trips. Owns the transcript, the doom-loop breakers,
 //! interrupt semantics, and compaction triggers.
 
+mod agents;
 pub mod compact;
 pub mod prompt;
 pub mod sched;
@@ -469,8 +470,18 @@ impl Agent {
                     return self.finish_interrupt(ui, &turn.tool_calls);
                 }
             }
+            // Multi-agent fan-out: group the batch's consecutive task calls so
+            // a fan-out renders one live checklist of agents instead of N
+            // identical truncated lines. Off the token path; display-only.
+            let mut panels = agents::Panels::build(&turn.tool_calls, self.tool_ctx.task_concurrency());
             let outcomes = sched::run_batch_with(&self.tool_ctx, batch, |progress| match progress {
                 sched::Progress::Started { index } => {
+                    // Open the agents panel (registering its ids) before the
+                    // task's own activity line, so the themed REPL can suppress
+                    // the now-redundant `* task` line in favor of the block.
+                    if let Some(render) = panels.on_started(index) {
+                        ui.agents(&render.block, &render.ids);
+                    }
                     let call = &turn.tool_calls[index];
                     ui.tool_start(
                         &call.id,
@@ -484,6 +495,17 @@ impl Agent {
                         ui.note(warning);
                     }
                     let call = &turn.tool_calls[index];
+                    // Re-render the agents panel first, so it registers its ids
+                    // and the themed REPL suppresses the now-redundant `* task`
+                    // done line even when a fan-out member finishes without a
+                    // prior Started (a canned or interrupted task). on_finished
+                    // returns None for non-panel calls, so every other tool is
+                    // unaffected and its done line renders as before.
+                    if let Some(render) =
+                        panels.on_finished(index, &outcome.summary, &outcome.content, outcome.is_error)
+                    {
+                        ui.agents(&render.block, &render.ids);
+                    }
                     ui.tool_done(&call.id, &outcome.summary, outcome.is_error);
                     // The todo tool's result is a checklist; show it as a
                     // visible block on the themed REPL (a no-op elsewhere).

@@ -1022,6 +1022,64 @@ fn dock_interrupt_drains_the_queue_to_the_draft() {
     rig.server.assert_clean();
 }
 
+/// The multi-agent fan-out panel on the themed dock surface: a batch of three
+/// distinct `task` calls renders one live checklist of agents (header with the
+/// concurrency cap, one row per agent, running then done) with a one-line
+/// result digest per finished agent, instead of three identical truncated
+/// lines. The three prompts share a prefix and differ only in their tails, so
+/// the panel must keep the rows visibly distinct.
+#[test]
+fn dock_renders_a_multi_agent_fanout_panel() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    rig.server.enqueue_stream_toolcalls(
+        &[
+            ("f1", "task", r#"{"prompt":"Read the article at http://x/ALPHATAIL"}"#),
+            ("f2", "task", r#"{"prompt":"Read the article at http://x/BETATAIL"}"#),
+            ("f3", "task", r#"{"prompt":"Read the article at http://x/GAMMATAIL"}"#),
+        ],
+        None,
+    );
+    // Distinct child results; the panel digest is each child's first line. The
+    // parent's collect turn (below) is the 4th queued completion.
+    rig.server.enqueue_stream_completion("ALPHA-RESULT one");
+    rig.server.enqueue_stream_completion("BETA-RESULT two");
+    rig.server.enqueue_stream_completion("GAMMA-RESULT three");
+    rig.server.enqueue_stream_completion("COLLECTED-END");
+
+    // Force the cap so the header text is deterministic and all three overlap.
+    let mut pty = spawn_pty_with(&rig, &[("NOOB_TASK_CONCURRENCY", "4")]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"fan out\r");
+    pty.wait_for("Working");
+    pty.wait_for("agents ("); // the panel opened as the agents started
+    pty.wait_for("COLLECTED-END"); // the whole turn (fan-out + collect) finished
+    settle();
+    pty.drain(std::time::Duration::from_millis(300));
+    pty.send(&[0x04]);
+    pty.wait_for("resume with --session");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    let seen = &pty.seen;
+    // Three distinct rows: the shared prefix did not collapse them.
+    for tail in ["ALPHATAIL", "BETATAIL", "GAMMATAIL"] {
+        assert!(seen.contains(tail), "distinct row for {tail} missing:\n{seen}");
+    }
+    // The header surfaces the concurrency cap and the fan-out reached all done.
+    assert!(seen.contains("up to 4 at once"), "concurrency cap not in the header:\n{seen}");
+    assert!(seen.contains("3/3 done"), "the panel never reached all-done:\n{seen}");
+    // A finished agent carries the done glyph and a one-line result digest (a
+    // child's result text can only reach the pty through the panel digest).
+    assert!(seen.contains("[x] agent"), "no agent row reached the done glyph:\n{seen}");
+    assert!(
+        ["ALPHA-RESULT", "BETA-RESULT", "GAMMA-RESULT"].iter().any(|d| seen.contains(d)),
+        "no result digest reached the panel:\n{seen}"
+    );
+    rig.server.assert_clean();
+}
+
 /// Write a SKILL.md (name + description + body) at `dir`.
 fn write_skill_md(dir: &std::path::Path, name: &str, desc: &str, body: &str) {
     std::fs::create_dir_all(dir).unwrap();
