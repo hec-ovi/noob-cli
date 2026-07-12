@@ -246,7 +246,14 @@ fn display_cell(input: &str) -> String {
             out.replace_range(start..start + marker.len(), "");
         }
     }
+    // Cells bypass the plain-path control sanitizer, so a literal tab or other
+    // control here would measure as one scalar but render as several columns and
+    // desync the row. Collapse every control char (including `\t`) to a single
+    // space so measurement and output agree. Runs before both.
     out.replace("\\|", "|")
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 fn fit_widths(mut widths: Vec<usize>, budget: usize) -> Vec<usize> {
@@ -436,9 +443,21 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
             if !current.is_empty() {
                 lines.push(std::mem::take(&mut current));
             }
-            let chars: Vec<char> = word.chars().collect();
-            for chunk in chars.chunks(width) {
-                lines.push(chunk.iter().collect());
+            // Hard-break by accumulated DISPLAY width, not a fixed char count, so
+            // a run of 2-column glyphs cannot overflow the column.
+            let mut chunk = String::new();
+            let mut chunk_width = 0;
+            for ch in word.chars() {
+                let cw = char_width(ch);
+                if chunk_width + cw > width && !chunk.is_empty() {
+                    lines.push(std::mem::take(&mut chunk));
+                    chunk_width = 0;
+                }
+                chunk.push(ch);
+                chunk_width += cw;
+            }
+            if !chunk.is_empty() {
+                lines.push(chunk);
             }
             continue;
         }
@@ -461,8 +480,49 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 }
 
 fn cell_width(s: &str) -> usize {
-    // Matches the rest of noob's declared single-column Unicode simplification.
-    s.chars().count()
+    // The single source of truth for column sizing, wrapping, and padding. It
+    // sums terminal display columns rather than Unicode scalars so a wide glyph
+    // or a combining mark cannot shove a row's right border off the shared column.
+    s.chars().map(char_width).sum()
+}
+
+/// Terminal display columns for one `char`: 0 for zero-width/combining marks,
+/// 2 for East-Asian Wide/Fullwidth and common emoji, 1 otherwise. This is a
+/// hand-rolled range check (no extra crates), covering the ranges noob actually
+/// emits in tables rather than the full UAX #11 table. On ASCII it equals the
+/// old scalar count, so ASCII layouts are unchanged.
+fn char_width(c: char) -> usize {
+    let c = c as u32;
+    // Zero-width: combining diacritics, zero-width spaces/joiner (incl. U+200D),
+    // variation selectors, and the BOM.
+    if matches!(c,
+        0x0300..=0x036F
+        | 0x200B..=0x200F
+        | 0xFE00..=0xFE0F
+        | 0xFEFF
+    ) {
+        return 0;
+    }
+    // Wide/Fullwidth East-Asian blocks and common emoji.
+    if matches!(c,
+        0x1100..=0x115F   // Hangul Jamo
+        | 0x2600..=0x26FF // Miscellaneous Symbols
+        | 0x2700..=0x27BF // Dingbats
+        | 0x2E80..=0x303E // CJK radicals, Kangxi, punctuation
+        | 0x3041..=0x33FF // Kana, CJK symbols, enclosed CJK
+        | 0x3400..=0x4DBF // CJK Ext A
+        | 0x4E00..=0x9FFF // CJK Unified
+        | 0xA000..=0xA4CF // Yi
+        | 0xAC00..=0xD7A3 // Hangul syllables
+        | 0xF900..=0xFAFF // CJK compatibility ideographs
+        | 0xFE30..=0xFE4F // CJK compatibility forms
+        | 0xFF00..=0xFF60 // Fullwidth forms
+        | 0xFFE0..=0xFFE6 // Fullwidth signs
+        | 0x1F300..=0x1FAFF // Emoji (Misc symbols/pictographs .. Symbols/pictographs ext-A)
+    ) {
+        return 2;
+    }
+    1
 }
 
 fn paint(style: Style, depth: ColorDepth, text: &str) -> String {
@@ -591,5 +651,49 @@ mod tests {
     fn inline_markers_are_removed_only_when_paired() {
         assert_eq!(display_cell("**bold** and `code`"), "bold and code");
         assert_eq!(display_cell("an * unmatched"), "an * unmatched");
+    }
+
+    #[test]
+    fn wide_glyph_rows_keep_right_borders_aligned() {
+        // OLD behavior: cell_width counted Unicode scalars, so a 2-column glyph
+        // like 世 padded as if it were 1 column and that row's right │ landed one
+        // cell left of the ASCII rows, giving a ragged right border. With
+        // display-width padding every rendered line is the same terminal width.
+        let mut table = Table::new("name | note", "--- | ---").unwrap();
+        table.push_row("ascii | plain").unwrap();
+        table.push_row("cjk | 世界").unwrap(); // two 2-column glyphs
+        table.push_row("emoji | 🚀 go").unwrap(); // one 2-column emoji
+        table.push_row("combine | e\u{0301}").unwrap(); // e + combining acute = 1 col
+        let stripped = plain(&table.render(40, &Theme::matrix(), ColorDepth::None));
+        let widths: Vec<usize> = stripped.lines().map(cell_width).collect();
+        assert!(widths.len() > 4);
+        for (line, w) in stripped.lines().zip(&widths) {
+            assert_eq!(*w, widths[0], "ragged right border on line {line:?}");
+        }
+    }
+
+    #[test]
+    fn tab_in_cell_does_not_desync_the_row() {
+        // A literal tab used to be emitted verbatim: it counts as one scalar for
+        // padding but renders as several columns, shoving the right border out.
+        // It is now collapsed to a space so measurement and output agree.
+        let mut table = Table::new("k | v", "--- | ---").unwrap();
+        table.push_row("plain | ab").unwrap();
+        table.push_row("tabbed | a\tb").unwrap();
+        let stripped = plain(&table.render(40, &Theme::matrix(), ColorDepth::None));
+        let widths: Vec<usize> = stripped.lines().map(cell_width).collect();
+        assert!(widths.iter().all(|w| *w == widths[0]), "rows desynced: {widths:?}");
+        assert!(!stripped.contains('\t'), "tab must be sanitized out of cells");
+    }
+
+    #[test]
+    fn char_width_matches_declared_ranges() {
+        assert_eq!(char_width('a'), 1);
+        assert_eq!(char_width('世'), 2);
+        assert_eq!(char_width('🚀'), 2);
+        assert_eq!(char_width('\u{0301}'), 0); // combining acute
+        assert_eq!(char_width('\u{200D}'), 0); // zero-width joiner
+        assert_eq!(cell_width("e\u{0301}"), 1);
+        assert_eq!(cell_width("世界"), 4);
     }
 }
