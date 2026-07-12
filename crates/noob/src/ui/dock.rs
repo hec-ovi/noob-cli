@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use noob_provider::http::INTERRUPTED;
 
-use super::prompt::{Decoder, Editor, Input, Key, RawGuard, Step, term_width};
-use super::style::{ColorDepth, RESET};
-use super::{TurnEvent, Ui, safe_terminal_text, scanner};
+use super::prompt::{Decoder, Editor, Input, Key, RawGuard, Step, term_height, term_width};
+use super::style::{ColorDepth, DIM, RESET};
+use super::{BufferedTurnRenderer, TurnEvent, Ui, safe_terminal_text, scanner};
 
 /// One event on the dock channel. Its receive order is the behavioral order:
 /// only adjacent `Render` events may be coalesced, while Ask/Key/ReaderGone/End
@@ -64,6 +64,16 @@ const COALESCE_MS: u64 = 8;
 /// How long a first ESC arms the cancel: a second ESC inside this window
 /// cancels the turn, and the window lapsing reverts the dock to normal.
 const CANCEL_WINDOW: Duration = Duration::from_secs(5);
+/// Hard ceiling on pinned region rows regardless of screen size, so a huge plan
+/// never turns the dock into a scroll of its own. The effective cap is the
+/// smaller of this and what the terminal height leaves once the three frame
+/// chrome rows and a line of output are reserved (see `region_rows`).
+const MAX_REGION_ROWS: usize = 24;
+/// Rows the frame reserves outside its pinned regions: the top status, the input
+/// row, the bottom status, and one line of scrolled output kept visible. The
+/// region cap is `term_height - this`, so the live frame never exceeds the
+/// screen (where relative cursor moves would clamp at the top and desync).
+const FRAME_RESERVE_ROWS: usize = 4;
 
 // ---------------------------------------------------------------------------
 // The output column tracker
@@ -581,9 +591,21 @@ impl DockSession {
         let started = Instant::now();
         let mut deferred: Option<Ev> = None;
 
-        // A running turn always owns a stable three-row frame. Its top status,
-        // editable draft, and queue/cancel line are independent, so typing can
-        // never hide liveness again.
+        // The live regions pinned between the top status and the input row: the
+        // plan checklist and the fan-out panel. Each is held as its raw block
+        // text and re-rendered in place as it changes, so the console never
+        // stacks a fresh copy of the plan on every update. `region_rows` is the
+        // styled, width-clamped view (one physical row each); `drawn_r` is how
+        // many region rows are actually on screen, so an erase always clears the
+        // exact height the frame currently occupies even as it grows or shrinks.
+        let mut plan_block: Option<String> = None;
+        let mut agents_block: Option<String> = None;
+        let mut region_rows: Vec<String> = Vec::new();
+        let mut drawn_r: usize = 0;
+
+        // A running turn always owns a stable frame: a top status row, any live
+        // regions, the editable draft, and a queue/cancel row. They are
+        // independent, so typing can never hide liveness again.
         self.draw_active_frame(
             ui,
             plan,
@@ -592,14 +614,19 @@ impl DockSession {
             &cancel,
             started,
             &active_tools,
+            &region_rows,
         );
+        // The initial frame carries no regions yet, so `drawn_r` stays 0 until
+        // the first plan or panel arrives.
 
         loop {
             cancel.expire(Instant::now());
             let now_width = term_width();
             if now_width != width {
-                ui.erase(true);
+                self.erase_dock(ui, drawn_r);
                 width = now_width;
+                region_rows =
+                    self.region_rows(ui, plan_block.as_deref(), agents_block.as_deref(), width);
                 self.draw_active_frame(
                     ui,
                     plan,
@@ -608,7 +635,9 @@ impl DockSession {
                     &cancel,
                     started,
                     &active_tools,
+                    &region_rows,
                 );
+                drawn_r = region_rows.len();
             }
 
             // Whole-turn liveness wakes only this display loop. Tool work,
@@ -632,6 +661,7 @@ impl DockSession {
                             &cancel,
                             started,
                             &active_tools,
+                            &region_rows,
                         );
                         continue;
                     }
@@ -641,8 +671,15 @@ impl DockSession {
 
             match first {
                 Ev::Render(event) => {
-                    Self::observe_render(&event, &mut active_tools);
-                    renderer.render(event);
+                    let mut regions_dirty = false;
+                    Self::absorb_render(
+                        event,
+                        &mut active_tools,
+                        &mut renderer,
+                        &mut plan_block,
+                        &mut agents_block,
+                        &mut regions_dirty,
+                    );
 
                     // Coalesce only adjacent rendering operations, for at most
                     // one small frame budget. The first non-render event is
@@ -655,8 +692,14 @@ impl DockSession {
                         }
                         match self.rx.recv_timeout(remaining) {
                             Ok(Ev::Render(event)) => {
-                                Self::observe_render(&event, &mut active_tools);
-                                renderer.render(event);
+                                Self::absorb_render(
+                                    event,
+                                    &mut active_tools,
+                                    &mut renderer,
+                                    &mut plan_block,
+                                    &mut agents_block,
+                                    &mut regions_dirty,
+                                );
                             }
                             Ok(barrier) => {
                                 deferred = Some(barrier);
@@ -666,8 +709,22 @@ impl DockSession {
                             Err(RecvTimeoutError::Disconnected) => return,
                         }
                     }
+                    // Recompute the pinned region view before any redraw, so the
+                    // frame that write_above or the region redraw paints already
+                    // reflects the new plan/panel at the current width.
+                    if regions_dirty {
+                        region_rows = self.region_rows(
+                            ui,
+                            plan_block.as_deref(),
+                            agents_block.as_deref(),
+                            width,
+                        );
+                    }
                     let batch = renderer.take();
                     if !batch.is_empty() {
+                        // Output scrolls above; the erase keys on the on-screen
+                        // height and the redraw on the new one, so a region that
+                        // changed in the same batch resizes the frame cleanly.
                         self.write_above(
                             ui,
                             &mut tracker,
@@ -678,6 +735,20 @@ impl DockSession {
                             &cancel,
                             started,
                             &active_tools,
+                            &region_rows,
+                            &mut drawn_r,
+                        );
+                    } else if regions_dirty {
+                        self.redraw_regions(
+                            ui,
+                            plan,
+                            width,
+                            &ask,
+                            &cancel,
+                            started,
+                            &active_tools,
+                            &region_rows,
+                            &mut drawn_r,
                         );
                     } else {
                         self.refresh_active_frame(
@@ -688,6 +759,7 @@ impl DockSession {
                             &cancel,
                             started,
                             &active_tools,
+                            &region_rows,
                         );
                     }
                 }
@@ -701,6 +773,7 @@ impl DockSession {
                         &cancel,
                         started,
                         &active_tools,
+                        &region_rows,
                     );
                 }
                 Ev::Key(key) => {
@@ -791,6 +864,8 @@ impl DockSession {
                             &cancel,
                             started,
                             &active_tools,
+                            &region_rows,
+                            &mut drawn_r,
                         );
                     } else {
                         self.refresh_active_frame(
@@ -801,6 +876,7 @@ impl DockSession {
                             &cancel,
                             started,
                             &active_tools,
+                            &region_rows,
                         );
                     }
                 }
@@ -817,10 +893,14 @@ impl DockSession {
                         &cancel,
                         started,
                         &active_tools,
+                        &region_rows,
                     );
                 }
                 Ev::End => {
-                    ui.erase(true);
+                    // Tear the whole frame down, regions and all, so the exact
+                    // height that was on screen is cleared (not a fixed three
+                    // rows). The idle prompt takes its place.
+                    self.erase_dock(ui, drawn_r);
                     return;
                 }
             }
@@ -839,8 +919,79 @@ impl DockSession {
         }
     }
 
+    /// Take in one semantic render op. The plan checklist and the fan-out panel
+    /// are diverted into pinned live regions instead of the scrolling
+    /// transcript, so they update in place rather than stacking a fresh block on
+    /// every change. A panel still records its covered task ids through the
+    /// renderer, so the redundant `* task` start/done lines stay suppressed even
+    /// though the panel block itself is never replayed there. Every other op
+    /// renders through the ordinary buffered renderer exactly as before.
+    fn absorb_render(
+        event: TurnEvent,
+        active: &mut Vec<(String, String)>,
+        renderer: &mut BufferedTurnRenderer,
+        plan_block: &mut Option<String>,
+        agents_block: &mut Option<String>,
+        dirty: &mut bool,
+    ) {
+        match event {
+            TurnEvent::Todos(text) => {
+                *plan_block = Some(text);
+                *dirty = true;
+            }
+            TurnEvent::Agents { block, ids } => {
+                renderer.cover_task_ids(&ids);
+                *agents_block = Some(block);
+                *dirty = true;
+            }
+            other => {
+                Self::observe_render(&other, active);
+                renderer.render(other);
+            }
+        }
+    }
+
+    /// The styled, width-clamped rows for the pinned regions: the plan checklist
+    /// above the fan-out panel, each block's lines in program order. Empty off
+    /// the themed surface, so a no-color or byte-identity dock pins nothing.
+    /// Capped so a very long plan or a wide fan-out cannot grow the frame past
+    /// the screen; the hidden rows are summarized in one trailing row.
+    fn region_rows(
+        &self,
+        ui: &Ui,
+        plan_block: Option<&str>,
+        agents_block: Option<&str>,
+        width: usize,
+    ) -> Vec<String> {
+        let mut rows = Vec::new();
+        if let Some(text) = plan_block {
+            rows.extend(ui.checklist_region_rows(text, width));
+        }
+        if let Some(block) = agents_block {
+            rows.extend(ui.checklist_region_rows(block, width));
+        }
+        // Bound the frame to the screen: never taller than the terminal leaves
+        // once the chrome and a line of output are reserved. On a terminal too
+        // short for any region row the cap is 0 and the dock falls back to the
+        // plain three-row frame.
+        let cap = term_height().saturating_sub(FRAME_RESERVE_ROWS).min(MAX_REGION_ROWS);
+        if rows.len() > cap {
+            if cap == 0 {
+                rows.clear();
+            } else {
+                let hidden = rows.len() - (cap - 1);
+                rows.truncate(cap - 1);
+                rows.push(format!("{DIM}… +{hidden} more{RESET}"));
+            }
+        }
+        rows
+    }
+
     /// Relay bytes above the frame without losing a partial output line, then
-    /// redraw the active frame below it.
+    /// redraw the frame below them. The erase keys on the height currently on
+    /// screen (`drawn_r`) and the redraw on the new region rows, so a region that
+    /// changed in this same batch resizes the frame in one pass. `drawn_r` is
+    /// updated to the height just drawn.
     #[allow(clippy::too_many_arguments)]
     fn write_above(
         &mut self,
@@ -853,8 +1004,10 @@ impl DockSession {
         cancel: &Cancel,
         started: Instant,
         active_tools: &[(String, String)],
+        region_rows: &[String],
+        drawn_r: &mut usize,
     ) {
-        ui.erase(true);
+        self.erase_dock(ui, *drawn_r);
         if !tracker.fresh {
             ui.out_raw(format!("\x1b[1A\x1b[{}G", tracker.col + 1).as_bytes());
         }
@@ -863,7 +1016,47 @@ impl DockSession {
         if !tracker.newline {
             ui.out_raw(b"\r\n");
         }
-        self.draw_active_frame(ui, plan, width, ask, cancel, started, active_tools);
+        self.draw_active_frame(ui, plan, width, ask, cancel, started, active_tools, region_rows);
+        *drawn_r = region_rows.len();
+    }
+
+    /// Resize and repaint the frame in place when a pinned region's row count
+    /// changed: erase the old height, then draw the new one at the same top
+    /// position. Growing extends downward (scrolling the transcript up like any
+    /// new bottom content); shrinking may leave a blank row below the frame until
+    /// the next output batch reclaims it.
+    #[allow(clippy::too_many_arguments)]
+    fn redraw_regions(
+        &mut self,
+        ui: &mut Ui,
+        plan: bool,
+        width: usize,
+        ask: &Option<AskState>,
+        cancel: &Cancel,
+        started: Instant,
+        active_tools: &[(String, String)],
+        region_rows: &[String],
+        drawn_r: &mut usize,
+    ) {
+        self.erase_dock(ui, *drawn_r);
+        self.draw_active_frame(ui, plan, width, ask, cancel, started, active_tools, region_rows);
+        *drawn_r = region_rows.len();
+    }
+
+    /// Erase the whole on-screen frame: the top status, `region_count` pinned
+    /// region rows, the input row, and the bottom status. Cursor starts on the
+    /// input row and ends at column 0 of the top row, where the next output
+    /// takes the frame's place. `2K` clears each line whole irrespective of the
+    /// cursor column, so this is exact at any height.
+    fn erase_dock(&mut self, ui: &mut Ui, region_count: usize) {
+        let up = 1 + region_count; // the input row sits this far below the top
+        let height = region_count + 3; // top + regions + input + bottom
+        let mut s = format!("\r\x1b[{up}A\x1b[2K");
+        for _ in 1..height {
+            s.push_str("\x1b[1B\r\x1b[2K");
+        }
+        s.push_str(&format!("\x1b[{}A\r", height - 1));
+        ui.out_raw(s.as_bytes());
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -876,15 +1069,30 @@ impl DockSession {
         cancel: &Cancel,
         started: Instant,
         active_tools: &[(String, String)],
+        region_rows: &[String],
     ) {
         let top = self.top_rule(ui, plan, width, started, active_tools);
         let bottom = self.bottom_rule(ui, width, ask, cancel);
-        ui.out_raw(format!("\r\x1b[2K{top}\r\n\r\n{bottom}\x1b[1A").as_bytes());
+        // Top status, each region row, a blank input row, then the bottom
+        // status, advancing into fresh rows with \r\n and clearing each (a no-op
+        // on the blank rows write_above just opened, self-healing otherwise).
+        let mut s = format!("\r\x1b[2K{top}");
+        for row in region_rows {
+            s.push_str("\r\n\x1b[2K");
+            s.push_str(row);
+        }
+        s.push_str("\r\n\x1b[2K\r\n\x1b[2K");
+        s.push_str(&bottom);
+        s.push_str("\x1b[1A");
+        ui.out_raw(s.as_bytes());
         self.redraw_active_input(ui, width, ask);
     }
 
-    /// Repaint the two status rows without erasing committed output. Cursor is
-    /// parked on the input row before and after this operation.
+    /// Repaint the status rows and pinned regions in place without erasing
+    /// committed output. Cursor is parked on the input row before and after. The
+    /// on-screen height must equal `region_rows.len() + 3`; a region whose row
+    /// count changed is repainted through `redraw_regions` (erase + draw), never
+    /// here, so this in-place repaint is always height-exact.
     #[allow(clippy::too_many_arguments)]
     fn refresh_active_frame(
         &mut self,
@@ -895,15 +1103,24 @@ impl DockSession {
         cancel: &Cancel,
         started: Instant,
         active_tools: &[(String, String)],
+        region_rows: &[String],
     ) {
         let top = self.top_rule(ui, plan, width, started, active_tools);
         let bottom = self.bottom_rule(ui, width, ask, cancel);
-        ui.out_raw(
-            format!(
-                "\r\x1b[1A\r\x1b[2K{top}\x1b[2B\r\x1b[2K{bottom}\x1b[1A\r"
-            )
-            .as_bytes(),
-        );
+        let up = 1 + region_rows.len();
+        let mut s = format!("\r\x1b[{up}A\r\x1b[2K{top}");
+        for row in region_rows {
+            // Clear the whole line before writing the row (one atomic write, so
+            // no flash): a trailing clear-to-end would instead sit on the parked
+            // deferred-wrap latch of a row clamped to exactly the width and erase
+            // its last glyph on every repaint.
+            s.push_str("\x1b[1B\r\x1b[2K");
+            s.push_str(row);
+        }
+        s.push_str("\x1b[2B\r\x1b[2K");
+        s.push_str(&bottom);
+        s.push_str("\x1b[1A\r");
+        ui.out_raw(s.as_bytes());
         self.redraw_active_input(ui, width, ask);
     }
 

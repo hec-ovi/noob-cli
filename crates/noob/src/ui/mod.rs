@@ -132,6 +132,17 @@ impl BufferedTurnRenderer {
     pub(super) fn take(&self) -> Vec<u8> {
         self.buffer.take()
     }
+
+    /// Register the task call ids an open fan-out panel covers, so their
+    /// redundant `* task` start/done lines are suppressed on the themed
+    /// surface. The dock pins the panel block itself as a live region and never
+    /// replays it through this renderer, so the ids must still be recorded here
+    /// (the renderer owns the tool lines that consult them).
+    pub(super) fn cover_task_ids(&mut self, ids: &[String]) {
+        for id in ids {
+            self.ui.panel_task_ids.insert(id.clone());
+        }
+    }
 }
 
 pub struct Ui {
@@ -662,6 +673,37 @@ impl Ui {
         self.render_checklist(block);
     }
 
+    /// Build the pinned-region rows for a checklist or fan-out block on the
+    /// themed dock: one styled physical row per source line, each clamped to a
+    /// single terminal row (the same one-row discipline the input line follows)
+    /// so the variable-height frame's erase and redraw stay exact. The glyph
+    /// styling matches [`Ui::render_checklist`] over the same characters.
+    /// Empty off the themed surface, so a no-color or byte-identity dock pins no
+    /// region at all, exactly as the scrolled block is silent there.
+    pub(super) fn checklist_region_rows(&self, text: &str, width: usize) -> Vec<String> {
+        if !self.styled() {
+            return Vec::new();
+        }
+        let activity = self.theme.activity.sgr(self.depth);
+        let note = self.theme.note.sgr(self.depth);
+        let mut rows = Vec::new();
+        for line in text.lines() {
+            let safe = safe_terminal_text(line);
+            if safe.trim().is_empty() {
+                continue;
+            }
+            let open: &str = if safe.starts_with("[ ]") {
+                DIM
+            } else if safe.starts_with("[x]") || safe.starts_with("[~]") {
+                &activity
+            } else {
+                &note
+            };
+            rows.push(format!("{open}{}{RESET}", clamp_to_row(&safe, width)));
+        }
+        rows
+    }
+
     /// Loop / lifecycle note ("cache prefix reset: compaction", nudges).
     pub fn note(&mut self, line: &str) {
         if self.send_turn(TurnEvent::Note(line.to_string())) {
@@ -881,6 +923,33 @@ fn safe_terminal_text(input: &str) -> std::borrow::Cow<'_, str> {
         }
     }
     std::borrow::Cow::Owned(out)
+}
+
+/// One physical row's worth of text: at most `width` terminal columns, counted
+/// by display width (so a wide CJK/emoji glyph counts as two, never wrapping the
+/// row to a second physical line), with a trailing ellipsis when the source is
+/// longer. Keeping a pinned region line to one physical row is what lets the
+/// variable-height frame erase and redraw by an exact row count.
+fn clamp_to_row(s: &str, width: usize) -> String {
+    let width = width.max(1);
+    if table::cell_width(s) <= width {
+        return s.to_string();
+    }
+    // Reserve the last column for the ellipsis, then take glyphs while their
+    // display width fits, so the result is at most `width` columns wide.
+    let budget = width - 1;
+    let mut used = 0usize;
+    let mut out = String::new();
+    for c in s.chars() {
+        let w = table::char_width(c);
+        if used + w > budget {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
 }
 
 /// Color allowed unless `NO_COLOR` is present and non-empty (the spec: honor it
@@ -1155,6 +1224,45 @@ mod tests {
         assert_ne!(s, format!("{checklist}\n"), "styled block must differ from plain");
         // Every opener is reset (paired escapes), so no color leaks past a line.
         assert_eq!(s.matches("\x1b[0m").count() * 2, s.matches("\x1b[").count());
+    }
+
+    #[test]
+    fn checklist_region_rows_are_one_clamped_physical_row_each() {
+        // The pinned-dock view of a plan: one styled physical row per source
+        // line so the variable-height frame erases and redraws by an exact count.
+        // Blank lines are dropped (an empty frame row is wasted height), and an
+        // over-long line is clamped with an ellipsis so it can never wrap.
+        let (ui, _out, _err) = harness(Mode::Repl, true, true);
+        let block = "plan (1/3 done):\n[x] short\n[ ] pending\n\n\
+                     [~] a very long item that must be clamped to the row";
+        let rows = ui.checklist_region_rows(block, 24);
+        assert_eq!(rows.len(), 4, "one row per non-empty source line: {rows:?}");
+        for row in &rows {
+            let plain = strip_ansi(row);
+            assert!(plain.chars().count() <= 24, "row exceeds the width clamp: {plain:?}");
+        }
+        assert!(strip_ansi(&rows[0]).contains("plan (1/3 done):"));
+        assert!(strip_ansi(&rows[1]).contains("[x] short"));
+        assert!(
+            strip_ansi(&rows[3]).ends_with('…'),
+            "the over-long row must be truncated: {:?}",
+            strip_ansi(&rows[3])
+        );
+        assert!(rows.iter().all(|r| r.contains('\x1b')), "region rows must carry styling");
+    }
+
+    #[test]
+    fn checklist_region_rows_are_empty_off_the_themed_surface() {
+        // The pinned region is a themed-REPL affordance, exactly like the
+        // scrolled block: a no-color tty, a piped REPL, and exec all pin nothing.
+        for (mode, color, ansi) in [
+            (Mode::Repl, false, true),
+            (Mode::Repl, false, false),
+            (Mode::Exec, true, true),
+        ] {
+            let (ui, _o, _e) = harness(mode, color, ansi);
+            assert!(ui.checklist_region_rows("plan (0/1 done):\n[ ] x", 40).is_empty());
+        }
     }
 
     #[test]

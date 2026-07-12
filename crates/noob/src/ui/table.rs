@@ -479,7 +479,7 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn cell_width(s: &str) -> usize {
+pub(super) fn cell_width(s: &str) -> usize {
     // The single source of truth for column sizing, wrapping, and padding. It
     // sums terminal display columns rather than Unicode scalars so a wide glyph
     // or a combining mark cannot shove a row's right border off the shared column.
@@ -490,8 +490,10 @@ fn cell_width(s: &str) -> usize {
 /// 2 for East-Asian Wide/Fullwidth and common emoji, 1 otherwise. This is a
 /// hand-rolled range check (no extra crates), covering the ranges noob actually
 /// emits in tables rather than the full UAX #11 table. On ASCII it equals the
-/// old scalar count, so ASCII layouts are unchanged.
-fn char_width(c: char) -> usize {
+/// old scalar count, so ASCII layouts are unchanged. Shared with the dock's
+/// pinned-region clamp so a wide glyph cannot wrap a region row to two physical
+/// rows and desync the frame height.
+pub(super) fn char_width(c: char) -> usize {
     let c = c as u32;
     // Zero-width: combining diacritics, zero-width spaces/joiner (incl. U+200D),
     // variation selectors, and the BOM.

@@ -413,6 +413,21 @@ pub(super) fn term_width() -> usize {
     }
 }
 
+/// Terminal height in rows via the window-size ioctl; 24 when it is unavailable
+/// (a startup pty that has not been sized yet reports 0). Used only to bound the
+/// dock's pinned regions so the live frame never grows taller than the screen,
+/// where the relative cursor moves would clamp at the top edge and desync.
+pub(super) fn term_height() -> usize {
+    unsafe {
+        let mut ws: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_row > 0 {
+            ws.ws_row as usize
+        } else {
+            24
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The editor: a pure state machine over decoded keys. No I/O, so it is fully
 // unit-testable without owning a terminal.
