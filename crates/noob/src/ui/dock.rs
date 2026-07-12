@@ -446,6 +446,10 @@ impl DockSession {
             let mut acted = false;
             while let Some(key) = self.pending.pop_front() {
                 acted = true;
+                if key == Key::Tab {
+                    super::prompt::complete_editor(&mut self.draft);
+                    continue;
+                }
                 match self.draft.apply(key) {
                     Step::Continue => {}
                     Step::Submit => return self.submit(ui, expanded),
@@ -472,7 +476,7 @@ impl DockSession {
             } else if expanded {
                 ui.refit(plan, &mut width);
             }
-            ui.redraw_input_row(&self.draft, width);
+            ui.redraw_input_with_completion(&self.draft, width);
             let mut gone = match self.rx.recv() {
                 Ok(ev) => self.absorb_idle(ev),
                 // Every Sender dropped: the session is torn down.

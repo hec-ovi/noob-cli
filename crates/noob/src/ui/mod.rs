@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 
 use noob_provider::types::{Item, Usage};
 
+pub(crate) mod commands;
 mod dock;
 mod markdown;
 pub(crate) mod prompt;

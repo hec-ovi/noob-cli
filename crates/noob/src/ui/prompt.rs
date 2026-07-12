@@ -28,7 +28,7 @@ use std::sync::atomic::Ordering;
 use noob_provider::http::INTERRUPTED;
 
 use super::style::{DIM, RESET};
-use super::{Mode, Ui};
+use super::{Mode, Ui, commands};
 
 thread_local! {
     /// Keys decoded past a submitted Enter within a single read (a multi-line
@@ -110,6 +110,10 @@ impl Ui {
             let mut acted = false;
             while let Some(key) = queue.pop_front() {
                 acted = true;
+                if key == Key::Tab {
+                    complete_editor(&mut ed);
+                    continue;
+                }
                 match ed.apply(key) {
                     Step::Continue => {}
                     Step::Submit => return self.submit(&ed, queue, expanded),
@@ -134,7 +138,7 @@ impl Ui {
             } else if expanded {
                 self.refit(plan, &mut width);
             }
-            self.redraw_input_row(&ed, width);
+            self.redraw_input_with_completion(&ed, width);
             let n = unsafe {
                 libc::read(libc::STDIN_FILENO, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
             };
@@ -272,6 +276,42 @@ impl Ui {
         self.out(&s);
     }
 
+    /// Redraw the input row, adding a dim slash-command completion hint after
+    /// the typed token when the draft is a `/`-prefix with candidates. Falls
+    /// back to the plain redraw for a non-command line, so nothing changes off
+    /// the completion path. The reader calls this in place of `redraw_input_row`
+    /// at the idle prompt.
+    pub(super) fn redraw_input_with_completion(&mut self, ed: &Editor, width: usize) {
+        match commands::hint(&ed.line()) {
+            Some(hint) => self.redraw_input_row_completion(ed, width, &hint),
+            None => self.redraw_input_row(ed, width),
+        }
+    }
+
+    /// Draw the input row as the typed token followed by a dim `hint`, all
+    /// windowed to one physical row so the three-row frame stays exact: the hint
+    /// is truncated to whatever columns remain after the marker and the token, so
+    /// the combined width never exceeds the terminal and can never wrap. The
+    /// cursor parks right after the token (before the hint), so typing extends
+    /// the command. The hint is display-only, never part of the buffer.
+    pub(super) fn redraw_input_row_completion(&mut self, ed: &Editor, width: usize, hint: &str) {
+        let color = self.box_color();
+        let reset = if color.is_empty() { "" } else { RESET };
+        let avail = width.saturating_sub(PREFIX_CELLS).max(1);
+        let (shown, cur) = input_window(&ed.buf, ed.cursor, avail);
+        let hint_room = avail.saturating_sub(shown.chars().count());
+        let shown_hint: String = hint.chars().take(hint_room).collect();
+        let dim = if self.color { DIM } else { "" };
+        let dim_reset = if self.color { RESET } else { "" };
+        // Content, then clear-to-end-of-line (no blank flash), then park the
+        // cursor after the token. col is always >= PREFIX_CELLS, so it is
+        // emitted unconditionally.
+        let col = PREFIX_CELLS + cur;
+        self.out(&format!(
+            "\r{color}{PREFIX}{reset}{shown}{dim}{shown_hint}{dim_reset}\x1b[K\r\x1b[{col}C"
+        ));
+    }
+
     /// Wipe the three frame rows (the input line, the bottom rule below it, the
     /// top rule above it), leaving the cursor at column 0 of the top row so the
     /// next output takes the frame's place. Cursor is assumed to be on the input
@@ -392,6 +432,10 @@ pub(crate) enum Key {
     KillToEnd,
     KillWord,
     Enter,
+    /// The Tab key. The pure editor ignores it (a no-op, so a `/`-prefixed
+    /// command never gets a literal tab); the raw reader intercepts it before
+    /// `apply` to run slash-command completion on the draft.
+    Tab,
     Interrupt,
     Eof,
     /// A lone ESC press (not the start of a sequence). Only ever produced
@@ -470,6 +514,9 @@ impl Editor {
             Key::KillToEnd => self.buf.truncate(self.cursor),
             Key::KillWord => self.kill_word(),
             Key::Enter => return Step::Submit,
+            // Tab is completion, handled by the reader before it reaches the
+            // editor; on the off chance one arrives here it inserts nothing.
+            Key::Tab => {}
             Key::Interrupt => return Step::Interrupt,
             // A lone ESC has no editing meaning; the dock consumes it
             // before the editor ever sees one.
@@ -496,6 +543,18 @@ impl Editor {
         }
         self.buf.drain(i..self.cursor);
         self.cursor = i;
+    }
+}
+
+/// Apply a slash-command Tab completion to `ed` in place, if its current line is
+/// a completable command token. A no-op otherwise (a non-command line, an
+/// ambiguous prefix already at its common stem, or an already-complete command),
+/// so Tab never inserts a literal tab and never disturbs a non-slash draft. The
+/// completed line's cursor lands at its end. This is the one place command
+/// knowledge meets the editor; the `Editor` state machine itself stays pure.
+pub(super) fn complete_editor(ed: &mut Editor) {
+    if let Some(completed) = commands::complete(&ed.line()) {
+        *ed = Editor::from_line(&completed);
     }
 }
 
@@ -652,7 +711,8 @@ impl Decoder {
                 0x0b => keys.push(Key::KillToEnd),
                 0x15 => keys.push(Key::KillToStart),
                 0x17 => keys.push(Key::KillWord),
-                b if b < 0x20 => {} // ignore other control (Tab, etc.)
+                0x09 => keys.push(Key::Tab),
+                b if b < 0x20 => {} // ignore other control bytes
                 _ => match take_char(&data, i) {
                     Decoded::Incomplete => {
                         self.pending = data[i..].to_vec();
@@ -1010,8 +1070,17 @@ mod tests {
         assert_eq!(keys(&[0x17]), vec![Key::KillWord]);
         assert_eq!(keys(&[0x03]), vec![Key::Interrupt]);
         assert_eq!(keys(&[0x04]), vec![Key::Eof]);
-        // Tab and other stray control bytes are dropped, not inserted.
-        assert_eq!(keys(&[0x09]), vec![]);
+        // Tab decodes to its own key (the reader uses it for command
+        // completion); the pure editor treats it as a no-op, never inserting a
+        // literal tab. Other stray control bytes are still dropped.
+        assert_eq!(keys(&[0x09]), vec![Key::Tab]);
+        let mut ed = Editor::default();
+        for k in keys(b"/pl") {
+            ed.apply(k);
+        }
+        assert!(matches!(ed.apply(Key::Tab), Step::Continue));
+        assert_eq!(ed.line(), "/pl", "Tab must not insert into the pure editor");
+        assert_eq!(keys(&[0x1c]), vec![]);
     }
 
     #[test]

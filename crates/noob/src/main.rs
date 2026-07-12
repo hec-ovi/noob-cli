@@ -371,7 +371,8 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                     }
                 }
                 other => ui.note(&format!(
-                    "unknown command /{other}; available: /plan /go /status /compact /skills /quit"
+                    "unknown command /{other}; available: {}",
+                    ui::commands::banner()
                 )),
             }
             continue;
@@ -521,8 +522,9 @@ fn greet(agent: &Agent, ui: &mut Ui) {
         .map(|s| format!(" · session {}", s.id()))
         .unwrap_or_default();
     ui.greeting(&format!(
-        "noob {} · {endpoint}{session}\ntype a task; /plan /go /status /compact /skills /quit",
-        env!("CARGO_PKG_VERSION")
+        "noob {} · {endpoint}{session}\ntype a task; {}",
+        env!("CARGO_PKG_VERSION"),
+        ui::commands::banner()
     ));
 }
 
