@@ -288,6 +288,18 @@ impl Ui {
         }
     }
 
+    /// Redraw the editable line of the persistent idle box. Same as the mid-turn
+    /// input, but an empty draft shows a dim "type a message" hint instead of a
+    /// lone marker, so the box always reads as a live input between turns rather
+    /// than collapsing to a bare `›`. A `/`-prefixed draft still shows its
+    /// slash-command completion. Display-only: the hint never enters the buffer.
+    pub(super) fn redraw_idle_input(&mut self, ed: &Editor, width: usize) {
+        match commands::hint(&ed.line()) {
+            Some(hint) => self.redraw_input_row_completion(ed, width, &hint),
+            None => self.redraw_input_row_hint(ed, width, "type a message"),
+        }
+    }
+
     /// Draw the input row as the typed token followed by a dim `hint`, all
     /// windowed to one physical row so the three-row frame stays exact: the hint
     /// is truncated to whatever columns remain after the marker and the token, so

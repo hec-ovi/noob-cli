@@ -1452,22 +1452,43 @@ fn dock_input_row_survives_a_scrolling_stream_at_the_screen_level() {
         mid.dump("mid")
     );
 
-    // ---- END-OF-TURN assertions: frame gone, a bare idle marker remains. ----
+    // ---- END-OF-TURN assertions: the live turn frame (Working/cancel) is gone,
+    //      replaced by the persistent idle input box so the input never collapses
+    //      to a lone marker between turns. ----
     let end_rows = end.render();
     assert!(
         dock_rows(&end_rows).is_none(),
-        "END-OF-TURN the live frame was not torn down:\n{}",
+        "END-OF-TURN the live turn frame (Working/cancel) was not torn down:\n{}",
         end.dump("end")
     );
-    let last_marker = end_rows
+    let marker = end_rows
         .iter()
-        .rposition(|r| r.trim_start().starts_with(MARKER))
-        .unwrap_or_else(|| panic!("END-OF-TURN no idle `{MARKER}` prompt:\n{}", end.dump("end")));
-    // Nothing streamed should sit below the idle prompt.
-    for (i, r) in end_rows.iter().enumerate().skip(last_marker + 1) {
+        .rposition(|r| r.contains(MARKER))
+        .unwrap_or_else(|| panic!("END-OF-TURN no idle input box:\n{}", end.dump("end")));
+    // The empty idle box reads as a live input (dim hint), never a bare marker,
+    // and no streamed output bled into the input row.
+    assert!(
+        end_rows[marker].contains("type a message"),
+        "END-OF-TURN the idle input lost its hint (collapsed to a bare marker): {:?}\n{}",
+        end_rows[marker],
+        end.dump("end")
+    );
+    assert!(
+        !end_rows[marker].contains("row-") && !end_rows[marker].contains("ZZEND"),
+        "END-OF-TURN streamed output bled into the idle input row: {:?}\n{}",
+        end_rows[marker],
+        end.dump("end")
+    );
+    // The box is framed: a rule directly below the input, and nothing past it.
+    assert!(
+        end_rows.get(marker + 1).is_some_and(|r| r.contains("──")),
+        "END-OF-TURN the idle box has no bottom rule under the input:\n{}",
+        end.dump("end")
+    );
+    for (i, r) in end_rows.iter().enumerate().skip(marker + 2) {
         assert!(
             r.is_empty(),
-            "END-OF-TURN row {i} below the idle prompt is not blank: {r:?}\n{}",
+            "END-OF-TURN row {i} below the idle box is not blank: {r:?}\n{}",
             end.dump("end")
         );
     }
@@ -1724,6 +1745,54 @@ fn dock_caps_pinned_regions_to_the_screen_height() {
         working < header && header < input,
         "plan not pinned inside the frame:\n{}",
         screen.dump("cap")
+    );
+}
+
+/// The idle input is a persistent framed box from the very first prompt: a plain
+/// rule above and below a `› type a message` line, present before any keystroke,
+/// so the input never reads as a lone marker (the reported "input disappears when
+/// inference finishes"). This is the dock default; the classic NOOB_DOCK=0 editor
+/// keeps its bare-marker-expands behavior.
+#[test]
+fn dock_idle_input_is_a_persistent_framed_box() {
+    const ROWS: u16 = 10;
+    const COLS: u16 = 50;
+
+    let rig = rig();
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)), &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    // No keystroke: the framed idle box must already be on screen.
+    pty.drain(std::time::Duration::from_millis(300));
+    let screen = pty.screen(ROWS, COLS);
+    let rows = screen.render();
+    println!("\n{}", screen.dump("FRESH IDLE BOX (no keystroke)"));
+
+    pty.send(&[0x04]); // Ctrl-D exits from the empty box
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+
+    let marker = rows
+        .iter()
+        .rposition(|r| r.contains(MARKER))
+        .unwrap_or_else(|| panic!("no idle input box before typing:\n{}", screen.dump("idle")));
+    assert!(
+        rows[marker].contains("type a message"),
+        "the fresh idle box is missing its hint (bare marker): {:?}\n{}",
+        rows[marker],
+        screen.dump("idle")
+    );
+    assert!(
+        marker >= 1 && rows[marker - 1].contains("──"),
+        "no top rule above the idle input:\n{}",
+        screen.dump("idle")
+    );
+    assert!(
+        rows.get(marker + 1).is_some_and(|r| r.contains("──")),
+        "no bottom rule below the idle input:\n{}",
+        screen.dump("idle")
     );
 }
 

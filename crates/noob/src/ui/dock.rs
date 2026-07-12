@@ -432,11 +432,14 @@ impl DockSession {
         self.draft = Editor::from_line(&parts.join("\n"));
     }
 
-    /// Read one line at the idle prompt, event-driven but with the exact
-    /// semantics of the per-prompt raw editor: bare marker until the first
-    /// key expands the frame, submit collapses to a `› message` record,
-    /// Ctrl-C cancels the line, Ctrl-D on an empty line is EOF. A draft
-    /// typed during the previous turn is already visible and editable.
+    /// Read one line at the idle prompt, event-driven with the semantics of the
+    /// per-prompt raw editor: a persistent framed box (a plain rule above and
+    /// below the editable line, a dim hint when empty) that stays visible the
+    /// whole time so the input never collapses to a lone marker between turns,
+    /// submit collapses it to a `› message` record, Ctrl-C cancels the line,
+    /// Ctrl-D on an empty line is EOF. A draft typed during the previous turn is
+    /// already visible and editable. Off the token path entirely: this runs only
+    /// while no turn is in flight.
     pub fn read_prompt(&mut self, ui: &mut Ui, plan: bool) -> Input {
         // Queued messages were echoed at acceptance time during the turn. Do
         // not print them a second time when they are dispatched.
@@ -446,47 +449,38 @@ impl DockSession {
         if self.reader_gone && self.pending.is_empty() {
             return Input::Eof;
         }
+        // The idle input is a persistent box, drawn up front and kept for the
+        // whole prompt: only the editable line repaints on a keystroke; the
+        // rules are redrawn only on a resize (refit), so typing stays cheap.
         let mut width = term_width();
-        let mut expanded = false;
-        if !self.draft.is_empty() {
-            expanded = true;
-            ui.expand(plan, width);
-        }
+        ui.expand(plan, width);
         loop {
-            let mut acted = false;
             while let Some(key) = self.pending.pop_front() {
-                acted = true;
                 if key == Key::Tab {
                     super::prompt::complete_editor(&mut self.draft);
                     continue;
                 }
                 match self.draft.apply(key) {
                     Step::Continue => {}
-                    Step::Submit => return self.submit(ui, expanded),
+                    Step::Submit => return self.submit(ui, true),
                     Step::Interrupt => {
-                        ui.erase(expanded);
+                        ui.erase(true);
                         self.draft = Editor::default();
                         INTERRUPTED.swap(false, Ordering::SeqCst);
                         return Input::Interrupted;
                     }
                     Step::Eof => {
-                        ui.erase(expanded);
+                        ui.erase(true);
                         return Input::Eof;
                     }
                 }
             }
             if self.reader_gone {
-                ui.erase(expanded);
+                ui.erase(true);
                 return Input::Eof;
             }
-            if acted && !expanded {
-                expanded = true;
-                width = term_width();
-                ui.expand(plan, width);
-            } else if expanded {
-                ui.refit(plan, &mut width);
-            }
-            ui.redraw_input_with_completion(&self.draft, width);
+            ui.refit(plan, &mut width);
+            ui.redraw_idle_input(&self.draft, width);
             let mut gone = match self.rx.recv() {
                 Ok(ev) => self.absorb_idle(ev),
                 // Every Sender dropped: the session is torn down.
