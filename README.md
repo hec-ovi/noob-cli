@@ -93,7 +93,7 @@ During a turn, typing edits the next draft. Enter queues one message. Escape twi
 - Read-only plan mode through `/plan`, followed by `/go`.
 - Lazy MCP over stdio and Streamable HTTP. Server schemas enter context only after connection.
 - Runtime skill discovery and atomic `/skills add`, `remove`, and `reload`.
-- A default terminal dock with elapsed status, active tools, editable typeahead, queueing, confirmations, cancellation, and Tab completion for slash commands.
+- A default terminal dock with elapsed status, active tools, editable typeahead, queueing, confirmations, cancellation, Tab completion for slash commands, live in-place plan and agents panels, and reflow on terminal resize.
 - Interactive Markdown for headings, emphasis, lists, fenced code, JSON, and width-aware tables.
 - Matrix, ocean, amber, and violet display themes.
 
@@ -175,6 +175,12 @@ NOOB_LIVE_BASE_URL=http://localhost:8080/v1 \
 NOOB_LIVE_MCP_URL=http://localhost:18000/mcp \
 ./dev.sh smoke
 ```
+
+### Verified end to end
+
+Beyond the offline suite, the interactive stack was driven against a local qwen model. The core tools, `todo` plans that are laid out and executed in the same turn, `subagent` fan-out, `/skills add`, use, and `remove`, `--resume` with on-screen replay, plan mode, cancellation, and resize reflow all behave as described.
+
+The external [research-skill](https://github.com/hec-ovi/research-skill) was installed with `/skills add <git-url>` and exercised with a plain research question and no extra prompting. The model built a project-scoped `.research/` store on its own: an `INDEX.md` and per-topic `FINDINGS.md` files carrying a `sources` block, by driving the bundled `websearch` tool across several searches and fetches. So an installed skill and the web-search tooling compose without hand-holding.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the runtime design and [PLAN.md](PLAN.md) for verified release status. The terminal design was cross-checked against current [Zero](https://github.com/Gitlawb/zero) and [Codex](https://github.com/openai/codex) source.
 
