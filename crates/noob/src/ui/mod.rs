@@ -903,6 +903,7 @@ fn is_synthetic_replay_item(text: &str) -> bool {
         || text.starts_with("[skills updated]")
         || text.starts_with("[loaded skills:")
         || text.starts_with("[conversation summary]")
+        || text.starts_with("[earlier conversation dropped:")
         || text.starts_with("[note]")
 }
 
@@ -1367,6 +1368,7 @@ mod tests {
             Item::User("[skills updated] now available: pdf: read pdfs.".into()),
             Item::User(crate::agent::PLAN_ENTER_MSG.into()),
             Item::User("[conversation summary]\nwork happened".into()),
+            Item::User("[earlier conversation dropped: 8 items removed because summary invalid]".into()),
             Item::User("great, thanks".into()),
             Item::Assistant {
                 text: "You're welcome!".into(),
@@ -1391,6 +1393,10 @@ mod tests {
         assert!(!plain.contains("[skills updated]"), "a skills note leaked into replay");
         assert!(!plain.contains("[plan mode]"), "the plan toggle leaked into replay");
         assert!(!plain.contains("[conversation summary]"), "a summary leaked into replay");
+        assert!(
+            !plain.contains("earlier conversation dropped"),
+            "a hard-drop compaction stub leaked into replay"
+        );
     }
 
     #[test]
