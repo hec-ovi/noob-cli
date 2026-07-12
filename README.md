@@ -80,11 +80,11 @@ Interactive commands:
 | `/skills reload` | Run discovery again |
 | `/quit`, `exit`, or `quit` | Leave the REPL |
 
-During a turn, typing edits the next draft. Enter queues one message. Escape twice within five seconds cancels, while Ctrl-C cancels immediately. A second Ctrl-C while cancellation is in progress restores the terminal and exits with status 130. Cancellation returns queued messages to the editor.
+During a turn the input stays live: typing edits the next message, and the dock keeps the plan, agents, and queue visible while output scrolls above them. The dock up close covers queueing and cancellation.
 
 ## Features
 
-- Eight core tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, and `todo` (a live `[x]`/`[~]`/`[ ]` checklist the model updates as it works, with no approval step).
+- Eight core tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, and `todo`.
 - Conditional SKILL.md, MCP, and self-spawned child-agent tools.
 - Parallel read-only calls with sequential mutation barriers and actual lifecycle timing.
 - A live agents panel for `subagent` fan-out: one checklist of the parallel sub-agents with running or done status, a one-line result each, and the concurrency cap (`NOOB_TASK_CONCURRENCY`).
@@ -97,9 +97,11 @@ During a turn, typing edits the next draft. Enter queues one message. Escape twi
 - Interactive Markdown for headings, emphasis, lists, fenced code, JSON, and width-aware tables.
 - Matrix, ocean, amber, and violet display themes.
 
-## Python and web search
+## 🔎 Web search: a skill and a tool
 
-The runtime image contains Python 3, uv, and `websearch-skill==0.1.0` in an isolated uv tool environment. The `websearch` command supports both standalone and MCP use:
+Web search reaches the model as a **skill plus a tool**, not a built-in.
+
+The **tool** is `websearch`, a small Python package ([`websearch-skill`](https://github.com/hec-ovi/websearch-skill), pinned and installed in its own uv tool environment inside the runtime image). It ships a CLI and a stdio MCP server:
 
 ```bash
 websearch web-search "query"
@@ -109,13 +111,31 @@ websearch github "repository topic" --language Rust
 websearch mcp
 ```
 
-The installer enables the stdio MCP server without starting a sidecar. The bundled skill provides the standalone Bash fallback. When running from the checkout, enable the same MCP configuration with:
+The **skill** is a `SKILL.md` in the config that tells the model when to search and which subcommand to reach for. The model runs `websearch` through `bash`, or through the MCP server when one is configured. The installer seeds both and enables the stdio server without a sidecar; the bundled skill is the standalone Bash fallback. From the checkout, turn on the same MCP config with:
 
 ```bash
 cp config/mcp.websearch.example.json config/mcp.json
 ```
 
-An existing Streamable HTTP sidecar can instead be configured by setting its URL in `mcp.json`.
+Point at an existing Streamable HTTP sidecar instead by setting its URL in `mcp.json`.
+
+The pair composes with no hand-holding. In a live run, asked a plain research question, the model reached for `websearch web-search` and `websearch web-fetch` across several queries on its own and folded the results into sourced findings.
+
+## 🧩 Skills: instructions the model runs
+
+A skill is a `SKILL.md` the model activates and then carries out with the ordinary tools, so it adds a capability without adding code. Install one from a local path or a git URL with `/skills add`, list with `/skills`, and drop a workspace one with `/skills remove`.
+
+The external [research-skill](https://github.com/hec-ovi/research-skill) shows the shape. Once installed, a plain research question drove the model to `write` a project-scoped `.research/` store (an `INDEX.md` and per-topic `FINDINGS.md`, each with a `sources` block), search through `websearch`, and `read` the store back on later lookups. It runs `read`, `write`, `bash`, and `websearch`, the same tools any turn uses.
+
+## 📟 The dock up close
+
+Three small things the persistent dock does while a turn streams above it.
+
+**📋 Plan.** The `todo` tool is a live checklist. The model lays out the steps and works them in the same turn, flipping each item from `[ ]` to `[~]` to `[x]` in a panel pinned above the input. The finished plan stays on screen when the turn ends.
+
+**⌨️ Queue.** Type while a turn is running. Enter queues that message with a `[queued]` marker, and it is dispatched when the turn finishes. Cancelling hands queued text back to the editor instead of firing it.
+
+**⎋ Cancel.** Escape twice within five seconds cancels a running turn; Ctrl-C cancels at once. A second Ctrl-C during cancellation restores the terminal and exits with status 130.
 
 ## Configuration
 
@@ -178,9 +198,7 @@ NOOB_LIVE_MCP_URL=http://localhost:18000/mcp \
 
 ### Verified end to end
 
-Beyond the offline suite, the interactive stack was driven against a local qwen model. The core tools, `todo` plans that are laid out and executed in the same turn, `subagent` fan-out, `/skills add`, use, and `remove`, `--resume` with on-screen replay, plan mode, cancellation, and resize reflow all behave as described.
-
-The external [research-skill](https://github.com/hec-ovi/research-skill) was installed with `/skills add <git-url>` and exercised with a plain research question and no extra prompting. The model built a project-scoped `.research/` store on its own: an `INDEX.md` and per-topic `FINDINGS.md` files carrying a `sources` block, by driving the bundled `websearch` tool across several searches and fetches. So an installed skill and the web-search tooling compose without hand-holding.
+Beyond the offline suite, the interactive stack was driven against a local qwen model with no prompt-steering: the core tools, `todo` plans executed in one turn, `subagent` fan-out, `/skills add`, use, and `remove`, `--resume` with on-screen replay, plan mode, cancellation, resize reflow, and the research-skill and `websearch` flow shown above all behaved as expected.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the runtime design and [PLAN.md](PLAN.md) for verified release status. The terminal design was cross-checked against current [Zero](https://github.com/Gitlawb/zero) and [Codex](https://github.com/openai/codex) source.
 
