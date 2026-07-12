@@ -263,6 +263,26 @@ fn session_resume() {
     rig.server.assert_clean();
 }
 
+/// exec never redisplays a resumed transcript (that is a REPL-only affordance):
+/// a second `--session` run prints only the new answer, not the prior turns nor
+/// the replay marker, keeping the exec surface byte-identical on resume.
+#[test]
+fn exec_resume_does_not_replay_prior_turns() {
+    let rig = rig();
+    rig.server.enqueue_stream_completion("first answer here");
+    rig.server.enqueue_stream_completion("second answer here");
+
+    ok(&rig.run(&["exec", "--session", "s-noreplay", "-p", "first question"]));
+    let out2 = ok(&rig.run(&["exec", "--session", "s-noreplay", "-p", "second question"]));
+
+    assert!(out2.contains("second answer here"));
+    // The prior turns are loaded into context but never echoed to stdout.
+    assert!(!out2.contains("first question"), "exec replayed a prior user turn to stdout");
+    assert!(!out2.contains("first answer here"), "exec replayed a prior assistant turn to stdout");
+    assert!(!out2.contains('\u{203a}'), "the replay user marker leaked into exec stdout");
+    rig.server.assert_clean();
+}
+
 /// Forced compaction: a small NOOB_CTX plus inflated reported usage makes
 /// the loop summarize the middle before the next request. Asserts the
 /// summarize request shape, the spliced summary, and the session reset.

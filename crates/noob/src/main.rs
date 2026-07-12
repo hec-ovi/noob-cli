@@ -94,7 +94,10 @@ fn current_depth() -> u32 {
         .unwrap_or(0)
 }
 
-fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
+/// Returns the assembled agent and whether an explicit `--resume <id>` missed
+/// (the id was given but no session file existed), so the REPL can tell the
+/// human it started fresh. The flag is display-only; `exec`/`child` ignore it.
+fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
     let config_dir = config::config_dir();
     let mut ov = boot.ov;
     if ov.base_url.is_none()
@@ -165,11 +168,12 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
         });
     }
 
-    let (session, replayed) = match boot.session {
-        None => (None, Vec::new()),
+    let (session, replayed, resume_missed) = match boot.session {
+        None => (None, Vec::new(), false),
         Some(id) => {
-            let (s, items) = Session::open(&config_dir, id.as_deref())?;
-            (Some(s), items)
+            let requested = id.is_some();
+            let (s, items, existed) = Session::open(&config_dir, id.as_deref())?;
+            (Some(s), items, requested && !existed)
         }
     };
     let mut agent = Agent::new(
@@ -189,7 +193,7 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
     // Read-only children: the schemas are already filtered above; this arms
     // the dispatcher's defense in depth against hallucinated mutations.
     agent.read_only = boot.read_only;
-    Ok(agent)
+    Ok((agent, resume_missed))
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +201,8 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<Agent, String> {
 // ---------------------------------------------------------------------------
 
 fn cmd_repl(args: &[String]) -> ExitCode {
-    const USAGE: &str = "usage: noob [--model <name>] [--base-url <url>] [--session <id> | --restore <id>] \
+    const USAGE: &str = "usage: noob [--model <name>] [--base-url <url>] \
+                         [--resume <id> | --session <id> | --restore <id>] \
                          [--plan] [--verbose] [--yolo]";
     let mut ov = Overrides::default();
     let mut yolo = false;
@@ -209,7 +214,7 @@ fn cmd_repl(args: &[String]) -> ExitCode {
         let taken = match arg.as_str() {
             "--model" => value_for(arg, it.next(), USAGE).map(|v| ov.model = Some(v)),
             "--base-url" => value_for(arg, it.next(), USAGE).map(|v| ov.base_url = Some(v)),
-            "--session" | "--restore" => {
+            "--resume" | "--session" | "--restore" => {
                 value_for(arg, it.next(), USAGE).map(|v| session_id = Some(v))
             }
             "--yolo" => {
@@ -235,20 +240,35 @@ fn cmd_repl(args: &[String]) -> ExitCode {
     let mut ui = Ui::new(Mode::Repl);
     // The REPL always persists: a fresh id, or resume the one given so a closed
     // session can be picked up where it left off.
-    let session = match session_id {
-        Some(id) => Some(Some(id)),
+    let session = match &session_id {
+        Some(id) => Some(Some(id.clone())),
         None => Some(None),
     };
     let mut boot = BootArgs::new(ov, yolo, plan, session);
     boot.verbose = verbose;
-    let mut agent = match bootstrap(boot, &mut ui) {
-        Ok(a) => a,
+    let (mut agent, resume_missed) = match bootstrap(boot, &mut ui) {
+        Ok(pair) => pair,
         Err(e) => {
             eprintln!("noob: {e}");
             return ExitCode::from(2);
         }
     };
     greet(&agent, &mut ui);
+    // A resume that named an id with no saved session starts fresh; on the
+    // interactive surface say so instead of silently opening an empty session.
+    // Gated on is_interactive so a piped REPL and exec stay byte-identical.
+    if resume_missed
+        && ui.is_interactive()
+        && let Some(id) = &session_id
+    {
+        ui.note(&format!("no saved session {id}; starting fresh"));
+    }
+    // Redisplay a resumed conversation on screen: interactive REPL only and
+    // only when there is history. Display-only and off the token path; it never
+    // touches the request body, the transcript, or the session log.
+    if ui.is_interactive() && !agent.items.is_empty() {
+        ui.replay_transcript(&agent.items);
+    }
     // The dock (fable.md): raw mode held for the session, a live input frame
     // during turns, output above it. NOOB_DOCK=0 keeps the classic per-prompt
     // editor and blocking turn below.
@@ -369,9 +389,7 @@ fn cmd_repl(args: &[String]) -> ExitCode {
         && let Some(s) = agent.session.as_ref()
     {
         let id = s.id().to_string();
-        ui.note(&format!(
-            "session {id} saved · resume with --session {id} · host install: noob --restore {id}"
-        ));
+        ui.note(&format!("session {id} saved · resume with: noob --resume {id}"));
     }
     ExitCode::SUCCESS
 }
@@ -593,7 +611,9 @@ fn cmd_exec(args: &[String]) -> ExitCode {
             },
             "--model" => value_for(arg, it.next(), USAGE).map(|v| ov.model = Some(v)),
             "--base-url" => value_for(arg, it.next(), USAGE).map(|v| ov.base_url = Some(v)),
-            "--session" => value_for(arg, it.next(), USAGE).map(|v| session_id = Some(v)),
+            "--resume" | "--session" | "--restore" => {
+                value_for(arg, it.next(), USAGE).map(|v| session_id = Some(v))
+            }
             "--json" => {
                 json_mode = true;
                 Ok(())
@@ -626,8 +646,10 @@ fn cmd_exec(args: &[String]) -> ExitCode {
     let session = session_id.map(Some);
     let mut boot = BootArgs::new(ov, yolo, plan, session);
     boot.verbose = verbose;
-    let mut agent = match bootstrap(boot, &mut ui) {
-        Ok(a) => a,
+    // exec never redisplays a resumed transcript (byte-identity), so the
+    // resume-miss flag is dropped here.
+    let (mut agent, _) = match bootstrap(boot, &mut ui) {
+        Ok(pair) => pair,
         Err(e) => {
             eprintln!("noob: {e}");
             return ExitCode::from(2);
@@ -690,8 +712,8 @@ fn cmd_child() -> ExitCode {
     let mut ui = Ui::new(Mode::Child);
     let mut boot = BootArgs::new(Overrides::default(), false, false, None);
     boot.read_only = read_only;
-    let mut agent = match bootstrap(boot, &mut ui) {
-        Ok(a) => a,
+    let (mut agent, _) = match bootstrap(boot, &mut ui) {
+        Ok(pair) => pair,
         Err(e) => return child_result("error", &e, 0, None),
     };
     // Both sides enforce the turn cap: the parent clamped its request; the

@@ -89,14 +89,19 @@ fn spawn_pty(rig: &Rig) -> Pty {
 /// Spawn with exactly the requested UI environment. An empty slice exercises
 /// the default dock; `NOOB_DOCK=0` is the classic escape hatch.
 fn spawn_pty_with(rig: &Rig, envs: &[(&str, &str)]) -> Pty {
-    spawn_pty_sized(rig, envs, None)
+    spawn_pty_sized(rig, envs, None, &[])
 }
 
 /// Spawn with a specific terminal size. `size = Some((rows, cols))` sets the
 /// pty winsize so scrolling behavior on a small screen is reproducible; noob
 /// reads only `cols` (via TIOCGWINSZ) and is otherwise row-agnostic, so the
 /// row count matters only to the emulator that replays the captured bytes.
-fn spawn_pty_sized(rig: &Rig, envs: &[(&str, &str)], size: Option<(u16, u16)>) -> Pty {
+fn spawn_pty_sized(
+    rig: &Rig,
+    envs: &[(&str, &str)],
+    size: Option<(u16, u16)>,
+    args: &[&str],
+) -> Pty {
     let (master, slave) = unsafe {
         let mut m: libc::c_int = 0;
         let mut s: libc::c_int = 0;
@@ -126,6 +131,7 @@ fn spawn_pty_sized(rig: &Rig, envs: &[(&str, &str)], size: Option<(u16, u16)>) -
     for (k, v) in envs {
         cmd.env(k, v);
     }
+    cmd.args(args);
     let child = cmd
         .stdin(stdio(slave))
         .stdout(stdio(slave))
@@ -271,7 +277,7 @@ fn raw_editor_edits_then_submits_the_clean_line() {
     pty.wait_for("done one");
     pty.wait_for(RAW_READY); // prompt 2 is now in raw mode
     pty.send(&[0x04]); // Ctrl-D at the empty prompt: exit
-    pty.wait_for("resume with --session"); // the exit hint tells you how to reopen
+    pty.wait_for("resume with"); // the exit hint tells you how to reopen
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -310,7 +316,7 @@ fn raw_editor_expands_a_framed_box_when_typing_starts() {
     pty.wait_for("framed reply");
     pty.wait_for(RAW_READY);
     pty.send(&[0x04]); // Ctrl-D exits
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -356,6 +362,125 @@ fn run_repl(rig: &Rig, args: &[&str], input: &[u8]) -> std::process::Output {
         .unwrap();
     child.stdin.take().unwrap().write_all(input).unwrap();
     child.wait_with_output().unwrap()
+}
+
+/// Write a session transcript file so a resume can replay it. `items` are the
+/// per-item JSON objects (the user/assistant/tool shapes the session log uses);
+/// each is wrapped as one `{"t":"item","item":...}` line under a meta header.
+fn write_session(config: &std::path::Path, id: &str, items: &[Value]) {
+    let dir = config.join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut out = format!("{}\n", serde_json::json!({"t":"meta","v":1,"id":id,"created_ms":0}));
+    for item in items {
+        out.push_str(&format!("{}\n", serde_json::json!({"t":"item","item":item})));
+    }
+    std::fs::write(dir.join(format!("{id}.jsonl")), out).unwrap();
+}
+
+/// Drop every SGR escape so an assertion can key on the plain text a human sees.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Resuming a saved session redraws the prior conversation on screen: the
+/// earlier human line and the model's reply both appear (as plain, strip-ANSI
+/// tokens) before the first new prompt, while a synthetic `[skills updated]`
+/// item is filtered out. Display-only: no model request is made on resume.
+#[test]
+fn resume_redisplays_the_prior_conversation() {
+    let rig = rig();
+    write_session(
+        rig.config.path(),
+        "replayme",
+        &[
+            serde_json::json!({"role": "user", "text": "PRIORUSERLINE remember this"}),
+            serde_json::json!({"role": "assistant", "text": "PRIORASSISTANTLINE understood.", "calls": [], "raw": []}),
+            // Synthetic plumbing that must NOT be redisplayed.
+            serde_json::json!({"role": "user", "text": "[skills updated] now available: HIDDENSKILL: nope."}),
+            serde_json::json!({"role": "user", "text": "SECONDUSERLINE and this"}),
+            serde_json::json!({"role": "assistant", "text": "SECONDASSISTANTLINE noted.", "calls": [], "raw": []}),
+        ],
+    );
+
+    // Classic per-prompt editor so the replay lands before a plain RAW_READY.
+    let mut pty = spawn_pty_sized(&rig, &[("NOOB_DOCK", "0")], None, &["--resume", "replayme"]);
+    pty.wait_for("type a task");
+    // The replay renders before the first prompt; wait for the last replayed
+    // assistant line to be sure the whole transcript was drawn.
+    pty.wait_for("SECONDASSISTANTLINE");
+    pty.wait_for(RAW_READY);
+    pty.send(&[0x04]); // Ctrl-D at the fresh prompt exits
+    pty.wait_for("resume with");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    let plain = strip_ansi(&pty.seen);
+    assert!(plain.contains("PRIORUSERLINE"), "prior user line not replayed:\n{plain}");
+    assert!(plain.contains("PRIORASSISTANTLINE"), "prior assistant line not replayed:\n{plain}");
+    assert!(plain.contains("SECONDUSERLINE"), "later user line not replayed:\n{plain}");
+    assert!(
+        !plain.contains("HIDDENSKILL"),
+        "a synthetic [skills updated] item leaked into the replay:\n{plain}"
+    );
+    // Replay is display-only: resuming fires no model request.
+    assert!(rig.api_requests().is_empty(), "replay must not make a model request");
+    rig.server.assert_clean();
+}
+
+/// `--resume <bogus>` with no matching saved session prints a not-found notice
+/// and still reaches a working prompt (it starts a fresh session).
+#[test]
+fn resume_of_a_missing_session_notes_and_starts_fresh() {
+    let rig = rig();
+    let mut pty = spawn_pty_sized(&rig, &[("NOOB_DOCK", "0")], None, &["--resume", "nosuchid"]);
+    pty.wait_for("type a task");
+    pty.wait_for("no saved session"); // the not-found notice
+    pty.wait_for(RAW_READY); // still reaches a working prompt
+    pty.send(&[0x04]); // Ctrl-D exits
+    pty.wait_for("resume with");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    assert!(pty.seen.contains("no saved session"), "the not-found notice never printed:\n{}", pty.seen);
+    rig.server.assert_clean();
+}
+
+/// `--resume` is a canonical alias for `--session`/`--restore`: a session
+/// created with `--session` resumes and extends under `--resume`.
+#[test]
+fn resume_alias_extends_a_session_created_with_session() {
+    let rig = rig();
+    rig.server.enqueue_stream_completion("noted");
+    let out1 = run_repl(&rig, &["--session", "aliastest"], b"remember gamma\n/quit\n");
+    assert!(out1.status.success(), "run 1 failed: {out1:?}");
+
+    rig.server.enqueue_stream_completion("recalled");
+    let out2 = run_repl(&rig, &["--resume", "aliastest"], b"what did i say\n/quit\n");
+    assert!(out2.status.success(), "run 2 failed: {out2:?}");
+
+    // Run 2 (under --resume) replayed run 1's user message into the request:
+    // the alias resumed the same transcript --session created.
+    let reqs = rig.api_requests();
+    let last = reqs.last().unwrap();
+    let msgs = last["messages"].as_array().unwrap();
+    assert!(
+        msgs.iter().any(|m| m["role"] == "user" && m["content"] == "remember gamma"),
+        "--resume did not resume the --session transcript: {msgs:?}"
+    );
+    rig.server.assert_clean();
 }
 
 /// Ctrl-C at the prompt cancels the current line and reprompts; it never
@@ -511,7 +636,7 @@ fn dock_is_default_and_liveness_survives_first_output() {
     pty.wait_for("default dock reply");
     settle();
     pty.send(&[0x04]);
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -540,7 +665,7 @@ fn interactive_model_markdown_renders_headings_code_json_and_tables() {
     pty.wait_for("RENDER-END");
     settle();
     pty.send(&[0x04]);
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -593,7 +718,7 @@ fn dock_edits_and_submits_like_the_classic_editor() {
     pty.wait_for("reply");
     settle(); // the next prompt has no raw-toggle marker: raw spans the session
     pty.send(&[0x04]); // Ctrl-D at the empty prompt exits
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -640,7 +765,7 @@ fn dock_captures_typing_during_a_slow_stream() {
     pty.wait_for("ran");
     settle();
     pty.send(&[0x04]);
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -681,7 +806,7 @@ fn dock_answers_a_mid_turn_confirmation() {
     pty.wait_for("written");
     settle();
     pty.send(&[0x04]);
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -713,7 +838,7 @@ fn dock_double_esc_cancels_an_open_confirmation_and_the_tool_batch() {
     pty.wait_for("[interrupted]");
     settle();
     pty.send(&[0x04]);
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -757,7 +882,7 @@ fn dock_typeahead_before_an_ask_cannot_confirm_it() {
     pty.wait_for("y"); // canceled queue returned to the editable draft
     pty.send(&[0x15]);
     pty.send(&[0x04]);
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -808,7 +933,7 @@ fn dock_compact_is_cancelable_with_ctrl_c() {
     pty.wait_for("keep this draft"); // canceled auxiliary turns restore queued input
     pty.send(&[0x15]); // clear the restored draft
     pty.send(&[0x04]); // Ctrl-D exits
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -872,7 +997,7 @@ fn dock_ctrl_d_at_a_confirmation_denies_and_continues() {
     pty.wait_for("alone");
     settle();
     pty.send(&[0x04]); // Ctrl-D at the empty prompt: exit
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -920,7 +1045,7 @@ fn dock_double_esc_cancels_a_running_turn() {
     pty.wait_for("[interrupted]"); // the agent finalized the canceled turn
     settle();
     pty.send(&[0x04]); // Ctrl-D exits
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -948,7 +1073,7 @@ fn dock_single_esc_does_not_cancel() {
     pty.wait_for("END-OK");
     settle();
     pty.send(&[0x04]);
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -981,7 +1106,7 @@ fn dock_queues_a_message_and_dispatches_after_the_turn() {
     pty.wait_for("second"); // turn 2 = the dispatched queued message's reply
     settle();
     pty.send(&[0x04]);
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -1013,7 +1138,7 @@ fn dock_interrupt_drains_the_queue_to_the_draft() {
     pty.wait_for("hold me");
     pty.send(&[0x15]); // Ctrl-U clears the restored draft
     pty.send(&[0x04]); // Ctrl-D on the now-empty line exits
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -1058,7 +1183,7 @@ fn dock_renders_a_multi_agent_fanout_panel() {
     settle();
     pty.drain(std::time::Duration::from_millis(300));
     pty.send(&[0x04]);
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -1130,7 +1255,7 @@ fn skills_add_registers_the_tool_and_the_skill_loads() {
     pty.wait_for("used the demo skill");
     pty.wait_for(RAW_READY);
     pty.send(&[0x04]);
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -1174,7 +1299,7 @@ fn dock_canceled_skill_clone_restores_queued_input() {
     pty.wait_for("keep skill draft");
     pty.send(&[0x15]);
     pty.send(&[0x04]);
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -1209,7 +1334,7 @@ fn skills_remove_announces_and_the_tool_rejects_the_gone_skill() {
     pty.wait_for("the skill is gone");
     pty.wait_for(RAW_READY);
     pty.send(&[0x04]);
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
@@ -1270,7 +1395,7 @@ fn dock_input_row_survives_a_scrolling_stream_at_the_screen_level() {
     // rows 1..14 => 15 deltas.
     rig.server.enqueue_raw(stalled_stream(&text, 15, 1200, true));
 
-    let mut pty = spawn_pty_sized(&rig, &[], Some((ROWS, COLS)));
+    let mut pty = spawn_pty_sized(&rig, &[], Some((ROWS, COLS)), &[]);
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"go\r");
@@ -1291,7 +1416,7 @@ fn dock_input_row_survives_a_scrolling_stream_at_the_screen_level() {
     println!("\n{}", end.dump("END-OF-TURN (idle prompt)"));
 
     pty.send(&[0x04]);
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     rig.server.assert_clean();
@@ -1358,7 +1483,7 @@ fn dock_input_row_shows_a_placeholder_when_empty_and_replaces_it_on_typing() {
     rig.server.enqueue_raw(stalled_stream(text, 3, 4000, true));
     rig.server.enqueue_stream_completion("second turn ran");
 
-    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)));
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)), &[]);
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"go\r");
@@ -1400,7 +1525,7 @@ fn dock_input_row_shows_a_placeholder_when_empty_and_replaces_it_on_typing() {
     pty.wait_for("second turn ran");
     settle();
     pty.send(&[0x04]);
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     let reqs = rig.api_requests();
@@ -1429,7 +1554,7 @@ fn dock_input_row_survives_wrapping_lines_at_the_screen_level() {
     let datas = noob_testkit::chat_stream_datas(&text);
     rig.server.enqueue_raw(stalled_stream(&text, datas.len() / 2, 1200, true));
 
-    let mut pty = spawn_pty_sized(&rig, &[], Some((ROWS, COLS)));
+    let mut pty = spawn_pty_sized(&rig, &[], Some((ROWS, COLS)), &[]);
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"go\r");
@@ -1447,7 +1572,7 @@ fn dock_input_row_survives_wrapping_lines_at_the_screen_level() {
     println!("\n{}", end.dump("WRAP END-OF-TURN (idle prompt)"));
 
     pty.send(&[0x04]);
-    pty.wait_for("resume with --session");
+    pty.wait_for("resume with");
     let status = pty.finish();
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     rig.server.assert_clean();

@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use noob_provider::types::Usage;
+use noob_provider::types::{Item, Usage};
 
 mod dock;
 mod markdown;
@@ -751,6 +751,84 @@ impl Ui {
         matches!(line.trim(), "y" | "Y" | "yes")
     }
 
+    /// Redraw a resumed session's prior conversation on the interactive REPL,
+    /// reusing the live renderers so it reads the way it did when it streamed.
+    /// Display-only: it walks the already-loaded transcript and never touches
+    /// the request body, the session log, or the JSONL protocol. Callers gate
+    /// on `is_interactive()` and a non-empty transcript, so `exec`, `--json`,
+    /// `child`, and a piped REPL never reach it. Synthetic bookkeeping items
+    /// (plan toggles, in-band skills notes, compaction summaries, the interrupt
+    /// and nudge markers) are filtered so the human sees the dialogue, not the
+    /// plumbing, and each tool body is digested to one line so a long session
+    /// never floods the screen on resume.
+    pub fn replay_transcript(&mut self, items: &[Item]) {
+        // call id -> tool name, so a replayed result can lead with its tool.
+        let mut names: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        for item in items {
+            match item {
+                Item::User(text) => {
+                    if !is_synthetic_replay_item(text) {
+                        self.replay_user(text);
+                    }
+                }
+                Item::Assistant { text, tool_calls, .. } => {
+                    if !text.is_empty() {
+                        // The exact streaming Markdown path a live reply uses, so
+                        // headings, bold, lists, and tables render identically.
+                        self.text_delta(text);
+                        self.end_line();
+                    }
+                    for call in tool_calls {
+                        names.insert(call.id.as_str(), call.name.as_str());
+                        let args =
+                            serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null);
+                        let brief = brief_args(&call.name, &args);
+                        self.render_tool_start(
+                            &call.id,
+                            &call.name,
+                            &brief,
+                            crate::tools::is_read_only(&call.name),
+                        );
+                    }
+                }
+                Item::ToolResult { call_id, content } => {
+                    let name = names.get(call_id.as_str()).copied();
+                    self.replay_tool_result(name, content);
+                }
+            }
+        }
+        self.end_line();
+    }
+
+    /// Echo one prior human turn on replay: a dim `\u{203a} {text}` line. No
+    /// themed user style exists (the dock shows only live input), so this is the
+    /// one place a past human line is redrawn; dim keeps it distinct from the
+    /// model's words above it.
+    fn replay_user(&mut self, text: &str) {
+        self.end_line();
+        let safe = safe_terminal_text(text);
+        let rendered = if self.ansi {
+            format!("{DIM}\u{203a} {safe}{RESET}\n")
+        } else {
+            format!("\u{203a} {safe}\n")
+        };
+        self.out(&rendered);
+    }
+
+    /// One compact done-style line for a replayed tool result: the tool name
+    /// (when the paired call is known) plus a single-line digest of the body, so
+    /// a resumed transcript never re-dumps a large tool payload.
+    fn replay_tool_result(&mut self, name: Option<&str>, content: &str) {
+        let digest = replay_result_digest(content);
+        let line = match name {
+            Some(n) if !digest.is_empty() => format!("{n} {digest}"),
+            Some(n) => n.to_string(),
+            None if !digest.is_empty() => digest,
+            None => return,
+        };
+        self.activity_line(&line, false);
+    }
+
     /// End of one user input's processing.
     pub fn done(&mut self, usage: Option<Usage>) {
         if self.send_turn(TurnEvent::Done(usage)) {
@@ -811,6 +889,36 @@ fn no_color_allowed() -> bool {
         Ok(v) => v.is_empty(),
         Err(_) => true,
     }
+}
+
+/// Harness-authored transcript items that are plumbing, not conversation: the
+/// plan-mode toggles, the in-band skills notes, compaction summaries, and the
+/// interrupt/nudge markers. Filtered from the on-screen replay so a resumed
+/// session shows the human's dialogue, not internal bookkeeping. This is a
+/// display filter only; every one of these items stays in the loaded context.
+fn is_synthetic_replay_item(text: &str) -> bool {
+    text == crate::agent::PLAN_ENTER_MSG
+        || text == crate::agent::PLAN_APPROVED_MSG
+        || text == "[interrupted]"
+        || text.starts_with("[skills updated]")
+        || text.starts_with("[loaded skills:")
+        || text.starts_with("[conversation summary]")
+        || text.starts_with("[note]")
+}
+
+/// A single-line, length-bounded digest of a tool result body for replay, so a
+/// resumed session shows a done-style summary instead of re-dumping the payload.
+fn replay_result_digest(content: &str) -> String {
+    let first = content.lines().next().unwrap_or("").trim();
+    let mut out = String::new();
+    for (count, ch) in first.chars().enumerate() {
+        if count == 72 {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// The most telling argument for the one-line activity display.
@@ -1227,6 +1335,62 @@ mod tests {
         let s = out.text();
         assert!(s.contains("\"t\":\"text\"") || s.contains("\"text\""), "event missing: {s:?}");
         assert!(!s.contains('\x1b'), "JSONL protocol must carry no escapes: {s:?}");
+    }
+
+    #[test]
+    fn replay_transcript_redisplays_turns_and_filters_synthetic_items() {
+        use noob_provider::types::ToolCall;
+        // color=false, ansi=true: the dim/rich-text path renders Markdown but
+        // emits no color, so strip_ansi yields exactly the human-visible text.
+        let (mut ui, out, _) = harness(Mode::Repl, false, true);
+        let items = vec![
+            Item::User("run the tests".into()),
+            Item::Assistant {
+                text: "Running the tests now.".into(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: r#"{"cmd":"cargo test"}"#.into(),
+                }],
+                raw_items: vec![],
+            },
+            Item::ToolResult {
+                call_id: "c1".into(),
+                content: "running 12 tests\ntest result: ok. 12 passed".into(),
+            },
+            Item::Assistant {
+                text: "All **12 tests** pass.".into(),
+                tool_calls: vec![],
+                raw_items: vec![],
+            },
+            // Synthetic plumbing between the real turns: all must be filtered.
+            Item::User("[skills updated] now available: pdf: read pdfs.".into()),
+            Item::User(crate::agent::PLAN_ENTER_MSG.into()),
+            Item::User("[conversation summary]\nwork happened".into()),
+            Item::User("great, thanks".into()),
+            Item::Assistant {
+                text: "You're welcome!".into(),
+                tool_calls: vec![],
+                raw_items: vec![],
+            },
+        ];
+        ui.replay_transcript(&items);
+        let plain = strip_ansi(&out.text());
+        assert_eq!(
+            plain,
+            "\u{203a} run the tests\n\
+             Running the tests now.\n\
+             * bash cargo test\n\
+             * bash running 12 tests\n\
+             All 12 tests pass.\n\
+             \u{203a} great, thanks\n\
+             You're welcome!\n",
+            "replay output drifted:\n{plain}"
+        );
+        // The synthetic markers never reach the screen.
+        assert!(!plain.contains("[skills updated]"), "a skills note leaked into replay");
+        assert!(!plain.contains("[plan mode]"), "the plan toggle leaked into replay");
+        assert!(!plain.contains("[conversation summary]"), "a summary leaked into replay");
     }
 
     #[test]

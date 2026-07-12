@@ -22,11 +22,14 @@ pub struct Session {
 
 impl Session {
     /// Open (resuming) or create the session `id`; a fresh id combines time,
-    /// process, and serial components when none is given.
+    /// process, and serial components when none is given. The returned bool is
+    /// whether the session file already existed: true on a real resume, false
+    /// when this call created it, so an explicit `--resume <id>` miss can be
+    /// reported to the human instead of silently starting fresh.
     pub fn open(
         config_dir: &Path,
         id: Option<&str>,
-    ) -> Result<(Session, Vec<Item>), String> {
+    ) -> Result<(Session, Vec<Item>, bool), String> {
         let dir = config_dir.join("sessions");
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
@@ -61,7 +64,7 @@ impl Session {
         for repair in repair_dangling_calls(&mut items) {
             session.log_item(&repair)?;
         }
-        Ok((session, items))
+        Ok((session, items, existed))
     }
 
     pub fn id(&self) -> &str {
@@ -238,8 +241,9 @@ mod tests {
     #[test]
     fn round_trip_all_item_kinds() {
         let tmp = tempfile::tempdir().unwrap();
-        let (mut s, replayed) = Session::open(tmp.path(), Some("t1")).unwrap();
+        let (mut s, replayed, existed) = Session::open(tmp.path(), Some("t1")).unwrap();
         assert!(replayed.is_empty());
+        assert!(!existed, "a first open must report the file did not exist");
         s.log_item(&Item::User("hello".into())).unwrap();
         s.log_item(&Item::Assistant {
             text: "hi".into(),
@@ -251,7 +255,8 @@ mod tests {
             .unwrap();
         drop(s);
 
-        let (_s2, items) = Session::open(tmp.path(), Some("t1")).unwrap();
+        let (_s2, items, existed) = Session::open(tmp.path(), Some("t1")).unwrap();
+        assert!(existed, "reopening a written session must report it existed");
         assert_eq!(items.len(), 3);
         match &items[1] {
             Item::Assistant { text, tool_calls, raw_items } => {
@@ -266,13 +271,13 @@ mod tests {
     #[test]
     fn reset_replaces_earlier_items_on_replay() {
         let tmp = tempfile::tempdir().unwrap();
-        let (mut s, _) = Session::open(tmp.path(), Some("t2")).unwrap();
+        let (mut s, _, _) = Session::open(tmp.path(), Some("t2")).unwrap();
         s.log_item(&Item::User("one".into())).unwrap();
         s.log_item(&Item::User("two".into())).unwrap();
         s.log_reset(&[Item::User("[summary]".into())]).unwrap();
         s.log_item(&Item::User("three".into())).unwrap();
         drop(s);
-        let (_s, items) = Session::open(tmp.path(), Some("t2")).unwrap();
+        let (_s, items, _) = Session::open(tmp.path(), Some("t2")).unwrap();
         assert_eq!(items.len(), 2);
         assert!(matches!(&items[0], Item::User(t) if t == "[summary]"));
         assert!(matches!(&items[1], Item::User(t) if t == "three"));
@@ -281,7 +286,7 @@ mod tests {
     #[test]
     fn fresh_ids_are_hex_and_files_land_in_sessions_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let (s, _) = Session::open(tmp.path(), None).unwrap();
+        let (s, _, _) = Session::open(tmp.path(), None).unwrap();
         assert!(
             s.id()
                 .split('-')
@@ -306,7 +311,7 @@ mod tests {
     #[test]
     fn resume_repairs_dangling_tool_calls() {
         let tmp = tempfile::tempdir().unwrap();
-        let (mut s, _) = Session::open(tmp.path(), Some("t4")).unwrap();
+        let (mut s, _, _) = Session::open(tmp.path(), Some("t4")).unwrap();
         s.log_item(&Item::User("go".into())).unwrap();
         s.log_item(&Item::Assistant {
             text: String::new(),
@@ -321,7 +326,7 @@ mod tests {
             .unwrap();
         drop(s); // killed before c2's result landed
 
-        let (_s2, items) = Session::open(tmp.path(), Some("t4")).unwrap();
+        let (_s2, items, _) = Session::open(tmp.path(), Some("t4")).unwrap();
         assert_eq!(items.len(), 4, "one synthetic result appended");
         match &items[3] {
             Item::ToolResult { call_id, content } => {
@@ -332,7 +337,7 @@ mod tests {
         }
         // Durable and idempotent: the repair went into the file, so a third
         // open sees a healed transcript and adds nothing.
-        let (_s3, items) = Session::open(tmp.path(), Some("t4")).unwrap();
+        let (_s3, items, _) = Session::open(tmp.path(), Some("t4")).unwrap();
         assert_eq!(items.len(), 4);
     }
 
@@ -346,7 +351,7 @@ mod tests {
             "{\"t\":\"item\",\"item\":{\"role\":\"user\",\"text\":\"ok\"}}\nGARBAGE\n",
         )
         .unwrap();
-        let (_s, items) = Session::open(tmp.path(), Some("t3")).unwrap();
+        let (_s, items, _) = Session::open(tmp.path(), Some("t3")).unwrap();
         assert_eq!(items.len(), 1);
     }
 
