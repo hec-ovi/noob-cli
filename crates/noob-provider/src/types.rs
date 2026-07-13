@@ -130,8 +130,15 @@ impl TurnRequest {
 pub enum Event {
     Text(String),
     Reasoning(String),
-    ToolCallStart { index: u32, id: String, name: String },
-    ToolArgsDelta { index: u32, delta: String },
+    ToolCallStart {
+        index: u32,
+        id: String,
+        name: String,
+    },
+    ToolArgsDelta {
+        index: u32,
+        delta: String,
+    },
     Usage(Usage),
     Done(Finish),
 }
@@ -152,7 +159,10 @@ pub enum ProviderError {
     /// Could not reach the endpoint at all.
     Connect(String),
     /// Non-2xx response.
-    Http { status: u16, body: String },
+    Http {
+        status: u16,
+        body: String,
+    },
     Timeout(TimeoutKind),
     /// Ctrl-C (or an explicit interrupt) during the request.
     Interrupted,
@@ -175,13 +185,18 @@ impl fmt::Display for ProviderError {
                         "check that NOOB_BASE_URL points at an OpenAI-compatible /v1 base, \
                          e.g. http://localhost:8090/v1"
                     }
-                    _ => "the response body usually names the cause; check the server logs \
-                          if it persists",
+                    _ => {
+                        "the response body usually names the cause; check the server logs \
+                          if it persists"
+                    }
                 };
                 write!(f, "endpoint returned HTTP {status}: {shown}; {remedy}")
             }
             ProviderError::Timeout(TimeoutKind::Connect) => {
-                write!(f, "timed out connecting; check NOOB_BASE_URL and that the server is up")
+                write!(
+                    f,
+                    "timed out connecting; check NOOB_BASE_URL and that the server is up"
+                )
             }
             ProviderError::Timeout(TimeoutKind::Send) => {
                 write!(

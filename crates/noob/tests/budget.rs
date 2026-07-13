@@ -69,8 +69,8 @@ fn no_output_cap_budget_and_phrasing() {
 
     // With no AGENTS.md, skills, or MCP, the system prompt IS the head.
     assert_eq!(system, head);
-    // 8 core (7 file/shell + todo) + task.
-    assert_eq!(artifact["tools"].as_array().unwrap().len(), 9);
+    // 9 core (7 file/shell + context + todo) + subagent.
+    assert_eq!(artifact["tools"].as_array().unwrap().len(), 10);
 
     let head_tokens = tokens(head);
     let tools_tokens = tokens(&tools);
@@ -92,11 +92,17 @@ fn no_output_cap_budget_and_phrasing() {
     // never by a length ceiling.
     let lower = system.to_lowercase();
     for banned in ["keep it brief", "keep it short", "be concise", "at most"] {
-        assert!(!lower.contains(banned), "banned phrase {banned:?} in the prompt");
+        assert!(
+            !lower.contains(banned),
+            "banned phrase {banned:?} in the prompt"
+        );
     }
-    let word_cap = regex::Regex::new(r"in \d+ (words|sentences|lines)|max \d+ (words|sentences)")
-        .unwrap();
-    assert!(!word_cap.is_match(&lower), "cap-style phrasing in the prompt");
+    let word_cap =
+        regex::Regex::new(r"in \d+ (words|sentences|lines)|max \d+ (words|sentences)").unwrap();
+    assert!(
+        !word_cap.is_match(&lower),
+        "cap-style phrasing in the prompt"
+    );
 
     // And no max_tokens-family key anywhere near the wire.
     let tools_lower = tools.to_lowercase();
@@ -105,7 +111,7 @@ fn no_output_cap_budget_and_phrasing() {
 }
 
 /// The ceilings hold for the full registered set: with a skill discovered
-/// and MCP configured the tools array grows to 12 (8 core, task, skill, the
+/// and MCP configured the tools array grows to 13 (9 core, subagent, skill, the
 /// MCP pair), the system prompt gains the resolver section and the MCP line;
 /// the head itself must stay byte-identical.
 #[test]
@@ -115,7 +121,7 @@ fn budget_holds_with_everything_registered() {
     let head = artifact["head"].as_str().unwrap();
 
     let tools = artifact["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 12);
+    assert_eq!(tools.len(), 13);
     for name in ["skill", "mcp_connect", "mcp_call", "subagent"] {
         assert!(
             tools.iter().any(|t| t["function"]["name"] == name),
@@ -144,7 +150,7 @@ fn budget_holds_with_everything_registered() {
 fn tool_descriptions_stay_terse() {
     let artifact = debug_prompt(true, true);
     let tools = artifact["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 12);
+    assert_eq!(tools.len(), 13);
     for t in tools {
         let f = &t["function"];
         let desc = f["description"].as_str().unwrap();

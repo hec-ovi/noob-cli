@@ -1,5 +1,5 @@
-//! noob: argv dispatch only. Subcommands: (repl) | exec | child | doctor |
-//! debug. Hand-rolled parsing; the whole surface is a handful of flags.
+//! noob: argv dispatch only. Subcommands: (repl) | exec | sessions | child |
+//! doctor | debug. Hand-rolled parsing; the whole surface is a handful of flags.
 
 mod agent;
 mod config;
@@ -20,7 +20,7 @@ use noob_provider::types::Overrides;
 use serde_json::json;
 
 use agent::{Agent, RunEnd, prompt};
-use session::Session;
+use session::{ReplayReport, Session};
 use tools::ToolCtx;
 use ui::{Mode, Ui};
 
@@ -36,12 +36,13 @@ fn main() -> ExitCode {
         Some("exec") => cmd_exec(&args[1..]),
         Some("debug") => cmd_debug(&args[1..]),
         Some("child") => cmd_child(),
+        Some("sessions") => cmd_sessions(),
         Some("doctor") => doctor::run(),
         Some(flag) if flag.starts_with('-') => cmd_repl(&args),
         None => cmd_repl(&[]),
         Some(other) => {
             eprintln!(
-                "noob: unknown command {other:?}; available: exec, debug, doctor, --version"
+                "noob: unknown command {other:?}; available: exec, sessions, debug, doctor, --version"
             );
             ExitCode::from(2)
         }
@@ -83,7 +84,14 @@ struct BootArgs {
 
 impl BootArgs {
     fn new(ov: Overrides, yolo: bool, plan: bool, session: Option<Option<String>>) -> BootArgs {
-        BootArgs { ov, yolo, plan, read_only: false, verbose: false, session }
+        BootArgs {
+            ov,
+            yolo,
+            plan,
+            read_only: false,
+            verbose: false,
+            session,
+        }
     }
 }
 
@@ -103,7 +111,7 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
     let mut ov = boot.ov;
     if ov.base_url.is_none()
         && config::setting(&config_dir, "NOOB_BASE_URL").is_none()
-        && let Some(found) = config::autodetect_base_url()
+        && let Some(found) = config::autodetect_base_url(&config_dir)
     {
         ui.note(&format!("using {found} (autodetected)"));
         ov.base_url = Some(found);
@@ -132,7 +140,11 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
         skills_index: skills::index(&discovered),
         // A read-only child has no mcp_call; naming servers would only
         // tempt it into calls it cannot make.
-        mcp_line: if boot.read_only { None } else { prompt::mcp_line(&mcp_servers) },
+        mcp_line: if boot.read_only {
+            None
+        } else {
+            prompt::mcp_line(&mcp_servers)
+        },
     };
     let system = prompt::assemble(&inputs);
     // Registered set is decided here and stays byte-stable for the session:
@@ -167,17 +179,25 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
             max_turns: config::task_max_turns(&config_dir),
             wall_clock: config::task_wall_clock(&config_dir),
             verbose: boot.verbose,
+            background: None,
         });
     }
 
-    let (session, replayed, resume_missed) = match boot.session {
-        None => (None, Vec::new(), false),
+    let (session, replayed, resume_missed, replay_report) = match boot.session {
+        None => (None, Vec::new(), false, ReplayReport::default()),
         Some(id) => {
             let requested = id.is_some();
-            let (s, items, existed) = Session::open(&config_dir, id.as_deref())?;
-            (Some(s), items, requested && !existed)
+            let resolved = match id.as_deref() {
+                Some("latest") => Session::latest_id(&config_dir)?,
+                _ => id,
+            };
+            let (s, items, existed, report) = Session::open(&config_dir, resolved.as_deref())?;
+            (Some(s), items, requested && !existed, report)
         }
     };
+    if let Some(warning) = replay_report.warning() {
+        ui.error(&warning);
+    }
     let mut agent = Agent::new(
         Client::new(Timeouts::default()),
         config_dir.clone(),
@@ -189,6 +209,13 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
         session,
         config::ctx_tokens(&config_dir),
     );
+    let orphaned = agent.repair_orphaned_background_results();
+    if orphaned > 0 {
+        agent.show_session_warning(ui);
+        ui.note(&format!(
+            "recovered {orphaned} unfinished background sub-agent(s) as canceled"
+        ));
+    }
     if boot.plan {
         agent.enter_plan(ui);
     }
@@ -275,6 +302,9 @@ fn cmd_repl(args: &[String]) -> ExitCode {
     // during turns, output above it. NOOB_DOCK=0 keeps the classic per-prompt
     // editor and blocking turn below.
     let mut dock = ui.dock_session();
+    if dock.is_some() {
+        agent.enable_background_agents(&mut ui);
+    }
 
     loop {
         ui.end_line();
@@ -283,11 +313,20 @@ fn cmd_repl(args: &[String]) -> ExitCode {
         // a Ctrl-C at the prompt reprompts, kept distinct from EOF. In cooked
         // mode a second Ctrl-C before any input still hard-exits via the signal
         // handler; in raw mode Ctrl-C cancels the line and Ctrl-D or /quit exit.
+        let background = agent.background_hub();
         let line = match dock.as_mut() {
-            Some(d) => d.read_prompt(&mut ui, agent.plan),
+            Some(d) => d.read_prompt(&mut ui, agent.plan, background.as_ref()),
             None => ui.read_prompt(agent.plan),
         };
         let line = match line {
+            ui::Input::BackgroundReady => {
+                let end = run_repl_background(&mut agent, &mut ui, &mut dock);
+                match end {
+                    RunEnd::Completed(_) | RunEnd::Interrupted => {}
+                    RunEnd::Aborted(msg) => ui.error(&format!("error: {msg}")),
+                }
+                continue;
+            }
             ui::Input::Eof => break,
             ui::Input::Interrupted => {
                 ui.note("(interrupted; /quit to exit)");
@@ -308,6 +347,27 @@ fn cmd_repl(args: &[String]) -> ExitCode {
             match cmd.trim() {
                 "quit" | "q" | "exit" => break,
                 "status" => status(&agent, &mut ui),
+                "sessions" => show_sessions(&agent.config_dir, &mut ui),
+                "clear-plan" => {
+                    let updates = agent.clear_plan_history(&mut ui);
+                    if updates == 0 {
+                        ui.note("no plan payloads in the current context");
+                    } else {
+                        ui.note(&format!(
+                            "plan cleared from context: {updates} update(s) redacted; cache prefix reset"
+                        ));
+                    }
+                }
+                s if s == "config" || s.starts_with("config ") => handle_config(
+                    s.strip_prefix("config").unwrap_or("").trim(),
+                    &agent,
+                    &mut ui,
+                ),
+                s if s == "agents" || s.starts_with("agents ") => handle_agents(
+                    s.strip_prefix("agents").unwrap_or("").trim(),
+                    &agent,
+                    &mut ui,
+                ),
                 "compact" => {
                     // Compaction makes a blocking summarizer request, so in
                     // dock mode it must run through the render loop like a
@@ -318,8 +378,12 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                     match dock.as_mut() {
                         Some(d) => {
                             let plan = agent.plan;
-                            d.run_turn(&mut ui, plan, |tui| agent.compact(tui));
-                            if INTERRUPTED.swap(false, Ordering::SeqCst) {
+                            let background = agent.background_hub();
+                            d.run_turn(&mut ui, plan, background.as_ref(), |tui| {
+                                agent.compact(tui)
+                            });
+                            let steered = d.take_steering();
+                            if INTERRUPTED.swap(false, Ordering::SeqCst) && !steered {
                                 d.drain_queue_to_draft();
                             }
                         }
@@ -355,10 +419,12 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                         match dock.as_mut() {
                             Some(d) => {
                                 let plan = agent.plan;
-                                d.run_turn(&mut ui, plan, |tui| {
+                                let background = agent.background_hub();
+                                d.run_turn(&mut ui, plan, background.as_ref(), |tui| {
                                     handle_skills(args, &mut agent, tui)
                                 });
-                                if INTERRUPTED.swap(false, Ordering::SeqCst) {
+                                let steered = d.take_steering();
+                                if INTERRUPTED.swap(false, Ordering::SeqCst) && !steered {
                                     d.drain_queue_to_draft();
                                 }
                             }
@@ -384,6 +450,7 @@ fn cmd_repl(args: &[String]) -> ExitCode {
             RunEnd::Aborted(msg) => ui.error(&format!("error: {msg}")),
         }
     }
+    agent.shutdown_background_agents(&mut ui);
     // Leave raw mode before the exit hint so it prints on a cooked terminal.
     drop(dock);
     // On the way out, tell the human how to pick this session back up. Only at
@@ -392,7 +459,9 @@ fn cmd_repl(args: &[String]) -> ExitCode {
         && let Some(s) = agent.session.as_ref()
     {
         let id = s.id().to_string();
-        ui.note(&format!("session {id} saved · resume with: noob --resume {id}"));
+        ui.note(&format!(
+            "session {id} saved · resume with: noob --resume {id}"
+        ));
     }
     ExitCode::SUCCESS
 }
@@ -410,10 +479,20 @@ fn run_repl_turn(
     match dock.as_mut() {
         Some(d) => {
             let plan = agent.plan;
-            let end = d.run_turn(ui, plan, |tui| agent.run_input(input, tui));
-            // A canceled turn hands any type-ahead back to the editor instead
-            // of firing it: an interrupt means the human wants to steer.
-            if matches!(end, RunEnd::Interrupted) {
+            let background = agent.background_hub();
+            let end = d.run_turn(ui, plan, background.as_ref(), |tui| {
+                agent.run_input(input, tui)
+            });
+            // Enter during a turn is explicit steering and leaves the queued
+            // message ready for immediate dispatch. Ctrl-C still hands any
+            // type-ahead back to the editor.
+            let steered = d.take_steering();
+            if steered {
+                // The worker normally consumes the interrupt. Clear the
+                // shared tail explicitly for abort/error races after the
+                // steering message was already accepted.
+                INTERRUPTED.store(false, Ordering::SeqCst);
+            } else if matches!(end, RunEnd::Interrupted) {
                 d.drain_queue_to_draft();
             }
             end
@@ -431,6 +510,101 @@ fn run_repl_turn(
     }
 }
 
+fn run_repl_background(
+    agent: &mut Agent,
+    ui: &mut Ui,
+    dock: &mut Option<ui::DockSession>,
+) -> RunEnd {
+    match dock.as_mut() {
+        Some(d) => {
+            let plan = agent.plan;
+            let background = agent.background_hub();
+            let end = d.run_turn(ui, plan, background.as_ref(), |tui| {
+                agent.continue_after_background(tui)
+            });
+            let steered = d.take_steering();
+            if steered {
+                INTERRUPTED.store(false, Ordering::SeqCst);
+            } else if matches!(end, RunEnd::Interrupted) {
+                d.drain_queue_to_draft();
+            }
+            end
+        }
+        None => agent.continue_after_background(ui),
+    }
+}
+
+fn handle_agents(args: &str, agent: &Agent, ui: &mut Ui) {
+    if args.is_empty() || args == "list" {
+        let snapshot = agent.background_snapshot();
+        if snapshot.rows.is_empty() {
+            ui.note("no background sub-agents");
+        } else {
+            ui.note(&format!("agents:\n  {}", snapshot.rows.join("\n  ")));
+        }
+        return;
+    }
+    let Some(target) = args.strip_prefix("cancel ").map(str::trim) else {
+        ui.error("usage: /agents [list | cancel <agent-N|all>]");
+        return;
+    };
+    if target == "all" {
+        let count = agent.cancel_all_background();
+        ui.note(&format!("canceling {count} background sub-agent(s)"));
+    } else if agent.cancel_background(target) {
+        ui.note(&format!("canceling {target}"));
+    } else {
+        ui.error(&format!(
+            "unknown background sub-agent {target:?}; run /agents to list them"
+        ));
+    }
+}
+
+fn session_lines(config_dir: &std::path::Path) -> Result<Vec<String>, String> {
+    let sessions = Session::list(config_dir)?;
+    Ok(sessions
+        .into_iter()
+        .enumerate()
+        .map(|(index, session)| {
+            let newest = if index == 0 { " (latest)" } else { "" };
+            format!(
+                "{}{} · {:.1} KiB",
+                session.id,
+                newest,
+                session.bytes as f64 / 1024.0
+            )
+        })
+        .collect())
+}
+
+fn show_sessions(config_dir: &std::path::Path, ui: &mut Ui) {
+    match session_lines(config_dir) {
+        Ok(lines) if lines.is_empty() => ui.note("no saved sessions"),
+        Ok(lines) => ui.note(&format!(
+            "saved sessions (newest first):\n  {}\nresume newest: noob --resume latest",
+            lines.join("\n  "),
+        )),
+        Err(error) => ui.error(&error),
+    }
+}
+
+fn cmd_sessions() -> ExitCode {
+    match session_lines(&config::config_dir()) {
+        Ok(lines) if lines.is_empty() => {
+            println!("no saved sessions");
+            ExitCode::SUCCESS
+        }
+        Ok(lines) => {
+            println!("{}", lines.join("\n"));
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("noob: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// The `/skills` command family (REPL only): list, reload, add a skill from a
 /// local path or git URL, or remove an installed one. Each mutation re-runs
 /// discovery through `reload_skills`, which registers the tool if needed and
@@ -441,6 +615,34 @@ fn handle_skills(args: &str, agent: &mut Agent, ui: &mut Ui) {
     let mut parts = args.splitn(2, char::is_whitespace);
     let verb = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
+    let _workspace_lease = if matches!(verb, "add" | "remove" | "rm") {
+        match tools::guard::workspace_write_lease(
+            &agent.tool_ctx.workspace,
+            std::time::Duration::ZERO,
+            || INTERRUPTED.load(Ordering::SeqCst),
+        ) {
+            Ok(lease) => Some(lease),
+            Err(tools::guard::WorkspaceLeaseError::Canceled) => {
+                ui.note("skill change canceled before touching the workspace");
+                return;
+            }
+            Err(tools::guard::WorkspaceLeaseError::Busy) => {
+                ui.error(
+                    "skill change blocked: another parent or sub-agent mutation is active; \
+                     wait for it or cancel the relevant agent, then retry",
+                );
+                return;
+            }
+            Err(tools::guard::WorkspaceLeaseError::Io(error)) => {
+                ui.error(&format!(
+                    "cannot lock the workspace for the skill change: {error}; nothing changed"
+                ));
+                return;
+            }
+        }
+    } else {
+        None
+    };
     match verb {
         "" | "list" => {
             if agent.tool_ctx.skills.is_empty() {
@@ -453,7 +655,11 @@ fn handle_skills(args: &str, agent: &mut Agent, ui: &mut Ui) {
                 .iter()
                 .map(|s| format!("  {}: {}", s.name, skills::clip_description(&s.description)))
                 .collect();
-            ui.note(&format!("skills ({}):\n{}", agent.tool_ctx.skills.len(), lines.join("\n")));
+            ui.note(&format!(
+                "skills ({}):\n{}",
+                agent.tool_ctx.skills.len(),
+                lines.join("\n")
+            ));
         }
         "reload" => {
             let (added, removed) = agent.reload_skills(ui);
@@ -478,9 +684,16 @@ fn handle_skills(args: &str, agent: &mut Agent, ui: &mut Ui) {
                 ui.error("usage: /skills remove <name>");
                 return;
             }
-            let dir = agent.tool_ctx.skills.iter().find(|s| s.name == rest).map(|s| s.dir.clone());
+            let dir = agent
+                .tool_ctx
+                .skills
+                .iter()
+                .find(|s| s.name == rest)
+                .map(|s| s.dir.clone());
             match dir {
-                None => ui.error(&format!("no installed skill named {rest:?}; /skills lists them")),
+                None => ui.error(&format!(
+                    "no installed skill named {rest:?}; /skills lists them"
+                )),
                 Some(dir) => match skills::remove(&agent.tool_ctx.workspace, &dir) {
                     Ok(()) => {
                         let (added, removed) = agent.reload_skills(ui);
@@ -523,8 +736,9 @@ fn greet(agent: &Agent, ui: &mut Ui) {
         .map(|s| format!(" · session {}", s.id()))
         .unwrap_or_default();
     ui.greeting(&format!(
-        "noob {} · {endpoint}{session}\ntype a task; {}",
+        "noob {} · {endpoint} · context {}{session}\ntype a task; {}",
         env!("CARGO_PKG_VERSION"),
+        tools::context::token_label(agent.ctx_tokens),
         ui::commands::banner()
     ));
 }
@@ -555,7 +769,12 @@ fn status(agent: &Agent, ui: &mut Ui) {
     let skills_line = if agent.tool_ctx.skills.is_empty() {
         String::new()
     } else {
-        let names: Vec<&str> = agent.tool_ctx.skills.iter().map(|s| s.name.as_str()).collect();
+        let names: Vec<&str> = agent
+            .tool_ctx
+            .skills
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
         format!("\nskills: {}", names.join(", "))
     };
     let mcp_line = match &agent.tool_ctx.mcp {
@@ -580,11 +799,77 @@ fn status(agent: &Agent, ui: &mut Ui) {
         .as_ref()
         .map(|s| format!("\nsession: {}", s.path().display()))
         .unwrap_or_default();
-    let plan_line = if agent.plan { "\nplan mode: on (read-only; /go approves)" } else { "" };
+    let plan_line = if agent.plan {
+        "\nplan mode: on (read-only; /go approves)"
+    } else {
+        ""
+    };
     ui.note(&format!(
-        "endpoint: {endpoint}\ncontext: ~{est} of {} tokens ({pct}%)\n{usage}{skills_line}{mcp_line}{plan_line}{session}",
-        agent.ctx_tokens
+        "endpoint: {endpoint}\ncontext: ~{} / {} tokens ({pct}%; {est} / {})\n{usage}{skills_line}{mcp_line}{plan_line}{session}",
+        tools::context::token_label(est),
+        tools::context::token_label(agent.ctx_tokens),
+        agent.ctx_tokens,
     ));
+}
+
+fn handle_config(args: &str, agent: &Agent, ui: &mut Ui) {
+    let path = agent.config_dir.join(".env");
+    if args.is_empty() || args == "list" {
+        let lines = config::EDITABLE
+            .iter()
+            .map(|(name, key)| {
+                let value =
+                    config::setting(&agent.config_dir, key).unwrap_or_else(|| "(default)".into());
+                format!("  {name} = {value}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        ui.note(&format!(
+            "config: {}\n{lines}\nuse /config set <name> <value> or /config unset <name>; API keys stay in the file, never terminal history",
+            path.display()
+        ));
+        return;
+    }
+
+    let mut parts = args.split_whitespace();
+    let verb = parts.next().unwrap_or("");
+    let name = parts.next().unwrap_or("");
+    let result = match verb {
+        "set" => {
+            let value = parts.collect::<Vec<_>>().join(" ");
+            if name.is_empty() || value.is_empty() {
+                Err("usage: /config set <name> <value>".to_string())
+            } else {
+                config::write_setting(&agent.config_dir, name, Some(&value))
+            }
+        }
+        "unset" if !name.is_empty() && parts.next().is_none() => {
+            config::write_setting(&agent.config_dir, name, None)
+        }
+        "unset" => Err("usage: /config unset <name>".to_string()),
+        _ => Err("usage: /config [list|set <name> <value>|unset <name>]".to_string()),
+    };
+    match result {
+        Ok(key) => {
+            let reload = match key {
+                "NOOB_BASE_URL" if verb == "unset" => {
+                    "restart noob to run localhost autodetect; an exported variable or CLI flag still overrides it"
+                }
+                "NOOB_BASE_URL" if agent.ov.base_url.is_some() => {
+                    "restart noob without a CLI override to apply it; this process is pinned to its startup endpoint"
+                }
+                "NOOB_BASE_URL" => {
+                    "applies on the next model request unless an exported variable overrides it"
+                }
+                "NOOB_MODEL" | "NOOB_API_STYLE" => {
+                    "applies on the next model request unless a CLI flag or exported variable overrides it"
+                }
+                _ => "restart noob to apply it",
+            };
+            ui.note(&format!("saved {key} in {} · {reload}", path.display()));
+        }
+        Err(error) => ui.error(&format!("config: {error}")),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -592,7 +877,8 @@ fn status(agent: &Agent, ui: &mut Ui) {
 // ---------------------------------------------------------------------------
 
 fn cmd_exec(args: &[String]) -> ExitCode {
-    const USAGE: &str = "usage: noob exec -p \"<prompt>\" [--json] [--session <id>] \
+    const USAGE: &str = "usage: noob exec -p \"<prompt>\" [--json] [--resume <id>] \
+                         [--session <id> | --restore <id>] \
                          [--plan] [--verbose] [--model <name>] [--base-url <url>] [--yolo]";
     let mut prompt_arg: Option<String> = None;
     let mut ov = Overrides::default();
@@ -646,7 +932,11 @@ fn cmd_exec(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     };
 
-    let mut ui = Ui::new(if json_mode { Mode::ExecJson } else { Mode::Exec });
+    let mut ui = Ui::new(if json_mode {
+        Mode::ExecJson
+    } else {
+        Mode::Exec
+    });
     let session = session_id.map(Some);
     let mut boot = BootArgs::new(ov, yolo, plan, session);
     boot.verbose = verbose;
@@ -682,23 +972,37 @@ fn cmd_exec(args: &[String]) -> ExitCode {
 /// writes exactly one JSON result line to stdout:
 /// `{"status": "ok"|"error", "result", "turns", "usage"}`.
 fn cmd_child() -> ExitCode {
+    subagent::install_parent_death_cleanup();
     /// Bound on the task payload; a parent never sends anything near this.
     const STDIN_CAP: u64 = 8 * 1024 * 1024;
     let mut payload = String::new();
-    let read = std::io::stdin().lock().take(STDIN_CAP).read_to_string(&mut payload);
+    let read = std::io::stdin()
+        .lock()
+        .take(STDIN_CAP)
+        .read_to_string(&mut payload);
     let parsed: Option<serde_json::Value> = match read {
         Ok(_) => serde_json::from_str(payload.trim()).ok(),
         Err(_) => None,
     };
     let Some(task_obj) = parsed.filter(|v| v.is_object()) else {
-        return child_result("error", "no task: stdin must carry one JSON object", 0, None);
+        return child_result(
+            "error",
+            "no task: stdin must carry one JSON object",
+            0,
+            None,
+        );
     };
     let Some(prompt_text) = task_obj
         .get("prompt")
         .and_then(serde_json::Value::as_str)
         .filter(|p| !p.trim().is_empty())
     else {
-        return child_result("error", "no task: the JSON object needs a \"prompt\"", 0, None);
+        return child_result(
+            "error",
+            "no task: the JSON object needs a \"prompt\"",
+            0,
+            None,
+        );
     };
     let read_only = match task_obj.get("tools").and_then(serde_json::Value::as_str) {
         None | Some("read-only") => true,
@@ -756,7 +1060,11 @@ fn child_result(
         "{}",
         json!({"status": status, "result": result, "turns": turns, "usage": usage})
     );
-    if status == "ok" { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    if status == "ok" {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 // ---------------------------------------------------------------------------

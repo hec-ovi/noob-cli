@@ -41,9 +41,8 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         return Err("old and new are identical; nothing would change".to_string());
     }
 
-    let bytes = std::fs::read(&path).map_err(|e| {
-        format!("cannot read {shown}: {e}; check the path with ls or glob")
-    })?;
+    let bytes = std::fs::read(&path)
+        .map_err(|e| format!("cannot read {shown}: {e}; check the path with ls or glob"))?;
     match ctx.seen.get(&path) {
         None => {
             return Err(format!(
@@ -65,7 +64,8 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     match ladder(&text, old, new, all) {
         Ok(applied) => {
             atomic_write(&path, applied.content.as_bytes())?;
-            ctx.seen.record(&path, FileStamp::of(applied.content.as_bytes()));
+            ctx.seen
+                .record(&path, FileStamp::of(applied.content.as_bytes()));
             ctx.edit_failures.lock().unwrap().remove(&fail_key);
             let n = applied.count;
             let mut msg = if n == 1 {
@@ -84,7 +84,11 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
             Ok(ToolOutcome::ok(msg.clone(), msg))
         }
         Err(LadderFail::Ambiguous { stage, n }) => {
-            *ctx.edit_failures.lock().unwrap().entry(fail_key).or_insert(0) += 1;
+            *ctx.edit_failures
+                .lock()
+                .unwrap()
+                .entry(fail_key)
+                .or_insert(0) += 1;
             let qual = match stage {
                 Stage::Exact => "",
                 Stage::Ws => " (ignoring trailing whitespace)",
@@ -257,7 +261,11 @@ fn shadow(s: &str, typo: bool) -> Shadow {
     }
     let eof_ws_dropped = !pending.is_empty();
     map.push(s.len());
-    Shadow { text, map, eof_ws_dropped }
+    Shadow {
+        text,
+        map,
+        eof_ws_dropped,
+    }
 }
 
 /// Find the needle shadow in the file shadow and map every hit back to
@@ -274,8 +282,7 @@ fn shadow_ranges(sh: &Shadow, needle: &Shadow) -> Vec<(usize, usize)> {
                 return true;
             }
             let end = i + needle.text.len();
-            end == sh.text.len()
-                || matches!(sh.text.as_bytes()[end], b'\n' | b' ' | b'\t' | b'\r')
+            end == sh.text.len() || matches!(sh.text.as_bytes()[end], b'\n' | b' ' | b'\t' | b'\r')
         })
         .map(|(i, _)| (sh.map[i], sh.map[i + needle.text.len()]))
         .collect()
@@ -312,7 +319,10 @@ fn split_indent(line: &str) -> (&str, &str) {
 /// Normalized comparison body: typographic fold + trailing whitespace strip
 /// ('\r' included so CRLF lines compare equal to their LF originals).
 fn norm_body(s: &str) -> String {
-    s.trim_end_matches([' ', '\t', '\r']).chars().map(fold).collect()
+    s.trim_end_matches([' ', '\t', '\r'])
+        .chars()
+        .map(fold)
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -387,8 +397,7 @@ fn stage_indent(text: &str, old: &str, new: &str, all: bool) -> Result<Applied, 
             // Replace back-to-front so earlier spans stay valid.
             let mut content = text.to_string();
             for cand in candidates.iter().rev() {
-                content = apply_indent(&content, &line_spans(&content), old, new, cand, 1)
-                    .content;
+                content = apply_indent(&content, &line_spans(&content), old, new, cand, 1).content;
             }
             Ok(Applied {
                 content,
@@ -569,7 +578,10 @@ mod tests {
     fn exact_single_replacement() {
         let (_t, ctx) = test_ctx();
         seed(&ctx, "f.rs", "fn a() {}\nfn b() {}\n");
-        let out = run(&ctx, &json!({"path": "f.rs", "old": "fn b()", "new": "fn c()"}));
+        let out = run(
+            &ctx,
+            &json!({"path": "f.rs", "old": "fn b()", "new": "fn c()"}),
+        );
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(out.content, "edited f.rs (1 replacement)");
         assert_eq!(file(&ctx, "f.rs"), "fn a() {}\nfn c() {}\n");
@@ -579,10 +591,16 @@ mod tests {
     fn ambiguity_is_rejected_with_the_location_count() {
         let (_t, ctx) = test_ctx();
         seed(&ctx, "f.rs", "x = 1;\nx = 1;\nx = 1;\n");
-        let out = run(&ctx, &json!({"path": "f.rs", "old": "x = 1;", "new": "x = 2;"}));
+        let out = run(
+            &ctx,
+            &json!({"path": "f.rs", "old": "x = 1;", "new": "x = 2;"}),
+        );
         assert!(out.is_error);
         assert!(out.content.contains("old matched 3 locations"));
-        assert!(out.content.contains("add surrounding lines to make it unique"));
+        assert!(
+            out.content
+                .contains("add surrounding lines to make it unique")
+        );
         assert_eq!(file(&ctx, "f.rs"), "x = 1;\nx = 1;\nx = 1;\n");
     }
 
@@ -688,7 +706,10 @@ mod tests {
         // "word\n" exact-misses (both lines carry trailing whitespace), then
         // matches twice at stage A; the ladder must stop there, not descend.
         seed(&ctx, "f.txt", "word \nword\t\n");
-        let out = run(&ctx, &json!({"path": "f.txt", "old": "word\n", "new": "sword\n"}));
+        let out = run(
+            &ctx,
+            &json!({"path": "f.txt", "old": "word\n", "new": "sword\n"}),
+        );
         assert!(out.is_error);
         assert!(out.content.contains("old matched 2 locations"));
         assert!(out.content.contains("ignoring trailing whitespace"));
@@ -700,7 +721,10 @@ mod tests {
         std::fs::write(ctx.workspace.join("f.rs"), "x\n").unwrap();
         let out = run(&ctx, &json!({"path": "f.rs", "old": "x", "new": "y"}));
         assert!(out.is_error);
-        assert!(out.content.contains("edit needs the current content, read it first"));
+        assert!(
+            out.content
+                .contains("edit needs the current content, read it first")
+        );
     }
 
     #[test]
@@ -738,16 +762,31 @@ mod tests {
         // Line 1 anchors ("line number 30" exists); line 2 never matches.
         let call = json!({"path": "f.txt", "old": "line number 30\nEXTRA JUNK", "new": "x"});
         let first = run(&ctx, &call);
-        assert!(first.content.contains("Closest region"), "{}", first.content);
+        assert!(
+            first.content.contains("Closest region"),
+            "{}",
+            first.content
+        );
         let second = run(&ctx, &call);
-        assert!(second.content.contains("The actual file content around the closest match"));
+        assert!(
+            second
+                .content
+                .contains("The actual file content around the closest match")
+        );
         // Up to 40 lines of ground truth, verbatim.
-        let shown = second.content.lines().filter(|l| l.starts_with("line number")).count();
+        let shown = second
+            .content
+            .lines()
+            .filter(|l| l.starts_with("line number"))
+            .count();
         assert!((35..=40).contains(&shown), "shown {shown} lines");
         let third = run(&ctx, &call);
         assert!(third.content.contains("re-read the file with read"));
         // A later success on this file removes its failure counter.
-        let ok = run(&ctx, &json!({"path": "f.txt", "old": "line number 30\n", "new": "thirty\n"}));
+        let ok = run(
+            &ctx,
+            &json!({"path": "f.txt", "old": "line number 30\n", "new": "thirty\n"}),
+        );
         assert!(!ok.is_error, "{}", ok.content);
     }
 
@@ -765,7 +804,10 @@ mod tests {
     fn deletion_via_empty_new_works() {
         let (_t, ctx) = test_ctx();
         seed(&ctx, "f.rs", "keep\ndrop me\nkeep too\n");
-        let out = run(&ctx, &json!({"path": "f.rs", "old": "drop me\n", "new": ""}));
+        let out = run(
+            &ctx,
+            &json!({"path": "f.rs", "old": "drop me\n", "new": ""}),
+        );
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(file(&ctx, "f.rs"), "keep\nkeep too\n");
     }
@@ -776,7 +818,10 @@ mod tests {
         // "word" appears exactly once as exact bytes, but the shadow view
         // would also match the "word  " line; exact must win with 1 hit.
         seed(&ctx, "f.txt", "word\nother word  here\n");
-        let out = run(&ctx, &json!({"path": "f.txt", "old": "word\n", "new": "sword\n"}));
+        let out = run(
+            &ctx,
+            &json!({"path": "f.txt", "old": "word\n", "new": "sword\n"}),
+        );
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(out.content, "edited f.txt (1 replacement)");
         assert_eq!(file(&ctx, "f.txt"), "sword\nother word  here\n");
@@ -833,7 +878,10 @@ mod tests {
         // trailing space claims exactly that, so the edit must apply
         // (over-rejecting here burns the model's retry budget for nothing).
         seed(&ctx, "f.md", "x \u{2014} y z\n");
-        let out = run(&ctx, &json!({"path": "f.md", "old": "x - y ", "new": "x-y"}));
+        let out = run(
+            &ctx,
+            &json!({"path": "f.md", "old": "x - y ", "new": "x-y"}),
+        );
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(file(&ctx, "f.md"), "x-y z\n");
 
@@ -854,7 +902,10 @@ mod tests {
         // old copied without the \r (what read/teach show): must match.
         // The last matched line's \r is consumed like any trailing
         // whitespace (new goes in verbatim); untouched lines keep CRLF.
-        let out = run(&ctx, &json!({"path": "f.txt", "old": "foo\nbar", "new": "baz"}));
+        let out = run(
+            &ctx,
+            &json!({"path": "f.txt", "old": "foo\nbar", "new": "baz"}),
+        );
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(file(&ctx, "f.txt"), "baz\nrest\r\n");
     }
@@ -870,14 +921,20 @@ mod tests {
         assert!(!out.is_error, "{}", out.content);
         let content = file(&ctx, "f.txt");
         assert!(content.contains("wait();"), "{content}");
-        assert!(content.starts_with("if x {\r\n"), "untouched lines keep CRLF: {content}");
+        assert!(
+            content.starts_with("if x {\r\n"),
+            "untouched lines keep CRLF: {content}"
+        );
     }
 
     #[test]
     fn stage_c_handles_old_with_trailing_newline() {
         let (_t, ctx) = test_ctx();
         seed(&ctx, "f.rs", "{\n    a();\n    b();\n}\n");
-        let out = run(&ctx, &json!({"path": "f.rs", "old": "a();\nb();\n", "new": "c();\n"}));
+        let out = run(
+            &ctx,
+            &json!({"path": "f.rs", "old": "a();\nb();\n", "new": "c();\n"}),
+        );
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("different indent depth"));
         assert_eq!(file(&ctx, "f.rs"), "{\n    c();\n}\n");

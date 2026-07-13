@@ -8,6 +8,7 @@
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,11 @@ use noob_provider::http::INTERRUPTED;
 use noob_provider::types::ToolSpec;
 
 use crate::tools::{ToolCtx, ToolOutcome, need_str, opt_str, opt_u64};
+
+mod background;
+#[cfg(test)]
+pub use background::JobProgressSnapshot;
+pub use background::{BackgroundHub, JobsSnapshot, ReadyResult};
 
 /// Recursion ceiling: depth 0 (the user's agent) and depth 1 children may
 /// spawn; at depth 2 the subagent tool is simply not registered.
@@ -29,6 +35,7 @@ pub const DEFAULT_WALL_CLOCK_S: u64 = 300;
 /// Child progress is UI-only and can be noisy. Keep a bounded head while
 /// draining the rest so parallel children cannot grow parent memory.
 const STDERR_CAP: usize = 64 * 1024;
+static PARENT_DIED: AtomicBool = AtomicBool::new(false);
 
 /// Session-scoped sub-agent settings, resolved once at bootstrap.
 #[derive(Clone, Debug)]
@@ -40,6 +47,25 @@ pub struct TaskCfg {
     pub wall_clock: Duration,
     /// Surface bounded child stderr as `[subagent] ...` after the child exits.
     pub verbose: bool,
+    /// Present only for the default interactive dock. Other surfaces keep the
+    /// original inline child contract.
+    pub background: Option<BackgroundHub>,
+}
+
+#[derive(Clone)]
+struct TaskRequest {
+    prompt: String,
+    tools_mode: String,
+    max_turns: u32,
+}
+
+#[derive(Clone)]
+struct RunCfg {
+    depth: u32,
+    wall_clock: Duration,
+    verbose: bool,
+    workspace: std::path::PathBuf,
+    progress: Option<background::ProgressLog>,
 }
 
 pub fn spec() -> ToolSpec {
@@ -51,7 +77,7 @@ pub fn spec() -> ToolSpec {
         parameters: json!({"type": "object", "properties": {
             "prompt": {"type": "string", "description": "complete standalone instructions"},
             "tools": {"type": "string", "enum": ["read-only", "all"],
-                      "description": "default read-only"},
+                      "description": "default read-only; use all for Bash, MCP/web, or file changes"},
             "max_turns": {"type": "integer"}
         }, "required": ["prompt"]}),
     }
@@ -64,13 +90,13 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
         );
     };
     let prompt = match need_str(args, "prompt") {
-        Ok(p) if !p.trim().is_empty() => p,
+        Ok(p) if !p.trim().is_empty() => p.to_string(),
         Ok(_) => return ToolOutcome::err("parameter \"prompt\" is empty; resend the call"),
         Err(e) => return ToolOutcome::err(e),
     };
     let tools_mode = match opt_str(args, "tools") {
-        Ok(None) => "read-only",
-        Ok(Some(m @ ("read-only" | "all"))) => m,
+        Ok(None) => "read-only".to_string(),
+        Ok(Some(m @ ("read-only" | "all"))) => m.to_string(),
         Ok(Some(other)) => {
             return ToolOutcome::err(format!(
                 "parameter \"tools\" must be \"read-only\" or \"all\", got {other:?}; \
@@ -87,31 +113,80 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
         Err(e) => return ToolOutcome::err(e),
     };
 
+    let request = TaskRequest {
+        prompt,
+        tools_mode,
+        max_turns,
+    };
+    let run_cfg = RunCfg {
+        depth: cfg.depth,
+        wall_clock: cfg.wall_clock,
+        verbose: cfg.verbose,
+        workspace: ctx.workspace.clone(),
+        progress: None,
+    };
+    // Every dock child detaches. Full-tool children take the cross-process
+    // workspace lease around each write/edit/bash call, so inference and
+    // read-only work remain parallel without permitting concurrent mutations.
+    if let Some(hub) = &cfg.background {
+        return hub.submit(run_cfg, request);
+    }
+    run_task(&run_cfg, &request, || INTERRUPTED.load(Ordering::SeqCst))
+}
+
+fn run_task(
+    cfg: &RunCfg,
+    request: &TaskRequest,
+    interrupted: impl Fn() -> bool + Copy,
+) -> ToolOutcome {
+    let deadline = Instant::now() + cfg.wall_clock;
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => return ToolOutcome::err(format!("cannot locate the noob binary: {e}")),
     };
-    let mut child = match Command::new(exe)
+    let parent_pid = unsafe { libc::getpid() };
+    let mut command = Command::new(exe);
+    command
         .arg("child")
         .env("NOOB_DEPTH", (cfg.depth + 1).to_string())
-        .current_dir(&ctx.workspace)
+        .current_dir(&cfg.workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-    {
+        .process_group(0);
+    // If the parent dies, SIGTERM lets the child's watchdog kill Bash, MCP,
+    // and nested-agent descendants before the child exits. The parent-pid
+    // recheck closes the fork-to-prctl race.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent_pid {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "the parent exited while spawning the sub-agent",
+                ));
+            }
+            Ok(())
+        });
+    }
+    let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => return ToolOutcome::err(format!("cannot spawn the sub-agent: {e}")),
     };
-    let deadline = Instant::now() + cfg.wall_clock;
-
     // One JSON object in, then EOF: the child reads stdin to end.
-    let payload = json!({"prompt": prompt, "tools": tools_mode, "max_turns": max_turns});
+    let payload = json!({
+        "prompt": request.prompt,
+        "tools": request.tools_mode,
+        "max_turns": request.max_turns,
+    });
     {
         let mut stdin = child.stdin.take().expect("piped stdin");
         let bytes = format!("{payload}\n");
-        if let Err(error) = write_child_input(&mut stdin, bytes.as_bytes(), deadline) {
+        if let Err(error) =
+            write_child_input_with(&mut stdin, bytes.as_bytes(), deadline, interrupted)
+        {
             kill_group(&mut child);
             return match error {
                 ChildInputError::Canceled => ToolOutcome::canceled(),
@@ -132,7 +207,14 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     let stdout_reader = std::thread::spawn(move || read_all(stdout));
     let stderr = child.stderr.take().expect("piped stderr");
     let verbose = cfg.verbose;
-    let stderr_reader = std::thread::spawn(move || drain_stderr(stderr, verbose));
+    let live_progress = cfg.progress.clone();
+    let stderr_reader = std::thread::spawn(move || {
+        drain_stderr_with(stderr, verbose, |bytes| {
+            if let Some(progress) = &live_progress {
+                progress.push(bytes);
+            }
+        })
+    });
 
     // The wait loop owns the three exits: completion, wall clock, Ctrl-C.
     let status = loop {
@@ -144,7 +226,7 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
                 break None;
             }
         }
-        if INTERRUPTED.load(Ordering::SeqCst) {
+        if interrupted() {
             kill_group(&mut child);
             let _ = stdout_reader.join();
             let progress = stderr_reader.join().unwrap_or_default();
@@ -209,16 +291,6 @@ enum ChildInputError {
 /// Send an arbitrarily large child prompt without letting a full pipe hide
 /// cancellation or the task wall clock. No output-length policy is imposed;
 /// every byte is written while the child continues reading.
-fn write_child_input(
-    stdin: &mut std::process::ChildStdin,
-    bytes: &[u8],
-    deadline: Instant,
-) -> Result<(), ChildInputError> {
-    write_child_input_with(stdin, bytes, deadline, || {
-        INTERRUPTED.load(Ordering::SeqCst)
-    })
-}
-
 fn write_child_input_with(
     stdin: &mut std::process::ChildStdin,
     mut bytes: &[u8],
@@ -259,15 +331,110 @@ fn write_child_input_with(
     Ok(())
 }
 
-/// SIGKILL the child's whole process group (it was spawned with
-/// `process_group(0)`), then reap.
+/// Ask the child to clean up its whole descendant tree, then force-kill and
+/// reap if it does not exit promptly.
 fn kill_group(child: &mut Child) {
     let pid = child.id() as libc::pid_t;
+    unsafe {
+        libc::kill(-pid, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => break,
+        }
+    }
+    kill_descendants(pid);
     unsafe {
         libc::kill(-pid, libc::SIGKILL);
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Install only in `noob child`. PDEATHSIG sets the atomic from a minimal
+/// signal handler; a normal watchdog thread then performs `/proc` traversal,
+/// kills every descendant, and exits. No allocation or locking occurs in the
+/// signal handler itself.
+pub(crate) fn install_parent_death_cleanup() {
+    extern "C" fn on_parent_death(_: libc::c_int) {
+        PARENT_DIED.store(true, Ordering::SeqCst);
+        INTERRUPTED.store(true, Ordering::SeqCst);
+    }
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = on_parent_death as *const () as usize;
+        action.sa_flags = 0;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+    }
+    std::thread::Builder::new()
+        .name("noob-parent-watchdog".to_string())
+        .spawn(|| {
+            loop {
+                if PARENT_DIED.load(Ordering::SeqCst) {
+                    let pid = unsafe { libc::getpid() };
+                    for _ in 0..3 {
+                        kill_descendants(pid);
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    unsafe { libc::_exit(143) };
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        })
+        .expect("spawn parent-death watchdog");
+}
+
+/// Kill the current snapshot of every Linux descendant, including processes
+/// that created their own session. Children are kept alive while this scan
+/// runs, so their descendants cannot be reparented out from under it first.
+fn kill_descendants(root: libc::pid_t) {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    let mut parents = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<libc::pid_t>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some(rest) = stat.rsplit_once(')').map(|(_, rest)| rest) else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let _state = fields.next();
+        let Some(parent) = fields.next().and_then(|field| field.parse().ok()) else {
+            continue;
+        };
+        parents.push((pid, parent));
+    }
+    let mut tree = std::collections::HashSet::from([root]);
+    loop {
+        let before = tree.len();
+        for &(pid, parent) in &parents {
+            if tree.contains(&parent) {
+                tree.insert(pid);
+            }
+        }
+        if tree.len() == before {
+            break;
+        }
+    }
+    tree.remove(&root);
+    for pid in tree {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
 }
 
 /// Read the child's single result line without an output-length cap.
@@ -282,17 +449,33 @@ fn read_all(mut stream: impl Read) -> String {
             Err(_) => break,
         }
     }
-    String::from_utf8(kept).unwrap_or_else(|error| {
-        String::from_utf8_lossy(error.as_bytes()).into_owned()
-    })
+    String::from_utf8(kept)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
 }
 
 /// Capture child progress when verbose, else discard. This function only
 /// reads memory and never touches the terminal; the completed ToolOutcome
 /// is surfaced later by the parent's ordered UI path.
+#[cfg(test)]
 fn drain_stderr(mut stream: impl Read, verbose: bool) -> String {
+    drain_stderr_with(&mut stream, verbose, |_| {})
+}
+
+fn drain_stderr_with(
+    mut stream: impl Read,
+    verbose: bool,
+    mut on_progress: impl FnMut(&[u8]),
+) -> String {
     if !verbose {
-        let _ = std::io::copy(&mut stream, &mut std::io::sink());
+        let mut buf = [0u8; 8 * 1024];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => on_progress(&buf[..n]),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
         return String::new();
     }
     let mut kept = Vec::with_capacity(STDERR_CAP);
@@ -302,6 +485,7 @@ fn drain_stderr(mut stream: impl Read, verbose: bool) -> String {
         match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
+                on_progress(&buf[..n]);
                 let take = n.min(STDERR_CAP.saturating_sub(kept.len()));
                 kept.extend_from_slice(&buf[..take]);
                 omitted = omitted.saturating_add(n - take);
@@ -315,7 +499,9 @@ fn drain_stderr(mut stream: impl Read, verbose: bool) -> String {
         if !text.ends_with('\n') {
             text.push('\n');
         }
-        text.push_str(&format!("[task progress truncated: {omitted} bytes omitted]"));
+        text.push_str(&format!(
+            "[task progress truncated: {omitted} bytes omitted]"
+        ));
     }
     text
 }
@@ -345,6 +531,7 @@ mod tests {
             max_turns: DEFAULT_MAX_TURNS,
             wall_clock: Duration::from_secs(DEFAULT_WALL_CLOCK_S),
             verbose: false,
+            background: None,
         }
     }
 
@@ -361,7 +548,10 @@ mod tests {
         let (_tmp, mut ctx) = test_ctx();
         ctx.task = Some(cfg());
         let out = run(&ctx, &json!({}));
-        assert!(out.content.contains("missing required parameter \"prompt\""));
+        assert!(
+            out.content
+                .contains("missing required parameter \"prompt\"")
+        );
         let out = run(&ctx, &json!({"prompt": "  "}));
         assert!(out.content.contains("is empty"));
         let out = run(&ctx, &json!({"prompt": "x", "tools": "everything"}));
@@ -396,8 +586,17 @@ mod tests {
 
     #[test]
     fn non_verbose_progress_is_drained_and_discarded() {
-        let progress = drain_stderr(std::io::Cursor::new(vec![b'x'; 100_000]), false);
+        let mut live = Vec::new();
+        let progress =
+            drain_stderr_with(std::io::Cursor::new(vec![b'x'; 100_000]), false, |bytes| {
+                live.extend_from_slice(bytes)
+            });
         assert!(progress.is_empty());
+        assert_eq!(
+            live.len(),
+            100_000,
+            "live UI receives progress even when retention is off"
+        );
     }
 
     #[test]

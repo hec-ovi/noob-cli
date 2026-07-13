@@ -33,11 +33,71 @@ pub enum RawStep {
 
 #[derive(Clone, Debug)]
 enum Scripted {
-    Json { status: u16, body: String },
+    Json {
+        status: u16,
+        body: String,
+    },
     Raw(Vec<RawStep>),
     /// Like Raw, but keeps the connection open for the next request (the
     /// bytes must be a self-delimiting response, e.g. chunked encoding).
     RawKeepAlive(Vec<RawStep>),
+}
+
+#[derive(Clone, Debug)]
+struct QueuedScript {
+    matcher: RequestMatch,
+    response: Scripted,
+}
+
+/// Route concurrent parent/child requests to deterministic scripts. Ordinary
+/// enqueue methods use `Any` and retain their FIFO behavior.
+#[derive(Clone, Debug)]
+pub enum RequestMatch {
+    Any,
+    HasTool(String),
+    LacksTool(String),
+    /// Match an exact user-role prompt in either Chat Completions `messages`
+    /// or Responses `input`. This distinguishes concurrent sub-agent requests
+    /// without also matching prompt text embedded in a parent tool call.
+    UserPrompt(String),
+}
+
+impl RequestMatch {
+    fn matches(&self, request: &Recorded) -> bool {
+        let has = |name: &str| {
+            request
+                .json()
+                .and_then(|body| body.get("tools").and_then(Value::as_array).cloned())
+                .is_some_and(|tools| {
+                    tools.iter().any(|tool| {
+                        tool.get("name").and_then(Value::as_str) == Some(name)
+                            || tool
+                                .get("function")
+                                .and_then(|function| function.get("name"))
+                                .and_then(Value::as_str)
+                                == Some(name)
+                    })
+                })
+        };
+        match self {
+            RequestMatch::Any => true,
+            RequestMatch::HasTool(name) => has(name),
+            RequestMatch::LacksTool(name) => !has(name),
+            RequestMatch::UserPrompt(prompt) => request.json().is_some_and(|body| {
+                ["messages", "input"].into_iter().any(|key| {
+                    body.get(key)
+                        .and_then(Value::as_array)
+                        .is_some_and(|items| {
+                            items.iter().any(|item| {
+                                item.get("role").and_then(Value::as_str) == Some("user")
+                                    && item.get("content").and_then(Value::as_str)
+                                        == Some(prompt.as_str())
+                            })
+                        })
+                })
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -66,7 +126,7 @@ impl Recorded {
 }
 
 struct Shared {
-    script: Mutex<VecDeque<Scripted>>,
+    script: Mutex<VecDeque<QueuedScript>>,
     recorded: Mutex<Vec<Recorded>>,
     violations: Mutex<Vec<String>>,
     /// How many prefix MISMATCHES are sanctioned. Consumed only when a
@@ -137,30 +197,38 @@ impl MockServer {
     }
 
     pub fn enqueue_json(&self, status: u16, body: Value) {
-        self.shared.script.lock().unwrap().push_back(Scripted::Json {
-            status,
-            body: body.to_string(),
+        self.shared.script.lock().unwrap().push_back(QueuedScript {
+            matcher: RequestMatch::Any,
+            response: Scripted::Json {
+                status,
+                body: body.to_string(),
+            },
         });
     }
 
     /// Enqueue raw bytes and sleeps; the connection closes when the steps end.
     pub fn enqueue_raw(&self, steps: Vec<RawStep>) {
-        self.shared
-            .script
-            .lock()
-            .unwrap()
-            .push_back(Scripted::Raw(steps));
+        self.shared.script.lock().unwrap().push_back(QueuedScript {
+            matcher: RequestMatch::Any,
+            response: Scripted::Raw(steps),
+        });
     }
 
     /// Enqueue raw bytes that leave the connection open afterwards. The
     /// bytes must form a self-delimiting response (chunked encoding or a
     /// content-length), or the client will wait forever for the body end.
     pub fn enqueue_raw_keepalive(&self, steps: Vec<RawStep>) {
-        self.shared
-            .script
-            .lock()
-            .unwrap()
-            .push_back(Scripted::RawKeepAlive(steps));
+        self.shared.script.lock().unwrap().push_back(QueuedScript {
+            matcher: RequestMatch::Any,
+            response: Scripted::RawKeepAlive(steps),
+        });
+    }
+
+    pub fn enqueue_raw_for(&self, matcher: RequestMatch, steps: Vec<RawStep>) {
+        self.shared.script.lock().unwrap().push_back(QueuedScript {
+            matcher,
+            response: Scripted::Raw(steps),
+        });
     }
 
     /// How many TCP connections the server has accepted. Lets tests assert
@@ -186,6 +254,15 @@ impl MockServer {
     pub fn enqueue_stream_completion(&self, text: &str) {
         let datas = chat_stream_datas(text);
         self.enqueue_sse(&datas.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+
+    pub fn enqueue_stream_completion_for(&self, matcher: RequestMatch, text: &str) {
+        let datas = chat_stream_datas(text);
+        let mut steps = vec![RawStep::Bytes(sse_headers())];
+        for data in datas {
+            steps.push(RawStep::Bytes(format!("data: {data}\n\n").into_bytes()));
+        }
+        self.enqueue_raw_for(matcher, steps);
     }
 
     /// Sanction one future prefix mismatch (compaction, plan-mode entry or
@@ -247,8 +324,9 @@ pub fn sse_headers() -> Vec<u8> {
 /// OpenAI actually use): one chunk per event, terminated properly, so the
 /// connection can be kept alive. Pair with `enqueue_raw_keepalive`.
 pub fn chunked_sse_response(datas: &[&str]) -> Vec<u8> {
-    let mut out = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n"
-        .to_vec();
+    let mut out =
+        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n"
+            .to_vec();
     for d in datas {
         let event = format!("data: {d}\n\n");
         out.extend_from_slice(format!("{:x}\r\n", event.len()).as_bytes());
@@ -267,7 +345,10 @@ pub fn chat_stream_datas(text: &str) -> Vec<String> {
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
         .to_string()
     }
-    let mut datas = vec![chunk(json!({"role": "assistant", "content": null}), Value::Null)];
+    let mut datas = vec![chunk(
+        json!({"role": "assistant", "content": null}),
+        Value::Null,
+    )];
     // Split into word-ish deltas so tests exercise real reassembly.
     let mut rest = text;
     while !rest.is_empty() {
@@ -307,7 +388,10 @@ pub fn chat_stream_toolcalls_datas(
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
         .to_string()
     }
-    let mut datas = vec![chunk(json!({"role": "assistant", "content": null}), Value::Null)];
+    let mut datas = vec![chunk(
+        json!({"role": "assistant", "content": null}),
+        Value::Null,
+    )];
     for (i, (id, name, args)) in calls.iter().enumerate() {
         datas.push(chunk(
             json!({"tool_calls": [{"index": i, "id": id, "type": "function",
@@ -349,6 +433,20 @@ impl MockServer {
         let datas = chat_stream_toolcalls_datas(calls, usage);
         self.enqueue_sse(&datas.iter().map(String::as_str).collect::<Vec<_>>());
     }
+
+    pub fn enqueue_stream_toolcalls_for(
+        &self,
+        matcher: RequestMatch,
+        calls: &[(&str, &str, &str)],
+        usage: Option<(u64, u64)>,
+    ) {
+        let datas = chat_stream_toolcalls_datas(calls, usage);
+        let mut steps = vec![RawStep::Bytes(sse_headers())];
+        for data in datas {
+            steps.push(RawStep::Bytes(format!("data: {data}\n\n").into_bytes()));
+        }
+        self.enqueue_raw_for(matcher, steps);
+    }
 }
 
 /// Load an SSE fixture and split it into TCP-chunk byte vectors at every
@@ -361,10 +459,7 @@ pub fn load_fixture_chunks(path: impl AsRef<std::path::Path>) -> Vec<Vec<u8>> {
     const SENTINEL: &[u8] = b"%%CHUNK%%";
     let mut chunks = Vec::new();
     let mut rest = &bytes[..];
-    while let Some(pos) = rest
-        .windows(SENTINEL.len())
-        .position(|w| w == SENTINEL)
-    {
+    while let Some(pos) = rest.windows(SENTINEL.len()).position(|w| w == SENTINEL) {
         chunks.push(rest[..pos].to_vec());
         rest = &rest[pos + SENTINEL.len()..];
     }
@@ -377,13 +472,18 @@ fn handle_connection(mut stream: TcpStream, shared: Arc<Shared>) {
     shared.connections.fetch_add(1, Ordering::SeqCst);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
     loop {
-        let Some(req) = read_request(&mut stream) else { return };
+        let Some(req) = read_request(&mut stream) else {
+            return;
+        };
         let is_api = req.path.ends_with("/chat/completions") || req.path.ends_with("/responses");
         if is_api {
             run_assertions(&shared, &req);
         }
+        let next = {
+            let mut script = shared.script.lock().unwrap();
+            take_matching_script(&mut script, &req)
+        };
         shared.recorded.lock().unwrap().push(req);
-        let next = shared.script.lock().unwrap().pop_front();
         match next {
             Some(Scripted::Json { status, body }) => {
                 let mut out = http_response(status, Some(body.len()));
@@ -419,6 +519,23 @@ fn handle_connection(mut stream: TcpStream, shared: Arc<Shared>) {
             }
         }
     }
+}
+
+/// Take the first matching routed script, using `Any` only as a fallback.
+/// FIFO order remains unchanged within the routed and `Any` groups.
+fn take_matching_script(
+    script: &mut VecDeque<QueuedScript>,
+    request: &Recorded,
+) -> Option<Scripted> {
+    let routed = script.iter().position(|queued| {
+        !matches!(&queued.matcher, RequestMatch::Any) && queued.matcher.matches(request)
+    });
+    let index = routed.or_else(|| {
+        script
+            .iter()
+            .position(|queued| matches!(&queued.matcher, RequestMatch::Any))
+    })?;
+    script.remove(index).map(|queued| queued.response)
 }
 
 fn write_steps(stream: &mut TcpStream, steps: Vec<RawStep>) -> bool {
@@ -494,7 +611,11 @@ fn run_assertions(shared: &Shared, req: &Recorded) {
 
     // 2 + 3 need the conversation array.
     let interleaved = shared.allow_interleaved.load(Ordering::SeqCst);
-    let array_key = if req.path.ends_with("/responses") { "input" } else { "messages" };
+    let array_key = if req.path.ends_with("/responses") {
+        "input"
+    } else {
+        "messages"
+    };
     if let Some(items) = body.get(array_key).and_then(Value::as_array) {
         // Prefix stability is byte-exact on the serialized array: llama.cpp
         // KV reuse is byte-sensitive, so a serializer that merely reorders
@@ -682,9 +803,7 @@ fn scan_value(b: &[u8], start: usize) -> Option<usize> {
         }
         _ => {
             let mut i = start;
-            while i < b.len()
-                && !matches!(b[i], b',' | b'}' | b']')
-                && !b[i].is_ascii_whitespace()
+            while i < b.len() && !matches!(b[i], b',' | b'}' | b']') && !b[i].is_ascii_whitespace()
             {
                 i += 1;
             }
@@ -871,13 +990,19 @@ mod tests {
     #[test]
     fn flags_prefix_break_and_accepts_declared_break() {
         let s = shared();
-        let first = req("/v1/chat/completions", json!({"messages": [{"role":"user","content":"a"}]}));
+        let first = req(
+            "/v1/chat/completions",
+            json!({"messages": [{"role":"user","content":"a"}]}),
+        );
         run_assertions(&s, &first);
         s.recorded.lock().unwrap().push(first);
         // Changed first element: violation.
         run_assertions(
             &s,
-            &req("/v1/chat/completions", json!({"messages": [{"role":"user","content":"CHANGED"}]})),
+            &req(
+                "/v1/chat/completions",
+                json!({"messages": [{"role":"user","content":"CHANGED"}]}),
+            ),
         );
         assert_eq!(s.violations.lock().unwrap().len(), 1);
         // Same change again, but declared: clean, and the allowance is
@@ -886,7 +1011,10 @@ mod tests {
         s.allowed_prefix_breaks.store(2, Ordering::SeqCst);
         run_assertions(
             &s,
-            &req("/v1/chat/completions", json!({"messages": [{"role":"user","content":"CHANGED"}]})),
+            &req(
+                "/v1/chat/completions",
+                json!({"messages": [{"role":"user","content":"CHANGED"}]}),
+            ),
         );
         assert!(s.violations.lock().unwrap().is_empty());
         assert_eq!(s.allowed_prefix_breaks.load(Ordering::SeqCst), 1);
@@ -979,7 +1107,10 @@ mod tests {
         run_assertions(&s, &first);
         s.recorded.lock().unwrap().push(first);
         // Same messages, different tools serialization: violation.
-        run_assertions(&s, &mk(json!([{"type":"function","function":{"name":"write"}}])));
+        run_assertions(
+            &s,
+            &mk(json!([{"type":"function","function":{"name":"write"}}])),
+        );
         let v: Vec<String> = std::mem::take(&mut s.violations.lock().unwrap());
         assert_eq!(v.len(), 1, "{v:?}");
         assert!(v[0].contains("tools array changed"), "{}", v[0]);
@@ -1051,5 +1182,62 @@ mod tests {
             ),
         );
         assert!(!s.violations.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn user_prompt_matches_chat_and_responses_but_not_tool_arguments() {
+        let matcher = RequestMatch::UserPrompt("inspect child alpha".into());
+        assert!(matcher.matches(&req(
+            "/v1/chat/completions",
+            json!({"messages": [{"role":"user","content":"inspect child alpha"}]})
+        )));
+        assert!(matcher.matches(&req(
+            "/v1/responses",
+            json!({"input": [
+                {"type":"message","role":"user","content":"inspect child alpha"}
+            ]})
+        )));
+        assert!(!matcher.matches(&req(
+            "/v1/chat/completions",
+            json!({"messages": [
+                {"role":"user","content":"launch helpers"},
+                {"role":"assistant","tool_calls":[{"id":"c1","function":{
+                    "name":"subagent",
+                    "arguments":"{\"prompt\":\"inspect child alpha\"}"
+                }}]}
+            ]})
+        )));
+    }
+
+    #[test]
+    fn routed_script_is_preferred_over_an_earlier_any_script() {
+        let mut script = VecDeque::from([
+            QueuedScript {
+                matcher: RequestMatch::Any,
+                response: Scripted::Json {
+                    status: 200,
+                    body: "fallback".into(),
+                },
+            },
+            QueuedScript {
+                matcher: RequestMatch::UserPrompt("child beta".into()),
+                response: Scripted::Json {
+                    status: 200,
+                    body: "specific".into(),
+                },
+            },
+        ]);
+        let request = req(
+            "/v1/chat/completions",
+            json!({"messages": [{"role":"user","content":"child beta"}]}),
+        );
+
+        let selected = take_matching_script(&mut script, &request).unwrap();
+        assert!(matches!(
+            selected,
+            Scripted::Json { body, .. } if body == "specific"
+        ));
+        assert_eq!(script.len(), 1);
+        assert!(matches!(script[0].matcher, RequestMatch::Any));
     }
 }

@@ -13,6 +13,7 @@
 
 use std::io::{IsTerminal, Write};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -29,10 +30,19 @@ mod theme;
 
 pub use dock::DockSession;
 pub(crate) use dock::WINCH;
+use markdown::Markdown;
 pub use prompt::Input;
 use style::{ColorDepth, DIM, RESET};
-use markdown::Markdown;
 use theme::Theme;
+
+pub(crate) fn elapsed_label(elapsed: Duration) -> String {
+    let millis = elapsed.as_millis();
+    if millis < 60_000 {
+        format!("{}.{:01}s", millis / 1_000, (millis % 1_000) / 100)
+    } else {
+        format!("{}m{:02}s", millis / 60_000, (millis / 1_000) % 60)
+    }
+}
 
 /// The column the label is padded to on the themed activity line, so the brief
 /// after it lines up. Sized to the longest label a summary leads with
@@ -63,15 +73,27 @@ pub(crate) enum TurnEvent {
     Text(String),
     Reasoning(String),
     EndLine,
-    ToolStart { id: String, name: String, brief: String, read_only: bool },
-    ToolDone { id: String, summary: String, is_error: bool },
-    /// The `todo` tool's rendered checklist text (header + one glyph line per
+    ToolStart {
+        id: String,
+        name: String,
+        brief: String,
+        read_only: bool,
+    },
+    ToolDone {
+        id: String,
+        summary: String,
+        is_error: bool,
+    },
+    /// The `plan` tool's rendered checklist text (header + one glyph line per
     /// item), for the themed REPL's visible block. Off the token path.
     Todos(String),
     /// A multi-agent fan-out panel re-render: the plain checklist block and the
     /// task call ids it covers (so the themed REPL suppresses their redundant
     /// `* task` activity lines). Themed REPL only; off the token path.
-    Agents { block: String, ids: Vec<String> },
+    Agents {
+        block: String,
+        ids: Vec<String>,
+    },
     Note(String),
     Error(String),
     Done(Option<Usage>),
@@ -116,10 +138,19 @@ impl BufferedTurnRenderer {
             TurnEvent::Text(s) => self.ui.text_delta(&s),
             TurnEvent::Reasoning(s) => self.ui.reasoning_delta(&s),
             TurnEvent::EndLine => self.ui.end_line(),
-            TurnEvent::ToolStart { id, name, brief, read_only } => {
+            TurnEvent::ToolStart {
+                id,
+                name,
+                brief,
+                read_only,
+            } => {
                 self.ui.render_tool_start(&id, &name, &brief, read_only);
             }
-            TurnEvent::ToolDone { id, summary, is_error } => {
+            TurnEvent::ToolDone {
+                id,
+                summary,
+                is_error,
+            } => {
                 self.ui.tool_done(&id, &summary, is_error);
             }
             TurnEvent::Todos(text) => self.ui.render_checklist(&text),
@@ -195,7 +226,11 @@ pub struct Ui {
 impl Ui {
     pub fn new(mode: Mode) -> Ui {
         let ansi = std::io::stdout().is_terminal();
-        let depth = if ansi { style::detect_depth() } else { ColorDepth::None };
+        let depth = if ansi {
+            style::detect_depth()
+        } else {
+            ColorDepth::None
+        };
         // A depthless terminal (TERM=dumb) or NO_COLOR falls back to the exact
         // pre-color behavior rather than emitting empty escapes.
         let color = ansi && no_color_allowed() && depth != ColorDepth::None;
@@ -459,8 +494,9 @@ impl Ui {
                 self.mid_line = !s.ends_with('\n');
             }
             _ if self.rich_text() => {
-                let rendered =
-                    self.markdown.feed(s, prompt::term_width(), &self.theme, self.depth);
+                let rendered = self
+                    .markdown
+                    .feed(s, prompt::term_width(), &self.theme, self.depth);
                 if !rendered.is_empty() {
                     self.out(&rendered);
                     self.mid_line = !rendered.ends_with('\n');
@@ -519,8 +555,9 @@ impl Ui {
         if self.rich_text() && self.markdown.has_pending() {
             // `finish` also clears CRLF/fence/table state when it currently
             // has no visible bytes, so every assistant message starts clean.
-            let rendered =
-                self.markdown.finish(prompt::term_width(), &self.theme, self.depth);
+            let rendered = self
+                .markdown
+                .finish(prompt::term_width(), &self.theme, self.depth);
             if !rendered.is_empty() {
                 self.out(&rendered);
                 self.mid_line = !rendered.ends_with('\n');
@@ -602,7 +639,7 @@ impl Ui {
         }
     }
 
-    /// Show the `todo` tool's checklist as a visible block. `text` is the
+    /// Show the `plan` tool's checklist as a visible block. `text` is the
     /// tool's own plain result (header + one glyph line per item), the exact
     /// bytes the model receives. On a dock turn it ships over the channel; the
     /// main-thread renderer replays it through `render_checklist`.
@@ -626,12 +663,15 @@ impl Ui {
         self.end_line();
         // styled() implies a real depth, so every opener below is non-empty.
         let activity = self.theme.activity.sgr(self.depth);
+        let error = self.theme.error.sgr(self.depth);
         let note = self.theme.note.sgr(self.depth);
         let mut block = String::new();
         for line in text.lines() {
             let safe = safe_terminal_text(line);
             let open: &str = if safe.starts_with("[ ]") {
                 DIM
+            } else if safe.starts_with("[!]") {
+                &error
             } else if safe.starts_with("[x]") || safe.starts_with("[~]") {
                 &activity
             } else {
@@ -652,7 +692,10 @@ impl Ui {
     /// a dock turn it ships over the channel; the main-thread renderer replays
     /// it through `render_agents`.
     pub fn agents(&mut self, block: &str, ids: &[String]) {
-        if self.send_turn(TurnEvent::Agents { block: block.to_string(), ids: ids.to_vec() }) {
+        if self.send_turn(TurnEvent::Agents {
+            block: block.to_string(),
+            ids: ids.to_vec(),
+        }) {
             return;
         }
         self.render_agents(block, ids);
@@ -686,6 +729,7 @@ impl Ui {
             return Vec::new();
         }
         let activity = self.theme.activity.sgr(self.depth);
+        let error = self.theme.error.sgr(self.depth);
         let note = self.theme.note.sgr(self.depth);
         let mut rows = Vec::new();
         for line in text.lines() {
@@ -695,6 +739,8 @@ impl Ui {
             }
             let open: &str = if safe.starts_with("[ ]") {
                 DIM
+            } else if safe.starts_with("[!]") {
+                &error
             } else if safe.starts_with("[x]") || safe.starts_with("[~]") {
                 &activity
             } else {
@@ -703,6 +749,22 @@ impl Ui {
             rows.push(format!("{open}{}{RESET}", clamp_to_row(&safe, width)));
         }
         rows
+    }
+
+    pub(super) fn regions_enabled(&self) -> bool {
+        self.styled()
+    }
+
+    pub(super) fn region_summary_row(&self, text: &str, width: usize, tone: RegionTone) -> String {
+        let open = match tone {
+            RegionTone::Activity => self.theme.activity.sgr(self.depth),
+            RegionTone::Error => self.theme.error.sgr(self.depth),
+            RegionTone::Dim => DIM.to_string(),
+        };
+        format!(
+            "{open}{}{RESET}",
+            clamp_to_row(&safe_terminal_text(text), width)
+        )
     }
 
     /// Loop / lifecycle note ("cache prefix reset: compaction", nudges).
@@ -777,7 +839,10 @@ impl Ui {
         // same degradation as every other unanswerable surface.
         if let Some(tx) = &self.turn_tx {
             let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
-            if tx.send(dock::Ev::Ask(question.to_string(), reply_tx)).is_err() {
+            if tx
+                .send(dock::Ev::Ask(question.to_string(), reply_tx))
+                .is_err()
+            {
                 return false;
             }
             return reply_rx.recv().unwrap_or(false);
@@ -815,7 +880,9 @@ impl Ui {
                         self.replay_user(text);
                     }
                 }
-                Item::Assistant { text, tool_calls, .. } => {
+                Item::Assistant {
+                    text, tool_calls, ..
+                } => {
                     if !text.is_empty() {
                         // The exact streaming Markdown path a live reply uses, so
                         // headings, bold, lists, and tables render identically.
@@ -897,15 +964,22 @@ impl Ui {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum RegionTone {
+    Activity,
+    Error,
+    Dim,
+}
+
 /// Make display text harmless before surrounding it with terminal controls.
 /// Newlines remain structural, tabs become spaces, carriage returns become
 /// newlines, and every other C0/C1 byte becomes visible. Model assistant text
 /// uses the stateful Markdown sanitizer; this covers reasoning, tool summaries,
 /// notes, endpoint strings, and confirmation questions.
 fn safe_terminal_text(input: &str) -> std::borrow::Cow<'_, str> {
-    let clean = input.chars().all(|c| {
-        c == '\n' || !matches!(c as u32, 0x00..=0x1f | 0x7f..=0x9f)
-    });
+    let clean = input
+        .chars()
+        .all(|c| c == '\n' || !matches!(c as u32, 0x00..=0x1f | 0x7f..=0x9f));
     if clean {
         return std::borrow::Cow::Borrowed(input);
     }
@@ -975,6 +1049,7 @@ fn is_synthetic_replay_item(text: &str) -> bool {
         || text.starts_with("[loaded skills:")
         || text.starts_with("[conversation summary]")
         || text.starts_with("[earlier conversation dropped:")
+        || text.starts_with("[background sub-agent result ")
         || text.starts_with("[note]")
 }
 
@@ -1071,7 +1146,11 @@ mod tests {
             mode,
             ansi,
             color,
-            depth: if color { ColorDepth::Truecolor } else { ColorDepth::None },
+            depth: if color {
+                ColorDepth::Truecolor
+            } else {
+                ColorDepth::None
+            },
             theme: Theme::matrix(),
             markdown: Markdown::new(),
             tinted: false,
@@ -1088,9 +1167,15 @@ mod tests {
 
     #[test]
     fn brief_args_picks_the_telling_field_and_shortens() {
-        assert_eq!(brief_args("bash", &json!({"cmd": "cargo  test"})), "cargo test");
+        assert_eq!(
+            brief_args("bash", &json!({"cmd": "cargo  test"})),
+            "cargo test"
+        );
         assert_eq!(brief_args("edit", &json!({"path": "src/a.rs"})), "src/a.rs");
-        assert_eq!(brief_args("grep", &json!({"pattern": "fn main"})), "fn main");
+        assert_eq!(
+            brief_args("grep", &json!({"pattern": "fn main"})),
+            "fn main"
+        );
         let long = brief_args("bash", &json!({"cmd": "x".repeat(200)}));
         assert_eq!(long.chars().count(), 61);
     }
@@ -1111,7 +1196,10 @@ mod tests {
             return;
         }
         let mut ui = Ui::new(Mode::Repl);
-        assert!(!ui.ask("grant?"), "a piped REPL must never grant a confirmation");
+        assert!(
+            !ui.ask("grant?"),
+            "a piped REPL must never grant a confirmation"
+        );
     }
 
     // --- the styled surface (only reachable through the seam) --------------
@@ -1143,8 +1231,15 @@ mod tests {
         let (mut ui, out, _) = harness(Mode::Repl, true, true);
         ui.tool_done("id", "done", false);
         let s = out.text();
-        assert_eq!(strip_ansi(&s), "* done\n", "content or marker changed under the color");
-        assert!(s.ends_with("\x1b[0m\n"), "line not reset-terminated (bleed risk): {s:?}");
+        assert_eq!(
+            strip_ansi(&s),
+            "* done\n",
+            "content or marker changed under the color"
+        );
+        assert!(
+            s.ends_with("\x1b[0m\n"),
+            "line not reset-terminated (bleed risk): {s:?}"
+        );
         assert_ne!(s, "* done\n", "styled line must differ from the plain form");
     }
 
@@ -1156,9 +1251,19 @@ mod tests {
         ui.tool_start("b", "bash", "cargo test", false); // 4-char label
         ui.tool_done("t", "task done (2 turns)", false); //                4-char label
         ui.tool_done("l", "ls . (3 entries)", false); //                  2-char label
-        let lines: Vec<String> = strip_ansi(&out.text()).lines().map(str::to_string).collect();
+        let lines: Vec<String> = strip_ansi(&out.text())
+            .lines()
+            .map(str::to_string)
+            .collect();
         // Each brief starts at the same column: "* " (2) + the 7-column label.
-        assert_eq!(lines, ["* bash   cargo test", "* task   done (2 turns)", "* ls     . (3 entries)"]);
+        assert_eq!(
+            lines,
+            [
+                "* bash   cargo test",
+                "* task   done (2 turns)",
+                "* ls     . (3 entries)"
+            ]
+        );
     }
 
     #[test]
@@ -1170,13 +1275,19 @@ mod tests {
         let (mut ui, out, _) = harness(Mode::Repl, true, true);
         ui.tool_done("id", "boom failed", true);
         let s = out.text();
-        assert!(s.contains("* boom failed"), "error line must not split a label out: {s:?}");
+        assert!(
+            s.contains("* boom failed"),
+            "error line must not split a label out: {s:?}"
+        );
         assert!(s.ends_with("\x1b[0m\n"), "error line must reset: {s:?}");
         // A non-error line of the same text does split the label, proving the
         // two paths differ (and that the split is what error suppresses).
         let (mut ui2, out2, _) = harness(Mode::Repl, true, true);
         ui2.tool_done("id", "boom failed", false);
-        assert!(!out2.text().contains("* boom failed"), "non-error line should isolate the label");
+        assert!(
+            !out2.text().contains("* boom failed"),
+            "non-error line should isolate the label"
+        );
     }
 
     #[test]
@@ -1196,7 +1307,11 @@ mod tests {
         ui_e.error("boom");
         let (mut ui_n, out_n, _) = harness(Mode::Repl, false, false);
         ui_n.note("boom");
-        assert_eq!(out_e.text(), out_n.text(), "error() drifted from note() when not styled");
+        assert_eq!(
+            out_e.text(),
+            out_n.text(),
+            "error() drifted from note() when not styled"
+        );
         assert_eq!(out_e.text(), "boom\n");
     }
 
@@ -1219,12 +1334,30 @@ mod tests {
         let s = out.text();
         let plain = strip_ansi(&s);
         for line in ["plan (1/3 done):", "[x] research", "[~] build", "[ ] test"] {
-            assert!(plain.contains(line), "checklist line {line:?} missing from: {plain:?}");
+            assert!(
+                plain.contains(line),
+                "checklist line {line:?} missing from: {plain:?}"
+            );
         }
         assert!(s.contains('\x1b'), "themed checklist must carry styling");
-        assert_ne!(s, format!("{checklist}\n"), "styled block must differ from plain");
+        assert_ne!(
+            s,
+            format!("{checklist}\n"),
+            "styled block must differ from plain"
+        );
         // Every opener is reset (paired escapes), so no color leaks past a line.
         assert_eq!(s.matches("\x1b[0m").count() * 2, s.matches("\x1b[").count());
+    }
+
+    #[test]
+    fn failed_agent_glyph_uses_the_error_tone() {
+        let (ui, _out, _err) = harness(Mode::Repl, true, true);
+        let rows = ui.checklist_region_rows("agents:\n[!] agent 1: failed", 80);
+        assert!(
+            rows[1].contains(&ui.theme.error.sgr(ui.depth)),
+            "{:?}",
+            rows[1]
+        );
     }
 
     #[test]
@@ -1240,7 +1373,10 @@ mod tests {
         assert_eq!(rows.len(), 4, "one row per non-empty source line: {rows:?}");
         for row in &rows {
             let plain = strip_ansi(row);
-            assert!(plain.chars().count() <= 24, "row exceeds the width clamp: {plain:?}");
+            assert!(
+                plain.chars().count() <= 24,
+                "row exceeds the width clamp: {plain:?}"
+            );
         }
         assert!(strip_ansi(&rows[0]).contains("plan (1/3 done):"));
         assert!(strip_ansi(&rows[1]).contains("[x] short"));
@@ -1249,7 +1385,10 @@ mod tests {
             "the over-long row must be truncated: {:?}",
             strip_ansi(&rows[3])
         );
-        assert!(rows.iter().all(|r| r.contains('\x1b')), "region rows must carry styling");
+        assert!(
+            rows.iter().all(|r| r.contains('\x1b')),
+            "region rows must carry styling"
+        );
     }
 
     #[test]
@@ -1262,8 +1401,20 @@ mod tests {
             (Mode::Exec, true, true),
         ] {
             let (ui, _o, _e) = harness(mode, color, ansi);
-            assert!(ui.checklist_region_rows("plan (0/1 done):\n[ ] x", 40).is_empty());
+            assert!(
+                ui.checklist_region_rows("plan (0/1 done):\n[ ] x", 40)
+                    .is_empty()
+            );
         }
+    }
+
+    #[test]
+    fn canceled_plan_summary_uses_the_error_tone() {
+        let (ui, _, _) = harness(Mode::Repl, true, true);
+        let row = ui.region_summary_row("plan canceled · 1/3", 80, RegionTone::Error);
+        assert!(row.contains(&ui.theme.error.sgr(ui.depth)), "{row:?}");
+        assert!(row.contains("plan canceled · 1/3"));
+        assert!(row.ends_with(RESET));
     }
 
     #[test]
@@ -1281,8 +1432,14 @@ mod tests {
         ] {
             let (mut ui, out, err) = harness(mode, color, ansi);
             ui.checklist(checklist);
-            assert!(out.text().is_empty(), "{label} stdout gained checklist bytes");
-            assert!(err.text().is_empty(), "{label} stderr gained checklist bytes");
+            assert!(
+                out.text().is_empty(),
+                "{label} stdout gained checklist bytes"
+            );
+            assert!(
+                err.text().is_empty(),
+                "{label} stderr gained checklist bytes"
+            );
         }
     }
 
@@ -1297,7 +1454,10 @@ mod tests {
                      [x] agent 1: fetch alpha  (7 turns) · Alpha summary line\n\
                      [~] agent 2: fetch beta\n\
                      [~] agent 3: fetch gamma";
-        ui.agents(block, &["f1".to_string(), "f2".to_string(), "f3".to_string()]);
+        ui.agents(
+            block,
+            &["f1".to_string(), "f2".to_string(), "f3".to_string()],
+        );
         let s = out.text();
         let plain = strip_ansi(&s);
         for line in [
@@ -1306,10 +1466,17 @@ mod tests {
             "[~] agent 2: fetch beta",
             "[~] agent 3: fetch gamma",
         ] {
-            assert!(plain.contains(line), "agents line {line:?} missing from: {plain:?}");
+            assert!(
+                plain.contains(line),
+                "agents line {line:?} missing from: {plain:?}"
+            );
         }
         assert!(s.contains('\x1b'), "themed agents panel must carry styling");
-        assert_ne!(s, format!("{block}\n"), "styled block must differ from plain");
+        assert_ne!(
+            s,
+            format!("{block}\n"),
+            "styled block must differ from plain"
+        );
         assert_eq!(s.matches("\x1b[0m").count() * 2, s.matches("\x1b[").count());
     }
 
@@ -1348,9 +1515,18 @@ mod tests {
         ui.tool_done("f1", "task done (2 turns)", false); //  covered: suppressed
         ui.tool_done("b", "ls . (3 entries)", false); //      unrelated: shown
         let plain = strip_ansi(&out.text());
-        assert!(!plain.contains("* task"), "a covered task line leaked past the panel:\n{plain}");
-        assert!(plain.contains("agent 1: solo"), "the panel itself must render:\n{plain}");
-        assert!(plain.contains("* ls"), "an unrelated tool line must still render:\n{plain}");
+        assert!(
+            !plain.contains("* task"),
+            "a covered task line leaked past the panel:\n{plain}"
+        );
+        assert!(
+            plain.contains("agent 1: solo"),
+            "the panel itself must render:\n{plain}"
+        );
+        assert!(
+            plain.contains("* ls"),
+            "an unrelated tool line must still render:\n{plain}"
+        );
     }
 
     #[test]
@@ -1384,8 +1560,15 @@ mod tests {
         // Raw text on stdout (the trailing \n is end_line closing the line
         // before the activity line, exactly as today); no escape anywhere.
         assert_eq!(out.text(), "hello\n", "exec text must be raw on stdout");
-        assert!(!out.text().contains('\x1b'), "exec stdout must carry no escapes");
-        assert_eq!(err.text(), "\x1b[2m* done\x1b[0m\n", "exec activity must stay legacy dim");
+        assert!(
+            !out.text().contains('\x1b'),
+            "exec stdout must carry no escapes"
+        );
+        assert_eq!(
+            err.text(),
+            "\x1b[2m* done\x1b[0m\n",
+            "exec activity must stay legacy dim"
+        );
     }
 
     #[test]
@@ -1395,10 +1578,16 @@ mod tests {
         let (mut ui, out, _) = harness(Mode::Repl, true, true);
         ui.text_delta("1. write ");
         ui.text_delta("greeting.txt");
-        assert!(out.text().is_empty(), "partial source line should stay buffered");
+        assert!(
+            out.text().is_empty(),
+            "partial source line should stay buffered"
+        );
         ui.end_line();
         let s = out.text();
-        assert!(strip_ansi(&s).contains("1. write greeting.txt\n"), "split text changed: {s:?}");
+        assert!(
+            strip_ansi(&s).contains("1. write greeting.txt\n"),
+            "split text changed: {s:?}"
+        );
         assert_eq!(s.matches("\x1b[0m").count() * 2, s.matches("\x1b[").count());
     }
 
@@ -1428,14 +1617,21 @@ mod tests {
         ui.prompt(false);
         let s = out.text();
         assert!(s.contains("> "), "prompt glyph missing: {s:?}");
-        assert!(s.ends_with("\x1b[0m"), "prompt not reset (would color typed input): {s:?}");
+        assert!(
+            s.ends_with("\x1b[0m"),
+            "prompt not reset (would color typed input): {s:?}"
+        );
     }
 
     #[test]
     fn child_text_goes_to_stderr_unstyled() {
         let (mut ui, out, err) = harness(Mode::Child, true, true);
         ui.text_delta("progress");
-        assert_eq!(out.text(), "", "child stdout is reserved for the result line");
+        assert_eq!(
+            out.text(),
+            "",
+            "child stdout is reserved for the result line"
+        );
         assert_eq!(err.text(), "progress");
     }
 
@@ -1444,8 +1640,14 @@ mod tests {
         let (mut ui, out, _) = harness(Mode::ExecJson, true, true);
         ui.text_delta("hi");
         let s = out.text();
-        assert!(s.contains("\"t\":\"text\"") || s.contains("\"text\""), "event missing: {s:?}");
-        assert!(!s.contains('\x1b'), "JSONL protocol must carry no escapes: {s:?}");
+        assert!(
+            s.contains("\"t\":\"text\"") || s.contains("\"text\""),
+            "event missing: {s:?}"
+        );
+        assert!(
+            !s.contains('\x1b'),
+            "JSONL protocol must carry no escapes: {s:?}"
+        );
     }
 
     #[test]
@@ -1478,7 +1680,13 @@ mod tests {
             Item::User("[skills updated] now available: pdf: read pdfs.".into()),
             Item::User(crate::agent::PLAN_ENTER_MSG.into()),
             Item::User("[conversation summary]\nwork happened".into()),
-            Item::User("[earlier conversation dropped: 8 items removed because summary invalid]".into()),
+            Item::User(
+                "[earlier conversation dropped: 8 items removed because summary invalid]".into(),
+            ),
+            Item::User(
+                "[background sub-agent result agent-1]\nstatus: ok\nresult:\ninternal report"
+                    .into(),
+            ),
             Item::User("great, thanks".into()),
             Item::Assistant {
                 text: "You're welcome!".into(),
@@ -1500,12 +1708,25 @@ mod tests {
             "replay output drifted:\n{plain}"
         );
         // The synthetic markers never reach the screen.
-        assert!(!plain.contains("[skills updated]"), "a skills note leaked into replay");
-        assert!(!plain.contains("[plan mode]"), "the plan toggle leaked into replay");
-        assert!(!plain.contains("[conversation summary]"), "a summary leaked into replay");
+        assert!(
+            !plain.contains("[skills updated]"),
+            "a skills note leaked into replay"
+        );
+        assert!(
+            !plain.contains("[plan mode]"),
+            "the plan toggle leaked into replay"
+        );
+        assert!(
+            !plain.contains("[conversation summary]"),
+            "a summary leaked into replay"
+        );
         assert!(
             !plain.contains("earlier conversation dropped"),
             "a hard-drop compaction stub leaked into replay"
+        );
+        assert!(
+            !plain.contains("background sub-agent result"),
+            "a background report was replayed as human input"
         );
     }
 
@@ -1524,7 +1745,10 @@ mod tests {
         ] {
             let (mut ui, _o, _e) = harness(mode, color, ansi);
             ui.thinking_start();
-            assert!(ui.scanner.is_none(), "scanner started on a non-themed surface");
+            assert!(
+                ui.scanner.is_none(),
+                "scanner started on a non-themed surface"
+            );
             ui.thinking_stop();
         }
     }

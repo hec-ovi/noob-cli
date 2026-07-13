@@ -18,7 +18,9 @@ fn fake_docker(dir: &std::path::Path) -> String {
     let docker = bin.join("docker");
     std::fs::write(
         &docker,
-        "#!/bin/sh\nprintf 'CALL\\n' >> \"$DOCKER_LOG\"\nprintf '%s\\n' \"$@\" >> \"$DOCKER_LOG\"\n",
+        "#!/bin/sh\nprintf 'CALL\\n' >> \"$DOCKER_LOG\"\n\
+         if [ -n \"${NOOB_WORKSPACE:-}\" ]; then printf 'NOOB_WORKSPACE=%s\\n' \"$NOOB_WORKSPACE\" >> \"$DOCKER_LOG\"; fi\n\
+         printf '%s\\n' \"$@\" >> \"$DOCKER_LOG\"\n",
     )
     .unwrap();
     std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -56,7 +58,11 @@ fn installer_builds_image_installs_launcher_and_forwards_restore() {
     assert!(launcher.is_file());
     assert!(config.join("skills/web-search/SKILL.md").is_file());
     assert!(config.join("mcp.json").is_file());
-    assert!(std::fs::read_to_string(config.join("mcp.json")).unwrap().contains("websearch"));
+    assert!(
+        std::fs::read_to_string(config.join("mcp.json"))
+            .unwrap()
+            .contains("websearch")
+    );
 
     let workspace = tmp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -71,19 +77,36 @@ fn installer_builds_image_installs_launcher_and_forwards_restore() {
         .env("DOCKER_LOG", &log)
         .output()
         .unwrap();
-    assert!(ran.status.success(), "launcher failed: {}", String::from_utf8_lossy(&ran.stderr));
+    assert!(
+        ran.status.success(),
+        "launcher failed: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
 
     let calls = std::fs::read_to_string(&log).unwrap();
-    assert!(calls.contains("build\n--target\nruntime\n--tag\nnoob:local"), "{calls}");
+    assert!(
+        calls
+            .contains("build\n--build-arg\nTARGETARCH=amd64\n--target\nruntime\n--tag\nnoob:local"),
+        "{calls}"
+    );
     assert!(calls.contains("run\n--rm\n-i\n"), "{calls}");
-    assert!(calls.contains(&format!("{}:/work", workspace.display())), "{calls}");
-    assert!(calls.contains(&format!("{}:/config", config.display())), "{calls}");
+    assert!(
+        calls.contains(&format!("{}:/work", workspace.display())),
+        "{calls}"
+    );
+    assert!(
+        calls.contains(&format!("{}:/config", config.display())),
+        "{calls}"
+    );
     assert!(calls.contains("--env\nNOOB_MODEL\n"), "{calls}");
     assert!(
         !calls.contains("NOOB_API_KEY"),
         "the launcher must not expose a host API key to tools: {calls}"
     );
-    assert!(calls.contains("noob:local\n--restore\nsaved-session\n"), "{calls}");
+    assert!(
+        calls.contains("noob:local\n--restore\nsaved-session\n"),
+        "{calls}"
+    );
 }
 
 #[test]
@@ -105,7 +128,10 @@ fn installer_refuses_to_replace_an_unmanaged_command_without_force() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("refusing to replace unmanaged"));
-    assert!(!log.exists(), "the image must not build after a safety refusal");
+    assert!(
+        !log.exists(),
+        "the image must not build after a safety refusal"
+    );
 }
 
 #[test]
@@ -130,8 +156,43 @@ fn live_runner_forwards_endpoint_overrides_to_docker() {
     );
 
     let calls = std::fs::read_to_string(log).unwrap();
-    assert!(calls.contains("build\n--target\ndev\n"), "{calls}");
+    assert!(
+        calls.contains("build\n--build-arg\nTARGETARCH=x86_64\n--target\ndev\n"),
+        "{calls}"
+    );
     assert!(calls.contains("-e\nNOOB_LIVE_BASE_URL\n"), "{calls}");
     assert!(calls.contains("-e\nNOOB_LIVE_MCP_URL\n"), "{calls}");
     assert!(calls.contains("--ignored\n--test-threads=1\n"), "{calls}");
+}
+
+#[test]
+fn dev_runner_creates_and_mounts_an_isolated_default_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let checkout = tmp.path().join("checkout");
+    std::fs::create_dir(&checkout).unwrap();
+    std::fs::copy(repo_root().join("dev.sh"), checkout.join("dev.sh")).unwrap();
+    let log = tmp.path().join("docker.log");
+    let path = fake_docker(tmp.path());
+
+    let output = Command::new("bash")
+        .arg(checkout.join("dev.sh"))
+        .env("PATH", path)
+        .env("DOCKER_LOG", &log)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "dev runner failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workspace = checkout.join("workspace").canonicalize().unwrap();
+    let calls = std::fs::read_to_string(log).unwrap();
+    assert!(
+        calls.contains(&format!("NOOB_WORKSPACE={}\n", workspace.display())),
+        "{calls}"
+    );
+    assert!(
+        calls.contains("compose\nrun\n--build\n--rm\n--user\n"),
+        "{calls}"
+    );
 }

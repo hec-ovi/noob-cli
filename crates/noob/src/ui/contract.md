@@ -13,11 +13,11 @@ Terminal input and rendering for REPL, exec, JSONL, and child surfaces. The modu
 - One main-thread render loop as the sole terminal writer.
 - One ordered channel for keys, semantic render events, questions, reader loss, and turn end.
 
-The active frame always shows status, editable draft or question, and queue/cancel state. Enter queues one message. Cancellation drains queued messages back into the draft. Escape twice within five seconds cancels; Ctrl-C commits cancellation immediately.
+The active frame always shows status, editable draft or question, and steering/cancel state. Enter accepts a non-empty steering message, interrupts the current parent turn, and dispatches the message on the next loop. Explicit cancellation preserves unsubmitted text in the draft. Escape twice within five seconds cancels; Ctrl-C commits cancellation immediately.
 
 Typeahead received before a question cannot answer it. EOF and reader errors persist as closed-input state and deny questions without deadlock.
 
-Tab completes a `/`-prefixed command in the input editor; a dim hint lists candidates for an ambiguous prefix and never enters the buffer. While a turn runs and the buffer is empty, the input row shows a dim placeholder. Completion and the placeholder are input-side only: the model receives a draft only on submission.
+Tab completes a `/`-prefixed command in the input editor; a dim hint lists candidates for an ambiguous prefix and never enters the buffer. With an empty draft and detached jobs, Tab toggles a persistent view of their IDs, state, elapsed time, prompt slices, and bounded recent activity. The view survives parent-turn boundaries while the editor stays usable. While a turn runs and the buffer is empty, the input row shows a steering placeholder. Completion, agent details, and the placeholder are input-side only: the model receives a draft only on submission.
 
 ## Semantic rendering
 
@@ -25,7 +25,7 @@ Tab completes a `/`-prefixed command in the input editor; a dim hint lists candi
 
 Tool requests remain JSONL planning events. Interactive tool start lines are emitted only when the scheduler begins execution, and finish lines follow real completion order.
 
-The `todo` tool's checklist and a `task` fan-out agents panel render as `[x]`/`[~]`/`[ ]` glyph blocks on the themed REPL. The plain block text is byte-identical on non-interactive surfaces, and the agents panel suppresses the now-redundant per-task activity lines it covers. On resume, `replay_transcript` redraws the prior conversation (human turns, assistant Markdown, and one-line tool digests) before the first prompt, filtering synthetic bookkeeping items; it never mutates the transcript or session.
+The `plan` checklist and sub-agent status share the themed REPL's bounded region. The active plan glyph animates display-only. Completed actions carry their own times. Long plans end in a counted summary and reserve the active step plus an agent status row; completed and canceled plans collapse to one timed line, with cancellation using the theme's red error style. The closed agents view derives its count from the live hub snapshot instead of a stale acknowledgment. Covered per-subagent activity lines are suppressed. On resume, `replay_transcript` redraws the prior conversation before the first prompt while filtering synthetic bookkeeping items; it never mutates the transcript or session.
 
 ## Markdown and tables
 

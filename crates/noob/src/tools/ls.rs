@@ -97,7 +97,10 @@ mod tests {
             std::fs::write(ctx.workspace.join(format!("f{i:03}")), "").unwrap();
         }
         let out = run(&ctx, &json!({}));
-        assert!(out.content.ends_with("250 entries, showing 200; narrow the pattern"));
+        assert!(
+            out.content
+                .ends_with("250 entries, showing 200; narrow the pattern")
+        );
         assert_eq!(out.content.lines().count(), 201);
         assert!(out.content.starts_with("f000\n"));
         assert!(out.content.contains("f199\n250 entries"));

@@ -17,8 +17,7 @@ fn live_endpoint(style: ApiStyle) -> Endpoint {
     Endpoint {
         base_url,
         api_key: "noauth".to_string(),
-        model: std::env::var("NOOB_LIVE_MODEL")
-            .unwrap_or_else(|_| "qwen3.6-35b-a3b".to_string()),
+        model: std::env::var("NOOB_LIVE_MODEL").unwrap_or_else(|_| "qwen3.6-35b-a3b".to_string()),
         style,
     }
 }
@@ -35,9 +34,7 @@ fn read_tool() -> ToolSpec {
 
 fn first_leg() -> TurnRequest {
     TurnRequest {
-        system: Some(
-            "You are noob, a coding agent. Use the provided tools to act.".to_string(),
-        ),
+        system: Some("You are noob, a coding agent. Use the provided tools to act.".to_string()),
         items: vec![Item::User("Read the file /work/hello.txt".to_string())],
         tools: vec![read_tool()],
     }
@@ -78,8 +75,8 @@ fn live_chat_toolcall_roundtrip() {
     assert_eq!(call.name, "read");
     assert!(!call.id.is_empty());
     assert!(saw_args_delta, "llama.cpp streams argument fragments");
-    let args: serde_json::Value = serde_json::from_str(&call.arguments)
-        .expect("arguments must be valid JSON after finish()");
+    let args: serde_json::Value =
+        serde_json::from_str(&call.arguments).expect("arguments must be valid JSON after finish()");
     assert_eq!(args["path"], "/work/hello.txt");
 
     let turn2 = chat::stream(&client, &ep, &second_leg(call, vec![]), &mut |_| {})
@@ -90,7 +87,10 @@ fn live_chat_toolcall_roundtrip() {
         "the answer should quote the file: {}",
         turn2.text
     );
-    assert!(turn2.usage.is_some(), "usage chunk expected with include_usage");
+    assert!(
+        turn2.usage.is_some(),
+        "usage chunk expected with include_usage"
+    );
 }
 
 /// Parallel tool calls in one inference (indexes 0 and 1, distinct ids).
@@ -105,15 +105,20 @@ fn live_chat_parallel_toolcalls() {
              independent reads are needed, issue all the tool calls in one turn."
                 .to_string(),
         ),
-        items: vec![Item::User("Read both /work/a.txt and /work/b.txt".to_string())],
+        items: vec![Item::User(
+            "Read both /work/a.txt and /work/b.txt".to_string(),
+        )],
         tools: vec![read_tool()],
     };
 
     let turn = chat::stream(&client, &ep, &req, &mut |_| {}).expect("live parallel calls");
     assert_eq!(turn.finish, Finish::ToolCalls, "turn: {turn:?}");
-    assert_eq!(turn.tool_calls.len(), 2, "expected both reads in one turn: {turn:?}");
-    let ids: std::collections::HashSet<_> =
-        turn.tool_calls.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(
+        turn.tool_calls.len(),
+        2,
+        "expected both reads in one turn: {turn:?}"
+    );
+    let ids: std::collections::HashSet<_> = turn.tool_calls.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(ids.len(), 2, "ids must be distinct");
     for c in &turn.tool_calls {
         assert!(serde_json::from_str::<serde_json::Value>(&c.arguments).is_ok());
@@ -137,7 +142,10 @@ fn live_responses_toolcall_roundtrip() {
     assert_eq!(call.name, "read");
     let args: serde_json::Value = serde_json::from_str(&call.arguments).unwrap();
     assert_eq!(args["path"], "/work/hello.txt");
-    assert!(!turn.raw_items.is_empty(), "completed output captured for replay");
+    assert!(
+        !turn.raw_items.is_empty(),
+        "completed output captured for replay"
+    );
 
     let turn2 = responses::stream(
         &client,

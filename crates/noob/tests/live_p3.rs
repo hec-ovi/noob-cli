@@ -8,8 +8,7 @@ use std::process::Command;
 use serde_json::Value;
 
 fn live_base_url() -> String {
-    std::env::var("NOOB_LIVE_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:8090/v1".to_string())
+    std::env::var("NOOB_LIVE_BASE_URL").unwrap_or_else(|_| "http://localhost:8090/v1".to_string())
 }
 
 fn rig() -> (tempfile::TempDir, tempfile::TempDir) {
@@ -77,7 +76,9 @@ fn live_skill_load_and_use() {
         .collect();
     // The model actually went through the skill tool...
     assert!(
-        events.iter().any(|e| e["t"] == "tool" && e["name"] == "skill"),
+        events
+            .iter()
+            .any(|e| e["t"] == "tool" && e["name"] == "skill"),
         "no skill tool call in: {stdout}"
     );
     // ...and the loaded body shaped the answer.

@@ -4,6 +4,7 @@
 # Cargo caches live in ./.cargo-home and ./target (gitignored, user-owned).
 set -euo pipefail
 cd "$(dirname "$0")"
+ROOT="$PWD"
 
 DEV_IMG=noob-dev
 case "$(uname -m)" in
@@ -16,13 +17,21 @@ UIDGID="$(id -u):$(id -g)"
 RUN=(docker run --rm --user "$UIDGID" -e CARGO_HOME=/src/.cargo-home
      -v "$PWD":/src -w /src "$DEV_IMG")
 
-dev_image() { docker build --target dev -t "$DEV_IMG" -f docker/Dockerfile .; }
+dev_image() {
+  docker build --build-arg "TARGETARCH=${RUST_TARGET%%-*}" --target dev \
+    -t "$DEV_IMG" -f docker/Dockerfile .
+}
 
 # Open the interactive agent: build the runtime image (cached, so fast when
 # nothing changed) and run it through compose in one step, forwarding any noob
-# flags (e.g. --session <id>). Compose passes the caller's uid:gid so files
+# flags (e.g. --resume <id>). Compose passes the caller's uid:gid so files
 # under /work are never root-owned on the host.
-open_agent() { docker compose run --build --rm --user "$UIDGID" noob "$@"; }
+open_agent() {
+  local workspace="${NOOB_WORKSPACE:-${WORKSPACE:-$ROOT/workspace}}"
+  mkdir -p "$workspace"
+  workspace="$(cd "$workspace" && pwd -P)"
+  NOOB_WORKSPACE="$workspace" docker compose run --build --rm --user "$UIDGID" noob "$@"
+}
 
 case "${1:-}" in
   # Offline suite: unit + e2e against the in-process mock. The whole story;
@@ -51,7 +60,7 @@ case "${1:-}" in
     ;;
   # Build the runtime image without running it.
   docker)
-    docker build -t noob -f docker/Dockerfile .
+    docker build --build-arg "TARGETARCH=${RUST_TARGET%%-*}" -t noob -f docker/Dockerfile .
     ;;
   install)
     shift
@@ -80,7 +89,7 @@ case "${1:-}" in
   -h|--help|help)
     echo "usage:"
     echo "  ./dev.sh                    open the agent"
-    echo "  ./dev.sh --restore <id>     restore a saved session"
+    echo "  ./dev.sh --resume <id>      resume a saved session"
     echo "  ./dev.sh --plan | --yolo    any noob flag is forwarded to the agent"
     echo "  ./dev.sh install|test|build|docker|exec \"prompt\"|smoke|size-check|clean"
     ;;

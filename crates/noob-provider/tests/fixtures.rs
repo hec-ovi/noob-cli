@@ -13,7 +13,10 @@ use noob_provider::types::{ApiStyle, Endpoint, Event, Finish, Item, ToolSpec, Tu
 use noob_testkit::{MockServer, RawStep, load_fixture_chunks, sse_headers};
 
 fn fixture(name: &str) -> Vec<Vec<u8>> {
-    load_fixture_chunks(format!("{}/testdata/sse/{name}", env!("CARGO_MANIFEST_DIR")))
+    load_fixture_chunks(format!(
+        "{}/testdata/sse/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
 }
 
 fn endpoint(server: &MockServer, style: ApiStyle) -> Endpoint {
@@ -70,8 +73,7 @@ fn llamacpp_toolcall_fixture_end_to_end() {
     assert_eq!(turn.tool_calls.len(), 1);
     assert_eq!(turn.tool_calls[0].id, "FJL6JI5993wALojEE60X2auup8PCLaui");
     assert_eq!(turn.tool_calls[0].name, "read");
-    let args: serde_json::Value =
-        serde_json::from_str(&turn.tool_calls[0].arguments).unwrap();
+    let args: serde_json::Value = serde_json::from_str(&turn.tool_calls[0].arguments).unwrap();
     assert_eq!(args["path"], "/work/hello.txt");
     let usage = turn.usage.unwrap();
     assert_eq!(usage.prompt_tokens, 354);
@@ -140,9 +142,15 @@ fn llamacpp_responses_fixture_end_to_end() {
 
     assert_eq!(turn.finish, Finish::ToolCalls);
     assert_eq!(turn.tool_calls.len(), 1);
-    assert_eq!(turn.tool_calls[0].id, "call_fLwarxp8xhBvVdMF1RdPmETSKQG2d3IJ");
+    assert_eq!(
+        turn.tool_calls[0].id,
+        "call_fLwarxp8xhBvVdMF1RdPmETSKQG2d3IJ"
+    );
     assert_eq!(turn.tool_calls[0].name, "read");
-    assert_eq!(turn.tool_calls[0].arguments, "{\"path\":\"/work/hello.txt\"}");
+    assert_eq!(
+        turn.tool_calls[0].arguments,
+        "{\"path\":\"/work/hello.txt\"}"
+    );
     // raw_items are the authoritative completed output, replayable verbatim.
     assert_eq!(turn.raw_items.len(), 1);
     assert_eq!(turn.raw_items[0]["type"], "function_call");
@@ -224,7 +232,10 @@ fn toolcall_fixture_resplit_at_every_byte_offset() {
     for cut in 0..=full.len() {
         let got = assemble(&[&full[..cut], &full[cut..]]);
         assert_eq!(got.tool_calls.len(), 1, "cut at {cut}");
-        assert_eq!(got.tool_calls[0].arguments, want.tool_calls[0].arguments, "cut at {cut}");
+        assert_eq!(
+            got.tool_calls[0].arguments, want.tool_calls[0].arguments,
+            "cut at {cut}"
+        );
         assert_eq!(got.tool_calls[0].id, want.tool_calls[0].id, "cut at {cut}");
         assert_eq!(got.usage, want.usage, "cut at {cut}");
         assert_eq!(got.finish, want.finish, "cut at {cut}");

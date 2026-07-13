@@ -58,10 +58,7 @@ fn run_inner(
         let mut over = ignore::overrides::OverrideBuilder::new(&root);
         over.add(pat)
             .map_err(|e| format!("bad glob {pat:?}: {e}; use gitignore syntax, e.g. *.rs"))?;
-        walk.overrides(
-            over.build()
-                .map_err(|e| format!("bad glob {pat:?}: {e}"))?,
-        );
+        walk.overrides(over.build().map_err(|e| format!("bad glob {pat:?}: {e}"))?);
     }
 
     let mut total = 0usize;
@@ -179,7 +176,11 @@ mod tests {
     fn ignore_case_flag_works() {
         let (_t, ctx) = test_ctx();
         std::fs::write(ctx.workspace.join("f.txt"), "ALPHA\n").unwrap();
-        assert!(run(&ctx, &json!({"pattern": "alpha"})).content.contains("no matches"));
+        assert!(
+            run(&ctx, &json!({"pattern": "alpha"}))
+                .content
+                .contains("no matches")
+        );
         let out = run(&ctx, &json!({"pattern": "alpha", "ignore_case": true}));
         assert!(out.content.contains("f.txt: ALPHA"));
     }

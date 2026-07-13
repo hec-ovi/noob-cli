@@ -41,6 +41,9 @@ thread_local! {
 /// Ctrl-C at the prompt are kept distinct: EOF exits, an interrupt reprompts.
 pub enum Input {
     Line(String),
+    /// Detached sub-agents settled while the dock was idle. The main thread
+    /// now owns the result-integration and parent-continuation boundary.
+    BackgroundReady,
     Interrupted,
     Eof,
 }
@@ -140,7 +143,11 @@ impl Ui {
             }
             self.redraw_input_with_completion(&ed, width);
             let n = unsafe {
-                libc::read(libc::STDIN_FILENO, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+                libc::read(
+                    libc::STDIN_FILENO,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                )
             };
             if n < 0 {
                 // EINTR: a signal landed. A first Ctrl-C set the flag (treat as
@@ -210,7 +217,9 @@ impl Ui {
         let reset = if color.is_empty() { "" } else { RESET };
         let top = box_rule(plan, width);
         let bottom = box_rule(false, width);
-        self.out(&format!("\r\x1b[2K{color}{top}{reset}\r\n\r\n{color}{bottom}{reset}\x1b[1A"));
+        self.out(&format!(
+            "\r\x1b[2K{color}{top}{reset}\r\n\r\n{color}{bottom}{reset}\x1b[1A"
+        ));
     }
 
     /// Snap the frame to the current terminal width when it changed: a freshly
@@ -232,7 +241,9 @@ impl Ui {
         let reset = if color.is_empty() { "" } else { RESET };
         let top = box_rule(plan, now);
         let bottom = box_rule(false, now);
-        self.out(&format!("{color}{top}{reset}\r\n\r\n{color}{bottom}{reset}\x1b[1A"));
+        self.out(&format!(
+            "{color}{top}{reset}\r\n\r\n{color}{bottom}{reset}\x1b[1A"
+        ));
     }
 
     /// Redraw the input line in place at the given width: return to column 0,
@@ -369,7 +380,10 @@ const PREFIX_CELLS: usize = 2;
 /// unset) leaves the editor on. A rebuild-free escape hatch for odd terminals.
 fn raw_enabled_by_env() -> bool {
     match std::env::var("NOOB_RAW") {
-        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
         Err(_) => true,
     }
 }
@@ -402,7 +416,11 @@ fn box_rule(plan: bool, width: usize) -> String {
 /// exact, and the buffer and the submitted line are always correct regardless.
 fn input_window(buf: &[char], cursor: usize, avail: usize) -> (String, usize) {
     let avail = avail.max(1);
-    let start = if cursor >= avail { cursor - avail + 1 } else { 0 };
+    let start = if cursor >= avail {
+        cursor - avail + 1
+    } else {
+        0
+    };
     let end = (start + avail).min(buf.len());
     let shown: String = buf[start..end]
         .iter()
@@ -632,7 +650,11 @@ impl Decoder {
             return None;
         }
         self.pending.clear();
-        Some(if self.paste { Key::Char('\u{1b}') } else { Key::Esc })
+        Some(if self.paste {
+            Key::Char('\u{1b}')
+        } else {
+            Key::Esc
+        })
     }
 
     pub(super) fn feed(&mut self, bytes: &[u8]) -> Vec<Key> {
@@ -1162,7 +1184,11 @@ mod tests {
         for k in k1.into_iter().chain(k2) {
             ed.apply(k);
         }
-        assert_eq!(ed.line(), "x\ny", "CRLF split across feeds doubled the newline");
+        assert_eq!(
+            ed.line(),
+            "x\ny",
+            "CRLF split across feeds doubled the newline"
+        );
     }
 
     #[test]
@@ -1190,7 +1216,10 @@ mod tests {
         let mut body = Vec::from(&b"\x1b["[..]);
         body.extend(std::iter::repeat_n(b'0', 200));
         let ks = dec.feed(&body);
-        assert!(ks.iter().any(|k| matches!(k, Key::Char('0'))), "did not recover: {ks:?}");
+        assert!(
+            ks.iter().any(|k| matches!(k, Key::Char('0'))),
+            "did not recover: {ks:?}"
+        );
         assert_eq!(dec.feed(b"a\r"), vec![Key::Char('a'), Key::Enter]);
     }
 
@@ -1244,7 +1273,10 @@ mod tests {
         assert_eq!(dec.feed(b"C"), vec![Key::Right]);
         // A paste terminator split across feeds still ends the paste.
         let mut dec = Decoder::default();
-        assert_eq!(dec.feed(b"\x1b[200~ab"), vec![Key::Char('a'), Key::Char('b')]);
+        assert_eq!(
+            dec.feed(b"\x1b[200~ab"),
+            vec![Key::Char('a'), Key::Char('b')]
+        );
         assert_eq!(dec.feed(b"\x1b[20"), vec![]); // incomplete terminator
         assert_eq!(dec.feed(b"1~cd"), vec![Key::Char('c'), Key::Char('d')]);
         // 'c'/'d' are outside the paste now, so a newline would submit.
@@ -1277,12 +1309,22 @@ mod tests {
         // The rule fills the terminal exactly, in plain dashes: no rounded
         // corners and no side borders (the frame is a top and a bottom line).
         let r = box_rule(false, 80);
-        assert!(r.chars().all(|c| c == '─'), "rule must be plain dashes: {r:?}");
+        assert!(
+            r.chars().all(|c| c == '─'),
+            "rule must be plain dashes: {r:?}"
+        );
         assert_eq!(r.chars().count(), 80, "rule must span the full width");
         // Plan mode keeps the label and still fills the width.
         let p = box_rule(true, 120);
-        assert!(p.starts_with("── plan "), "plan rule must carry the label: {p:?}");
-        assert_eq!(p.chars().count(), 120, "plan rule must still span the width");
+        assert!(
+            p.starts_with("── plan "),
+            "plan rule must carry the label: {p:?}"
+        );
+        assert_eq!(
+            p.chars().count(),
+            120,
+            "plan rule must still span the width"
+        );
     }
 
     #[test]
@@ -1294,12 +1336,20 @@ mod tests {
         assert_eq!(cur, 5);
         // Long line at any width never exceeds `avail` cells (so it cannot wrap),
         // and the cursor stays inside the window at every position.
-        let long: Vec<char> = (0..200u32).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
+        let long: Vec<char> = (0..200u32)
+            .map(|i| char::from(b'a' + (i % 26) as u8))
+            .collect();
         for &avail in &[1usize, 5, 16, 40] {
             for cursor in [0, 1, 50, 199, 200] {
                 let (shown, cur) = input_window(&long, cursor, avail);
-                assert!(shown.chars().count() <= avail, "window exceeds avail {avail}: {shown:?}");
-                assert!(cur < avail, "cursor {cur} not inside window (avail {avail})");
+                assert!(
+                    shown.chars().count() <= avail,
+                    "window exceeds avail {avail}: {shown:?}"
+                );
+                assert!(
+                    cur < avail,
+                    "cursor {cur} not inside window (avail {avail})"
+                );
                 assert!(cur <= shown.chars().count(), "cursor past the shown text");
             }
         }

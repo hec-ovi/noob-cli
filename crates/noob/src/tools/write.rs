@@ -92,7 +92,10 @@ mod tests {
         std::fs::write(&p, "v2-from-elsewhere").unwrap();
         let out = run(&ctx, &json!({"path": "f.txt", "content": "v3"}));
         assert!(out.is_error);
-        assert!(out.content.contains("changed on disk since your last read; re-read it"));
+        assert!(
+            out.content
+                .contains("changed on disk since your last read; re-read it")
+        );
     }
 
     #[test]
@@ -130,11 +133,9 @@ mod tests {
         assert!(!ctx.workspace.join(".claude/skills/x/SKILL.md").exists());
         // Approve exactly this real target (what the agent gate records on
         // grant) and the write proceeds.
-        let target = super::super::guard::skill_write_target(
-            &ctx.workspace,
-            ".claude/skills/x/SKILL.md",
-        )
-        .unwrap();
+        let target =
+            super::super::guard::skill_write_target(&ctx.workspace, ".claude/skills/x/SKILL.md")
+                .unwrap();
         ctx.approved_skill_writes.lock().unwrap().insert(target, 1);
         let out = run(&ctx, &args);
         assert!(!out.is_error, "{}", out.content);

@@ -9,8 +9,7 @@ use std::process::Command;
 use serde_json::Value;
 
 fn live_base_url() -> String {
-    std::env::var("NOOB_LIVE_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:8090/v1".to_string())
+    std::env::var("NOOB_LIVE_BASE_URL").unwrap_or_else(|_| "http://localhost:8090/v1".to_string())
 }
 
 /// Minimal std-only HTTP POST for the tokenizer check: the noob crate must
@@ -172,11 +171,110 @@ fn live_tokenizer_budget() {
     let root = base.trim_end_matches("/v1");
     let count = |text: &str| -> usize {
         let v = post_json(root, "/tokenize", &serde_json::json!({"content": text}));
-        v["tokens"].as_array().expect("llama-server /tokenize").len()
+        v["tokens"]
+            .as_array()
+            .expect("llama-server /tokenize")
+            .len()
     };
     let head_tokens = count(artifact["head"].as_str().unwrap());
     let tools_tokens = count(&artifact["tools"].to_string());
-    assert!(head_tokens <= 560, "head {head_tokens} tokens on the qwen tokenizer");
-    assert!(tools_tokens <= 940, "tools {tools_tokens} tokens on the qwen tokenizer");
+    assert!(
+        head_tokens <= 560,
+        "head {head_tokens} tokens on the qwen tokenizer"
+    );
+    assert!(
+        tools_tokens <= 940,
+        "tools {tools_tokens} tokens on the qwen tokenizer"
+    );
     assert!(head_tokens + tools_tokens <= 1500);
+}
+
+/// User-style requirements check: the real model creates and advances its own
+/// visible plan, performs a file change, then a fresh resumed process can use
+/// the context tool and accurately explain what the preceding turn did.
+#[test]
+#[ignore = "live: needs qwen at :8090 (NOOB_LIVE=1)"]
+fn live_plan_context_and_followup_awareness() {
+    let (config, work) = rig();
+    let session = "live-requirements-awareness";
+    let first = noob(
+        config.path(),
+        work.path(),
+        &[
+            "exec",
+            "--json",
+            "--session",
+            session,
+            "-p",
+            "Use the plan tool before any file tool. Plan, create requirement-proof.txt \
+             containing exactly AWARE-OF-MY-PLAN, verify it, and mark every plan item complete.",
+        ],
+    );
+    assert!(
+        first.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_events: Vec<Value> = String::from_utf8_lossy(&first.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    assert!(
+        first_events
+            .iter()
+            .any(|event| event["t"] == "tool" && event["name"] == "plan"),
+        "the model never created a visible plan: {}",
+        String::from_utf8_lossy(&first.stdout)
+    );
+    assert_eq!(
+        std::fs::read_to_string(work.path().join("requirement-proof.txt"))
+            .unwrap()
+            .trim(),
+        "AWARE-OF-MY-PLAN"
+    );
+
+    let followup = noob(
+        config.path(),
+        work.path(),
+        &[
+            "exec",
+            "--json",
+            "--session",
+            session,
+            "-p",
+            "Use the context tool once. Then explain what file you created in the previous turn \
+             and whether that plan finished.",
+        ],
+    );
+    assert!(
+        followup.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&followup.stdout),
+        String::from_utf8_lossy(&followup.stderr)
+    );
+    let followup_events: Vec<Value> = String::from_utf8_lossy(&followup.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    assert!(
+        followup_events
+            .iter()
+            .any(|event| event["t"] == "tool" && event["name"] == "context"),
+        "the model did not inspect its context budget: {}",
+        String::from_utf8_lossy(&followup.stdout)
+    );
+    let answer: String = followup_events
+        .iter()
+        .filter(|event| event["t"] == "text")
+        .filter_map(|event| event["d"].as_str())
+        .collect();
+    assert!(
+        answer.contains("requirement-proof.txt"),
+        "lost prior-turn awareness: {answer}"
+    );
+    assert!(
+        answer.to_ascii_lowercase().contains("complet"),
+        "did not understand the plan finished: {answer}"
+    );
 }

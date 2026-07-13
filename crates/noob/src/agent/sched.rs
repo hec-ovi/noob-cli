@@ -8,6 +8,7 @@
 
 use std::ops::Range;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -83,11 +84,17 @@ fn partition(kinds: &[Kind]) -> Vec<Group> {
         }
         if j == i {
             // kinds[i] is Mutating: alone, in order.
-            groups.push(Group { range: i..i + 1, kind: Kind::Mutating });
+            groups.push(Group {
+                range: i..i + 1,
+                kind: Kind::Mutating,
+            });
             i += 1;
         } else {
             // All-Free groups run at the read cap (nothing executes anyway).
-            groups.push(Group { range: i..j, kind: group_kind.unwrap_or(Kind::Read) });
+            groups.push(Group {
+                range: i..j,
+                kind: group_kind.unwrap_or(Kind::Read),
+            });
             i = j;
         }
     }
@@ -99,8 +106,14 @@ fn partition(kinds: &[Kind]) -> Vec<Group> {
 /// "canceled by user" result: a mutation must never land AFTER the user
 /// canceled, and every call id still gets exactly one result.
 pub enum Progress<'a> {
-    Started { index: usize },
-    Finished { index: usize, outcome: &'a ToolOutcome },
+    Started {
+        index: usize,
+    },
+    Finished {
+        index: usize,
+        outcome: &'a ToolOutcome,
+        elapsed: Option<Duration>,
+    },
 }
 
 #[cfg(test)]
@@ -125,7 +138,11 @@ pub fn run_batch_with(
         if INTERRUPTED.load(Ordering::SeqCst) {
             for index in group.range.clone() {
                 let outcome = ToolOutcome::canceled();
-                on_progress(Progress::Finished { index, outcome: &outcome });
+                on_progress(Progress::Finished {
+                    index,
+                    outcome: &outcome,
+                    elapsed: None,
+                });
                 slots[index] = Some(outcome);
             }
             continue; // later groups get their synthetic results too
@@ -133,11 +150,18 @@ pub fn run_batch_with(
         if group.kind == Kind::Mutating {
             let index = group.range.start;
             let planned = batch[index].take().unwrap();
-            if matches!(&planned, Planned::Run { .. }) {
+            let started = if matches!(&planned, Planned::Run { .. }) {
                 on_progress(Progress::Started { index });
-            }
+                Some(Instant::now())
+            } else {
+                None
+            };
             let outcome = execute(ctx, planned);
-            on_progress(Progress::Finished { index, outcome: &outcome });
+            on_progress(Progress::Finished {
+                index,
+                outcome: &outcome,
+                elapsed: started.map(|at| at.elapsed()),
+            });
             slots[index] = Some(outcome);
             continue;
         }
@@ -154,7 +178,11 @@ pub fn run_batch_with(
             if INTERRUPTED.load(Ordering::SeqCst) {
                 for (k, _) in wave {
                     let outcome = ToolOutcome::canceled();
-                    on_progress(Progress::Finished { index: *k, outcome: &outcome });
+                    on_progress(Progress::Finished {
+                        index: *k,
+                        outcome: &outcome,
+                        elapsed: None,
+                    });
                     slots[*k] = Some(outcome);
                 }
                 continue;
@@ -169,34 +197,41 @@ pub fn run_batch_with(
                             on_progress(Progress::Finished {
                                 index: *index,
                                 outcome: &outcome,
+                                elapsed: None,
                             });
                             slots[*index] = Some(outcome);
                         }
                         Planned::Run { .. } => {
+                            let started = Instant::now();
                             on_progress(Progress::Started { index: *index });
                             running += 1;
                             let tx = done_tx.clone();
                             scope.spawn(move || {
-                                let outcome = std::panic::catch_unwind(
-                                    std::panic::AssertUnwindSafe(|| execute_ref(ctx, planned)),
-                                )
-                                .unwrap_or_else(|_| {
-                                    ToolOutcome::err(
-                                        "the tool crashed while running; this is a noob bug, \
+                                let outcome =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        execute_ref(ctx, planned)
+                                    }))
+                                    .unwrap_or_else(|_| {
+                                        ToolOutcome::err(
+                                            "the tool crashed while running; this is a noob bug, \
                                          try a different approach",
-                                    )
-                                });
-                                let _ = tx.send((*index, outcome));
+                                        )
+                                    });
+                                let _ = tx.send((*index, outcome, started.elapsed()));
                             });
                         }
                     }
                 }
                 drop(done_tx);
                 for _ in 0..running {
-                    let (index, outcome) = done_rx
+                    let (index, outcome, elapsed) = done_rx
                         .recv()
                         .expect("every scoped tool sends one completion");
-                    on_progress(Progress::Finished { index, outcome: &outcome });
+                    on_progress(Progress::Finished {
+                        index,
+                        outcome: &outcome,
+                        elapsed: Some(elapsed),
+                    });
                     slots[index] = Some(outcome);
                 }
             });
@@ -244,15 +279,24 @@ mod tests {
     fn ctx() -> (tempfile::TempDir, ToolCtx) {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path().canonicalize().unwrap();
-        (tmp, ToolCtx::new(ws, crate::tools::guard::Sandbox::Container))
+        (
+            tmp,
+            ToolCtx::new(ws, crate::tools::guard::Sandbox::Container),
+        )
     }
 
     fn bash(cmd: &str) -> Planned {
-        Planned::Run { name: "bash".into(), args: json!({"cmd": cmd}) }
+        Planned::Run {
+            name: "bash".into(),
+            args: json!({"cmd": cmd}),
+        }
     }
 
     fn read(path: &str) -> Planned {
-        Planned::Run { name: "read".into(), args: json!({"path": path}) }
+        Planned::Run {
+            name: "read".into(),
+            args: json!({"path": path}),
+        }
     }
 
     #[test]
@@ -293,18 +337,29 @@ mod tests {
     fn progress_reports_parallel_finishes_when_they_really_complete() {
         let (_t, ctx) = ctx();
         let batch = vec![
-            Planned::Run { name: "__test_wait".into(), args: json!({"millis": 80}) },
-            Planned::Run { name: "__test_wait".into(), args: json!({"millis": 5}) },
+            Planned::Run {
+                name: "__test_wait".into(),
+                args: json!({"millis": 80}),
+            },
+            Planned::Run {
+                name: "__test_wait".into(),
+                args: json!({"millis": 5}),
+            },
         ];
         let mut events = Vec::new();
+        let mut durations = Vec::new();
         let out = run_batch_with(&ctx, batch, |event| match event {
             Progress::Started { index } => events.push(("start", index)),
-            Progress::Finished { index, .. } => events.push(("done", index)),
+            Progress::Finished { index, elapsed, .. } => {
+                events.push(("done", index));
+                durations.push(elapsed.expect("a real call has a duration"));
+            }
         });
         assert_eq!(events[..2], [("start", 0), ("start", 1)]);
         assert_eq!(events[2..], [("done", 1), ("done", 0)]);
         assert_eq!(out[0].content, "80");
         assert_eq!(out[1].content, "5");
+        assert!(durations.iter().all(|elapsed| !elapsed.is_zero()));
     }
 
     #[test]
@@ -333,7 +388,12 @@ mod tests {
         // the point is it completes and stays ordered.
         let out = run_batch(
             &ctx,
-            vec![read("f"), read("f"), bash("sleep 0.2; echo done"), read("f")],
+            vec![
+                read("f"),
+                read("f"),
+                bash("sleep 0.2; echo done"),
+                read("f"),
+            ],
         );
         assert!(out[2].content.contains("done"));
         assert!(started.elapsed() >= Duration::from_millis(200));
@@ -362,7 +422,10 @@ mod tests {
     fn partition_groups_match_the_locked_scheduling_semantics() {
         use Kind::*;
         let groups = |kinds: &[Kind]| -> Vec<(Range<usize>, Kind)> {
-            partition(kinds).into_iter().map(|g| (g.range, g.kind)).collect()
+            partition(kinds)
+                .into_iter()
+                .map(|g| (g.range, g.kind))
+                .collect()
         };
         // Reads group; a mutation is alone; tasks fan out together.
         assert_eq!(
@@ -371,10 +434,7 @@ mod tests {
         );
         // Free (canned) items join whatever group surrounds them, including
         // a task group, and an all-free batch runs as one read-cap group.
-        assert_eq!(
-            groups(&[Task, Free, Task]),
-            vec![(0..3, Task)]
-        );
+        assert_eq!(groups(&[Task, Free, Task]), vec![(0..3, Task)]);
         assert_eq!(groups(&[Free, Free]), vec![(0..2, Read)]);
         // Free items before a mutation group together; the mutation stays alone.
         assert_eq!(
@@ -382,16 +442,16 @@ mod tests {
             vec![(0..1, Read), (1..2, Mutating), (2..3, Read)]
         );
         // A read run and a task run never merge: their caps differ.
-        assert_eq!(
-            groups(&[Read, Task]),
-            vec![(0..1, Read), (1..2, Task)]
-        );
+        assert_eq!(groups(&[Read, Task]), vec![(0..1, Read), (1..2, Task)]);
         assert_eq!(groups(&[]), vec![]);
     }
 
     #[test]
     fn task_calls_classify_as_task_and_everything_else_keeps_its_class() {
-        let task = Planned::Run { name: "subagent".into(), args: json!({"prompt": "x"}) };
+        let task = Planned::Run {
+            name: "subagent".into(),
+            args: json!({"prompt": "x"}),
+        };
         assert_eq!(kind(&task), Kind::Task);
         assert_eq!(kind(&read("f")), Kind::Read);
         assert_eq!(kind(&bash("ls")), Kind::Mutating);

@@ -46,7 +46,11 @@ fn rig() -> Rig {
     let config = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     write_env(config.path(), &server.base_url());
-    Rig { server, config, work }
+    Rig {
+        server,
+        config,
+        work,
+    }
 }
 
 impl Rig {
@@ -62,7 +66,10 @@ impl Rig {
     /// Run `noob child` with the given stdin payload; returns the output.
     fn run_child(&self, payload: &str, depth: Option<&str>) -> std::process::Output {
         let mut cmd = noob(self.config.path(), self.work.path());
-        cmd.arg("child").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.arg("child")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         if let Some(d) = depth {
             cmd.env("NOOB_DEPTH", d);
         }
@@ -104,16 +111,27 @@ fn child_protocol_single_result_line() {
     rig.server.enqueue_stream_completion("the child answer");
 
     let out = rig.run_child(r#"{"prompt": "inspect the workspace"}"#, None);
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(lines.len(), 1, "stdout must carry exactly one line: {stdout:?}");
+    assert_eq!(
+        lines.len(),
+        1,
+        "stdout must carry exactly one line: {stdout:?}"
+    );
     let result: Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(result["status"], "ok");
     assert_eq!(result["result"], "the child answer");
     assert_eq!(result["turns"], 1);
-    assert!(result["usage"]["prompt"].is_u64(), "usage missing: {result}");
+    assert!(
+        result["usage"]["prompt"].is_u64(),
+        "usage missing: {result}"
+    );
     // The streamed text went to stderr as progress, never to stdout.
     assert!(String::from_utf8_lossy(&out.stderr).contains("the child answer"));
 
@@ -123,7 +141,10 @@ fn child_protocol_single_result_line() {
     assert_eq!(msgs.len(), 2, "fresh context: system + prompt only");
     assert_eq!(msgs[1]["content"], "inspect the workspace");
     // Read-only default: exploration set only (no skills in this workspace).
-    assert_eq!(tool_names(&reqs[0]), ["read", "grep", "glob", "ls"]);
+    assert_eq!(
+        tool_names(&reqs[0]),
+        ["read", "grep", "glob", "ls", "context"]
+    );
     rig.server.assert_clean();
 }
 
@@ -144,9 +165,15 @@ fn child_tool_sets_by_mode_and_depth() {
     let reqs = rig.api_requests();
     let depth1 = tool_names(&reqs[0]);
     let depth2 = tool_names(&reqs[1]);
-    assert!(depth1.contains(&"subagent".to_string()), "depth 1 may spawn: {depth1:?}");
+    assert!(
+        depth1.contains(&"subagent".to_string()),
+        "depth 1 may spawn: {depth1:?}"
+    );
     assert!(depth1.contains(&"bash".to_string()));
-    assert!(!depth2.contains(&"subagent".to_string()), "depth 2 must not spawn: {depth2:?}");
+    assert!(
+        !depth2.contains(&"subagent".to_string()),
+        "depth 2 must not spawn: {depth2:?}"
+    );
     assert!(depth2.contains(&"bash".to_string()));
     rig.server.assert_clean();
 }
@@ -161,10 +188,15 @@ fn read_only_child_refuses_hallucinated_mutations() {
         &[("m1", "write", r#"{"path":"evil.txt","content":"boom"}"#)],
         None,
     );
-    rig.server.enqueue_stream_completion("understood, reporting instead");
+    rig.server
+        .enqueue_stream_completion("understood, reporting instead");
 
     let out = rig.run_child(r#"{"prompt": "survey the repo"}"#, None);
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         !rig.work.path().join("evil.txt").exists(),
         "a read-only child executed a mutating call"
@@ -188,7 +220,12 @@ fn read_only_child_refuses_hallucinated_mutations() {
 #[test]
 fn child_rejects_bad_payloads_with_one_line() {
     let rig = rig();
-    for payload in ["not json", "{}", r#"{"prompt": "  "}"#, r#"{"prompt":"x","tools":"root"}"#] {
+    for payload in [
+        "not json",
+        "{}",
+        r#"{"prompt": "  "}"#,
+        r#"{"prompt":"x","tools":"root"}"#,
+    ] {
         let out = rig.run_child(payload, None);
         assert!(!out.status.success(), "payload {payload:?} must fail");
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -207,8 +244,10 @@ fn child_errors_at_the_turn_cap() {
     std::fs::write(rig.work.path().join("f"), "content\n").unwrap();
     rig.server
         .enqueue_stream_toolcalls(&[("t1", "read", r#"{"path":"f"}"#)], None);
-    rig.server
-        .enqueue_stream_toolcalls(&[("t2", "grep", r#"{"pattern":"content","path":"f"}"#)], None);
+    rig.server.enqueue_stream_toolcalls(
+        &[("t2", "grep", r#"{"pattern":"content","path":"f"}"#)],
+        None,
+    );
 
     let out = rig.run_child(r#"{"prompt": "keep reading", "max_turns": 2}"#, None);
     assert!(!out.status.success());
@@ -279,7 +318,12 @@ fn child_fanout() {
     assert_eq!(child_reqs.len(), 3);
     for r in child_reqs {
         assert_eq!(r["messages"].as_array().unwrap().len(), 2);
-        assert!(!r["messages"][1]["content"].as_str().unwrap().contains("spawn three"));
+        assert!(
+            !r["messages"][1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("spawn three")
+        );
     }
     rig.server.assert_clean();
 }
@@ -310,18 +354,43 @@ fn fanout_panel_is_absent_on_the_exec_surface() {
         .args(["exec", "-p", "spawn three helpers"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     // The classic per-task lines are intact for every agent.
-    assert!(stderr.contains("* subagent helper alpha"), "missing start line:\n{stderr}");
-    assert!(stderr.contains("* subagent helper beta"), "missing start line:\n{stderr}");
-    assert!(stderr.contains("* subagent helper gamma"), "missing start line:\n{stderr}");
-    assert!(stderr.contains("* done (1 turns)"), "missing completion line:\n{stderr}");
+    assert!(
+        stderr.contains("* subagent helper alpha"),
+        "missing start line:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("* subagent helper beta"),
+        "missing start line:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("* subagent helper gamma"),
+        "missing start line:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("* done (1 turns)"),
+        "missing completion line:\n{stderr}"
+    );
     // None of the panel bytes reach a headless surface.
-    assert!(!stderr.contains("agents ("), "the panel header leaked into exec:\n{stderr}");
-    assert!(!stderr.contains("agent 1:"), "a panel row leaked into exec:\n{stderr}");
-    assert!(!stdout_has_panel(&out.stdout), "the panel leaked into exec stdout");
+    assert!(
+        !stderr.contains("agents ("),
+        "the panel header leaked into exec:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("agent 1:"),
+        "a panel row leaked into exec:\n{stderr}"
+    );
+    assert!(
+        !stdout_has_panel(&out.stdout),
+        "the panel leaked into exec stdout"
+    );
     rig.server.assert_clean();
 }
 
@@ -357,7 +426,11 @@ fn fanout_respects_the_concurrency_cap() {
         .args(["exec", "-p", "fan out"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Arrival times of the three child requests, in order.
     let mut child_arrivals: Vec<Instant> = rig
@@ -366,7 +439,11 @@ fn fanout_respects_the_concurrency_cap() {
         .iter()
         .filter(|r| {
             r.json()
-                .and_then(|j| j["messages"][1]["content"].as_str().map(|c| c.starts_with("helper ")))
+                .and_then(|j| {
+                    j["messages"][1]["content"]
+                        .as_str()
+                        .map(|c| c.starts_with("helper "))
+                })
                 .unwrap_or(false)
         })
         .map(|r| r.arrived)
@@ -397,14 +474,77 @@ fn fanout_respects_the_concurrency_cap() {
     rig.server.assert_clean();
 }
 
+/// A child at depth 1 keeps the subagent tool, but cannot turn the root's
+/// configured fan-out into another full fan-out of its own. Its nested calls
+/// run one at a time even when the configured root cap is four.
+#[test]
+fn nested_fanout_is_serial_without_disabling_nested_agents() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    rig.server.enqueue_stream_toolcalls(
+        &[
+            ("n1", "subagent", r#"{"prompt":"nested one"}"#),
+            ("n2", "subagent", r#"{"prompt":"nested two"}"#),
+            ("n3", "subagent", r#"{"prompt":"nested three"}"#),
+        ],
+        None,
+    );
+    for text in ["nested one done", "nested two done", "nested three done"] {
+        rig.enqueue_slow_completion(text, 400);
+    }
+    rig.server
+        .enqueue_stream_completion("nested results collected");
+
+    let out = noob(rig.config.path(), rig.work.path())
+        .env("NOOB_DEPTH", "1")
+        .env("NOOB_TASK_CONCURRENCY", "4")
+        .args(["exec", "-p", "delegate nested work"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mut arrivals: Vec<Instant> = rig
+        .server
+        .recorded()
+        .iter()
+        .filter(|request| {
+            request
+                .json()
+                .and_then(|body| {
+                    body["messages"][1]["content"]
+                        .as_str()
+                        .map(|content| content.starts_with("nested "))
+                })
+                .unwrap_or(false)
+        })
+        .map(|request| request.arrived)
+        .collect();
+    arrivals.sort();
+    assert_eq!(arrivals.len(), 3, "all nested calls must still execute");
+    for pair in arrivals.windows(2) {
+        let gap = pair[1].duration_since(pair[0]);
+        assert!(
+            gap >= Duration::from_millis(350),
+            "nested calls overlapped despite the depth-1 clamp; gap was {gap:?}"
+        );
+    }
+    rig.server.assert_clean();
+}
+
 /// The wall clock: a wedged child is killed (whole process group) and the
 /// parent gets a teaching error instead of a hang; the loop continues.
 #[test]
 fn task_wall_clock_kills_a_wedged_child() {
     let rig = rig();
     rig.server.allow_interleaving();
-    rig.server
-        .enqueue_stream_toolcalls(&[("w1", "subagent", r#"{"prompt":"never finishes"}"#)], None);
+    rig.server.enqueue_stream_toolcalls(
+        &[("w1", "subagent", r#"{"prompt":"never finishes"}"#)],
+        None,
+    );
     // The child's model response never arrives within its watchdog window;
     // the PARENT's 1s wall clock fires first and kills the child.
     rig.server.enqueue_raw(vec![
@@ -419,7 +559,11 @@ fn task_wall_clock_kills_a_wedged_child() {
         .args(["exec", "-p", "spawn a doomed helper"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         started.elapsed() < Duration::from_secs(15),
         "the wall clock did not fire; took {:?}",
@@ -427,9 +571,7 @@ fn task_wall_clock_kills_a_wedged_child() {
     );
 
     let reqs = rig.api_requests();
-    let result = reqs
-        .last()
-        .unwrap()["messages"]
+    let result = reqs.last().unwrap()["messages"]
         .as_array()
         .unwrap()
         .iter()
@@ -439,6 +581,76 @@ fn task_wall_clock_kills_a_wedged_child() {
         .unwrap()
         .to_string();
     assert!(result.contains("exceeded the 1s wall clock"), "{result}");
+    rig.server.assert_clean();
+}
+
+#[test]
+fn parent_death_kills_bash_descendant_of_child_agent() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let marker = rig.work.path().join("orphan-bash.pid");
+    let bash_args = serde_json::json!({
+        "cmd": "echo $$ > \"$NOOB_ORPHAN_MARKER\"; trap '' TERM; while :; do sleep 1; done"
+    })
+    .to_string();
+    rig.server.enqueue_stream_toolcalls_for(
+        noob_testkit::RequestMatch::UserPrompt("delegate the command".to_string()),
+        &[(
+            "s1",
+            "subagent",
+            r#"{"prompt":"start the requested command","tools":"all"}"#,
+        )],
+        None,
+    );
+    rig.server.enqueue_stream_toolcalls_for(
+        noob_testkit::RequestMatch::UserPrompt("start the requested command".to_string()),
+        &[("b1", "bash", &bash_args)],
+        None,
+    );
+
+    // The root noob process spawns `noob child` with PDEATHSIG. Killing the
+    // root must also kill Bash after Bash escaped into its own session and
+    // ignored SIGTERM.
+    let mut parent = noob(rig.config.path(), rig.work.path());
+    parent
+        .env("NOOB_ORPHAN_MARKER", &marker)
+        .args(["exec", "-p", "delegate the command"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut parent = parent.spawn().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.is_file() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        marker.is_file(),
+        "the child never started its Bash descendant"
+    );
+    let bash_pid: libc::pid_t = std::fs::read_to_string(&marker)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    parent.kill().unwrap();
+    parent.wait().unwrap();
+    let is_live = |pid: libc::pid_t| {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        stat.rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            != Some("Z")
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while is_live(bash_pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !is_live(bash_pid),
+        "Bash process {bash_pid} survived its noob parent"
+    );
     rig.server.assert_clean();
 }
 
@@ -456,6 +668,10 @@ fn depth_cap_removes_the_task_schema() {
     assert!(out.status.success());
     let names = tool_names(&rig.api_requests()[0]);
     assert!(!names.contains(&"subagent".to_string()), "{names:?}");
-    assert_eq!(names.len(), 8, "the 8 core tools only (no task at the depth cap)");
+    assert_eq!(
+        names.len(),
+        9,
+        "the 9 core tools only (no subagent at the depth cap)"
+    );
     rig.server.assert_clean();
 }

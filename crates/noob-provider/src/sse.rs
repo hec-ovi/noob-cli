@@ -34,7 +34,10 @@ pub struct SseParser {
 
 impl SseParser {
     pub fn new() -> SseParser {
-        SseParser { at_start: true, ..Default::default() }
+        SseParser {
+            at_start: true,
+            ..Default::default()
+        }
     }
 
     /// Feed one chunk of raw bytes; push every completed event onto `out`.
@@ -138,7 +141,10 @@ mod tests {
     use super::*;
 
     fn ev(event: Option<&str>, data: &str) -> SseEvent {
-        SseEvent { event: event.map(str::to_string), data: data.to_string() }
+        SseEvent {
+            event: event.map(str::to_string),
+            data: data.to_string(),
+        }
     }
 
     #[test]
@@ -185,13 +191,14 @@ mod tests {
 
     #[test]
     fn bom_stripped_on_first_line_only() {
-        assert_eq!(
-            parse_all(b"\xEF\xBB\xBFdata: a\n\n"),
-            vec![ev(None, "a")]
-        );
+        assert_eq!(parse_all(b"\xEF\xBB\xBFdata: a\n\n"), vec![ev(None, "a")]);
         // A BOM later in the stream is content, not a BOM.
         let got = parse_all(b"data: a\n\n\xEF\xBB\xBFdata: b\n\n");
-        assert_eq!(got.len(), 1, "the bogus second line is not a data field: {got:?}");
+        assert_eq!(
+            got.len(),
+            1,
+            "the bogus second line is not a data field: {got:?}"
+        );
     }
 
     #[test]
@@ -226,7 +233,10 @@ mod tests {
     #[test]
     fn finish_flushes_terminated_trailing_event() {
         // Stream ends after a terminated data line but without the blank line.
-        assert_eq!(parse_all(b"data: a\n\ndata: tail\n"), vec![ev(None, "a"), ev(None, "tail")]);
+        assert_eq!(
+            parse_all(b"data: a\n\ndata: tail\n"),
+            vec![ev(None, "a"), ev(None, "tail")]
+        );
     }
 
     #[test]

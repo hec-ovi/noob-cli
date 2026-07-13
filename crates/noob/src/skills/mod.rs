@@ -110,7 +110,12 @@ fn register_skill(dir: PathBuf, out: &mut Vec<Skill>) {
             if out.iter().any(|s| s.name == name) {
                 return; // shadowed by a higher-priority location
             }
-            out.push(Skill { name, description, dir, file });
+            out.push(Skill {
+                name,
+                description,
+                dir,
+                file,
+            });
         }
         Err(reason) => {
             eprintln!("noob: skipping skill {}: {reason}", file.display());
@@ -269,7 +274,8 @@ fn install_git(workspace: &Path, url: &str) -> Result<String, String> {
     // candidate, even if the process dies before cleanup.
     let staging = staging_path(workspace, "git");
     if let Some(parent) = staging.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create the skills dir: {e}"))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create the skills dir: {e}"))?;
     }
     let mut child = Command::new("git")
         .args(["clone", "--quiet", "--depth", "1", "--", url])
@@ -499,8 +505,7 @@ fn read_frontmatter_file(path: &Path) -> std::io::Result<String> {
         return String::from_utf8(kept)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e));
     }
-    String::from_utf8(kept)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    String::from_utf8(kept).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 fn fence_line(bytes: &[u8]) -> std::io::Result<bool> {
@@ -631,10 +636,7 @@ fn scan_block<'a>(
         };
         let bytes = line.as_bytes();
         let mut cut = 0;
-        while cut < indent
-            && cut < bytes.len()
-            && matches!(bytes[cut], b' ' | b'\t')
-        {
+        while cut < indent && cut < bytes.len() && matches!(bytes[cut], b' ' | b'\t') {
             cut += 1;
         }
         let stripped = &line[cut..];
@@ -840,7 +842,14 @@ mod tests {
 
     #[test]
     fn block_headers_with_explicit_indent_digits_parse_as_blocks() {
-        for header in ["|2", ">-2", "|+", ">2-", "| # keep newlines", ">-  # folded"] {
+        for header in [
+            "|2",
+            ">-2",
+            "|+",
+            ">2-",
+            "| # keep newlines",
+            ">-  # folded",
+        ] {
             let text = format!("---\nname: n\ndescription: {header}\n  real text\n---\n");
             let p = parse(&text).unwrap();
             assert_eq!(p.fields["description"], "real text", "header {header:?}");
@@ -868,9 +877,21 @@ mod tests {
 
     #[test]
     fn missing_or_unterminated_frontmatter_errors() {
-        assert!(parse("# just markdown\n").unwrap_err().contains("no frontmatter"));
-        assert!(parse("---\nname: x\n").unwrap_err().contains("unterminated"));
-        assert!(parse("---\njust a stray line\n---\n").unwrap_err().contains("key: value"));
+        assert!(
+            parse("# just markdown\n")
+                .unwrap_err()
+                .contains("no frontmatter")
+        );
+        assert!(
+            parse("---\nname: x\n")
+                .unwrap_err()
+                .contains("unterminated")
+        );
+        assert!(
+            parse("---\njust a stray line\n---\n")
+                .unwrap_err()
+                .contains("key: value")
+        );
     }
 
     #[test]
@@ -894,10 +915,16 @@ mod tests {
         let long_name = format!("---\nname: {}\ndescription: d\n---\n", "x".repeat(65));
         let long_desc = format!("---\nname: n\ndescription: {}\n---\n", "d".repeat(1025));
         for (fm, needle) in [
-            ("---\ndescription: d\n---\n", "missing required field `name`"),
+            (
+                "---\ndescription: d\n---\n",
+                "missing required field `name`",
+            ),
             ("---\nname: Bad_Name\ndescription: d\n---\n", "lowercase"),
             (long_name.as_str(), "max 64"),
-            ("---\nname: n\n---\n", "missing required field `description`"),
+            (
+                "---\nname: n\n---\n",
+                "missing required field `description`",
+            ),
             (long_desc.as_str(), "max 1024"),
         ] {
             let p = parse(fm).unwrap();
@@ -916,7 +943,11 @@ mod tests {
         // A source dir whose folder name differs from the skill name: the
         // install must key off the frontmatter, and carry bundled files.
         let src = ws.path().join("some-folder");
-        write_skill(src.parent().unwrap(), "some-folder", &skill_md("installed", "d"));
+        write_skill(
+            src.parent().unwrap(),
+            "some-folder",
+            &skill_md("installed", "d"),
+        );
         std::fs::write(src.join("helper.sh"), "echo hi\n").unwrap();
         std::fs::create_dir_all(src.join(".git")).unwrap();
         std::fs::write(src.join(".git/config"), "private clone metadata").unwrap();
@@ -924,17 +955,31 @@ mod tests {
         assert_eq!(name, "installed");
         let dest = ws.path().join(".noob/skills/installed");
         assert!(dest.join("SKILL.md").is_file(), "SKILL.md must be copied");
-        assert!(dest.join("helper.sh").is_file(), "bundled files must be copied");
-        assert!(!dest.join(".git").exists(), "VCS metadata must not be installed");
+        assert!(
+            dest.join("helper.sh").is_file(),
+            "bundled files must be copied"
+        );
+        assert!(
+            !dest.join(".git").exists(),
+            "VCS metadata must not be installed"
+        );
         assert!(
             std::fs::read_dir(ws.path().join(".noob"))
                 .unwrap()
-                .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".skill-")),
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".skill-")),
             "a completed install must not leave staging data"
         );
         // It is now discoverable.
         let cfg = tempfile::tempdir().unwrap();
-        assert!(discover(ws.path(), cfg.path(), &[]).iter().any(|s| s.name == "installed"));
+        assert!(
+            discover(ws.path(), cfg.path(), &[])
+                .iter()
+                .any(|s| s.name == "installed")
+        );
     }
 
     #[test]
@@ -947,7 +992,10 @@ mod tests {
         let name = install(ws.path(), ws.path().to_str().unwrap()).unwrap();
         assert_eq!(name, "root-skill");
         let dest = ws.path().join(".noob/skills/root-skill");
-        assert_eq!(std::fs::read_to_string(dest.join("bundle/note.txt")).unwrap(), "note");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("bundle/note.txt")).unwrap(),
+            "note"
+        );
         assert_eq!(
             std::fs::read_dir(dest.join(".noob")).unwrap().count(),
             0,
@@ -963,7 +1011,10 @@ mod tests {
         std::fs::create_dir_all(&bad).unwrap();
         std::fs::write(bad.join("SKILL.md"), "no frontmatter here\n").unwrap();
         assert!(install(ws.path(), bad.to_str().unwrap()).is_err());
-        assert!(!ws.path().join(".noob/skills").exists(), "a rejected install must write nothing");
+        assert!(
+            !ws.path().join(".noob/skills").exists(),
+            "a rejected install must write nothing"
+        );
         // A valid install, then a duplicate is refused.
         let src = ws.path().join("src");
         write_skill(ws.path(), "src", &skill_md("dup", "d"));
@@ -1004,7 +1055,10 @@ mod tests {
         std::fs::write(&path, text).unwrap();
         let frontmatter = read_frontmatter_file(&path).unwrap();
         assert!(frontmatter.len() < 1024);
-        assert_eq!(validate(&parse(&frontmatter).unwrap().fields).unwrap().0, "large-body");
+        assert_eq!(
+            validate(&parse(&frontmatter).unwrap().fields).unwrap().0,
+            "large-body"
+        );
     }
 
     #[test]
@@ -1027,10 +1081,26 @@ mod tests {
     fn discovery_covers_all_four_roots_in_priority_order() {
         let ws = tempfile::tempdir().unwrap();
         let cfg = tempfile::tempdir().unwrap();
-        write_skill(&ws.path().join(".noob/skills"), "a", &skill_md("alpha", "from noob"));
-        write_skill(&ws.path().join(".claude/skills"), "b", &skill_md("beta", "from claude"));
-        write_skill(&ws.path().join(".agents/skills"), "c", &skill_md("gamma", "from agents"));
-        write_skill(&cfg.path().join("skills"), "d", &skill_md("delta", "from config"));
+        write_skill(
+            &ws.path().join(".noob/skills"),
+            "a",
+            &skill_md("alpha", "from noob"),
+        );
+        write_skill(
+            &ws.path().join(".claude/skills"),
+            "b",
+            &skill_md("beta", "from claude"),
+        );
+        write_skill(
+            &ws.path().join(".agents/skills"),
+            "c",
+            &skill_md("gamma", "from agents"),
+        );
+        write_skill(
+            &cfg.path().join("skills"),
+            "d",
+            &skill_md("delta", "from config"),
+        );
         let skills = discover(ws.path(), cfg.path(), &[]);
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["alpha", "beta", "gamma", "delta"]);
@@ -1040,8 +1110,16 @@ mod tests {
     fn first_hit_per_name_wins_across_roots() {
         let ws = tempfile::tempdir().unwrap();
         let cfg = tempfile::tempdir().unwrap();
-        write_skill(&ws.path().join(".noob/skills"), "s", &skill_md("dup", "project wins"));
-        write_skill(&cfg.path().join("skills"), "s", &skill_md("dup", "global loses"));
+        write_skill(
+            &ws.path().join(".noob/skills"),
+            "s",
+            &skill_md("dup", "project wins"),
+        );
+        write_skill(
+            &cfg.path().join("skills"),
+            "s",
+            &skill_md("dup", "global loses"),
+        );
         let skills = discover(ws.path(), cfg.path(), &[]);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].description, "project wins");
@@ -1084,9 +1162,21 @@ mod tests {
         let cfg = tempfile::tempdir().unwrap();
         // A censurado-style dispatcher at a non-root path: `cli/SKILL.md`
         // routes to sub-skills under `cli/skills/*/SKILL.md`.
-        write_skill(ws.path(), "cli", &skill_md("censurado", "dispatcher that routes verbs"));
-        write_skill(&ws.path().join("cli/skills"), "walk", &skill_md("walk", "sub-skill a"));
-        write_skill(&ws.path().join("cli/skills"), "build", &skill_md("build", "sub-skill b"));
+        write_skill(
+            ws.path(),
+            "cli",
+            &skill_md("censurado", "dispatcher that routes verbs"),
+        );
+        write_skill(
+            &ws.path().join("cli/skills"),
+            "walk",
+            &skill_md("walk", "sub-skill a"),
+        );
+        write_skill(
+            &ws.path().join("cli/skills"),
+            "build",
+            &skill_md("build", "sub-skill b"),
+        );
 
         let extra = vec![ws.path().join("cli")];
         let skills = discover(ws.path(), cfg.path(), &extra);
@@ -1105,8 +1195,16 @@ mod tests {
     fn configured_paths_coexist_with_default_roots_after_them() {
         let ws = tempfile::tempdir().unwrap();
         let cfg = tempfile::tempdir().unwrap();
-        write_skill(&ws.path().join(".noob/skills"), "foo-dir", &skill_md("foo", "a default root"));
-        write_skill(ws.path(), "cli", &skill_md("censurado", "a configured resolver"));
+        write_skill(
+            &ws.path().join(".noob/skills"),
+            "foo-dir",
+            &skill_md("foo", "a default root"),
+        );
+        write_skill(
+            ws.path(),
+            "cli",
+            &skill_md("censurado", "a configured resolver"),
+        );
 
         let extra = vec![ws.path().join("cli")];
         let skills = discover(ws.path(), cfg.path(), &extra);
@@ -1119,7 +1217,11 @@ mod tests {
     fn default_roots_win_a_name_clash_against_configured_paths() {
         let ws = tempfile::tempdir().unwrap();
         let cfg = tempfile::tempdir().unwrap();
-        write_skill(&ws.path().join(".noob/skills"), "dup-dir", &skill_md("dup", "default wins"));
+        write_skill(
+            &ws.path().join(".noob/skills"),
+            "dup-dir",
+            &skill_md("dup", "default wins"),
+        );
         write_skill(ws.path(), "cli", &skill_md("dup", "configured loses"));
 
         let extra = vec![ws.path().join("cli")];
@@ -1225,14 +1327,24 @@ mod tests {
             })
             .collect();
         let idx = index(&skills).unwrap();
-        assert!(idx.len() <= INDEX_CHAR_BUDGET + 40, "index is {} chars", idx.len());
-        assert!(idx.contains("- skill-000: "), "early skills keep descriptions");
+        assert!(
+            idx.len() <= INDEX_CHAR_BUDGET + 40,
+            "index is {} chars",
+            idx.len()
+        );
+        assert!(
+            idx.contains("- skill-000: "),
+            "early skills keep descriptions"
+        );
         assert!(
             idx.lines().any(|l| l == "- skill-020"),
             "overflow skills get name-only lines: {idx}"
         );
         let note = idx.lines().last().unwrap();
-        assert!(note.contains("more skills not listed"), "count note missing: {note}");
+        assert!(
+            note.contains("more skills not listed"),
+            "count note missing: {note}"
+        );
         let listed = idx.lines().filter(|l| l.starts_with("- ")).count();
         let counted: usize = note
             .trim_start_matches('[')

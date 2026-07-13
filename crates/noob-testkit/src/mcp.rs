@@ -141,7 +141,9 @@ impl McpHttpServer {
 fn handle(mut stream: TcpStream, shared: Arc<Shared>) {
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
     loop {
-        let Some(req) = crate::read_request(&mut stream) else { return };
+        let Some(req) = crate::read_request(&mut stream) else {
+            return;
+        };
         let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
         let method = body.get("method").and_then(Value::as_str).unwrap_or("");
         let id = body.get("id").cloned();
@@ -190,9 +192,7 @@ fn handle(mut stream: TcpStream, shared: Arc<Shared>) {
                 }
                 continue;
             }
-            "tools/list" => {
-                Some((rpc_result(&id, json!({"tools": shared.tools})), None))
-            }
+            "tools/list" => Some((rpc_result(&id, json!({"tools": shared.tools})), None)),
             "tools/call" => {
                 let params = body.get("params").cloned().unwrap_or(Value::Null);
                 shared.calls.lock().unwrap().push(params.clone());
@@ -204,8 +204,7 @@ fn handle(mut stream: TcpStream, shared: Arc<Shared>) {
                         return;
                     }
                     loop {
-                        if stream.write_all(b": keepalive\n\n").is_err()
-                            || stream.flush().is_err()
+                        if stream.write_all(b": keepalive\n\n").is_err() || stream.flush().is_err()
                         {
                             return;
                         }
@@ -242,10 +241,16 @@ fn handle(mut stream: TcpStream, shared: Arc<Shared>) {
             )),
         };
 
-        let Some((msg, new_session)) = response else { return };
+        let Some((msg, new_session)) = response else {
+            return;
+        };
         if shared.sse_mode.load(Ordering::SeqCst) {
             // SSE bodies are close-delimited: one response per connection.
-            let _ = write_sse(&mut stream, &msg, new_session.as_deref().or(session.as_deref()));
+            let _ = write_sse(
+                &mut stream,
+                &msg,
+                new_session.as_deref().or(session.as_deref()),
+            );
             return;
         }
         if write_simple(
@@ -278,7 +283,11 @@ fn check_wire(shared: &Shared, req: &Recorded, method: &str) {
             "{method}: MCP-Protocol-Version header missing on a post-initialize request"
         ));
     }
-    if req.header("content-type").map(|c| !c.starts_with("application/json")) == Some(true) {
+    if req
+        .header("content-type")
+        .map(|c| !c.starts_with("application/json"))
+        == Some(true)
+    {
         violations.push(format!("{method}: content-type is not application/json"));
     }
     shared.violations.lock().unwrap().extend(violations);

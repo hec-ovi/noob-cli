@@ -10,19 +10,20 @@ During a turn, the dock keeps three rows visible:
 
 1. Animated status with elapsed time, plan mode, and active tools.
 2. Editable draft or an active confirmation question.
-3. Queue count and cancellation state.
+3. Steering and cancellation state.
 
-The user can type while the model streams or tools run. Enter queues one message for the next turn and immediately records it as queued in the transcript view. Cancellation returns queued text to the editor. Escape twice within five seconds cancels; Ctrl-C cancels immediately. A second Ctrl-C during cancellation restores the terminal and exits with status 130.
+The user can type while the model streams or tools run. Enter records the submitted text with a `[steering]` marker, interrupts the current parent turn, and dispatches the message on the next loop. Escape or Ctrl-C cancellation keeps unsubmitted text in the editor. Escape twice within five seconds cancels; Ctrl-C cancels immediately. A second Ctrl-C during cancellation restores the terminal and exits with status 130.
 
 One main-thread render loop owns terminal output. A stdin reader and the agent worker send ordered events to it. Text, reasoning, tool start, tool finish, notes, errors, questions, keys, reader loss, and turn end retain channel order. Only adjacent render events can share a short repaint window.
 
 The interactive REPL also provides:
 
-- Tab completion for a `/`-prefixed command, with a dim hint that lists candidates for an ambiguous prefix. Completion is input-side editing between keystrokes, never during a token stream.
-- A dim `type to queue a message` placeholder on the input row while a turn runs and the buffer is empty.
-- A `todo` checklist: the model maintains a `[x]`/`[~]`/`[ ]` list through the `todo` tool and the themed REPL recolors the glyph lines. It is agent-driven with no approval step and is separate from `/plan`.
-- An agents panel for `task` fan-out: two or more consecutive `task` calls render as one checklist with per-agent running or done status, a one-line result and turn count each, and the concurrency cap in the header. A lone `task` keeps its single activity line.
-- Redisplay on resume: at an interactive terminal a resumed conversation is redrawn before the first prompt (past human turns, assistant Markdown, and one-line tool digests), with synthetic bookkeeping items filtered. It is display-only and never touches the request, transcript, or session log.
+- Tab completion for a `/`-prefixed command, with a dim hint that lists candidates for an ambiguous prefix. On an empty draft, Tab instead opens a persistent, bounded view of detached sub-agent state and recent activity.
+- A dim `type to steer the turn` placeholder on the input row while a turn runs and the buffer is empty.
+- A `plan` checklist maintained by the model through the `plan` tool. The active glyph animates, completed actions show elapsed time, long lists are capped with counts, and completed or canceled plans collapse to one timed line. It is agent-driven with no approval step and is separate from `/plan` mode.
+- Detached `subagent` jobs with stable IDs, cancellation through `/agents`, and one final result injected into the parent context as soon as that job is ready. This includes `tools: "all"` jobs; unrelated slow jobs do not delay a completed result.
+- Redisplay on resume: at an interactive terminal a resumed conversation is redrawn before the first prompt, with synthetic bookkeeping items filtered. Corrupt records are skipped with one bounded warning. Redisplay is display-only and never touches the request, transcript, or session log.
+- Immediate resize reflow through SIGWINCH while idle or during an active turn.
 
 ## Rendering
 
@@ -58,13 +59,12 @@ Unknown names fall back to `matrix`. Color depth degrades from truecolor to 256 
 - Piped and headless protocol bytes remain unchanged.
 - The model receives a draft only after submission.
 - The request path does not parse Markdown; semantic text is parsed only by the interactive renderer.
-- The terminal and scheduler behaviors have unit tests plus 41 pty tests.
+- Terminal and scheduler behavior is covered by unit tests and real pseudo-terminal tests.
 
 ## Backlog
 
 - In-session history navigation.
 - Optional folding for long displayed tool results without changing transcript content.
 - Richer MCP JSON presentation after the untrusted-content wrapper.
-- Terminal resize handling while no key or output event is arriving.
 
 These are interface enhancements, not release blockers for the current dock and Markdown implementation.

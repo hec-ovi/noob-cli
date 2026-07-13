@@ -10,12 +10,20 @@ fn env_edits_apply_on_next_resolve() {
     let dir = tempfile::tempdir().unwrap();
     let env_path = dir.path().join(".env");
 
-    std::fs::write(&env_path, "NOOB_BASE_URL=http://one:1/v1\nNOOB_API_KEY=k1\n").unwrap();
+    std::fs::write(
+        &env_path,
+        "NOOB_BASE_URL=http://one:1/v1\nNOOB_API_KEY=k1\n",
+    )
+    .unwrap();
     let ep1 = resolve_endpoint(dir.path(), &Overrides::default()).unwrap();
     assert_eq!(ep1.base_url, "http://one:1/v1");
     assert_eq!(ep1.api_key, "k1");
 
-    std::fs::write(&env_path, "NOOB_BASE_URL=http://two:2/v1\nNOOB_API_KEY=k2\n").unwrap();
+    std::fs::write(
+        &env_path,
+        "NOOB_BASE_URL=http://two:2/v1\nNOOB_API_KEY=k2\n",
+    )
+    .unwrap();
     let ep2 = resolve_endpoint(dir.path(), &Overrides::default()).unwrap();
     assert_eq!(ep2.base_url, "http://two:2/v1");
     assert_eq!(ep2.api_key, "k2");
@@ -50,7 +58,11 @@ fn api_style_defaults_by_host_and_accepts_override() {
     let ep = resolve_endpoint(dir.path(), &Overrides::default()).unwrap();
     assert_eq!(ep.style, ApiStyle::Chat);
 
-    std::fs::write(dir.path().join(".env"), "NOOB_BASE_URL=http://localhost:8090/v1\n").unwrap();
+    std::fs::write(
+        dir.path().join(".env"),
+        "NOOB_BASE_URL=http://localhost:8090/v1\n",
+    )
+    .unwrap();
     let ep = resolve_endpoint(dir.path(), &Overrides::default()).unwrap();
     assert_eq!(ep.style, ApiStyle::Chat);
 }

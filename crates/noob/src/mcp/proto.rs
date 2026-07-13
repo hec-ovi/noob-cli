@@ -35,7 +35,10 @@ pub fn method_not_found(id: &Value) -> Value {
 #[derive(Debug)]
 pub enum Inbound {
     /// A response to our request `id`: Ok(result) or Err(rendered error).
-    Response { id: u64, outcome: Result<Value, String> },
+    Response {
+        id: u64,
+        outcome: Result<Value, String>,
+    },
     /// A server-to-client request (has both id and method); needs a reply.
     ServerRequest { id: Value },
     /// A notification (no id) or anything else safely ignorable.
@@ -49,7 +52,9 @@ pub fn classify(msg: &Value) -> Inbound {
         Some(id) if has_method => Inbound::ServerRequest { id: id.clone() },
         Some(id) => {
             // Some servers echo numeric ids as strings; accept both.
-            let Some(id) = id.as_u64().or_else(|| id.as_str().and_then(|s| s.parse().ok()))
+            let Some(id) = id
+                .as_u64()
+                .or_else(|| id.as_str().and_then(|s| s.parse().ok()))
             else {
                 return Inbound::Other;
             };
@@ -85,7 +90,10 @@ mod tests {
     #[test]
     fn classify_covers_all_inbound_shapes() {
         match classify(&json!({"jsonrpc":"2.0","id":7,"result":{"ok":true}})) {
-            Inbound::Response { id: 7, outcome: Ok(v) } => assert_eq!(v["ok"], true),
+            Inbound::Response {
+                id: 7,
+                outcome: Ok(v),
+            } => assert_eq!(v["ok"], true),
             other => panic!("{other:?}"),
         }
         match classify(&json!({"jsonrpc":"2.0","id":"7","result":1})) {
@@ -93,13 +101,18 @@ mod tests {
             other => panic!("string id must parse: {other:?}"),
         }
         match classify(&json!({"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"boom"}})) {
-            Inbound::Response { id: 2, outcome: Err(e) } => {
+            Inbound::Response {
+                id: 2,
+                outcome: Err(e),
+            } => {
                 assert!(e.contains("-32000") && e.contains("boom"));
             }
             other => panic!("{other:?}"),
         }
         assert!(matches!(
-            classify(&json!({"jsonrpc":"2.0","id":9,"method":"sampling/createMessage","params":{}})),
+            classify(
+                &json!({"jsonrpc":"2.0","id":9,"method":"sampling/createMessage","params":{}})
+            ),
             Inbound::ServerRequest { .. }
         ));
         assert!(matches!(
@@ -108,7 +121,10 @@ mod tests {
         ));
         // A result missing entirely still resolves (Null), never wedges.
         match classify(&json!({"jsonrpc":"2.0","id":1})) {
-            Inbound::Response { outcome: Ok(Value::Null), .. } => {}
+            Inbound::Response {
+                outcome: Ok(Value::Null),
+                ..
+            } => {}
             other => panic!("{other:?}"),
         }
     }

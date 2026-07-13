@@ -104,6 +104,7 @@ Within a stable mode, each provider request is an exact byte-prefix extension of
 - Plan-mode entry and exit, which change the available schemas.
 - First registration of the skill tool during an in-session skill reload.
 - Context compaction.
+- Explicit `/clear-plan` cleanup, which replaces historical plan payloads.
 
 The agent records the reason whenever it resets the cache baseline.
 
@@ -120,7 +121,7 @@ The user-facing agent permits at most 50 inference rounds per input. Doom-loop c
 The scheduler partitions one assistant tool batch in emission order:
 
 - Consecutive read-only calls run on scoped threads, up to eight at once.
-- Consecutive `subagent` calls form one fan-out group limited by child concurrency.
+- Consecutive `subagent` calls form one fan-out group limited by child concurrency. Depth-1 agents retain delegation but run one nested child at a time, so root fan-out cannot multiply into a second full fan-out per child. Calls acknowledge quickly in the dock and run inline on headless or classic surfaces.
 - Every other mutation is a sequential barrier.
 - Results are returned and appended in emission order.
 - Start events are emitted immediately before real execution.
@@ -137,24 +138,25 @@ Compaction starts when the estimated context reaches 75 percent of `NOOB_CTX` or
 The ladder is:
 
 1. Replace older large tool results with deterministic placeholders.
-2. If that is insufficient, summarize the middle against the fixed schema in `prompts/compact.md`.
+2. If that is insufficient, summarize the middle against the fixed schema in `crates/noob/prompts/compact.md`.
 3. Validate that a summary is non-empty, smaller, and structurally complete.
 4. Retry one invalid summary, then prune or hard-drop instead of accepting it.
 
-The head and recent tail stay verbatim, and call/result pairs are never split. A harness-built pin block preserves the original task, touched files, and loaded skills across repeated compactions and process resumes.
+The head and recent tail stay verbatim, and call/result pairs are never split. A harness-built pin block preserves the original task, touched files, loaded skills, and active background job IDs across repeated compactions and process resumes.
 
 ## Tools and bounded I/O
 
-The core tools are `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, and `todo`. Conditional tools are `skill`, `mcp_connect`, `mcp_call`, and `subagent`.
+The core tools are `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `context`, and `plan`. Conditional tools are `skill`, `mcp_connect`, `mcp_call`, and `subagent`.
 
 Important mechanics:
 
-- `todo` maintains a visible checklist the model overwrites wholesale on each call. The rendered `[x]`/`[~]`/`[ ]` text is the tool result, so every surface and the model transcript see the same plan. It mutates shared state, so it is a sequential barrier and is not a plan-mode tool.
-
+- `plan` maintains the visible checklist the model overwrites wholesale on each call. The rendered `[x]`/`[~]`/`[ ]` text is the tool result, so every surface and the model transcript see the same plan. It mutates shared state, so it is a sequential barrier and is not a plan-mode tool. Historical `todo` calls remain accepted on resume.
+- `context` reports the agent's current estimate, total window, and automatic compaction threshold.
 - `read` opens with `O_NONBLOCK`, validates the opened handle with `fstat`, rejects non-regular files, and drains the full file in 64 KiB chunks. It hashes and counts all bytes while retaining only the requested page and line previews.
 - `write` and `edit` use read-before-write stamps, same-directory temporary files, `fsync`, and rename. Existing mode bits are preserved.
 - `edit` applies exact matching first, then trailing-whitespace, typographic, uniform-indent, and CRLF-compatible shadows. Every stage rejects ambiguity.
 - `bash` merges stdout and stderr at the file-descriptor level, drains output continuously into a bounded 8 KiB head plus 16 KiB tail, and kills its process group on timeout or cancellation.
+- Each `write`, `edit`, or `bash` call takes an advisory lock on the workspace directory inode. This lock crosses parent and child processes without adding a project file. One leased call runs at a time. Detached children wait for a bounded interval and receive a conflict if it stays busy; the parent reports a conflict immediately so the main conversation is not held behind a child mutation. This is call-level coordination, not a transaction covering a child's whole task. The lease ends when the tool call returns and does not cover unmanaged or deliberately detached processes.
 - `grep`, `glob`, and `ls` cap retained result entries or bytes and include an actionable continuation marker.
 - Tool truncation occurs once before transcript insertion. It does not alter the underlying command or file operation.
 
@@ -166,7 +168,7 @@ Sessions are append-only JSONL files under `<config>/sessions`. Fresh IDs contai
 
 Every append, flush, reset, and repair error is propagated. If persistence fails during a live run, the agent detaches the broken session, keeps the valid in-memory transcript, and shows one ordered warning. It never silently claims that an item was saved.
 
-Resume streams the JSONL through a buffered reader, skips corrupt lines, repairs dangling tool calls with synthetic results, reconstructs compaction pins, and restores a provider-valid transcript without retaining stale pre-reset history. `--resume <id>` is the recovery flag, with `--restore` and `--session` as aliases; resuming an unknown id starts a fresh session with a note. At an interactive terminal a resumed conversation is also redisplayed before the first prompt (human turns, assistant Markdown, and one-line tool digests, with synthetic bookkeeping items filtered). The redisplay is display-only and does not touch the request body, the transcript, or the session log.
+Resume streams the JSONL through a buffered reader, skips corrupt records with one bounded warning, repairs dangling tool calls and acknowledged background jobs with synthetic terminal results, reconstructs compaction pins, and restores a provider-valid transcript without retaining stale pre-reset history. `noob sessions` and `/sessions` list files newest first; `--resume latest` selects the newest. `--resume <id>` is the recovery flag, with `--restore` and `--session` as aliases; resuming an unknown id starts a fresh session with a note. At an interactive terminal a resumed conversation is also redisplayed before the first prompt (human turns, assistant Markdown, and one-line tool digests, with synthetic bookkeeping items filtered). The redisplay is display-only and does not touch the request body, the transcript, or the session log.
 
 ## Skills
 
@@ -204,7 +206,11 @@ Server catalogs and results are wrapped as untrusted content before transcript i
 
 ## Child agents
 
-The `subagent` tool spawns `current_exe() child` with a JSON task on stdin. The child gets a fresh prompt and no parent history. It writes progress to stderr and exactly one JSON result line to stdout. Only the result field enters the parent transcript.
+The `subagent` tool spawns `current_exe() child` with a JSON task on stdin. The child gets a fresh prompt and no parent history. It writes progress to stderr and exactly one JSON result line to stdout.
+
+In the default interactive dock, every child call detaches into a session-scoped background hub. This includes `tools: "all"` jobs that can use Bash, MCP, web search, and file mutation. The original tool call receives one immediate `{"job_id":"agent-N","status":"running"}` result, preserving Chat and Responses call/result adjacency. The final child output later enters once as a synthetic user result packet, never as a second tool result. Its framing and the system prompt mark it as untrusted report data, not a human instruction. The owner thread alone appends that packet, persists it, and invokes a parent continuation as soon as any result is ready. One slow child cannot hold an unrelated completed report.
+
+The hub uses a fixed FIFO worker pool and applies `NOOB_TASK_CONCURRENCY` to its detached work. It distinguishes queued, running, and ready jobs, bounds the undelivered queue, and exposes per-job cancellation through `/agents`. Tab toggles a persistent bounded view of child stderr, including recent tool activity, while final reports remain uncapped. Shutdown cancels, signals, reaps, and joins all child processes. On Linux, parent-death cleanup also kills descendants still attached to the child before exit. `exec`, piped input, nested children, and the classic prompt retain inline behavior.
 
 Defaults are four concurrent children, 25 rounds, 300 seconds, and recursion depth two. The parent starts the wall clock before sending the task. Child stdin is nonblocking and cancellation-aware, the final result line is read without an output-length cap, and optional progress retention is bounded at 64 KiB while both streams continue to drain.
 
@@ -225,19 +231,19 @@ flowchart LR
 
 The main thread is the only terminal writer. The worker emits semantic text, reasoning, tool start, tool finish, note, error, ask, and end events. Adjacent render events can share an 8 ms repaint window; asks, keys, reader loss, and end are strict ordering barriers.
 
-The active frame always has three rows:
+The active frame has three fixed rows plus bounded optional plan or agent status rows:
 
 1. Animated comet, elapsed time, plan state, and active tools.
 2. Editable draft or confirmation question.
-3. Queue count and cancellation state.
+3. Steering and cancellation state.
 
-Entering a message during a turn immediately records it above the frame as queued. At most one queued message is dispatched after a turn. Cancellation drains queued messages back into the draft. Escape twice within five seconds cancels; Ctrl-C cancels immediately; a second Ctrl-C during cancellation restores the terminal and exits with status 130.
+Entering a message during a turn immediately records it above the frame as steering, interrupts that parent turn, and dispatches the message on the next REPL loop. An explicit Escape or Ctrl-C cancellation leaves unsubmitted text in the draft. Escape twice within five seconds cancels; Ctrl-C cancels immediately; a second Ctrl-C during cancellation restores the terminal and exits with status 130.
 
-Reader loss is an ordering barrier. Keys accepted before EOF are processed first, pending confirmations are denied, and the REPL exits once queued work is drained rather than waiting on an input thread that can no longer answer.
+Reader loss is an ordering barrier. Keys accepted before EOF are processed first, pending confirmations are denied, and any already submitted steering message is dispatched before the REPL exits. It never waits on an input thread that can no longer answer.
 
 Assistant Markdown is parsed only for the interactive REPL. The line-streaming renderer supports headings, emphasis, code spans, lists, quotes, fenced code, JSON accents, and GFM-style tables. Tables switch to stacked records on narrow terminals and size their cells by terminal display width so wide glyphs keep the borders aligned. Parser buffers are bounded, but overflow degrades to literal streaming and never drops model output.
 
-Two display-only artifacts reuse the checklist glyphs: the `todo` tool's `[x]`/`[~]`/`[ ]` plan, and an agents panel that folds a `subagent` fan-out of two or more parallel sub-agents into one checklist with per-agent status, a one-line result and turn count, and the concurrency cap in the header. The input editor completes a `/`-prefixed command on Tab (a dim hint lists candidates for an ambiguous prefix) and shows a dim placeholder while a turn runs and the buffer is empty. None of these alter the transcript or the headless bytes.
+Two display-only artifacts share the bounded region: the `plan` checklist and sub-agent status. The active plan glyph animates, each completed action records its own elapsed time, long plans end in counted summaries while reserving the active step, and completed or canceled plans collapse with total elapsed time. Detached agents occupy one live `[N] agents running (Tab to view)` row; empty-draft Tab toggles persistent details with stable IDs, state, elapsed time, prompt slices, and bounded recent activity. Region capping reserves both the active plan step and an agent summary. Slash-command Tab completion still applies when a draft is nonempty. None of these alter the transcript or headless bytes.
 
 Model text and all untrusted summaries are sanitized so control bytes cannot execute terminal commands. `NO_COLOR` removes color without removing structure, liveness, or reasoning text.
 
@@ -249,10 +255,10 @@ The enforced release budgets are:
 
 | Budget | Limit | Current validation |
 |---|---:|---:|
-| Static release binary | 8 MiB | Re-measured by `./dev.sh size-check` |
+| Static release binary | 8 MiB | 3,892,096 bytes |
 | Runtime dependency graph | 45 crates | 40 crates |
 | Fixed prompt plus schemas | 1,500 tokens | Offline and live tokenizer checks |
-| Offline tests | None | 586 tests, plus 8 opt-in live tests |
+| Offline tests | None | 658 passed; 9 live checks remain opt-in |
 
 The required local gates are:
 

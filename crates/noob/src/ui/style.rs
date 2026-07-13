@@ -158,8 +158,14 @@ mod tests {
 
     #[test]
     fn truecolor_opener_is_exact() {
-        assert_eq!(fg_sgr(ColorDepth::Truecolor, rgb(1, 2, 3), false), "\x1b[38;2;1;2;3m");
-        assert_eq!(fg_sgr(ColorDepth::Truecolor, rgb(1, 2, 3), true), "\x1b[1;38;2;1;2;3m");
+        assert_eq!(
+            fg_sgr(ColorDepth::Truecolor, rgb(1, 2, 3), false),
+            "\x1b[38;2;1;2;3m"
+        );
+        assert_eq!(
+            fg_sgr(ColorDepth::Truecolor, rgb(1, 2, 3), true),
+            "\x1b[1;38;2;1;2;3m"
+        );
     }
 
     #[test]
@@ -192,9 +198,15 @@ mod tests {
 
     #[test]
     fn depth_ladder_reads_env() {
-        assert_eq!(depth_from_env(Some("truecolor"), Some("xterm")), ColorDepth::Truecolor);
+        assert_eq!(
+            depth_from_env(Some("truecolor"), Some("xterm")),
+            ColorDepth::Truecolor
+        );
         assert_eq!(depth_from_env(Some("24bit"), None), ColorDepth::Truecolor);
-        assert_eq!(depth_from_env(None, Some("xterm-256color")), ColorDepth::Ansi256);
+        assert_eq!(
+            depth_from_env(None, Some("xterm-256color")),
+            ColorDepth::Ansi256
+        );
         assert_eq!(depth_from_env(None, Some("dumb")), ColorDepth::None);
         assert_eq!(depth_from_env(None, Some("xterm")), ColorDepth::Ansi16);
         assert_eq!(depth_from_env(None, None), ColorDepth::Ansi16);

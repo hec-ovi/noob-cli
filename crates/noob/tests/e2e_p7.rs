@@ -27,7 +27,10 @@ fn doctor_healthy_setup_exits_zero() {
     let work = tempfile::tempdir().unwrap();
     std::fs::write(
         config.path().join(".env"),
-        format!("NOOB_BASE_URL={}\nNOOB_MODEL=mockmodel\n", server.base_url()),
+        format!(
+            "NOOB_BASE_URL={}\nNOOB_MODEL=mockmodel\n",
+            server.base_url()
+        ),
     )
     .unwrap();
     std::fs::write(
@@ -36,9 +39,15 @@ fn doctor_healthy_setup_exits_zero() {
     )
     .unwrap();
     // The reachability GET on {base}/models.
-    server.enqueue_json(200, json!({"object": "list", "data": [{"id": "mockmodel"}]}));
+    server.enqueue_json(
+        200,
+        json!({"object": "list", "data": [{"id": "mockmodel"}]}),
+    );
 
-    let out = noob(config.path(), work.path()).arg("doctor").output().unwrap();
+    let out = noob(config.path(), work.path())
+        .arg("doctor")
+        .output()
+        .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{stdout}");
     for needle in [
@@ -60,12 +69,22 @@ fn doctor_unreachable_endpoint_fails_with_a_fix() {
     let config = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     // Discard port: connection refused immediately.
-    std::fs::write(config.path().join(".env"), "NOOB_BASE_URL=http://127.0.0.1:9/v1\n").unwrap();
+    std::fs::write(
+        config.path().join(".env"),
+        "NOOB_BASE_URL=http://127.0.0.1:9/v1\n",
+    )
+    .unwrap();
 
-    let out = noob(config.path(), work.path()).arg("doctor").output().unwrap();
+    let out = noob(config.path(), work.path())
+        .arg("doctor")
+        .output()
+        .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!out.status.success(), "{stdout}");
-    assert!(stdout.contains("FAIL  endpoint http://127.0.0.1:9/v1 is unreachable"), "{stdout}");
+    assert!(
+        stdout.contains("FAIL  endpoint http://127.0.0.1:9/v1 is unreachable"),
+        "{stdout}"
+    );
     assert!(stdout.contains("fix:"), "{stdout}");
     assert!(stdout.contains("fix the FAIL lines above"), "{stdout}");
 }
@@ -77,19 +96,31 @@ fn doctor_broken_env_and_mcp_json_fail_with_fixes() {
     let work = tempfile::tempdir().unwrap();
     std::fs::write(
         config.path().join(".env"),
-        format!("NOOB_BASE_URL={}\nthis line is not a pair\n", server.base_url()),
+        format!(
+            "NOOB_BASE_URL={}\nthis line is not a pair\n",
+            server.base_url()
+        ),
     )
     .unwrap();
     std::fs::write(config.path().join("mcp.json"), "{ definitely not json").unwrap();
 
-    let out = noob(config.path(), work.path()).arg("doctor").output().unwrap();
+    let out = noob(config.path(), work.path())
+        .arg("doctor")
+        .output()
+        .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!out.status.success(), "{stdout}");
-    assert!(stdout.contains("FAIL") && stdout.contains(".env"), "{stdout}");
+    assert!(
+        stdout.contains("FAIL") && stdout.contains(".env"),
+        "{stdout}"
+    );
     assert!(stdout.contains("expected KEY=VALUE"), "{stdout}");
     // The broken .env must NOT be papered over by localhost autodetect.
     assert!(stdout.contains("FAIL  endpoint config:"), "{stdout}");
-    assert!(stdout.contains("mcp.json") && stdout.contains("not valid JSON"), "{stdout}");
+    assert!(
+        stdout.contains("mcp.json") && stdout.contains("not valid JSON"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -99,7 +130,10 @@ fn doctor_missing_config_dir_fails() {
     let out = noob(&ghost, work.path()).arg("doctor").output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!out.status.success(), "{stdout}");
-    assert!(stdout.contains("FAIL  config dir") && stdout.contains("does not exist"), "{stdout}");
+    assert!(
+        stdout.contains("FAIL  config dir") && stdout.contains("does not exist"),
+        "{stdout}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -112,7 +146,10 @@ fn compaction_rig() -> (MockServer, tempfile::TempDir, tempfile::TempDir) {
     let work = tempfile::tempdir().unwrap();
     std::fs::write(
         config.path().join(".env"),
-        format!("NOOB_BASE_URL={}\nNOOB_MODEL=mockmodel\n", server.base_url()),
+        format!(
+            "NOOB_BASE_URL={}\nNOOB_MODEL=mockmodel\n",
+            server.base_url()
+        ),
     )
     .unwrap();
     (server, config, work)
@@ -136,7 +173,9 @@ fn messages_text(req: &serde_json::Value) -> String {
 fn compaction_prune_path_skips_the_summarizer() {
     let (server, config, work) = compaction_rig();
     // A ~30 KiB file: its read result is prunable (over the 2 KiB floor).
-    let big: String = (0..300).map(|i| format!("line {i:03} {}\n", "x".repeat(90))).collect();
+    let big: String = (0..300)
+        .map(|i| format!("line {i:03} {}\n", "x".repeat(90)))
+        .collect();
     std::fs::write(work.path().join("big.txt"), &big).unwrap();
     server.enqueue_stream_toolcalls(
         &[("p1", "read", r#"{"path":"big.txt"}"#)],
@@ -149,9 +188,16 @@ fn compaction_prune_path_skips_the_summarizer() {
         .args(["exec", "-p", "look at big.txt"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("pruned 1 old tool results"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("pruned 1 old tool results"),
+        "stderr: {stderr}"
+    );
 
     let reqs: Vec<serde_json::Value> = server
         .recorded()
@@ -202,7 +248,11 @@ fn compaction_pins_survive_two_cycles_across_resume() {
         .args(["exec", "--session", "pins-s1", "-p", "read the three files"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Cycle 2: resume in a FRESH process (empty seen-files registry), one
     // more medium read whose usage re-crosses the trigger.
@@ -216,7 +266,11 @@ fn compaction_pins_survive_two_cycles_across_resume() {
         .args(["exec", "--session", "pins-s1", "-p", "continue"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let reqs: Vec<serde_json::Value> = server
         .recorded()
@@ -224,12 +278,19 @@ fn compaction_pins_survive_two_cycles_across_resume() {
         .filter(|r| r.path.ends_with("/chat/completions"))
         .map(|r| r.json().unwrap())
         .collect();
-    assert_eq!(reqs.len(), 8, "cycle 1: r1-r3 + summarize + r4; cycle 2: r5 + summarize + r6");
+    assert_eq!(
+        reqs.len(),
+        8,
+        "cycle 1: r1-r3 + summarize + r4; cycle 2: r5 + summarize + r6"
+    );
     // Cycle 1 splice: summary + pins, assembled by the harness.
     let spliced1 = messages_text(&reqs[4]);
     assert!(spliced1.contains("[conversation summary]"), "{spliced1}");
     assert!(spliced1.contains("## Goal"), "{spliced1}");
-    assert!(spliced1.contains("[task: read the three files]"), "{spliced1}");
+    assert!(
+        spliced1.contains("[task: read the three files]"),
+        "{spliced1}"
+    );
     assert!(
         spliced1.contains("[files touched: f1.txt, f2.txt, f3.txt]"),
         "{spliced1}"
@@ -237,13 +298,22 @@ fn compaction_pins_survive_two_cycles_across_resume() {
     // Cycle 2's summarizer INPUT carries the previous summary and pins
     // (merge, never summary-of-summary alone)...
     let sum2_input = messages_text(&reqs[6]);
-    assert!(sum2_input.contains("[task: read the three files]"), "{sum2_input}");
-    assert!(sum2_input.contains("[files touched: f1.txt"), "{sum2_input}");
+    assert!(
+        sum2_input.contains("[task: read the three files]"),
+        "{sum2_input}"
+    );
+    assert!(
+        sum2_input.contains("[files touched: f1.txt"),
+        "{sum2_input}"
+    );
     // ...and the second splice re-pins everything, merging this process's
     // own reads (f4) with the carried list, even though this process never
     // touched f1-f3 itself.
     let spliced2 = messages_text(&reqs[7]);
-    assert!(spliced2.contains("[task: read the three files]"), "{spliced2}");
+    assert!(
+        spliced2.contains("[task: read the three files]"),
+        "{spliced2}"
+    );
     assert!(
         spliced2.contains("[files touched: f1.txt, f2.txt, f3.txt, f4.txt]"),
         "{spliced2}"
@@ -272,7 +342,11 @@ fn failed_summary_hard_drops_with_pins() {
         .args(["exec", "-p", "check the files"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let reqs: Vec<serde_json::Value> = server
         .recorded()
@@ -303,7 +377,10 @@ fn repl_bare_exit_words_leave_cleanly() {
     let work = tempfile::tempdir().unwrap();
     std::fs::write(
         config.path().join(".env"),
-        format!("NOOB_BASE_URL={}\nNOOB_MODEL=mockmodel\n", server.base_url()),
+        format!(
+            "NOOB_BASE_URL={}\nNOOB_MODEL=mockmodel\n",
+            server.base_url()
+        ),
     )
     .unwrap();
     for word in ["exit", "quit"] {

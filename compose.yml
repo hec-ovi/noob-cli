@@ -1,5 +1,5 @@
 # Agent:    ./dev.sh             (or: docker compose run --build --rm noob)
-# Resume:   ./dev.sh --session <id>
+# Resume:   ./dev.sh --resume <id>
 # One-shot: ./dev.sh exec "..."  (or: docker compose run --rm noob exec -p "...")
 #
 # The user mapping below only works if your shell EXPORTS UID and GID
@@ -28,8 +28,8 @@ services:
       # `NOOB_DOCK=0 ./dev.sh` (classic per-prompt editor),
       # `NOOB_RAW=0 ./dev.sh` (cooked reader).
       #
-      # Persistent-input dock: live input while streaming, message queue,
-      # double-ESC cancel. On by default.
+      # Persistent-input dock: live steering while streaming and double-ESC
+      # cancel. On by default.
       - NOOB_DOCK=${NOOB_DOCK:-1}
       # Raw-mode line editor (0 => plain cooked read_line). On by default.
       - NOOB_RAW=${NOOB_RAW:-1}
@@ -44,7 +44,7 @@ services:
       # Named display palette: matrix, ocean, amber, or violet.
       - NOOB_THEME=${NOOB_THEME:-matrix}
     volumes:
-      - ${WORKSPACE:-.}:/work
+      - ${NOOB_WORKSPACE:-./workspace}:/work
       - ${NOOB_CONFIG:-./config}:/config
     stdin_open: true
     tty: true

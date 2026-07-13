@@ -51,7 +51,10 @@ impl Scanner {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let handle = thread::spawn(move || run(&thread_stop, depth, ramp));
-        Scanner { stop, handle: Some(handle) }
+        Scanner {
+            stop,
+            handle: Some(handle),
+        }
     }
 
     /// Halt the sweep and wait for the thread to clear its line, so on return
@@ -144,8 +147,8 @@ fn cell(depth: ColorDepth, color: Rgb, bold: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::style::rgb;
+    use super::*;
 
     const RAMP: [Rgb; 6] = [
         rgb(60, 125, 85),
@@ -180,7 +183,10 @@ mod tests {
     fn depthless_frame_carries_no_escape_codes() {
         // At a depthless terminal the comet is bare squares, never a stray SGR.
         let f = frame(5, ColorDepth::None, &RAMP);
-        assert!(!f.contains('\x1b'), "depthless frame emitted an escape: {f:?}");
+        assert!(
+            !f.contains('\x1b'),
+            "depthless frame emitted an escape: {f:?}"
+        );
         assert!(f.contains(CELL), "depthless frame drew no square: {f:?}");
     }
 

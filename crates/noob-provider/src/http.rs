@@ -147,7 +147,10 @@ impl WatchdogCtl {
         let mut phase = self.inner.phase.lock().unwrap();
         match *phase {
             Phase::AwaitFirstByte { idle, .. } | Phase::Streaming { idle, .. } => {
-                *phase = Phase::Streaming { deadline: Instant::now() + idle, idle };
+                *phase = Phase::Streaming {
+                    deadline: Instant::now() + idle,
+                    idle,
+                };
             }
             // Header bytes never advance the phase; the caller flips to
             // AwaitFirstByte once ureq hands back the response head.
@@ -238,7 +241,10 @@ impl Transport for TickTransport {
                     stall_deadline = Instant::now() + WRITE_TIMEOUT;
                 }
                 Err(e)
-                    if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) =>
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
                 {
                     if Instant::now() >= stall_deadline {
                         // Record the phase so the error maps to a send-stall
@@ -375,7 +381,10 @@ impl Default for RetryPolicy {
 impl RetryPolicy {
     /// No retries at all (watchdog tests, doctor probes).
     pub fn none() -> Self {
-        RetryPolicy { delays: Vec::new(), jitter: false }
+        RetryPolicy {
+            delays: Vec::new(),
+            jitter: false,
+        }
     }
 }
 
@@ -395,7 +404,14 @@ fn retryable_error(e: &ProviderError) -> bool {
 
 /// `Retry-After: <seconds>` honored up to 60 s; the HTTP-date form is ignored.
 fn retry_after(resp: &ureq::http::Response<ureq::Body>) -> Option<Duration> {
-    let secs: u64 = resp.headers().get("retry-after")?.to_str().ok()?.trim().parse().ok()?;
+    let secs: u64 = resp
+        .headers()
+        .get("retry-after")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
     Some(Duration::from_secs(secs.min(60)))
 }
 
@@ -427,7 +443,9 @@ fn compat_field(body: &serde_json::Value, error_body: &str) -> Option<String> {
 /// crate for one sleep.
 fn jittered(max: Duration) -> Duration {
     use std::hash::{BuildHasher, Hasher};
-    let r = std::collections::hash_map::RandomState::new().build_hasher().finish();
+    let r = std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish();
     let ms = max.as_millis().max(1) as u64;
     Duration::from_millis(r % ms + 1)
 }
@@ -478,7 +496,13 @@ impl Client {
             })
             .chain(RustlsConnector::default());
         let agent = Agent::with_parts(config, connector, DefaultResolver::default());
-        Client { agent, ctl, timeouts, retry, compat_stripped: Mutex::new(HashSet::new()) }
+        Client {
+            agent,
+            ctl,
+            timeouts,
+            retry,
+            compat_stripped: Mutex::new(HashSet::new()),
+        }
     }
 
     /// Watchdog handle, for wiring an interrupt source other than SIGINT.
@@ -624,7 +648,11 @@ impl Client {
                 && let Some(&delay) = backoff.next()
             {
                 self.sleep_interruptible(wait.unwrap_or_else(|| {
-                    if self.retry.jitter { jittered(delay) } else { delay }
+                    if self.retry.jitter {
+                        jittered(delay)
+                    } else {
+                        delay
+                    }
                 }))?;
                 continue;
             }
@@ -818,11 +846,7 @@ pub fn probe(url: &str, timeout: Duration) -> bool {
 
 /// One-shot GET returning (status, body head). `noob doctor`'s reachability
 /// check; only ever called against the user's configured endpoint.
-pub fn get_status(
-    url: &str,
-    api_key: &str,
-    timeout: Duration,
-) -> Result<(u16, String), String> {
+pub fn get_status(url: &str, api_key: &str, timeout: Duration) -> Result<(u16, String), String> {
     let config = Config::builder()
         .http_status_as_error(false)
         .proxy(None)
@@ -916,9 +940,16 @@ mod tests {
         }
         // English prose containing a field name as a word must NOT strip:
         // a false strip is remembered for the whole client lifetime.
-        assert_eq!(compat_field(&body, "input must include at least one item"), None);
+        assert_eq!(
+            compat_field(&body, "input must include at least one item"),
+            None
+        );
         assert_eq!(compat_field(&body, "this response cannot be stored"), None);
-        assert_eq!(compat_field(&body, "unknown field: stream_options"), None, "unquoted");
+        assert_eq!(
+            compat_field(&body, "unknown field: stream_options"),
+            None,
+            "unquoted"
+        );
         // Named but never sent: nothing to strip.
         assert_eq!(compat_field(&body, "'include' is not supported"), None);
         // Core fields are never eligible even if the error quotes them.
@@ -929,7 +960,10 @@ mod tests {
     fn jitter_stays_in_range_and_is_nonzero() {
         for _ in 0..200 {
             let d = jittered(Duration::from_millis(100));
-            assert!(d > Duration::ZERO && d <= Duration::from_millis(100), "{d:?}");
+            assert!(
+                d > Duration::ZERO && d <= Duration::from_millis(100),
+                "{d:?}"
+            );
         }
     }
 }

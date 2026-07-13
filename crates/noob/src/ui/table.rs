@@ -684,8 +684,14 @@ mod tests {
         table.push_row("tabbed | a\tb").unwrap();
         let stripped = plain(&table.render(40, &Theme::matrix(), ColorDepth::None));
         let widths: Vec<usize> = stripped.lines().map(cell_width).collect();
-        assert!(widths.iter().all(|w| *w == widths[0]), "rows desynced: {widths:?}");
-        assert!(!stripped.contains('\t'), "tab must be sanitized out of cells");
+        assert!(
+            widths.iter().all(|w| *w == widths[0]),
+            "rows desynced: {widths:?}"
+        );
+        assert!(
+            !stripped.contains('\t'),
+            "tab must be sanitized out of cells"
+        );
     }
 
     #[test]

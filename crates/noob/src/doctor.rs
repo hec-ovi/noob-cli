@@ -106,24 +106,22 @@ fn check_endpoint(config_dir: &Path) -> Vec<Check> {
             checks.push(Check::Fail(format!("endpoint config: {msg}")));
             None
         }
-        Err(ProviderError::Config(_)) => {
-            match config::autodetect_base_url() {
-                Some(found) => {
-                    checks.push(Check::Ok(format!("endpoint autodetected: {found}")));
-                    ov.base_url = Some(found);
-                    noob_provider::resolve_endpoint(config_dir, &ov).ok()
-                }
-                None => {
-                    checks.push(Check::Fail(
-                        "no endpoint: NOOB_BASE_URL is unset and nothing answered the \
+        Err(ProviderError::Config(_)) => match config::autodetect_base_url(config_dir) {
+            Some(found) => {
+                checks.push(Check::Ok(format!("endpoint autodetected: {found}")));
+                ov.base_url = Some(found);
+                noob_provider::resolve_endpoint(config_dir, &ov).ok()
+            }
+            None => {
+                checks.push(Check::Fail(
+                    "no endpoint: NOOB_BASE_URL is unset and nothing answered the \
                          localhost probes (:8090 :8080 :11434 :1234 :8000); fix: start \
                          your model server or set NOOB_BASE_URL in the config .env"
-                            .to_string(),
-                    ));
-                    None
-                }
+                        .to_string(),
+                ));
+                None
             }
-        }
+        },
         Err(e) => {
             checks.push(Check::Fail(format!("endpoint config: {e}")));
             None
@@ -136,8 +134,11 @@ fn check_endpoint(config_dir: &Path) -> Vec<Check> {
         ApiStyle::Chat => "chat",
         ApiStyle::Responses => "responses",
     };
-    match noob_provider::http::get_status(&format!("{}/models", ep.base_url), &ep.api_key, REACH_TIMEOUT)
-    {
+    match noob_provider::http::get_status(
+        &format!("{}/models", ep.base_url),
+        &ep.api_key,
+        REACH_TIMEOUT,
+    ) {
         Ok((status, _)) if (200..300).contains(&status) => {
             checks.push(Check::Ok(format!(
                 "endpoint {} answers /models (HTTP {status}); model {:?}, style {style}",
@@ -183,7 +184,9 @@ fn check_mcp(workspace: &Path, config_dir: &Path) -> Vec<Check> {
     let global = config_dir.join("mcp.json");
     let project = workspace.join(".noob/mcp.json");
     if !global.is_file() && !project.is_file() {
-        checks.push(Check::Ok("no mcp.json (MCP tools stay unregistered)".to_string()));
+        checks.push(Check::Ok(
+            "no mcp.json (MCP tools stay unregistered)".to_string(),
+        ));
         return checks;
     }
     // Invalid JSON is a FAIL (the user wrote it wanting servers); per-entry

@@ -23,9 +23,7 @@ const MAX_TIMEOUT_S: u64 = 600;
 pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     match run_inner(ctx, args) {
         Ok(out) => out,
-        Err(msg) if msg.starts_with("command canceled by user") => {
-            ToolOutcome::canceled_with(msg)
-        }
+        Err(msg) if msg.starts_with("command canceled by user") => ToolOutcome::canceled_with(msg),
         Err(msg) => ToolOutcome::err(msg),
     }
 }
@@ -221,7 +219,11 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         && !ctx.bash_warned.swap(true, Ordering::SeqCst))
     .then(|| "no sandbox: commands run directly on your host".to_string());
     let code = status.and_then(|s| s.code()).unwrap_or(-1);
-    let summary = format!("bash {} ({:.1}s, exit {code})", brief(cmd), elapsed.as_secs_f32());
+    let summary = format!(
+        "bash {} ({:.1}s, exit {code})",
+        brief(cmd),
+        elapsed.as_secs_f32()
+    );
     let mut out = if code == 0 {
         if body.is_empty() {
             body = "(no output)".to_string();
@@ -256,13 +258,13 @@ mod tests {
     #[test]
     fn merged_output_in_order_and_exit_zero() {
         let (_t, ctx) = test_ctx();
-        let out = run(
-            &ctx,
-            &json!({"cmd": "echo one; echo two >&2; echo three"}),
-        );
+        let out = run(&ctx, &json!({"cmd": "echo one; echo two >&2; echo three"}));
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(out.content, "one\ntwo\nthree\n");
-        assert!(out.summary.starts_with("bash echo one; echo two >&2; echo three ("));
+        assert!(
+            out.summary
+                .starts_with("bash echo one; echo two >&2; echo three (")
+        );
         assert!(out.summary.ends_with("exit 0)"));
     }
 
@@ -288,11 +290,18 @@ mod tests {
         let (_t, ctx) = test_ctx();
         let started = std::time::Instant::now();
         // The sleep is a CHILD of bash; only a group kill reaches it.
-        let out = run(&ctx, &json!({"cmd": "echo early; sleep 30", "timeout_s": 1}));
+        let out = run(
+            &ctx,
+            &json!({"cmd": "echo early; sleep 30", "timeout_s": 1}),
+        );
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(out.is_error);
         assert!(out.content.contains("timed out after 1s and was killed"));
-        assert!(out.content.contains("early"), "partial output kept: {}", out.content);
+        assert!(
+            out.content.contains("early"),
+            "partial output kept: {}",
+            out.content
+        );
     }
 
     #[test]
@@ -327,7 +336,8 @@ mod tests {
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("started"));
         assert!(
-            out.content.contains("[background processes left by the command were killed"),
+            out.content
+                .contains("[background processes left by the command were killed"),
             "{}",
             out.content
         );
@@ -374,7 +384,10 @@ mod tests {
         let (_t, ctx) = test_ctx();
         // >64 KiB (default pipe capacity) written at once: hangs if the
         // parent waits before draining.
-        let out = run(&ctx, &json!({"cmd": "head -c 300000 /dev/zero | tr '\\0' 'x'"}));
+        let out = run(
+            &ctx,
+            &json!({"cmd": "head -c 300000 /dev/zero | tr '\\0' 'x'"}),
+        );
         assert!(!out.is_error);
         assert!(out.content.contains("xxx"));
     }

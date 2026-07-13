@@ -39,7 +39,11 @@ fn rig() -> Rig {
     let config = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     write_env(config.path(), &server.base_url());
-    Rig { server, config, work }
+    Rig {
+        server,
+        config,
+        work,
+    }
 }
 
 impl Rig {
@@ -93,27 +97,35 @@ fn ok(out: &std::process::Output) -> String {
 #[test]
 fn resolver_index_and_tool_registration() {
     let rig = rig();
-    rig.skill(".claude/skills", "greeting", "says hello politely", "# Greeting\n\nSay hi.\n");
+    rig.skill(
+        ".claude/skills",
+        "greeting",
+        "says hello politely",
+        "# Greeting\n\nSay hi.\n",
+    );
     rig.server.enqueue_stream_completion("noted");
 
     ok(&rig.run(&["exec", "-p", "hello"]));
 
     let reqs = rig.api_requests();
     let system = reqs[0]["messages"][0]["content"].as_str().unwrap();
-    assert!(system.contains("# Skills (resolver)"), "resolver section missing");
+    assert!(
+        system.contains("# Skills (resolver)"),
+        "resolver section missing"
+    );
     assert!(
         system.contains("Load a matching skill with the skill tool and follow it before acting"),
         "dispatcher instruction missing"
     );
     assert!(system.contains("- greeting: says hello politely"));
     let tools = reqs[0]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 11);
     assert!(tools.iter().any(|t| t["function"]["name"] == "skill"));
     rig.server.assert_clean();
 }
 
 /// No skills discovered: no resolver section, no skill tool; the tools
-/// array stays the 8 core specs plus task (the registered set is decided at
+/// array stays the 9 core specs plus subagent (the registered set is decided at
 /// start).
 #[test]
 fn no_skills_means_no_skill_tool_and_no_section() {
@@ -125,7 +137,7 @@ fn no_skills_means_no_skill_tool_and_no_section() {
     let reqs = rig.api_requests();
     let system = reqs[0]["messages"][0]["content"].as_str().unwrap();
     assert!(!system.contains("# Skills"));
-    assert_eq!(reqs[0]["tools"].as_array().unwrap().len(), 9);
+    assert_eq!(reqs[0]["tools"].as_array().unwrap().len(), 10);
     rig.server.assert_clean();
 }
 
@@ -161,9 +173,15 @@ fn skill_tool_returns_body_and_never_mutates_the_head() {
     // The system prompt did not change when the skill loaded, and neither
     // did the tools array: both are frozen for the session.
     assert_eq!(reqs[0]["messages"][0], reqs[1]["messages"][0]);
-    assert_eq!(reqs[0]["tools"], reqs[1]["tools"], "tools array drifted mid-session");
-    assert_eq!(reqs[0]["tools"].as_array().unwrap().len(), 10);
-    assert!(!reqs[1]["tools"].is_null(), "a real turn must carry the tools array");
+    assert_eq!(
+        reqs[0]["tools"], reqs[1]["tools"],
+        "tools array drifted mid-session"
+    );
+    assert_eq!(reqs[0]["tools"].as_array().unwrap().len(), 11);
+    assert!(
+        !reqs[1]["tools"].is_null(),
+        "a real turn must carry the tools array"
+    );
     rig.server.assert_clean();
 }
 
@@ -176,9 +194,19 @@ fn four_discovery_roots_and_first_hit_priority() {
     rig.skill(".claude/skills", "beta", "from claude", "b\n");
     rig.skill(".agents/skills", "gamma", "from agents", "c\n");
     let config_skills = rig.config.path().join("skills");
-    rig.skill(config_skills.to_str().unwrap(), "delta", "from config", "d\n");
+    rig.skill(
+        config_skills.to_str().unwrap(),
+        "delta",
+        "from config",
+        "d\n",
+    );
     // The same name in two roots: .noob wins over config.
-    rig.skill(config_skills.to_str().unwrap(), "alpha", "shadowed loser", "x\n");
+    rig.skill(
+        config_skills.to_str().unwrap(),
+        "alpha",
+        "shadowed loser",
+        "x\n",
+    );
     rig.server.enqueue_stream_completion("counted");
 
     ok(&rig.run(&["exec", "-p", "list your skills"]));
@@ -270,8 +298,16 @@ fn same_batch_symlink_into_skills_is_refused_at_execution() {
     // plan-time gate does not fire; the write tool re-checks at execution.
     rig.server.enqueue_stream_toolcalls(
         &[
-            ("t1", "bash", r#"{"cmd":"ln -s .claude/skills/greeting innocent"}"#),
-            ("t2", "write", r#"{"path":"innocent/INJECTED.md","content":"payload"}"#),
+            (
+                "t1",
+                "bash",
+                r#"{"cmd":"ln -s .claude/skills/greeting innocent"}"#,
+            ),
+            (
+                "t2",
+                "write",
+                r#"{"path":"innocent/INJECTED.md","content":"payload"}"#,
+            ),
         ],
         None,
     );
@@ -280,7 +316,10 @@ fn same_batch_symlink_into_skills_is_refused_at_execution() {
     ok(&rig.run(&["exec", "-p", "sneak a skill in"]));
 
     assert!(
-        !rig.work.path().join(".claude/skills/greeting/INJECTED.md").exists(),
+        !rig.work
+            .path()
+            .join(".claude/skills/greeting/INJECTED.md")
+            .exists(),
         "a same-batch symlink routed a write into the skills dir"
     );
     let reqs = rig.api_requests();
@@ -328,7 +367,12 @@ fn unknown_skill_error_lists_available() {
 #[test]
 fn skills_gate() {
     let rig = rig();
-    rig.skill(".claude/skills", "greeting", "says hello", "original body\n");
+    rig.skill(
+        ".claude/skills",
+        "greeting",
+        "says hello",
+        "original body\n",
+    );
     rig.server.enqueue_stream_toolcalls(
         &[(
             "g1",
@@ -341,11 +385,12 @@ fn skills_gate() {
 
     ok(&rig.run(&["exec", "-p", "improve your greeting skill"]));
 
-    let on_disk = std::fs::read_to_string(
-        rig.work.path().join(".claude/skills/greeting/SKILL.md"),
-    )
-    .unwrap();
-    assert!(on_disk.contains("original body"), "the skill file was modified");
+    let on_disk =
+        std::fs::read_to_string(rig.work.path().join(".claude/skills/greeting/SKILL.md")).unwrap();
+    assert!(
+        on_disk.contains("original body"),
+        "the skill file was modified"
+    );
     assert!(!on_disk.contains("injected"));
 
     let reqs = rig.api_requests();
@@ -378,7 +423,8 @@ fn compaction_relists_loaded_skills() {
         &[("c1", "skill", r#"{"name":"bigproc"}"#)],
         Some((3500, 100)),
     );
-    rig.server.enqueue_stream_completion("SUMMARY-OF-EVERYTHING");
+    rig.server
+        .enqueue_stream_completion("SUMMARY-OF-EVERYTHING");
     rig.server.enqueue_stream_completion("continuing");
     rig.server.expect_prefix_break();
     rig.server.expect_prefix_break();
@@ -404,7 +450,10 @@ fn compaction_relists_loaded_skills() {
         cont.contains("[loaded skills: bigproc]"),
         "re-listing missing from the spliced summary:\n{cont}"
     );
-    assert!(!cont.contains("procedure step 500"), "the body must be gone");
+    assert!(
+        !cont.contains("procedure step 500"),
+        "the body must be gone"
+    );
     rig.server.assert_clean();
 }
 
@@ -421,7 +470,13 @@ fn resume_then_compaction_still_relists_loaded_skills() {
     rig.server
         .enqueue_stream_toolcalls(&[("r1", "skill", r#"{"name":"bigproc"}"#)], None);
     rig.server.enqueue_stream_completion("loaded");
-    ok(&rig.run(&["exec", "--session", "s-skills", "-p", "load the bigproc skill"]));
+    ok(&rig.run(&[
+        "exec",
+        "--session",
+        "s-skills",
+        "-p",
+        "load the bigproc skill",
+    ]));
 
     // Run 2 (tiny ctx): the replayed transcript alone crosses 75%, so the
     // loop compacts before its first request.
@@ -472,7 +527,8 @@ fn hard_drop_compaction_relists_loaded_skills() {
             "message": "the request exceeds the available context size. try increasing it"
         }}),
     );
-    rig.server.enqueue_stream_completion("continuing after hard drop");
+    rig.server
+        .enqueue_stream_completion("continuing after hard drop");
     rig.server.expect_prefix_break();
     rig.server.expect_prefix_break();
 
@@ -509,7 +565,12 @@ fn skills_gate_grant_via_tty() {
     use std::os::fd::FromRawFd;
 
     let rig = rig();
-    rig.skill(".claude/skills", "greeting", "says hello", "original body\n");
+    rig.skill(
+        ".claude/skills",
+        "greeting",
+        "says hello",
+        "original body\n",
+    );
     // A NEW file inside the skills dir: the gate fires on the directory,
     // and check-and-set (which refuses unread overwrites) stays out of the
     // picture.
@@ -528,7 +589,13 @@ fn skills_gate_grant_via_tty() {
         let mut m: libc::c_int = 0;
         let mut s: libc::c_int = 0;
         assert_eq!(
-            libc::openpty(&mut m, &mut s, std::ptr::null_mut(), std::ptr::null(), std::ptr::null()),
+            libc::openpty(
+                &mut m,
+                &mut s,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null()
+            ),
             0,
             "openpty failed"
         );
@@ -587,10 +654,8 @@ fn skills_gate_grant_via_tty() {
     watchdog.join().ok();
     assert!(status.success(), "repl exit: {status:?};\n{seen}");
 
-    let on_disk = std::fs::read_to_string(
-        rig.work.path().join(".claude/skills/greeting/NOTES.md"),
-    )
-    .unwrap();
+    let on_disk =
+        std::fs::read_to_string(rig.work.path().join(".claude/skills/greeting/NOTES.md")).unwrap();
     assert!(
         on_disk.contains("improved body"),
         "granted confirmation did not let the write through:\n{seen}"

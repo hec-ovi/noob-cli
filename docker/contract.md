@@ -12,3 +12,5 @@ Invariants: the runtime image contains zero state, config, or keys; the agent
 works on the `/work` bind mount, never the container filesystem. The compose
 file and installed host launcher bind `/work` and `/config`. The builder selects
 the static musl target for Docker `amd64` or `arm64`.
+
+The checkout runner creates and mounts ignored `workspace/` by default. `NOOB_WORKSPACE` selects another host directory. The installed launcher mounts its current directory so it can operate on an existing project.

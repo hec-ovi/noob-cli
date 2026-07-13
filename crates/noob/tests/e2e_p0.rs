@@ -46,7 +46,10 @@ fn exec_round_trip_against_mock() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello from the mock");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "hello from the mock"
+    );
 
     let recorded = server.recorded();
     assert_eq!(recorded.len(), 1);
@@ -57,21 +60,24 @@ fn exec_round_trip_against_mock() {
     let body = req.json().unwrap();
     assert_eq!(body["model"], "mockmodel");
     // The request carries the frozen system head and the core tools
-    // (8 core: 7 file/shell tools + todo, plus task; no skills or MCP here).
+    // (9 core: 7 file/shell tools + context + todo, plus subagent).
     assert_eq!(body["messages"][0]["role"], "system");
     assert_eq!(body["messages"][1]["role"], "user");
     assert_eq!(body["messages"][1]["content"], "say hi");
-    assert_eq!(body["tools"].as_array().unwrap().len(), 9);
+    assert_eq!(body["tools"].as_array().unwrap().len(), 10);
     server.assert_clean();
 }
 
 #[test]
 fn missing_base_url_fails_with_remedy() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join(".env"), "# nothing configured\n").unwrap();
+    std::fs::write(
+        dir.path().join(".env"),
+        "# nothing configured\nNOOB_AUTODETECT=0\n",
+    )
+    .unwrap();
 
     let out = noob(dir.path())
-        .env("NOOB_AUTODETECT", "0")
         .args(["exec", "-p", "hi"])
         .output()
         .unwrap();
@@ -89,7 +95,10 @@ fn http_error_body_reaches_the_user() {
     let dir = tempfile::tempdir().unwrap();
     write_env(dir.path(), &server.base_url(), "", "m");
 
-    let out = noob(dir.path()).args(["exec", "-p", "hi"]).output().unwrap();
+    let out = noob(dir.path())
+        .args(["exec", "-p", "hi"])
+        .output()
+        .unwrap();
 
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -121,7 +130,10 @@ fn proxy_env_vars_are_ignored() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "proxy-free answer");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "proxy-free answer"
+    );
     server.assert_clean();
 }
 
@@ -137,7 +149,10 @@ fn flag_without_value_is_a_usage_error() {
         let out = noob(dir.path()).args(&args).output().unwrap();
         assert_eq!(out.status.code(), Some(2), "args: {args:?}");
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("needs a value"), "args: {args:?} stderr: {stderr}");
+        assert!(
+            stderr.contains("needs a value"),
+            "args: {args:?} stderr: {stderr}"
+        );
     }
 }
 
@@ -165,7 +180,11 @@ fn config_precedence_flag_env_file() {
         .args(["exec", "-p", "hi", "--model", "flag-model"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Process env beats file; the secret still comes from the file. A new
     // exec run is a new session (different model in the env block), so the
@@ -177,7 +196,11 @@ fn config_precedence_flag_env_file() {
         .args(["exec", "-p", "hi"])
         .output()
         .unwrap();
-    assert!(out2.status.success(), "stderr={}", String::from_utf8_lossy(&out2.stderr));
+    assert!(
+        out2.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
 
     let recorded = server.recorded();
     assert_eq!(recorded.len(), 2);
@@ -247,7 +270,12 @@ fn sigint_aborts_a_stalled_request() {
     // The graceful watchdog path prints its message; the hard second-Ctrl-C
     // _exit path prints nothing. Asserting the message pins the right path.
     let mut stderr = String::new();
-    child.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
     assert!(stderr.contains("interrupted"), "stderr: {stderr}");
     server.assert_clean();
 }

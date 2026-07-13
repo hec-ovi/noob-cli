@@ -91,7 +91,11 @@ pub fn sketch(schema: &Value) -> String {
     let mut parts: Vec<String> = Vec::new();
     for (key, prop) in properties {
         let ty = prop.get("type").and_then(Value::as_str).unwrap_or("any");
-        let opt = if required.contains(&key.as_str()) { "" } else { "?" };
+        let opt = if required.contains(&key.as_str()) {
+            ""
+        } else {
+            "?"
+        };
         parts.push(format!("{key}{opt}: {ty}"));
     }
     // Required first keeps the important arguments visible when a catalog
@@ -127,7 +131,10 @@ mod tests {
     fn reports_every_problem_at_once() {
         let err = validate(&echo_schema(), &json!({"count": "three"})).unwrap_err();
         assert!(err.contains("missing required \"text\""), "{err}");
-        assert!(err.contains("\"count\" must be a integer, got string"), "{err}");
+        assert!(
+            err.contains("\"count\" must be a integer, got string"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -143,7 +150,10 @@ mod tests {
         let schema = json!({"type": "object", "properties": {
             "i": {"type": "integer"}, "n": {"type": "number"}}});
         assert!(validate(&schema, &json!({"i": 3, "n": 3.5})).is_ok());
-        assert!(validate(&schema, &json!({"n": 3})).is_ok(), "an int is a number");
+        assert!(
+            validate(&schema, &json!({"n": 3})).is_ok(),
+            "an int is a number"
+        );
         let err = validate(&schema, &json!({"i": 3.5})).unwrap_err();
         assert!(err.contains("must be a integer"), "{err}");
     }
@@ -158,7 +168,10 @@ mod tests {
 
     #[test]
     fn sketch_marks_optionals_and_orders_required_first() {
-        assert_eq!(sketch(&echo_schema()), "(text: string, count?: integer, deep?: object)");
+        assert_eq!(
+            sketch(&echo_schema()),
+            "(text: string, count?: integer, deep?: object)"
+        );
         assert_eq!(sketch(&json!({"type": "object"})), "()");
         assert_eq!(
             sketch(&json!({"properties": {"q": {}}, "required": ["q"]})),

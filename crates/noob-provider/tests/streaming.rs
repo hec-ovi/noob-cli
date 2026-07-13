@@ -23,7 +23,11 @@ fn endpoint(server: &MockServer, style: ApiStyle) -> Endpoint {
 }
 
 fn user_turn(text: &str) -> TurnRequest {
-    TurnRequest { system: None, items: vec![Item::User(text.to_string())], tools: vec![] }
+    TurnRequest {
+        system: None,
+        items: vec![Item::User(text.to_string())],
+        tools: vec![],
+    }
 }
 
 fn fast_retry() -> RetryPolicy {
@@ -79,8 +83,16 @@ fn json_answer_to_streamed_request_is_parsed_not_fed_to_sse() {
 
     assert_eq!(turn.text, "plain json answer");
     // The guard path still produces the uniform event stream.
-    assert!(events.iter().any(|e| matches!(e, Event::Text(t) if t == "plain json answer")));
-    assert!(events.iter().any(|e| matches!(e, Event::Done(Finish::Stop))));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Text(t) if t == "plain json answer"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Done(Finish::Stop)))
+    );
     server.assert_clean();
 }
 
@@ -178,7 +190,11 @@ fn retry_after_header_wins_over_the_backoff_schedule() {
     .unwrap();
 
     assert_eq!(turn.text, "after the pause");
-    assert!(start.elapsed() >= Duration::from_millis(900), "took {:?}", start.elapsed());
+    assert!(
+        start.elapsed() >= Duration::from_millis(900),
+        "took {:?}",
+        start.elapsed()
+    );
     assert_eq!(server.recorded().len(), 2);
     server.assert_clean();
 }
@@ -221,7 +237,11 @@ fn no_retry_after_the_first_content_byte() {
         "expected a typed timeout, got {err:?}"
     );
     assert_eq!(text, "par", "partial output was delivered before the stall");
-    assert_eq!(server.recorded().len(), 1, "mid-stream death must not retry");
+    assert_eq!(
+        server.recorded().len(),
+        1,
+        "mid-stream death must not retry"
+    );
     server.assert_clean();
 }
 
@@ -230,8 +250,11 @@ fn no_retry_after_the_first_content_byte() {
 #[test]
 fn compat_400_strips_the_named_field_and_remembers() {
     let server = MockServer::start();
-    server.enqueue_json(400, json!({"error": {
-        "message": "Unknown parameter: 'stream_options'", "type": "invalid_request_error"}}));
+    server.enqueue_json(
+        400,
+        json!({"error": {
+        "message": "Unknown parameter: 'stream_options'", "type": "invalid_request_error"}}),
+    );
     server.enqueue_stream_completion("works without it");
     server.enqueue_stream_completion("second turn");
     let client = Client::new(Timeouts::default());
@@ -274,7 +297,10 @@ fn ordinary_400_is_not_retried() {
     )
     .unwrap_err();
 
-    assert!(matches!(err, ProviderError::Http { status: 400, .. }), "{err:?}");
+    assert!(
+        matches!(err, ProviderError::Http { status: 400, .. }),
+        "{err:?}"
+    );
     assert_eq!(server.recorded().len(), 1);
     server.assert_clean();
 }
@@ -311,7 +337,11 @@ fn interrupt_mid_stream_aborts_with_partial_output() {
 
     assert!(matches!(err, ProviderError::Interrupted), "{err:?}");
     assert_eq!(text, "begin");
-    assert!(start.elapsed() < Duration::from_millis(2600), "took {:?}", start.elapsed());
+    assert!(
+        start.elapsed() < Duration::from_millis(2600),
+        "took {:?}",
+        start.elapsed()
+    );
     server.assert_clean();
 }
 
@@ -335,7 +365,11 @@ fn chat_stream_reuses_the_connection_across_turns() {
     assert_eq!(t1.text, "turn one");
     assert_eq!(t2.text, "turn two");
     assert_eq!(server.recorded().len(), 2);
-    assert_eq!(server.connection_count(), 1, "keep-alive must reuse the connection");
+    assert_eq!(
+        server.connection_count(),
+        1,
+        "keep-alive must reuse the connection"
+    );
     server.assert_clean();
 }
 
@@ -372,10 +406,17 @@ fn idle_clock_engages_when_body_arrives_with_the_headers() {
     .unwrap_err();
 
     assert!(
-        matches!(err, ProviderError::Timeout(noob_provider::types::TimeoutKind::Idle)),
+        matches!(
+            err,
+            ProviderError::Timeout(noob_provider::types::TimeoutKind::Idle)
+        ),
         "expected Idle, got {err:?}"
     );
-    assert!(start.elapsed() < Duration::from_secs(4), "took {:?}", start.elapsed());
+    assert!(
+        start.elapsed() < Duration::from_secs(4),
+        "took {:?}",
+        start.elapsed()
+    );
     server.assert_clean();
 }
 
@@ -403,7 +444,10 @@ fn responses_round_trip_with_tool_result_replay() {
                 tool_calls: vec![],
                 raw_items: vec![raw_call.clone()],
             },
-            Item::ToolResult { call_id: "call_1".to_string(), content: "hi".to_string() },
+            Item::ToolResult {
+                call_id: "call_1".to_string(),
+                content: "hi".to_string(),
+            },
         ],
         tools: vec![ToolSpec {
             name: "read".to_string(),
@@ -426,7 +470,10 @@ fn responses_round_trip_with_tool_result_replay() {
     let body = server.recorded()[0].json().unwrap();
     assert_eq!(body["store"], false);
     assert_eq!(body["stream"], true);
-    assert_eq!(body["input"][1], raw_call, "captured wire item replayed verbatim");
+    assert_eq!(
+        body["input"][1], raw_call,
+        "captured wire item replayed verbatim"
+    );
     assert_eq!(body["input"][2]["type"], "function_call_output");
     server.assert_clean();
 }
@@ -442,7 +489,10 @@ fn hot_reload_env() {
     let env_path = dir.path().join(".env");
     std::fs::write(
         &env_path,
-        format!("NOOB_BASE_URL={}\nNOOB_API_KEY=key-one\n", server.base_url()),
+        format!(
+            "NOOB_BASE_URL={}\nNOOB_API_KEY=key-one\n",
+            server.base_url()
+        ),
     )
     .unwrap();
     let client = Client::new(Timeouts::default());
@@ -451,7 +501,10 @@ fn hot_reload_env() {
     run_turn(&client, dir.path(), &ov, &user_turn("go"), &mut |_| {}).unwrap();
     std::fs::write(
         &env_path,
-        format!("NOOB_BASE_URL={}\nNOOB_API_KEY=key-two\n", server.base_url()),
+        format!(
+            "NOOB_BASE_URL={}\nNOOB_API_KEY=key-two\n",
+            server.base_url()
+        ),
     )
     .unwrap();
     run_turn(&client, dir.path(), &ov, &user_turn("go"), &mut |_| {}).unwrap();
@@ -481,9 +534,20 @@ fn no_output_cap() {
         parameters: json!({"type": "object",
             "properties": {"command": {"type": "string"}}}),
     }];
-    chat::stream(&client, &endpoint(&server, ApiStyle::Chat), &req, &mut |_| {}).unwrap();
-    responses::stream(&client, &endpoint(&server, ApiStyle::Responses), &req, &mut |_| {})
-        .unwrap();
+    chat::stream(
+        &client,
+        &endpoint(&server, ApiStyle::Chat),
+        &req,
+        &mut |_| {},
+    )
+    .unwrap();
+    responses::stream(
+        &client,
+        &endpoint(&server, ApiStyle::Responses),
+        &req,
+        &mut |_| {},
+    )
+    .unwrap();
 
     // The mock's automatic scan is the real teeth; make the intent explicit
     // here too by scanning the recorded bodies ourselves.

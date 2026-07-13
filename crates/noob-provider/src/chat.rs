@@ -115,9 +115,15 @@ fn build_messages(req: TurnRequestRef<'_>) -> Vec<Value> {
     for item in req.items {
         match item {
             Item::User(text) => messages.push(json!({"role": "user", "content": text})),
-            Item::Assistant { text, tool_calls, .. } => {
+            Item::Assistant {
+                text, tool_calls, ..
+            } => {
                 let mut msg = json!({"role": "assistant"});
-                msg["content"] = if text.is_empty() { Value::Null } else { json!(text) };
+                msg["content"] = if text.is_empty() {
+                    Value::Null
+                } else {
+                    json!(text)
+                };
                 if !tool_calls.is_empty() {
                     msg["tool_calls"] = Value::Array(
                         tool_calls
@@ -149,8 +155,15 @@ fn replay_turn(turn: &Turn, on: &mut dyn FnMut(Event)) {
         on(Event::Text(turn.text.clone()));
     }
     for (i, c) in turn.tool_calls.iter().enumerate() {
-        on(Event::ToolCallStart { index: i as u32, id: c.id.clone(), name: c.name.clone() });
-        on(Event::ToolArgsDelta { index: i as u32, delta: c.arguments.clone() });
+        on(Event::ToolCallStart {
+            index: i as u32,
+            id: c.id.clone(),
+            name: c.name.clone(),
+        });
+        on(Event::ToolArgsDelta {
+            index: i as u32,
+            delta: c.arguments.clone(),
+        });
     }
     if let Some(u) = turn.usage {
         on(Event::Usage(u));
@@ -220,7 +233,10 @@ pub(crate) fn parse_completion(bytes: &[u8]) -> Result<Turn, ProviderError> {
     let usage = v.get("usage").and_then(|u| {
         Some(Usage {
             prompt_tokens: u.get("prompt_tokens")?.as_u64().unwrap_or(0),
-            completion_tokens: u.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0),
+            completion_tokens: u
+                .get("completion_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
             cached_prompt_tokens: u
                 .get("prompt_tokens_details")
                 .and_then(|d| d.get("cached_tokens"))
@@ -229,7 +245,14 @@ pub(crate) fn parse_completion(bytes: &[u8]) -> Result<Turn, ProviderError> {
         })
     });
 
-    Ok(Turn { text, reasoning, tool_calls, usage, finish, raw_items: Vec::new() })
+    Ok(Turn {
+        text,
+        reasoning,
+        tool_calls,
+        usage,
+        finish,
+        raw_items: Vec::new(),
+    })
 }
 
 #[cfg(test)]
@@ -255,7 +278,11 @@ mod tests {
             "finish_reason":"tool_calls"}]}"#;
         let turn = parse_completion(body.as_bytes()).unwrap();
         assert_eq!(turn.finish, Finish::ToolCalls);
-        assert!(turn.tool_calls[0].id.starts_with("call_"), "{}", turn.tool_calls[0].id);
+        assert!(
+            turn.tool_calls[0].id.starts_with("call_"),
+            "{}",
+            turn.tool_calls[0].id
+        );
         assert_eq!(turn.tool_calls[0].name, "read");
         let args: serde_json::Value = serde_json::from_str(&turn.tool_calls[0].arguments).unwrap();
         assert_eq!(args["path"], "a.txt");
@@ -293,7 +320,10 @@ mod tests {
                     }],
                     raw_items: vec![],
                 },
-                Item::ToolResult { call_id: "c1".into(), content: "data".into() },
+                Item::ToolResult {
+                    call_id: "c1".into(),
+                    content: "data".into(),
+                },
             ],
             tools: vec![],
         };
@@ -303,7 +333,10 @@ mod tests {
         assert_eq!(messages[2]["role"], "assistant");
         assert_eq!(messages[2]["content"], serde_json::Value::Null);
         assert_eq!(messages[2]["tool_calls"][0]["id"], "c1");
-        assert_eq!(messages[2]["tool_calls"][0]["function"]["arguments"], "{\"path\":\"a\"}");
+        assert_eq!(
+            messages[2]["tool_calls"][0]["function"]["arguments"],
+            "{\"path\":\"a\"}"
+        );
         assert_eq!(
             messages[3],
             json!({"role": "tool", "tool_call_id": "c1", "content": "data"})

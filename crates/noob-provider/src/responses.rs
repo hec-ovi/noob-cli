@@ -118,7 +118,11 @@ fn build_input(req: TurnRequestRef<'_>) -> Vec<Value> {
             Item::User(text) => {
                 input.push(json!({"type": "message", "role": "user", "content": text}));
             }
-            Item::Assistant { text, tool_calls, raw_items } => {
+            Item::Assistant {
+                text,
+                tool_calls,
+                raw_items,
+            } => {
                 if !raw_items.is_empty() {
                     // Verbatim replay preserves reasoning items and byte
                     // identity (the append-only prefix property).
@@ -164,7 +168,9 @@ impl State {
     fn on_event(&mut self, kind: &str, payload: &Value, on: &mut dyn FnMut(Event)) {
         match kind {
             "response.output_item.added" => {
-                let Some(item) = payload.get("item") else { return };
+                let Some(item) = payload.get("item") else {
+                    return;
+                };
                 if item.get("type").and_then(Value::as_str) == Some("function_call") {
                     let item_id = item
                         .get("id")
@@ -198,10 +204,16 @@ impl State {
                 }
             }
             "response.function_call_arguments.delta" => {
-                let delta = payload.get("delta").and_then(Value::as_str).unwrap_or_default();
+                let delta = payload
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 if let Some(pos) = self.call_pos(payload) {
                     self.calls[pos].1.arguments.push_str(delta);
-                    on(Event::ToolArgsDelta { index: pos as u32, delta: delta.to_string() });
+                    on(Event::ToolArgsDelta {
+                        index: pos as u32,
+                        delta: delta.to_string(),
+                    });
                 }
             }
             "response.function_call_arguments.done" => {
@@ -213,21 +225,29 @@ impl State {
                 }
             }
             "response.output_text.delta" => {
-                let delta = payload.get("delta").and_then(Value::as_str).unwrap_or_default();
+                let delta = payload
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 if !delta.is_empty() {
                     self.text.push_str(delta);
                     on(Event::Text(delta.to_string()));
                 }
             }
             "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
-                let delta = payload.get("delta").and_then(Value::as_str).unwrap_or_default();
+                let delta = payload
+                    .get("delta")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 if !delta.is_empty() {
                     self.reasoning.push_str(delta);
                     on(Event::Reasoning(delta.to_string()));
                 }
             }
             "response.output_item.done" => {
-                let Some(item) = payload.get("item") else { return };
+                let Some(item) = payload.get("item") else {
+                    return;
+                };
                 if !self.raw_from_completed {
                     self.raw_items.push(item.clone());
                 }
@@ -244,7 +264,9 @@ impl State {
                 }
             }
             "response.completed" => {
-                let Some(response) = payload.get("response") else { return };
+                let Some(response) = payload.get("response") else {
+                    return;
+                };
                 self.on_completed_response(response, on);
             }
             "response.failed" => {
@@ -298,8 +320,7 @@ impl State {
             for item in output {
                 match item.get("type").and_then(Value::as_str).unwrap_or("") {
                     "function_call" => {
-                        let item_id =
-                            item.get("id").and_then(Value::as_str).unwrap_or_default();
+                        let item_id = item.get("id").and_then(Value::as_str).unwrap_or_default();
                         let known = self.calls.iter().any(|(iid, _)| iid == item_id);
                         if !known {
                             // Whole call only in the final response object.
@@ -309,9 +330,7 @@ impl State {
                                     .and_then(Value::as_str)
                                     .filter(|s| !s.is_empty())
                                     .map(str::to_string)
-                                    .unwrap_or_else(|| {
-                                        format!("call_resp_{}", self.calls.len())
-                                    }),
+                                    .unwrap_or_else(|| format!("call_resp_{}", self.calls.len())),
                                 name: item
                                     .get("name")
                                     .and_then(Value::as_str)
@@ -438,7 +457,11 @@ impl State {
         on(Event::Done(finish.clone()));
         Turn {
             text: self.text,
-            reasoning: if self.reasoning.is_empty() { None } else { Some(self.reasoning) },
+            reasoning: if self.reasoning.is_empty() {
+                None
+            } else {
+                Some(self.reasoning)
+            },
             tool_calls,
             usage: self.usage,
             finish,
@@ -507,8 +530,14 @@ mod tests {
     #[test]
     fn text_stream_and_usage() {
         let (turn, _) = drive(&[
-            ("response.output_text.delta", json!({"item_id": "m1", "delta": "hel"})),
-            ("response.output_text.delta", json!({"item_id": "m1", "delta": "lo"})),
+            (
+                "response.output_text.delta",
+                json!({"item_id": "m1", "delta": "hel"}),
+            ),
+            (
+                "response.output_text.delta",
+                json!({"item_id": "m1", "delta": "lo"}),
+            ),
             (
                 "response.completed",
                 json!({"response": {"output": [{"id": "m1", "type": "message",
@@ -608,7 +637,11 @@ mod tests {
                 json!({"item_id": "fc_1", "delta": "{\"path\":\"/wo"}),
             ),
         ]);
-        assert!(matches!(turn.finish, Finish::Error(_)), "finish: {:?}", turn.finish);
+        assert!(
+            matches!(turn.finish, Finish::Error(_)),
+            "finish: {:?}",
+            turn.finish
+        );
 
         // A lenient server that stops after COMPLETE calls (arguments
         // parse) but never sends response.completed is tolerated.
@@ -644,9 +677,15 @@ mod tests {
         assert_eq!(body["store"], false);
         assert_eq!(body["stream"], true);
 
-        let local = Endpoint { base_url: "http://localhost:8090/v1".into(), ..openai };
+        let local = Endpoint {
+            base_url: "http://localhost:8090/v1".into(),
+            ..openai
+        };
         let body = build_body(&local, req.borrowed());
-        assert!(body.get("include").is_none(), "include only for api.openai.com");
+        assert!(
+            body.get("include").is_none(),
+            "include only for api.openai.com"
+        );
     }
 
     #[test]
@@ -718,12 +757,18 @@ mod tests {
                     }],
                     raw_items: raw.clone(),
                 },
-                Item::ToolResult { call_id: "c1".into(), content: "out".into() },
+                Item::ToolResult {
+                    call_id: "c1".into(),
+                    content: "out".into(),
+                },
             ],
             tools: vec![],
         };
         let input = build_input(req.borrowed());
-        assert_eq!(input[0], json!({"type": "message", "role": "user", "content": "go"}));
+        assert_eq!(
+            input[0],
+            json!({"type": "message", "role": "user", "content": "go"})
+        );
         assert_eq!(input[1], raw[0]);
         assert_eq!(input[2], raw[1]);
         assert_eq!(

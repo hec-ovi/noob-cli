@@ -3,9 +3,28 @@
 //! lazy inside noob-provider so they never enter the process environment.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use std::io::Write;
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 use crate::tools::guard::Sandbox;
+
+/// User-facing `/config` names. Secrets are deliberately absent: putting an
+/// API key in terminal history is not an acceptable configuration flow.
+pub const EDITABLE: &[(&str, &str)] = &[
+    ("base-url", "NOOB_BASE_URL"),
+    ("model", "NOOB_MODEL"),
+    ("api-style", "NOOB_API_STYLE"),
+    ("ctx", "NOOB_CTX"),
+    ("autodetect", "NOOB_AUTODETECT"),
+    ("task-concurrency", "NOOB_TASK_CONCURRENCY"),
+    ("task-max-turns", "NOOB_TASK_MAX_TURNS"),
+    ("task-wall-clock", "NOOB_TASK_WALL_CLOCK_S"),
+];
 
 /// Resolution order: NOOB_CONFIG_DIR > /config (the container bind mount) >
 /// ~/.config/noob outside Docker. The directory does not have to exist yet;
@@ -42,6 +61,158 @@ pub fn setting(config_dir: &Path, key: &str) -> Option<String> {
         .get(key)
         .cloned()
         .filter(|v| !v.is_empty())
+}
+
+pub fn editable_key(name: &str) -> Option<&'static str> {
+    EDITABLE
+        .iter()
+        .find(|(alias, _)| *alias == name)
+        .map(|(_, key)| *key)
+}
+
+/// Validate and atomically update one non-secret `.env` setting. Existing
+/// comments and unrelated settings stay in place; an active value is replaced
+/// in place, while a new value is appended. Rewrites normalize line endings.
+pub fn write_setting(
+    config_dir: &Path,
+    name: &str,
+    value: Option<&str>,
+) -> Result<&'static str, String> {
+    let key = editable_key(name).ok_or_else(|| {
+        format!(
+            "unknown setting {name:?}; available: {}",
+            EDITABLE
+                .iter()
+                .map(|(alias, _)| *alias)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    if let Some(value) = value {
+        if value.contains('\n') || value.contains('\r') {
+            return Err("the value cannot contain a newline".to_string());
+        }
+        validate_setting(name, value)?;
+    }
+
+    std::fs::create_dir_all(config_dir).map_err(|e| {
+        format!(
+            "cannot create config directory {}: {e}",
+            config_dir.display()
+        )
+    })?;
+    let path = config_dir.join(".env");
+    let old = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    let mut found = false;
+    let mut lines = Vec::new();
+    for line in old.lines() {
+        let active = line
+            .trim_start()
+            .strip_prefix("export ")
+            .unwrap_or_else(|| line.trim_start());
+        if active
+            .strip_prefix(key)
+            .is_some_and(|tail| tail.starts_with('='))
+        {
+            if !found {
+                if let Some(value) = value {
+                    lines.push(format!("{key}={value}"));
+                }
+                found = true;
+            }
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if !found && let Some(value) = value {
+        lines.push(format!("{key}={value}"));
+    }
+    let mut next = lines.join("\n");
+    if !next.is_empty() {
+        next.push('\n');
+    }
+    let existing_permissions = std::fs::symlink_metadata(&path)
+        .ok()
+        .filter(|metadata| metadata.file_type().is_file())
+        .map(|metadata| metadata.permissions());
+    let (tmp, mut file) = open_config_temp(config_dir)
+        .map_err(|e| format!("cannot create a temporary config file: {e}"))?;
+    let replace = (|| -> std::io::Result<()> {
+        file.write_all(next.as_bytes())?;
+        if let Some(permissions) = existing_permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, &path)
+    })();
+    if let Err(error) = replace {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("cannot replace {}: {error}", path.display()));
+    }
+    Ok(key)
+}
+
+fn create_private_temp(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options.open(path)
+}
+
+fn open_config_temp(config_dir: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    static TMP_SERIAL: AtomicU64 = AtomicU64::new(1);
+    for _ in 0..32 {
+        let serial = TMP_SERIAL.fetch_add(1, Ordering::Relaxed);
+        let path = config_dir.join(format!(".env.tmp-{}-{serial}", std::process::id()));
+        match create_private_temp(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "too many stale .env temporary files",
+    ))
+}
+
+fn validate_setting(name: &str, value: &str) -> Result<(), String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("the value is empty; use /config unset <name> instead".to_string());
+    }
+    let range = |min: u64, max: u64| {
+        value
+            .parse::<u64>()
+            .ok()
+            .filter(|n| (min..=max).contains(n))
+            .map(|_| ())
+            .ok_or_else(|| format!("{name} must be an integer from {min} to {max}"))
+    };
+    match name {
+        "api-style" if !matches!(value, "chat" | "responses") => {
+            Err("api-style must be chat or responses".to_string())
+        }
+        "ctx" => range(4_096, u64::MAX),
+        "task-concurrency" => range(1, 16),
+        "task-max-turns" => range(1, 50),
+        "task-wall-clock" => range(1, 3_600),
+        "autodetect"
+            if !matches!(
+                value.to_ascii_lowercase().as_str(),
+                "0" | "1" | "true" | "false" | "on" | "off" | "yes" | "no"
+            ) =>
+        {
+            Err("autodetect must be on/off, true/false, yes/no, or 1/0".to_string())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// NOOB_SKILL_PATHS: extra resolver/dispatcher skill directories to index, on
@@ -133,22 +304,24 @@ pub fn detect_sandbox(config_dir: &Path, yolo: bool) -> (Sandbox, String) {
 /// The zero-friction path: when no base URL is configured, probe the usual
 /// localhost ports with a short timeout. Loopback only, only when
 /// unconfigured, never a remote call.
-pub fn autodetect_base_url() -> Option<String> {
+pub fn autodetect_base_url(config_dir: &Path) -> Option<String> {
     // An explicit off switch is useful for deterministic automation and for
     // hosts where another user's local model must not be selected. Normal
     // interactive behavior remains zero-configuration.
-    if std::env::var("NOOB_AUTODETECT")
-        .ok()
-        .is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
-    {
+    if setting(config_dir, "NOOB_AUTODETECT").is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        )
+    }) {
         return None;
     }
     let candidates = [
-        "http://localhost:8090/v1", // llama.cpp (this project's default)
-        "http://localhost:8080/v1", // llama.cpp default port
+        "http://localhost:8090/v1",  // llama.cpp (this project's default)
+        "http://localhost:8080/v1",  // llama.cpp default port
         "http://localhost:11434/v1", // Ollama
-        "http://localhost:1234/v1", // LM Studio
-        "http://localhost:8000/v1", // vLLM
+        "http://localhost:1234/v1",  // LM Studio
+        "http://localhost:8000/v1",  // vLLM
     ];
     first_responding(&candidates)
 }
@@ -181,6 +354,109 @@ mod tests {
     }
 
     #[test]
+    fn editable_settings_preserve_comments_replace_and_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".env"),
+            "# keep this\nNOOB_MODEL=old\nNOOB_CTX=8192\n",
+        )
+        .unwrap();
+        assert_eq!(
+            write_setting(tmp.path(), "model", Some("new-model")).unwrap(),
+            "NOOB_MODEL"
+        );
+        write_setting(tmp.path(), "ctx", None).unwrap();
+        write_setting(tmp.path(), "task-concurrency", Some("8")).unwrap();
+        let got = std::fs::read_to_string(tmp.path().join(".env")).unwrap();
+        assert_eq!(
+            got,
+            "# keep this\nNOOB_MODEL=new-model\nNOOB_TASK_CONCURRENCY=8\n"
+        );
+    }
+
+    #[test]
+    fn editable_settings_reject_secrets_unknown_names_and_invalid_ranges() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            write_setting(tmp.path(), "api-key", Some("secret"))
+                .unwrap_err()
+                .contains("unknown")
+        );
+        assert!(
+            write_setting(tmp.path(), "ctx", Some("100"))
+                .unwrap_err()
+                .contains("4096")
+        );
+        assert!(
+            write_setting(tmp.path(), "task-concurrency", Some("17"))
+                .unwrap_err()
+                .contains("16")
+        );
+        assert!(
+            write_setting(tmp.path(), "api-style", Some("magic"))
+                .unwrap_err()
+                .contains("chat")
+        );
+        assert!(!tmp.path().join(".env").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn editable_settings_preserve_mode_and_create_private_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let existing = tempfile::tempdir().unwrap();
+        let existing_path = existing.path().join(".env");
+        std::fs::write(&existing_path, "NOOB_MODEL=old\n").unwrap();
+        std::fs::set_permissions(&existing_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        write_setting(existing.path(), "model", Some("new")).unwrap();
+        assert_eq!(
+            std::fs::metadata(&existing_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640
+        );
+
+        let fresh = tempfile::tempdir().unwrap();
+        write_setting(fresh.path(), "model", Some("new")).unwrap();
+        assert_eq!(
+            std::fs::metadata(fresh.path().join(".env"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_temp_creation_never_follows_a_precreated_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        let link = tmp.path().join(".env.tmp-hostile");
+        std::fs::write(&target, "secret stays intact").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let error = create_private_temp(&link).expect_err("create_new must reject the symlink");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(target).unwrap(),
+            "secret stays intact"
+        );
+    }
+
+    #[test]
+    fn editable_settings_reject_newline_injection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let error = write_setting(tmp.path(), "model", Some("safe\nNOOB_CTX=4096"))
+            .expect_err("newlines must not create a second setting");
+        assert!(error.contains("newline"));
+        assert!(!tmp.path().join(".env").exists());
+    }
+
+    #[test]
     fn skill_paths_split_on_colon_and_resolve_against_workspace() {
         let cfg = tempfile::tempdir().unwrap();
         let ws = tempfile::tempdir().unwrap();
@@ -203,7 +479,10 @@ mod tests {
         );
         // Empty and whitespace-only entries are ignored.
         std::fs::write(cfg.path().join(".env"), "NOOB_SKILL_PATHS=: cli : :\n").unwrap();
-        assert_eq!(skill_paths(cfg.path(), ws.path()), vec![ws.path().join("cli")]);
+        assert_eq!(
+            skill_paths(cfg.path(), ws.path()),
+            vec![ws.path().join("cli")]
+        );
     }
 
     #[test]

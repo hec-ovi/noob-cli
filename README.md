@@ -6,7 +6,7 @@ The release binary is under 4 MB with 40 runtime crates. There is no async runti
 
 ## Install
 
-The host needs Linux, Bash, and Docker Engine. amd64 and arm64 are supported.
+The host needs Linux, Bash, Git, and a running Docker Engine available to your user. amd64 and arm64 are supported. Development from the checkout also needs the Docker Compose plugin. The first build needs network access to pull the Rust and Alpine images, Alpine runtime packages, and the pinned websearch package.
 
 ```bash
 git clone https://github.com/hec-ovi/noob-cli.git
@@ -23,15 +23,25 @@ cd /path/to/project
 noob
 ```
 
-The installed command mounts the current directory at `/work`, mounts `${XDG_CONFIG_HOME:-$HOME/.config}/noob` at `/config`, uses the caller's UID and GID, and removes the container when the command exits.
+The installed command mounts the directory where you run it at `/work`. For disposable work, keep it separate from a source checkout:
+
+```bash
+mkdir -p ~/noob-workspace
+cd ~/noob-workspace
+noob
+```
+
+It also mounts `${XDG_CONFIG_HOME:-$HOME/.config}/noob` at `/config`, uses the caller's UID and GID, and removes the container when the command exits.
 
 Resume a saved session:
 
 ```bash
-noob --resume <session>
+noob sessions
+noob --resume latest
+# or: noob --resume <session-id>
 ```
 
-`--resume` is the canonical recovery flag; `--restore` and `--session` are aliases. On an interactive resume noob redisplays the prior conversation, and resuming an unknown id prints `no saved session <id>; starting fresh`. The exit line prints the session ID and the `noob --resume <id>` command that reopens it.
+`noob sessions` lists saved sessions newest first. `--resume latest` selects the newest one without copying its ID. `--resume` is the canonical recovery flag; `--restore` and `--session` are aliases. On an interactive resume noob redisplays the prior conversation, and resuming an unknown id prints `no saved session <id>; starting fresh`. The exit line prints the session ID and the exact command that reopens it.
 
 Installer options:
 
@@ -43,13 +53,15 @@ Installer options:
 
 ## Run from the checkout
 
-For development, or without installing the host command:
+For development, or without installing the host command, the default agent mount is the ignored `workspace/` directory in this checkout:
 
 ```bash
 ./dev.sh
-WORKSPACE=/absolute/path/to/project ./dev.sh
-./dev.sh exec "inspect the project and run its tests"
+NOOB_WORKSPACE=/absolute/path/to/project ./dev.sh
+NOOB_WORKSPACE="$PWD" ./dev.sh exec "inspect the project and run its tests"
 ```
+
+`./dev.sh` creates the default `workspace/` directory before mounting it at `/work`, so generated projects do not land in the noob-cli source tree.
 
 With no configured base URL, noob probes supported localhost ports. To pin an endpoint, copy and edit the example:
 
@@ -62,6 +74,7 @@ cp config/.env.example config/.env
 ```text
 noob [--model <name>] [--base-url <url>] [--resume <id>] [--plan] [--verbose] [--yolo]
 noob exec -p "<prompt>" [--json] [--resume <id>] [--plan] [--verbose] [--model <name>] [--base-url <url>] [--yolo]
+noob sessions
 noob doctor
 noob --version
 ```
@@ -71,8 +84,13 @@ Interactive commands:
 | Command | Action |
 |---|---|
 | `/plan` | Enter read-only plan mode |
+| `/clear-plan` | Redact prior plan payloads from the active context |
 | `/go` | Approve the plan and restore the full tool set |
 | `/status` | Show endpoint, usage, session, skills, and MCP state |
+| `/sessions` | List saved sessions newest first |
+| `/agents` | List background sub-agents |
+| `/agents cancel <agent-N\|all>` | Cancel and reap detached work |
+| `/config` | Show, set, or unset non-secret `.env` settings |
 | `/compact` | Compact the current session |
 | `/skills` | List skills |
 | `/skills add <path-or-git-url>` | Install and reload one skill |
@@ -80,20 +98,21 @@ Interactive commands:
 | `/skills reload` | Run discovery again |
 | `/quit`, `exit`, or `quit` | Leave the REPL |
 
-During a turn the input stays live: typing edits the next message, and the dock keeps the plan, agents, and queue visible while output scrolls above them. The dock up close covers queueing and cancellation.
+During a turn the input stays live: typing edits the next message, and Enter steers immediately by stopping the current parent turn and dispatching the accepted message. The dock keeps plan and agent status visible while output scrolls above it.
 
 ## Features
 
-- Eight core tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, and `todo`.
+- Nine core tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `context`, and `plan`.
 - Conditional SKILL.md, MCP, and self-spawned child-agent tools.
 - Parallel read-only calls with sequential mutation barriers and actual lifecycle timing.
-- A live agents panel for `subagent` fan-out: one checklist of the parallel sub-agents with running or done status, a one-line result each, and the concurrency cap (`NOOB_TASK_CONCURRENCY`).
+- Detached sub-agents in the interactive dock, including `tools: "all"` coding and web-search jobs. The original call receives a running acknowledgment, then one final report enters context. Tab shows bounded live child activity and `/agents` manages cancellation.
+- A cross-process workspace lease around each individual child `write`, `edit`, or `bash` call. Leased calls do not overlap, while inference, file inspection, and MCP calls remain concurrent. A child waits for the lease for a bounded time; a parent mutation reports the active conflict promptly instead of blocking the conversation.
 - Read-before-write stamps, atomic writes, deterministic edit fallbacks, and ambiguity rejection.
-- JSONL sessions, `--resume` with on-screen replay of the prior conversation, context compaction, cache-prefix checks, and dangling-call repair.
+- JSONL sessions, newest-first discovery, `--resume latest`, on-screen replay, context compaction, cache-prefix checks, and repair of dangling calls or interrupted background jobs.
 - Read-only plan mode through `/plan`, followed by `/go`.
 - Lazy MCP over stdio and Streamable HTTP. Server schemas enter context only after connection.
 - Runtime skill discovery and atomic `/skills add`, `remove`, and `reload`.
-- A default terminal dock with elapsed status, active tools, editable typeahead, queueing, confirmations, cancellation, Tab completion for slash commands, live in-place plan and agents panels, and reflow on terminal resize.
+- A default terminal dock with elapsed status, active tools, editable steering, confirmations, cancellation, Tab completion for slash commands, live in-place plan and agents panels, and reflow on terminal resize.
 - Interactive Markdown for headings, emphasis, lists, fenced code, JSON, and width-aware tables.
 - Matrix, ocean, amber, and violet display themes.
 
@@ -131,9 +150,11 @@ The external [research-skill](https://github.com/hec-ovi/research-skill) shows t
 
 Three small things the persistent dock does while a turn streams above it.
 
-**📋 Plan.** The `todo` tool is a live checklist. The model lays out the steps and works them in the same turn, flipping each item from `[ ]` to `[~]` to `[x]` in a panel pinned above the input. The finished plan stays on screen when the turn ends.
+**📋 Plan.** The `plan` tool is the live checklist the model and user both see. The active `[~]` box spins while work runs, and each completed action shows its elapsed time. Long lists are capped with completed, active, pending, and hidden counts. A finished or canceled plan collapses to one timed line; cancellation uses the theme's red error style. `/clear-plan` replaces historical plan arguments and results with small placeholders while keeping provider-valid call/result pairs.
 
-**⌨️ Queue.** Type while a turn is running. Enter queues that message with a `[queued]` marker, and it is dispatched when the turn finishes. Cancelling hands queued text back to the editor instead of firing it.
+**👥 Agents.** Sub-agents detach after an immediate job acknowledgment, so the prompt becomes usable while they work. Use `tools: "all"` for coding, Bash, MCP, or web-search work. The dock keeps a current `[N] agents running` line beside a plan. Press Tab on an empty draft for persistent job details and recent activity, or use `/agents`. Each finished result is removed from its child instance, injected once into the parent context, and delivered without waiting for unrelated slow jobs.
+
+**⌨️ Steering.** Type while a parent turn is running. Enter records the message with a `[steering]` marker, interrupts that turn, and dispatches the message on the next loop. Escape or Ctrl-C cancellation keeps unsubmitted text in the editor instead of firing it.
 
 **⎋ Cancel.** Escape twice within five seconds cancels a running turn; Ctrl-C cancels at once. A second Ctrl-C during cancellation restores the terminal and exits with status 130.
 
@@ -158,6 +179,12 @@ The mounted config directory contains `.env`, optional `AGENTS.md`, `mcp.json`, 
 
 If startup autodetection selects an endpoint, that selection is fixed for the process. Restart noob to switch from an autodetected endpoint to a newly added `.env` URL. The launcher forwards a fixed set of `NOOB_*` and proxy variables plus any names listed in `NOOB_ENV`, and never forwards `NOOB_API_KEY`; put secrets in the mounted config `.env` and protect that directory with normal file permissions. `/skills reload` and a new process reload skills and MCP configuration respectively.
 
+The model server needs one request slot for the parent plus `NOOB_TASK_CONCURRENCY` child slots. With the defaults, configure at least five slots and give every slot the same 131,072-token window as `NOOB_CTX`. The [companion llama.cpp stack](https://github.com/hec-ovi/llama-vulkan-strix) documents and validates the required total KV-cache arithmetic.
+
+`/status` and the model-callable `context` tool show the estimated use, configured total, and 75 percent automatic-compaction threshold. When compaction runs, the terminal states whether the configured threshold, an endpoint overflow, or a length finish triggered it, then reports whether old tool output was pruned or the older conversation was summarized. Provider failures include the failed stage or HTTP status and a concrete next check.
+
+`/config list` shows the effective non-secret settings and their file. `/config set ctx 65536` and `/config unset ctx` update that file atomically. Endpoint, model, and API-style edits apply on the next request unless a CLI flag or exported variable overrides them. Context and child-agent budget edits need a restart. API keys are intentionally not accepted by `/config`; edit the mounted `.env` so a secret does not enter terminal history.
+
 Display variables can be set in the shell or the checkout's root `.env` for Compose:
 
 | Key | Default | Meaning |
@@ -170,7 +197,7 @@ Display variables can be set in the shell or the checkout's root `.env` for Comp
 
 ## Output surfaces
 
-- Interactive REPL: terminal dock, Markdown, typeahead, queueing, and confirmations.
+- Interactive REPL: terminal dock, Markdown, live steering, and confirmations.
 - `exec`: assistant text on stdout and progress on stderr.
 - `exec --json`: one JSON object per event.
 - `child`: one JSON result line on stdout and progress on stderr.
@@ -198,9 +225,9 @@ NOOB_LIVE_MCP_URL=http://localhost:18000/mcp \
 
 ### Verified end to end
 
-Beyond the offline suite, the interactive stack was driven against a local qwen model with no prompt-steering: the core tools, `todo` plans executed in one turn, `subagent` fan-out, `/skills add`, use, and `remove`, `--resume` with on-screen replay, plan mode, cancellation, resize reflow, and the research-skill and `websearch` flow shown above all behaved as expected.
+Beyond the offline suite, the stack was driven against the local qwen endpoint. A fresh session created and completed its own visible plan, wrote and verified a file, resumed in a new process, called the context tool, and accurately explained the prior work. The backing llama.cpp server was also exercised with five simultaneous uncapped requests, matching one parent plus four detached children.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the runtime design and [PLAN.md](PLAN.md) for verified release status. The terminal design was cross-checked against current [Zero](https://github.com/Gitlawb/zero) and [Codex](https://github.com/openai/codex) source.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the runtime design and [PLAN.md](PLAN.md) for verified release status. The terminal design was cross-checked against source snapshots from [Zero](https://github.com/Gitlawb/zero/tree/1af58828eb3c22567599c000736c913a290959d2) and [Codex](https://github.com/openai/codex/tree/5c19155cbd93bfa099016e7487259f61669823ff).
 
 ## License
 

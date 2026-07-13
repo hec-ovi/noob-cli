@@ -46,7 +46,11 @@ impl HttpTransport {
             url: url.to_string(),
             timeout,
             client: Client::with_retry(timeouts, RetryPolicy::none()),
-            state: Mutex::new(HttpState { session: None, protocol: None, next_id: 1 }),
+            state: Mutex::new(HttpState {
+                session: None,
+                protocol: None,
+                next_id: 1,
+            }),
         }
     }
 
@@ -84,8 +88,8 @@ impl HttpTransport {
         let (outcome, session) = self
             .post_and_parse(state, &init, Some(id))
             .map_err(RpcFailure::into_message)?;
-        let result = outcome
-            .ok_or_else(|| "the server sent no response to initialize".to_string())??;
+        let result =
+            outcome.ok_or_else(|| "the server sent no response to initialize".to_string())??;
         if let Some(sess) = session {
             state.session = Some(sess);
         }
@@ -227,7 +231,9 @@ impl HttpTransport {
                 parser.feed(&buf[..n], &mut events);
             }
             for ev in events.drain(..) {
-                let Ok(msg) = serde_json::from_str::<Value>(&ev.data) else { continue };
+                let Ok(msg) = serde_json::from_str::<Value>(&ev.data) else {
+                    continue;
+                };
                 if let Inbound::Response { id, outcome } = proto::classify(&msg)
                     && id == want
                 {
@@ -302,14 +308,26 @@ mod tests {
         let listed = t.request("tools/list", json!({})).unwrap();
         assert_eq!(listed["tools"][0]["name"], "echo");
         let result = t
-            .request("tools/call", json!({"name": "echo", "arguments": {"text": "hi"}}))
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": "hi"}}),
+            )
             .unwrap();
-        assert!(result["content"][0]["text"].as_str().unwrap().contains("hi"));
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("hi")
+        );
         // The session assigned at initialize was replayed on every request.
         let reqs = server.requests();
         assert!(reqs.len() >= 4);
         for r in &reqs[1..] {
-            assert_eq!(r.header("mcp-session-id"), Some("sess-0"), "session not replayed");
+            assert_eq!(
+                r.header("mcp-session-id"),
+                Some("sess-0"),
+                "session not replayed"
+            );
         }
         server.assert_clean();
     }
@@ -321,9 +339,17 @@ mod tests {
         t.ensure_ready().unwrap();
         server.drop_session_once();
         let result = t
-            .request("tools/call", json!({"name": "echo", "arguments": {"text": "again"}}))
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": "again"}}),
+            )
             .unwrap();
-        assert!(result["content"][0]["text"].as_str().unwrap().contains("again"));
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("again")
+        );
         assert_eq!(server.initialize_count(), 2, "exactly one re-initialize");
         server.assert_clean();
     }
@@ -366,7 +392,10 @@ mod tests {
         server.trickle_next_call();
         let started = std::time::Instant::now();
         let err = t
-            .request("tools/call", json!({"name": "echo", "arguments": {"text": "x"}}))
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": "x"}}),
+            )
             .unwrap_err();
         assert!(err.contains("timed out after 1s"), "{err}");
         assert!(err.contains("kept the stream alive"), "{err}");
@@ -378,7 +407,10 @@ mod tests {
         );
         // The transport stays usable for the next call.
         let ok = t
-            .request("tools/call", json!({"name": "echo", "arguments": {"text": "back"}}))
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": "back"}}),
+            )
             .unwrap();
         assert!(ok["content"][0]["text"].as_str().unwrap().contains("back"));
     }
@@ -390,12 +422,18 @@ mod tests {
         t.ensure_ready().unwrap();
         server.oversize_next_call();
         let err = t
-            .request("tools/call", json!({"name": "echo", "arguments": {"text": "x"}}))
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": "x"}}),
+            )
             .unwrap_err();
         assert!(err.contains("more than 8 MiB"), "{err}");
 
         let ok = t
-            .request("tools/call", json!({"name": "echo", "arguments": {"text": "back"}}))
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": "back"}}),
+            )
             .unwrap();
         assert!(ok["content"][0]["text"].as_str().unwrap().contains("back"));
     }

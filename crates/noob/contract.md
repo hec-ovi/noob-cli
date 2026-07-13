@@ -1,6 +1,6 @@
 # crates/noob
 
-The binary. `main.rs` is argv dispatch only: `repl` (default) | `exec` |
+The binary. `main.rs` dispatches `repl` (default) | `exec` | `sessions` |
 `child` (the sub-agent entry point; one JSON task on stdin, one JSON result
 line on stdout) | `doctor` (setup diagnosis, one line per check, exit 1 on
 any FAIL) | `debug` | `--version`. Hand-rolled flag parsing; no clap.
@@ -13,4 +13,4 @@ Owns the SIGINT handler: first Ctrl-C sets the shared interrupt flag (an
 in-flight request aborts within about one second), second Ctrl-C hard-exits.
 
 Module map (each with its own contract): `agent/`, `tools/`, `skills/`,
-`mcp/`, `task/`, `config/`, `session/`, `ui/`, plus `prompts/` and `tests/`.
+`mcp/`, `subagent/`, `config/`, `session/`, `ui/`, plus `prompts/` and `tests/`.

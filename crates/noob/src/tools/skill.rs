@@ -125,14 +125,27 @@ mod tests {
     #[test]
     fn returns_body_without_frontmatter_plus_dir_and_tracks_loading() {
         let (_tmp, mut ctx) = test_ctx();
-        install_skill(&mut ctx, "pdf-tools", "# PDF tools\n\nUse pdftotext first.\n");
+        install_skill(
+            &mut ctx,
+            "pdf-tools",
+            "# PDF tools\n\nUse pdftotext first.\n",
+        );
         let out = run(&ctx, &json!({"name": "pdf-tools"}));
         assert!(!out.is_error, "{}", out.content);
-        assert!(out.content.starts_with("skill: pdf-tools\ndir: .noob/skills/pdf-tools\n\n"));
+        assert!(
+            out.content
+                .starts_with("skill: pdf-tools\ndir: .noob/skills/pdf-tools\n\n")
+        );
         assert!(out.content.contains("Use pdftotext first."));
-        assert!(!out.content.contains("description: test skill"), "frontmatter must be stripped");
+        assert!(
+            !out.content.contains("description: test skill"),
+            "frontmatter must be stripped"
+        );
         assert!(out.warning.is_none());
-        assert_eq!(*ctx.loaded_skills.lock().unwrap(), vec!["pdf-tools".to_string()]);
+        assert_eq!(
+            *ctx.loaded_skills.lock().unwrap(),
+            vec!["pdf-tools".to_string()]
+        );
         // Loading again does not duplicate the tracking entry.
         run(&ctx, &json!({"name": "pdf-tools"}));
         assert_eq!(ctx.loaded_skills.lock().unwrap().len(), 1);
@@ -170,12 +183,24 @@ mod tests {
         assert!(!out.is_error);
         assert!(out.content.len() < 25 * 1024 + 200);
         // The cap must deliver the leading ~24 KiB, not an empty stub.
-        assert!(out.content.len() > 24 * 1024 - 200, "capped body suspiciously small");
-        assert!(out.content.contains("body line 0\n"), "the body head must survive the cap");
-        assert!(out.content.contains("[skill body capped at 24 KiB; read the rest with read "));
+        assert!(
+            out.content.len() > 24 * 1024 - 200,
+            "capped body suspiciously small"
+        );
+        assert!(
+            out.content.contains("body line 0\n"),
+            "the body head must survive the cap"
+        );
+        assert!(
+            out.content
+                .contains("[skill body capped at 24 KiB; read the rest with read ")
+        );
         assert!(out.content.contains(".noob/skills/big/SKILL.md offset="));
         let warning = out.warning.expect("oversize warning");
-        assert!(warning.contains("recommends bodies under 5000 tokens"), "{warning}");
+        assert!(
+            warning.contains("recommends bodies under 5000 tokens"),
+            "{warning}"
+        );
         // The estimate is the real chars/4 figure, not a floored "5k" that
         // reads as equal to the recommendation.
         let est: u64 = warning

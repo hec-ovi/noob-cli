@@ -8,8 +8,8 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::Ordering;
 use std::sync::Mutex;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -178,7 +178,12 @@ impl StdioTransport {
                 }
             }
         });
-        state.proc = Some(Proc { child, stdin, rx, live: true });
+        state.proc = Some(Proc {
+            child,
+            stdin,
+            rx,
+            live: true,
+        });
 
         // Handshake: initialize -> capture negotiated version -> initialized.
         let init = match self.rpc_locked(state, "initialize", proto::initialize_params()) {
@@ -285,11 +290,9 @@ impl StdioTransport {
                 Err(mpsc::RecvTimeoutError::Timeout) => {} // loop re-checks deadline
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     state.proc = None;
-                    return Err(
-                        "the MCP server process exited unexpectedly; it will be \
+                    return Err("the MCP server process exited unexpectedly; it will be \
                          restarted on the next call"
-                            .to_string(),
-                    );
+                        .to_string());
                 }
             }
         }
@@ -353,10 +356,7 @@ fn write_deadline(
 }
 
 /// Read one `\n`-terminated line without unbounded growth. `Ok(None)` = EOF.
-fn read_line_bounded(
-    reader: &mut impl BufRead,
-    cap: usize,
-) -> std::io::Result<Option<Vec<u8>>> {
+fn read_line_bounded(reader: &mut impl BufRead, cap: usize) -> std::io::Result<Option<Vec<u8>>> {
     let mut line = Vec::new();
     loop {
         let buf = reader.fill_buf()?;
@@ -419,7 +419,10 @@ done
         let listed = t.request("tools/list", json!({})).unwrap();
         assert_eq!(listed["tools"][0]["name"], "echo");
         let result = t
-            .request("tools/call", json!({"name": "echo", "arguments": {"text": "hi"}}))
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": "hi"}}),
+            )
             .unwrap();
         assert_eq!(result["content"][0]["text"], "echo: hi");
     }
@@ -483,14 +486,23 @@ done
         t.ensure_ready().unwrap();
         let started = Instant::now();
         let err = t
-            .request("tools/call", json!({"name": "echo", "arguments": {"text": "x"}}))
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": "x"}}),
+            )
             .unwrap_err();
         assert!(err.contains("timed out after 1s"), "{err}");
         assert!(err.contains("restarted on the next call"), "{err}");
-        assert!(started.elapsed() < Duration::from_secs(5), "kill was not prompt");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "kill was not prompt"
+        );
         // Transparent respawn: the next call handshakes again and succeeds.
         let result = t
-            .request("tools/call", json!({"name": "echo", "arguments": {"text": "back"}}))
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": "back"}}),
+            )
             .unwrap();
         assert_eq!(result["content"][0]["text"], "echo: back");
     }
@@ -504,11 +516,7 @@ done
             flag = tmp.path().join("interrupted.flag").display()
         );
         let cmd = shell_server(tmp.path(), "server.sh", &call_case);
-        let t = std::sync::Arc::new(StdioTransport::new(
-            "sh",
-            &[cmd],
-            Duration::from_secs(30),
-        ));
+        let t = std::sync::Arc::new(StdioTransport::new("sh", &[cmd], Duration::from_secs(30)));
         t.ensure_ready().unwrap();
 
         let signal = t.clone();
@@ -518,15 +526,24 @@ done
         });
         let started = Instant::now();
         let err = t
-            .request("tools/call", json!({"name": "echo", "arguments": {"text": "x"}}))
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": "x"}}),
+            )
             .unwrap_err();
         interrupter.join().unwrap();
         assert!(err.contains("canceled by user"), "{err}");
-        assert!(started.elapsed() < Duration::from_secs(2), "cancel was not prompt");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cancel was not prompt"
+        );
 
         t.test_interrupted.store(false, Ordering::SeqCst);
         let result = t
-            .request("tools/call", json!({"name": "echo", "arguments": {"text": "back"}}))
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": "back"}}),
+            )
             .unwrap();
         assert_eq!(result["content"][0]["text"], "echo: back");
     }
@@ -542,11 +559,17 @@ done
         let cmd = shell_server(tmp.path(), "server.sh", &call_case);
         let t = StdioTransport::new("sh", &[cmd], Duration::from_secs(5));
         let err = t
-            .request("tools/call", json!({"name": "echo", "arguments": {"text": "x"}}))
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": "x"}}),
+            )
             .unwrap_err();
         assert!(err.contains("exited unexpectedly"), "{err}");
         let result = t
-            .request("tools/call", json!({"name": "echo", "arguments": {"text": "alive"}}))
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": "alive"}}),
+            )
             .unwrap();
         assert_eq!(result["content"][0]["text"], "echo: alive");
     }
@@ -570,7 +593,10 @@ done
         let cmd = shell_server(tmp.path(), "server.sh", &call_case);
         let t = StdioTransport::new("sh", &[cmd], Duration::from_secs(5));
         let result = t
-            .request("tools/call", json!({"name": "echo", "arguments": {"text": "ok"}}))
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": "ok"}}),
+            )
             .unwrap();
         assert_eq!(result["content"][0]["text"], "echo: ok");
     }
@@ -596,7 +622,10 @@ exec sleep 600
         let big = "x".repeat(512 * 1024); // far past any pipe buffer
         let started = Instant::now();
         let err = t
-            .request("tools/call", json!({"name": "echo", "arguments": {"text": big}}))
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": big}}),
+            )
             .unwrap_err();
         assert!(err.contains("not accepting input"), "{err}");
         assert!(err.contains("restarted on the next call"), "{err}");
@@ -634,18 +663,30 @@ exec sleep 600
         let big = "x".repeat(512 * 1024);
         let started = Instant::now();
         let err = t
-            .request("tools/call", json!({"name": "echo", "arguments": {"text": big}}))
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": big}}),
+            )
             .unwrap_err();
         interrupter.join().unwrap();
         assert!(err.contains("canceled by user"), "{err}");
-        assert!(started.elapsed() < Duration::from_secs(2), "cancel was not prompt");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cancel was not prompt"
+        );
     }
 
     #[test]
     fn bounded_line_reader_rejects_runaway_lines() {
         let mut small = std::io::Cursor::new(b"abc\ndef".to_vec());
-        assert_eq!(read_line_bounded(&mut small, 10).unwrap(), Some(b"abc".to_vec()));
-        assert_eq!(read_line_bounded(&mut small, 10).unwrap(), Some(b"def".to_vec()));
+        assert_eq!(
+            read_line_bounded(&mut small, 10).unwrap(),
+            Some(b"abc".to_vec())
+        );
+        assert_eq!(
+            read_line_bounded(&mut small, 10).unwrap(),
+            Some(b"def".to_vec())
+        );
         assert_eq!(read_line_bounded(&mut small, 10).unwrap(), None);
         let mut big = std::io::Cursor::new(vec![b'x'; 100]);
         assert!(read_line_bounded(&mut big, 10).is_err());

@@ -272,7 +272,10 @@ mod tests {
     fn plain_banner_shows_the_wordmark() {
         // At None depth the glyphs are unwrapped, so the wordmark is contiguous.
         let b = banner(&Theme::matrix(), ColorDepth::None);
-        assert!(b.contains("No0B-CL1"), "plain banner missing wordmark: {b:?}");
+        assert!(
+            b.contains("No0B-CL1"),
+            "plain banner missing wordmark: {b:?}"
+        );
     }
 
     #[test]
@@ -280,7 +283,9 @@ mod tests {
         let t = Theme::matrix();
         // The contract is not "which green": it is that each core tool reads as
         // its own color, so distinct tools must not collide on one hue.
-        let core = ["read", "grep", "glob", "ls", "bash", "edit", "write", "subagent", "skill", "mcp"];
+        let core = [
+            "read", "grep", "glob", "ls", "bash", "edit", "write", "subagent", "skill", "mcp",
+        ];
         for (i, a) in core.iter().enumerate() {
             for b in &core[i + 1..] {
                 assert_ne!(
@@ -296,8 +301,15 @@ mod tests {
         assert_eq!(t.label_style("wrote").fg, t.label_style("write").fg);
         // An unplaced word still resolves to a real, stable palette slot.
         let unknown = t.label_style("frobnicate").fg;
-        assert_eq!(unknown, t.label_style("frobnicate").fg, "hash slot must be stable");
-        assert!(t.activity_palette.contains(&unknown), "hash must land inside the palette");
+        assert_eq!(
+            unknown,
+            t.label_style("frobnicate").fg,
+            "hash slot must be stable"
+        );
+        assert!(
+            t.activity_palette.contains(&unknown),
+            "hash must land inside the palette"
+        );
     }
 
     #[test]

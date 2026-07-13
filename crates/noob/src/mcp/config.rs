@@ -36,7 +36,10 @@ pub fn load(workspace: &Path, config_dir: &Path) -> (Vec<ServerConfig>, Vec<Stri
     let mut servers: Vec<ServerConfig> = Vec::new();
     // Global first, project second: a later push with the same name replaces
     // the earlier one (project wins).
-    for path in [config_dir.join("mcp.json"), workspace.join(".noob/mcp.json")] {
+    for path in [
+        config_dir.join("mcp.json"),
+        workspace.join(".noob/mcp.json"),
+    ] {
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -99,7 +102,9 @@ fn parse_entry(name: &str, entry: &Value) -> Result<ServerConfig, String> {
             if !url.starts_with("http://") && !url.starts_with("https://") {
                 return Err(format!("url {url:?} must start with http:// or https://"));
             }
-            TransportConfig::Http { url: url.trim_end_matches('/').to_string() }
+            TransportConfig::Http {
+                url: url.trim_end_matches('/').to_string(),
+            }
         }
         (None, Some(command)) => {
             if command.trim().is_empty() {
@@ -125,7 +130,10 @@ fn parse_entry(name: &str, entry: &Value) -> Result<ServerConfig, String> {
                     return Err(format!("\"args\" must be an array of strings, got {other}"));
                 }
             };
-            TransportConfig::Stdio { command: command.to_string(), args }
+            TransportConfig::Stdio {
+                command: command.to_string(),
+                args,
+            }
         }
     };
     let timeout_s = match entry.get("timeout_s") {
@@ -182,7 +190,9 @@ mod tests {
         // Trailing slash trimmed so joined RPC URLs stay clean.
         assert_eq!(
             servers[1].transport,
-            TransportConfig::Http { url: "http://localhost:8000".into() }
+            TransportConfig::Http {
+                url: "http://localhost:8000".into()
+            }
         );
         assert_eq!(servers[1].timeout, Duration::from_secs(DEFAULT_TIMEOUT_S));
     }
@@ -203,11 +213,16 @@ mod tests {
         );
         let (servers, warnings) = load(ws.path(), cfg.path());
         assert!(warnings.is_empty(), "{warnings:?}");
-        let by_name: Vec<(&str, &TransportConfig)> =
-            servers.iter().map(|s| (s.name.as_str(), &s.transport)).collect();
+        let by_name: Vec<(&str, &TransportConfig)> = servers
+            .iter()
+            .map(|s| (s.name.as_str(), &s.transport))
+            .collect();
         assert_eq!(servers.len(), 3);
         assert!(by_name.iter().any(|(n, t)| *n == "shared"
-            && **t == TransportConfig::Http { url: "http://project:1".into() }));
+            && **t
+                == TransportConfig::Http {
+                    url: "http://project:1".into()
+                }));
         assert!(by_name.iter().any(|(n, _)| *n == "only-global"));
         assert!(by_name.iter().any(|(n, _)| *n == "only-project"));
     }
@@ -232,7 +247,11 @@ mod tests {
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "good");
         assert_eq!(warnings.len(), 5, "{warnings:?}");
-        assert!(warnings.iter().any(|w| w.contains("both") && w.contains("pick one")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("both") && w.contains("pick one"))
+        );
         assert!(warnings.iter().any(|w| w.contains("neither")));
     }
 
@@ -241,7 +260,11 @@ mod tests {
         let cfg = tempfile::tempdir().unwrap();
         let ws = tempfile::tempdir().unwrap();
         write(cfg.path(), "mcp.json", "{ not json");
-        write(ws.path(), ".noob/mcp.json", r#"{"servers": {"ok": {"url": "http://x:1"}}}"#);
+        write(
+            ws.path(),
+            ".noob/mcp.json",
+            r#"{"servers": {"ok": {"url": "http://x:1"}}}"#,
+        );
         let (servers, warnings) = load(ws.path(), cfg.path());
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "ok");

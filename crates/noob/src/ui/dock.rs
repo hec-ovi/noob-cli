@@ -17,8 +17,10 @@ use std::time::{Duration, Instant};
 use noob_provider::http::INTERRUPTED;
 
 use super::prompt::{Decoder, Editor, Input, Key, RawGuard, Step, term_height, term_width};
-use super::style::{ColorDepth, DIM, RESET};
-use super::{BufferedTurnRenderer, TurnEvent, Ui, safe_terminal_text, scanner};
+use super::style::{ColorDepth, RESET};
+use super::{
+    BufferedTurnRenderer, RegionTone, TurnEvent, Ui, elapsed_label, safe_terminal_text, scanner,
+};
 
 /// One event on the dock channel. Its receive order is the behavioral order:
 /// only adjacent `Render` events may be coalesced, while Ask/Key/ReaderGone/End
@@ -60,7 +62,10 @@ pub(crate) static WINCH: AtomicBool = AtomicBool::new(false);
 /// value leave the default interactive driver enabled.
 pub(super) fn enabled_by_env() -> bool {
     match std::env::var("NOOB_DOCK") {
-        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"),
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
         Err(_) => true,
     }
 }
@@ -148,7 +153,12 @@ impl Default for OutTracker {
     fn default() -> Self {
         // A turn starts on a fresh row: the prompt collapsed to its
         // `› message` record and ended the line with a real newline.
-        OutTracker { col: 0, fresh: true, newline: true, esc: EscScan::Normal }
+        OutTracker {
+            col: 0,
+            fresh: true,
+            newline: true,
+            esc: EscScan::Normal,
+        }
     }
 }
 
@@ -271,7 +281,11 @@ fn reader(tx: SyncSender<Ev>) {
     let mut buf = [0u8; 1024];
     loop {
         let n = unsafe {
-            libc::read(libc::STDIN_FILENO, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+            libc::read(
+                libc::STDIN_FILENO,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+            )
         };
         if n < 0 {
             if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
@@ -284,9 +298,7 @@ fn reader(tx: SyncSender<Ev>) {
                 // An external SIGINT (kill -INT; the keyboard's Ctrl-C is a
                 // byte in raw mode). The handler set the flag; surface it as
                 // the interrupt key so the loop reacts without a keystroke.
-                if INTERRUPTED.load(Ordering::SeqCst)
-                    && tx.send(Ev::Key(Key::Interrupt)).is_err()
-                {
+                if INTERRUPTED.load(Ordering::SeqCst) && tx.send(Ev::Key(Key::Interrupt)).is_err() {
                     return;
                 }
                 continue;
@@ -306,7 +318,11 @@ fn reader(tx: SyncSender<Ev>) {
             }
         }
         if dec.has_dangling_esc() {
-            let mut pfd = libc::pollfd { fd: libc::STDIN_FILENO, events: libc::POLLIN, revents: 0 };
+            let mut pfd = libc::pollfd {
+                fd: libc::STDIN_FILENO,
+                events: libc::POLLIN,
+                revents: 0,
+            };
             let ready = unsafe { libc::poll(&mut pfd, 1, ESC_GRACE_MS) };
             if ready == 0
                 && let Some(key) = dec.flush_dangling_esc()
@@ -407,10 +423,18 @@ pub struct DockSession {
     /// line per turn; the tail waits here, replacing the old CARRYOVER).
     pending: VecDeque<Key>,
     draft: Editor,
-    /// Messages typed and submitted with Enter WHILE a turn ran: they are
-    /// dispatched one per turn once the agent is free (FIFO), and drained back
-    /// into the draft if the turn is interrupted rather than fired blindly.
+    /// Messages submitted with Enter while a turn ran. Submission interrupts
+    /// that turn as steering; the next prompt dispatches one message at once.
+    /// Explicit Esc/Ctrl-C cancellation still drains them back into the draft.
     queue: VecDeque<String>,
+    /// Tab toggles this persistent view. It survives turn boundaries so a
+    /// background child remains inspectable both while the parent runs and at
+    /// the otherwise-idle prompt.
+    agent_view: bool,
+    /// True when this turn's interrupt came from a submitted steering message,
+    /// not explicit Esc/Ctrl-C cancellation. The REPL consumes it after the
+    /// worker ends to decide whether queued input should dispatch or be restored.
+    steering: bool,
     /// Permanent input-stream state. The channel itself cannot disconnect
     /// while this session owns `tx`, so ReaderGone must survive the turn where
     /// it was observed and make every later prompt return EOF immediately.
@@ -432,6 +456,8 @@ impl DockSession {
             pending: VecDeque::new(),
             draft: Editor::default(),
             queue: VecDeque::new(),
+            agent_view: false,
+            steering: false,
             reader_gone: false,
             _guard: guard,
         })
@@ -459,6 +485,13 @@ impl DockSession {
         self.draft = Editor::from_line(&parts.join("\n"));
     }
 
+    /// Consume whether the most recent turn was interrupted by an Enter
+    /// submission. Call this after every dock turn (including a completion
+    /// racing the interrupt) so the marker cannot leak into a later turn.
+    pub fn take_steering(&mut self) -> bool {
+        std::mem::take(&mut self.steering)
+    }
+
     /// Read one line at the idle prompt, event-driven with the semantics of the
     /// per-prompt raw editor: a persistent framed box (a plain rule above and
     /// below the editable line, a dim hint when empty) that stays visible the
@@ -467,7 +500,12 @@ impl DockSession {
     /// Ctrl-D on an empty line is EOF. A draft typed during the previous turn is
     /// already visible and editable. Off the token path entirely: this runs only
     /// while no turn is in flight.
-    pub fn read_prompt(&mut self, ui: &mut Ui, plan: bool) -> Input {
+    pub fn read_prompt(
+        &mut self,
+        ui: &mut Ui,
+        plan: bool,
+        background: Option<&crate::subagent::BackgroundHub>,
+    ) -> Input {
         // Queued messages were echoed at acceptance time during the turn. Do
         // not print them a second time when they are dispatched.
         if let Some(input) = self.next_queued() {
@@ -476,42 +514,103 @@ impl DockSession {
         if self.reader_gone && self.pending.is_empty() {
             return Input::Eof;
         }
-        // The idle input is a persistent box, drawn up front and kept for the
-        // whole prompt: only the editable line repaints on a keystroke; the
-        // rules are redrawn only on a resize (refit), so typing stays cheap.
+        // The idle input is a persistent box. When the agents view is open its
+        // live rows are pinned immediately above that box; the editor remains
+        // on the same single input row and stays fully usable.
         let mut width = term_width();
-        ui.expand(plan, width);
+        let mut agent_rows = self.idle_agent_rows(ui, background, width);
+        self.draw_idle_prompt(ui, plan, width, &agent_rows);
+        let mut input_dirty = true;
         loop {
+            if background.is_some_and(crate::subagent::BackgroundHub::settled_ready) {
+                self.erase_idle_prompt(ui, agent_rows.len());
+                return Input::BackgroundReady;
+            }
+
+            let now_width = term_width();
+            let next_agent_rows = self.idle_agent_rows(ui, background, now_width);
+            if now_width != width || next_agent_rows != agent_rows {
+                self.erase_idle_prompt(ui, agent_rows.len());
+                width = now_width;
+                agent_rows = next_agent_rows;
+                self.draw_idle_prompt(ui, plan, width, &agent_rows);
+                input_dirty = true;
+            }
+
             while let Some(key) = self.pending.pop_front() {
+                input_dirty = true;
                 if key == Key::Tab {
+                    if self.draft.is_empty()
+                        && let Some(hub) = background
+                    {
+                        let snapshot = hub.snapshot();
+                        if self.agent_view || !snapshot.rows.is_empty() {
+                            self.erase_idle_prompt(ui, agent_rows.len());
+                            self.agent_view = !self.agent_view;
+                            agent_rows = self.idle_agent_rows(ui, background, width);
+                            self.draw_idle_prompt(ui, plan, width, &agent_rows);
+                            continue;
+                        }
+                    }
                     super::prompt::complete_editor(&mut self.draft);
                     continue;
                 }
                 match self.draft.apply(key) {
                     Step::Continue => {}
-                    Step::Submit => return self.submit(ui, true),
+                    Step::Submit => {
+                        if agent_rows.is_empty() {
+                            return self.submit(ui, true);
+                        }
+                        self.erase_idle_prompt(ui, agent_rows.len());
+                        return self.submit(ui, false);
+                    }
                     Step::Interrupt => {
-                        ui.erase(true);
+                        self.erase_idle_prompt(ui, agent_rows.len());
                         self.draft = Editor::default();
                         INTERRUPTED.swap(false, Ordering::SeqCst);
                         return Input::Interrupted;
                     }
                     Step::Eof => {
-                        ui.erase(true);
+                        self.erase_idle_prompt(ui, agent_rows.len());
                         return Input::Eof;
                     }
                 }
             }
             if self.reader_gone {
-                ui.erase(true);
+                self.erase_idle_prompt(ui, agent_rows.len());
                 return Input::Eof;
             }
-            ui.refit(plan, &mut width);
-            ui.redraw_idle_input(&self.draft, width);
-            let mut gone = match self.rx.recv() {
-                Ok(ev) => self.absorb_idle(ev),
-                // Every Sender dropped: the session is torn down.
-                Err(_) => true,
+            if input_dirty {
+                ui.redraw_idle_input(&self.draft, width);
+                input_dirty = false;
+            }
+            let received = if let Some(hub) = background {
+                match self.rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(ev) => Some(ev),
+                    Err(RecvTimeoutError::Timeout) if hub.settled_ready() => {
+                        self.erase_idle_prompt(ui, agent_rows.len());
+                        return Input::BackgroundReady;
+                    }
+                    // Wake the outer loop to refresh elapsed time and recent
+                    // child activity even when the keyboard is untouched.
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => {
+                        self.reader_gone = true;
+                        None
+                    }
+                }
+            } else {
+                match self.rx.recv() {
+                    Ok(ev) => Some(ev),
+                    Err(_) => {
+                        self.reader_gone = true;
+                        None
+                    }
+                }
+            };
+            let mut gone = match received {
+                Some(ev) => self.absorb_idle(ev),
+                None => self.reader_gone,
             };
             while let Ok(ev) = self.rx.try_recv() {
                 gone |= self.absorb_idle(ev);
@@ -527,6 +626,37 @@ impl DockSession {
                 continue;
             }
         }
+    }
+
+    fn draw_idle_prompt(&mut self, ui: &mut Ui, plan: bool, width: usize, rows: &[String]) {
+        if !rows.is_empty() {
+            let mut block = String::new();
+            for row in rows {
+                block.push_str("\r\x1b[2K");
+                block.push_str(row);
+                block.push_str("\r\n");
+            }
+            ui.out_raw(block.as_bytes());
+        }
+        ui.expand(plan, width);
+    }
+
+    /// Clear the optional agent rows and the three-row idle box, leaving the
+    /// cursor at the topmost row they occupied. With no agent rows this emits
+    /// exactly the ordinary prompt erasure.
+    fn erase_idle_prompt(&mut self, ui: &mut Ui, region_count: usize) {
+        ui.erase(true);
+        if region_count == 0 {
+            return;
+        }
+        let mut block = format!("\x1b[{region_count}A\r\x1b[2K");
+        for _ in 1..region_count {
+            block.push_str("\x1b[1B\r\x1b[2K");
+        }
+        if region_count > 1 {
+            block.push_str(&format!("\x1b[{}A\r", region_count - 1));
+        }
+        ui.out_raw(block.as_bytes());
     }
 
     /// File an idle-time event: keys queue for the editor, a straggler from a
@@ -568,6 +698,7 @@ impl DockSession {
         &mut self,
         ui: &mut Ui,
         plan: bool,
+        background: Option<&crate::subagent::BackgroundHub>,
         f: impl FnOnce(&mut Ui) -> R + Send,
     ) -> R {
         let mut turn_ui = ui.for_turn(self.tx.clone());
@@ -578,9 +709,8 @@ impl DockSession {
                 // Always send the End barrier, including a panic path, so the
                 // terminal-owning thread cannot wait forever. The scoped
                 // thread rethrows after the render loop has restored the dock.
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    f(&mut turn_ui)
-                }));
+                let outcome =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut turn_ui)));
                 match outcome {
                     Ok(end) => {
                         *slot.lock().unwrap() = Some(end);
@@ -592,7 +722,7 @@ impl DockSession {
                     }
                 }
             });
-            self.render_loop(ui, plan);
+            self.render_loop(ui, plan, background);
         });
         slot.into_inner()
             .unwrap()
@@ -602,7 +732,12 @@ impl DockSession {
     /// The render loop: sole terminal writer while a turn runs. Receive order
     /// is semantic order. Only adjacent Render events share a repaint; Ask,
     /// keys, reader loss, and End are strict barriers.
-    fn render_loop(&mut self, ui: &mut Ui, plan: bool) {
+    fn render_loop(
+        &mut self,
+        ui: &mut Ui,
+        plan: bool,
+        background: Option<&crate::subagent::BackgroundHub>,
+    ) {
         let mut tracker = OutTracker::default();
         let mut width = term_width();
         let mut ask: Option<AskState> = None;
@@ -646,8 +781,13 @@ impl DockSession {
             if now_width != width {
                 self.erase_dock(ui, drawn_r);
                 width = now_width;
-                region_rows =
-                    self.region_rows(ui, plan_block.as_deref(), agents_block.as_deref(), width);
+                region_rows = self.region_rows(
+                    ui,
+                    plan_block.as_deref(),
+                    agents_block.as_deref(),
+                    background,
+                    width,
+                );
                 self.draw_active_frame(
                     ui,
                     plan,
@@ -674,16 +814,38 @@ impl DockSession {
                     Ok(ev) => ev,
                     Err(RecvTimeoutError::Timeout) => {
                         cancel.expire(Instant::now());
-                        self.refresh_active_frame(
+                        let refreshed = self.region_rows(
                             ui,
-                            plan,
+                            plan_block.as_deref(),
+                            agents_block.as_deref(),
+                            background,
                             width,
-                            &ask,
-                            &cancel,
-                            started,
-                            &active_tools,
-                            &region_rows,
                         );
+                        if refreshed != region_rows {
+                            region_rows = refreshed;
+                            self.redraw_regions(
+                                ui,
+                                plan,
+                                width,
+                                &ask,
+                                &cancel,
+                                started,
+                                &active_tools,
+                                &region_rows,
+                                &mut drawn_r,
+                            );
+                        } else {
+                            self.refresh_active_frame(
+                                ui,
+                                plan,
+                                width,
+                                &ask,
+                                &cancel,
+                                started,
+                                &active_tools,
+                                &region_rows,
+                            );
+                        }
                         continue;
                     }
                     Err(RecvTimeoutError::Disconnected) => return,
@@ -738,6 +900,7 @@ impl DockSession {
                             ui,
                             plan_block.as_deref(),
                             agents_block.as_deref(),
+                            background,
                             width,
                         );
                     }
@@ -799,7 +962,8 @@ impl DockSession {
                 }
                 Ev::Key(key) => {
                     cancel.expire(Instant::now());
-                    let mut queued_record = None;
+                    let mut accepted_record = None;
+                    let mut agents_toggled = false;
                     if ask.is_some() {
                         match key {
                             Key::Enter => {
@@ -811,6 +975,7 @@ impl DockSession {
                             Key::Interrupt => {
                                 let a = ask.take().expect("ask exists");
                                 let _ = a.reply.send(false);
+                                self.steering = false;
                                 if cancel.interrupt() == InterruptAction::HardExit {
                                     hard_exit();
                                 }
@@ -819,6 +984,7 @@ impl DockSession {
                                 if !cancel.committed && cancel.disarm() {
                                     let a = ask.take().expect("ask exists");
                                     let _ = a.reply.send(false);
+                                    self.steering = false;
                                     cancel.commit();
                                 } else if !cancel.committed {
                                     cancel.armed_until = Some(Instant::now() + CANCEL_WINDOW);
@@ -842,6 +1008,7 @@ impl DockSession {
                     } else {
                         match key {
                             Key::Interrupt => {
+                                self.steering = false;
                                 if cancel.interrupt() == InterruptAction::HardExit {
                                     hard_exit();
                                 }
@@ -850,6 +1017,7 @@ impl DockSession {
                                 if cancel.committed {
                                     // Already canceling.
                                 } else if cancel.disarm() {
+                                    self.steering = false;
                                     cancel.commit();
                                 } else {
                                     cancel.armed_until = Some(Instant::now() + CANCEL_WINDOW);
@@ -861,11 +1029,28 @@ impl DockSession {
                                     let message = self.draft.line();
                                     self.queue.push_back(message.clone());
                                     self.draft = Editor::default();
-                                    queued_record = Some(self.queued_record(ui, &message));
+                                    self.commit_steering();
+                                    accepted_record = Some(self.steering_record(ui, &message));
                                 }
                             }
                             Key::Eof => {
                                 cancel.disarm();
+                            }
+                            Key::Tab => {
+                                cancel.disarm();
+                                if !cancel.committed
+                                    && self.draft.is_empty()
+                                    && let Some(hub) = background
+                                {
+                                    let snapshot = hub.snapshot();
+                                    if self.agent_view || !snapshot.rows.is_empty() {
+                                        self.agent_view = !self.agent_view;
+                                        agents_toggled = true;
+                                    }
+                                }
+                                if !agents_toggled && !cancel.committed {
+                                    super::prompt::complete_editor(&mut self.draft);
+                                }
                             }
                             other => {
                                 cancel.disarm();
@@ -874,7 +1059,40 @@ impl DockSession {
                         }
                     }
 
-                    if let Some(record) = queued_record {
+                    if agents_toggled {
+                        let refreshed = self.region_rows(
+                            ui,
+                            plan_block.as_deref(),
+                            agents_block.as_deref(),
+                            background,
+                            width,
+                        );
+                        if refreshed != region_rows {
+                            region_rows = refreshed;
+                            self.redraw_regions(
+                                ui,
+                                plan,
+                                width,
+                                &ask,
+                                &cancel,
+                                started,
+                                &active_tools,
+                                &region_rows,
+                                &mut drawn_r,
+                            );
+                        } else {
+                            self.refresh_active_frame(
+                                ui,
+                                plan,
+                                width,
+                                &ask,
+                                &cancel,
+                                started,
+                                &active_tools,
+                                &region_rows,
+                            );
+                        }
+                    } else if let Some(record) = accepted_record {
                         self.write_above(
                             ui,
                             &mut tracker,
@@ -924,10 +1142,18 @@ impl DockSession {
                     // above the idle prompt, so a finished plan stays visible at
                     // the bottom instead of vanishing with the frame. A turn with
                     // no region tears down exactly as before (byte-identical).
+                    let final_rows = self.final_region_rows(
+                        ui,
+                        plan_block.as_deref(),
+                        agents_block.as_deref(),
+                        width,
+                        cancel.committed,
+                        started.elapsed(),
+                    );
                     self.erase_dock(ui, drawn_r);
-                    if !region_rows.is_empty() {
+                    if !final_rows.is_empty() {
                         let mut block = String::new();
-                        for row in &region_rows {
+                        for row in &final_rows {
                             block.push_str("\r\x1b[2K");
                             block.push_str(row);
                             block.push_str("\r\n");
@@ -998,30 +1224,229 @@ impl DockSession {
         ui: &Ui,
         plan_block: Option<&str>,
         agents_block: Option<&str>,
+        background: Option<&crate::subagent::BackgroundHub>,
         width: usize,
     ) -> Vec<String> {
-        let mut rows = Vec::new();
+        if !ui.regions_enabled() {
+            return Vec::new();
+        }
+        let mut rows: Vec<PinnedRegionRow> = Vec::new();
         if let Some(text) = plan_block {
-            rows.extend(ui.checklist_region_rows(text, width));
+            let counts = checklist_counts(text);
+            if counts.is_complete() {
+                let mut label = format!("plan completed · {}/{}", counts.done, counts.total());
+                if let Some(plan_elapsed) = plan_elapsed(text) {
+                    label.push_str(" · ");
+                    label.push_str(plan_elapsed);
+                }
+                rows.push(PinnedRegionRow::summary(
+                    ui,
+                    label,
+                    width,
+                    RegionTone::Activity,
+                    RegionPriority::Plan,
+                ));
+            } else {
+                rows.extend(checklist_pinned_rows(ui, text, width, RegionSource::Plan));
+            }
+        }
+
+        // The event block for detached work captures only its admission-time
+        // count. Derive open and closed views from the hub on every repaint so
+        // completion/cancellation cannot leave a stale "running" row. The
+        // event block remains the fallback for non-background panels.
+        let snapshot_block = background.and_then(|hub| {
+            let snapshot = hub.snapshot();
+            if self.agent_view {
+                expanded_agent_snapshot_block(&snapshot)
+            } else {
+                collapsed_agent_snapshot_block(&snapshot)
+            }
+        });
+        let shown_agents = if background.is_some() {
+            snapshot_block.as_deref()
+        } else {
+            agents_block
+        };
+        if let Some(block) = shown_agents {
+            rows.extend(checklist_pinned_rows(
+                ui,
+                block,
+                width,
+                RegionSource::Agents,
+            ));
+        }
+        let counts = checklist_counts(plan_block.unwrap_or_default())
+            .plus(checklist_counts(shown_agents.unwrap_or_default()));
+        self.cap_region_rows(ui, rows, counts, width)
+    }
+
+    fn idle_agent_rows(
+        &self,
+        ui: &Ui,
+        background: Option<&crate::subagent::BackgroundHub>,
+        width: usize,
+    ) -> Vec<String> {
+        if !self.agent_view || !ui.regions_enabled() {
+            return Vec::new();
+        }
+        let Some(hub) = background else {
+            return Vec::new();
+        };
+        let Some(block) = expanded_agent_snapshot_block(&hub.snapshot()) else {
+            return Vec::new();
+        };
+        let counts = checklist_counts(&block);
+        let rows = checklist_pinned_rows(ui, &block, width, RegionSource::Agents);
+        self.cap_region_rows(ui, rows, counts, width)
+    }
+
+    fn final_region_rows(
+        &self,
+        ui: &Ui,
+        plan_block: Option<&str>,
+        agents_block: Option<&str>,
+        width: usize,
+        canceled: bool,
+        elapsed: Duration,
+    ) -> Vec<String> {
+        if !ui.regions_enabled() {
+            return Vec::new();
+        }
+        let mut rows: Vec<PinnedRegionRow> = Vec::new();
+        if let Some(text) = plan_block {
+            let counts = checklist_counts(text);
+            let summary_elapsed = plan_elapsed(text)
+                .map(str::to_owned)
+                .unwrap_or_else(|| elapsed_label(elapsed));
+            if canceled {
+                rows.push(PinnedRegionRow::summary(
+                    ui,
+                    format!(
+                        "plan canceled · {}/{} completed · {}",
+                        counts.done,
+                        counts.total(),
+                        summary_elapsed,
+                    ),
+                    width,
+                    RegionTone::Error,
+                    RegionPriority::Plan,
+                ));
+            } else if counts.is_complete() {
+                rows.push(PinnedRegionRow::summary(
+                    ui,
+                    format!(
+                        "plan completed · {}/{} · {}",
+                        counts.done,
+                        counts.total(),
+                        summary_elapsed,
+                    ),
+                    width,
+                    RegionTone::Activity,
+                    RegionPriority::Plan,
+                ));
+            } else {
+                rows.extend(checklist_pinned_rows(ui, text, width, RegionSource::Plan));
+            }
         }
         if let Some(block) = agents_block {
-            rows.extend(ui.checklist_region_rows(block, width));
+            rows.extend(checklist_pinned_rows(
+                ui,
+                block,
+                width,
+                RegionSource::Agents,
+            ));
         }
+        let counts = checklist_counts(plan_block.unwrap_or_default())
+            .plus(checklist_counts(agents_block.unwrap_or_default()));
+        self.cap_region_rows(ui, rows, counts, width)
+    }
+
+    fn cap_region_rows(
+        &self,
+        ui: &Ui,
+        rows: Vec<PinnedRegionRow>,
+        counts: ChecklistCounts,
+        width: usize,
+    ) -> Vec<String> {
         // Bound the frame to the screen: never taller than the terminal leaves
         // once the chrome and a line of output are reserved. On a terminal too
         // short for any region row the cap is 0 and the dock falls back to the
         // plain three-row frame.
-        let cap = term_height().saturating_sub(FRAME_RESERVE_ROWS).min(MAX_REGION_ROWS);
-        if rows.len() > cap {
-            if cap == 0 {
-                rows.clear();
-            } else {
-                let hidden = rows.len() - (cap - 1);
-                rows.truncate(cap - 1);
-                rows.push(format!("{DIM}… +{hidden} more{RESET}"));
+        let cap = term_height()
+            .saturating_sub(FRAME_RESERVE_ROWS)
+            .min(MAX_REGION_ROWS);
+        if rows.len() <= cap {
+            return rows.into_iter().map(|row| row.rendered).collect();
+        }
+        if cap == 0 {
+            return Vec::new();
+        }
+
+        // Preserve the active plan item and the agent header/summary before
+        // filling spare rows in source order. A long plan must never push the
+        // only agent indicator below the cap, and a panel must never hide the
+        // step that is actually running.
+        let plan_row = rows
+            .iter()
+            .position(|row| row.priority == RegionPriority::Plan);
+        let agent_row = rows
+            .iter()
+            .position(|row| row.priority == RegionPriority::Agents);
+        let mut mandatory = Vec::new();
+        if let Some(index) = plan_row {
+            mandatory.push(index);
+        }
+        if let Some(index) = agent_row {
+            mandatory.push(index);
+        }
+        mandatory.sort_unstable();
+        mandatory.dedup();
+
+        // A pathologically short terminal may leave one region row for two
+        // independent indicators. Keep both facts in one compact row.
+        if cap == 1 && plan_row.is_some() && agent_row.is_some() {
+            return vec![ui.region_summary_row(
+                "[~] plan active · agents active",
+                width,
+                RegionTone::Activity,
+            )];
+        }
+
+        let summary_slot = usize::from(cap > mandatory.len());
+        let content_cap = cap.saturating_sub(summary_slot);
+        let mut selected = vec![false; rows.len()];
+        for &index in mandatory.iter().take(content_cap) {
+            selected[index] = true;
+        }
+        let mut selected_count = selected.iter().filter(|&&keep| keep).count();
+        for keep in &mut selected {
+            if selected_count == content_cap {
+                break;
+            }
+            if !*keep {
+                *keep = true;
+                selected_count += 1;
             }
         }
-        rows
+
+        let hidden = rows.len().saturating_sub(selected_count);
+        let mut visible: Vec<String> = rows
+            .into_iter()
+            .zip(selected)
+            .filter_map(|(row, keep)| keep.then_some(row.rendered))
+            .collect();
+        if hidden > 0 && summary_slot > 0 {
+            visible.push(ui.region_summary_row(
+                &format!(
+                    "… {} completed · {} active · {} pending · {hidden} hidden",
+                    counts.done, counts.active, counts.pending,
+                ),
+                width,
+                RegionTone::Dim,
+            ));
+        }
+        visible
     }
 
     /// Relay bytes above the frame without losing a partial output line, then
@@ -1053,7 +1478,16 @@ impl DockSession {
         if !tracker.newline {
             ui.out_raw(b"\r\n");
         }
-        self.draw_active_frame(ui, plan, width, ask, cancel, started, active_tools, region_rows);
+        self.draw_active_frame(
+            ui,
+            plan,
+            width,
+            ask,
+            cancel,
+            started,
+            active_tools,
+            region_rows,
+        );
         *drawn_r = region_rows.len();
     }
 
@@ -1076,7 +1510,16 @@ impl DockSession {
         drawn_r: &mut usize,
     ) {
         self.erase_dock(ui, *drawn_r);
-        self.draw_active_frame(ui, plan, width, ask, cancel, started, active_tools, region_rows);
+        self.draw_active_frame(
+            ui,
+            plan,
+            width,
+            ask,
+            cancel,
+            started,
+            active_tools,
+            region_rows,
+        );
         *drawn_r = region_rows.len();
     }
 
@@ -1110,13 +1553,14 @@ impl DockSession {
     ) {
         let top = self.top_rule(ui, plan, width, started, active_tools);
         let bottom = self.bottom_rule(ui, width, ask, cancel);
+        let tick = (started.elapsed().as_millis() / COMET_MS as u128) as usize;
         // Top status, each region row, a blank input row, then the bottom
         // status, advancing into fresh rows with \r\n and clearing each (a no-op
         // on the blank rows write_above just opened, self-healing otherwise).
         let mut s = format!("\r\x1b[2K{top}");
         for row in region_rows {
             s.push_str("\r\n\x1b[2K");
-            s.push_str(row);
+            s.push_str(&animated_region_row(row, tick));
         }
         s.push_str("\r\n\x1b[2K\r\n\x1b[2K");
         s.push_str(&bottom);
@@ -1144,6 +1588,7 @@ impl DockSession {
     ) {
         let top = self.top_rule(ui, plan, width, started, active_tools);
         let bottom = self.bottom_rule(ui, width, ask, cancel);
+        let tick = (started.elapsed().as_millis() / COMET_MS as u128) as usize;
         let up = 1 + region_rows.len();
         let mut s = format!("\r\x1b[{up}A\r\x1b[2K{top}");
         for row in region_rows {
@@ -1152,7 +1597,7 @@ impl DockSession {
             // deferred-wrap latch of a row clamped to exactly the width and erase
             // its last glyph on every repaint.
             s.push_str("\x1b[1B\r\x1b[2K");
-            s.push_str(row);
+            s.push_str(&animated_region_row(row, tick));
         }
         s.push_str("\x1b[2B\r\x1b[2K");
         s.push_str(&bottom);
@@ -1167,7 +1612,7 @@ impl DockSession {
             let ed = Editor::from_line(&shown);
             ui.redraw_input_row(&ed, width);
         } else {
-            ui.redraw_input_row_hint(&self.draft, width, "type to queue a message");
+            ui.redraw_input_row_hint(&self.draft, width, "type to steer the turn");
         }
     }
 
@@ -1213,12 +1658,23 @@ impl DockSession {
     ) -> String {
         let (label, open) = if cancel.committed {
             ("canceling".to_string(), ui.theme.error.sgr(ui.depth))
+        } else if self.steering {
+            (
+                "steering · stopping current turn".to_string(),
+                ui.box_color(),
+            )
         } else if cancel.is_armed() {
-            ("press ESC again to cancel".to_string(), ui.theme.error.sgr(ui.depth))
+            (
+                "press ESC again to cancel".to_string(),
+                ui.theme.error.sgr(ui.depth),
+            )
         } else if self.reader_gone {
             ("input closed".to_string(), ui.theme.error.sgr(ui.depth))
         } else if ask.is_some() {
-            ("Enter confirms · Ctrl-C cancels all".to_string(), ui.box_color())
+            (
+                "Enter confirms · Ctrl-C cancels all".to_string(),
+                ui.box_color(),
+            )
         } else if self.queue.is_empty() {
             ("Esc Esc to cancel".to_string(), ui.box_color())
         } else {
@@ -1230,7 +1686,15 @@ impl DockSession {
         styled_rule(&label, width, &open)
     }
 
-    fn queued_record(&self, ui: &Ui, message: &str) -> String {
+    fn commit_steering(&mut self) {
+        // Unit tests keep the process-global flag isolated; PTY tests execute
+        // the shipped path and exercise the real provider/tool interruption.
+        #[cfg(not(test))]
+        INTERRUPTED.store(true, Ordering::SeqCst);
+        self.steering = true;
+    }
+
+    fn steering_record(&self, ui: &Ui, message: &str) -> String {
         let shown: String = message
             .chars()
             .map(|c| if c.is_control() { ' ' } else { c })
@@ -1243,7 +1707,7 @@ impl DockSession {
             ui.theme.note.sgr(ui.depth)
         };
         let note_reset = if note.is_empty() { "" } else { RESET };
-        format!("{prompt}› {reset}{shown} {note}[queued]{note_reset}\r\n")
+        format!("{prompt}› {reset}{shown} {note}[steering]{note_reset}\r\n")
     }
 }
 
@@ -1257,6 +1721,171 @@ fn frame_label(input: &str) -> String {
         shown.push('…');
     }
     shown
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RegionPriority {
+    None,
+    Plan,
+    Agents,
+}
+
+#[derive(Clone, Copy)]
+enum RegionSource {
+    Plan,
+    Agents,
+}
+
+struct PinnedRegionRow {
+    rendered: String,
+    priority: RegionPriority,
+}
+
+impl PinnedRegionRow {
+    fn summary(
+        ui: &Ui,
+        label: String,
+        width: usize,
+        tone: RegionTone,
+        priority: RegionPriority,
+    ) -> PinnedRegionRow {
+        PinnedRegionRow {
+            rendered: ui.region_summary_row(&label, width, tone),
+            priority,
+        }
+    }
+}
+
+fn checklist_pinned_rows(
+    ui: &Ui,
+    text: &str,
+    width: usize,
+    source: RegionSource,
+) -> Vec<PinnedRegionRow> {
+    let source_lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    ui.checklist_region_rows(text, width)
+        .into_iter()
+        .zip(source_lines)
+        .enumerate()
+        .map(|(index, (rendered, line))| {
+            let priority = match source {
+                RegionSource::Plan if line.starts_with("[~]") => RegionPriority::Plan,
+                RegionSource::Agents if index == 0 => RegionPriority::Agents,
+                _ => RegionPriority::None,
+            };
+            PinnedRegionRow { rendered, priority }
+        })
+        .collect()
+}
+
+fn agent_snapshot_block(snapshot: &crate::subagent::JobsSnapshot) -> String {
+    let mut block = format!(
+        "agents ({} active, {} ready): · {} queued · {} running · Tab to close",
+        snapshot.active, snapshot.ready, snapshot.queued, snapshot.running,
+    );
+    for row in &snapshot.rows {
+        let glyph = if row.contains(" · queued · ") {
+            "[ ]"
+        } else if row.contains(" · ready · ") {
+            "[x]"
+        } else {
+            "[~]"
+        };
+        block.push('\n');
+        block.push_str(glyph);
+        block.push(' ');
+        block.push_str(row);
+
+        let id = row.split(" · ").next().unwrap_or_default();
+        if let Some(progress) = snapshot
+            .recent_progress
+            .iter()
+            .find(|progress| progress.id == id)
+        {
+            for line in &progress.lines {
+                block.push('\n');
+                block.push_str("    ");
+                block.push_str(id);
+                block.push_str(" │ ");
+                block.push_str(line);
+            }
+        }
+    }
+    block
+}
+
+fn expanded_agent_snapshot_block(snapshot: &crate::subagent::JobsSnapshot) -> Option<String> {
+    (!snapshot.rows.is_empty()).then(|| agent_snapshot_block(snapshot))
+}
+
+fn collapsed_agent_snapshot_block(snapshot: &crate::subagent::JobsSnapshot) -> Option<String> {
+    if snapshot.active > 0 {
+        Some(format!(
+            "[{}] agents running (Tab to view)",
+            snapshot.active
+        ))
+    } else if snapshot.ready > 0 {
+        Some(format!("[{}] agents ready (Tab to view)", snapshot.ready))
+    } else {
+        None
+    }
+}
+
+/// New plan payloads append lifecycle time after the compatible header,
+/// `plan (x/y done): · 1.2s`. Old payloads have no suffix and fall back to the
+/// dock turn duration in final summaries.
+fn plan_elapsed(text: &str) -> Option<&str> {
+    let header = text.lines().next()?;
+    let (_, elapsed) = header.split_once("): · ")?;
+    let elapsed = elapsed.trim();
+    (!elapsed.is_empty()).then_some(elapsed)
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+struct ChecklistCounts {
+    done: usize,
+    active: usize,
+    pending: usize,
+}
+
+impl ChecklistCounts {
+    fn total(self) -> usize {
+        self.done + self.active + self.pending
+    }
+
+    fn is_complete(self) -> bool {
+        self.total() > 0 && self.done == self.total()
+    }
+
+    fn plus(self, other: ChecklistCounts) -> ChecklistCounts {
+        ChecklistCounts {
+            done: self.done + other.done,
+            active: self.active + other.active,
+            pending: self.pending + other.pending,
+        }
+    }
+}
+
+fn checklist_counts(text: &str) -> ChecklistCounts {
+    let mut counts = ChecklistCounts::default();
+    for line in text.lines() {
+        if line.starts_with("[x]") || line.starts_with("[!]") {
+            counts.done += 1;
+        } else if line.starts_with("[~]") {
+            counts.active += 1;
+        } else if line.starts_with("[ ]") {
+            counts.pending += 1;
+        }
+    }
+    counts
+}
+
+fn animated_region_row(row: &str, tick: usize) -> String {
+    const FRAMES: [&str; 4] = ["[|]", "[/]", "[-]", "[\\]"];
+    row.replacen("[~]", FRAMES[tick % FRAMES.len()], 1)
 }
 
 /// Start a confirmation only while keyboard input can still arrive. A reader
@@ -1276,15 +1905,6 @@ fn route_ask(
             answer: String::new(),
             reply,
         });
-    }
-}
-
-fn elapsed_label(elapsed: Duration) -> String {
-    let millis = elapsed.as_millis();
-    if millis < 60_000 {
-        format!("{}.{:01}s", millis / 1_000, (millis % 1_000) / 100)
-    } else {
-        format!("{}m{:02}s", millis / 60_000, (millis / 1_000) % 60)
     }
 }
 
@@ -1388,7 +2008,11 @@ mod tests {
         let t = fed(b"abc\n", 80);
         assert_eq!((t.col, t.fresh), (0, true), "\\n opens a fresh row");
         let t = fed(b"abc\r", 80);
-        assert_eq!((t.col, t.fresh), (0, false), "\\r returns onto used content");
+        assert_eq!(
+            (t.col, t.fresh),
+            (0, false),
+            "\\r returns onto used content"
+        );
         // \r on a fresh row keeps it fresh (nothing was printed there).
         let t = fed(b"abc\n\r", 80);
         assert!(t.fresh);
@@ -1526,6 +2150,87 @@ mod tests {
         assert_eq!(elapsed_label(Duration::from_millis(123)), "0.1s");
         assert_eq!(elapsed_label(Duration::from_millis(12_345)), "12.3s");
         assert_eq!(elapsed_label(Duration::from_secs(125)), "2m05s");
+    }
+
+    #[test]
+    fn checklist_counts_drive_completed_and_overflow_summaries() {
+        let counts = checklist_counts("plan (2/4 done):\n[x] one\n[x] two\n[~] three\n[ ] four");
+        assert_eq!(
+            counts,
+            ChecklistCounts {
+                done: 2,
+                active: 1,
+                pending: 1
+            }
+        );
+        assert!(!counts.is_complete());
+        assert!(checklist_counts("plan (2/2 done):\n[x] one\n[x] two").is_complete());
+        assert_eq!(checklist_counts("agents:\n[!] failed").done, 1);
+    }
+
+    #[test]
+    fn agent_snapshot_view_keeps_compact_row_and_separate_recent_activity() {
+        let snapshot = crate::subagent::JobsSnapshot {
+            active: 1,
+            queued: 0,
+            running: 1,
+            ready: 0,
+            active_ids: vec!["agent-1".into()],
+            undelivered_ids: vec!["agent-1".into()],
+            rows: vec!["agent-1 · running · 1.2s · code one file · * bash make".into()],
+            recent_progress: vec![crate::subagent::JobProgressSnapshot {
+                id: "agent-1".into(),
+                lines: vec!["* read src/lib.rs".into(), "* write src/lib.rs".into()],
+            }],
+        };
+        let block = agent_snapshot_block(&snapshot);
+        let lines: Vec<&str> = block.lines().collect();
+        assert!(lines[0].starts_with("agents (1 active, 0 ready):"));
+        assert!(lines[1].contains("[~] agent-1 · running · 1.2s · code one file"));
+        assert_eq!(lines[2], "    agent-1 │ * read src/lib.rs");
+        assert_eq!(lines[3], "    agent-1 │ * write src/lib.rs");
+
+        assert_eq!(
+            collapsed_agent_snapshot_block(&snapshot).as_deref(),
+            Some("[1] agents running (Tab to view)")
+        );
+        let ready = crate::subagent::JobsSnapshot {
+            active: 0,
+            ready: 1,
+            ..crate::subagent::JobsSnapshot::default()
+        };
+        assert_eq!(
+            collapsed_agent_snapshot_block(&ready).as_deref(),
+            Some("[1] agents ready (Tab to view)")
+        );
+        assert!(
+            collapsed_agent_snapshot_block(&crate::subagent::JobsSnapshot::default()).is_none()
+        );
+        assert!(
+            expanded_agent_snapshot_block(&crate::subagent::JobsSnapshot::default()).is_none(),
+            "an open temporal view must disappear once its last job is drained"
+        );
+    }
+
+    #[test]
+    fn plan_elapsed_reads_new_header_and_old_headers_still_fall_back() {
+        assert_eq!(
+            plan_elapsed("plan (1/2 done): · 3.4s\n[x] first · 1.0s\n[~] second"),
+            Some("3.4s")
+        );
+        assert_eq!(
+            plan_elapsed("plan (1/2 done):\n[x] first\n[~] second"),
+            None
+        );
+    }
+
+    #[test]
+    fn active_plan_glyph_animates_without_changing_other_rows() {
+        assert_eq!(animated_region_row("[~] active", 0), "[|] active");
+        assert_eq!(animated_region_row("[~] active", 1), "[/] active");
+        assert_eq!(animated_region_row("[~] active", 2), "[-] active");
+        assert_eq!(animated_region_row("[~] active", 3), "[\\] active");
+        assert_eq!(animated_region_row("[x] done", 3), "[x] done");
     }
 
     #[test]

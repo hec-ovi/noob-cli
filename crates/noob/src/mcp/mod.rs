@@ -78,7 +78,10 @@ const MAX_LIST_PAGES: usize = 16;
 
 impl Mcp {
     pub fn new(servers: Vec<ServerConfig>) -> Mcp {
-        Mcp { servers, conns: Mutex::new(HashMap::new()) }
+        Mcp {
+            servers,
+            conns: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Configured server names, sorted (config::load sorts).
@@ -115,15 +118,15 @@ impl Mcp {
                     Transport::Stdio(stdio::StdioTransport::new(command, args, cfg.timeout))
                 }
             };
-            Arc::new(Connection { transport, tools: Mutex::new(Vec::new()) })
+            Arc::new(Connection {
+                transport,
+                tools: Mutex::new(Vec::new()),
+            })
         });
         let protocol = conn.transport.ensure_ready()?;
         let tools = list_tools(&conn.transport)?;
         *conn.tools.lock().unwrap() = tools.clone();
-        self.conns
-            .lock()
-            .unwrap()
-            .insert(name.to_string(), conn);
+        self.conns.lock().unwrap().insert(name.to_string(), conn);
         Ok(ConnectInfo { protocol, tools })
     }
 
@@ -180,7 +183,9 @@ mod tests {
     fn manager_with(server_url: &str) -> Mcp {
         Mcp::new(vec![ServerConfig {
             name: "mock".to_string(),
-            transport: TransportConfig::Http { url: server_url.to_string() },
+            transport: TransportConfig::Http {
+                url: server_url.to_string(),
+            },
             timeout: Duration::from_secs(5),
         }])
     }
@@ -189,7 +194,10 @@ mod tests {
     fn connect_caches_the_catalog_and_call_round_trips() {
         let server = noob_testkit::mcp::McpHttpServer::start(noob_testkit::mcp::echo_tools());
         let mcp = manager_with(&server.url());
-        assert!(mcp.connection("mock").is_none(), "lazy: nothing before connect");
+        assert!(
+            mcp.connection("mock").is_none(),
+            "lazy: nothing before connect"
+        );
         let info = mcp.connect("mock").unwrap();
         assert_eq!(info.protocol, "2025-11-25");
         assert_eq!(info.tools.len(), 1);
@@ -199,7 +207,12 @@ mod tests {
         let result = mcp
             .call(&conn, "echo", &serde_json::json!({"text": "hola"}))
             .unwrap();
-        assert!(result["content"][0]["text"].as_str().unwrap().contains("hola"));
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("hola")
+        );
         server.assert_clean();
     }
 

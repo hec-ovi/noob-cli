@@ -41,7 +41,11 @@ fn rig() -> Rig {
     let config = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     write_env(config.path(), &server.base_url());
-    Rig { server, config, work }
+    Rig {
+        server,
+        config,
+        work,
+    }
 }
 
 impl Rig {
@@ -125,7 +129,11 @@ fn mcp_line_and_tool_registration() {
     // Nothing was probed at session start: both URLs are dead ports and the
     // run still succeeded (lazy to the bone).
     let tools = reqs[0]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 11, "8 core + task + mcp_connect + mcp_call");
+    assert_eq!(
+        tools.len(),
+        12,
+        "9 core + subagent + mcp_connect + mcp_call"
+    );
     assert!(tools.iter().any(|t| t["function"]["name"] == "mcp_connect"));
     assert!(tools.iter().any(|t| t["function"]["name"] == "mcp_call"));
     rig.server.assert_clean();
@@ -139,7 +147,7 @@ fn no_mcp_config_means_no_line_and_no_tools() {
     let reqs = rig.api_requests();
     let system = reqs[0]["messages"][0]["content"].as_str().unwrap();
     assert!(!system.contains("MCP servers"));
-    assert_eq!(reqs[0]["tools"].as_array().unwrap().len(), 9);
+    assert_eq!(reqs[0]["tools"].as_array().unwrap().len(), 10);
     rig.server.assert_clean();
 }
 
@@ -157,7 +165,11 @@ fn connect_and_call_stdio_through_the_loop() {
     rig.server
         .enqueue_stream_toolcalls(&[("m1", "mcp_connect", r#"{"server":"mock"}"#)], None);
     rig.server.enqueue_stream_toolcalls(
-        &[("m2", "mcp_call", r#"{"server":"mock","tool":"echo","args":{"text":"ping"}}"#)],
+        &[(
+            "m2",
+            "mcp_call",
+            r#"{"server":"mock","tool":"echo","args":{"text":"ping"}}"#,
+        )],
         None,
     );
     rig.server.enqueue_stream_completion("done");
@@ -175,7 +187,10 @@ fn connect_and_call_stdio_through_the_loop() {
         .as_str()
         .unwrap()
         .to_string();
-    assert!(catalog.starts_with("connected to mock: 1 tools (protocol 2025-11-25)"), "{catalog}");
+    assert!(
+        catalog.starts_with("connected to mock: 1 tools (protocol 2025-11-25)"),
+        "{catalog}"
+    );
     assert!(catalog.contains("[untrusted content from MCP server \"mock\""));
     assert!(catalog.contains("- echo(text: string): echoes text back"));
 
@@ -205,12 +220,19 @@ fn connect_and_call_http_through_the_loop() {
     let mcp_server = McpHttpServer::start(echo_tools());
     rig.mcp_json(
         rig.config.path(),
-        &format!(r#"{{"servers": {{"web": {{"url": "{}"}}}}}}"#, mcp_server.url()),
+        &format!(
+            r#"{{"servers": {{"web": {{"url": "{}"}}}}}}"#,
+            mcp_server.url()
+        ),
     );
     rig.server
         .enqueue_stream_toolcalls(&[("h1", "mcp_connect", r#"{"server":"web"}"#)], None);
     rig.server.enqueue_stream_toolcalls(
-        &[("h2", "mcp_call", r#"{"server":"web","tool":"echo","args":{"text":"hola"}}"#)],
+        &[(
+            "h2",
+            "mcp_call",
+            r#"{"server":"web","tool":"echo","args":{"text":"hola"}}"#,
+        )],
         None,
     );
     rig.server.enqueue_stream_completion("done");
@@ -244,8 +266,16 @@ fn call_before_connect_teaches_the_next_move() {
     );
     rig.server.enqueue_stream_toolcalls(
         &[
-            ("e1", "mcp_call", r#"{"server":"mock","tool":"echo","args":{}}"#),
-            ("e2", "mcp_call", r#"{"server":"ghost","tool":"echo","args":{}}"#),
+            (
+                "e1",
+                "mcp_call",
+                r#"{"server":"mock","tool":"echo","args":{}}"#,
+            ),
+            (
+                "e2",
+                "mcp_call",
+                r#"{"server":"ghost","tool":"echo","args":{}}"#,
+            ),
         ],
         None,
     );
@@ -261,8 +291,16 @@ fn call_before_connect_teaches_the_next_move() {
         .filter(|m| m["role"] == "tool")
         .map(|m| m["content"].as_str().unwrap().to_string())
         .collect();
-    assert!(results[0].contains("connect first with mcp_connect"), "{}", results[0]);
-    assert!(results[1].contains("unknown MCP server \"ghost\""), "{}", results[1]);
+    assert!(
+        results[0].contains("connect first with mcp_connect"),
+        "{}",
+        results[0]
+    );
+    assert!(
+        results[1].contains("unknown MCP server \"ghost\""),
+        "{}",
+        results[1]
+    );
     rig.server.assert_clean();
 }
 
@@ -277,7 +315,7 @@ fn broken_config_warns_and_project_overrides_global() {
     ok(&out);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("not valid JSON"), "stderr: {stderr}");
-    assert_eq!(rig.api_requests()[0]["tools"].as_array().unwrap().len(), 9);
+    assert_eq!(rig.api_requests()[0]["tools"].as_array().unwrap().len(), 10);
 
     // Second run: valid global + project override for the same name.
     rig.mcp_json(

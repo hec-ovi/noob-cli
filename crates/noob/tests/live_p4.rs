@@ -9,13 +9,11 @@ use std::process::Command;
 use serde_json::Value;
 
 fn live_base_url() -> String {
-    std::env::var("NOOB_LIVE_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:8090/v1".to_string())
+    std::env::var("NOOB_LIVE_BASE_URL").unwrap_or_else(|_| "http://localhost:8090/v1".to_string())
 }
 
 fn websearch_url() -> String {
-    std::env::var("NOOB_LIVE_MCP_URL")
-        .unwrap_or_else(|_| "http://localhost:8000/mcp".to_string())
+    std::env::var("NOOB_LIVE_MCP_URL").unwrap_or_else(|_| "http://localhost:8000/mcp".to_string())
 }
 
 #[test]
@@ -66,7 +64,9 @@ fn live_websearch_through_mcp() {
         .collect();
     // The model went through the whole MCP chain...
     assert!(
-        events.iter().any(|e| e["t"] == "tool" && e["name"] == "mcp_connect"),
+        events
+            .iter()
+            .any(|e| e["t"] == "tool" && e["name"] == "mcp_connect"),
         "no mcp_connect call in: {stdout}"
     );
     let calls: Vec<&Value> = events
@@ -84,5 +84,8 @@ fn live_websearch_through_mcp() {
         .filter(|e| e["t"] == "text")
         .filter_map(|e| e["d"].as_str())
         .collect();
-    assert!(text.contains("2015"), "answer not grounded by the search: {text}");
+    assert!(
+        text.contains("2015"),
+        "answer not grounded by the search: {text}"
+    );
 }

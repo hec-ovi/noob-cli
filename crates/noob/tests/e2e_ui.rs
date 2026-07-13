@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::os::fd::FromRawFd;
 use std::process::Command;
 
-use noob_testkit::MockServer;
+use noob_testkit::{MockServer, RequestMatch};
 use serde_json::Value;
 
 // The test-only screen emulator (tests/vt.rs), included as a module so the
@@ -48,7 +48,11 @@ fn rig() -> Rig {
     let config = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     write_env(config.path(), &server.base_url());
-    Rig { server, config, work }
+    Rig {
+        server,
+        config,
+        work,
+    }
 }
 
 impl Rig {
@@ -58,6 +62,15 @@ impl Rig {
             .iter()
             .filter(|r| r.path.ends_with("/chat/completions"))
             .map(|r| r.json().unwrap())
+            .collect()
+    }
+
+    fn responses_requests(&self) -> Vec<Value> {
+        self.server
+            .recorded()
+            .iter()
+            .filter(|request| request.path.ends_with("/responses"))
+            .map(|request| request.json().unwrap())
             .collect()
     }
 }
@@ -116,7 +129,13 @@ fn spawn_pty_sized(
             .map(|w| w as *const libc::winsize)
             .unwrap_or(std::ptr::null());
         assert_eq!(
-            libc::openpty(&mut m, &mut s, std::ptr::null_mut(), std::ptr::null(), ws_ptr),
+            libc::openpty(
+                &mut m,
+                &mut s,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                ws_ptr
+            ),
             0,
             "openpty failed"
         );
@@ -227,7 +246,11 @@ impl Pty {
                 break;
             }
             let ms = (remaining.as_millis() as i32).min(40);
-            let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
             let ready = unsafe { libc::poll(&mut pfd, 1, ms) };
             if ready <= 0 {
                 continue; // timeout or EINTR: keep polling until the budget ends
@@ -258,7 +281,12 @@ impl Pty {
     /// a keystroke.
     fn resize(&mut self, rows: u16, cols: u16) {
         use std::os::fd::AsRawFd;
-        let ws = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
+        let ws = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
         unsafe {
             libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &ws);
             if let Some(child) = &self.child {
@@ -300,7 +328,11 @@ fn raw_editor_edits_then_submits_the_clean_line() {
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     let reqs = rig.api_requests();
     assert_eq!(reqs.len(), 1, "only the edited line should have run");
-    assert_eq!(last_user(&reqs[0]), "say hi", "the killed draft leaked into the message");
+    assert_eq!(
+        last_user(&reqs[0]),
+        "say hi",
+        "the killed draft leaked into the message"
+    );
     rig.server.assert_clean();
 }
 
@@ -339,7 +371,11 @@ fn raw_editor_expands_a_framed_box_when_typing_starts() {
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     let reqs = rig.api_requests();
     assert_eq!(reqs.len(), 1, "only the submitted line should have run");
-    assert_eq!(last_user(&reqs[0]), "hello frame", "the framed line must reach the agent intact");
+    assert_eq!(
+        last_user(&reqs[0]),
+        "hello frame",
+        "the framed line must reach the agent intact"
+    );
     rig.server.assert_clean();
 }
 
@@ -362,7 +398,8 @@ fn repl_session_resume_extends_the_transcript() {
     let last = reqs.last().unwrap();
     let msgs = last["messages"].as_array().unwrap();
     assert!(
-        msgs.iter().any(|m| m["role"] == "user" && m["content"] == "remember alpha"),
+        msgs.iter()
+            .any(|m| m["role"] == "user" && m["content"] == "remember alpha"),
         "resumed transcript missing the first turn: {msgs:?}"
     );
     rig.server.assert_clean();
@@ -381,15 +418,121 @@ fn run_repl(rig: &Rig, args: &[&str], input: &[u8]) -> std::process::Output {
     child.wait_with_output().unwrap()
 }
 
+#[test]
+fn config_command_updates_non_secret_env_without_a_model_request() {
+    let rig = rig();
+    let out = run_repl(
+        &rig,
+        &[],
+        b"/config set ctx 65536\n/config set task-concurrency 8\n/quit\n",
+    );
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let env = std::fs::read_to_string(rig.config.path().join(".env")).unwrap();
+    assert!(
+        env.contains("NOOB_BASE_URL="),
+        "provider config was lost: {env}"
+    );
+    assert!(
+        env.contains("NOOB_MODEL=mockmodel"),
+        "model config was lost: {env}"
+    );
+    assert!(
+        env.contains("NOOB_CTX=65536"),
+        "context setting missing: {env}"
+    );
+    assert!(
+        env.contains("NOOB_TASK_CONCURRENCY=8"),
+        "task setting missing: {env}"
+    );
+    assert!(
+        rig.api_requests().is_empty(),
+        "/config must not invoke the model"
+    );
+}
+
+#[test]
+fn unsetting_base_url_explains_that_autodetect_runs_after_restart() {
+    let rig = rig();
+    let out = run_repl(&rig, &[], b"/config unset base-url\n/quit\n");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("restart noob to run localhost autodetect"),
+        "{stdout}"
+    );
+    let env = std::fs::read_to_string(rig.config.path().join(".env")).unwrap();
+    assert!(!env.contains("NOOB_BASE_URL="), "{env}");
+    assert!(rig.api_requests().is_empty());
+}
+
+#[test]
+fn clear_plan_redacts_plan_payloads_from_resumed_context() {
+    let rig = rig();
+    let plan = r#"{"todos":[{"content":"LARGE-PLAN-PAYLOAD","status":"completed"}]}"#;
+    rig.server
+        .enqueue_stream_toolcalls(&[("p1", "plan", plan)], None);
+    rig.server.enqueue_stream_completion("finished");
+    let first = run_repl(&rig, &[], b"do it\n/clear-plan\n/quit\n");
+    assert!(
+        first.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let session_path = std::fs::read_dir(rig.config.path().join("sessions"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let id = session_path
+        .file_stem()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let last_reset = std::fs::read_to_string(&session_path)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .rfind(|line| line["t"] == "reset")
+        .expect("/clear-plan must persist a reset record");
+    let reset_text = last_reset.to_string();
+    assert!(!reset_text.contains("LARGE-PLAN-PAYLOAD"), "{reset_text}");
+    assert!(
+        reset_text.contains("plan cleared from context"),
+        "{reset_text}"
+    );
+
+    rig.server.expect_prefix_break();
+    rig.server.enqueue_stream_completion("no payload");
+    let second = run_repl(&rig, &["--resume", &id], b"what remains\n/quit\n");
+    assert!(second.status.success());
+    let resumed = rig.api_requests().last().unwrap().to_string();
+    assert!(!resumed.contains("LARGE-PLAN-PAYLOAD"), "{resumed}");
+    assert!(resumed.contains("plan cleared from context"), "{resumed}");
+    rig.server.assert_clean();
+}
+
 /// Write a session transcript file so a resume can replay it. `items` are the
 /// per-item JSON objects (the user/assistant/tool shapes the session log uses);
 /// each is wrapped as one `{"t":"item","item":...}` line under a meta header.
 fn write_session(config: &std::path::Path, id: &str, items: &[Value]) {
     let dir = config.join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
-    let mut out = format!("{}\n", serde_json::json!({"t":"meta","v":1,"id":id,"created_ms":0}));
+    let mut out = format!(
+        "{}\n",
+        serde_json::json!({"t":"meta","v":1,"id":id,"created_ms":0})
+    );
     for item in items {
-        out.push_str(&format!("{}\n", serde_json::json!({"t":"item","item":item})));
+        out.push_str(&format!(
+            "{}\n",
+            serde_json::json!({"t":"item","item":item})
+        ));
     }
     std::fs::write(dir.join(format!("{id}.jsonl")), out).unwrap();
 }
@@ -445,15 +588,27 @@ fn resume_redisplays_the_prior_conversation() {
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     let plain = strip_ansi(&pty.seen);
-    assert!(plain.contains("PRIORUSERLINE"), "prior user line not replayed:\n{plain}");
-    assert!(plain.contains("PRIORASSISTANTLINE"), "prior assistant line not replayed:\n{plain}");
-    assert!(plain.contains("SECONDUSERLINE"), "later user line not replayed:\n{plain}");
+    assert!(
+        plain.contains("PRIORUSERLINE"),
+        "prior user line not replayed:\n{plain}"
+    );
+    assert!(
+        plain.contains("PRIORASSISTANTLINE"),
+        "prior assistant line not replayed:\n{plain}"
+    );
+    assert!(
+        plain.contains("SECONDUSERLINE"),
+        "later user line not replayed:\n{plain}"
+    );
     assert!(
         !plain.contains("HIDDENSKILL"),
         "a synthetic [skills updated] item leaked into the replay:\n{plain}"
     );
     // Replay is display-only: resuming fires no model request.
-    assert!(rig.api_requests().is_empty(), "replay must not make a model request");
+    assert!(
+        rig.api_requests().is_empty(),
+        "replay must not make a model request"
+    );
     rig.server.assert_clean();
 }
 
@@ -471,7 +626,11 @@ fn resume_of_a_missing_session_notes_and_starts_fresh() {
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
-    assert!(pty.seen.contains("no saved session"), "the not-found notice never printed:\n{}", pty.seen);
+    assert!(
+        pty.seen.contains("no saved session"),
+        "the not-found notice never printed:\n{}",
+        pty.seen
+    );
     rig.server.assert_clean();
 }
 
@@ -481,7 +640,11 @@ fn resume_of_a_missing_session_notes_and_starts_fresh() {
 fn resume_alias_extends_a_session_created_with_session() {
     let rig = rig();
     rig.server.enqueue_stream_completion("noted");
-    let out1 = run_repl(&rig, &["--session", "aliastest"], b"remember gamma\n/quit\n");
+    let out1 = run_repl(
+        &rig,
+        &["--session", "aliastest"],
+        b"remember gamma\n/quit\n",
+    );
     assert!(out1.status.success(), "run 1 failed: {out1:?}");
 
     rig.server.enqueue_stream_completion("recalled");
@@ -494,10 +657,89 @@ fn resume_alias_extends_a_session_created_with_session() {
     let last = reqs.last().unwrap();
     let msgs = last["messages"].as_array().unwrap();
     assert!(
-        msgs.iter().any(|m| m["role"] == "user" && m["content"] == "remember gamma"),
+        msgs.iter()
+            .any(|m| m["role"] == "user" && m["content"] == "remember gamma"),
         "--resume did not resume the --session transcript: {msgs:?}"
     );
     rig.server.assert_clean();
+}
+
+#[test]
+fn sessions_command_lists_newest_and_resume_latest_replays_it() {
+    let rig = rig();
+    write_session(
+        rig.config.path(),
+        "older-session",
+        &[serde_json::json!({"role":"user","text":"OLDER-MARKER"})],
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write_session(
+        rig.config.path(),
+        "newer-session",
+        &[serde_json::json!({"role":"user","text":"NEWER-MARKER"})],
+    );
+
+    let listed = noob(rig.config.path(), rig.work.path())
+        .arg("sessions")
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    let mut lines = stdout.lines();
+    assert!(
+        lines.next().unwrap().starts_with("newer-session (latest)"),
+        "{stdout}"
+    );
+    assert!(
+        lines.next().unwrap().starts_with("older-session"),
+        "{stdout}"
+    );
+
+    rig.server.enqueue_stream_completion("LATEST-RESUMED");
+    let resumed = run_repl(&rig, &["--resume", "latest"], b"continue latest\n/quit\n");
+    assert!(
+        resumed.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let messages = rig.api_requests().last().unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["content"] == "NEWER-MARKER")
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message["content"] == "OLDER-MARKER")
+    );
+    rig.server.assert_clean();
+}
+
+#[test]
+fn sessions_command_lists_more_than_twenty_sessions() {
+    let rig = rig();
+    for index in 0..25 {
+        write_session(
+            rig.config.path(),
+            &format!("session-{index:02}"),
+            &[serde_json::json!({"role":"user","text":format!("marker-{index}")})],
+        );
+    }
+
+    let listed = noob(rig.config.path(), rig.work.path())
+        .arg("sessions")
+        .output()
+        .unwrap();
+    assert!(listed.status.success());
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert_eq!(stdout.lines().count(), 25, "{stdout}");
+    for index in 0..25 {
+        assert!(stdout.contains(&format!("session-{index:02}")), "{stdout}");
+    }
 }
 
 /// Ctrl-C at the prompt cancels the current line and reprompts; it never
@@ -578,10 +820,12 @@ fn raw_repl_shows_a_thinking_scanner_while_the_model_works() {
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     // The comet glyph appears before the reply and is then cleared; its bytes
     // remain in the stream even though the line was wiped.
-    let last_comet = pty
-        .seen
-        .rfind('▪')
-        .unwrap_or_else(|| panic!("the thinking scanner never rendered a comet frame:\n{}", pty.seen));
+    let last_comet = pty.seen.rfind('▪').unwrap_or_else(|| {
+        panic!(
+            "the thinking scanner never rendered a comet frame:\n{}",
+            pty.seen
+        )
+    });
     // ...and it is torn down before the reply: no frame lands after the reply
     // text begins, so the model's words never interleave with the animation
     // (the first output byte joins the animation thread before it is written).
@@ -619,14 +863,26 @@ fn piped_repl_uses_cooked_reader_with_no_box() {
 
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("piped answer"), "turn did not run: {stdout}");
-    assert!(stdout.contains("> "), "cooked prompt marker missing: {stdout}");
-    assert!(!stdout.contains('›'), "the box marker leaked into a piped repl: {stdout}");
+    assert!(
+        stdout.contains("piped answer"),
+        "turn did not run: {stdout}"
+    );
+    assert!(
+        stdout.contains("> "),
+        "cooked prompt marker missing: {stdout}"
+    );
+    assert!(
+        !stdout.contains('›'),
+        "the box marker leaked into a piped repl: {stdout}"
+    );
     assert!(
         !stdout.contains("\x1b[?2004h") && !stdout.contains("\x1b[?2004l"),
         "bracketed paste toggled on a piped repl: {stdout}"
     );
-    assert!(!stdout.contains('▪'), "the thinking scanner leaked into a piped repl: {stdout}");
+    assert!(
+        !stdout.contains('▪'),
+        "the thinking scanner leaked into a piped repl: {stdout}"
+    );
     rig.server.assert_clean();
 }
 
@@ -686,14 +942,26 @@ fn interactive_model_markdown_renders_headings_code_json_and_tables() {
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
-    assert!(!pty.seen.contains("### Status"), "heading markdown leaked as source");
-    assert!(!pty.seen.contains("**ready**"), "bold markdown leaked as source");
-    assert!(!pty.seen.contains("```json"), "fence markdown leaked as source");
+    assert!(
+        !pty.seen.contains("### Status"),
+        "heading markdown leaked as source"
+    );
+    assert!(
+        !pty.seen.contains("**ready**"),
+        "bold markdown leaked as source"
+    );
+    assert!(
+        !pty.seen.contains("```json"),
+        "fence markdown leaked as source"
+    );
     assert!(
         pty.seen.contains("┌─ ") && pty.seen.contains("json"),
         "JSON fence lost its labelled gutter"
     );
-    assert!(pty.seen.contains('┬'), "the table was not laid out as a grid");
+    assert!(
+        pty.seen.contains('┬'),
+        "the table was not laid out as a grid"
+    );
     rig.server.assert_clean();
 }
 
@@ -741,7 +1009,11 @@ fn dock_edits_and_submits_like_the_classic_editor() {
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     let reqs = rig.api_requests();
     assert_eq!(reqs.len(), 1, "only the edited line should have run");
-    assert_eq!(last_user(&reqs[0]), "say hi", "the killed draft leaked into the message");
+    assert_eq!(
+        last_user(&reqs[0]),
+        "say hi",
+        "the killed draft leaked into the message"
+    );
     rig.server.assert_clean();
 }
 
@@ -787,7 +1059,11 @@ fn dock_captures_typing_during_a_slow_stream() {
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     let reqs = rig.api_requests();
-    assert_eq!(reqs.len(), 2, "the mid-turn typing must not fire its own request");
+    assert_eq!(
+        reqs.len(),
+        2,
+        "the mid-turn typing must not fire its own request"
+    );
     assert_eq!(last_user(&reqs[0]), "start");
     assert_eq!(
         last_user(&reqs[1]),
@@ -859,8 +1135,17 @@ fn dock_double_esc_cancels_an_open_confirmation_and_the_tool_batch() {
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
-    assert!(!rig.work.path().join(".claude/skills/nope/SKILL.md").exists());
-    assert_eq!(rig.api_requests().len(), 1, "the canceled batch must not continue");
+    assert!(
+        !rig.work
+            .path()
+            .join(".claude/skills/nope/SKILL.md")
+            .exists()
+    );
+    assert_eq!(
+        rig.api_requests().len(),
+        1,
+        "the canceled batch must not continue"
+    );
     rig.server.assert_clean();
 }
 
@@ -891,8 +1176,7 @@ fn dock_typeahead_before_an_ask_cannot_confirm_it() {
     pty.wait_for(RAW_READY);
     pty.send(b"try the write\r");
     pty.wait_for("Working");
-    pty.send(b"y\r"); // submitted before the question exists: queue, never consent
-    pty.wait_for("[queued]");
+    pty.send(b"y"); // type-ahead before the question exists, never consent
     pty.wait_for("[y/N]"); // still waiting for a fresh answer
     pty.send(b"\x1b\x1b");
     pty.wait_for("[interrupted]");
@@ -903,7 +1187,12 @@ fn dock_typeahead_before_an_ask_cannot_confirm_it() {
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
-    assert!(!rig.work.path().join(".claude/skills/nope/SKILL.md").exists());
+    assert!(
+        !rig.work
+            .path()
+            .join(".claude/skills/nope/SKILL.md")
+            .exists()
+    );
     assert_eq!(rig.api_requests().len(), 1);
     rig.server.assert_clean();
 }
@@ -924,7 +1213,8 @@ fn dock_compact_is_cancelable_with_ctrl_c() {
     // The reply must exceed the tail budget (NOOB_CTX/4 = 1024 tokens ≈ 4 KiB)
     // on its own so it does not all fit in the retained tail, leaving a middle
     // of >= 2 items for the summarizer.
-    rig.server.enqueue_stream_completion(&format!("reply {} END-ONE", "x".repeat(6000)));
+    rig.server
+        .enqueue_stream_completion(&format!("reply {} END-ONE", "x".repeat(6000)));
     // The summarizer request: 200 headers, then a long silence. The watchdog
     // first-byte budget is 300s, so only INTERRUPTED can end this early.
     rig.server.enqueue_raw(vec![
@@ -943,8 +1233,8 @@ fn dock_compact_is_cancelable_with_ctrl_c() {
     settle(); // back at the idle prompt (a mid-turn Enter is inert pre-queue)
     pty.send(b"/compact\r");
     pty.wait_for("compacting"); // the summarizer request is now in flight, stalled
-    pty.send(b"keep this draft\r");
-    pty.wait_for("[queued]");
+    pty.send(b"keep this draft");
+    pty.wait_for("keep this draft");
     pty.send(&[0x03]); // Ctrl-C: a raw byte in dock mode, must still cancel
     pty.wait_for("compaction canceled"); // the watchdog tripped via INTERRUPTED
     pty.wait_for("keep this draft"); // canceled auxiliary turns restore queued input
@@ -959,14 +1249,18 @@ fn dock_compact_is_cancelable_with_ctrl_c() {
     // The 2nd request is the summarizer (compact.md system prompt), proving
     // the cancel hit the compaction request, not a normal turn.
     let sys = reqs[1]["messages"][0]["content"].as_str().unwrap_or("");
-    assert!(sys.contains("summarize an agent session"), "2nd req not the summarizer: {sys}");
+    assert!(
+        sys.contains("summarize an agent session"),
+        "2nd req not the summarizer: {sys}"
+    );
     rig.server.assert_clean();
 }
 
 #[test]
 fn dock_second_ctrl_c_hard_exits_with_terminal_restore() {
     let rig = rig();
-    rig.server.enqueue_raw(stalled_stream("Working END-NEVER", 2, 8000, false));
+    rig.server
+        .enqueue_raw(stalled_stream("Working END-NEVER", 2, 8000, false));
 
     let mut pty = spawn_pty_with(&rig, DOCK);
     pty.wait_for("type a task");
@@ -977,7 +1271,12 @@ fn dock_second_ctrl_c_hard_exits_with_terminal_restore() {
     pty.wait_for("\x1b[?2004l");
     let status = pty.finish();
 
-    assert_eq!(status.code(), Some(130), "hard cancel: {status:?};\n{}", pty.seen);
+    assert_eq!(
+        status.code(),
+        Some(130),
+        "hard cancel: {status:?};\n{}",
+        pty.seen
+    );
     assert!(
         pty.seen.contains("\x1b[?2004l"),
         "hard exit did not restore terminal modes:\n{}",
@@ -1019,16 +1318,26 @@ fn dock_ctrl_d_at_a_confirmation_denies_and_continues() {
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     let denied = rig.work.path().join(".claude/skills/nope/SKILL.md");
-    assert!(!denied.is_file(), "the write must have been denied, not executed");
+    assert!(
+        !denied.is_file(),
+        "the write must have been denied, not executed"
+    );
     rig.server.assert_clean();
 }
 
 /// A run whose stream sends `head_words` deltas, then holds `stall_ms`, then
 /// (optionally) sends the rest and closes. `chat_stream_datas` splits on
 /// whitespace, so head_words counts role delta + that many words.
-fn stalled_stream(text: &str, head_deltas: usize, stall_ms: u64, resume: bool) -> Vec<noob_testkit::RawStep> {
+fn stalled_stream(
+    text: &str,
+    head_deltas: usize,
+    stall_ms: u64,
+    resume: bool,
+) -> Vec<noob_testkit::RawStep> {
     let datas = noob_testkit::chat_stream_datas(text);
-    let mut head = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n".to_vec();
+    let mut head =
+        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n"
+            .to_vec();
     head.extend_from_slice(&sse_frames(&datas[..head_deltas]));
     let mut steps = vec![
         noob_testkit::RawStep::Bytes(head),
@@ -1042,6 +1351,59 @@ fn stalled_stream(text: &str, head_deltas: usize, stall_ms: u64, resume: bool) -
     steps
 }
 
+fn responses_completion_stream(text: &str, stall_ms: u64) -> Vec<noob_testkit::RawStep> {
+    let message = serde_json::json!({
+        "id": "message-1",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type":"output_text","text":text}]
+    });
+    let events = [
+        serde_json::json!({"type":"response.output_text.delta","item_id":"message-1","delta":text}),
+        serde_json::json!({
+            "type":"response.completed",
+            "response": {"status":"completed","output":[message],"usage":{"input_tokens":10,"output_tokens":5}}
+        }),
+    ];
+    let mut steps = vec![noob_testkit::RawStep::Bytes(noob_testkit::sse_headers())];
+    if stall_ms > 0 {
+        steps.push(noob_testkit::RawStep::SleepMs(stall_ms));
+    }
+    for event in events {
+        steps.push(noob_testkit::RawStep::Bytes(
+            format!("data: {event}\n\n").into_bytes(),
+        ));
+    }
+    steps
+}
+
+fn responses_toolcall_stream(
+    call_id: &str,
+    name: &str,
+    arguments: &str,
+) -> Vec<noob_testkit::RawStep> {
+    let item = serde_json::json!({
+        "id": "function-1",
+        "type": "function_call",
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments
+    });
+    let events = [
+        serde_json::json!({"type":"response.output_item.added","item":item}),
+        serde_json::json!({"type":"response.output_item.done","item":item}),
+        serde_json::json!({
+            "type":"response.completed",
+            "response": {"status":"completed","output":[item],"usage":{"input_tokens":10,"output_tokens":5}}
+        }),
+    ];
+    let mut bytes = noob_testkit::sse_headers();
+    for event in events {
+        bytes.extend_from_slice(format!("data: {event}\n\n").as_bytes());
+    }
+    vec![noob_testkit::RawStep::Bytes(bytes)]
+}
+
 /// M5 (double-ESC cancel): a first ESC during a turn arms a red hint; a second
 /// ESC inside the window commits, setting INTERRUPTED so the watchdog trips the
 /// in-flight read and the agent finalizes the turn with `[interrupted]`.
@@ -1049,7 +1411,8 @@ fn stalled_stream(text: &str, head_deltas: usize, stall_ms: u64, resume: bool) -
 fn dock_double_esc_cancels_a_running_turn() {
     let rig = rig();
     // Stream one word then stall indefinitely; only a cancel ends it.
-    rig.server.enqueue_raw(stalled_stream("Working END-NEVER", 2, 8000, false));
+    rig.server
+        .enqueue_raw(stalled_stream("Working END-NEVER", 2, 8000, false));
 
     let mut pty = spawn_pty_with(&rig, DOCK);
     pty.wait_for("type a task");
@@ -1066,7 +1429,44 @@ fn dock_double_esc_cancels_a_running_turn() {
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
-    assert!(!pty.seen.contains("END-NEVER"), "the stalled tail must never have streamed");
+    assert!(
+        !pty.seen.contains("END-NEVER"),
+        "the stalled tail must never have streamed"
+    );
+    rig.server.assert_clean();
+}
+
+#[test]
+fn dock_collapses_an_interrupted_plan_to_a_canceled_summary() {
+    let rig = rig();
+    let plan = r#"{"todos":[{"content":"finished","status":"completed"},{"content":"still working","status":"in_progress"},{"content":"later","status":"pending"}]}"#;
+    rig.server
+        .enqueue_stream_toolcalls(&[("p1", "plan", plan)], None);
+    rig.server
+        .enqueue_raw(stalled_stream("WAITING END-NEVER", 2, 8000, false));
+
+    let mut pty = spawn_pty_with(&rig, DOCK);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"run the plan\r");
+    pty.wait_for("plan (1/3 done):");
+    pty.send(&[0x1b]);
+    pty.wait_for("press ESC again to cancel");
+    pty.send(&[0x1b]);
+    pty.wait_for("[interrupted]");
+    pty.wait_for("plan canceled");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    assert!(
+        pty.seen.contains("plan canceled · 1/3 completed"),
+        "{}",
+        pty.seen
+    );
+    assert!(!pty.seen.contains("END-NEVER"));
     rig.server.assert_clean();
 }
 
@@ -1077,7 +1477,8 @@ fn dock_double_esc_cancels_a_running_turn() {
 fn dock_single_esc_does_not_cancel() {
     let rig = rig();
     // One word, a short stall, then the rest of the reply and a clean close.
-    rig.server.enqueue_raw(stalled_stream("Working through it END-OK", 2, 1500, true));
+    rig.server
+        .enqueue_raw(stalled_stream("Working through it END-OK", 2, 1500, true));
 
     let mut pty = spawn_pty_with(&rig, DOCK);
     pty.wait_for("type a task");
@@ -1094,33 +1495,36 @@ fn dock_single_esc_does_not_cancel() {
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
-    assert!(!pty.seen.contains("[interrupted]"), "one ESC must not cancel the turn");
+    assert!(
+        !pty.seen.contains("[interrupted]"),
+        "one ESC must not cancel the turn"
+    );
     let reqs = rig.api_requests();
     assert_eq!(reqs.len(), 1, "exactly the one turn ran to completion");
     rig.server.assert_clean();
 }
 
-/// M6 (queue): typing a message and pressing Enter WHILE a turn runs queues it
-/// (the "N queued" indicator shows) instead of firing it; when the turn ends it
-/// dispatches as the next turn, in order.
+/// Enter on a non-empty running-turn draft is steering: it interrupts the
+/// current provider request and dispatches the accepted message on the next
+/// REPL iteration instead of waiting for the old turn to finish.
 #[test]
-fn dock_queues_a_message_and_dispatches_after_the_turn() {
+fn dock_enter_steers_and_dispatches_on_the_next_loop() {
     let rig = rig();
-    // Turn 1 streams a word, holds long enough to type ahead, then finishes.
-    rig.server.enqueue_raw(stalled_stream("Working END-ONE", 2, 3000, true));
-    // Turn 2 is the dispatched queued message.
+    // Turn 1 enters a real long-running tool. Enter must stop it; turn 2 is the
+    // steering message, not passive type-ahead.
+    rig.server
+        .enqueue_stream_toolcalls(&[("slow-tool", "bash", r#"{"cmd":"sleep 8"}"#)], None);
     rig.server.enqueue_stream_completion("second done");
 
     let mut pty = spawn_pty_with(&rig, DOCK);
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"go\r");
-    pty.wait_for("Working"); // turn 1 is streaming, now stalled
-    pty.send(b"queued msg\r"); // typed + Enter mid-turn: queues, does not fire
-    pty.wait_for("[queued]"); // accepted messages are echoed immediately
-    pty.wait_for("1 queued"); // the queue indicator confirms it landed
-    pty.wait_for("END-ONE"); // turn 1 finishes
-    pty.wait_for("second"); // turn 2 = the dispatched queued message's reply
+    pty.wait_for("sleep 8");
+    pty.send(b"steer now\r");
+    pty.wait_for("[steering]");
+    pty.wait_for("[interrupted]");
+    pty.wait_for("second");
     settle();
     pty.send(&[0x04]);
     pty.wait_for("resume with");
@@ -1128,30 +1532,47 @@ fn dock_queues_a_message_and_dispatches_after_the_turn() {
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     let reqs = rig.api_requests();
-    assert_eq!(reqs.len(), 2, "the driving turn + the dispatched queued message");
+    assert_eq!(
+        reqs.len(),
+        2,
+        "the interrupted turn + immediate steering turn"
+    );
     assert_eq!(last_user(&reqs[0]), "go");
-    assert_eq!(last_user(&reqs[1]), "queued msg", "the queued message must run as the next turn");
+    assert_eq!(last_user(&reqs[1]), "steer now");
+    let messages = reqs[1]["messages"].as_array().unwrap();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["role"] == "user" && message["content"] == "[interrupted]"),
+        "the interrupted turn must close in-band before steering: {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| { message["role"] == "tool" && message["tool_call_id"] == "slow-tool" }),
+        "the interrupted tool call must have a matching result: {messages:?}"
+    );
     rig.server.assert_clean();
 }
 
-/// M6: interrupting a turn with a queued message drains it back into the editor
-/// (an interrupt means "stop, I will steer") rather than firing it. The message
-/// reappears at the prompt as an editable draft and no second request is made.
+/// Explicit cancellation keeps unsubmitted type-ahead as an editable draft and
+/// does not dispatch it. This remains distinct from Enter steering above.
 #[test]
-fn dock_interrupt_drains_the_queue_to_the_draft() {
+fn dock_interrupt_preserves_the_unsubmitted_draft() {
     let rig = rig();
-    rig.server.enqueue_raw(stalled_stream("Working END-NEVER", 2, 8000, false));
+    rig.server
+        .enqueue_raw(stalled_stream("Working END-NEVER", 2, 8000, false));
 
     let mut pty = spawn_pty_with(&rig, DOCK);
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"go\r");
     pty.wait_for("Working");
-    pty.send(b"hold me\r"); // queue a message mid-turn
-    pty.wait_for("1 queued");
+    pty.send(b"hold me");
+    pty.wait_for("hold me");
     pty.send(b"\x1b\x1b"); // both taps in one kernel read must still cancel
     pty.wait_for("[interrupted]");
-    // The queued message is restored to the editor, not dispatched.
+    // The unsubmitted draft remains editable and was not dispatched.
     pty.wait_for("hold me");
     pty.send(&[0x15]); // Ctrl-U clears the restored draft
     pty.send(&[0x04]); // Ctrl-D on the now-empty line exits
@@ -1160,65 +1581,554 @@ fn dock_interrupt_drains_the_queue_to_the_draft() {
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     let reqs = rig.api_requests();
-    assert_eq!(reqs.len(), 1, "the queued message must NOT have been dispatched after the cancel");
+    assert_eq!(
+        reqs.len(),
+        1,
+        "the draft must not dispatch after explicit cancel"
+    );
     rig.server.assert_clean();
 }
 
-/// The multi-agent fan-out panel on the themed dock surface: a batch of three
-/// distinct `task` calls renders one live checklist of agents (header with the
-/// concurrency cap, one row per agent, running then done) with a one-line
-/// result digest per finished agent, instead of three identical truncated
-/// lines. The three prompts share a prefix and differ only in their tails, so
-/// the panel must keep the rows visibly distinct.
+/// Dock fan-out is detached. The compact row opens into three live, distinct
+/// snapshot rows on Tab; shared prompt prefixes must not collapse their tails.
 #[test]
-fn dock_renders_a_multi_agent_fanout_panel() {
+fn dock_renders_a_detached_multi_agent_detail_view() {
     let rig = rig();
     rig.server.allow_interleaving();
-    rig.server.enqueue_stream_toolcalls(
+    let parent = || RequestMatch::UserPrompt("fan out".to_string());
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
         &[
-            ("f1", "subagent", r#"{"prompt":"Read the article at http://x/ALPHATAIL"}"#),
-            ("f2", "subagent", r#"{"prompt":"Read the article at http://x/BETATAIL"}"#),
-            ("f3", "subagent", r#"{"prompt":"Read the article at http://x/GAMMATAIL"}"#),
+            (
+                "f1",
+                "subagent",
+                r#"{"prompt":"Read the article at http://x/ALPHATAIL","tools":"all"}"#,
+            ),
+            (
+                "f2",
+                "subagent",
+                r#"{"prompt":"Read the article at http://x/BETATAIL","tools":"all"}"#,
+            ),
+            (
+                "f3",
+                "subagent",
+                r#"{"prompt":"Read the article at http://x/GAMMATAIL","tools":"all"}"#,
+            ),
         ],
         None,
     );
-    // Distinct child results; the panel digest is each child's first line. The
-    // parent's collect turn (below) is the 4th queued completion.
-    rig.server.enqueue_stream_completion("ALPHA-RESULT one");
-    rig.server.enqueue_stream_completion("BETA-RESULT two");
-    rig.server.enqueue_stream_completion("GAMMA-RESULT three");
-    rig.server.enqueue_stream_completion("COLLECTED-END");
+    rig.server
+        .enqueue_stream_completion_for(parent(), "PARENT-FANOUT-END");
+    for (tail, result, delay) in [
+        ("ALPHATAIL", "ALPHA-RESULT one", 800),
+        ("BETATAIL", "BETA-RESULT two", 1800),
+        ("GAMMATAIL", "GAMMA-RESULT three", 2800),
+    ] {
+        rig.server.enqueue_raw_for(
+            RequestMatch::UserPrompt(format!("Read the article at http://x/{tail}")),
+            stalled_stream(result, 1, delay, true),
+        );
+    }
+    rig.server
+        .enqueue_stream_completion_for(parent(), "COLLECTED-ONE");
+    rig.server
+        .enqueue_stream_completion_for(parent(), "COLLECTED-TWO");
+    rig.server
+        .enqueue_stream_completion_for(parent(), "COLLECTED-END");
 
     // Force the cap so the header text is deterministic and all three overlap.
     let mut pty = spawn_pty_with(&rig, &[("NOOB_TASK_CONCURRENCY", "4")]);
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"fan out\r");
-    pty.wait_for("Working");
-    pty.wait_for("agents ("); // the panel opened as the agents started
-    pty.wait_for("COLLECTED-END"); // the whole turn (fan-out + collect) finished
+    pty.wait_for("PARENT-FANOUT-END");
+    pty.wait_for("[3] agents running (Tab to view)");
+    pty.send(b"\t");
+    pty.wait_for("agents (3 active, 0 ready):");
+    for tail in ["ALPHATAIL", "BETATAIL", "GAMMATAIL"] {
+        pty.wait_for(tail);
+    }
+    pty.wait_for("COLLECTED-END");
+    pty.wait_for("type a message");
     settle();
-    pty.drain(std::time::Duration::from_millis(300));
-    pty.send(&[0x04]);
+    pty.send(b"/quit\r");
     pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     let seen = &pty.seen;
-    // Three distinct rows: the shared prefix did not collapse them.
     for tail in ["ALPHATAIL", "BETATAIL", "GAMMATAIL"] {
-        assert!(seen.contains(tail), "distinct row for {tail} missing:\n{seen}");
+        assert!(
+            seen.contains(tail),
+            "distinct row for {tail} missing:\n{seen}"
+        );
     }
-    // The header surfaces the concurrency cap and the fan-out reached all done.
-    assert!(seen.contains("up to 4 at once"), "concurrency cap not in the header:\n{seen}");
-    assert!(seen.contains("3/3 done"), "the panel never reached all-done:\n{seen}");
-    // A finished agent carries the done glyph and a one-line result digest (a
-    // child's result text can only reach the pty through the panel digest).
-    assert!(seen.contains("[x] agent"), "no agent row reached the done glyph:\n{seen}");
     assert!(
-        ["ALPHA-RESULT", "BETA-RESULT", "GAMMA-RESULT"].iter().any(|d| seen.contains(d)),
-        "no result digest reached the panel:\n{seen}"
+        seen.contains("agents (3 active, 0 ready):"),
+        "the detached detail view never opened:\n{seen}"
     );
+    rig.server.assert_clean();
+}
+
+/// Detached read-only sub-agents acknowledge their original tool call, then
+/// leave the dock free to dispatch a human follow-up before the child finishes.
+/// Tab opens a persistent detail region that survives the parent turn ending
+/// while the ordinary prompt remains editable. The final child output returns
+/// once as a synthetic user item and triggers one automatic continuation.
+#[test]
+fn background_agent_view_stays_pinned_while_the_prompt_remains_usable() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+    let child = || RequestMatch::LacksTool("subagent".to_string());
+
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[(
+            "bg-call",
+            "subagent",
+            r#"{"prompt":"slow standalone research"}"#,
+        )],
+        None,
+    );
+    rig.server
+        .enqueue_raw_for(parent(), stalled_stream("AGENT-STARTED-END", 1, 600, true));
+    rig.server.enqueue_raw_for(
+        child(),
+        stalled_stream("CHILD-RESULT-UNIQUE", 1, 2500, true),
+    );
+    rig.server
+        .enqueue_stream_completion_for(parent(), "STEERED-END");
+    rig.server
+        .enqueue_stream_completion_for(parent(), "AGENT-COLLECTED-END");
+
+    let mut pty = spawn_pty_with(&rig, &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"start research\r");
+    pty.wait_for("[1] agents running (Tab to view)");
+    pty.send(b"\t");
+    pty.wait_for("agents (1 active, 0 ready):");
+    pty.wait_for("slow standalone research");
+    pty.wait_for("AGENT-STARTED-END");
+    pty.send(b"answer me while it runs");
+    pty.drain(std::time::Duration::from_millis(300));
+    let open_view = pty.screen(18, 90);
+    let open_rows = open_view.render();
+    let visible = open_rows.join("\n");
+    assert!(
+        visible.contains("slow standalone research"),
+        "agent detail did not remain pinned after the parent turn:\n{}",
+        open_view.dump("persistent agents")
+    );
+    assert!(
+        open_rows
+            .iter()
+            .any(|row| row.contains(MARKER) && row.contains("answer me while it runs")),
+        "the editor is not usable under the persistent agents region:\n{}",
+        open_view.dump("persistent agents")
+    );
+    pty.send(b"\r");
+    pty.wait_for("STEERED-END");
+    pty.wait_for("agent-1 ok");
+    pty.wait_for("AGENT-COLLECTED-END");
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    let requests = rig.api_requests();
+    let child_request = requests
+        .iter()
+        .find(|request| last_user(request) == "slow standalone research")
+        .expect("child request");
+    assert_eq!(child_request["messages"].as_array().unwrap().len(), 2);
+
+    let final_parent = requests
+        .iter()
+        .rev()
+        .find(|request| {
+            request["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == "subagent")
+        })
+        .expect("final parent request");
+    let messages = final_parent["messages"].as_array().unwrap();
+    let acks: Vec<&Value> = messages
+        .iter()
+        .filter(|message| message["role"] == "tool" && message["tool_call_id"] == "bg-call")
+        .collect();
+    assert_eq!(
+        acks.len(),
+        1,
+        "one immediate result per original call: {messages:?}"
+    );
+    let ack: Value = serde_json::from_str(acks[0]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        ack,
+        serde_json::json!({"job_id":"agent-1","status":"running"})
+    );
+    let packets: Vec<&str> = messages
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .filter_map(|message| message["content"].as_str())
+        .filter(|content| content.starts_with("[background sub-agent result agent-1]"))
+        .collect();
+    assert_eq!(
+        packets.len(),
+        1,
+        "completion packet duplicated: {messages:?}"
+    );
+    assert!(packets[0].contains("CHILD-RESULT-UNIQUE"));
+    assert!(
+        !acks[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("CHILD-RESULT-UNIQUE")
+    );
+
+    let recorded = rig.server.recorded();
+    let steered = recorded
+        .iter()
+        .find(|record| {
+            record.json().is_some_and(|request| {
+                request["messages"].as_array().is_some_and(|messages| {
+                    messages.iter().any(|message| {
+                        message["role"] == "user" && message["content"] == "answer me while it runs"
+                    })
+                }) && !request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|message| {
+                        message["role"] == "user"
+                            && message["content"].as_str().is_some_and(|content| {
+                                content.starts_with("[background sub-agent result agent-1]")
+                            })
+                    })
+            })
+        })
+        .expect("steered parent request");
+    let collected = recorded
+        .iter()
+        .find(|record| {
+            record.json().is_some_and(|request| {
+                request["messages"].as_array().is_some_and(|messages| {
+                    messages.iter().any(|message| {
+                        message["role"] == "user"
+                            && message["content"].as_str().is_some_and(|content| {
+                                content.starts_with("[background sub-agent result agent-1]")
+                            })
+                    })
+                })
+            })
+        })
+        .expect("result continuation request");
+    assert!(
+        steered.arrived < collected.arrived,
+        "the human turn was blocked by the child"
+    );
+    rig.server.assert_clean();
+}
+
+/// A full-tool dock child detaches just like a read-only child. It receives the
+/// complete coding/MCP-capable schema set, may mutate the workspace under the
+/// cross-process lease, and reports exactly once after the parent has already
+/// returned to the prompt.
+#[test]
+fn detached_all_tools_child_writes_a_file_and_reports_once() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    std::fs::write(
+        rig.config.path().join("mcp.json"),
+        r#"{"servers":{"example":{"url":"http://127.0.0.1:9"}}}"#,
+    )
+    .unwrap();
+
+    let parent = || RequestMatch::UserPrompt("delegate single file".to_string());
+    let child = || RequestMatch::UserPrompt("write the delegated file".to_string());
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[(
+            "all-call",
+            "subagent",
+            r#"{"prompt":"write the delegated file","tools":"all"}"#,
+        )],
+        None,
+    );
+    rig.server
+        .enqueue_stream_completion_for(parent(), "PARENT-DETACHED-END");
+
+    // Hold the child's first model response so the parent must finish before
+    // the write can happen. Then the child calls the real write entry point.
+    let write_args = r#"{"path":"delegated.txt","content":"written by detached child\n"}"#;
+    let datas =
+        noob_testkit::chat_stream_toolcalls_datas(&[("child-write", "write", write_args)], None);
+    let mut tail = sse_frames(&datas);
+    tail.extend_from_slice(b"0\r\n\r\n");
+    rig.server.enqueue_raw_for(
+        child(),
+        vec![
+            noob_testkit::RawStep::Bytes(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n"
+                    .to_vec(),
+            ),
+            noob_testkit::RawStep::SleepMs(1200),
+            noob_testkit::RawStep::Bytes(tail),
+        ],
+    );
+    rig.server
+        .enqueue_stream_completion_for(child(), "CHILD-WRITE-DONE");
+    rig.server
+        .enqueue_stream_completion_for(parent(), "ALL-TOOLS-COLLECTED-END");
+
+    let output = rig.work.path().join("delegated.txt");
+    let mut pty = spawn_pty_with(&rig, &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"delegate single file\r");
+    pty.wait_for("PARENT-DETACHED-END");
+    assert!(
+        !output.exists(),
+        "the delayed child mutated the workspace before the parent turn ended"
+    );
+    pty.wait_for("[1] agents running (Tab to view)");
+    pty.wait_for("agent-1 ok");
+    pty.wait_for("ALL-TOOLS-COLLECTED-END");
+    pty.wait_for("type a message");
+    settle();
+    pty.send(b"/quit\r");
+    pty.wait_for("resume with");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    assert_eq!(
+        std::fs::read_to_string(&output).unwrap(),
+        "written by detached child\n"
+    );
+
+    let requests = rig.api_requests();
+    let child_request = requests
+        .iter()
+        .find(|request| last_user(request) == "write the delegated file")
+        .expect("child request");
+    let schemas = child_request["tools"]
+        .as_array()
+        .expect("child tool schemas");
+    let has_schema = |name: &str| {
+        schemas
+            .iter()
+            .any(|schema| schema["function"]["name"] == name || schema["name"] == name)
+    };
+    for name in ["write", "edit", "bash", "mcp_connect", "mcp_call"] {
+        assert!(
+            has_schema(name),
+            "full-tool child lacks {name}: {schemas:?}"
+        );
+    }
+
+    let final_parent = requests
+        .iter()
+        .rev()
+        .find(|request| {
+            request["messages"].as_array().is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    message["role"] == "user"
+                        && message["content"].as_str().is_some_and(|content| {
+                            content.starts_with("[background sub-agent result agent-1]")
+                        })
+                })
+            })
+        })
+        .expect("final parent request");
+    let messages = final_parent["messages"].as_array().unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| {
+                message["role"] == "tool" && message["tool_call_id"] == "all-call"
+            })
+            .count(),
+        1,
+        "the original tool call must receive exactly one running ack: {messages:?}"
+    );
+    let packets: Vec<&str> = messages
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .filter_map(|message| message["content"].as_str())
+        .filter(|content| content.starts_with("[background sub-agent result agent-1]"))
+        .collect();
+    assert_eq!(packets.len(), 1, "result packet duplicated: {messages:?}");
+    assert!(packets[0].contains("CHILD-WRITE-DONE"));
+    rig.server.assert_clean();
+}
+
+#[test]
+fn responses_background_result_preserves_one_call_output_and_one_report() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::UserPrompt("start responses helper".to_string());
+    let child = || RequestMatch::UserPrompt("responses child task".to_string());
+    rig.server.enqueue_raw_for(
+        parent(),
+        responses_toolcall_stream(
+            "responses-bg-call",
+            "subagent",
+            r#"{"prompt":"responses child task"}"#,
+        ),
+    );
+    rig.server
+        .enqueue_raw_for(parent(), responses_completion_stream("RESPONSES-ACK", 0));
+    rig.server.enqueue_raw_for(
+        child(),
+        responses_completion_stream("RESPONSES-CHILD-RESULT", 600),
+    );
+    rig.server.enqueue_raw_for(
+        parent(),
+        responses_completion_stream("RESPONSES-COLLECTED", 0),
+    );
+
+    let mut pty = spawn_pty_with(&rig, &[("NOOB_API_STYLE", "responses")]);
+    pty.wait_for(RAW_READY);
+    pty.send(b"start responses helper\r");
+    pty.wait_for("RESPONSES-ACK");
+    pty.wait_for("agent-1 ok");
+    pty.wait_for("RESPONSES-COLLECTED");
+    pty.send(&[0x04]);
+    assert!(pty.finish().success());
+
+    let requests = rig.responses_requests();
+    let final_parent = requests
+        .iter()
+        .rev()
+        .find(|request| {
+            request["input"].as_array().is_some_and(|input| {
+                input.iter().any(|item| {
+                    item["type"] == "message"
+                        && item["role"] == "user"
+                        && item["content"].as_str().is_some_and(|content| {
+                            content.starts_with("[background sub-agent result agent-1]")
+                        })
+                })
+            })
+        })
+        .expect("automatic result continuation");
+    let input = final_parent["input"].as_array().unwrap();
+    let outputs: Vec<&Value> = input
+        .iter()
+        .filter(|item| {
+            item["type"] == "function_call_output" && item["call_id"] == "responses-bg-call"
+        })
+        .collect();
+    assert_eq!(outputs.len(), 1, "{input:?}");
+    assert_eq!(
+        serde_json::from_str::<Value>(outputs[0]["output"].as_str().unwrap()).unwrap(),
+        serde_json::json!({"job_id":"agent-1","status":"running"}),
+    );
+    let reports = input
+        .iter()
+        .filter(|item| {
+            item["type"] == "message"
+                && item["role"] == "user"
+                && item["content"].as_str().is_some_and(|content| {
+                    content.starts_with("[background sub-agent result agent-1]")
+                })
+        })
+        .count();
+    assert_eq!(reports, 1, "{input:?}");
+    rig.server.assert_clean();
+}
+
+#[test]
+fn resume_repairs_a_persisted_background_ack_after_hard_exit_once() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::UserPrompt("launch orphan".to_string());
+    let child = || RequestMatch::UserPrompt("slow orphan work".to_string());
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[("bg-orphan", "subagent", r#"{"prompt":"slow orphan work"}"#)],
+        None,
+    );
+    rig.server
+        .enqueue_stream_completion_for(parent(), "ACK-PERSISTED");
+    rig.server
+        .enqueue_raw_for(child(), stalled_stream("NEVER-COLLECTED", 1, 10_000, true));
+
+    let mut first = spawn_pty_with(&rig, &[]);
+    first.wait_for(RAW_READY);
+    first.send(b"launch orphan\r");
+    first.wait_for("ACK-PERSISTED");
+    first.wait_for("[1] agents running (Tab to view)");
+    let pid = first.child.as_ref().unwrap().id() as libc::pid_t;
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    let status = first.finish();
+    assert!(!status.success(), "hard exit unexpectedly succeeded");
+
+    let session_path = std::fs::read_dir(rig.config.path().join("sessions"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut resumed = spawn_pty_sized(&rig, &[], None, &["--resume", "latest"]);
+    resumed.wait_for("recovered 1 unfinished background sub-agent(s) as canceled");
+    resumed.wait_for(RAW_READY);
+    resumed.send(&[0x04]);
+    assert!(resumed.finish().success());
+
+    let saved = std::fs::read_to_string(session_path).unwrap();
+    assert_eq!(
+        saved
+            .matches("[background sub-agent result agent-1]")
+            .count(),
+        1,
+        "orphan repair must be durable and exact once: {saved}"
+    );
+    rig.server.assert_clean();
+}
+
+#[test]
+fn agents_cancel_kills_a_detached_child_and_keeps_the_prompt_usable() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+    let child = || RequestMatch::LacksTool("subagent".to_string());
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[("cancel-call", "subagent", r#"{"prompt":"wait forever"}"#)],
+        None,
+    );
+    rig.server
+        .enqueue_raw_for(parent(), stalled_stream("CANCEL-JOB-STARTED", 1, 600, true));
+    rig.server.enqueue_raw_for(
+        child(),
+        stalled_stream("NEVER-SHOULD-FINISH", 1, 20_000, true),
+    );
+    rig.server
+        .enqueue_stream_completion_for(parent(), "CANCEL-COLLECTED-END");
+
+    let started = std::time::Instant::now();
+    let mut pty = spawn_pty_with(&rig, &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"start doomed helper\r");
+    pty.wait_for("[1] agents running (Tab to view)");
+    pty.send(b"/agents cancel agent-1\r");
+    pty.wait_for("[steering]");
+    pty.wait_for("canceling agent-1");
+    pty.wait_for("agent-1 canceled");
+    pty.wait_for("CANCEL-COLLECTED-END");
+    pty.wait_for("type a message");
+    settle();
+    pty.send(b"/quit\r");
+    pty.wait_for("resume with");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
     rig.server.assert_clean();
 }
 
@@ -1259,7 +2169,8 @@ fn skills_add_registers_the_tool_and_the_skill_loads() {
         "STEP-ONE: do the demo thing.",
     );
     // The "use demo" turn: the model loads the skill, then answers.
-    rig.server.enqueue_stream_toolcalls(&[("c1", "skill", r#"{"name":"demo"}"#)], None);
+    rig.server
+        .enqueue_stream_toolcalls(&[("c1", "skill", r#"{"name":"demo"}"#)], None);
     rig.server.enqueue_stream_completion("used the demo skill");
 
     let mut pty = spawn_pty(&rig); // classic REPL: per-prompt RAW_READY sync
@@ -1277,7 +2188,11 @@ fn skills_add_registers_the_tool_and_the_skill_loads() {
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     let reqs = rig.api_requests();
-    assert_eq!(reqs.len(), 2, "the tool-call round and the completion round");
+    assert_eq!(
+        reqs.len(),
+        2,
+        "the tool-call round and the completion round"
+    );
     // The skill tool was registered mid-session: the first request already
     // carries it, though the session booted with no skills.
     let tools = reqs[0]["tools"].as_array().expect("tools array");
@@ -1286,8 +2201,14 @@ fn skills_add_registers_the_tool_and_the_skill_loads() {
         "the skill tool must be registered after /skills add"
     );
     // The in-band announcement reached the model, and the skill body loaded.
-    assert!(all_content(&reqs[0]).contains("[skills updated]"), "missing the in-band note");
-    assert!(all_content(&reqs[1]).contains("STEP-ONE"), "the skill body did not load");
+    assert!(
+        all_content(&reqs[0]).contains("[skills updated]"),
+        "missing the in-band note"
+    );
+    assert!(
+        all_content(&reqs[1]).contains("STEP-ONE"),
+        "the skill body did not load"
+    );
     rig.server.assert_clean();
 }
 
@@ -1309,8 +2230,8 @@ fn dock_canceled_skill_clone_restores_queued_input() {
     pty.wait_for(RAW_READY);
     pty.send(b"/skills add https://example.invalid/demo.git\r");
     pty.wait_for("Working");
-    pty.send(b"keep skill draft\r");
-    pty.wait_for("[queued]");
+    pty.send(b"keep skill draft");
+    pty.wait_for("keep skill draft");
     pty.send(&[0x03]);
     pty.wait_for("skill installation canceled by user");
     pty.wait_for("keep skill draft");
@@ -1320,7 +2241,10 @@ fn dock_canceled_skill_clone_restores_queued_input() {
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
-    assert!(rig.api_requests().is_empty(), "the restored draft must not auto-run");
+    assert!(
+        rig.api_requests().is_empty(),
+        "the restored draft must not auto-run"
+    );
 }
 
 /// M8: removing a skill mid-session announces it and the `skill` tool then
@@ -1338,7 +2262,8 @@ fn skills_remove_announces_and_the_tool_rejects_the_gone_skill() {
     );
     // After removal the model still tries to load it (the head is stale); the
     // tool must reject, and the model then answers.
-    rig.server.enqueue_stream_toolcalls(&[("c1", "skill", r#"{"name":"demo"}"#)], None);
+    rig.server
+        .enqueue_stream_toolcalls(&[("c1", "skill", r#"{"name":"demo"}"#)], None);
     rig.server.enqueue_stream_completion("the skill is gone");
 
     let mut pty = spawn_pty(&rig);
@@ -1367,7 +2292,10 @@ fn skills_remove_announces_and_the_tool_rejects_the_gone_skill() {
         all_content(&reqs[1]).contains("unknown skill"),
         "the skill tool must reject a removed skill"
     );
-    assert!(!rig.work.path().join(".noob/skills/demo").exists(), "the skill dir must be gone");
+    assert!(
+        !rig.work.path().join(".noob/skills/demo").exists(),
+        "the skill dir must be gone"
+    );
     rig.server.assert_clean();
 }
 
@@ -1387,7 +2315,9 @@ const MARKER: &str = "\u{203a}";
 /// row indices if the top and bottom rules are both present.
 fn dock_rows(screen: &[String]) -> Option<(usize, usize)> {
     let top = screen.iter().rposition(|r| r.contains("Working"))?;
-    let bottom = screen.iter().rposition(|r| r.contains("Esc Esc to cancel"))?;
+    let bottom = screen
+        .iter()
+        .rposition(|r| r.contains("Esc Esc to cancel"))?;
     Some((top, bottom))
 }
 
@@ -1417,7 +2347,8 @@ fn dock_input_row_survives_a_scrolling_stream_at_the_screen_level() {
     text.push_str("ZZEND");
     // datas: [role, row-01..row-24, ZZEND, finish, usage, DONE]. Head = role +
     // rows 1..14 => 15 deltas.
-    rig.server.enqueue_raw(stalled_stream(&text, 15, 1200, true));
+    rig.server
+        .enqueue_raw(stalled_stream(&text, 15, 1200, true));
 
     let mut pty = spawn_pty_sized(&rig, &[], Some((ROWS, COLS)), &[]);
     pty.wait_for("type a task");
@@ -1512,7 +2443,7 @@ fn dock_input_row_survives_a_scrolling_stream_at_the_screen_level() {
 }
 
 /// The input row is a visible affordance during a turn: while the draft is
-/// empty the dock shows a dim "type to queue a message" placeholder (so the row
+/// empty the dock shows a dim "type to steer the turn" placeholder (so the row
 /// never reads as absent, the reported "input disappears during activity"), and
 /// the first keystroke replaces it with the draft rather than sitting beside it.
 #[test]
@@ -1542,7 +2473,7 @@ fn dock_input_row_shows_a_placeholder_when_empty_and_replaces_it_on_typing() {
     let (top, _bottom) = dock_rows(&empty_rows)
         .unwrap_or_else(|| panic!("dock rules missing:\n{}", empty.dump("empty")));
     assert!(
-        empty_rows[top + 1].contains("type to queue a message"),
+        empty_rows[top + 1].contains("type to steer the turn"),
         "the empty input row shows no placeholder affordance: {:?}\n{}",
         empty_rows[top + 1],
         empty.dump("empty")
@@ -1557,7 +2488,7 @@ fn dock_input_row_shows_a_placeholder_when_empty_and_replaces_it_on_typing() {
         .unwrap_or_else(|| panic!("dock rules missing after typing:\n{}", typed.dump("typed")));
     let tinput = &typed_rows[ttop + 1];
     assert!(
-        tinput.contains("my note") && !tinput.contains("type to queue a message"),
+        tinput.contains("my note") && !tinput.contains("type to steer the turn"),
         "typing did not replace the placeholder: {tinput:?}\n{}",
         typed.dump("typed")
     );
@@ -1579,7 +2510,7 @@ fn dock_input_row_shows_a_placeholder_when_empty_and_replaces_it_on_typing() {
 }
 
 /// The plan is a single pinned region that updates in place, never a fresh block
-/// stacked on every `todo` call (the reported console redundancy). Two `todo`
+/// stacked on every `plan` call (the reported console redundancy). Two `plan`
 /// calls advance the same plan; mid-turn the live screen shows the LATEST state
 /// exactly once, the superseded state is gone (overwritten in place, not scrolled
 /// into history), and the plan sits inside the dock between the "Working" status
@@ -1594,11 +2525,14 @@ fn dock_pins_the_plan_as_one_in_place_region() {
     let rig = rig();
     let a = r#"{"todos":[{"content":"alpha","status":"pending"},{"content":"beta","status":"pending"}]}"#;
     let b = r#"{"todos":[{"content":"alpha","status":"completed"},{"content":"beta","status":"pending"}]}"#;
-    rig.server.enqueue_stream_toolcalls(&[("p1", "todo", a)], None);
-    rig.server.enqueue_stream_toolcalls(&[("p2", "todo", b)], None);
+    rig.server
+        .enqueue_stream_toolcalls(&[("p1", "plan", a)], None);
+    rig.server
+        .enqueue_stream_toolcalls(&[("p2", "plan", b)], None);
     // A stalled final turn so the screen can be snapped while the frame is live
     // (turn end tears the frame, regions and all, down).
-    rig.server.enqueue_raw(stalled_stream("all planned ZZEND", 1, 3000, true));
+    rig.server
+        .enqueue_raw(stalled_stream("all planned ZZEND", 1, 3000, true));
 
     let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)), &[]);
     pty.wait_for("type a task");
@@ -1625,10 +2559,23 @@ fn dock_pins_the_plan_as_one_in_place_region() {
     // The scrolled tool summary is "plan: N/2 done" (no paren), so "plan (" keys
     // on the block header alone.
     let headers = rows.iter().filter(|r| r.contains("plan (")).count();
-    assert_eq!(headers, 1, "the plan must be one pinned block, not stacked:\n{}", screen.dump("plan"));
+    assert_eq!(
+        headers,
+        1,
+        "the plan must be one pinned block, not stacked:\n{}",
+        screen.dump("plan")
+    );
     let joined = rows.join("\n");
-    assert!(joined.contains("[x] alpha"), "the advanced item is not shown:\n{}", screen.dump("plan"));
-    assert!(joined.contains("[ ] beta"), "the pending item is not shown:\n{}", screen.dump("plan"));
+    assert!(
+        joined.contains("[x] alpha"),
+        "the advanced item is not shown:\n{}",
+        screen.dump("plan")
+    );
+    assert!(
+        joined.contains("[ ] beta"),
+        "the pending item is not shown:\n{}",
+        screen.dump("plan")
+    );
     // The superseded state was overwritten in place, not left in the transcript.
     assert!(
         !joined.contains("[ ] alpha"),
@@ -1642,9 +2589,18 @@ fn dock_pins_the_plan_as_one_in_place_region() {
     );
 
     // The region sits inside the dock: below "Working", above the input row.
-    let working = rows.iter().rposition(|r| r.contains("Working")).expect("Working status row");
-    let header = rows.iter().position(|r| r.contains("plan (1/2 done):")).expect("plan header row");
-    let input = rows.iter().rposition(|r| r.contains(MARKER)).expect("input row");
+    let working = rows
+        .iter()
+        .rposition(|r| r.contains("Working"))
+        .expect("Working status row");
+    let header = rows
+        .iter()
+        .position(|r| r.contains("plan (1/2 done):"))
+        .expect("plan header row");
+    let input = rows
+        .iter()
+        .rposition(|r| r.contains(MARKER))
+        .expect("input row");
     assert!(
         working < header && header < input,
         "plan not pinned between status and input (working {working}, header {header}, input {input}):\n{}",
@@ -1652,10 +2608,9 @@ fn dock_pins_the_plan_as_one_in_place_region() {
     );
 }
 
-/// When a turn ends, the finished plan is left as a static record directly above
-/// the idle input box instead of being torn down with the live frame, so a
-/// completed checklist stays visible at the bottom. A turn with no plan tears
-/// down exactly as before (covered by the scrolling test's end-of-turn assertion).
+/// When a turn ends, a completed plan collapses to one timed summary directly
+/// above the idle input. The individual completed rows do not consume the
+/// bottom of the terminal indefinitely.
 #[test]
 fn dock_leaves_the_finished_plan_visible_above_the_idle_box() {
     const ROWS: u16 = 16;
@@ -1664,8 +2619,10 @@ fn dock_leaves_the_finished_plan_visible_above_the_idle_box() {
     let rig = rig();
     let a = r#"{"todos":[{"content":"alpha","status":"pending"},{"content":"beta","status":"pending"}]}"#;
     let b = r#"{"todos":[{"content":"alpha","status":"completed"},{"content":"beta","status":"completed"}]}"#;
-    rig.server.enqueue_stream_toolcalls(&[("p1", "todo", a)], None);
-    rig.server.enqueue_stream_toolcalls(&[("p2", "todo", b)], None);
+    rig.server
+        .enqueue_stream_toolcalls(&[("p1", "plan", a)], None);
+    rig.server
+        .enqueue_stream_toolcalls(&[("p2", "plan", b)], None);
     rig.server.enqueue_stream_completion("PLAN-COMPLETE-ZZ");
 
     let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)), &[]);
@@ -1685,23 +2642,28 @@ fn dock_leaves_the_finished_plan_visible_above_the_idle_box() {
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     rig.server.assert_clean();
 
-    // The live turn frame (Working/cancel) is gone, but the finished plan block
-    // remains, sitting above the idle input box.
-    assert!(dock_rows(&rows).is_none(), "the live turn frame must be gone at idle");
-    let marker = rows.iter().rposition(|r| r.contains(MARKER)).expect("idle input box");
+    // The live frame is gone, but one completed summary remains above input.
+    assert!(
+        dock_rows(&rows).is_none(),
+        "the live turn frame must be gone at idle"
+    );
+    let marker = rows
+        .iter()
+        .rposition(|r| r.contains(MARKER))
+        .expect("idle input box");
     let header = rows
         .iter()
-        .position(|r| r.contains("plan (2/2 done):"))
+        .position(|r| r.contains("plan completed · 2/2 ·"))
         .unwrap_or_else(|| panic!("finished plan did not persist:\n{}", screen.dump("end")));
     assert!(
         header < marker,
-        "the finished plan must sit above the idle input box (header {header}, marker {marker}):\n{}",
+        "the completed plan must sit above the idle input box (header {header}, marker {marker}):\n{}",
         screen.dump("end")
     );
     let joined = rows.join("\n");
     assert!(
-        joined.contains("[x] alpha") && joined.contains("[x] beta"),
-        "the completed checklist items are not shown at idle:\n{}",
+        !joined.contains("[x] alpha") && !joined.contains("[x] beta"),
+        "completed items should collapse at idle:\n{}",
         screen.dump("end")
     );
 }
@@ -1719,16 +2681,18 @@ fn dock_region_row_keeps_its_ellipsis_across_an_in_place_refresh() {
 
     let rig = rig();
     let long = "this is a very long plan item that certainly exceeds the terminal width";
-    let todo = format!(r#"{{"todos":[{{"content":"{long}","status":"completed"}}]}}"#);
-    rig.server.enqueue_stream_toolcalls(&[("p1", "todo", todo.as_str())], None);
-    rig.server.enqueue_raw(stalled_stream("done ZZEND", 1, 3000, true));
+    let todo = format!(r#"{{"todos":[{{"content":"{long}","status":"pending"}}]}}"#);
+    rig.server
+        .enqueue_stream_toolcalls(&[("p1", "plan", todo.as_str())], None);
+    rig.server
+        .enqueue_raw(stalled_stream("done ZZEND", 1, 3000, true));
 
     let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)), &[]);
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"go\r");
     pty.wait_for("Working");
-    pty.wait_for("plan (1/1 done):");
+    pty.wait_for("plan (0/1 done):");
     // Span several 120ms comet refreshes: the in-place repaint is where a
     // full-width region row could lose its trailing ellipsis.
     pty.drain(std::time::Duration::from_millis(500));
@@ -1744,7 +2708,10 @@ fn dock_region_row_keeps_its_ellipsis_across_an_in_place_refresh() {
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     rig.server.assert_clean();
 
-    let item = rows.iter().find(|r| r.contains("this is a very")).expect("clamped plan item row");
+    let item = rows
+        .iter()
+        .find(|r| r.contains("this is a very"))
+        .expect("clamped plan item row");
     assert!(
         item.ends_with('…'),
         "the clamped region row lost its ellipsis on an in-place refresh: {item:?}\n{}",
@@ -1763,17 +2730,21 @@ fn dock_caps_pinned_regions_to_the_screen_height() {
 
     let rig = rig();
     // Twelve items plus the header would be 13 region rows; the cap on a 10-row
-    // screen is term_height - 4 = 6, so most collapse into a "+N more" row.
+    // screen is term_height - 4 = 6, so most collapse into a counted row.
     let mut items = String::new();
     for i in 1..=12 {
         if i > 1 {
             items.push(',');
         }
-        items.push_str(&format!(r#"{{"content":"item number {i:02}","status":"pending"}}"#));
+        items.push_str(&format!(
+            r#"{{"content":"item number {i:02}","status":"pending"}}"#
+        ));
     }
     let todo = format!(r#"{{"todos":[{items}]}}"#);
-    rig.server.enqueue_stream_toolcalls(&[("p1", "todo", todo.as_str())], None);
-    rig.server.enqueue_raw(stalled_stream("done ZZEND", 1, 3000, true));
+    rig.server
+        .enqueue_stream_toolcalls(&[("p1", "plan", todo.as_str())], None);
+    rig.server
+        .enqueue_raw(stalled_stream("done ZZEND", 1, 3000, true));
 
     let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)), &[]);
     pty.wait_for("type a task");
@@ -1796,10 +2767,18 @@ fn dock_caps_pinned_regions_to_the_screen_height() {
 
     // The frame is intact and on-screen: status, input row, and bottom rule all
     // present and in order within the ten rows (no top-edge clamp corruption).
-    let working = rows.iter().rposition(|r| r.contains("Working")).expect("Working row on screen");
-    let input = rows.iter().rposition(|r| r.contains(MARKER)).expect("input row on screen");
-    let bottom =
-        rows.iter().rposition(|r| r.contains("Esc Esc to cancel")).expect("bottom rule on screen");
+    let working = rows
+        .iter()
+        .rposition(|r| r.contains("Working"))
+        .expect("Working row on screen");
+    let input = rows
+        .iter()
+        .rposition(|r| r.contains(MARKER))
+        .expect("input row on screen");
+    let bottom = rows
+        .iter()
+        .rposition(|r| r.contains("Esc Esc to cancel"))
+        .expect("bottom rule on screen");
     assert!(
         working < input && input < bottom,
         "frame rows out of order (working {working}, input {input}, bottom {bottom}):\n{}",
@@ -1807,15 +2786,99 @@ fn dock_caps_pinned_regions_to_the_screen_height() {
     );
     // The overflow collapsed into a single summary row rather than overrunning.
     assert!(
-        rows.iter().any(|r| r.contains("… +") && r.contains("more")),
+        rows.iter()
+            .any(|r| r.contains("12 pending") && r.contains("hidden")),
         "no overflow summary row; the region was not capped to the screen:\n{}",
         screen.dump("cap")
     );
-    let header = rows.iter().position(|r| r.contains("plan (0/12 done):")).expect("plan header");
+    let header = rows
+        .iter()
+        .position(|r| r.contains("plan (0/12 done):"))
+        .expect("plan header");
     assert!(
         working < header && header < input,
         "plan not pinned inside the frame:\n{}",
         screen.dump("cap")
+    );
+}
+
+/// A cap must reserve independent rows for the active plan step and the compact
+/// detached-agent indicator. Source-order truncation used to hide one or both
+/// when the active plan item appeared late in a long checklist.
+#[test]
+fn dock_cap_keeps_active_plan_step_and_agent_summary() {
+    const ROWS: u16 = 10;
+    const COLS: u16 = 64;
+
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let mut items = String::new();
+    for i in 1..=12 {
+        if i > 1 {
+            items.push(',');
+        }
+        let status = if i == 12 { "in_progress" } else { "pending" };
+        let content = if i == 12 {
+            "late active step"
+        } else {
+            "early pending step"
+        };
+        items.push_str(&format!(
+            r#"{{"content":"{content} {i:02}","status":"{status}"}}"#
+        ));
+    }
+    let plan = format!(r#"{{"todos":[{items}]}}"#);
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+    let child = || RequestMatch::LacksTool("subagent".to_string());
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[
+            ("cap-plan", "plan", plan.as_str()),
+            ("cap-agent", "subagent", r#"{"prompt":"slow cap child"}"#),
+        ],
+        None,
+    );
+    rig.server
+        .enqueue_raw_for(parent(), stalled_stream("PARENT-CAP-END", 1, 1600, true));
+    rig.server
+        .enqueue_raw_for(child(), stalled_stream("CAP-CHILD-DONE", 1, 2400, true));
+    rig.server
+        .enqueue_stream_completion_for(parent(), "CAP-COLLECTED-END");
+
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)), &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"run capped plan and helper\r");
+    pty.wait_for("plan (0/12 done):");
+    pty.wait_for("[1] agents running (Tab to view)");
+    pty.drain(std::time::Duration::from_millis(450));
+    let screen = pty.screen(ROWS, COLS);
+    let rows = screen.render();
+    let visible = rows.join("\n");
+
+    pty.wait_for("PARENT-CAP-END");
+    pty.wait_for("agent-1 ok");
+    pty.wait_for("CAP-COLLECTED-END");
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+
+    assert!(
+        visible.contains("late active step 12"),
+        "the active plan step was hidden by the cap:\n{}",
+        screen.dump("combined cap")
+    );
+    assert!(
+        visible.contains("agents running (Tab to view)"),
+        "the agent summary was hidden by the long plan:\n{}",
+        screen.dump("combined cap")
+    );
+    assert!(
+        visible.contains("hidden"),
+        "the remaining capped rows were not summarized:\n{}",
+        screen.dump("combined cap")
     );
 }
 
@@ -1885,19 +2948,30 @@ fn dock_idle_box_reflows_on_resize_without_a_keystroke() {
 
     let rule_dashes = |pty: &Pty, cols: u16| -> usize {
         let rows = pty.screen(ROWS, cols).render();
-        let marker = rows.iter().rposition(|r| r.contains(MARKER)).expect("idle box marker");
+        let marker = rows
+            .iter()
+            .rposition(|r| r.contains(MARKER))
+            .expect("idle box marker");
         // The rule directly under the input row is the box bottom.
-        rows.get(marker + 1).map(|r| r.chars().filter(|&c| c == '─').count()).unwrap_or(0)
+        rows.get(marker + 1)
+            .map(|r| r.chars().filter(|&c| c == '─').count())
+            .unwrap_or(0)
     };
 
     let narrow = rule_dashes(&pty, 50);
-    assert_eq!(narrow, 50, "the initial idle box rule should span the 50-col terminal");
+    assert_eq!(
+        narrow, 50,
+        "the initial idle box rule should span the 50-col terminal"
+    );
 
     // Resize wider with NO keystroke: SIGWINCH must reflow the box.
     pty.resize(ROWS, 100);
     pty.drain(std::time::Duration::from_millis(500));
     let wide = rule_dashes(&pty, 100);
-    assert_eq!(wide, 100, "the idle box did not reflow to 100 cols on resize (SIGWINCH ignored)");
+    assert_eq!(
+        wide, 100,
+        "the idle box did not reflow to 100 cols on resize (SIGWINCH ignored)"
+    );
 
     pty.send(&[0x04]);
     pty.wait_for("resume with");
@@ -1925,7 +2999,8 @@ fn dock_input_row_survives_wrapping_lines_at_the_screen_level() {
     }
     text.push_str("ZZEND");
     let datas = noob_testkit::chat_stream_datas(&text);
-    rig.server.enqueue_raw(stalled_stream(&text, datas.len() / 2, 1200, true));
+    rig.server
+        .enqueue_raw(stalled_stream(&text, datas.len() / 2, 1200, true));
 
     let mut pty = spawn_pty_sized(&rig, &[], Some((ROWS, COLS)), &[]);
     pty.wait_for("type a task");
@@ -1953,7 +3028,12 @@ fn dock_input_row_survives_wrapping_lines_at_the_screen_level() {
     // MID-TURN: the dock is three contiguous rows and the input row is present.
     let (top, bottom) = dock_rows(&mid_rows)
         .unwrap_or_else(|| panic!("mid-turn dock rules missing:\n{}", mid.dump("mid")));
-    assert_eq!(bottom, top + 2, "the dock is not three contiguous rows:\n{}", mid.dump("mid"));
+    assert_eq!(
+        bottom,
+        top + 2,
+        "the dock is not three contiguous rows:\n{}",
+        mid.dump("mid")
+    );
     let input = &mid_rows[top + 1];
     assert!(
         input.contains(MARKER),
@@ -2016,7 +3096,10 @@ fn tab_completes_a_unique_slash_command_prefix() {
         "the prefix did not complete; it dispatched as an unknown command:\n{}",
         pty.seen
     );
-    assert!(rig.api_requests().is_empty(), "/plan makes no model request");
+    assert!(
+        rig.api_requests().is_empty(),
+        "/plan makes no model request"
+    );
     rig.server.assert_clean();
 }
 
@@ -2095,8 +3178,15 @@ fn tab_on_a_non_slash_line_is_inert() {
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     let reqs = rig.api_requests();
     assert_eq!(reqs.len(), 1);
-    assert_eq!(last_user(&reqs[0]), "say hi", "Tab altered a non-slash line");
-    assert!(!last_user(&reqs[0]).contains('\t'), "a literal tab leaked into the line");
+    assert_eq!(
+        last_user(&reqs[0]),
+        "say hi",
+        "Tab altered a non-slash line"
+    );
+    assert!(
+        !last_user(&reqs[0]).contains('\t'),
+        "a literal tab leaked into the line"
+    );
     rig.server.assert_clean();
 }
 
@@ -2123,6 +3213,9 @@ fn tab_does_not_complete_in_the_argument_region() {
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
-    assert!(rig.api_requests().is_empty(), "no command here makes a model request");
+    assert!(
+        rig.api_requests().is_empty(),
+        "no command here makes a model request"
+    );
     rig.server.assert_clean();
 }

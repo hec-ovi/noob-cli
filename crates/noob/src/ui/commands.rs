@@ -21,19 +21,67 @@ pub(crate) struct Command {
 /// Order is the display order used by the banner. Aliases the match also accepts
 /// (`q`, `exit`) are intentionally omitted: this is the discoverable set.
 pub(crate) const COMMANDS: &[Command] = &[
-    Command { name: "plan", desc: "enter plan mode (read-only tools until /go)", takes_args: false },
-    Command { name: "go", desc: "approve the plan and run it", takes_args: false },
-    Command { name: "status", desc: "endpoint, model, session, and usage", takes_args: false },
-    Command { name: "compact", desc: "summarize and shrink the context", takes_args: false },
-    Command { name: "skills", desc: "list, add, remove, or reload skills", takes_args: true },
-    Command { name: "quit", desc: "leave the REPL", takes_args: false },
+    Command {
+        name: "plan",
+        desc: "enter plan mode (read-only tools until /go)",
+        takes_args: false,
+    },
+    Command {
+        name: "clear-plan",
+        desc: "remove completed plan payloads from context",
+        takes_args: false,
+    },
+    Command {
+        name: "go",
+        desc: "approve the plan and run it",
+        takes_args: false,
+    },
+    Command {
+        name: "status",
+        desc: "endpoint, model, session, and usage",
+        takes_args: false,
+    },
+    Command {
+        name: "sessions",
+        desc: "list saved sessions newest first",
+        takes_args: false,
+    },
+    Command {
+        name: "agents",
+        desc: "list or cancel background sub-agents",
+        takes_args: true,
+    },
+    Command {
+        name: "config",
+        desc: "show or set non-secret configuration",
+        takes_args: true,
+    },
+    Command {
+        name: "compact",
+        desc: "summarize and shrink the context",
+        takes_args: false,
+    },
+    Command {
+        name: "skills",
+        desc: "list, add, remove, or reload skills",
+        takes_args: true,
+    },
+    Command {
+        name: "quit",
+        desc: "leave the REPL",
+        takes_args: false,
+    },
 ];
 
 /// The command list as the banner and the unknown-command notice show it:
-/// `/plan /go /status /compact /skills /quit`. Both callers read this, so the
+/// `/plan /clear-plan /go /status /sessions /agents /config /compact /skills /quit`. Both callers read this, so the
 /// two can never drift from the list completion uses.
 pub(crate) fn banner() -> String {
-    COMMANDS.iter().map(|c| format!("/{}", c.name)).collect::<Vec<_>>().join(" ")
+    COMMANDS
+        .iter()
+        .map(|c| format!("/{}", c.name))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The command token being typed, if completion applies to this line: the line
@@ -52,7 +100,11 @@ pub(crate) fn command_token(line: &str) -> Option<&str> {
 /// Command names whose start matches `token` (every command for an empty token,
 /// i.e. a bare `/`). In `COMMANDS` order.
 pub(crate) fn candidates(token: &str) -> Vec<&'static str> {
-    COMMANDS.iter().map(|c| c.name).filter(|n| n.starts_with(token)).collect()
+    COMMANDS
+        .iter()
+        .map(|c| c.name)
+        .filter(|n| n.starts_with(token))
+        .collect()
 }
 
 /// The longest common prefix of a set of names, for advancing an ambiguous Tab
@@ -85,7 +137,11 @@ pub(crate) fn complete(line: &str) -> Option<String> {
         [] => return None,
         [one] => {
             let takes_args = COMMANDS.iter().any(|c| c.name == *one && c.takes_args);
-            if takes_args { format!("/{one} ") } else { format!("/{one}") }
+            if takes_args {
+                format!("/{one} ")
+            } else {
+                format!("/{one}")
+            }
         }
         many => format!("/{}", longest_common_prefix(many)),
     };
@@ -105,11 +161,19 @@ pub(crate) fn hint(line: &str) -> Option<String> {
         [] => None,
         [one] if *one == token => None,
         [one] => {
-            let desc = COMMANDS.iter().find(|c| c.name == *one).map(|c| c.desc).unwrap_or("");
+            let desc = COMMANDS
+                .iter()
+                .find(|c| c.name == *one)
+                .map(|c| c.desc)
+                .unwrap_or("");
             Some(format!("  /{one}  {desc}"))
         }
         many => {
-            let list = many.iter().map(|n| format!("/{n}")).collect::<Vec<_>>().join(" ");
+            let list = many
+                .iter()
+                .map(|n| format!("/{n}"))
+                .collect::<Vec<_>>()
+                .join(" ");
             Some(format!("  {list}"))
         }
     }
@@ -121,7 +185,10 @@ mod tests {
 
     #[test]
     fn banner_lists_every_command_with_a_slash() {
-        assert_eq!(banner(), "/plan /go /status /compact /skills /quit");
+        assert_eq!(
+            banner(),
+            "/plan /clear-plan /go /status /sessions /agents /config /compact /skills /quit"
+        );
     }
 
     #[test]
@@ -141,15 +208,23 @@ mod tests {
     fn a_unique_prefix_completes_to_the_full_command() {
         assert_eq!(complete("/pl").as_deref(), Some("/plan"));
         assert_eq!(complete("/g").as_deref(), Some("/go"));
-        assert_eq!(complete("/c").as_deref(), Some("/compact"));
+        assert_eq!(complete("/c"), None);
+        assert_eq!(complete("/co"), None);
+        assert_eq!(complete("/com").as_deref(), Some("/compact"));
+        assert_eq!(complete("/con").as_deref(), Some("/config "));
+        assert_eq!(complete("/cl").as_deref(), Some("/clear-plan"));
         assert_eq!(complete("/q").as_deref(), Some("/quit"));
         assert_eq!(complete("/st").as_deref(), Some("/status"));
+        assert_eq!(complete("/se").as_deref(), Some("/sessions"));
+        assert_eq!(complete("/ag").as_deref(), Some("/agents "));
     }
 
     #[test]
     fn an_arg_taking_command_completes_with_a_trailing_space() {
-        // /skills is the only command with arguments; the space starts them.
+        // Argument-taking commands append a space so the next key starts arguments.
         assert_eq!(complete("/sk").as_deref(), Some("/skills "));
+        assert_eq!(complete("/conf").as_deref(), Some("/config "));
+        assert_eq!(complete("/ag").as_deref(), Some("/agents "));
         // /status takes none, so no trailing space.
         assert_eq!(complete("/stat").as_deref(), Some("/status"));
     }
@@ -159,7 +234,7 @@ mod tests {
         // /s matches skills and status; their only shared prefix is "s", which
         // is already typed, so Tab is a no-op (it must NOT pick one).
         assert_eq!(complete("/s"), None);
-        assert_eq!(candidates("s"), vec!["status", "skills"]);
+        assert_eq!(candidates("s"), vec!["status", "sessions", "skills"]);
     }
 
     #[test]
@@ -174,7 +249,10 @@ mod tests {
     fn the_hint_lists_candidates_or_a_single_description() {
         // Ambiguous: the candidates, each with its slash.
         let h = hint("/s").unwrap();
-        assert!(h.contains("/skills") && h.contains("/status"), "candidates missing: {h:?}");
+        assert!(
+            h.contains("/skills") && h.contains("/status"),
+            "candidates missing: {h:?}"
+        );
         // Unique partial: the completion and its description.
         let h = hint("/pl").unwrap();
         assert!(h.contains("/plan"), "the completion is missing: {h:?}");

@@ -43,6 +43,12 @@ if ! command -v docker >/dev/null 2>&1; then
     exit 127
 fi
 
+case "$(uname -m)" in
+    x86_64|amd64) docker_arch=amd64 ;;
+    aarch64|arm64) docker_arch=arm64 ;;
+    *) echo "install.sh: unsupported host architecture: $(uname -m)" >&2; exit 2 ;;
+esac
+
 destination="$prefix/bin/noob"
 if [[ -e "$destination" && $force -ne 1 ]]; then
     if ! grep -q "noob-cli managed Docker launcher" "$destination" 2>/dev/null; then
@@ -52,7 +58,8 @@ if [[ -e "$destination" && $force -ne 1 ]]; then
 fi
 
 echo "Building isolated runtime image noob:local..."
-docker build --target runtime --tag noob:local --file "$ROOT/docker/Dockerfile" "$ROOT"
+docker build --build-arg "TARGETARCH=$docker_arch" --target runtime --tag noob:local \
+    --file "$ROOT/docker/Dockerfile" "$ROOT"
 
 install -d "$prefix/bin"
 install -m 0755 "$ROOT/scripts/noob" "$destination"
@@ -73,8 +80,9 @@ if [[ -d "$ROOT/config/skills" ]]; then
 fi
 
 echo "Installed $destination"
-echo "Run: noob"
-echo "Restore: noob --restore <session>"
+echo "For scratch work: mkdir -p noob-workspace && cd noob-workspace && noob"
+echo "For a project: cd /path/to/project && noob"
+echo "Resume: noob --resume <session>"
 case ":$PATH:" in
     *":$prefix/bin:"*) ;;
     *) echo "Add $prefix/bin to PATH to use the noob command." ;;

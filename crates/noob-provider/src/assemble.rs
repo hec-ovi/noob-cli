@@ -143,7 +143,11 @@ impl Assembler {
         if let Some(i) = positional {
             return i;
         }
-        if let Some(id) = entry.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        if let Some(id) = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
             if let Some((w, _)) = self.calls.iter().find(|(_, c)| c.id == id) {
                 return *w;
             }
@@ -171,16 +175,19 @@ impl Assembler {
 
         // Repeated id/name in every delta: ignore after first.
         if call.id.is_empty()
-            && let Some(id) = entry.get("id").and_then(Value::as_str).filter(|s| !s.is_empty())
+            && let Some(id) = entry
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
         {
             call.id = id.to_string();
         }
         let f = entry.get("function");
         if call.name.is_empty()
             && let Some(name) = f
-            .and_then(|f| f.get("name"))
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
         {
             call.name = name.to_string();
         }
@@ -199,14 +206,20 @@ impl Assembler {
         match f.and_then(|f| f.get("arguments")) {
             Some(Value::String(s)) if !s.is_empty() => {
                 call.arguments.push_str(s);
-                on(Event::ToolArgsDelta { index: pos as u32, delta: s.clone() });
+                on(Event::ToolArgsDelta {
+                    index: pos as u32,
+                    delta: s.clone(),
+                });
             }
             // arguments as a JSON object instead of a string (live llama.cpp
             // regression, ggml-org/llama.cpp#20198): re-serialize canonically.
             Some(obj @ Value::Object(_)) => {
                 let s = obj.to_string();
                 call.arguments.push_str(&s);
-                on(Event::ToolArgsDelta { index: pos as u32, delta: s });
+                on(Event::ToolArgsDelta {
+                    index: pos as u32,
+                    delta: s,
+                });
             }
             _ => {}
         }
@@ -245,7 +258,11 @@ impl Assembler {
 
         Turn {
             text: self.text,
-            reasoning: if self.reasoning.is_empty() { None } else { Some(self.reasoning) },
+            reasoning: if self.reasoning.is_empty() {
+                None
+            } else {
+                Some(self.reasoning)
+            },
             tool_calls,
             usage: self.usage,
             finish,
@@ -299,8 +316,10 @@ mod tests {
     fn standard_flow_id_and_name_first_then_arg_fragments() {
         let (turn, events) = drive(&[
             delta(json!({"role": "assistant", "content": null})),
-            delta(json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function",
-                "function": {"name": "read", "arguments": "{"}}]})),
+            delta(
+                json!({"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                "function": {"name": "read", "arguments": "{"}}]}),
+            ),
             delta(json!({"tool_calls": [{"index": 0,
                 "function": {"arguments": "\"path\":\"a\"}"}}]})),
             json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
@@ -371,10 +390,12 @@ mod tests {
 
     #[test]
     fn whole_call_in_final_non_delta_message() {
-        let (turn, _) = drive(&[json!({"choices": [{"index": 0, "finish_reason": "tool_calls",
+        let (turn, _) = drive(&[
+            json!({"choices": [{"index": 0, "finish_reason": "tool_calls",
             "message": {"role": "assistant", "content": null, "tool_calls": [
                 {"id": "c9", "type": "function",
-                 "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}}]}}]})]);
+                 "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}}]}}]}),
+        ]);
         assert_eq!(turn.finish, Finish::ToolCalls);
         assert_eq!(turn.tool_calls[0].id, "c9");
         assert_eq!(turn.tool_calls[0].arguments, "{\"command\":\"ls\"}");
@@ -414,18 +435,21 @@ mod tests {
         // non-delta message, whose entries carry no index fields. Position
         // is authoritative; the calls must never merge.
         let (turn, events) = drive(&[json!({"choices": [{"index": 0,
-            "finish_reason": "tool_calls",
-            "message": {"tool_calls": [
-                {"id": "c1", "function": {"name": "read", "arguments": "{\"path\":\"a\"}"}},
-                {"id": "c2", "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}}
-            ]}}]})]);
+        "finish_reason": "tool_calls",
+        "message": {"tool_calls": [
+            {"id": "c1", "function": {"name": "read", "arguments": "{\"path\":\"a\"}"}},
+            {"id": "c2", "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}}
+        ]}}]})]);
         assert_eq!(turn.tool_calls.len(), 2);
         assert_eq!(turn.tool_calls[0].id, "c1");
         assert_eq!(turn.tool_calls[0].arguments, "{\"path\":\"a\"}");
         assert_eq!(turn.tool_calls[1].id, "c2");
         assert_eq!(turn.tool_calls[1].name, "bash");
         assert_eq!(turn.tool_calls[1].arguments, "{\"command\":\"ls\"}");
-        let starts = events.iter().filter(|e| matches!(e, Event::ToolCallStart { .. })).count();
+        let starts = events
+            .iter()
+            .filter(|e| matches!(e, Event::ToolCallStart { .. }))
+            .count();
         assert_eq!(starts, 2);
     }
 

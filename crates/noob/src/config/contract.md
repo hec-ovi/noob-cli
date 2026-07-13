@@ -8,8 +8,10 @@ not here.
 
 Directory precedence: `NOOB_CONFIG_DIR` > `/config` (the container mount) >
 `~/.config/noob`. Setting precedence: CLI flag > process env (non-secret keys
-only) > `/config/.env`. API keys are never read here: they stay lazy inside
+only) > `<resolved-config>/.env`. API keys are never read here: they stay lazy inside
 noob-provider and never enter the process environment.
+
+`/config` atomically replaces or removes an allowlisted non-secret setting while preserving comments and unrelated `.env` lines. API keys are excluded from this terminal command.
 
 Sandbox: explicit NOOB_SANDBOX wins, otherwise /.dockerenv decides;
 `--yolo` lifts the workspace restriction. Autodetect probes localhost

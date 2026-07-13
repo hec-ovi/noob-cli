@@ -55,10 +55,15 @@ impl HeadTailBuffer {
         }
         if bytes.len() >= self.tail_cap {
             self.tail.clear();
-            self.tail.extend_from_slice(&bytes[bytes.len() - self.tail_cap..]);
+            self.tail
+                .extend_from_slice(&bytes[bytes.len() - self.tail_cap..]);
             return;
         }
-        let overflow = self.tail.len().saturating_add(bytes.len()).saturating_sub(self.tail_cap);
+        let overflow = self
+            .tail
+            .len()
+            .saturating_add(bytes.len())
+            .saturating_sub(self.tail_cap);
         if overflow > 0 {
             self.tail.copy_within(overflow.., 0);
             self.tail.truncate(self.tail.len() - overflow);
@@ -139,17 +144,17 @@ pub fn clip_line(line: &str) -> Cow<'_, str> {
 /// Tail-heavy because compilers and test runners put the verdict last.
 #[cfg(test)]
 pub fn head_tail(s: &str, head: usize, tail: usize) -> Cow<'_, str> {
-    head_tail_with(s, head, tail, "narrow the command if you need the omitted part")
+    head_tail_with(
+        s,
+        head,
+        tail,
+        "narrow the command if you need the omitted part",
+    )
 }
 
 /// Same shape with a caller-supplied next action, because the marker is API
 /// surface: "narrow the command" teaches nothing on an MCP result.
-pub fn head_tail_with<'a>(
-    s: &'a str,
-    head: usize,
-    tail: usize,
-    next_action: &str,
-) -> Cow<'a, str> {
+pub fn head_tail_with<'a>(s: &'a str, head: usize, tail: usize, next_action: &str) -> Cow<'a, str> {
     if s.len() <= head + tail {
         return Cow::Borrowed(s);
     }
@@ -244,7 +249,10 @@ mod tests {
             assert!(out.stored_len() <= 30);
         }
         let rendered = out.render();
-        assert!(rendered.starts_with("abcdefghij\n[output truncated:"), "{rendered}");
+        assert!(
+            rendered.starts_with("abcdefghij\n[output truncated:"),
+            "{rendered}"
+        );
         assert!(rendered.ends_with("ghijklmnopqrstuvwxyz"), "{rendered}");
         assert!(rendered.contains("25970 bytes omitted"), "{rendered}");
     }
@@ -275,7 +283,12 @@ mod tests {
 
     #[test]
     fn golden_mcp_cap_marker() {
-        let s = format!("{}{}{}", "a".repeat(MCP_HEAD), "b".repeat(64), "c".repeat(MCP_TAIL));
+        let s = format!(
+            "{}{}{}",
+            "a".repeat(MCP_HEAD),
+            "b".repeat(64),
+            "c".repeat(MCP_TAIL)
+        );
         let out = mcp_cap(&s);
         assert!(
             out.contains(

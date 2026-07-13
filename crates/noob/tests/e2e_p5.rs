@@ -42,7 +42,11 @@ fn rig() -> Rig {
     let config = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     write_env(config.path(), &server.base_url());
-    Rig { server, config, work }
+    Rig {
+        server,
+        config,
+        work,
+    }
 }
 
 impl Rig {
@@ -99,7 +103,11 @@ fn plan_gate() {
     .unwrap();
     // The model tries to write during planning, then presents its plan.
     rig.server.enqueue_stream_toolcalls(
-        &[("p1", "write", r#"{"path":"sneak.txt","content":"early write"}"#)],
+        &[(
+            "p1",
+            "write",
+            r#"{"path":"sneak.txt","content":"early write"}"#,
+        )],
         None,
     );
     rig.server
@@ -107,7 +115,10 @@ fn plan_gate() {
 
     let out = rig.run(&["exec", "--plan", "-p", "plan the feature"]);
     let stdout = ok(&out);
-    assert!(stdout.contains("1. read the code"), "plan text missing: {stdout}");
+    assert!(
+        stdout.contains("1. read the code"),
+        "plan text missing: {stdout}"
+    );
 
     let reqs = rig.api_requests();
     assert_eq!(reqs.len(), 2);
@@ -115,7 +126,7 @@ fn plan_gate() {
     for req in &reqs {
         assert_eq!(
             tool_names(req),
-            ["read", "grep", "glob", "ls", "skill"],
+            ["read", "grep", "glob", "ls", "context", "skill"],
             "plan mode must send only read-only schemas"
         );
     }
@@ -155,7 +166,11 @@ fn plan_session_resume_restores_full_tools() {
     // Run 2: same session, no --plan; the model executes the plan.
     rig.server.expect_tools_change();
     rig.server.enqueue_stream_toolcalls(
-        &[("g1", "write", r#"{"path":"result.txt","content":"the answer"}"#)],
+        &[(
+            "g1",
+            "write",
+            r#"{"path":"result.txt","content":"the answer"}"#,
+        )],
         None,
     );
     rig.server.enqueue_stream_completion("done");
@@ -163,8 +178,11 @@ fn plan_session_resume_restores_full_tools() {
 
     let reqs = rig.api_requests();
     assert_eq!(reqs.len(), 3);
-    assert_eq!(tool_names(&reqs[0]), ["read", "grep", "glob", "ls"]);
-    assert_eq!(tool_names(&reqs[1]).len(), 9, "full set after resume");
+    assert_eq!(
+        tool_names(&reqs[0]),
+        ["read", "grep", "glob", "ls", "context"]
+    );
+    assert_eq!(tool_names(&reqs[1]).len(), 10, "full set after resume");
     // The resumed request byte-extends the plan-mode transcript (the mock's
     // automatic prefix assertion saw no unsanctioned break), and the write
     // actually executed this time.
@@ -185,9 +203,14 @@ fn repl_plan_then_go_flow() {
     let rig = rig();
     // Turn 1 (normal), turn 2 (planning, read-only), turn 3 (after /go).
     rig.server.enqueue_stream_completion("hello");
-    rig.server.enqueue_stream_completion("1. write greeting.txt");
+    rig.server
+        .enqueue_stream_completion("1. write greeting.txt");
     rig.server.enqueue_stream_toolcalls(
-        &[("w1", "write", r#"{"path":"greeting.txt","content":"hi there"}"#)],
+        &[(
+            "w1",
+            "write",
+            r#"{"path":"greeting.txt","content":"hi there"}"#,
+        )],
         None,
     );
     rig.server.enqueue_stream_completion("plan executed");
@@ -198,7 +221,13 @@ fn repl_plan_then_go_flow() {
         let mut m: libc::c_int = 0;
         let mut s: libc::c_int = 0;
         assert_eq!(
-            libc::openpty(&mut m, &mut s, std::ptr::null_mut(), std::ptr::null(), std::ptr::null()),
+            libc::openpty(
+                &mut m,
+                &mut s,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null()
+            ),
             0,
             "openpty failed"
         );
@@ -249,7 +278,7 @@ fn repl_plan_then_go_flow() {
                     Err(e) => panic!("pty read error: {e}; saw:\n{seen}"),
                 }
             }
-    };
+        };
     let prompt_ready = "\x1b[?2004h";
     wait_for(&mut master, "type a task", &mut seen);
     wait_for(&mut master, prompt_ready, &mut seen);
@@ -287,9 +316,12 @@ fn repl_plan_then_go_flow() {
     );
     let reqs = rig.api_requests();
     assert_eq!(reqs.len(), 4);
-    assert_eq!(tool_names(&reqs[0]).len(), 9, "normal turn: full set");
-    assert_eq!(tool_names(&reqs[1]), ["read", "grep", "glob", "ls"]);
-    assert_eq!(tool_names(&reqs[2]).len(), 9, "after /go: full set");
+    assert_eq!(tool_names(&reqs[0]).len(), 10, "normal turn: full set");
+    assert_eq!(
+        tool_names(&reqs[1]),
+        ["read", "grep", "glob", "ls", "context"]
+    );
+    assert_eq!(tool_names(&reqs[2]).len(), 10, "after /go: full set");
     // The approval message /go appends is the last user message before the
     // execution turn.
     let msgs = reqs[2]["messages"].as_array().unwrap();
@@ -310,6 +342,9 @@ fn plan_mode_edge_commands() {
     assert!(out.status.success());
     // Only the read-only set went out; exit code 0 (the plan is the product).
     let reqs = rig.api_requests();
-    assert_eq!(tool_names(&reqs[0]), ["read", "grep", "glob", "ls"]);
+    assert_eq!(
+        tool_names(&reqs[0]),
+        ["read", "grep", "glob", "ls", "context"]
+    );
     rig.server.assert_clean();
 }

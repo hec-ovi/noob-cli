@@ -36,12 +36,10 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
         .open(&path)
-        .map_err(|e| {
-            format!("cannot read {shown_path}: {e}; check the path with ls or glob")
-        })?;
-    let metadata = file.metadata().map_err(|e| {
-        format!("cannot read {shown_path}: {e}; check the path with ls or glob")
-    })?;
+        .map_err(|e| format!("cannot read {shown_path}: {e}; check the path with ls or glob"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("cannot read {shown_path}: {e}; check the path with ls or glob"))?;
     if !metadata.file_type().is_file() {
         return Err(format!(
             "cannot read {shown_path}: it is not a regular file; use read only for text files"
@@ -125,7 +123,13 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     };
 
     // Record the stamp of the full stream, not just the retained page.
-    ctx.seen.record(&path, FileStamp { len: byte_count, hash });
+    ctx.seen.record(
+        &path,
+        FileStamp {
+            len: byte_count,
+            hash,
+        },
+    );
 
     if total == 0 {
         return Ok(ToolOutcome::ok(
@@ -302,7 +306,10 @@ mod tests {
         write(&ctx, "f.txt", "one\n");
         let out = run(&ctx, &json!({"path": "f.txt", "offset": 5}));
         assert!(out.is_error);
-        assert!(out.content.contains("has 1 lines; offset 5 is past the end"));
+        assert!(
+            out.content
+                .contains("has 1 lines; offset 5 is past the end")
+        );
     }
 
     #[test]
@@ -333,7 +340,11 @@ mod tests {
         let started = std::time::Instant::now();
         let out = run(&ctx, &json!({"path": "pipe"}));
         assert!(out.is_error);
-        assert!(out.content.contains("not a regular file"), "{}", out.content);
+        assert!(
+            out.content.contains("not a regular file"),
+            "{}",
+            out.content
+        );
         assert!(started.elapsed() < std::time::Duration::from_millis(100));
     }
 
@@ -341,12 +352,17 @@ mod tests {
     fn long_lines_are_clipped_and_byte_cap_pages() {
         let (_t, ctx) = test_ctx();
         // 200 lines x ~600 chars: hits the 40 KiB cap well before 200 lines.
-        let body: String = (0..200).map(|i| format!("{i:03}{}\n", "x".repeat(600))).collect();
+        let body: String = (0..200)
+            .map(|i| format!("{i:03}{}\n", "x".repeat(600)))
+            .collect();
         write(&ctx, "big.txt", &body);
         let out = run(&ctx, &json!({"path": "big.txt"}));
         assert!(!out.is_error);
         assert!(out.content.contains("[line clipped; 603 chars total]"));
-        assert!(out.content.contains("[output capped at 40 KiB; continue with offset="));
+        assert!(
+            out.content
+                .contains("[output capped at 40 KiB; continue with offset=")
+        );
         assert!(out.content.len() <= READ_BYTE_CAP + 200);
     }
 
@@ -358,7 +374,10 @@ mod tests {
         let out = run(&ctx, &json!({"path": "huge-line.txt", "limit": 1}));
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("2097152 chars total"));
-        assert!(out.content.len() < 1_000, "only a bounded preview should survive");
+        assert!(
+            out.content.len() < 1_000,
+            "only a bounded preview should survive"
+        );
         assert_eq!(ctx.seen.get(&path), Some(FileStamp::of(body.as_bytes())));
     }
 

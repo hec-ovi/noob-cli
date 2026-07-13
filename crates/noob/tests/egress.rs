@@ -15,11 +15,21 @@ fn only_the_provider_depends_on_ureq() {
     // whole check, and skipping resolution keeps the test offline-clean
     // (locked-but-never-built optional deps have no cached manifests).
     let out = Command::new(env!("CARGO"))
-        .args(["metadata", "--format-version", "1", "--no-deps", "--offline"])
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--offline",
+        ])
         .current_dir(manifest_dir)
         .output()
         .expect("cargo metadata runs");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let meta: Value = serde_json::from_slice(&out.stdout).unwrap();
 
     let members: Vec<&str> = meta["workspace_members"]

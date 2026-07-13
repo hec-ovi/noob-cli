@@ -25,6 +25,7 @@
 use noob_provider::types::{Item, ProviderError, TurnRequestRef};
 
 use super::{Agent, looks_like_context_overflow, prompt};
+use crate::tools::context::token_label;
 use crate::ui::Ui;
 
 /// Tail kept verbatim, in estimated tokens: ~20k on a full-size context,
@@ -51,6 +52,10 @@ fn tail_budget(ctx_tokens: u64) -> u64 {
     TAIL_TOKENS.min(ctx_tokens / 4)
 }
 
+fn ratio_floor(value: u64, numerator: u64, denominator: u64) -> u64 {
+    (u128::from(value) * u128::from(numerator) / u128::from(denominator)) as u64
+}
+
 const SUMMARIZE_ASK: &str =
     "Summarize the conversation above following your instructions. Output only the summary.";
 
@@ -59,7 +64,11 @@ const SUMMARIZE_ASK: &str =
 pub fn item_chars(item: &Item) -> usize {
     40 + match item {
         Item::User(text) => text.len(),
-        Item::Assistant { text, tool_calls, raw_items } => {
+        Item::Assistant {
+            text,
+            tool_calls,
+            raw_items,
+        } => {
             text.len()
                 + tool_calls
                     .iter()
@@ -175,7 +184,10 @@ fn pruned_middle(items: &[Item], cut: usize) -> (Vec<Item>, usize) {
                     content.len()
                 );
                 saved += content.len().saturating_sub(placeholder.len());
-                out.push(Item::ToolResult { call_id: call_id.clone(), content: placeholder });
+                out.push(Item::ToolResult {
+                    call_id: call_id.clone(),
+                    content: placeholder,
+                });
             }
             other => out.push(other.clone()),
         }
@@ -192,10 +204,10 @@ impl Agent {
         let mut acc = 0u64;
         while cut > 0 {
             let c = (item_chars(&self.items[cut - 1]) / 4) as u64;
-            if acc + c > budget {
+            if acc.saturating_add(c) > budget {
                 break;
             }
-            acc += c;
+            acc = acc.saturating_add(c);
             cut -= 1;
         }
         // Never split a call/result pair: a tail starting with tool results
@@ -212,7 +224,14 @@ impl Agent {
         // no hallucination risk, the conversational skeleton survives.
         let (pruned, saved) = pruned_middle(&self.items, cut);
         let estimate = self.context_estimate();
-        let target = self.ctx_tokens * PRUNE_TARGET_NUM / PRUNE_TARGET_DEN;
+        let target = ratio_floor(self.ctx_tokens, PRUNE_TARGET_NUM, PRUNE_TARGET_DEN);
+        ui.note(&format!(
+            "compacting context: ~{} / {} tokens ({}%); target below {} (60%)",
+            token_label(estimate),
+            token_label(self.ctx_tokens),
+            estimate.saturating_mul(100) / self.ctx_tokens.max(1),
+            token_label(target),
+        ));
         if saved > 0 && estimate.saturating_sub((saved / 4) as u64) <= target {
             let pruned_count = pruned
                 .iter()
@@ -221,7 +240,9 @@ impl Agent {
                 .count();
             self.adopt(pruned, ui);
             ui.note(&format!(
-                "cache prefix reset: pruned {pruned_count} old tool results (no summary needed)"
+                "context compacted: pruned {pruned_count} old tool results without a model summary; now ~{} / {} tokens",
+                token_label(self.context_estimate()),
+                token_label(self.ctx_tokens),
             ));
             return true;
         }
@@ -237,7 +258,7 @@ impl Agent {
             items: &middle,
             tools: &[],
         };
-        ui.note("compacting the conversation…");
+        ui.note("old tool-output pruning was not enough; summarizing the older conversation");
         let mut summary: Option<String> = None;
         let mut hard_drop_reason: Option<String> = None;
         for attempt in 0..2 {
@@ -255,9 +276,10 @@ impl Agent {
                 }
                 // The summarize request itself overflowed: deterministic
                 // hard drop (retrying the same overflow is pointless).
-                Err(ProviderError::Http { status: 400, ref body })
-                    if looks_like_context_overflow(body) =>
-                {
+                Err(ProviderError::Http {
+                    status: 400,
+                    ref body,
+                }) if looks_like_context_overflow(body) => {
                     hard_drop_reason = Some("the context overflowed".to_string());
                     break;
                 }
@@ -267,7 +289,7 @@ impl Agent {
                     // (the compression-loop trap): back off until usage
                     // grows further.
                     ui.note(&format!("compaction failed: {e}; continuing uncompacted"));
-                    self.compact_backoff = estimate + self.ctx_tokens / 20;
+                    self.compact_backoff = estimate.saturating_add(self.ctx_tokens / 20);
                     return false;
                 }
                 Ok(turn) => {
@@ -306,17 +328,17 @@ impl Agent {
                 if saved > 0 {
                     self.adopt(pruned, ui);
                     self.compact_backoff =
-                        self.context_estimate() + self.ctx_tokens / 20;
+                        self.context_estimate().saturating_add(self.ctx_tokens / 20);
                     ui.note(&format!(
-                        "cache prefix reset: {reason}; pruned old tool results instead"
+                        "context compacted: {reason}; pruned old tool results instead; now ~{} / {} tokens",
+                        token_label(self.context_estimate()),
+                        token_label(self.ctx_tokens),
                     ));
                     return true;
                 }
                 // Ladder step 3b: nothing to prune; the stub note is the
                 // only option left.
-                format!(
-                    "[earlier conversation dropped: {cut} items removed because {reason}]"
-                )
+                format!("[earlier conversation dropped: {cut} items removed because {reason}]")
             }
             (None, None) => unreachable!("the attempt loop always sets one of the two"),
         };
@@ -344,7 +366,11 @@ impl Agent {
         if !files.is_empty() {
             let more = files.len().saturating_sub(PIN_MAX_FILES);
             files.truncate(PIN_MAX_FILES);
-            let suffix = if more > 0 { format!(" (+{more} more)") } else { String::new() };
+            let suffix = if more > 0 {
+                format!(" (+{more} more)")
+            } else {
+                String::new()
+            };
             spliced.push_str(&format!("\n[files touched: {}{suffix}]", files.join(", ")));
         }
         // Deterministic re-listing (names only) so the model does not forget
@@ -360,25 +386,42 @@ impl Agent {
         // the original skills, and this is what keeps the model from offering
         // a removed one after a compaction.
         if let Some(current) = self.skills_drifted() {
-            let listed = if current.is_empty() { "none".to_string() } else { current.join(", ") };
+            let listed = if current.is_empty() {
+                "none".to_string()
+            } else {
+                current.join(", ")
+            };
             spliced.push_str(&format!("\n[skills available now: {listed}]"));
+        }
+        let pending_agents = self.background_snapshot().undelivered_ids;
+        if !pending_agents.is_empty() {
+            spliced.push_str(&format!(
+                "\n[background sub-agent results pending: {}]",
+                pending_agents.join(", "),
+            ));
         }
 
         let mut new_items = vec![Item::User(spliced)];
         new_items.extend_from_slice(&self.items[cut..]);
         self.adopt(new_items, ui);
-        ui.note("cache prefix reset: compaction");
+        ui.note(&format!(
+            "context compacted and session preserved: now ~{} / {} tokens",
+            token_label(self.context_estimate()),
+            token_label(self.ctx_tokens),
+        ));
         true
     }
 
     /// Install a compacted transcript and reset everything the old one
     /// backed: the repeat detector (an identical call is now legitimate),
     /// the usage baseline, the failure backoff, and the session log.
-    fn adopt(&mut self, items: Vec<Item>, ui: &mut Ui) {
+    pub(crate) fn adopt(&mut self, items: Vec<Item>, ui: &mut Ui) {
         self.items = items;
         self.recent_calls.clear();
         self.last_usage = None;
         self.chars_since_usage = self.items.iter().map(item_chars).sum();
+        self.tool_ctx
+            .set_context(self.context_estimate(), self.ctx_tokens);
         self.compact_backoff = 0;
         let failure = self
             .session
@@ -399,8 +442,14 @@ impl Agent {
 fn items_eq(a: &Item, b: &Item) -> bool {
     match (a, b) {
         (
-            Item::ToolResult { call_id: ia, content: ca },
-            Item::ToolResult { call_id: ib, content: cb },
+            Item::ToolResult {
+                call_id: ia,
+                content: ca,
+            },
+            Item::ToolResult {
+                call_id: ib,
+                content: cb,
+            },
         ) => ia == ib && ca == cb,
         _ => true, // pruning only rewrites tool results
     }
@@ -410,6 +459,14 @@ fn items_eq(a: &Item, b: &Item) -> bool {
 mod tests {
     use super::*;
     use noob_provider::types::ToolCall;
+
+    #[test]
+    fn ratio_floor_handles_the_largest_configured_context() {
+        assert_eq!(
+            ratio_floor(u64::MAX, PRUNE_TARGET_NUM, PRUNE_TARGET_DEN),
+            ((u128::from(u64::MAX) * 3) / 5) as u64,
+        );
+    }
 
     #[test]
     fn item_chars_counts_all_payload_fields() {
@@ -429,13 +486,25 @@ mod tests {
 
     #[test]
     fn summary_validation_catches_the_small_model_failure_modes() {
-        assert!(matches!(validate_summary("", 10_000), SummaryCheck::Hard(_)));
-        assert!(matches!(validate_summary("   \n  ", 10_000), SummaryCheck::Hard(_)));
+        assert!(matches!(
+            validate_summary("", 10_000),
+            SummaryCheck::Hard(_)
+        ));
+        assert!(matches!(
+            validate_summary("   \n  ", 10_000),
+            SummaryCheck::Hard(_)
+        ));
         // A "summary" as big as what it replaces would wedge the session.
         let inflated = "x".repeat(6_000);
-        assert!(matches!(validate_summary(&inflated, 10_000), SummaryCheck::Hard(_)));
+        assert!(matches!(
+            validate_summary(&inflated, 10_000),
+            SummaryCheck::Hard(_)
+        ));
         // Schema-poor but small and non-empty: soft-accepted.
-        assert!(matches!(validate_summary("did stuff", 10_000), SummaryCheck::Soft));
+        assert!(matches!(
+            validate_summary("did stuff", 10_000),
+            SummaryCheck::Soft
+        ));
         let good = "## Goal\nfix the bug\n## Next steps\nrun tests";
         assert!(matches!(validate_summary(good, 10_000), SummaryCheck::Ok));
     }
@@ -461,7 +530,10 @@ mod tests {
     }
 
     fn result(id: &str, content: String) -> Item {
-        Item::ToolResult { call_id: id.into(), content }
+        Item::ToolResult {
+            call_id: id.into(),
+            content,
+        }
     }
 
     fn calls(pairs: &[(&str, &str)]) -> Item {

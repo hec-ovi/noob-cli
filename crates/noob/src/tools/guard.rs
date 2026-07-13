@@ -5,8 +5,10 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// fnv1a64: tiny, dependency-free, good enough to detect any edit.
 pub fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -45,6 +47,63 @@ pub enum Sandbox {
     Container,
     /// Outside a container: write/edit refuse paths outside the workspace.
     Workspace,
+}
+
+/// Held across one write/edit/bash call. Locking the workspace directory inode
+/// works across the parent and child processes, and across containers sharing
+/// the same bind mount, without adding lock files to the user's project.
+pub struct WorkspaceWriteLease {
+    _directory: std::fs::File,
+}
+
+#[derive(Debug)]
+pub enum WorkspaceLeaseError {
+    Busy,
+    Canceled,
+    Io(String),
+}
+
+pub fn workspace_write_lease(
+    workspace: &Path,
+    wait: Duration,
+    interrupted: impl Fn() -> bool,
+) -> Result<WorkspaceWriteLease, WorkspaceLeaseError> {
+    // Cancellation is a mutation barrier, not only a way out of lock
+    // contention. A tool canceled before dispatch must not acquire a lease
+    // and then continue into write/edit/bash merely because the lock was free.
+    if interrupted() {
+        return Err(WorkspaceLeaseError::Canceled);
+    }
+    let directory = std::fs::File::open(workspace)
+        .map_err(|error| WorkspaceLeaseError::Io(error.to_string()))?;
+    let deadline = Instant::now() + wait;
+    loop {
+        let rc = unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            // Close the check-to-acquire window. Returning drops `directory`,
+            // which releases the just-acquired flock before any tool runs.
+            if interrupted() {
+                return Err(WorkspaceLeaseError::Canceled);
+            }
+            return Ok(WorkspaceWriteLease {
+                _directory: directory,
+            });
+        }
+        let error = std::io::Error::last_os_error();
+        if !error
+            .raw_os_error()
+            .is_some_and(|code| code == libc::EWOULDBLOCK || code == libc::EAGAIN)
+        {
+            return Err(WorkspaceLeaseError::Io(error.to_string()));
+        }
+        if interrupted() {
+            return Err(WorkspaceLeaseError::Canceled);
+        }
+        if Instant::now() >= deadline {
+            return Err(WorkspaceLeaseError::Busy);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 /// Session-scoped registry of last-known file content, keyed by resolved
@@ -103,11 +162,7 @@ pub fn resolve_path(workspace: &Path, raw: &str) -> PathBuf {
 /// Workspace-mode write gate. `path` must already be resolved. Checks the
 /// lexical path AND the canonicalized deepest existing ancestor, so a
 /// symlink inside the tree cannot smuggle a write outside it.
-pub fn check_write_allowed(
-    sandbox: Sandbox,
-    workspace: &Path,
-    path: &Path,
-) -> Result<(), String> {
+pub fn check_write_allowed(sandbox: Sandbox, workspace: &Path, path: &Path) -> Result<(), String> {
     if sandbox == Sandbox::Container {
         return Ok(());
     }
@@ -145,8 +200,10 @@ pub fn in_skills_dir(path: &Path) -> bool {
     dirs.pop(); // the final component is the file itself, not an ancestor
     // Case-insensitive: a case-preserving filesystem must not let SKILLS/
     // dodge the gate.
-    dirs.iter()
-        .any(|name| name.to_str().is_some_and(|s| s.eq_ignore_ascii_case("skills")))
+    dirs.iter().any(|name| {
+        name.to_str()
+            .is_some_and(|s| s.eq_ignore_ascii_case("skills"))
+    })
 }
 
 /// If a write to `raw` would land inside a skills directory, return the
@@ -229,6 +286,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn canceled_before_lock_never_receives_a_workspace_lease() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let result = workspace_write_lease(tmp.path(), Duration::ZERO, || {
+            checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            true
+        });
+        assert!(matches!(result, Err(WorkspaceLeaseError::Canceled)));
+        assert_eq!(checks.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // No lease leaked from the canceled call.
+        assert!(workspace_write_lease(tmp.path(), Duration::ZERO, || false).is_ok());
+    }
+
+    #[test]
+    fn cancellation_immediately_after_acquisition_releases_the_lease() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let result = workspace_write_lease(tmp.path(), Duration::ZERO, || {
+            checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0
+        });
+        assert!(matches!(result, Err(WorkspaceLeaseError::Canceled)));
+        assert_eq!(checks.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        // The canceled path dropped the directory fd and its flock.
+        assert!(workspace_write_lease(tmp.path(), Duration::ZERO, || false).is_ok());
+    }
+
+    #[test]
     fn fnv_matches_reference_vectors() {
         // Published FNV-1a 64-bit vectors.
         assert_eq!(fnv1a64(b""), 0xcbf29ce484222325);
@@ -239,9 +325,15 @@ mod tests {
     #[test]
     fn resolve_folds_dots_and_joins_relative() {
         let ws = Path::new("/work");
-        assert_eq!(resolve_path(ws, "src/main.rs"), PathBuf::from("/work/src/main.rs"));
+        assert_eq!(
+            resolve_path(ws, "src/main.rs"),
+            PathBuf::from("/work/src/main.rs")
+        );
         assert_eq!(resolve_path(ws, "./a/../b"), PathBuf::from("/work/b"));
-        assert_eq!(resolve_path(ws, "/etc/passwd"), PathBuf::from("/etc/passwd"));
+        assert_eq!(
+            resolve_path(ws, "/etc/passwd"),
+            PathBuf::from("/etc/passwd")
+        );
         assert_eq!(resolve_path(ws, "../../etc/x"), PathBuf::from("/etc/x"));
     }
 
@@ -282,8 +374,8 @@ mod tests {
         }
         for miss in [
             "/work/src/main.rs",
-            "/work/skills",              // a file named skills, not a dir of it
-            "/work/my-skills/notes.md",  // exact component match only
+            "/work/skills",             // a file named skills, not a dir of it
+            "/work/my-skills/notes.md", // exact component match only
             "/work/docs/skillset/a.md",
         ] {
             assert!(!in_skills_dir(Path::new(miss)), "{miss} must not be gated");
@@ -304,7 +396,10 @@ mod tests {
         let real = resolve_real(&ws.join("innocent/new.md")).unwrap();
         assert_eq!(real, target.join("new.md"));
         assert!(in_skills_dir(&real));
-        assert!(!in_skills_dir(&ws.join("innocent/new.md")), "lexical form alone is blind");
+        assert!(
+            !in_skills_dir(&ws.join("innocent/new.md")),
+            "lexical form alone is blind"
+        );
     }
 
     #[test]

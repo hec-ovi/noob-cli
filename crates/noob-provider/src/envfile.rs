@@ -16,11 +16,19 @@ pub fn parse(src: &str) -> Result<HashMap<String, String>, String> {
         }
         let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
         let Some((key, value)) = line.split_once('=') else {
-            return Err(format!("line {}: expected KEY=VALUE, got {:?}", idx + 1, raw.trim()));
+            return Err(format!(
+                "line {}: expected KEY=VALUE, got {:?}",
+                idx + 1,
+                raw.trim()
+            ));
         };
         let key = key.trim();
         if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            return Err(format!("line {}: {:?} is not a valid key name", idx + 1, key));
+            return Err(format!(
+                "line {}: {:?} is not a valid key name",
+                idx + 1,
+                key
+            ));
         }
         map.insert(key.to_string(), clean_value(value));
     }

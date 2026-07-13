@@ -183,7 +183,10 @@ mod tests {
                 .unwrap();
         }
         let out = run(&ctx, &json!({"pattern": "*.txt"}));
-        assert!(out.content.ends_with("230 files, showing 200; narrow the pattern"));
+        assert!(
+            out.content
+                .ends_with("230 files, showing 200; narrow the pattern")
+        );
         assert!(out.content.starts_with("f000.txt\n"));
         assert!(out.content.contains("f199.txt\n230 files"));
         assert!(!out.content.contains("f200.txt"));

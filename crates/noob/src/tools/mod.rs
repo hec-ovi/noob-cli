@@ -3,6 +3,7 @@
 //! Truncation happens here, once, at emission; results are byte-frozen after.
 
 pub mod bash;
+pub mod context;
 pub mod edit;
 pub mod glob;
 pub mod grep;
@@ -15,16 +16,18 @@ pub mod todo;
 pub mod truncate;
 pub mod write;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
 use guard::{Sandbox, SeenFiles};
 use noob_provider::types::ToolSpec;
 
-/// One line of the agentic checklist the `todo` tool maintains. The model
+/// One line of the agentic checklist the `plan` tool maintains. The model
 /// sends the whole list each call (overwrite semantics); the rendered list is
 /// the tool result, so every surface and the model see the same plan.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +41,13 @@ pub enum TodoStatus {
     Pending,
     InProgress,
     Completed,
+}
+
+#[derive(Default)]
+pub(crate) struct PlanTiming {
+    pub started: Option<Instant>,
+    pub active: HashMap<String, Instant>,
+    pub completed: HashMap<String, Duration>,
 }
 
 impl TodoStatus {
@@ -89,9 +99,18 @@ pub struct ToolCtx {
     /// Sub-agent settings; Some only when the task tool is registered
     /// (depth below the ceiling, full tool set). Set at bootstrap.
     pub task: Option<crate::subagent::TaskCfg>,
-    /// The agentic checklist the `todo` tool maintains for this session.
-    /// Overwritten wholesale on each `todo` call; starts empty.
+    /// The agentic checklist the `plan` tool maintains for this session.
+    /// Overwritten wholesale on each `plan` call; starts empty.
     pub todos: Mutex<Vec<TodoItem>>,
+    /// Wall-clock lifecycle for the visible plan and each observed active item.
+    /// This is display state only and never enters a provider request except via
+    /// the rendered plan tool result.
+    pub(crate) plan_timing: Mutex<PlanTiming>,
+    /// Context accounting shared with the model-callable `context` tool.
+    /// The agent refreshes the estimate at transcript boundaries; the tool
+    /// only reads these atomics, so concurrent read batches stay lock-free.
+    context_used: AtomicU64,
+    context_total: AtomicU64,
 }
 
 impl ToolCtx {
@@ -108,12 +127,34 @@ impl ToolCtx {
             mcp: None,
             task: None,
             todos: Mutex::new(Vec::new()),
+            plan_timing: Mutex::new(PlanTiming::default()),
+            context_used: AtomicU64::new(0),
+            context_total: AtomicU64::new(0),
         }
     }
 
-    /// The fan-out cap for a group of task calls in one batch.
+    pub(crate) fn set_context(&self, used: u64, total: u64) {
+        self.context_used.store(used, Ordering::Relaxed);
+        self.context_total.store(total, Ordering::Relaxed);
+    }
+
+    pub(crate) fn context(&self) -> (u64, u64) {
+        (
+            self.context_used.load(Ordering::Relaxed),
+            self.context_total.load(Ordering::Relaxed),
+        )
+    }
+
+    /// The fan-out cap for a group of task calls in one batch. A depth-1
+    /// process may still delegate, but does so one child at a time. Otherwise
+    /// C root children could each fan out C more model requests and turn the
+    /// configured cap into C squared across the process tree.
     pub(crate) fn task_concurrency(&self) -> usize {
-        self.task.as_ref().map(|t| t.concurrency).unwrap_or(1).max(1)
+        self.task
+            .as_ref()
+            .map(|t| if t.depth == 0 { t.concurrency } else { 1 })
+            .unwrap_or(1)
+            .max(1)
     }
 
     /// Execution-time half of the skills-dir write gate: refuse a write/edit
@@ -197,26 +238,70 @@ impl ToolOutcome {
 
 /// Read-only calls run concurrently; anything else is a sequential barrier.
 pub fn is_read_only(name: &str) -> bool {
-    matches!(name, "read" | "grep" | "glob" | "ls" | "skill" | "mcp_connect")
+    matches!(
+        name,
+        "read" | "grep" | "glob" | "ls" | "context" | "skill" | "mcp_connect"
+    )
 }
 
 /// The read-only tool SET (plan mode and read-only children): exploration
 /// plus skills. Narrower than `is_read_only` on purpose: mcp_connect is
 /// safe to parallelize but pointless without mcp_call, so it stays out.
-pub const READ_ONLY_SET: &[&str] = &["read", "grep", "glob", "ls", "skill"];
+pub const READ_ONLY_SET: &[&str] = &["read", "grep", "glob", "ls", "context", "skill"];
 
 /// Execute one tool call. `args` is the parsed arguments object.
 pub fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
+    // Full-tool child agents run concurrently, but their individual workspace
+    // mutations take an OS lock on the mounted directory. Root turns fail
+    // promptly when another writer is active; children wait briefly so two
+    // independent edits serialize without occupying the main conversation.
+    let _workspace_lease = if matches!(name, "write" | "edit" | "bash") {
+        let depth = std::env::var("NOOB_DEPTH")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0);
+        let wait = if depth == 0 {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_secs(30)
+        };
+        match guard::workspace_write_lease(&ctx.workspace, wait, || {
+            noob_provider::http::INTERRUPTED.load(Ordering::SeqCst)
+        }) {
+            Ok(lease) => Some(lease),
+            Err(guard::WorkspaceLeaseError::Canceled) => return ToolOutcome::canceled(),
+            Err(guard::WorkspaceLeaseError::Busy) => {
+                return ToolOutcome::err(
+                    "workspace write blocked: another parent or sub-agent mutation is active; \
+                     continue read-only, wait for it to finish, or cancel the relevant agent \
+                     with /agents cancel <agent-N>",
+                );
+            }
+            Err(guard::WorkspaceLeaseError::Io(error)) => {
+                return ToolOutcome::err(format!(
+                    "cannot lock the workspace before {name}: {error}; no files were changed"
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    dispatch_unlocked(ctx, name, args)
+}
+
+fn dispatch_unlocked(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
     match name {
         "read" => read::run(ctx, args),
         "write" => write::run(ctx, args),
         "edit" => edit::run(ctx, args),
         "bash" => bash::run(ctx, args),
+        "context" => context::run(ctx, args),
         "grep" => grep::run(ctx, args),
         "glob" => glob::run(ctx, args),
         "ls" => ls::run(ctx, args),
         "skill" => skill::run(ctx, args),
-        "todo" => todo::run(ctx, args),
+        // `todo` accepts historical/replayed calls; only `plan` is registered.
+        "plan" | "todo" => todo::run(ctx, args),
         "mcp_connect" => mcp::run_connect(ctx, args),
         "mcp_call" => mcp::run_call(ctx, args),
         "subagent" => crate::subagent::run(ctx, args),
@@ -226,7 +311,7 @@ pub fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
     }
 }
 
-/// The 8 core tool schemas, registered at session start and byte-stable for
+/// The core tool schemas, registered at session start and byte-stable for
 /// the whole session (both bootstrap sites start from this set). Descriptions
 /// <= 20 words each; the serialized array is budget-tested against the
 /// 940-token ceiling.
@@ -298,6 +383,7 @@ pub fn specs() -> Vec<ToolSpec> {
                 "path": {"type": "string", "description": "default: working directory"}
             }}),
         ),
+        context::spec(),
         todo::spec(),
     ]
 }
@@ -310,7 +396,9 @@ pub(crate) fn need_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String
         Some(other) => Err(format!(
             "parameter {key:?} must be a string, got {other}; resend the call"
         )),
-        None => Err(format!("missing required parameter {key:?}; resend the call")),
+        None => Err(format!(
+            "missing required parameter {key:?}; resend the call"
+        )),
     }
 }
 
@@ -379,21 +467,38 @@ mod tests {
 
     #[test]
     fn read_only_partition_matches_the_locked_decision() {
-        for t in ["read", "grep", "glob", "ls", "skill", "mcp_connect"] {
+        for t in [
+            "read",
+            "grep",
+            "glob",
+            "ls",
+            "context",
+            "skill",
+            "mcp_connect",
+        ] {
             assert!(is_read_only(t), "{t} must be read-only");
         }
         // todo mutates shared state, so it is a sequential barrier, never a
         // concurrent read-only call.
-        for t in ["write", "edit", "bash", "mcp_call", "subagent", "todo"] {
+        for t in [
+            "write", "edit", "bash", "mcp_call", "subagent", "plan", "todo",
+        ] {
             assert!(!is_read_only(t), "{t} must be a barrier");
         }
     }
 
     #[test]
-    fn eight_core_specs_with_short_descriptions() {
+    fn core_specs_include_context_and_todo_with_short_descriptions() {
         let specs = specs();
-        assert_eq!(specs.len(), 8);
-        assert!(specs.iter().any(|s| s.name == "todo"), "todo must be a core spec");
+        assert_eq!(specs.len(), 9);
+        assert!(
+            specs.iter().any(|s| s.name == "context"),
+            "context must be a core spec"
+        );
+        assert!(
+            specs.iter().any(|s| s.name == "plan"),
+            "plan must be a core spec"
+        );
         for s in &specs {
             let words = s.description.split_whitespace().count();
             assert!(words <= 20, "{} description has {words} words", s.name);
@@ -411,8 +516,70 @@ mod tests {
 
     #[test]
     fn numeric_strings_are_accepted_for_integer_params() {
-        assert_eq!(opt_u64(&json!({"offset": "12"}), "offset").unwrap(), Some(12));
+        assert_eq!(
+            opt_u64(&json!({"offset": "12"}), "offset").unwrap(),
+            Some(12)
+        );
         assert_eq!(opt_u64(&json!({"offset": 12}), "offset").unwrap(), Some(12));
         assert!(opt_u64(&json!({"offset": -3}), "offset").is_err());
+    }
+
+    #[test]
+    fn nested_agents_delegate_without_multiplying_the_root_fanout_cap() {
+        let (_tmp, mut ctx) = test_ctx();
+        let cfg = crate::subagent::TaskCfg {
+            depth: 0,
+            concurrency: 4,
+            max_turns: 25,
+            wall_clock: std::time::Duration::from_secs(300),
+            verbose: false,
+            background: None,
+        };
+        ctx.task = Some(cfg.clone());
+        assert_eq!(ctx.task_concurrency(), 4);
+
+        ctx.task = Some(crate::subagent::TaskCfg { depth: 1, ..cfg });
+        assert_eq!(ctx.task_concurrency(), 1);
+        assert!(ctx.task.is_some(), "nested delegation remains registered");
+    }
+
+    #[test]
+    fn writable_background_lease_refuses_a_conflicting_parent_write() {
+        let (_tmp, mut ctx) = test_ctx();
+        ctx.task = Some(crate::subagent::TaskCfg {
+            depth: 0,
+            concurrency: 2,
+            max_turns: 25,
+            wall_clock: std::time::Duration::from_secs(300),
+            verbose: false,
+            background: None,
+        });
+        let child_lease =
+            guard::workspace_write_lease(&ctx.workspace, std::time::Duration::ZERO, || false)
+                .unwrap();
+        let blocked = dispatch(
+            &ctx,
+            "write",
+            &json!({"path": "race.txt", "content": "parent"}),
+        );
+        assert!(blocked.is_error);
+        assert!(
+            blocked
+                .content
+                .contains("another parent or sub-agent mutation")
+        );
+        assert!(!ctx.workspace.join("race.txt").exists());
+
+        drop(child_lease);
+        let written = dispatch(
+            &ctx,
+            "write",
+            &json!({"path": "race.txt", "content": "parent"}),
+        );
+        assert!(!written.is_error, "{}", written.content);
+        assert_eq!(
+            std::fs::read_to_string(ctx.workspace.join("race.txt")).unwrap(),
+            "parent"
+        );
     }
 }

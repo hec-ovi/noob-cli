@@ -200,7 +200,11 @@ fn interrupt_aborts_a_blocked_request_send_within_a_tick() {
         matches!(err, ProviderError::Interrupted),
         "expected Interrupted, got {err:?}"
     );
-    assert!(start.elapsed() < Duration::from_millis(2600), "took {:?}", start.elapsed());
+    assert!(
+        start.elapsed() < Duration::from_millis(2600),
+        "took {:?}",
+        start.elapsed()
+    );
 }
 
 /// Nobody listening: typed connect error naming the URL. Connect errors are

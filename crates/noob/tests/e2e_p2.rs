@@ -41,7 +41,11 @@ fn rig() -> Rig {
     let config = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     write_env(config.path(), &server.base_url());
-    Rig { server, config, work }
+    Rig {
+        server,
+        config,
+        work,
+    }
 }
 
 impl Rig {
@@ -107,6 +111,34 @@ fn cache_prefix() {
     rig.server.assert_clean();
 }
 
+/// A failed tool row must carry the remedy already present in the tool result,
+/// rather than collapsing the live UI to a bare `error` label.
+#[test]
+fn tool_error_row_is_descriptive() {
+    let rig = rig();
+    rig.server
+        .enqueue_stream_toolcalls(&[("e1", "read", r#"{"path":"missing-marker.txt"}"#)], None);
+    rig.server
+        .enqueue_stream_completion("I will use another path.");
+
+    let out = rig.run(&["exec", "-p", "read the missing file"]);
+    ok(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("error: cannot read missing-marker.txt"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("check the path with ls or glob"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.lines().any(|line| line.trim() == "* error"),
+        "stderr: {stderr}"
+    );
+    rig.server.assert_clean();
+}
+
 /// One assistant turn with three read calls: all three results come back
 /// in emission order, one tool message per call id.
 #[test]
@@ -130,7 +162,10 @@ fn parallel_calls() {
     let reqs = rig.api_requests();
     let msgs = reqs[1]["messages"].as_array().unwrap();
     let tools: Vec<&Value> = msgs.iter().filter(|m| m["role"] == "tool").collect();
-    let ids: Vec<&str> = tools.iter().map(|t| t["tool_call_id"].as_str().unwrap()).collect();
+    let ids: Vec<&str> = tools
+        .iter()
+        .map(|t| t["tool_call_id"].as_str().unwrap())
+        .collect();
     assert_eq!(ids, ["p1", "p2", "p3"], "results must keep emission order");
     for (t, marker) in tools.iter().zip(["XX", "YY", "ZZ"]) {
         assert!(t["content"].as_str().unwrap().contains(marker));
@@ -155,7 +190,10 @@ fn mutate_barrier() {
     ok(&rig.run(&["exec", "-p", "run both"]));
 
     let log = std::fs::read_to_string(rig.work.path().join("log.txt")).unwrap();
-    assert_eq!(log, "A\nB\n", "mutating calls must serialize in emission order");
+    assert_eq!(
+        log, "A\nB\n",
+        "mutating calls must serialize in emission order"
+    );
     rig.server.assert_clean();
 }
 
@@ -277,9 +315,18 @@ fn exec_resume_does_not_replay_prior_turns() {
 
     assert!(out2.contains("second answer here"));
     // The prior turns are loaded into context but never echoed to stdout.
-    assert!(!out2.contains("first question"), "exec replayed a prior user turn to stdout");
-    assert!(!out2.contains("first answer here"), "exec replayed a prior assistant turn to stdout");
-    assert!(!out2.contains('\u{203a}'), "the replay user marker leaked into exec stdout");
+    assert!(
+        !out2.contains("first question"),
+        "exec replayed a prior user turn to stdout"
+    );
+    assert!(
+        !out2.contains("first answer here"),
+        "exec replayed a prior assistant turn to stdout"
+    );
+    assert!(
+        !out2.contains('\u{203a}'),
+        "the replay user marker leaked into exec stdout"
+    );
     rig.server.assert_clean();
 }
 
@@ -298,9 +345,11 @@ fn compaction() {
         Some((3500, 100)),
     );
     // The summarize request's canned answer.
-    rig.server.enqueue_stream_completion("SUMMARY-OF-EVERYTHING");
+    rig.server
+        .enqueue_stream_completion("SUMMARY-OF-EVERYTHING");
     // The post-compaction continuation.
-    rig.server.enqueue_stream_completion("continuing after compaction");
+    rig.server
+        .enqueue_stream_completion("continuing after compaction");
     // Two sanctioned breaks: the summarize request, then the rebuilt prefix.
     rig.server.expect_prefix_break();
     rig.server.expect_prefix_break();
@@ -312,6 +361,20 @@ fn compaction() {
         .unwrap();
     let stdout = ok(&out);
     assert!(stdout.contains("continuing after compaction"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("automatic compaction threshold reached"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("threshold 75%"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("context compacted and session preserved"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("cache prefix reset: compaction"),
+        "stderr: {stderr}"
+    );
 
     let reqs = rig.api_requests();
     assert_eq!(reqs.len(), 3);
@@ -325,7 +388,12 @@ fn compaction() {
     );
     assert!(reqs[1]["tools"].is_null(), "the summarizer gets no tools");
     let last_sum = sum_msgs.last().unwrap();
-    assert!(last_sum["content"].as_str().unwrap().contains("Output only the summary"));
+    assert!(
+        last_sum["content"]
+            .as_str()
+            .unwrap()
+            .contains("Output only the summary")
+    );
     // Request 3 carries the spliced summary instead of the old middle.
     let cont_msgs = reqs[2]["messages"].as_array().unwrap();
     let joined: String = cont_msgs
@@ -335,11 +403,13 @@ fn compaction() {
         .join("\n");
     assert!(joined.contains("[conversation summary]"));
     assert!(joined.contains("SUMMARY-OF-EVERYTHING"));
-    assert!(!joined.contains("filler line 250"), "the middle must be gone");
+    assert!(
+        !joined.contains("filler line 250"),
+        "the middle must be gone"
+    );
 
     // The session log recorded the reset; a resume sees the compacted state.
-    let log = std::fs::read_to_string(rig.config.path().join("sessions/s-compact.jsonl"))
-        .unwrap();
+    let log = std::fs::read_to_string(rig.config.path().join("sessions/s-compact.jsonl")).unwrap();
     assert!(log.lines().any(|l| l.contains("\"t\":\"reset\"")));
     rig.server.assert_clean();
 }
@@ -367,7 +437,10 @@ fn workspace_mode_refuses_outside_writes() {
     let msgs = reqs[1]["messages"].as_array().unwrap();
     let result = msgs.iter().find(|m| m["role"] == "tool").unwrap();
     assert!(
-        result["content"].as_str().unwrap().contains("outside the workspace"),
+        result["content"]
+            .as_str()
+            .unwrap()
+            .contains("outside the workspace"),
         "{}",
         result["content"]
     );
@@ -398,7 +471,10 @@ fn repl_smoke() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("repl says hi"), "stdout: {stdout}");
-    assert!(stdout.contains("endpoint:"), "/status output missing: {stdout}");
+    assert!(
+        stdout.contains("endpoint:"),
+        "/status output missing: {stdout}"
+    );
     assert!(stdout.contains("mockmodel"));
     rig.server.assert_clean();
 }
@@ -454,7 +530,10 @@ fn dash_leading_prompts_are_accepted() {
     let stdout = ok(&out);
     assert!(stdout.contains("dashes are fine"));
     let reqs = rig.api_requests();
-    assert_eq!(reqs[0]["messages"][1]["content"], "--verbose is broken, help");
+    assert_eq!(
+        reqs[0]["messages"][1]["content"],
+        "--verbose is broken, help"
+    );
     rig.server.assert_clean();
 }
 
