@@ -2296,6 +2296,104 @@ fn skills_add_registers_the_tool_and_the_skill_loads() {
     rig.server.assert_clean();
 }
 
+/// `/mcp add` installs a server on the fly: the entry persists to the project
+/// mcp.json, the two MCP tools register mid-session (absent at bootstrap), the
+/// in-band `[mcp updated]` note reaches the model, `/mcp connect` lists the
+/// catalog for the human, and the model can immediately mcp_call. `/mcp
+/// remove` then drops it and announces the removal.
+#[test]
+fn mcp_add_registers_the_tools_connects_and_removes() {
+    let rig = rig();
+    let mcp_server = noob_testkit::mcp::McpHttpServer::start(noob_testkit::mcp::echo_tools());
+
+    // The "use echo" turn: the model calls the freshly added server, then answers.
+    rig.server.enqueue_stream_toolcalls(
+        &[(
+            "m1",
+            "mcp_call",
+            r#"{"server":"mock","tool":"echo","args":{"text":"hola"}}"#,
+        )],
+        None,
+    );
+    rig.server.enqueue_stream_completion("echo went through");
+
+    let mut pty = spawn_pty(&rig); // classic REPL: per-prompt RAW_READY sync
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"/mcp\r");
+    pty.wait_for("no MCP servers configured");
+    pty.wait_for(RAW_READY);
+    pty.send(format!("/mcp add mock {}\r", mcp_server.url()).as_bytes());
+    pty.wait_for("cache prefix reset: MCP tools registered");
+    pty.wait_for("mcp: added mock");
+    pty.wait_for(RAW_READY);
+    pty.send(b"/mcp connect mock\r");
+    pty.wait_for("connected mock");
+    pty.wait_for("1 tools: echo");
+    pty.wait_for(RAW_READY);
+    pty.send(b"use echo\r");
+    pty.wait_for("echo went through");
+    pty.wait_for(RAW_READY);
+    pty.send(b"/mcp remove mock\r");
+    pty.wait_for("mcp: removed mock");
+    pty.wait_for(RAW_READY);
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    // The added server persisted to the project file, then remove dropped it.
+    let cfg = std::fs::read_to_string(rig.work.path().join(".noob/mcp.json")).unwrap();
+    assert!(
+        !cfg.contains("mock"),
+        "remove must drop the entry from .noob/mcp.json: {cfg}"
+    );
+    let reqs = rig.api_requests();
+    assert_eq!(reqs.len(), 2, "the mcp_call round and the completion round");
+    // The MCP tools were registered mid-session: the first request carries
+    // them although the session booted with no mcp.json.
+    let tools = reqs[0]["tools"].as_array().expect("tools array");
+    for name in ["mcp_connect", "mcp_call"] {
+        assert!(
+            tools.iter().any(|t| t["function"]["name"] == name),
+            "{name} must be registered after /mcp add"
+        );
+    }
+    assert!(
+        all_content(&reqs[0]).contains("[mcp updated]"),
+        "missing the in-band note"
+    );
+    // The tool result the model saw carries the echoed payload.
+    assert!(
+        all_content(&reqs[1]).contains("hola"),
+        "the mcp_call result did not reach the model"
+    );
+    mcp_server.assert_clean();
+    rig.server.assert_clean();
+}
+
+/// `/context` answers from the same estimate the model-callable context tool
+/// reports, without any model round-trip.
+#[test]
+fn context_command_reports_usage_without_a_model_call() {
+    let rig = rig();
+    let mut pty = spawn_pty(&rig);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"/context\r");
+    pty.wait_for("context: ~");
+    pty.wait_for("automatic compaction starts near");
+    pty.wait_for(RAW_READY);
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    assert!(
+        rig.api_requests().is_empty(),
+        "/context must not call the model"
+    );
+}
+
 #[test]
 fn dock_canceled_skill_clone_restores_queued_input() {
     use std::os::unix::fs::PermissionsExt;

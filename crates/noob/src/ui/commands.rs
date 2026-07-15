@@ -42,6 +42,11 @@ pub(crate) const COMMANDS: &[Command] = &[
         takes_args: false,
     },
     Command {
+        name: "context",
+        desc: "context use and the compaction threshold",
+        takes_args: false,
+    },
+    Command {
         name: "sessions",
         desc: "list saved sessions newest first",
         takes_args: false,
@@ -64,6 +69,11 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command {
         name: "skills",
         desc: "list, add, remove, or reload skills",
+        takes_args: true,
+    },
+    Command {
+        name: "mcp",
+        desc: "list, add, remove, or connect MCP servers",
         takes_args: true,
     },
     Command {
@@ -187,7 +197,7 @@ mod tests {
     fn banner_lists_every_command_with_a_slash() {
         assert_eq!(
             banner(),
-            "/plan /clear-plan /go /status /sessions /agents /config /compact /skills /quit"
+            "/plan /clear-plan /go /status /context /sessions /agents /config /compact /skills /mcp /quit"
         );
     }
 
@@ -211,12 +221,16 @@ mod tests {
         assert_eq!(complete("/c"), None);
         assert_eq!(complete("/co"), None);
         assert_eq!(complete("/com").as_deref(), Some("/compact"));
-        assert_eq!(complete("/con").as_deref(), Some("/config "));
+        // /con is shared by config and context: Tab holds at the prefix.
+        assert_eq!(complete("/con"), None);
+        assert_eq!(complete("/conf").as_deref(), Some("/config "));
+        assert_eq!(complete("/cont").as_deref(), Some("/context"));
         assert_eq!(complete("/cl").as_deref(), Some("/clear-plan"));
         assert_eq!(complete("/q").as_deref(), Some("/quit"));
         assert_eq!(complete("/st").as_deref(), Some("/status"));
         assert_eq!(complete("/se").as_deref(), Some("/sessions"));
         assert_eq!(complete("/ag").as_deref(), Some("/agents "));
+        assert_eq!(complete("/m").as_deref(), Some("/mcp "));
     }
 
     #[test]

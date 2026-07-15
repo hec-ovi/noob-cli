@@ -20,16 +20,22 @@ pub fn spec() -> ToolSpec {
 
 pub fn run(ctx: &ToolCtx, _args: &Value) -> ToolOutcome {
     let (used, total) = ctx.context();
+    ToolOutcome::ok(
+        report(used, total),
+        format!("context: {}/{}", token_label(used), token_label(total)),
+    )
+}
+
+/// The one-line usage report, shared by the model-callable tool and the
+/// human-facing `/context` command so the two can never drift.
+pub fn report(used: u64, total: u64) -> String {
     let pct = used.saturating_mul(100) / total.max(1);
     let threshold = total.saturating_mul(3) / 4;
-    ToolOutcome::ok(
-        format!(
-            "context: ~{} / {} tokens ({pct}%); automatic compaction starts near {} (75%)",
-            token_label(used),
-            token_label(total),
-            token_label(threshold),
-        ),
-        format!("context: {}/{}", token_label(used), token_label(total)),
+    format!(
+        "context: ~{} / {} tokens ({pct}%); automatic compaction starts near {} (75%)",
+        token_label(used),
+        token_label(total),
+        token_label(threshold),
     )
 }
 

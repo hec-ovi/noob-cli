@@ -17,7 +17,7 @@ The active frame always shows status, editable draft or question, and steering/c
 
 Typeahead received before a question cannot answer it. EOF and reader errors persist as closed-input state and deny questions without deadlock.
 
-Tab completes a `/`-prefixed command in the input editor; a dim hint lists candidates for an ambiguous prefix and never enters the buffer. With an empty draft and detached jobs, Tab toggles a persistent view of their IDs, state, elapsed time, prompt slices, and bounded recent activity. The view survives parent-turn boundaries while the editor stays usable. While a turn runs and the buffer is empty, the input row shows a steering placeholder. Completion, agent details, and the placeholder are input-side only: the model receives a draft only on submission.
+Tab completes a `/`-prefixed command in the input editor; a dim hint lists candidates for an ambiguous prefix and never enters the buffer. With an empty draft and detached jobs, Tab toggles a persistent view of their IDs, state, elapsed time, prompt slices, and bounded recent activity. The view survives parent-turn boundaries while the editor stays usable; when closed, a one-line live running/ready counter stays pinned above the idle input instead of vanishing. While a turn runs and the buffer is empty, the input row shows a steering placeholder. Completion, agent details, and the placeholder are input-side only: the model receives a draft only on submission.
 
 ## Semantic rendering
 

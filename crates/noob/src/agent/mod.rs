@@ -362,6 +362,78 @@ impl Agent {
         (added, removed)
     }
 
+    /// Re-load mcp.json from disk (the user ran an `/mcp` command) and
+    /// reconcile the live session: swap in the fresh server set, register the
+    /// mcp_connect/mcp_call pair if they were absent (the zero-servers-to-some
+    /// transition, one sanctioned cache break exactly like the skill tool),
+    /// and append an in-band `[mcp updated]` message so the model learns the
+    /// new names despite the frozen prompt head. Returns (added, removed)
+    /// server names for the caller's summary line.
+    pub fn reload_mcp(&mut self, ui: &mut Ui) -> (Vec<String>, Vec<String>) {
+        let (servers, warnings) =
+            crate::mcp::config::load(&self.tool_ctx.workspace, &self.config_dir);
+        for warning in &warnings {
+            ui.error(&format!("mcp: {warning}"));
+        }
+        let old: Vec<String> = self
+            .tool_ctx
+            .mcp
+            .as_ref()
+            .map(|m| m.names().iter().map(|n| n.to_string()).collect())
+            .unwrap_or_default();
+        let added: Vec<String> = servers
+            .iter()
+            .map(|s| s.name.clone())
+            .filter(|n| !old.contains(n))
+            .collect();
+        let removed: Vec<String> = old
+            .iter()
+            .filter(|n| !servers.iter().any(|s| &s.name == *n))
+            .cloned()
+            .collect();
+
+        let had_none = self.tool_ctx.mcp.is_none();
+        self.tool_ctx.mcp = if servers.is_empty() {
+            None
+        } else {
+            Some(crate::mcp::Mcp::new(servers))
+        };
+
+        // Register the two MCP tools once, on the transition from no servers
+        // to some (mirrors the skill tool's one sanctioned cache break).
+        if had_none
+            && self.tool_ctx.mcp.is_some()
+            && !self.tools.iter().any(|t| t.name == "mcp_connect")
+        {
+            for spec in [tools::mcp::connect_spec(), tools::mcp::call_spec()] {
+                if !self.full_tools.iter().any(|t| t.name == spec.name) {
+                    self.full_tools.push(spec.clone());
+                }
+                self.tools.push(spec);
+            }
+            ui.note("cache prefix reset: MCP tools registered (servers are now available)");
+        }
+
+        if !added.is_empty() || !removed.is_empty() {
+            let mut msg = String::from("[mcp updated]");
+            if !added.is_empty() {
+                msg.push_str(&format!(
+                    " servers now available: {}. To use one: mcp_connect with its name, then mcp_call.",
+                    added.join(", ")
+                ));
+            }
+            if !removed.is_empty() {
+                msg.push_str(&format!(
+                    " no longer available (do not use): {}.",
+                    removed.join(", ")
+                ));
+            }
+            self.push_item(Item::User(msg));
+            self.show_session_warning(ui);
+        }
+        (added, removed)
+    }
+
     /// Whether the live skill set has drifted from the session-start set (an
     /// on-the-fly `/skills` change). Compaction pins the current set when so,
     /// so the correction survives even after the announcement is summarized.

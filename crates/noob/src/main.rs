@@ -347,6 +347,10 @@ fn cmd_repl(args: &[String]) -> ExitCode {
             match cmd.trim() {
                 "quit" | "q" | "exit" => break,
                 "status" => status(&agent, &mut ui),
+                "context" => ui.note(&tools::context::report(
+                    agent.context_estimate(),
+                    agent.ctx_tokens,
+                )),
                 "sessions" => show_sessions(&agent.config_dir, &mut ui),
                 "clear-plan" => {
                     let updates = agent.clear_plan_history(&mut ui);
@@ -408,6 +412,33 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                         }
                     } else {
                         ui.note("not in plan mode; /plan enters it");
+                    }
+                }
+                s if s == "mcp" || s.starts_with("mcp ") => {
+                    let args = s.strip_prefix("mcp").unwrap_or("").trim();
+                    // A connect makes a network round-trip that can hang until
+                    // the timeout. Keep the dock alive so Ctrl-C stays
+                    // actionable while it runs, exactly like a skill clone.
+                    if args.starts_with("connect ") {
+                        match dock.as_mut() {
+                            Some(d) => {
+                                let plan = agent.plan;
+                                let background = agent.background_hub();
+                                d.run_turn(&mut ui, plan, background.as_ref(), |tui| {
+                                    handle_mcp(args, &mut agent, tui)
+                                });
+                                let steered = d.take_steering();
+                                if INTERRUPTED.swap(false, Ordering::SeqCst) && !steered {
+                                    d.drain_queue_to_draft();
+                                }
+                            }
+                            None => {
+                                handle_mcp(args, &mut agent, &mut ui);
+                                INTERRUPTED.store(false, Ordering::SeqCst);
+                            }
+                        }
+                    } else {
+                        handle_mcp(args, &mut agent, &mut ui);
                     }
                 }
                 s if s == "skills" || s.starts_with("skills ") => {
@@ -707,6 +738,136 @@ fn handle_skills(args: &str, agent: &mut Agent, ui: &mut Ui) {
             "unknown /skills subcommand {other:?}; use: list, add, remove, reload"
         )),
     }
+}
+
+fn handle_mcp(args: &str, agent: &mut Agent, ui: &mut Ui) {
+    let mut parts = args.splitn(2, char::is_whitespace);
+    let verb = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("").trim();
+    let project = mcp::config::project_path(&agent.tool_ctx.workspace);
+    match verb {
+        "" | "list" => {
+            let Some(mgr) = &agent.tool_ctx.mcp else {
+                ui.note(
+                    "no MCP servers configured; /mcp add <name> <url|command> installs one \
+                     (persisted in .noob/mcp.json)",
+                );
+                return;
+            };
+            let lines: Vec<String> = mgr
+                .names()
+                .iter()
+                .map(|name| {
+                    let state = match mgr.connection(name) {
+                        Some(conn) => format!("connected, {} tools", conn.tools().len()),
+                        None => "not connected".to_string(),
+                    };
+                    format!("  {name}: {state}")
+                })
+                .collect();
+            ui.note(&format!(
+                "mcp servers ({}):\n{}\nconnect one with /mcp connect <name> (the model uses mcp_connect)",
+                lines.len(),
+                lines.join("\n")
+            ));
+        }
+        "add" => {
+            let Some((name, spec)) = rest
+                .split_once(char::is_whitespace)
+                .map(|(n, s)| (n.trim(), s.trim()))
+            else {
+                ui.error(
+                    "usage: /mcp add <name> <url|command...> \
+                     (e.g. /mcp add deepwiki https://mcp.deepwiki.com/mcp)",
+                );
+                return;
+            };
+            let transport = match mcp::config::parse_spec(spec) {
+                Ok(t) => t,
+                Err(e) => {
+                    ui.error(&format!("mcp add failed: {e}"));
+                    return;
+                }
+            };
+            if let Err(e) = mcp::config::add_server(&project, name, &transport) {
+                ui.error(&format!("mcp add failed: {e}"));
+                return;
+            }
+            let (added, removed) = agent.reload_mcp(ui);
+            mcp_delta(ui, &added, &removed);
+        }
+        "remove" | "rm" => {
+            if rest.is_empty() {
+                ui.error("usage: /mcp remove <name>");
+                return;
+            }
+            match mcp::config::remove_server(&project, rest) {
+                Ok(true) => {
+                    let (added, removed) = agent.reload_mcp(ui);
+                    mcp_delta(ui, &added, &removed);
+                }
+                Ok(false) => {
+                    let hint = if agent
+                        .tool_ctx
+                        .mcp
+                        .as_ref()
+                        .is_some_and(|m| m.names().contains(&rest))
+                    {
+                        format!(
+                            "{rest:?} is not in the project file; it comes from the global \
+                             <config>/mcp.json, edit that file to remove it"
+                        )
+                    } else {
+                        format!("no MCP server named {rest:?}; /mcp lists them")
+                    };
+                    ui.error(&hint);
+                }
+                Err(e) => ui.error(&format!("mcp remove failed: {e}")),
+            }
+        }
+        "connect" => {
+            if rest.is_empty() {
+                ui.error("usage: /mcp connect <name>");
+                return;
+            }
+            let Some(mgr) = &agent.tool_ctx.mcp else {
+                ui.error("no MCP servers configured; /mcp add <name> <url|command> installs one");
+                return;
+            };
+            match mgr.connect(rest) {
+                Ok(info) => {
+                    let names: Vec<&str> =
+                        info.tools.iter().map(|t| t.name.as_str()).collect();
+                    ui.note(&format!(
+                        "connected {rest} (protocol {}): {} tools: {}",
+                        info.protocol,
+                        info.tools.len(),
+                        names.join(", ")
+                    ));
+                }
+                Err(e) => ui.error(&format!("mcp connect failed: {e}")),
+            }
+        }
+        other => ui.error(&format!(
+            "unknown /mcp subcommand {other:?}; use: list, add, remove, connect"
+        )),
+    }
+}
+
+/// One line summarizing what an `/mcp` change did, mirroring `skills_delta`.
+fn mcp_delta(ui: &mut Ui, added: &[String], removed: &[String]) {
+    if added.is_empty() && removed.is_empty() {
+        ui.note("mcp: no change");
+        return;
+    }
+    let mut parts = Vec::new();
+    if !added.is_empty() {
+        parts.push(format!("added {}", added.join(", ")));
+    }
+    if !removed.is_empty() {
+        parts.push(format!("removed {}", removed.join(", ")));
+    }
+    ui.note(&format!("mcp: {}", parts.join("; ")));
 }
 
 /// One line summarizing what a reload changed, so the human sees it even when
