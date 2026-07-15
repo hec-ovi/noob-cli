@@ -1833,6 +1833,90 @@ fn background_agent_view_stays_pinned_while_the_prompt_remains_usable() {
     rig.server.assert_clean();
 }
 
+/// The running-agents counter must survive the idle prompt: while a detached
+/// child still runs, the collapsed `[N] agents running` row stays pinned above
+/// the idle box, Tab expands the panel, and Tab again falls back to the live
+/// counter, never to nothing (the live-work-goes-invisible regression). The
+/// counter must be LIVE: every static end-of-turn record froze at "[2] agents
+/// running", so a row reading "[1]" can only come from the live snapshot.
+#[test]
+fn idle_prompt_keeps_the_running_agents_counter_after_closing_the_tab_view() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+    let child = || RequestMatch::LacksTool("subagent".to_string());
+
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[
+            ("bg-a", "subagent", r#"{"prompt":"fast idle child"}"#),
+            ("bg-b", "subagent", r#"{"prompt":"slow idle child"}"#),
+        ],
+        None,
+    );
+    rig.server
+        .enqueue_stream_completion_for(parent(), "PARENT-IDLE-END");
+    rig.server
+        .enqueue_raw_for(child(), stalled_stream("FAST-CHILD-DONE", 1, 1200, true));
+    rig.server
+        .enqueue_raw_for(child(), stalled_stream("SLOW-CHILD-DONE", 1, 8000, true));
+    rig.server
+        .enqueue_stream_completion_for(parent(), "FIRST-COLLECTED-END");
+    rig.server
+        .enqueue_stream_completion_for(parent(), "ALL-COLLECTED-END");
+
+    let mut pty = spawn_pty_with(&rig, &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"start two idle children\r");
+    pty.wait_for("PARENT-IDLE-END");
+
+    // The fast child settles and is collected; the slow child keeps running,
+    // so the next idle prompt has exactly one live background agent.
+    pty.wait_for("FIRST-COLLECTED-END");
+    pty.wait_for("type a message");
+    settle();
+
+    // Idle, view closed: the pinned counter reads the LIVE count of 1 (all
+    // frozen records above say "[2]"; pre-fix there was no idle row at all).
+    let idle = pty.screen(16, 90);
+    assert!(
+        idle.render()
+            .join("\n")
+            .contains("[1] agents running (Tab to view)"),
+        "no live running counter at the idle prompt:\n{}",
+        idle.dump("idle counter")
+    );
+
+    // Tab expands to the detail panel.
+    pty.send(b"\t");
+    pty.wait_for("agents (1 active, 0 ready):");
+
+    // Tab again closes it: the live counter must come back, not vanish.
+    pty.send(b"\t");
+    pty.drain(std::time::Duration::from_millis(400));
+    let closed = pty.screen(16, 90);
+    let visible = closed.render().join("\n");
+    assert!(
+        visible.contains("[1] agents running (Tab to view)"),
+        "no live counter after closing the agents view:\n{}",
+        closed.dump("counter after close")
+    );
+    assert!(
+        !visible.contains("agents (1 active"),
+        "the detail panel did not close:\n{}",
+        closed.dump("counter after close")
+    );
+
+    // The slow child settles, its result is collected, and the exit is clean.
+    pty.wait_for("ALL-COLLECTED-END");
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+}
+
 /// A full-tool dock child detaches just like a read-only child. It receives the
 /// complete coding/MCP-capable schema set, may mutate the workspace under the
 /// cross-process lease, and reports exactly once after the parent has already

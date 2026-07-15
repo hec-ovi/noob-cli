@@ -1287,13 +1287,23 @@ impl DockSession {
         background: Option<&crate::subagent::BackgroundHub>,
         width: usize,
     ) -> Vec<String> {
-        if !self.agent_view || !ui.regions_enabled() {
+        if !ui.regions_enabled() {
             return Vec::new();
         }
         let Some(hub) = background else {
             return Vec::new();
         };
-        let Some(block) = expanded_agent_snapshot_block(&hub.snapshot()) else {
+        // Mirror the in-turn region selection: the expanded panel behind Tab,
+        // otherwise the one-line running/ready counter. Closing the panel must
+        // fall back to the counter, never to nothing, or live background work
+        // becomes invisible at the idle prompt.
+        let snapshot = hub.snapshot();
+        let block = if self.agent_view {
+            expanded_agent_snapshot_block(&snapshot)
+        } else {
+            collapsed_agent_snapshot_block(&snapshot)
+        };
+        let Some(block) = block else {
             return Vec::new();
         };
         let counts = checklist_counts(&block);
