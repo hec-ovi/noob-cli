@@ -178,20 +178,44 @@ fn install_root(workspace: &Path) -> PathBuf {
     workspace.join(".noob/skills")
 }
 
-/// Install a skill from a local path (a skill directory or a bare SKILL.md)
-/// or a git URL into `<workspace>/.noob/skills/<name>`. The source is parsed
-/// and validated before anything is committed, so a malformed skill is
-/// rejected with a reason and nothing is copied. Returns the installed name.
+/// Install a skill from a local path (a skill directory or a bare SKILL.md),
+/// a git URL, or an `owner/repo` GitHub shorthand (the same registry shape
+/// `npx skills add` uses) into `<workspace>/.noob/skills/<name>`. The source
+/// is parsed and validated before anything is committed, so a malformed skill
+/// is rejected with a reason and nothing is copied. Returns the installed name.
 pub fn install(workspace: &Path, source: &str) -> Result<String, String> {
+    match git_url_for(source, Path::new(source).exists()) {
+        Some(url) => install_git(workspace, &url),
+        None => install_path(workspace, Path::new(source)),
+    }
+}
+
+/// The clone URL for a git-shaped source: explicit URLs pass through, and an
+/// `owner/repo` GitHub shorthand (the registry shape `npx skills add` uses)
+/// expands, but only when nothing with that name exists on disk, so a real
+/// `owner/repo`-shaped local directory always wins. `None` means a local path.
+fn git_url_for(source: &str, exists_locally: bool) -> Option<String> {
     let looks_git = source.starts_with("http://")
         || source.starts_with("https://")
         || source.starts_with("git@")
         || source.ends_with(".git");
     if looks_git {
-        install_git(workspace, source)
-    } else {
-        install_path(workspace, Path::new(source))
+        return Some(source.to_string());
     }
+    if exists_locally {
+        return None;
+    }
+    // Exactly one slash, both segments limited to GitHub's name alphabet, and
+    // neither starting with a dot (so `./dir` and hidden paths never read as
+    // a repo).
+    let (owner, repo) = source.split_once('/')?;
+    let valid = |s: &str| {
+        !s.is_empty()
+            && !s.starts_with('.')
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    (valid(owner) && valid(repo)).then(|| format!("https://github.com/{owner}/{repo}.git"))
 }
 
 fn install_path(workspace: &Path, source: &Path) -> Result<String, String> {
@@ -740,6 +764,43 @@ pub fn body_of(text: &str) -> (Cow<'_, str>, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_url_maps_owner_repo_shorthand_and_passes_urls_through() {
+        assert_eq!(
+            git_url_for("hec-ovi/research-skill", false).as_deref(),
+            Some("https://github.com/hec-ovi/research-skill.git")
+        );
+        assert_eq!(
+            git_url_for("a_b/c.d", false).as_deref(),
+            Some("https://github.com/a_b/c.d.git")
+        );
+        // Explicit git sources pass through untouched, even when a local path
+        // of the same name exists.
+        assert_eq!(
+            git_url_for("https://example.com/x.git", true).as_deref(),
+            Some("https://example.com/x.git")
+        );
+        assert_eq!(
+            git_url_for("git@github.com:o/r.git", false).as_deref(),
+            Some("git@github.com:o/r.git")
+        );
+    }
+
+    #[test]
+    fn git_url_never_shadows_a_local_path_or_misreads_one() {
+        // A directory literally named like `owner/repo` wins over the
+        // GitHub-registry reading.
+        assert_eq!(git_url_for("acme/tools", true), None);
+        // Not a shorthand: paths, hidden segments, extra slashes, bare names.
+        assert_eq!(git_url_for("./local/dir", false), None);
+        assert_eq!(git_url_for(".hidden/repo", false), None);
+        assert_eq!(git_url_for("a/b/c", false), None);
+        assert_eq!(git_url_for("just-a-dir", false), None);
+        assert_eq!(git_url_for("owner/", false), None);
+        assert_eq!(git_url_for("/repo", false), None);
+        assert_eq!(git_url_for("owner/re po", false), None);
+    }
 
     fn skill_md(name: &str, desc: &str) -> String {
         format!("---\nname: {name}\ndescription: {desc}\n---\nBody of {name}.\n")
