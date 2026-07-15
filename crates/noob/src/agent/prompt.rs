@@ -200,6 +200,23 @@ mod tests {
     }
 
     #[test]
+    fn base_prompt_forbids_waiting_for_subagents() {
+        // Guards the no-polling directive: a local model was caught running
+        // `sleep 180` in bash over and over to "wait" for detached children,
+        // pinning the session while their ready results could not inject
+        // (they only arrive once the turn ends).
+        let b = BASE_MD.to_lowercase();
+        assert!(
+            b.contains("only once you end your reply"),
+            "base.md must say results arrive only after the turn ends"
+        );
+        assert!(
+            b.contains("no sleep, no polling loop"),
+            "base.md must forbid sleeping/polling for subagent results"
+        );
+    }
+
+    #[test]
     fn agents_md_layers_append_in_order_global_then_project() {
         let mut i = inputs();
         i.global_agents = Some("be global".into());
