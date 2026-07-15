@@ -28,6 +28,10 @@ use crate::ui::Ui;
 const TURN_CAP: u32 = 50;
 const DOOM_WINDOW: usize = 12;
 const DOOM_REPEATS: usize = 3;
+/// Tools the repeat intercept never touches: their results are time-varying
+/// or side-effectful, so an identical call can legitimately repeat (an MCP
+/// bridge poll, a clock read, a fresh sub-agent instance).
+const REPEAT_EXEMPT: &[&str] = &["bash", "mcp_call", "subagent"];
 const NUDGE_AT: u32 = 4;
 const PAUSE_AT: u32 = 8;
 
@@ -1108,32 +1112,40 @@ impl Agent {
                 );
             }
         }
-        // serde_json's default map is sorted, so this serialization is
-        // canonical: key order cannot dodge the repeat detector.
-        let canonical = format!("{}\u{0}{}", call.name, args);
-        let hash = fnv1a64(canonical.as_bytes());
-        // "3 times within the last 12 calls": the window includes the
-        // current call, so look at the 11 preceding ones.
-        let repeats = self
-            .recent_calls
-            .iter()
-            .rev()
-            .take(DOOM_WINDOW - 1)
-            .filter(|&&h| h == hash)
-            .count();
-        self.recent_calls.push_back(hash);
-        if self.recent_calls.len() > DOOM_WINDOW {
-            self.recent_calls.pop_front();
-        }
-        if repeats + 1 >= DOOM_REPEATS {
-            return (
-                sched::Planned::Canned(ToolOutcome::err(
-                    "repeated identical call; the result will not change; \
-                     take a different approach"
-                        .to_string(),
-                )),
-                args,
-            );
+        // The repeat intercept only applies to calls whose result is a pure
+        // function of the arguments and the local files. A shell command, an
+        // MCP tool, or a fresh sub-agent is time-varying by nature (a bridge
+        // poll like wait_for_message repeats identical arguments BY DESIGN),
+        // so "the result will not change" would be a lie there; the
+        // consecutive-error breakers still bound genuinely failing loops.
+        if !REPEAT_EXEMPT.contains(&call.name.as_str()) {
+            // serde_json's default map is sorted, so this serialization is
+            // canonical: key order cannot dodge the repeat detector.
+            let canonical = format!("{}\u{0}{}", call.name, args);
+            let hash = fnv1a64(canonical.as_bytes());
+            // "3 times within the last 12 calls": the window includes the
+            // current call, so look at the 11 preceding ones.
+            let repeats = self
+                .recent_calls
+                .iter()
+                .rev()
+                .take(DOOM_WINDOW - 1)
+                .filter(|&&h| h == hash)
+                .count();
+            self.recent_calls.push_back(hash);
+            if self.recent_calls.len() > DOOM_WINDOW {
+                self.recent_calls.pop_front();
+            }
+            if repeats + 1 >= DOOM_REPEATS {
+                return (
+                    sched::Planned::Canned(ToolOutcome::err(
+                        "repeated identical call; the result will not change; \
+                         take a different approach"
+                            .to_string(),
+                    )),
+                    args,
+                );
+            }
         }
         (
             sched::Planned::Run {
@@ -1503,6 +1515,48 @@ mod tests {
                 assert!(out.content.contains("repeated identical call"));
             }
             sched::Planned::Run { .. } => panic!("third X within 12 must intercept"),
+        }
+    }
+
+    #[test]
+    fn time_varying_tools_may_repeat_identically_forever() {
+        // A serve loop polls an MCP bridge with the SAME wait_for_message
+        // call by design (caught live: the intercept broke a telegram serve
+        // after three timed_out rounds). bash and subagent are equally
+        // time-varying. The intercept must never fire for them.
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let mut agent = Agent::new(
+            Client::new(Timeouts::default()),
+            tmp.path().to_path_buf(),
+            Overrides::default(),
+            "sys".into(),
+            vec![],
+            vec![],
+            ToolCtx::new(ws, crate::tools::guard::Sandbox::Container),
+            None,
+            131_072,
+        );
+        let ran = |p: &sched::Planned| matches!(p, sched::Planned::Run { .. });
+        for (name, args) in [
+            (
+                "mcp_call",
+                r#"{"server":"telegram","tool":"wait_for_message","args":{}}"#,
+            ),
+            ("bash", r#"{"cmd":"date"}"#),
+            ("subagent", r#"{"prompt":"same goal"}"#),
+        ] {
+            for round in 0..5 {
+                let call = ToolCall {
+                    id: "c".into(),
+                    name: name.into(),
+                    arguments: args.into(),
+                };
+                assert!(
+                    ran(&agent.plan_call(&call).0),
+                    "{name} round {round} must run, never intercept"
+                );
+            }
         }
     }
 
