@@ -12,7 +12,7 @@ Built-in tools and their schemas. Core tools are read, write, edit, bash, grep, 
 
 - `bash` merges stdout and stderr, continuously drains through a bounded head/tail buffer, and kills its process group on timeout or cancellation.
 - `write`, `edit`, and `bash` take an OS lease on the workspace directory for the duration of one call. Leased calls do not overlap. Detached children wait for a bounded interval; a root call reports a conflict promptly. The advisory lease does not cover unmanaged or deliberately detached processes.
-- `grep` and `glob` honor gitignore; `ls` lists explicitly.
+- `grep` and `glob` honor gitignore; `ls` lists explicitly and opens with a `<dir>:` header line so bare entry names always carry their base path.
 - Retained tool results are bounded once before transcript insertion and include continuation instructions when clipped.
 - `context` reports the same estimated use, configured total, and 75 percent compaction threshold as the agent loop.
 - `plan` reports total elapsed time and records each completed item's elapsed time in its transcript-visible checklist.

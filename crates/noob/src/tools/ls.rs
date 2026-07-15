@@ -1,5 +1,10 @@
 //! ls: one directory's entries, sorted by name, directories marked with a
 //! trailing slash. Explicit listing, so gitignore does NOT apply here.
+//!
+//! The content opens with a `<dir>:` header line (the `ls -R` convention) so the
+//! model always sees the base path next to the bare names: a live session showed
+//! a small model reading `contract.md` out of an `ls /config` listing and then
+//! asking for `/contract.md`, because nothing in the result carried the prefix.
 
 use std::sync::atomic::Ordering;
 
@@ -61,7 +66,8 @@ fn run_inner(
         ));
     }
     let shown_count = names.len();
-    let mut content = names.join("\n");
+    let mut content = format!("{shown}:\n");
+    content.push_str(&names.join("\n"));
     if let Some(trailer) = list_trailer("entries", total, shown_count) {
         content.push('\n');
         content.push_str(&trailer);
@@ -86,8 +92,19 @@ mod tests {
         std::fs::write(ctx.workspace.join("a.txt"), "").unwrap();
         let out = run(&ctx, &json!({}));
         assert!(!out.is_error);
-        assert_eq!(out.content, "a.txt\nb.txt\nsub/");
+        assert_eq!(out.content, ".:\na.txt\nb.txt\nsub/");
         assert_eq!(out.summary, "ls . (3 entries)");
+    }
+
+    #[test]
+    fn listing_anchors_the_names_to_the_asked_dir() {
+        // A model must never have to guess the base path of a bare name: the
+        // header line carries the directory it asked for.
+        let (_t, ctx) = test_ctx();
+        std::fs::create_dir(ctx.workspace.join("cfg")).unwrap();
+        std::fs::write(ctx.workspace.join("cfg/contract.md"), "").unwrap();
+        let out = run(&ctx, &json!({"path": "cfg"}));
+        assert_eq!(out.content, "cfg:\ncontract.md");
     }
 
     #[test]
@@ -101,8 +118,8 @@ mod tests {
             out.content
                 .ends_with("250 entries, showing 200; narrow the pattern")
         );
-        assert_eq!(out.content.lines().count(), 201);
-        assert!(out.content.starts_with("f000\n"));
+        assert_eq!(out.content.lines().count(), 202);
+        assert!(out.content.starts_with(".:\nf000\n"));
         assert!(out.content.contains("f199\n250 entries"));
         assert!(!out.content.contains("f200\n"));
     }
