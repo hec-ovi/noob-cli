@@ -1766,9 +1766,15 @@ fn background_agent_view_stays_pinned_while_the_prompt_remains_usable() {
         "one immediate result per original call: {messages:?}"
     );
     let ack: Value = serde_json::from_str(acks[0]["content"].as_str().unwrap()).unwrap();
-    assert_eq!(
-        ack,
-        serde_json::json!({"job_id":"agent-1","status":"running"})
+    assert_eq!(ack["job_id"], "agent-1");
+    assert_eq!(ack["status"], "running");
+    // The acknowledgment carries the lifecycle contract for the orchestrator.
+    assert!(
+        ack["contract"]
+            .as_str()
+            .unwrap()
+            .contains("polling cannot fetch it"),
+        "{ack}"
     );
     let packets: Vec<&str> = messages
         .iter()
@@ -1917,6 +1923,91 @@ fn idle_prompt_keeps_the_running_agents_counter_after_closing_the_tab_view() {
     rig.server.assert_clean();
 }
 
+/// A child that finishes while the parent turn is still running is delivered
+/// at the next round INSIDE that turn, not held for the turn's end: the round
+/// after the child settles must already carry the result packet, and no
+/// separate background continuation happens afterwards. This is the
+/// deterministic close of the sub-agent loop (a model that "waits" for a
+/// report receives it at its very next step).
+#[test]
+fn ready_child_result_is_delivered_mid_turn_at_the_next_round() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+    let child = || RequestMatch::LacksTool("subagent".to_string());
+
+    // Round 1: spawn the child. The child answers immediately.
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[("bg-mid", "subagent", r#"{"prompt":"fast goal"}"#)],
+        None,
+    );
+    rig.server
+        .enqueue_stream_completion_for(child(), "FAST-GOAL-DONE");
+
+    // Round 2: the parent keeps its turn alive (a stalled response emitting
+    // one more tool call), long enough for the child to settle meanwhile.
+    let datas =
+        noob_testkit::chat_stream_toolcalls_datas(&[("p2", "bash", r#"{"cmd":"echo still-here"}"#)], None);
+    let mut tail = sse_frames(&datas);
+    tail.extend_from_slice(b"0\r\n\r\n");
+    rig.server.enqueue_raw_for(
+        parent(),
+        vec![
+            noob_testkit::RawStep::Bytes(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n"
+                    .to_vec(),
+            ),
+            noob_testkit::RawStep::SleepMs(3000),
+            noob_testkit::RawStep::Bytes(tail),
+        ],
+    );
+
+    // Round 3: sees the injected packet and finishes the turn.
+    rig.server
+        .enqueue_stream_completion_for(parent(), "SAW-THE-REPORT-END");
+
+    let mut pty = spawn_pty_with(&rig, &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"spawn and keep working\r");
+    pty.wait_for("agent-1 ok");
+    pty.wait_for("SAW-THE-REPORT-END");
+    pty.wait_for("type a message");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+
+    let requests = rig.api_requests();
+    let parent_requests: Vec<&Value> = requests
+        .iter()
+        .filter(|request| {
+            request["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == "subagent")
+        })
+        .collect();
+    // Exactly three parent rounds, all within ONE turn: no post-turn
+    // background continuation was needed.
+    assert_eq!(parent_requests.len(), 3, "{requests:?}");
+    let final_messages = parent_requests[2]["messages"].as_array().unwrap();
+    assert!(
+        final_messages.iter().any(|message| {
+            message["role"] == "user"
+                && message["content"].as_str().is_some_and(|content| {
+                    content.starts_with("[background sub-agent result agent-1]")
+                        && content.contains("FAST-GOAL-DONE")
+                })
+        }),
+        "the packet must ride the SAME turn's next round: {final_messages:?}"
+    );
+    rig.server.assert_clean();
+}
+
 /// A full-tool dock child detaches just like a read-only child. It receives the
 /// complete coding/MCP-capable schema set, may mutate the workspace under the
 /// cross-process lease, and reports exactly once after the parent has already
@@ -2012,6 +2103,15 @@ fn detached_all_tools_child_writes_a_file_and_reports_once() {
             "full-tool child lacks {name}: {schemas:?}"
         );
     }
+    // The child's system prompt carries the lifecycle contract: one goal,
+    // one final report, the instance closes.
+    assert!(
+        child_request["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("# Sub-agent contract"),
+        "the child system prompt must carry the sub-agent contract"
+    );
 
     let final_parent = requests
         .iter()
@@ -2107,10 +2207,9 @@ fn responses_background_result_preserves_one_call_output_and_one_report() {
         })
         .collect();
     assert_eq!(outputs.len(), 1, "{input:?}");
-    assert_eq!(
-        serde_json::from_str::<Value>(outputs[0]["output"].as_str().unwrap()).unwrap(),
-        serde_json::json!({"job_id":"agent-1","status":"running"}),
-    );
+    let ack = serde_json::from_str::<Value>(outputs[0]["output"].as_str().unwrap()).unwrap();
+    assert_eq!(ack["job_id"], "agent-1");
+    assert_eq!(ack["status"], "running");
     let reports = input
         .iter()
         .filter(|item| {

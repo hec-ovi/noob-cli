@@ -1185,6 +1185,18 @@ fn cmd_child() -> ExitCode {
         Ok(pair) => pair,
         Err(e) => return child_result("error", &e, 0, None),
     };
+    // The sub-agent lifecycle contract, layered system-level: one goal in,
+    // one final report out, the instance closes. Deliberately hard language;
+    // a small model treats soft phrasing as optional.
+    agent.system.push_str(
+        "\n\n# Sub-agent contract\n\
+         You are a sub-agent with exactly ONE goal: the task in the next message. \
+         You MUST complete it and end with a single final message carrying your \
+         complete result; that message is returned to the orchestrator that spawned \
+         you and closes this instance. NEVER wait for further input, NEVER ask \
+         questions (nobody can answer), and NEVER idle in sleep or polling loops: \
+         goal done, report, stop.",
+    );
     // Both sides enforce the turn cap: the parent clamped its request; the
     // child clamps that against its own environment's ceiling.
     let env_cap = config::task_max_turns(&agent.config_dir);

@@ -761,6 +761,12 @@ impl Agent {
             if INTERRUPTED.load(Ordering::SeqCst) {
                 return self.finish_interrupt(ui, &[]);
             }
+            // Deterministic close of the sub-agent loop: any child that
+            // finished while this batch ran is delivered NOW, before the next
+            // model round. A model that (wrongly) tries to wait for a report
+            // still receives it at its next step, so a sleep/poll idiom can
+            // never spin a turn against children that are already done.
+            self.integrate_background_results(ui);
             if self.consec_errors >= PAUSE_AT {
                 let last = outcomes
                     .iter()

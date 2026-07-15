@@ -218,8 +218,20 @@ impl BackgroundHub {
         drop(state);
         self.inner.changed.notify_all();
 
+        // The acknowledgment carries the lifecycle contract at the exact
+        // decision point: the orchestrating model reads this result when it
+        // chooses its next move. Small local models were caught sleeping in
+        // bash to "wait" for children; the contract makes the loop closure
+        // explicit and deterministic.
         ToolOutcome::ok(
-            json!({"job_id": id, "status": "running"}).to_string(),
+            json!({
+                "job_id": id,
+                "status": "running",
+                "contract": "detached with one goal; the final report is delivered to you \
+                             automatically as [background sub-agent result]; waiting, sleeping, \
+                             or polling cannot fetch it, so continue other work or finish",
+            })
+            .to_string(),
             format!("{id} started · {active} active"),
         )
     }
@@ -602,10 +614,12 @@ mod tests {
 
         assert_eq!(first.summary, "agent-1 started · 1 active");
         assert_eq!(second.summary, "agent-2 started · 2 active");
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&second.content).unwrap(),
-            json!({"job_id":"agent-2","status":"running"}),
-            "the transcript acknowledgment stays compatible"
+        let ack = serde_json::from_str::<serde_json::Value>(&second.content).unwrap();
+        assert_eq!(ack["job_id"], "agent-2", "the acknowledgment stays parseable");
+        assert_eq!(ack["status"], "running");
+        assert!(
+            ack["contract"].as_str().unwrap().contains("delivered to you"),
+            "the acknowledgment must carry the lifecycle contract: {ack}"
         );
         gate.store(true, Ordering::SeqCst);
         assert_eq!(hub.shutdown().len(), 2);

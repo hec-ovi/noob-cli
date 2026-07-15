@@ -71,8 +71,8 @@ struct RunCfg {
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "subagent".to_string(),
-        description: "Spawn an independent sub-agent with its own context and tools that returns \
-                      one result; call several times to fan out."
+        description: "Spawn a detached sub-agent for ONE goal; its final report returns \
+                      automatically when done; call repeatedly to fan out."
             .to_string(),
         parameters: json!({"type": "object", "properties": {
             "prompt": {"type": "string", "description": "complete standalone instructions"},
