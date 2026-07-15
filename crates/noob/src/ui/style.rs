@@ -7,6 +7,18 @@
 
 /// Reset every SGR attribute.
 pub const RESET: &str = "\x1b[0m";
+
+/// Wrap `text` in a style's SGR sequence at the given depth; plain text when
+/// the depth renders no color. The one shared paint primitive for the
+/// styled renderers (tables, markdown).
+pub(super) fn paint(style: Style, depth: ColorDepth, text: &str) -> String {
+    let open = style.sgr(depth);
+    if open.is_empty() {
+        text.to_string()
+    } else {
+        format!("{open}{text}{RESET}")
+    }
+}
 /// Faint intensity, used by the legacy dim activity lines (kept byte-identical
 /// on the non-REPL surfaces).
 pub const DIM: &str = "\x1b[2m";

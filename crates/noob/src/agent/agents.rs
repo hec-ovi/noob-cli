@@ -300,16 +300,9 @@ fn turns_of(summary: &str) -> Option<String> {
 fn digest_of(content: &str) -> Option<String> {
     let line = content.lines().map(str::trim).find(|l| !l.is_empty())?;
     let flat = line.replace('\r', " ");
-    Some(clip(&flat, DIGEST))
+    Some(super::clip(&flat, DIGEST))
 }
 
-fn clip(s: &str, chars: usize) -> String {
-    if s.chars().count() <= chars {
-        return s.to_string();
-    }
-    let cut: String = s.chars().take(chars).collect();
-    format!("{cut}…")
-}
 
 #[cfg(test)]
 mod tests {

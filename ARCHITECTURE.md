@@ -182,7 +182,7 @@ Agent-authored write or edit targets inside a skills directory require a real te
 
 ## MCP
 
-MCP configuration is merged from `<config>/mcp.json` and `<workspace>/.noob/mcp.json`, with project entries winning by name.
+MCP configuration is merged from `<config>/mcp.json` and `<workspace>/.noob/mcp.json`, with project entries winning by name. `/mcp add <name> <url|command...>` writes the project file through the same entry validation the loader uses and reloads the live server set in place; the two MCP tools register on the zero-to-some transition, one sanctioned cache break exactly like the skill tool, and an in-band `[mcp updated]` note corrects the model's working set.
 
 Startup only names servers. `mcp_connect` initializes one server and caches its tool catalog. `mcp_call` validates arguments against the cached schema before transport.
 

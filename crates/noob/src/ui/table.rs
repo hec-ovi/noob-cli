@@ -6,7 +6,7 @@
 //! markdown driver renders the buffered rows and streams the remainder as plain
 //! source, so model output is never truncated.
 
-use super::style::{ColorDepth, RESET, Style};
+use super::style::{ColorDepth, Style, paint};
 use super::theme::Theme;
 
 /// A table is deliberately much smaller than a model response. Hitting a bound
@@ -525,15 +525,6 @@ pub(super) fn char_width(c: char) -> usize {
         return 2;
     }
     1
-}
-
-fn paint(style: Style, depth: ColorDepth, text: &str) -> String {
-    let open = style.sgr(depth);
-    if open.is_empty() {
-        text.to_string()
-    } else {
-        format!("{open}{text}{RESET}")
-    }
 }
 
 #[cfg(test)]

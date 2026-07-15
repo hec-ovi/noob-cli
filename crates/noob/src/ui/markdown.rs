@@ -12,7 +12,7 @@
 //! the existing end-of-message newline/reset. Do not wrap the returned bytes in
 //! the old one-shot assistant tint: this renderer supplies balanced styles.
 
-use super::style::{ColorDepth, RESET, Style};
+use super::style::{ColorDepth, RESET, Style, paint};
 use super::table::{self, Table};
 use super::theme::Theme;
 
@@ -650,15 +650,6 @@ fn italic_sgr(style: Style, depth: ColorDepth) -> String {
     open.pop();
     open.push_str(";3m");
     open
-}
-
-fn paint(style: Style, depth: ColorDepth, text: &str) -> String {
-    let open = style.sgr(depth);
-    if open.is_empty() {
-        text.to_string()
-    } else {
-        format!("{open}{text}{RESET}")
-    }
 }
 
 fn is_c0_or_del(c: char) -> bool {

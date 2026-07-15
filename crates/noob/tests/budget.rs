@@ -15,8 +15,8 @@ const TOOLS_CEILING: usize = 940; // serialized wire tools array
 const TOTAL_CEILING: usize = 1500; // total fixed first-request overhead
 
 /// `with_skill` plants one skill in the workspace and `with_mcp` one
-/// configured server, so the artifact carries the FULL registered set (8
-/// core + skill + mcp_connect + mcp_call) plus the resolver section and the
+/// configured server, so the artifact carries the FULL registered set (9
+/// core + subagent + skill + mcp_connect + mcp_call) plus the resolver section and the
 /// MCP line: the ceilings must hold with everything registered, not just
 /// the bare core.
 fn debug_prompt(with_skill: bool, with_mcp: bool) -> Value {

@@ -87,15 +87,20 @@ Interactive commands:
 | `/clear-plan` | Redact prior plan payloads from the active context |
 | `/go` | Approve the plan and restore the full tool set |
 | `/status` | Show endpoint, usage, session, skills, and MCP state |
+| `/context` | Show context use and the automatic-compaction threshold |
 | `/sessions` | List saved sessions newest first |
 | `/agents` | List background sub-agents |
 | `/agents cancel <agent-N\|all>` | Cancel and reap detached work |
 | `/config` | Show, set, or unset non-secret `.env` settings |
 | `/compact` | Compact the current session |
 | `/skills` | List skills |
-| `/skills add <path-or-git-url>` | Install and reload one skill |
+| `/skills add <path\|git-url\|owner/repo>` | Install and reload one skill (`owner/repo` reads from GitHub, like `npx skills add`) |
 | `/skills remove <name>` | Remove a workspace-installed skill |
 | `/skills reload` | Run discovery again |
+| `/mcp` | List configured MCP servers and their connection state |
+| `/mcp add <name> <url\|command...>` | Install an MCP server on the fly (persisted to `.noob/mcp.json`) |
+| `/mcp remove <name>` | Drop a project-installed MCP server |
+| `/mcp connect <name>` | Connect now and print the server's tool catalog |
 | `/quit`, `exit`, or `quit` | Leave the REPL |
 
 During a turn the input stays live: typing edits the next message, and Enter steers immediately by stopping the current parent turn and dispatching the accepted message. The dock keeps plan and agent status visible while output scrolls above it.
@@ -110,7 +115,7 @@ During a turn the input stays live: typing edits the next message, and Enter ste
 - Read-before-write stamps, atomic writes, deterministic edit fallbacks, and ambiguity rejection.
 - JSONL sessions, newest-first discovery, `--resume latest`, on-screen replay, context compaction, cache-prefix checks, and repair of dangling calls or interrupted background jobs.
 - Read-only plan mode through `/plan`, followed by `/go`.
-- Lazy MCP over stdio and Streamable HTTP. Server schemas enter context only after connection.
+- Lazy MCP over stdio and Streamable HTTP. Server schemas enter context only after connection, and `/mcp add` installs a server mid-session.
 - Runtime skill discovery and atomic `/skills add`, `remove`, and `reload`.
 - A default terminal dock with elapsed status, active tools, editable steering, confirmations, cancellation, Tab completion for slash commands, live in-place plan and agents panels, and reflow on terminal resize.
 - Interactive Markdown for headings, emphasis, lists, fenced code, JSON, and width-aware tables.
@@ -142,7 +147,7 @@ The pair composes with no hand-holding. In a live run, asked a plain research qu
 
 ## 🧩 Skills: instructions the model runs
 
-A skill is a `SKILL.md` the model activates and then carries out with the ordinary tools, so it adds a capability without adding code. Install one from a local path or a git URL with `/skills add`, list with `/skills`, and drop a workspace one with `/skills remove`.
+A skill is a `SKILL.md` the model activates and then carries out with the ordinary tools, so it adds a capability without adding code. Install one from a local path, a git URL, or an `owner/repo` GitHub shorthand with `/skills add` (`/skills add hec-ovi/research-skill` just works), list with `/skills`, and drop a workspace one with `/skills remove`.
 
 The external [research-skill](https://github.com/hec-ovi/research-skill) shows the shape. Once installed, a plain research question drove the model to `write` a project-scoped `.research/` store (an `INDEX.md` and per-topic `FINDINGS.md`, each with a `sources` block), search through `websearch`, and `read` the store back on later lookups. It runs `read`, `write`, `bash`, and `websearch`, the same tools any turn uses.
 
@@ -177,11 +182,11 @@ The mounted config directory contains `.env`, optional `AGENTS.md`, `mcp.json`, 
 | `NOOB_SKILL_PATHS` | none | Colon-separated skill directories, each resolved against the workspace and registered as one resolver skill (so a `cli/SKILL.md` dispatcher is discovered without copying it into a skills root) | `.env`: `/skills reload`; environment: process start |
 | `NOOB_ENV` | none | Comma-separated allowlist of extra environment variable names the host launcher forwards into the container (for a workflow's own variables) | process start (launcher) |
 
-If startup autodetection selects an endpoint, that selection is fixed for the process. Restart noob to switch from an autodetected endpoint to a newly added `.env` URL. The launcher forwards a fixed set of `NOOB_*` and proxy variables plus any names listed in `NOOB_ENV`, and never forwards `NOOB_API_KEY`; put secrets in the mounted config `.env` and protect that directory with normal file permissions. `/skills reload` and a new process reload skills and MCP configuration respectively.
+If startup autodetection selects an endpoint, that selection is fixed for the process. Restart noob to switch from an autodetected endpoint to a newly added `.env` URL. The launcher forwards a fixed set of `NOOB_*` and proxy variables plus any names listed in `NOOB_ENV`, and never forwards `NOOB_API_KEY`; put secrets in the mounted config `.env` and protect that directory with normal file permissions. `/skills reload` reloads skills; `/mcp add` and `/mcp remove` reload the MCP server set in place.
 
 The model server needs one request slot for the parent plus `NOOB_TASK_CONCURRENCY` child slots. With the defaults, configure at least five slots and give every slot the same 131,072-token window as `NOOB_CTX`. The [companion llama.cpp stack](https://github.com/hec-ovi/llama-vulkan-strix) documents and validates the required total KV-cache arithmetic.
 
-`/status` and the model-callable `context` tool show the estimated use, configured total, and 75 percent automatic-compaction threshold. When compaction runs, the terminal states whether the configured threshold, an endpoint overflow, or a length finish triggered it, then reports whether old tool output was pruned or the older conversation was summarized. Provider failures include the failed stage or HTTP status and a concrete next check.
+`/context` (and `/status`, and the model-callable `context` tool) shows the estimated use, configured total, and 75 percent automatic-compaction threshold. When compaction runs, the terminal states whether the configured threshold, an endpoint overflow, or a length finish triggered it, then reports whether old tool output was pruned or the older conversation was summarized. Provider failures include the failed stage or HTTP status and a concrete next check.
 
 `/config list` shows the effective non-secret settings and their file. `/config set ctx 65536` and `/config unset ctx` update that file atomically. Endpoint, model, and API-style edits apply on the next request unless a CLI flag or exported variable overrides them. Context and child-agent budget edits need a restart. API keys are intentionally not accepted by `/config`; edit the mounted `.env` so a secret does not enter terminal history.
 
