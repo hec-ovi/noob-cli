@@ -116,11 +116,13 @@ pub fn parse_spec(spec: &str) -> Result<TransportConfig, String> {
 }
 
 /// Insert or replace `name` in the mcp.json at `path`, preserving every other
-/// entry byte-for-byte at the JSON level. The entry is validated through the
-/// same `parse_entry` the loader uses, so a written server can never be one
-/// the next session refuses to load.
+/// entry byte-for-byte at the JSON level. Re-adding an existing name keeps its
+/// `timeout_s` (the spec syntax cannot express one, so a replace must not
+/// silently drop a hand-tuned long-poll timeout). The entry is validated
+/// through the same `parse_entry` the loader uses, so a written server can
+/// never be one the next session refuses to load.
 pub fn add_server(path: &Path, name: &str, transport: &TransportConfig) -> Result<(), String> {
-    let entry = match transport {
+    let mut entry = match transport {
         TransportConfig::Http { url } => serde_json::json!({ "url": url }),
         TransportConfig::Stdio { command, args } => {
             if args.is_empty() {
@@ -130,7 +132,6 @@ pub fn add_server(path: &Path, name: &str, transport: &TransportConfig) -> Resul
             }
         }
     };
-    parse_entry(name, &entry)?;
     let mut root: Value = match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text)
             .map_err(|e| format!("{} is not valid JSON ({e}); fix it first", path.display()))?,
@@ -143,11 +144,21 @@ pub fn add_server(path: &Path, name: &str, transport: &TransportConfig) -> Resul
             path.display()
         ));
     };
-    obj.entry("servers")
+    let servers = obj
+        .entry("servers")
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
-        .ok_or_else(|| format!("{}: \"servers\" is not an object; fix it first", path.display()))?
-        .insert(name.to_string(), entry);
+        .ok_or_else(|| {
+            format!(
+                "{}: \"servers\" is not an object; fix it first",
+                path.display()
+            )
+        })?;
+    if let Some(timeout) = servers.get(name).and_then(|prev| prev.get("timeout_s")) {
+        entry["timeout_s"] = timeout.clone();
+    }
+    parse_entry(name, &entry)?;
+    servers.insert(name.to_string(), entry);
     write_config(path, &root)
 }
 
@@ -311,6 +322,23 @@ mod tests {
         let (servers, _) = load(ws.path(), ws.path().join("nope").as_path());
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "keep");
+    }
+
+    #[test]
+    fn re_adding_a_server_keeps_its_hand_tuned_timeout() {
+        // Caught live: re-adding telegram to trigger a reload dropped the
+        // timeout_s that a long-poll server needs.
+        let ws = tempfile::tempdir().unwrap();
+        let path = project_path(ws.path());
+        write(
+            ws.path(),
+            ".noob/mcp.json",
+            r#"{"servers": {"tg": {"url": "http://localhost:8765/mcp", "timeout_s": 300}}}"#,
+        );
+        add_server(&path, "tg", &parse_spec("http://localhost:8765/mcp").unwrap()).unwrap();
+        let (servers, warnings) = load(ws.path(), ws.path().join("nope").as_path());
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(servers[0].timeout, Duration::from_secs(300));
     }
 
     #[test]
