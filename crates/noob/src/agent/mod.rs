@@ -764,7 +764,7 @@ impl Agent {
                         ) {
                             ui.agents(&render.block, &render.ids);
                         }
-                        let visible = visible_tool_summary(outcome);
+                        let visible = visible_tool_summary(&call.name, outcome);
                         let summary = timed_summary(&call.name, &visible, elapsed);
                         ui.tool_done(&call.id, &summary, outcome.is_error && !outcome.canceled);
                         // The plan tool's result is a checklist; show it as a
@@ -1185,6 +1185,27 @@ impl Agent {
                 );
             }
         }
+        // A detached child's report arrives on its own between rounds, so a
+        // parent that sleeps to "wait for it" can never observe anything a
+        // plain end-of-turn would not deliver sooner; it only blocks the
+        // conversation (live catch: `sleep 30` after a subagent spawn forced
+        // the user to interrupt the turn just to get the prompt back).
+        if call.name == "bash"
+            && self.background_snapshot().active > 0
+            && args
+                .get("cmd")
+                .and_then(Value::as_str)
+                .is_some_and(leading_sleep)
+        {
+            return (
+                sched::Planned::Canned(ToolOutcome::err(
+                    "sleep is blocked while detached sub-agents run: their \
+                     reports arrive on their own the moment a child finishes; \
+                     finish your reply and end the turn, or do other real work",
+                )),
+                args,
+            );
+        }
         // The repeat intercept only applies to calls whose result is a pure
         // function of the arguments and the local files. A shell command, an
         // MCP tool, or a fresh sub-agent is time-varying by nature (a bridge
@@ -1349,6 +1370,20 @@ fn clip(s: &str, chars: usize) -> String {
     format!("{cut}…")
 }
 
+/// True when a command line LEADS with `sleep`: the command exists to wait
+/// ("sleep 30", "sleep 30 && echo waited"). A sleep after real work in the
+/// same line ("bin/serve & sleep 1 && curl ...") is pacing between commands
+/// and stays allowed. Same harness rule class as Claude Code's blocked
+/// foreground sleep; scoped to detached-agent waits because noob has no
+/// separate monitor primitive for user-requested delays.
+fn leading_sleep(cmd: &str) -> bool {
+    cmd.split(['\n', ';'])
+        .flat_map(|part| part.split("&&"))
+        .find(|segment| !segment.trim().is_empty())
+        .and_then(|segment| segment.split_whitespace().next())
+        == Some("sleep")
+}
+
 fn timed_summary(name: &str, summary: &str, elapsed: Option<std::time::Duration>) -> String {
     match elapsed {
         // Bash already measures and prints its own lifecycle duration.
@@ -1361,9 +1396,11 @@ fn timed_summary(name: &str, summary: &str, elapsed: Option<std::time::Duration>
 /// Keep the full tool result in the transcript while making a failed activity
 /// line useful on its own. ToolOutcome's stable machine summary remains
 /// `error`; only the human-facing row receives the first diagnostic line.
-fn visible_tool_summary(outcome: &ToolOutcome) -> String {
+/// A canceled call names its subject: a lone "* canceled" row read as "my
+/// background work was killed" in a live session when only one bash wait was.
+fn visible_tool_summary(name: &str, outcome: &ToolOutcome) -> String {
     if outcome.canceled {
-        return outcome.summary.clone();
+        return format!("{name} {}", outcome.summary);
     }
     if !outcome.is_error {
         return outcome.summary.clone();
@@ -1395,14 +1432,34 @@ mod tests {
             "cannot read missing.txt: no such file; check the path with ls or glob\nmore detail",
         );
         assert_eq!(
-            visible_tool_summary(&out),
+            visible_tool_summary("read", &out),
             "error: cannot read missing.txt: no such file; check the path with ls or glob",
         );
         assert_eq!(
-            visible_tool_summary(&ToolOutcome::err("sub-agent error: turn cap")),
+            visible_tool_summary("subagent", &ToolOutcome::err("sub-agent error: turn cap")),
             "sub-agent error: turn cap"
         );
-        assert_eq!(visible_tool_summary(&ToolOutcome::canceled()), "canceled");
+        assert_eq!(
+            visible_tool_summary("bash", &ToolOutcome::canceled()),
+            "bash canceled",
+            "a canceled call must name its subject"
+        );
+    }
+
+    #[test]
+    fn leading_sleep_flags_waits_and_spares_pacing() {
+        for waiting in ["sleep 30", "sleep 30 && echo waited", "  sleep 5; ls", "\nsleep 1"] {
+            assert!(leading_sleep(waiting), "{waiting:?}");
+        }
+        for working in [
+            "echo sleep",
+            "./sleep.sh",
+            "bin/serve & sleep 1 && curl localhost",
+            "make build; sleep 2; make test",
+            "curl -m 30 http://x",
+        ] {
+            assert!(!leading_sleep(working), "{working:?}");
+        }
     }
 
     #[test]

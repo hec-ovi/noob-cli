@@ -1578,10 +1578,12 @@ fn dock_steering_during_bash_with_a_running_agent_answers_the_message() {
         )],
         None,
     );
-    // After the ack the parent (wrongly) settles in to wait for the child.
+    // After the ack the parent starts a long-running REAL command (a leading
+    // sleep would be refused by the agent-wait block; steering must still
+    // work when genuine work is in flight).
     rig.server.enqueue_stream_toolcalls_for(
         parent(),
-        &[("wait-call", "bash", r#"{"cmd":"sleep 8"}"#)],
+        &[("wait-call", "bash", r#"{"cmd":"tail -f /dev/null"}"#)],
         None,
     );
     rig.server.enqueue_raw_for(
@@ -1631,6 +1633,90 @@ fn dock_steering_during_bash_with_a_running_agent_answers_the_message() {
         interrupts, 1,
         "exactly one interrupt: the bash cancel; the steered turn itself \
          must run, not phantom-cancel: {steered}"
+    );
+    rig.server.assert_clean();
+}
+
+/// The live scenario that motivated the agent-wait block, end to end: the
+/// model spawns a detached researcher, tries to sleep-wait for it, gets the
+/// structural refusal, and ends its turn. The user's next message is then a
+/// PLAIN prompt turn: no steering, no cancellation, no interrupt anywhere on
+/// screen, and the child's report still arrives on its own afterward.
+#[test]
+fn sleep_wait_is_refused_and_the_prompt_frees_without_steering() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+    let child = || RequestMatch::LacksTool("subagent".to_string());
+
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[("bg-call", "subagent", r#"{"prompt":"deep research"}"#)],
+        None,
+    );
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[("wait-call", "bash", r#"{"cmd":"sleep 30 && echo waited"}"#)],
+        None,
+    );
+    rig.server
+        .enqueue_stream_completion_for(parent(), "SPAWNED-END");
+    rig.server.enqueue_raw_for(
+        child(),
+        stalled_stream("CHILD-RESULT-UNIQUE", 1, 2500, true),
+    );
+    rig.server
+        .enqueue_stream_completion_for(parent(), "CHAT-ANSWER-END");
+    rig.server
+        .enqueue_stream_completion_for(parent(), "COLLECTED-END");
+
+    let mut pty = spawn_pty_with(&rig, DOCK);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"research it\r");
+    // The refusal ends the wait instantly; the turn completes on its own.
+    pty.wait_for("SPAWNED-END");
+    // The prompt is free while the child still runs: a normal message, not
+    // steering.
+    pty.send(b"can we keep talking?\r");
+    pty.wait_for("CHAT-ANSWER-END");
+    pty.wait_for("agent-1 ok");
+    pty.wait_for("COLLECTED-END");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+
+    // The whole exchange shows zero interruption vocabulary.
+    for noise in ["[steering]", "canceled", "[interrupted]"] {
+        assert!(
+            !pty.seen.contains(noise),
+            "{noise:?} appeared in a flow with nothing to interrupt:\n{}",
+            pty.seen
+        );
+    }
+
+    let requests = rig.api_requests();
+    // The refusal reached the model as the sleep call's result.
+    assert!(
+        requests.iter().any(|request| {
+            request["messages"].as_array().unwrap().iter().any(|m| {
+                m["role"] == "tool"
+                    && m["tool_call_id"] == "wait-call"
+                    && m["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("sleep is blocked"))
+            })
+        }),
+        "the sleep refusal never reached the model"
+    );
+    // And the user's message dispatched as an ordinary turn.
+    assert!(
+        requests
+            .iter()
+            .any(|request| last_user(request) == "can we keep talking?"),
+        "the free-prompt message never dispatched"
     );
     rig.server.assert_clean();
 }
