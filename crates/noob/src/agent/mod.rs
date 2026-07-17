@@ -1040,7 +1040,19 @@ impl Agent {
         }
         self.push_item(Item::User("[interrupted]".to_string()));
         self.show_session_warning(ui);
-        ui.note("[interrupted]");
+        // The transcript item stays exactly "[interrupted]" (replay filter,
+        // frozen phrasing); only the display note reassures. Live catch: a
+        // user canceled a turn while detached agents ran and read the
+        // interrupt as having killed their research.
+        let active = self.background_snapshot().active;
+        if active > 0 {
+            let plural = if active == 1 { "agent keeps" } else { "agents keep" };
+            ui.note(&format!(
+                "[interrupted] ({active} detached {plural} running; Tab or /agents to view)"
+            ));
+        } else {
+            ui.note("[interrupted]");
+        }
         RunEnd::Interrupted
     }
 

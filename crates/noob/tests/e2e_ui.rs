@@ -1555,6 +1555,83 @@ fn dock_enter_steers_and_dispatches_on_the_next_loop() {
     rig.server.assert_clean();
 }
 
+/// The live-caught combination: a detached child is running AND the parent
+/// turn is inside a slow bash when the user steers. The steering must stop
+/// only the parent's bash, dispatch the message as a normal answered turn
+/// (exactly one [interrupted] marker), and leave the child running to
+/// deliver its report afterward.
+#[test]
+fn dock_steering_during_bash_with_a_running_agent_answers_the_message() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+    let child = || RequestMatch::LacksTool("subagent".to_string());
+
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[(
+            "bg-call",
+            "subagent",
+            r#"{"prompt":"slow standalone research"}"#,
+        )],
+        None,
+    );
+    // After the ack the parent (wrongly) settles in to wait for the child.
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[("wait-call", "bash", r#"{"cmd":"sleep 8"}"#)],
+        None,
+    );
+    rig.server.enqueue_raw_for(
+        child(),
+        stalled_stream("CHILD-RESULT-UNIQUE", 1, 2500, true),
+    );
+    rig.server
+        .enqueue_stream_completion_for(parent(), "STEERED-END");
+    rig.server
+        .enqueue_stream_completion_for(parent(), "AGENT-COLLECTED-END");
+
+    let mut pty = spawn_pty_with(&rig, DOCK);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"start research\r");
+    pty.wait_for("[1] agents running (Tab to view)");
+    // Steer off the spinner's live "· bash" label, not the scrollback start
+    // line: the dock emits that line before repainting the pinned agents row,
+    // so a wait on the row would already have consumed past it.
+    pty.wait_for("· bash");
+    pty.send(b"steer now\r");
+    pty.wait_for("[steering]");
+    // The display note names the surviving child, so a canceling human is not
+    // left believing the interrupt killed their detached work.
+    pty.wait_for("[interrupted] (1 detached agent keeps running");
+    pty.wait_for("STEERED-END");
+    pty.wait_for("AGENT-COLLECTED-END");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    let requests = rig.api_requests();
+    let steered = requests
+        .iter()
+        .find(|request| last_user(request) == "steer now")
+        .expect("steered turn request");
+    let interrupts = steered["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "user" && message["content"] == "[interrupted]")
+        .count();
+    assert_eq!(
+        interrupts, 1,
+        "exactly one interrupt: the bash cancel; the steered turn itself \
+         must run, not phantom-cancel: {steered}"
+    );
+    rig.server.assert_clean();
+}
+
 /// Explicit cancellation keeps unsubmitted type-ahead as an editable draft and
 /// does not dispatch it. This remains distinct from Enter steering above.
 #[test]
