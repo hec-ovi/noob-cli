@@ -110,7 +110,7 @@ During a turn the input stays live: typing edits the next message, and Enter ste
 - Nine core tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `context`, and `plan`.
 - Conditional SKILL.md, MCP, and self-spawned child-agent tools.
 - Parallel read-only calls with sequential mutation barriers and actual lifecycle timing.
-- Detached sub-agents in the interactive dock, including `tools: "all"` coding and web-search jobs. The original call receives a running acknowledgment, then one final report enters context. Tab shows bounded live child activity and `/agents` manages cancellation. A parent that tries to `sleep` out a running child is refused: reports arrive on their own, so the turn ends and the prompt stays free.
+- Detached sub-agents in the interactive dock, including `tools: "all"` coding and web-search jobs. The original call receives a running acknowledgment, then one final report enters context. Tab shows bounded live child activity; both the user (`/agents cancel`) and the model (`subagent {"cancel":"agent-N"}`) can cancel a job. A parent that tries to `sleep` out a running child is refused: reports arrive on their own, so the turn ends and the prompt stays free.
 - A cross-process workspace lease around each individual child `write`, `edit`, or `bash` call. Leased calls do not overlap, while inference, file inspection, and MCP calls remain concurrent. A child waits for the lease for a bounded time; a parent mutation reports the active conflict promptly instead of blocking the conversation.
 - Read-before-write stamps, atomic writes, deterministic edit fallbacks, and ambiguity rejection.
 - JSONL sessions, newest-first discovery, `--resume latest`, on-screen replay, context compaction, cache-prefix checks, and repair of dangling calls or interrupted background jobs.
@@ -209,10 +209,10 @@ Measured on the stock install (websearch skill and MCP server, all 13 tools) aga
 | Piece | Tokens |
 |---|---|
 | System prompt | 581 |
-| Tool schemas, 13 tools | 849 |
-| noob total | 1,430 |
-| Chat template and message framing added by the server | 511 |
-| First request total | 1,941 |
+| Tool schemas, 13 tools | 870 |
+| noob total | 1,451 |
+| Chat template and message framing added by the server | 514 |
+| First request total | 1,965 |
 
 The 511 is the model's own chat template (qwen3 re-wraps the tools in its `<tools>` block with tool-calling instructions), so it changes with the model and its tokenizer; noob never sends those bytes. llama.cpp caches the prefix, so the overhead is prefilled once per slot, not on every turn. Reproduce with `noob debug prompt --json` and the server's `/tokenize` endpoint.
 

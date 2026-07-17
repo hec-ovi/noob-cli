@@ -226,7 +226,10 @@ impl Pty {
                     self.raw.extend_from_slice(&buf[..n]);
                     self.seen.push_str(&String::from_utf8_lossy(&buf[..n]));
                 }
-                Err(e) => panic!("pty read error: {e}; saw:\n{}", self.seen),
+                Err(e) => panic!(
+                    "pty read error: {e} while waiting for {marker:?}; saw:\n{}",
+                    self.seen
+                ),
             }
         }
     }
@@ -1717,6 +1720,86 @@ fn sleep_wait_is_refused_and_the_prompt_frees_without_steering() {
             .iter()
             .any(|request| last_user(request) == "can we keep talking?"),
         "the free-prompt message never dispatched"
+    );
+    rig.server.assert_clean();
+}
+
+/// The model manages its own fleet: subagent {"cancel":"agent-N"} stops a
+/// detached child through the same path as /agents cancel, the ack names the
+/// canceling job, and the child's terminal packet still closes the loop so
+/// the transcript never dangles.
+#[test]
+fn model_cancels_its_own_subagent() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+    let child = || RequestMatch::LacksTool("subagent".to_string());
+
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[("bg-call", "subagent", r#"{"prompt":"doomed research"}"#)],
+        None,
+    );
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[("stop-call", "subagent", r#"{"cancel":"agent-1"}"#)],
+        None,
+    );
+    rig.server
+        .enqueue_stream_completion_for(parent(), "STOPPED-END");
+    // The child would stall a long time; the cancel must beat it.
+    rig.server
+        .enqueue_raw_for(child(), stalled_stream("NEVER-DELIVERED", 1, 30_000, true));
+    rig.server
+        .enqueue_stream_completion_for(parent(), "CLOSED-END");
+
+    let mut pty = spawn_pty_with(&rig, DOCK);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"start then stop it\r");
+    // The done-line renderer styles the summary's first word separately, so
+    // the two halves are matched on their own.
+    pty.wait_for("canceling");
+    pty.wait_for("agent-1 · ");
+    pty.wait_for("STOPPED-END");
+    pty.wait_for("CLOSED-END");
+    // Ctrl-D only lands once the idle prompt is back; a byte sent during turn
+    // teardown is consumed as an in-turn key and dropped.
+    pty.wait_for("type a message");
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+
+    let requests = rig.api_requests();
+    // The cancel ack reached the model on the stop call...
+    assert!(
+        requests.iter().any(|request| {
+            request["messages"].as_array().unwrap().iter().any(|m| {
+                m["role"] == "tool"
+                    && m["tool_call_id"] == "stop-call"
+                    && m["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("\"canceling\""))
+            })
+        }),
+        "cancel acknowledgment missing"
+    );
+    // ...and the canceled child still delivered exactly one terminal packet.
+    let packets = requests
+        .iter()
+        .flat_map(|request| request["messages"].as_array().unwrap())
+        .filter(|m| {
+            m["role"] == "user"
+                && m["content"]
+                    .as_str()
+                    .is_some_and(|c| c.starts_with("[background sub-agent result agent-1]"))
+        })
+        .count();
+    assert!(packets > 0, "no terminal packet for the canceled child");
+    assert!(
+        !pty.seen.contains("NEVER-DELIVERED"),
+        "the canceled child's output leaked into the session"
     );
     rig.server.assert_clean();
 }

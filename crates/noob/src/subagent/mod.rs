@@ -78,8 +78,10 @@ pub fn spec() -> ToolSpec {
             "prompt": {"type": "string", "description": "complete standalone instructions"},
             "tools": {"type": "string", "enum": ["read-only", "all"],
                       "description": "default read-only; use all for Bash, MCP/web, or file changes"},
-            "max_turns": {"type": "integer"}
-        }, "required": ["prompt"]}),
+            "max_turns": {"type": "integer"},
+            "cancel": {"type": "string",
+                       "description": "cancel this running job id (e.g. agent-1) instead of spawning"}
+        }}),
     }
 }
 
@@ -89,6 +91,32 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
             "sub-agents are not available here; do the work yourself with the other tools",
         );
     };
+    // Fleet control without a second tool schema: {"cancel": "agent-N"} stops
+    // a detached job through the same path as the human's /agents cancel, so
+    // the model can act on "stop the research" instead of deferring to the
+    // user. Spawning and canceling are mutually exclusive shapes of one call.
+    match opt_str(args, "cancel") {
+        Ok(Some(id)) => {
+            let Some(hub) = &cfg.background else {
+                return ToolOutcome::err(
+                    "no detached sub-agents on this surface; nothing to cancel",
+                );
+            };
+            let id = id.to_string();
+            return if hub.cancel(&id) {
+                ToolOutcome::ok(
+                    json!({"job_id": id, "status": "canceling"}).to_string(),
+                    format!("canceling {id}"),
+                )
+            } else {
+                ToolOutcome::err(format!(
+                    "no active job {id:?}; job ids come from your spawn acknowledgments"
+                ))
+            };
+        }
+        Ok(None) => {}
+        Err(e) => return ToolOutcome::err(e),
+    }
     let prompt = match need_str(args, "prompt") {
         Ok(p) if !p.trim().is_empty() => p.to_string(),
         Ok(_) => return ToolOutcome::err("parameter \"prompt\" is empty; resend the call"),
@@ -556,6 +584,36 @@ mod tests {
         assert!(out.content.contains("is empty"));
         let out = run(&ctx, &json!({"prompt": "x", "tools": "everything"}));
         assert!(out.content.contains("\"read-only\" or \"all\""));
+    }
+
+    #[test]
+    fn cancel_shape_stops_a_hub_job_and_refuses_cleanly_without_one() {
+        let (_tmp, mut ctx) = test_ctx();
+        ctx.task = Some(cfg());
+        // No hub on this surface: a clear refusal, never a spawn.
+        let out = run(&ctx, &json!({"cancel": "agent-1"}));
+        assert!(out.is_error && out.content.contains("nothing to cancel"));
+
+        let hub = BackgroundHub::new(1);
+        if let Some(task) = ctx.task.as_mut() {
+            task.background = Some(hub.clone());
+        }
+        // An unknown id is named as such, pointing back at the acks.
+        let out = run(&ctx, &json!({"cancel": "agent-9"}));
+        assert!(out.is_error && out.content.contains("no active job"));
+
+        // A live job cancels through the same path as /agents cancel.
+        let _ack = hub.submit_with("probe".to_string(), |cancel| {
+            while !cancel.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            crate::tools::ToolOutcome::canceled()
+        });
+        let out = run(&ctx, &json!({"cancel": "agent-1"}));
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("canceling"));
+        let results = hub.shutdown();
+        assert!(results.iter().all(|r| r.outcome.canceled));
     }
 
     #[test]

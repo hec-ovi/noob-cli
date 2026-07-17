@@ -168,7 +168,7 @@ impl BackgroundHub {
     }
 
     #[cfg(test)]
-    fn submit_with(
+    pub(crate) fn submit_with(
         &self,
         prompt: String,
         runner: impl FnOnce(Arc<AtomicBool>) -> ToolOutcome + Send + 'static,
@@ -229,7 +229,8 @@ impl BackgroundHub {
                 "status": "running",
                 "contract": "detached with one goal; the final report is delivered to you \
                              automatically as [background sub-agent result]; waiting, sleeping, \
-                             or polling cannot fetch it, so continue other work or finish",
+                             or polling cannot fetch it, so continue other work or finish; \
+                             subagent {\"cancel\":\"<job_id>\"} stops it",
             })
             .to_string(),
             format!("{id} started · {active} active"),

@@ -122,6 +122,7 @@ The scheduler partitions one assistant tool batch in emission order:
 
 - Consecutive read-only calls run on scoped threads, up to eight at once.
 - Consecutive `subagent` calls form one fan-out group limited by child concurrency. Depth-1 agents retain delegation but run one nested child at a time, so root fan-out cannot multiply into a second full fan-out per child. Calls acknowledge quickly in the dock and run inline on headless or classic surfaces.
+- The model manages its own fleet: `subagent {"cancel":"agent-N"}` stops a detached job through the same path as the human's `/agents cancel`, and the canceled child still delivers one terminal packet so the transcript never dangles. Children remain bounded regardless: per-child turn caps and a wall clock the parent enforces by killing the process group.
 - A bash command that leads with `sleep` is refused while detached sub-agents run. Reports are delivered event-driven between rounds and at the idle prompt, so such a sleep can never observe anything an end-of-turn would not deliver sooner; it only blocks the conversation. Pacing sleeps after real work in the same command line stay allowed, as does any sleep when no children are active.
 - Every other mutation is a sequential barrier.
 - Results are returned and appended in emission order.
