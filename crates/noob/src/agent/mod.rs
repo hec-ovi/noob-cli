@@ -1197,11 +1197,16 @@ impl Agent {
                 .and_then(Value::as_str)
                 .is_some_and(leading_sleep)
         {
+            // A calm skip, not an error: an error-styled refusal sent the
+            // model into retry mode and painted a red line per attempt. The
+            // skip reads as a settled no-op, the message still names the way
+            // out, and the 50-round turn cap bounds a model that insists.
             return (
-                sched::Planned::Canned(ToolOutcome::err(
-                    "sleep is blocked while detached sub-agents run: their \
-                     reports arrive on their own the moment a child finishes; \
-                     finish your reply and end the turn, or do other real work",
+                sched::Planned::Canned(ToolOutcome::ok(
+                    "sleep skipped: detached sub-agent reports arrive on \
+                     their own the moment a child finishes, so there is \
+                     nothing to wait for; do other work or end your turn now",
+                    "sleep skipped (agents report on their own)",
                 )),
                 args,
             );

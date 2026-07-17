@@ -96,7 +96,10 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     // the model can act on "stop the research" instead of deferring to the
     // user. Spawning and canceling are mutually exclusive shapes of one call.
     match opt_str(args, "cancel") {
-        Ok(Some(id)) => {
+        // A blank id is "not canceling", not a bad cancel: models pad
+        // optional fields with empty strings, and that padding must never
+        // block a spawn (live catch on the first 0.3.3 run).
+        Ok(Some(id)) if !id.trim().is_empty() => {
             let Some(hub) = &cfg.background else {
                 return ToolOutcome::err(
                     "no detached sub-agents on this surface; nothing to cancel",
@@ -114,7 +117,7 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
                 ))
             };
         }
-        Ok(None) => {}
+        Ok(Some(_)) | Ok(None) => {}
         Err(e) => return ToolOutcome::err(e),
     }
     let prompt = match need_str(args, "prompt") {
@@ -601,6 +604,14 @@ mod tests {
         // An unknown id is named as such, pointing back at the acks.
         let out = run(&ctx, &json!({"cancel": "agent-9"}));
         assert!(out.is_error && out.content.contains("no active job"));
+
+        // A blank cancel is "not canceling": it must fall through to the
+        // spawn shape (live catch: the model padded its spawn call with
+        // "cancel": "" and the spawn was rejected). With a blank prompt the
+        // spawn path then reports the prompt, never a bad cancel id.
+        let out = run(&ctx, &json!({"cancel": "", "prompt": "  "}));
+        assert!(out.content.contains("is empty"), "{}", out.content);
+        assert!(!out.content.contains("no active job"), "{}", out.content);
 
         // A live job cancels through the same path as /agents cancel.
         let _ack = hub.submit_with("probe".to_string(), |cancel| {

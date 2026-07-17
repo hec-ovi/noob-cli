@@ -1701,7 +1701,7 @@ fn sleep_wait_is_refused_and_the_prompt_frees_without_steering() {
     }
 
     let requests = rig.api_requests();
-    // The refusal reached the model as the sleep call's result.
+    // The skip reached the model as the sleep call's result.
     assert!(
         requests.iter().any(|request| {
             request["messages"].as_array().unwrap().iter().any(|m| {
@@ -1709,10 +1709,17 @@ fn sleep_wait_is_refused_and_the_prompt_frees_without_steering() {
                     && m["tool_call_id"] == "wait-call"
                     && m["content"]
                         .as_str()
-                        .is_some_and(|c| c.contains("sleep is blocked"))
+                        .is_some_and(|c| c.contains("sleep skipped"))
             })
         }),
-        "the sleep refusal never reached the model"
+        "the sleep skip never reached the model"
+    );
+    // A skip is not an error: the screen must not show a red error line
+    // for it (the red-wall regression).
+    assert!(
+        !pty.seen.contains("error: sleep"),
+        "the sleep skip rendered as an error:\n{}",
+        pty.seen
     );
     // And the user's message dispatched as an ordinary turn.
     assert!(
@@ -2164,7 +2171,10 @@ fn idle_prompt_keeps_the_running_agents_counter_after_closing_the_tab_view() {
     );
 
     // The slow child settles, its result is collected, and the exit is clean.
+    // Ctrl-D only after the idle prompt is back: a byte sent during turn
+    // teardown is consumed as an in-turn key and dropped (flaked under load).
     pty.wait_for("ALL-COLLECTED-END");
+    pty.wait_for("type a message");
     pty.send(&[0x04]);
     pty.wait_for("resume with");
     let status = pty.finish();
