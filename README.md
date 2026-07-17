@@ -200,6 +200,22 @@ Display variables can be set in the shell or the checkout's root `.env` for Comp
 | `COLORTERM` | `truecolor` in Docker | Terminal color capability |
 | `NO_COLOR` | unset | Disable color while keeping structure and status |
 
+## Prompt budget
+
+The fixed first-request overhead is small and locked. `noob debug prompt --json` prints the exact system prompt and tool schemas the binary sends, and a budget test keeps that artifact under 1,500 tokens (o200k tokenizer) with every tool, a skill, and an MCP server registered.
+
+Measured on the stock install (websearch skill and MCP server, all 13 tools) against qwen3.6-35b-a3b on llama.cpp:
+
+| Piece | Tokens |
+|---|---|
+| System prompt | 581 |
+| Tool schemas, 13 tools | 849 |
+| noob total | 1,430 |
+| Chat template and message framing added by the server | 511 |
+| First request total | 1,941 |
+
+The 511 is the model's own chat template (qwen3 re-wraps the tools in its `<tools>` block with tool-calling instructions), so it changes with the model and its tokenizer; noob never sends those bytes. llama.cpp caches the prefix, so the overhead is prefilled once per slot, not on every turn. Reproduce with `noob debug prompt --json` and the server's `/tokenize` endpoint.
+
 ## Output surfaces
 
 - Interactive REPL: terminal dock, Markdown, live steering, and confirmations.
