@@ -1523,7 +1523,9 @@ fn dock_enter_steers_and_dispatches_on_the_next_loop() {
     pty.wait_for("sleep 8");
     pty.send(b"steer now\r");
     pty.wait_for("[steering]");
-    pty.wait_for("[interrupted]");
+    // The display note is reworded for the handoff (the transcript item stays
+    // "[interrupted]"; asserted below on the wire).
+    pty.wait_for("[steering] turn stopped · your message is next");
     pty.wait_for("second");
     settle();
     pty.send(&[0x04]);
@@ -1602,9 +1604,10 @@ fn dock_steering_during_bash_with_a_running_agent_answers_the_message() {
     pty.wait_for("· bash");
     pty.send(b"steer now\r");
     pty.wait_for("[steering]");
-    // The display note names the surviving child, so a canceling human is not
-    // left believing the interrupt killed their detached work.
-    pty.wait_for("[interrupted] (1 detached agent keeps running");
+    // The reworded handoff note plus the surviving-child suffix, so a
+    // steering human is neither told "interrupted" nor left believing the
+    // stop killed their detached work.
+    pty.wait_for("[steering] turn stopped · your message is next (1 detached agent keeps running");
     pty.wait_for("STEERED-END");
     pty.wait_for("AGENT-COLLECTED-END");
     settle();
@@ -2500,7 +2503,7 @@ fn mcp_add_registers_the_tools_connects_and_removes() {
     pty.wait_for("no MCP servers configured");
     pty.wait_for(RAW_READY);
     pty.send(format!("/mcp add mock {}\r", mcp_server.url()).as_bytes());
-    pty.wait_for("cache prefix reset: MCP tools registered");
+    pty.wait_for("MCP tools available: server tools registered");
     pty.wait_for("mcp: added mock");
     pty.wait_for(RAW_READY);
     pty.send(b"/mcp connect mock\r");
@@ -3237,6 +3240,75 @@ fn dock_cap_keeps_active_plan_step_and_agent_summary() {
         visible.contains("hidden"),
         "the remaining capped rows were not summarized:\n{}",
         screen.dump("combined cap")
+    );
+}
+
+/// The plan's own cap, independent of the screen: even on a tall terminal a
+/// long checklist pins the header, at most six step rows windowed on the
+/// active step, and one "… +N more" row with done/queued counts, instead of
+/// the whole list.
+#[test]
+fn dock_plan_region_caps_at_six_steps_with_a_more_row() {
+    const ROWS: u16 = 40;
+    const COLS: u16 = 72;
+
+    let rig = rig();
+    let mut items = String::new();
+    for i in 1..=12 {
+        if i > 1 {
+            items.push(',');
+        }
+        let status = match i {
+            1..=3 => "completed",
+            4 => "in_progress",
+            _ => "pending",
+        };
+        items.push_str(&format!(r#"{{"content":"step {i:02}","status":"{status}"}}"#));
+    }
+    let plan = format!(r#"{{"todos":[{items}]}}"#);
+    rig.server
+        .enqueue_stream_toolcalls(&[("p1", "plan", plan.as_str())], None);
+    rig.server
+        .enqueue_raw(stalled_stream("PLANCAP-END", 1, 2500, true));
+
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)), &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"go\r");
+    pty.wait_for("plan (3/12 done):");
+    pty.drain(std::time::Duration::from_millis(500));
+    let screen = pty.screen(ROWS, COLS);
+    let rows = screen.render();
+    let visible = rows.join("\n");
+
+    pty.wait_for("PLANCAP-END");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+
+    // The window leads with the active step and runs into the queue; the
+    // three completed steps and the overflow tail collapse into counts.
+    for shown in ["step 04", "step 05", "step 09"] {
+        assert!(
+            visible.contains(shown),
+            "{shown} missing from the plan window:\n{}",
+            screen.dump("plan cap")
+        );
+    }
+    for hidden in ["step 01", "step 03", "step 10", "step 12"] {
+        assert!(
+            !visible.contains(hidden),
+            "{hidden} should be behind the cap:\n{}",
+            screen.dump("plan cap")
+        );
+    }
+    assert!(
+        visible.contains("… +6 more steps · 3 done · 3 queued"),
+        "the more-row with counts is missing:\n{}",
+        screen.dump("plan cap")
     );
 }
 

@@ -86,6 +86,12 @@ const CANCEL_WINDOW: Duration = Duration::from_secs(5);
 /// smaller of this and what the terminal height leaves once the three frame
 /// chrome rows and a line of output are reserved (see `region_rows`).
 const MAX_REGION_ROWS: usize = 24;
+/// The plan checklist's own cap, applied before the screen cap: the header
+/// plus at most this many step rows, then one "… +N more" summary row. Even
+/// on a tall terminal a 20-step plan must not become the whole dock; the
+/// window keeps the active step and prefers what comes next over what is
+/// already done.
+const PLAN_STEP_ROWS: usize = 6;
 /// Rows the frame reserves outside its pinned regions: the top status, the input
 /// row, the bottom status, and one line of scrolled output kept visible. The
 /// region cap is `term_height - this`, so the live frame never exceeds the
@@ -856,7 +862,7 @@ impl DockSession {
                 Ev::Render(event) => {
                     let mut regions_dirty = false;
                     Self::absorb_render(
-                        event,
+                        self.reword_for_steering(event),
                         &mut active_tools,
                         &mut renderer,
                         &mut plan_block,
@@ -876,7 +882,7 @@ impl DockSession {
                         match self.rx.recv_timeout(remaining) {
                             Ok(Ev::Render(event)) => {
                                 Self::absorb_render(
-                                    event,
+                                    self.reword_for_steering(event),
                                     &mut active_tools,
                                     &mut renderer,
                                     &mut plan_block,
@@ -1247,7 +1253,7 @@ impl DockSession {
                     RegionPriority::Plan,
                 ));
             } else {
-                rows.extend(checklist_pinned_rows(ui, text, width, RegionSource::Plan));
+                rows.extend(capped_plan_rows(ui, text, width));
             }
         }
 
@@ -1356,7 +1362,7 @@ impl DockSession {
                     RegionPriority::Plan,
                 ));
             } else {
-                rows.extend(checklist_pinned_rows(ui, text, width, RegionSource::Plan));
+                rows.extend(capped_plan_rows(ui, text, width));
             }
         }
         if let Some(block) = agents_block {
@@ -1696,6 +1702,28 @@ impl DockSession {
         styled_rule(&label, width, &open)
     }
 
+    /// Display-only rewording for the steering handoff. The agent finalizes
+    /// a steered turn exactly like a cancel and notes "[interrupted]", but on
+    /// this path the stop is a handoff: the accepted message dispatches next.
+    /// Showing the word "interrupted" here read as lost work in a live
+    /// session. The transcript item keeps its frozen "[interrupted]" phrasing
+    /// (replay filter, cache identity); only the on-screen note changes, and
+    /// any suffix (surviving detached agents) is preserved.
+    fn reword_for_steering(&self, event: TurnEvent) -> TurnEvent {
+        if !self.steering {
+            return event;
+        }
+        match event {
+            TurnEvent::Note(line) if line.starts_with("[interrupted]") => {
+                let suffix = line.strip_prefix("[interrupted]").unwrap_or_default();
+                TurnEvent::Note(format!(
+                    "[steering] turn stopped · your message is next{suffix}"
+                ))
+            }
+            other => other,
+        }
+    }
+
     fn commit_steering(&mut self) {
         // Unit tests keep the process-global flag isolated; PTY tests execute
         // the shipped path and exercise the real provider/tool interruption.
@@ -1764,6 +1792,97 @@ impl PinnedRegionRow {
             priority,
         }
     }
+}
+
+/// The plan region with the plan's own cap: every non-step row (the header),
+/// a contiguous window of at most PLAN_STEP_ROWS steps that contains the
+/// active one and prefers what comes next, and one dim "… +N more" row
+/// naming what is hidden. A plan at or under the cap renders whole. The
+/// screen cap in `cap_region_rows` still applies afterwards, so the active
+/// step keeps its reservation there via its row priority.
+fn capped_plan_rows(ui: &Ui, text: &str, width: usize) -> Vec<PinnedRegionRow> {
+    let rows = checklist_pinned_rows(ui, text, width, RegionSource::Plan);
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let step_lines: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| is_plan_step(line))
+        .map(|(index, _)| index)
+        .collect();
+    let steps: Vec<&str> = step_lines.iter().map(|&index| lines[index]).collect();
+    let Some((range, hidden_done, hidden_queued)) = plan_cap_selection(&steps) else {
+        return rows;
+    };
+    let window = &step_lines[range];
+
+    let mut visible: Vec<PinnedRegionRow> = rows
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            (!is_plan_step(lines[index]) || window.contains(&index)).then_some(row)
+        })
+        .collect();
+    visible.push(PinnedRegionRow::summary(
+        ui,
+        plan_cap_label(hidden_done, hidden_queued),
+        width,
+        RegionTone::Dim,
+        RegionPriority::None,
+    ));
+    visible
+}
+
+fn is_plan_step(line: &str) -> bool {
+    line.starts_with("[x]")
+        || line.starts_with("[!]")
+        || line.starts_with("[~]")
+        || line.starts_with("[ ]")
+}
+
+/// Pure window math for the plan cap. Given the step glyph lines in order,
+/// the contiguous PLAN_STEP_ROWS window to show and the hidden done/queued
+/// counts; None when the plan already fits. The window anchors on the active
+/// step (falling back to the first pending one) so it shows the active step
+/// plus what comes next, shifting back only when the tail runs short.
+fn plan_cap_selection(steps: &[&str]) -> Option<(std::ops::Range<usize>, usize, usize)> {
+    if steps.len() <= PLAN_STEP_ROWS {
+        return None;
+    }
+    let anchor = steps
+        .iter()
+        .position(|step| step.starts_with("[~]"))
+        .or_else(|| steps.iter().position(|step| step.starts_with("[ ]")))
+        .unwrap_or(0);
+    let start = anchor.min(steps.len() - PLAN_STEP_ROWS);
+    let range = start..start + PLAN_STEP_ROWS;
+    let mut hidden_done = 0usize;
+    let mut hidden_queued = 0usize;
+    for (position, step) in steps.iter().enumerate() {
+        if range.contains(&position) {
+            continue;
+        }
+        if step.starts_with("[ ]") {
+            hidden_queued += 1;
+        } else {
+            hidden_done += 1;
+        }
+    }
+    Some((range, hidden_done, hidden_queued))
+}
+
+fn plan_cap_label(hidden_done: usize, hidden_queued: usize) -> String {
+    let hidden = hidden_done + hidden_queued;
+    let mut label = format!("… +{hidden} more step{}", if hidden == 1 { "" } else { "s" });
+    if hidden_done > 0 {
+        label.push_str(&format!(" · {hidden_done} done"));
+    }
+    if hidden_queued > 0 {
+        label.push_str(&format!(" · {hidden_queued} queued"));
+    }
+    label
 }
 
 fn checklist_pinned_rows(
@@ -2176,6 +2295,45 @@ mod tests {
         assert!(!counts.is_complete());
         assert!(checklist_counts("plan (2/2 done):\n[x] one\n[x] two").is_complete());
         assert_eq!(checklist_counts("agents:\n[!] failed").done, 1);
+    }
+
+    #[test]
+    fn plan_cap_windows_on_the_active_step_and_counts_the_hidden_rest() {
+        // At or under the cap: untouched.
+        let fits: Vec<&str> = vec!["[x] a", "[~] b", "[ ] c"];
+        assert!(plan_cap_selection(&fits).is_none());
+
+        // Active mid-list: the window starts at the active step and runs
+        // forward; everything hidden before it is done, after it queued.
+        let steps: Vec<&str> = vec![
+            "[x] 1", "[x] 2", "[x] 3", "[~] 4", "[ ] 5", "[ ] 6", "[ ] 7", "[ ] 8", "[ ] 9",
+            "[ ] 10",
+        ];
+        let (range, done, queued) = plan_cap_selection(&steps).expect("over the cap");
+        assert_eq!(range, 3..9, "active step leads the window");
+        assert_eq!((done, queued), (3, 1));
+
+        // Active near the end: the window shifts back instead of running
+        // past the list, and the hidden side is all completed work.
+        let late: Vec<&str> = vec![
+            "[x] 1", "[x] 2", "[x] 3", "[x] 4", "[x] 5", "[x] 6", "[x] 7", "[x] 8", "[~] 9",
+            "[ ] 10",
+        ];
+        let (range, done, queued) = plan_cap_selection(&late).expect("over the cap");
+        assert_eq!(range, 4..10, "window clamps to the tail");
+        assert_eq!((done, queued), (4, 0));
+
+        // No active step yet: anchor on the first pending one.
+        let fresh: Vec<&str> = vec![
+            "[ ] 1", "[ ] 2", "[ ] 3", "[ ] 4", "[ ] 5", "[ ] 6", "[ ] 7", "[ ] 8",
+        ];
+        let (range, done, queued) = plan_cap_selection(&fresh).expect("over the cap");
+        assert_eq!(range, 0..6);
+        assert_eq!((done, queued), (0, 2));
+
+        assert_eq!(plan_cap_label(3, 1), "… +4 more steps · 3 done · 1 queued");
+        assert_eq!(plan_cap_label(0, 1), "… +1 more step · 1 queued");
+        assert_eq!(plan_cap_label(4, 0), "… +4 more steps · 4 done");
     }
 
     #[test]

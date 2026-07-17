@@ -155,7 +155,7 @@ The external [research-skill](https://github.com/hec-ovi/research-skill) shows t
 
 Three small things the persistent dock does while a turn streams above it.
 
-**📋 Plan.** The `plan` tool is the live checklist the model and user both see. The active `[~]` box spins while work runs, and each completed action shows its elapsed time. Long lists are capped with completed, active, pending, and hidden counts. A finished or canceled plan collapses to one timed line; cancellation uses the theme's red error style. `/clear-plan` replaces historical plan arguments and results with small placeholders while keeping provider-valid call/result pairs.
+**📋 Plan.** The `plan` tool is the live checklist the model and user both see. The active `[~]` box spins while work runs, and each completed action shows its elapsed time. Long lists show at most six steps windowed on the active one, plus one `… +N more` row with done and queued counts. A finished or canceled plan collapses to one timed line; cancellation uses the theme's red error style. `/clear-plan` replaces historical plan arguments and results with small placeholders while keeping provider-valid call/result pairs.
 
 **👥 Agents.** Sub-agents detach after an immediate job acknowledgment, so the prompt becomes usable while they work. Use `tools: "all"` for coding, Bash, MCP, or web-search work. The dock keeps a current `[N] agents running` line beside a plan. Press Tab on an empty draft for persistent job details and recent activity, or use `/agents`. Each finished result is removed from its child instance, injected once into the parent context, and delivered without waiting for unrelated slow jobs.
 

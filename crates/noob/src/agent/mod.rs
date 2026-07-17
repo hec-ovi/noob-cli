@@ -305,7 +305,7 @@ impl Agent {
             .collect();
         self.push_item(Item::User(PLAN_ENTER_MSG.to_string()));
         self.show_session_warning(ui);
-        ui.note("cache prefix reset: plan mode (read-only tools; approve with /go)");
+        ui.note("plan mode: read-only tools until /go (cache prefix reset)");
         true
     }
 
@@ -318,7 +318,7 @@ impl Agent {
         }
         self.plan = false;
         self.tools = self.full_tools.clone();
-        ui.note("cache prefix reset: plan approved (full tools restored)");
+        ui.note("plan approved: full tools restored (cache prefix reset)");
         true
     }
 
@@ -387,7 +387,7 @@ impl Agent {
                 self.full_tools.push(spec.clone());
             }
             self.tools.push(spec);
-            ui.note("cache prefix reset: skill tool registered (skills are now available)");
+            ui.note("skills available: skill tool registered (cache prefix reset)");
         }
 
         if !added.is_empty() || !removed.is_empty() {
@@ -456,7 +456,7 @@ impl Agent {
                 }
                 self.tools.push(spec);
             }
-            ui.note("cache prefix reset: MCP tools registered (servers are now available)");
+            ui.note("MCP tools available: server tools registered (cache prefix reset)");
         }
 
         if !added.is_empty() || !removed.is_empty() {
@@ -896,7 +896,7 @@ impl Agent {
             return;
         };
         let results = hub.shutdown();
-        self.install_background_results(results, ui);
+        self.install_background_results_with(results, ui, true);
     }
 
     fn integrate_background_results(&mut self, ui: &mut Ui) -> usize {
@@ -912,6 +912,15 @@ impl Agent {
         results: Vec<crate::subagent::ReadyResult>,
         ui: &mut Ui,
     ) -> usize {
+        self.install_background_results_with(results, ui, false)
+    }
+
+    fn install_background_results_with(
+        &mut self,
+        results: Vec<crate::subagent::ReadyResult>,
+        ui: &mut Ui,
+        at_exit: bool,
+    ) -> usize {
         let count = results.len();
         for result in results {
             let status = if result.outcome.canceled {
@@ -926,22 +935,35 @@ impl Agent {
                 status,
                 &result.outcome.content,
             )));
-            let mut line = format!(
-                "{} {status} · {}",
-                result.id,
-                crate::ui::elapsed_label(result.elapsed),
-            );
-            let digest = result
-                .outcome
-                .content
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .map(|line| clip(line, 96));
-            if let Some(digest) = digest {
-                line.push_str(" · ");
-                line.push_str(&digest);
-            }
+            // At /quit the cancellation is a consequence of leaving, not a
+            // targeted kill; "agent-1 canceled · canceled by user" read as
+            // lost work in a live session. The persisted packet keeps the
+            // canceled status for resume; only the display softens.
+            let line = if at_exit && result.outcome.canceled {
+                format!(
+                    "{} stopped at exit · {}",
+                    result.id,
+                    crate::ui::elapsed_label(result.elapsed),
+                )
+            } else {
+                let mut line = format!(
+                    "{} {status} · {}",
+                    result.id,
+                    crate::ui::elapsed_label(result.elapsed),
+                );
+                let digest = result
+                    .outcome
+                    .content
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(|line| clip(line, 96));
+                if let Some(digest) = digest {
+                    line.push_str(" · ");
+                    line.push_str(&digest);
+                }
+                line
+            };
             if result.outcome.is_error && !result.outcome.canceled {
                 ui.error(&line);
             } else {
