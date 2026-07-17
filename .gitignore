@@ -1,4 +1,5 @@
 .research/
+.noob/
 
 # build caches (docker bind mounts, user-owned)
 /target

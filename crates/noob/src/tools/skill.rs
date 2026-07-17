@@ -90,8 +90,29 @@ fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> Tool
 
     let dir = display_path(ctx, &skill.dir);
     let lines = shown.lines().count();
+    // Skills are portable documents and may name another harness's tool
+    // vocabulary. Give the model a mechanical mapping before the untrusted
+    // body so compatibility does not depend on improvisation. Loaded skill
+    // names are also withheld from descendants by the subagent protocol.
+    let runtime = "[noob runtime mapping: use subagent(prompt, tools, max_turns) for delegation; \
+                   dock subagents are already detached, so ignore model, description, and \
+                   run_in_background fields from other harnesses. Translate foreign web-tool \
+                   names to registered noob tools. Use tools:\"web\" for a nonmutating research \
+                   child with web MCP access. This loaded skill is not exposed again inside \
+                   descendants.]";
+    // Repeat the operational part after the untrusted body. Large skills can
+    // contain many later harness-specific directives, and small local models
+    // follow the nearest instruction more reliably than an early disclaimer.
+    let reminder = "[noob runtime reminder: child briefs may name only tools registered in this \
+                    session. When MCP server websearch is configured, say to call mcp_connect \
+                    {\"server\":\"websearch\"} once and then mcp_call, and pass tools:\"web\"; \
+                    this prevents Bash/write/edit, so the child must return its complete synthesis \
+                    and never create files. Do not tell it to load a web-search skill or use \
+                    WebSearch/WebFetch. Otherwise say to use Bash websearch/curl. A user-specified \
+                    agent count is a hard cap; never spawn a replacement after failure unless the \
+                    user explicitly requested retries.]";
     ToolOutcome {
-        content: format!("skill: {name}\ndir: {dir}\n\n{shown}{marker}"),
+        content: format!("skill: {name}\ndir: {dir}\n\n{runtime}\n\n{shown}{marker}\n\n{reminder}"),
         is_error: false,
         summary: format!("skill {name} ({lines} lines)"),
         warning,
@@ -137,6 +158,14 @@ mod tests {
                 .starts_with("skill: pdf-tools\ndir: .noob/skills/pdf-tools\n\n")
         );
         assert!(out.content.contains("Use pdftotext first."));
+        assert!(out.content.contains("[noob runtime mapping:"));
+        assert!(out.content.contains("[noob runtime reminder:"));
+        assert!(out.content.ends_with("]"));
+        assert!(out.content.contains("mcp_connect"));
+        assert!(out.content.contains("then mcp_call"));
+        assert!(out.content.contains("tools:\"web\""));
+        assert!(out.content.contains("never create files"));
+        assert!(out.content.contains("run_in_background"));
         assert!(
             !out.content.contains("description: test skill"),
             "frontmatter must be stripped"
@@ -216,11 +245,16 @@ mod tests {
             .rsplit_once("offset=")
             .unwrap()
             .1
-            .trim_end_matches(']')
+            .split_once(']')
+            .unwrap()
+            .0
             .parse()
             .unwrap();
         let shown_newlines = out
             .content
+            .split_once("\n\n")
+            .unwrap()
+            .1
             .split_once("\n\n")
             .unwrap()
             .1

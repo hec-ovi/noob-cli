@@ -17,7 +17,7 @@ who have make).
   static binary.
 - `./dev.sh repl` is the REPL, `./dev.sh exec "..."` a one-shot (both pass
   your uid:gid to compose so files under /work keep your ownership).
-- `./dev.sh size-check` enforces the footprint budgets (binary <= 8 MB,
+- `./dev.sh size-check` enforces the footprint budgets (binary <= 8 MiB,
   runtime crate graph <= 45).
 
 ## Layout
@@ -37,4 +37,13 @@ invariants, nothing about the rest of the system.
   capped. The mock server fails any test that tries.
 - The binary talks only to the configured endpoints; no telemetry, no update
   checks.
+- Interactive background children never own the parent transcript, session,
+  provider instance, UI, or input loop. The main agent remains usable while
+  they run.
+- Every detached spawn receives one immediate acknowledgment and exactly one
+  later terminal packet. Accepted cancellation or terminal failure rejects
+  same-turn replacement spawns until a new human instruction begins.
+- Child tool profiles are structural: read-only inspection, nonmutating web
+  research through one unambiguous `websearch` MCP server, or the full tool set.
+  Interactive dock children are leaves in every profile.
 - Commits are small and conventional; tests accompany every behavioral change.

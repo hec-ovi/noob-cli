@@ -2,7 +2,7 @@
 
 noob-cli is a compact Rust agent for OpenAI-compatible model endpoints. It runs in an isolated Docker container against the current project directory, with persistent configuration and sessions stored outside the image.
 
-The release binary is under 4 MB with 40 runtime crates. There is no async runtime or TUI framework.
+The static release binary is 4,313,984 bytes (4.11 MiB) with 40 runtime crates. There is no async runtime or TUI framework.
 
 ## Install
 
@@ -110,8 +110,9 @@ During a turn the input stays live: typing edits the next message, and Enter ste
 - Nine core tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `context`, and `plan`.
 - Conditional SKILL.md, MCP, and self-spawned child-agent tools.
 - Parallel read-only calls with sequential mutation barriers and actual lifecycle timing.
-- Detached sub-agents in the interactive dock, including `tools: "all"` coding and web-search jobs. The original call receives a running acknowledgment, then one final report enters context. Tab shows bounded live child activity; both the user (`/agents cancel`) and the model (`subagent {"cancel":"agent-N"}`) can cancel a job. A parent that tries to `sleep` out a running child is refused: reports arrive on their own, so the turn ends and the prompt stays free.
-- A cross-process workspace lease around each individual child `write`, `edit`, or `bash` call. Leased calls do not overlap, while inference, file inspection, and MCP calls remain concurrent. A child waits for the lease for a bounded time; a parent mutation reports the active conflict promptly instead of blocking the conversation.
+- Detached sub-agents in the interactive dock. The original call receives a running acknowledgment, then one final report enters context exactly once. The prompt remains usable for ordinary main-agent work while several children run, and a child completion never interrupts an active parent turn. Tab shows bounded live child activity; both the user (`/agents cancel`) and the model (`subagent {"cancel":"agent-N"}`) can cancel a job. An accepted cancellation or terminal child failure blocks same-turn replacement spawns until the next human instruction.
+- Three child tool profiles: the default `tools: "read-only"` for local inspection, `tools: "web"` for local inspection plus one unambiguous web-search MCP server, and `tools: "all"` for the full registered tool set. Web children cannot run Bash, mutate files, change the plan, or delegate. Dock children are leaves in every profile.
+- A cross-process workspace lease around each `write` or `edit` call. File-tool mutations do not overlap, while inference, Bash, file inspection, and MCP calls remain concurrent. A child waits for the lease for a bounded time; a parent file mutation reports the active conflict promptly instead of blocking the conversation. Shell commands that mutate files are outside this guarantee, so the agent contract reserves Bash for builds, tests, and exploration.
 - Read-before-write stamps, atomic writes, deterministic edit fallbacks, and ambiguity rejection.
 - JSONL sessions, newest-first discovery, `--resume latest`, on-screen replay, context compaction, cache-prefix checks, and repair of dangling calls or interrupted background jobs.
 - Read-only plan mode through `/plan`, followed by `/go`.
@@ -143,13 +144,13 @@ cp config/mcp.websearch.example.json config/mcp.json
 
 Point at an existing Streamable HTTP sidecar instead by setting its URL in `mcp.json`.
 
-The pair composes with no hand-holding. In a live run, asked a plain research question, the model reached for `websearch web-search` and `websearch web-fetch` across several queries on its own and folded the results into sourced findings.
+The opt-in live test gives qwen a research prompt with the MCP server configured, then asserts that the JSON event stream contains `mcp_connect` and `mcp_call` operations targeting `websearch`.
 
 ## 🧩 Skills: instructions the model runs
 
 A skill is a `SKILL.md` the model activates and then carries out with the ordinary tools, so it adds a capability without adding code. Install one from a local path, a git URL, or an `owner/repo` GitHub shorthand with `/skills add` (`/skills add hec-ovi/research-skill` just works), list with `/skills`, and drop a workspace one with `/skills remove`.
 
-The external [research-skill](https://github.com/hec-ovi/research-skill) shows the shape. Once installed, a plain research question drove the model to `write` a project-scoped `.research/` store (an `INDEX.md` and per-topic `FINDINGS.md`, each with a `sources` block), search through `websearch`, and `read` the store back on later lookups. It runs `read`, `write`, `bash`, and `websearch`, the same tools any turn uses.
+The external [research-skill](https://github.com/hec-ovi/research-skill) shows the shape. With one unambiguous `websearch` MCP server configured, noob recognizes that skill's investigation brief and enforces `tools: "web"`, even if a small model requested `"all"`. That child can inspect local files and gather web evidence, but cannot run Bash, write files, change the plan, or spawn another agent. It returns the complete synthesis; the main agent validates it and alone updates the project-scoped `.research/` store. A completed web report is accepted only after at least two distinct `mcp_call` operations reached the server and returned server-originated results. Without that MCP match, the parent can use `tools: "all"` with the standalone `websearch` command when the task needs it.
 
 ## 📟 The dock up close
 
@@ -157,7 +158,7 @@ Three small things the persistent dock does while a turn streams above it.
 
 **📋 Plan.** The `plan` tool is the live checklist the model and user both see. The active `[~]` box spins while work runs, and each completed action shows its elapsed time. Long lists show at most six steps windowed on the active one, plus one `… +N more` row with done and queued counts. A finished or canceled plan collapses to one timed line; cancellation uses the theme's red error style. `/clear-plan` replaces historical plan arguments and results with small placeholders while keeping provider-valid call/result pairs.
 
-**👥 Agents.** Sub-agents detach after an immediate job acknowledgment, so the prompt becomes usable while they work. Use `tools: "all"` for coding, Bash, MCP, or web-search work. The dock keeps a current `[N] agents running` line beside a plan. Press Tab on an empty draft for persistent job details and recent activity, or use `/agents`. Each finished result is removed from its child instance, injected once into the parent context, and delivered without waiting for unrelated slow jobs.
+**👥 Agents.** Sub-agents detach after an immediate job acknowledgment, so the prompt becomes usable while they work. Use `tools: "read-only"` for inspection, `tools: "web"` for nonmutating MCP research, and `tools: "all"` for coding or shell work. Background jobs and the foreground plan are independent state machines that may coexist; the dock renders separate regions, and agent lifecycle is never copied into plan steps. Press Tab on an empty draft for persistent job details and recent activity, or use `/agents`. Each terminal result is removed from its child instance and injected once into the parent context. A message already being composed wins the completion race and receives ready reports before its own text in the ordinary turn. A failed or canceled report, including one coalesced with a success, leaves the prompt idle instead of invoking parent inference. Cancellation and failure also reject autonomous replacement spawns until a new human turn begins.
 
 **⌨️ Steering.** Type while a parent turn is running. Enter records the message with a `[steering]` marker, interrupts that turn, and dispatches the message on the next loop. Escape or Ctrl-C cancellation keeps unsubmitted text in the editor instead of firing it.
 
@@ -184,7 +185,7 @@ The mounted config directory contains `.env`, optional `AGENTS.md`, `mcp.json`, 
 
 If startup autodetection selects an endpoint, that selection is fixed for the process. Restart noob to switch from an autodetected endpoint to a newly added `.env` URL. The launcher forwards a fixed set of `NOOB_*` and proxy variables plus any names listed in `NOOB_ENV`, and never forwards `NOOB_API_KEY`; put secrets in the mounted config `.env` and protect that directory with normal file permissions. `/skills reload` reloads skills; `/mcp add` and `/mcp remove` reload the MCP server set in place.
 
-The model server needs one request slot for the parent plus `NOOB_TASK_CONCURRENCY` child slots. With the defaults, configure at least five slots and give every slot the same 131,072-token window as `NOOB_CTX`. The [companion llama.cpp stack](https://github.com/hec-ovi/llama-vulkan-strix) documents and validates the required total KV-cache arithmetic.
+The model server needs one request slot for the parent plus `NOOB_TASK_CONCURRENCY` child slots to keep all of them generating at once. With the defaults, configure at least five slots. For llama.cpp, `--parallel` controls the `total_slots` reported by `GET /props`; set `--ctx-size` and the KV-cache configuration so the reported `n_ctx` is at least `NOOB_CTX` while those slots are active. `noob doctor` performs that read-only capacity check and also reports disabled tool-calling capabilities. See the current [llama.cpp server documentation](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md) and the [companion stack](https://github.com/hec-ovi/llama-vulkan-strix) for the deployment arithmetic.
 
 `/context` (and `/status`, and the model-callable `context` tool) shows the estimated use, configured total, and 75 percent automatic-compaction threshold. When compaction runs, the terminal states whether the configured threshold, an endpoint overflow, or a length finish triggered it, then reports whether old tool output was pruned or the older conversation was summarized. Provider failures include the failed stage or HTTP status and a concrete next check.
 
@@ -208,13 +209,13 @@ Measured on the stock install (websearch skill and MCP server, all 13 tools) aga
 
 | Piece | Tokens |
 |---|---|
-| System prompt | 581 |
-| Tool schemas, 13 tools | 870 |
-| noob total | 1,451 |
-| Chat template and message framing added by the server | 514 |
-| First request total | 1,965 |
+| System prompt | 585 |
+| Tool schemas, 13 tools | 902 |
+| noob total | 1,487 |
+| Chat template and message framing added by the server | 530 |
+| First request total | 2,017 |
 
-The 511 is the model's own chat template (qwen3 re-wraps the tools in its `<tools>` block with tool-calling instructions), so it changes with the model and its tokenizer; noob never sends those bytes. llama.cpp caches the prefix, so the overhead is prefilled once per slot, not on every turn. Reproduce with `noob debug prompt --json` and the server's `/tokenize` endpoint.
+The server-side framing figure is the model's own chat template (qwen3 re-wraps the tools in its `<tools>` block with tool-calling instructions), so it changes with the model and its tokenizer; noob never sends those bytes. llama.cpp caches the prefix, so the overhead is prefilled once per slot, not on every turn. Reproduce with `noob debug prompt --json` and the server's `/tokenize` endpoint.
 
 ## Output surfaces
 
@@ -234,7 +235,7 @@ Formatting never changes requests, transcripts, sessions, or cache-prefix bytes.
 ./dev.sh smoke
 ```
 
-`./dev.sh test` runs the full offline suite in the dev container. `./dev.sh size-check` enforces an 8 MB static-binary limit and a 45-crate runtime limit. `./dev.sh smoke` runs the opt-in live model and web-search checks serially.
+`./dev.sh test` runs the full offline suite in the dev container. `./dev.sh size-check` enforces an 8 MiB static-binary limit and a 45-crate runtime limit. `./dev.sh smoke` runs the opt-in live model and web-search checks serially.
 
 To use non-default live endpoints:
 

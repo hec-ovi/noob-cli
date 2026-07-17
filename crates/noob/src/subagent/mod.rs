@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use noob_provider::http::INTERRUPTED;
-use noob_provider::types::ToolSpec;
+use noob_provider::types::{Overrides, ToolSpec};
 
 use crate::tools::{ToolCtx, ToolOutcome, need_str, opt_str, opt_u64};
 
@@ -47,6 +47,16 @@ pub struct TaskCfg {
     pub wall_clock: Duration,
     /// Surface bounded child stderr as `[subagent] ...` after the child exits.
     pub verbose: bool,
+    /// Effective root CLI overrides. Children receive these over the private
+    /// stdin protocol so a root `--model` or `--base-url` cannot silently send
+    /// detached work to a different provider.
+    pub overrides: Overrides,
+    /// Preserve the root sandbox decision across the process boundary.
+    pub yolo: bool,
+    /// Skills loaded by ancestors are orchestration context, not child task
+    /// context. Keep the whole chain so nested children cannot rediscover and
+    /// recursively execute the skill that spawned them.
+    pub ancestor_skills: Vec<String>,
     /// Present only for the default interactive dock. Other surfaces keep the
     /// original inline child contract.
     pub background: Option<BackgroundHub>,
@@ -57,13 +67,19 @@ struct TaskRequest {
     prompt: String,
     tools_mode: String,
     max_turns: u32,
+    excluded_skills: Vec<String>,
 }
 
 #[derive(Clone)]
 struct RunCfg {
-    depth: u32,
+    /// Exact depth passed to the child. Dock jobs are structural leaves so a
+    /// root fleet cannot multiply behind the user's back or oversubscribe the
+    /// provider slots that `noob doctor` validated.
+    child_depth: u32,
     wall_clock: Duration,
     verbose: bool,
+    overrides: Overrides,
+    yolo: bool,
     workspace: std::path::PathBuf,
     progress: Option<background::ProgressLog>,
 }
@@ -71,17 +87,22 @@ struct RunCfg {
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "subagent".to_string(),
-        description: "Spawn a detached sub-agent for ONE goal; its final report returns \
-                      automatically when done; call repeatedly to fan out."
+        description: "Spawn, inspect, or cancel detached sub-agents; reports return automatically."
             .to_string(),
         parameters: json!({"type": "object", "properties": {
             "prompt": {"type": "string", "description": "complete standalone instructions"},
-            "tools": {"type": "string", "enum": ["read-only", "all"],
-                      "description": "default read-only; use all for Bash, MCP/web, or file changes"},
+            "tools": {"type": "string", "enum": ["read-only", "web", "all"],
+                      "description": "default read-only; web adds web-search MCP without mutations; all adds Bash and file changes"},
             "max_turns": {"type": "integer"},
+            "status": {"type": "boolean",
+                       "description": "true returns one current snapshot; reports still arrive automatically"},
             "cancel": {"type": "string",
-                       "description": "cancel this running job id (e.g. agent-1) instead of spawning"}
-        }}),
+                       "description": "stop this job id only when no longer needed; never use as status"}
+        }, "anyOf": [
+            {"required": ["prompt"]},
+            {"required": ["status"]},
+            {"required": ["cancel"]}
+        ]}),
     }
 }
 
@@ -91,51 +112,96 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
             "sub-agents are not available here; do the work yourself with the other tools",
         );
     };
+    let cancel = match opt_str(args, "cancel") {
+        Ok(Some(id)) if !id.trim().is_empty() => Some(id.trim()),
+        Ok(Some(_)) | Ok(None) => None,
+        Err(e) => return ToolOutcome::err(e),
+    };
+    let status = match args.get("status") {
+        None | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) => true,
+        Some(_) => return ToolOutcome::err("parameter \"status\" must be true or false"),
+    };
+    let has_prompt = args
+        .get("prompt")
+        .and_then(Value::as_str)
+        .is_some_and(|prompt| !prompt.trim().is_empty());
+    if usize::from(cancel.is_some()) + usize::from(status) + usize::from(has_prompt) > 1 {
+        return ToolOutcome::err(
+            "choose exactly one subagent operation: prompt to spawn, status:true to inspect, \
+             or cancel with a job id",
+        );
+    }
+    if status {
+        let Some(hub) = &cfg.background else {
+            return ToolOutcome::err("no detached sub-agents on this surface; no status available");
+        };
+        let snapshot = hub.snapshot();
+        return ToolOutcome::ok(
+            json!({
+                "active": snapshot.active,
+                "queued": snapshot.queued,
+                "running": snapshot.running,
+                "ready": snapshot.ready,
+                "active_ids": snapshot.active_ids,
+                "contract": "snapshot only; final reports arrive automatically; do not poll",
+            })
+            .to_string(),
+            format!("{} active · {} ready", snapshot.active, snapshot.ready),
+        );
+    }
     // Fleet control without a second tool schema: {"cancel": "agent-N"} stops
     // a detached job through the same path as the human's /agents cancel, so
     // the model can act on "stop the research" instead of deferring to the
     // user. Spawning and canceling are mutually exclusive shapes of one call.
-    match opt_str(args, "cancel") {
-        // A blank id is "not canceling", not a bad cancel: models pad
-        // optional fields with empty strings, and that padding must never
-        // block a spawn (live catch on the first 0.3.3 run).
-        Ok(Some(id)) if !id.trim().is_empty() => {
-            let Some(hub) = &cfg.background else {
-                return ToolOutcome::err(
-                    "no detached sub-agents on this surface; nothing to cancel",
-                );
-            };
-            let id = id.to_string();
-            return if hub.cancel(&id) {
-                ToolOutcome::ok(
-                    json!({"job_id": id, "status": "canceling"}).to_string(),
-                    format!("canceling {id}"),
-                )
-            } else {
-                ToolOutcome::err(format!(
-                    "no active job {id:?}; job ids come from your spawn acknowledgments"
-                ))
-            };
-        }
-        Ok(Some(_)) | Ok(None) => {}
-        Err(e) => return ToolOutcome::err(e),
+    if let Some(id) = cancel {
+        let Some(hub) = &cfg.background else {
+            return ToolOutcome::err("no detached sub-agents on this surface; nothing to cancel");
+        };
+        let id = id.to_string();
+        return if hub.cancel(&id) {
+            ToolOutcome::ok(
+                json!({"job_id": id, "status": "canceling"}).to_string(),
+                format!("canceling {id}"),
+            )
+        } else {
+            ToolOutcome::err(format!(
+                "no active job {id:?}; job ids come from your spawn acknowledgments"
+            ))
+        };
     }
     let prompt = match need_str(args, "prompt") {
         Ok(p) if !p.trim().is_empty() => p.to_string(),
         Ok(_) => return ToolOutcome::err("parameter \"prompt\" is empty; resend the call"),
         Err(e) => return ToolOutcome::err(e),
     };
-    let tools_mode = match opt_str(args, "tools") {
+    let web_mcp = configured_web_mcp(ctx);
+    let requested_tools_mode = match opt_str(args, "tools") {
         Ok(None) => "read-only".to_string(),
-        Ok(Some(m @ ("read-only" | "all"))) => m.to_string(),
+        Ok(Some(m @ ("read-only" | "web" | "all"))) => m.to_string(),
         Ok(Some(other)) => {
             return ToolOutcome::err(format!(
-                "parameter \"tools\" must be \"read-only\" or \"all\", got {other:?}; \
+                "parameter \"tools\" must be \"read-only\", \"web\", or \"all\", got {other:?}; \
                  resend the call"
             ));
         }
         Err(e) => return ToolOutcome::err(e),
     };
+    // The installed research workflow explicitly assigns storage to the
+    // parent. Small models sometimes still give that child `all`; recognize
+    // the workflow's required brief and enforce its nonmutating web profile.
+    let research_investigation = research_investigation_loaded(ctx, &prompt);
+    let tools_mode = if research_investigation && web_mcp.is_some() {
+        "web".to_string()
+    } else {
+        requested_tools_mode
+    };
+    if tools_mode == "web" && web_mcp.is_none() {
+        return ToolOutcome::err(
+            "tools mode \"web\" needs one unambiguous MCP server named websearch; configure it \
+             or use \"all\" for the Bash websearch fallback",
+        );
+    }
     // Both sides enforce the turn cap: the parent clamps the request here,
     // the child clamps again against its own environment.
     let max_turns = match opt_u64(args, "max_turns") {
@@ -144,25 +210,90 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
         Err(e) => return ToolOutcome::err(e),
     };
 
+    let excluded_skills = skill_exclusions(cfg, ctx, web_mcp.is_some());
     let request = TaskRequest {
-        prompt,
+        prompt: child_prompt(prompt, web_mcp.as_deref(), tools_mode == "web"),
         tools_mode,
         max_turns,
+        excluded_skills,
     };
+    let detached = cfg.background.is_some();
     let run_cfg = RunCfg {
-        depth: cfg.depth,
+        child_depth: if detached { MAX_DEPTH } else { cfg.depth + 1 },
         wall_clock: cfg.wall_clock,
         verbose: cfg.verbose,
+        overrides: cfg.overrides.clone(),
+        yolo: cfg.yolo,
         workspace: ctx.workspace.clone(),
         progress: None,
     };
     // Every dock child detaches. Full-tool children take the cross-process
-    // workspace lease around each write/edit/bash call, so inference and
-    // read-only work remain parallel without permitting concurrent mutations.
+    // workspace lease around write/edit calls. Bash remains available for
+    // builds, tests, and exploration while children infer or mutate files.
     if let Some(hub) = &cfg.background {
         return hub.submit(run_cfg, request);
     }
     run_task(&run_cfg, &request, || INTERRUPTED.load(Ordering::SeqCst))
+}
+
+fn configured_web_mcp(ctx: &ToolCtx) -> Option<String> {
+    let names = ctx.mcp.as_ref()?.names();
+    crate::mcp::unique_normalized_server(names, "websearch").map(str::to_string)
+}
+
+fn research_investigation_loaded(ctx: &ToolCtx, prompt: &str) -> bool {
+    if !ctx
+        .loaded_skills
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|name| name == "research")
+    {
+        return false;
+    }
+    let lower = prompt.to_ascii_lowercase();
+    ["zero prior context", "contrarian", "## sources"]
+        .into_iter()
+        .filter(|marker| lower.contains(marker))
+        .count()
+        >= 2
+}
+
+/// Tool names copied from another harness are a common source of small-model
+/// loops. Put the actual noob calls at the start of the leaf's task, where the
+/// child can act on them without rediscovering a compatibility skill.
+fn child_prompt(prompt: String, web_mcp: Option<&str>, web_only: bool) -> String {
+    let Some(server) = web_mcp else {
+        return prompt;
+    };
+    let mutation_rule = if web_only {
+        " This is a nonmutating research child: Bash, write, and edit are unavailable. Do not \
+         create files; return the complete synthesis in your final message so the parent can \
+         validate and store it."
+    } else {
+        ""
+    };
+    format!(
+        "[noob child runtime: you are one leaf agent and cannot delegate. For live web access, \
+         do not load a web-search skill and do not invent WebSearch or WebFetch calls. Call \
+         mcp_connect {{\"server\":\"{server}\"}} once, then call catalog tools through \
+         mcp_call {{\"server\":\"{server}\",\"tool\":\"...\",\"args\":{{...}}}}. Use the \
+         minimum evidence required by the brief; once its requirements are met, stop gathering \
+         and return the synthesis before the turn budget.{mutation_rule}]\n\n{prompt}"
+    )
+}
+
+fn skill_exclusions(cfg: &TaskCfg, ctx: &ToolCtx, mcp_replaces_web_skill: bool) -> Vec<String> {
+    let mut excluded = cfg.ancestor_skills.clone();
+    for name in ctx.loaded_skills.lock().unwrap().iter() {
+        if !excluded.contains(name) {
+            excluded.push(name.clone());
+        }
+    }
+    if mcp_replaces_web_skill && !excluded.iter().any(|name| name == "web-search") {
+        excluded.push("web-search".to_string());
+    }
+    excluded
 }
 
 fn run_task(
@@ -179,7 +310,7 @@ fn run_task(
     let mut command = Command::new(exe);
     command
         .arg("child")
-        .env("NOOB_DEPTH", (cfg.depth + 1).to_string())
+        .env("NOOB_DEPTH", cfg.child_depth.to_string())
         .current_dir(&cfg.workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -203,7 +334,7 @@ fn run_task(
         });
     }
     let mut child = match command.spawn() {
-        Ok(c) => c,
+        Ok(child) => ChildGuard::new(child),
         Err(e) => return ToolOutcome::err(format!("cannot spawn the sub-agent: {e}")),
     };
     // One JSON object in, then EOF: the child reads stdin to end.
@@ -211,6 +342,14 @@ fn run_task(
         "prompt": request.prompt,
         "tools": request.tools_mode,
         "max_turns": request.max_turns,
+        "_noob_runtime": {
+            "base_url": cfg.overrides.base_url,
+            "model": cfg.overrides.model,
+            "api_style": cfg.overrides.api_style,
+            "yolo": cfg.yolo,
+            "verbose": cfg.verbose,
+            "excluded_skills": request.excluded_skills,
+        },
     });
     {
         let mut stdin = child.stdin.take().expect("piped stdin");
@@ -218,7 +357,7 @@ fn run_task(
         if let Err(error) =
             write_child_input_with(&mut stdin, bytes.as_bytes(), deadline, interrupted)
         {
-            kill_group(&mut child);
+            child.terminate();
             return match error {
                 ChildInputError::Canceled => ToolOutcome::canceled(),
                 ChildInputError::Timeout => ToolOutcome::err(format!(
@@ -235,36 +374,59 @@ fn run_task(
 
     // Readers on threads so a chatty child never deadlocks on a full pipe.
     let stdout = child.stdout.take().expect("piped stdout");
-    let stdout_reader = std::thread::spawn(move || read_all(stdout));
+    let stdout_reader = match std::thread::Builder::new()
+        .name("noob-agent-stdout".to_string())
+        .spawn(move || read_all(stdout))
+    {
+        Ok(reader) => reader,
+        Err(error) => {
+            child.terminate();
+            return ToolOutcome::err(format!("cannot start the sub-agent output reader: {error}"));
+        }
+    };
     let stderr = child.stderr.take().expect("piped stderr");
     let verbose = cfg.verbose;
     let live_progress = cfg.progress.clone();
-    let stderr_reader = std::thread::spawn(move || {
-        drain_stderr_with(stderr, verbose, |bytes| {
-            if let Some(progress) = &live_progress {
-                progress.push(bytes);
-            }
-        })
-    });
+    let stderr_reader = match std::thread::Builder::new()
+        .name("noob-agent-stderr".to_string())
+        .spawn(move || {
+            drain_stderr_with(stderr, verbose, |bytes| {
+                if let Some(progress) = &live_progress {
+                    progress.push(bytes);
+                }
+            })
+        }) {
+        Ok(reader) => reader,
+        Err(error) => {
+            child.terminate();
+            let _ = stdout_reader.join();
+            return ToolOutcome::err(format!(
+                "cannot start the sub-agent diagnostics reader: {error}"
+            ));
+        }
+    };
 
     // The wait loop owns the three exits: completion, wall clock, Ctrl-C.
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
+            Ok(Some(status)) => {
+                child.disarm();
+                break Some(status);
+            }
             Ok(None) => {}
             Err(_) => {
-                kill_group(&mut child);
+                child.terminate();
                 break None;
             }
         }
         if interrupted() {
-            kill_group(&mut child);
+            child.terminate();
             let _ = stdout_reader.join();
             let progress = stderr_reader.join().unwrap_or_default();
             return with_progress(ToolOutcome::canceled(), verbose, progress);
         }
         if Instant::now() >= deadline {
-            kill_group(&mut child);
+            child.terminate();
             let _ = stdout_reader.join();
             let progress = stderr_reader.join().unwrap_or_default();
             return with_progress(
@@ -360,6 +522,51 @@ fn write_child_input_with(
         }
     }
     Ok(())
+}
+
+/// A spawned child is armed until `try_wait` reaps it or an explicit
+/// termination path runs. If an unexpected unwind crosses `run_task`, Drop
+/// still kills and reaps the process group instead of orphaning it.
+struct ChildGuard {
+    child: Child,
+    armed: bool,
+}
+
+impl ChildGuard {
+    fn new(child: Child) -> ChildGuard {
+        ChildGuard { child, armed: true }
+    }
+
+    fn terminate(&mut self) {
+        if self.armed {
+            kill_group(&mut self.child);
+            self.armed = false;
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl std::ops::Deref for ChildGuard {
+    type Target = Child;
+
+    fn deref(&self) -> &Child {
+        &self.child
+    }
+}
+
+impl std::ops::DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.child
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        self.terminate();
+    }
 }
 
 /// Ask the child to clean up its whole descendant tree, then force-kill and
@@ -562,6 +769,9 @@ mod tests {
             max_turns: DEFAULT_MAX_TURNS,
             wall_clock: Duration::from_secs(DEFAULT_WALL_CLOCK_S),
             verbose: false,
+            overrides: Overrides::default(),
+            yolo: false,
+            ancestor_skills: Vec::new(),
             background: None,
         }
     }
@@ -586,7 +796,15 @@ mod tests {
         let out = run(&ctx, &json!({"prompt": "  "}));
         assert!(out.content.contains("is empty"));
         let out = run(&ctx, &json!({"prompt": "x", "tools": "everything"}));
-        assert!(out.content.contains("\"read-only\" or \"all\""));
+        assert!(out.content.contains("\"read-only\", \"web\", or \"all\""));
+        let out = run(&ctx, &json!({"prompt": "x", "tools": "web"}));
+        assert!(out.is_error && out.content.contains("needs one unambiguous MCP server"));
+        let out = run(&ctx, &json!({"prompt": "x", "cancel": "agent-1"}));
+        assert!(out.is_error);
+        assert!(out.content.contains("choose exactly one"));
+
+        let schema = spec().parameters;
+        assert_eq!(schema["anyOf"].as_array().unwrap().len(), 3);
     }
 
     #[test]
@@ -601,6 +819,10 @@ mod tests {
         if let Some(task) = ctx.task.as_mut() {
             task.background = Some(hub.clone());
         }
+        let status = run(&ctx, &json!({"status": true}));
+        assert!(!status.is_error, "{}", status.content);
+        assert!(status.content.contains("\"active\":0"));
+        assert!(status.content.contains("do not poll"));
         // An unknown id is named as such, pointing back at the acks.
         let out = run(&ctx, &json!({"cancel": "agent-9"}));
         assert!(out.is_error && out.content.contains("no active job"));
@@ -625,6 +847,84 @@ mod tests {
         assert!(out.content.contains("canceling"));
         let results = hub.shutdown();
         assert!(results.iter().all(|r| r.outcome.canceled));
+    }
+
+    #[test]
+    fn loaded_and_ancestor_skills_are_excluded_from_descendants_once() {
+        let (_tmp, ctx) = test_ctx();
+        let mut task = cfg();
+        task.ancestor_skills = vec!["research".into(), "shared".into()];
+        *ctx.loaded_skills.lock().unwrap() =
+            vec!["shared".into(), "domain".into(), "research".into()];
+        assert_eq!(
+            skill_exclusions(&task, &ctx, false),
+            vec!["research", "shared", "domain"]
+        );
+    }
+
+    #[test]
+    fn configured_web_mcp_replaces_the_descendant_compatibility_skill() {
+        let (_tmp, mut ctx) = test_ctx();
+        ctx.mcp = Some(crate::mcp::Mcp::new(vec![
+            crate::mcp::config::ServerConfig {
+                name: "Web_Search".into(),
+                transport: crate::mcp::config::TransportConfig::Http {
+                    url: "http://127.0.0.1:9/mcp".into(),
+                },
+                timeout: Duration::from_secs(1),
+            },
+        ]));
+        let web = configured_web_mcp(&ctx);
+        assert_eq!(web.as_deref(), Some("Web_Search"));
+        let prompt = child_prompt("research current facts".into(), web.as_deref(), true);
+        assert!(prompt.starts_with("[noob child runtime:"));
+        assert!(prompt.contains("mcp_connect {\"server\":\"Web_Search\"}"));
+        assert!(prompt.contains("stop gathering and return the synthesis"));
+        assert!(prompt.contains("Do not create files"));
+        assert!(prompt.ends_with("research current facts"));
+        assert!(skill_exclusions(&cfg(), &ctx, true).contains(&"web-search".to_string()));
+
+        *ctx.loaded_skills.lock().unwrap() = vec!["research".into()];
+        assert!(research_investigation_loaded(
+            &ctx,
+            "You have zero prior context. Run a CONTRARIAN pass. End with ## Sources."
+        ));
+        assert!(!research_investigation_loaded(&ctx, "implement the parser"));
+
+        ctx.mcp = Some(crate::mcp::Mcp::new(vec![
+            crate::mcp::config::ServerConfig {
+                name: "web-search".into(),
+                transport: crate::mcp::config::TransportConfig::Http {
+                    url: "http://127.0.0.1:9/mcp".into(),
+                },
+                timeout: Duration::from_secs(1),
+            },
+            crate::mcp::config::ServerConfig {
+                name: "web_search".into(),
+                transport: crate::mcp::config::TransportConfig::Http {
+                    url: "http://127.0.0.1:9/mcp".into(),
+                },
+                timeout: Duration::from_secs(1),
+            },
+        ]));
+        assert!(configured_web_mcp(&ctx).is_none());
+    }
+
+    #[test]
+    fn armed_child_guard_kills_and_reaps_on_drop() {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 30").process_group(0);
+        let child = command.spawn().unwrap();
+        let pid = child.id() as libc::pid_t;
+        drop(ChildGuard::new(child));
+
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
     }
 
     #[test]

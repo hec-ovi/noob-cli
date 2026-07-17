@@ -7,7 +7,7 @@ Each round borrows the system prompt, items, and active schemas through `TurnReq
 ## Scheduler
 
 - Consecutive read-only calls run concurrently on scoped threads, cap 8.
-- Consecutive subagent calls form one fan-out group under child concurrency.
+- Detached subagent admissions and controls execute in emission order; the hub runs admitted children concurrently under the child cap. Inline child calls retain bounded fan-out.
 - Other mutations are sequential barriers.
 - Starts are reported immediately before execution.
 - Parallel finishes are reported in actual completion order.
@@ -21,7 +21,7 @@ Plan mode sends only the read-only tool set and refuses hallucinated mutations. 
 
 Compaction prunes old large tool results first, then summarizes and validates the middle if needed. Call/result pairs stay intact, and harness-built pins preserve task, files, loaded skills, and active background job IDs.
 
-The default interactive dock detaches every sub-agent, including `tools: "all"` jobs. Original calls receive immediate acknowledgments. The owner thread injects each terminal result once as a synthetic user item and continues as soon as any job is ready, without waiting for unrelated jobs. Headless and classic-prompt calls remain inline. Each workspace-mutating child tool call contends for the tools layer's cross-process lease, so leased calls do not overlap.
+The default interactive dock detaches every sub-agent. Original calls receive immediate acknowledgments. The main agent can process ordinary human turns while several children run, and child completion does not interrupt an active parent turn. The owner thread injects each terminal result exactly once as a synthetic user item without waiting for unrelated jobs. When all coalesced ready results succeeded, parent inference starts only if the human is not composing a message; their submitted turn otherwise integrates the packets first. Any error or cancellation in the drained batch remains visible and durable without invoking parent inference. Cancel acceptance and terminal child failure close a same-turn replacement gate until the next human input. Headless and classic-prompt calls remain inline. File-tool mutations contend for the cross-process workspace lease. Bash remains concurrent for builds, tests, and exploration; the system contract directs source changes through write/edit. Background jobs and the foreground plan are independent state machines and dock regions; they may coexist, and agent lifecycle is never represented as plan items.
 
 `/clear-plan` explicitly resets the cache prefix by replacing plan arguments and results with placeholders. It preserves call/result structure and persists the replacement as a session reset.
 

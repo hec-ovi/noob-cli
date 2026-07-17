@@ -335,7 +335,12 @@ mod tests {
             ".noob/mcp.json",
             r#"{"servers": {"tg": {"url": "http://localhost:8765/mcp", "timeout_s": 300}}}"#,
         );
-        add_server(&path, "tg", &parse_spec("http://localhost:8765/mcp").unwrap()).unwrap();
+        add_server(
+            &path,
+            "tg",
+            &parse_spec("http://localhost:8765/mcp").unwrap(),
+        )
+        .unwrap();
         let (servers, warnings) = load(ws.path(), ws.path().join("nope").as_path());
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(servers[0].timeout, Duration::from_secs(300));

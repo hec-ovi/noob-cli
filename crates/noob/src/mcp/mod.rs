@@ -76,6 +76,30 @@ pub struct Mcp {
 /// misbehaving; cap and carry on with what arrived.
 const MAX_LIST_PAGES: usize = 16;
 
+/// Small local models commonly vary case and separator spelling in MCP
+/// server names. Normalize only those harmless differences; callers still
+/// require a unique configured match before accepting an alias.
+pub(crate) fn normalize_server_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| !matches!(c, '-' | '_'))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+pub(crate) fn unique_normalized_server<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    requested: &str,
+) -> Option<&'a str> {
+    let normalized = normalize_server_name(requested);
+    let mut matches = names
+        .into_iter()
+        .filter(|name| normalize_server_name(name) == normalized);
+    match (matches.next(), matches.next()) {
+        (Some(name), None) => Some(name),
+        _ => None,
+    }
+}
+
 impl Mcp {
     pub fn new(servers: Vec<ServerConfig>) -> Mcp {
         Mcp {

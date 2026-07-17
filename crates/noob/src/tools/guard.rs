@@ -49,7 +49,7 @@ pub enum Sandbox {
     Workspace,
 }
 
-/// Held across one write/edit/bash call. Locking the workspace directory inode
+/// Held across one write/edit call. Locking the workspace directory inode
 /// works across the parent and child processes, and across containers sharing
 /// the same bind mount, without adding lock files to the user's project.
 pub struct WorkspaceWriteLease {
@@ -70,7 +70,7 @@ pub fn workspace_write_lease(
 ) -> Result<WorkspaceWriteLease, WorkspaceLeaseError> {
     // Cancellation is a mutation barrier, not only a way out of lock
     // contention. A tool canceled before dispatch must not acquire a lease
-    // and then continue into write/edit/bash merely because the lock was free.
+    // and then continue into write/edit merely because the lock was free.
     if interrupted() {
         return Err(WorkspaceLeaseError::Canceled);
     }

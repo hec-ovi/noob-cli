@@ -1733,8 +1733,8 @@ fn sleep_wait_is_refused_and_the_prompt_frees_without_steering() {
 
 /// The model manages its own fleet: subagent {"cancel":"agent-N"} stops a
 /// detached child through the same path as /agents cancel, the ack names the
-/// canceling job, and the child's terminal packet still closes the loop so
-/// the transcript never dangles.
+/// canceling job, and the child's terminal packet still closes the loop. A
+/// cancellation does not spend another parent inference merely to report it.
 #[test]
 fn model_cancels_its_own_subagent() {
     let rig = rig();
@@ -1757,8 +1757,6 @@ fn model_cancels_its_own_subagent() {
     // The child would stall a long time; the cancel must beat it.
     rig.server
         .enqueue_raw_for(child(), stalled_stream("NEVER-DELIVERED", 1, 30_000, true));
-    rig.server
-        .enqueue_stream_completion_for(parent(), "CLOSED-END");
 
     let mut pty = spawn_pty_with(&rig, DOCK);
     pty.wait_for("type a task");
@@ -1769,7 +1767,6 @@ fn model_cancels_its_own_subagent() {
     pty.wait_for("canceling");
     pty.wait_for("agent-1 · ");
     pty.wait_for("STOPPED-END");
-    pty.wait_for("CLOSED-END");
     // Ctrl-D only lands once the idle prompt is back; a byte sent during turn
     // teardown is consumed as an in-turn key and dropped.
     pty.wait_for("type a message");
@@ -1779,6 +1776,20 @@ fn model_cancels_its_own_subagent() {
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
 
     let requests = rig.api_requests();
+    let parent_requests = requests
+        .iter()
+        .filter(|request| {
+            request["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == "subagent")
+        })
+        .count();
+    assert_eq!(
+        parent_requests, 3,
+        "cancellation triggered an extra parent model turn"
+    );
     // The cancel ack reached the model on the stop call...
     assert!(
         requests.iter().any(|request| {
@@ -1792,22 +1803,94 @@ fn model_cancels_its_own_subagent() {
         }),
         "cancel acknowledgment missing"
     );
-    // ...and the canceled child still delivered exactly one terminal packet.
-    let packets = requests
-        .iter()
-        .flat_map(|request| request["messages"].as_array().unwrap())
-        .filter(|m| {
-            m["role"] == "user"
-                && m["content"]
-                    .as_str()
-                    .is_some_and(|c| c.starts_with("[background sub-agent result agent-1]"))
-        })
-        .count();
-    assert!(packets > 0, "no terminal packet for the canceled child");
+    // ...and the canceled child still persisted exactly one terminal packet,
+    // without spending a provider request merely to echo that cancellation.
+    let session_path = std::fs::read_dir(rig.config.path().join("sessions"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let saved = std::fs::read_to_string(session_path).unwrap();
+    assert_eq!(
+        saved
+            .matches("[background sub-agent result agent-1]")
+            .count(),
+        1,
+        "canceled terminal packet was missing or duplicated: {saved}"
+    );
+    assert!(saved.contains(r#"\"status\":\"canceled\""#), "{saved}");
     assert!(
         !pty.seen.contains("NEVER-DELIVERED"),
         "the canceled child's output leaked into the session"
     );
+    rig.server.assert_clean();
+}
+
+/// Cancel and replacement calls in one model batch are ordered controls. The
+/// accepted cancel closes admission immediately, before its terminal packet is
+/// drained, so the second call cannot start an autonomous replacement.
+#[test]
+fn cancel_then_spawn_in_one_batch_blocks_the_replacement() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+    let child = || RequestMatch::LacksTool("subagent".to_string());
+
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[("start", "subagent", r#"{"prompt":"original slow child"}"#)],
+        None,
+    );
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[
+            ("cancel", "subagent", r#"{"cancel":"agent-1"}"#),
+            (
+                "replace",
+                "subagent",
+                r#"{"prompt":"unrequested replacement"}"#,
+            ),
+        ],
+        None,
+    );
+    rig.server
+        .enqueue_stream_completion_for(parent(), "REPLACEMENT-BLOCKED-END");
+    rig.server
+        .enqueue_raw_for(child(), stalled_stream("MUST-NOT-FINISH", 1, 30_000, true));
+
+    let mut pty = spawn_pty_with(&rig, DOCK);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"start, cancel, and wrongly replace\r");
+    pty.wait_for("canceling");
+    pty.wait_for("do not spawn a replacement until the human gives a new instruction");
+    pty.wait_for("REPLACEMENT-BLOCKED-END");
+    pty.wait_for("type a message");
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+
+    let requests = rig.api_requests();
+    assert!(
+        requests
+            .iter()
+            .all(|request| last_user(request) != "unrequested replacement"),
+        "the replacement reached the provider: {requests:?}"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| { tool["function"]["name"] == "subagent" }))
+            .count(),
+        3
+    );
+    assert!(!pty.seen.contains("MUST-NOT-FINISH"), "{}", pty.seen);
     rig.server.assert_clean();
 }
 
@@ -2095,6 +2178,383 @@ fn background_agent_view_stays_pinned_while_the_prompt_remains_usable() {
     rig.server.assert_clean();
 }
 
+/// Three real child processes remain in flight while the idle parent handles
+/// an ordinary human turn. The follow-up reaches the provider before any child
+/// report, then every child result is integrated exactly once without plan or
+/// cancellation traffic.
+#[test]
+fn main_turn_runs_while_three_background_children_remain_in_flight() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[
+            ("three-a", "subagent", r#"{"prompt":"THREE-CHILD-A"}"#),
+            ("three-b", "subagent", r#"{"prompt":"THREE-CHILD-B"}"#),
+            ("three-c", "subagent", r#"{"prompt":"THREE-CHILD-C"}"#),
+        ],
+        None,
+    );
+    rig.server
+        .enqueue_stream_completion_for(parent(), "PARENT-THREE-YIELDED");
+    rig.server
+        .enqueue_stream_completion_for(parent(), "MAIN-WHILE-THREE");
+    for (prompt, result, delay) in [
+        ("THREE-CHILD-A", "THREE-RESULT-A", 3500),
+        ("THREE-CHILD-B", "THREE-RESULT-B", 5500),
+        ("THREE-CHILD-C", "THREE-RESULT-C", 7500),
+    ] {
+        rig.server.enqueue_raw_for(
+            RequestMatch::UserPrompt(prompt.to_string()),
+            stalled_stream(result, 1, delay, true),
+        );
+    }
+    rig.server
+        .enqueue_stream_completion_for(parent(), "COLLECT-THREE-A");
+    rig.server
+        .enqueue_stream_completion_for(parent(), "COLLECT-THREE-B");
+    rig.server
+        .enqueue_stream_completion_for(parent(), "COLLECT-THREE-END");
+
+    let mut pty = spawn_pty_with(&rig, &[("NOOB_TASK_CONCURRENCY", "4")]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"start three background children\r");
+    pty.wait_for("PARENT-THREE-YIELDED");
+    pty.wait_for("type a message");
+    pty.send(b"human main work\r");
+    pty.wait_for("MAIN-WHILE-THREE");
+    pty.wait_for("agent-1 ok");
+    pty.wait_for("agent-2 ok");
+    pty.wait_for("agent-3 ok");
+    pty.wait_for("COLLECT-THREE-END");
+    pty.wait_for("type a message");
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    assert!(!pty.seen.contains("[steering]"), "{}", pty.seen);
+    assert!(!pty.seen.contains("[interrupted]"), "{}", pty.seen);
+    assert!(!pty.seen.contains(" canceled"), "{}", pty.seen);
+    assert!(
+        pty.seen.find("MAIN-WHILE-THREE") < pty.seen.find("agent-1 ok"),
+        "the human response did not finish before the children: {}",
+        pty.seen
+    );
+
+    let recorded = rig.server.recorded();
+    let human = recorded
+        .iter()
+        .find(|record| {
+            record.json().is_some_and(|request| {
+                request["messages"].as_array().is_some_and(|messages| {
+                    messages.iter().any(|message| {
+                        message["role"] == "user" && message["content"] == "human main work"
+                    })
+                })
+            })
+        })
+        .expect("human parent request");
+    let first_report = recorded
+        .iter()
+        .find(|record| {
+            record.json().is_some_and(|request| {
+                request["messages"].as_array().is_some_and(|messages| {
+                    messages.iter().any(|message| {
+                        message["role"] == "user"
+                            && message["content"].as_str().is_some_and(|content| {
+                                content.starts_with("[background sub-agent result agent-")
+                            })
+                    })
+                })
+            })
+        })
+        .expect("first report continuation");
+    assert!(
+        human.arrived < first_report.arrived,
+        "the human request waited behind a child"
+    );
+
+    let requests = rig.api_requests();
+    for prompt in ["THREE-CHILD-A", "THREE-CHILD-B", "THREE-CHILD-C"] {
+        let child = requests
+            .iter()
+            .find(|request| last_user(request) == prompt)
+            .unwrap_or_else(|| panic!("missing request for {prompt}"));
+        assert!(
+            child["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tool| tool["function"]["name"] != "subagent"),
+            "detached child {prompt} retained nested delegation"
+        );
+    }
+    let final_parent = requests
+        .iter()
+        .rev()
+        .find(|request| {
+            request["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == "subagent")
+        })
+        .expect("final parent request");
+    let messages = final_parent["messages"].as_array().unwrap();
+    for (id, result) in [
+        ("agent-1", "THREE-RESULT-A"),
+        ("agent-2", "THREE-RESULT-B"),
+        ("agent-3", "THREE-RESULT-C"),
+    ] {
+        let packets = messages
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .filter_map(|message| message["content"].as_str())
+            .filter(|content| content.starts_with(&format!("[background sub-agent result {id}]")))
+            .collect::<Vec<_>>();
+        assert_eq!(packets.len(), 1, "duplicate or missing {id}: {messages:?}");
+        assert!(
+            packets[0].contains(result),
+            "wrong {id} report: {}",
+            packets[0]
+        );
+    }
+    assert!(messages.iter().all(|message| {
+        message["tool_calls"]
+            .as_array()
+            .is_none_or(|calls| calls.iter().all(|call| call["function"]["name"] != "plan"))
+    }));
+    rig.server.assert_clean();
+}
+
+/// A completed child must not steal an idle prompt that the human is already
+/// composing. The ordinary submitted turn integrates the ready packet first,
+/// then the complete human message, without relabeling Enter as steering.
+#[test]
+fn typed_idle_followup_wins_the_race_with_a_ready_child() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+    let child = || RequestMatch::LacksTool("subagent".to_string());
+
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[(
+            "race-agent",
+            "subagent",
+            r#"{"prompt":"finish during typing"}"#,
+        )],
+        None,
+    );
+    rig.server
+        .enqueue_stream_completion_for(parent(), "PARENT-YIELDED");
+    rig.server
+        .enqueue_raw_for(child(), stalled_stream("RACE-CHILD-DONE", 1, 1200, true));
+    rig.server
+        .enqueue_stream_completion_for(parent(), "FOLLOWUP-WITH-RESULT-END");
+
+    let mut pty = spawn_pty_with(&rig, &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"start race child\r");
+    pty.wait_for("PARENT-YIELDED");
+    pty.wait_for("type a message");
+    pty.send(b"human follow");
+    pty.wait_for("human follow");
+
+    // The child settles while the draft is nonempty. Its row may update, but
+    // no automatic provider continuation may start before the human presses
+    // Enter.
+    pty.wait_for("[1] agents ready (Tab to view)");
+    let before_enter = rig.api_requests();
+    let parent_before_enter = before_enter
+        .iter()
+        .filter(|request| {
+            request["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == "subagent")
+        })
+        .count();
+    assert_eq!(
+        parent_before_enter, 2,
+        "a background continuation stole the typed prompt: {before_enter:?}"
+    );
+
+    pty.send(b"up\r");
+    pty.wait_for("agent-1 ok");
+    pty.wait_for("FOLLOWUP-WITH-RESULT-END");
+    pty.wait_for("type a message");
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    assert!(!pty.seen.contains("[steering]"), "{}", pty.seen);
+    assert!(!pty.seen.contains("[interrupted]"), "{}", pty.seen);
+
+    let requests = rig.api_requests();
+    let combined = requests
+        .iter()
+        .find(|request| last_user(request) == "human followup")
+        .expect("combined human/result request");
+    let messages = combined["messages"].as_array().unwrap();
+    assert!(messages.iter().any(|message| {
+        message["role"] == "user"
+            && message["content"].as_str().is_some_and(|content| {
+                content.starts_with("[background sub-agent result agent-1]")
+                    && content.contains("RACE-CHILD-DONE")
+            })
+    }));
+    rig.server.assert_clean();
+}
+
+/// A terminal child error is visible and durable, but it must not start an
+/// unrequested parent inference that can spawn replacement children. The next
+/// provider request belongs to the next human turn.
+#[test]
+fn failed_background_child_leaves_the_idle_prompt_free_without_auto_retry() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+    let child = || RequestMatch::LacksTool("subagent".to_string());
+
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[("fail-agent", "subagent", r#"{"prompt":"hit the cap"}"#)],
+        None,
+    );
+    rig.server
+        .enqueue_stream_completion_for(parent(), "PARENT-AFTER-ACK");
+    // With one child round, this tool call executes and then the child reaches
+    // its configured inference cap before it can produce a final response.
+    rig.server
+        .enqueue_stream_toolcalls_for(child(), &[("child-ls", "ls", r#"{}"#)], None);
+
+    let mut pty = spawn_pty_with(&rig, &[("NOOB_TASK_MAX_TURNS", "1")]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"start failing child\r");
+    pty.wait_for("PARENT-AFTER-ACK");
+    pty.wait_for("agent-1 error");
+    pty.wait_for("type a message");
+    settle();
+
+    let parent_requests = rig
+        .api_requests()
+        .iter()
+        .filter(|request| {
+            request["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == "subagent")
+        })
+        .count();
+    assert_eq!(
+        parent_requests, 2,
+        "the failed child triggered an unrequested parent retry"
+    );
+
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+}
+
+/// Coalescing must not weaken the failure rule. If one ready child succeeded
+/// while another failed, both reports become visible and durable, but the
+/// success cannot reopen parent inference and give the model an opportunity
+/// to hammer replacement spawns rejected by the same-turn failure gate.
+#[test]
+fn mixed_success_and_failure_leave_the_idle_prompt_without_auto_retry() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[
+            (
+                "mixed-ok",
+                "subagent",
+                r#"{"prompt":"mixed successful child"}"#,
+            ),
+            (
+                "mixed-fail",
+                "subagent",
+                r#"{"prompt":"mixed failing child"}"#,
+            ),
+        ],
+        None,
+    );
+    rig.server
+        .enqueue_stream_completion_for(parent(), "PARENT-AFTER-MIXED-ACK");
+    rig.server.enqueue_raw_for(
+        RequestMatch::UserPrompt("mixed successful child".to_string()),
+        stalled_stream("MIXED-CHILD-OK", 1, 1200, true),
+    );
+
+    let datas =
+        noob_testkit::chat_stream_toolcalls_datas(&[("mixed-child-ls", "ls", r#"{}"#)], None);
+    let delayed_tool_call = noob_testkit::sse_headers();
+    let mut tool_call_tail = sse_frames(&datas);
+    tool_call_tail.extend_from_slice(b"0\r\n\r\n");
+    rig.server.enqueue_raw_for(
+        RequestMatch::UserPrompt("mixed failing child".to_string()),
+        vec![
+            noob_testkit::RawStep::Bytes(delayed_tool_call),
+            noob_testkit::RawStep::SleepMs(1200),
+            noob_testkit::RawStep::Bytes(tool_call_tail),
+        ],
+    );
+
+    let mut pty = spawn_pty_with(&rig, &[("NOOB_TASK_MAX_TURNS", "1")]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"start mixed children\r");
+    pty.wait_for("PARENT-AFTER-MIXED-ACK");
+    pty.wait_for("type a message");
+    pty.send(b"hold completion");
+    pty.wait_for("hold completion");
+    pty.wait_for("[2] agents ready (Tab to view)");
+
+    // Emptying the draft lets the owner drain both terminal results together.
+    // The mixed batch must return directly to idle without another request.
+    pty.send(&[0x15]);
+    pty.wait_for("agent-1 ok");
+    pty.wait_for("agent-2 error");
+    pty.wait_for("type a message");
+    settle();
+
+    let parent_requests = rig
+        .api_requests()
+        .iter()
+        .filter(|request| {
+            request["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == "subagent")
+        })
+        .count();
+    assert_eq!(
+        parent_requests, 2,
+        "a mixed terminal batch triggered parent inference"
+    );
+
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+}
+
 /// The running-agents counter must survive the idle prompt: while a detached
 /// child still runs, the collapsed `[N] agents running` row stays pinned above
 /// the idle box, Tab expands the panel, and Tab again falls back to the live
@@ -2206,8 +2666,10 @@ fn ready_child_result_is_delivered_mid_turn_at_the_next_round() {
 
     // Round 2: the parent keeps its turn alive (a stalled response emitting
     // one more tool call), long enough for the child to settle meanwhile.
-    let datas =
-        noob_testkit::chat_stream_toolcalls_datas(&[("p2", "bash", r#"{"cmd":"echo still-here"}"#)], None);
+    let datas = noob_testkit::chat_stream_toolcalls_datas(
+        &[("p2", "bash", r#"{"cmd":"echo still-here"}"#)],
+        None,
+    );
     let mut tail = sse_frames(&datas);
     tail.extend_from_slice(b"0\r\n\r\n");
     rig.server.enqueue_raw_for(
@@ -2549,8 +3011,6 @@ fn agents_cancel_kills_a_detached_child_and_keeps_the_prompt_usable() {
         child(),
         stalled_stream("NEVER-SHOULD-FINISH", 1, 20_000, true),
     );
-    rig.server
-        .enqueue_stream_completion_for(parent(), "CANCEL-COLLECTED-END");
 
     let started = std::time::Instant::now();
     let mut pty = spawn_pty_with(&rig, &[]);
@@ -2562,7 +3022,6 @@ fn agents_cancel_kills_a_detached_child_and_keeps_the_prompt_usable() {
     pty.wait_for("[steering]");
     pty.wait_for("canceling agent-1");
     pty.wait_for("agent-1 canceled");
-    pty.wait_for("CANCEL-COLLECTED-END");
     pty.wait_for("type a message");
     settle();
     pty.send(b"/quit\r");
@@ -3442,7 +3901,9 @@ fn dock_plan_region_caps_at_six_steps_with_a_more_row() {
             4 => "in_progress",
             _ => "pending",
         };
-        items.push_str(&format!(r#"{{"content":"step {i:02}","status":"{status}"}}"#));
+        items.push_str(&format!(
+            r#"{{"content":"step {i:02}","status":"{status}"}}"#
+        ));
     }
     let plan = format!(r#"{{"todos":[{items}]}}"#);
     rig.server

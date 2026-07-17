@@ -25,7 +25,7 @@ Tab completes a `/`-prefixed command in the input editor; a dim hint lists candi
 
 Tool requests remain JSONL planning events. Interactive tool start lines are emitted only when the scheduler begins execution, and finish lines follow real completion order.
 
-The `plan` checklist and sub-agent status share the themed REPL's bounded region. The active plan glyph animates display-only. Completed actions carry their own times. Long plans end in a counted summary and reserve the active step plus an agent status row; completed and canceled plans collapse to one timed line, with cancellation using the theme's red error style. The closed agents view derives its count from the live hub snapshot instead of a stale acknowledgment. Covered per-subagent activity lines are suppressed. On resume, `replay_transcript` redraws the prior conversation before the first prompt while filtering synthetic bookkeeping items; it never mutates the transcript or session.
+The `plan` checklist and sub-agent status are independent state machines that may coexist in the themed REPL's bounded region. The active plan glyph animates display-only. Completed actions carry their own times. Long plans end in a counted summary and reserve the active step plus an agent status row; completed and canceled plans collapse to one timed line, with cancellation using the theme's red error style. The closed agents view derives its count from the live hub snapshot instead of a stale acknowledgment. Covered per-subagent activity lines are suppressed. On resume, `replay_transcript` redraws the prior conversation before the first prompt while filtering synthetic bookkeeping items; it never mutates the transcript or session.
 
 ## Markdown and tables
 

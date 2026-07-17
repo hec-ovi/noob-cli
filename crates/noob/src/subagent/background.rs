@@ -75,6 +75,9 @@ struct Inner {
     state: Mutex<State>,
     changed: Condvar,
     next_id: AtomicU64,
+    /// Cheap display invalidation. The dock reads this on its streaming hot
+    /// path and builds an allocated snapshot only after lifecycle state moves.
+    revision: AtomicU64,
     concurrency: usize,
 }
 
@@ -84,6 +87,9 @@ struct State {
     jobs: Vec<Job>,
     workers: Vec<JoinHandle<()>>,
     stopping: bool,
+    /// Failure/cancellation and the next human turn are ordered by the same
+    /// mutex as admission. This closes the terminal-commit-to-drain race.
+    spawn_paused: bool,
 }
 
 struct Job {
@@ -141,6 +147,7 @@ impl BackgroundHub {
                 state: Mutex::new(State::default()),
                 changed: Condvar::new(),
                 next_id: AtomicU64::new(1),
+                revision: AtomicU64::new(0),
                 concurrency,
             }),
         };
@@ -183,6 +190,12 @@ impl BackgroundHub {
         runner: impl FnOnce(Arc<AtomicBool>) -> ToolOutcome + Send + 'static,
     ) -> ToolOutcome {
         let mut state = self.inner.state.lock().unwrap();
+        if state.spawn_paused {
+            return ToolOutcome::err(
+                "a background child failed or was canceled in this turn; do not spawn a \
+                 replacement until the human gives a new instruction",
+            );
+        }
         if state.stopping {
             return ToolOutcome::err(
                 "background sub-agents are shutting down; retry in a new session",
@@ -206,6 +219,7 @@ impl BackgroundHub {
             runner: Some(Box::new(runner)),
             progress,
         });
+        self.inner.revision.fetch_add(1, Ordering::Release);
         // This summary is display metadata only; the tool-result JSON remains
         // byte-compatible. The panel uses it after a successful acknowledgment
         // so its compact count includes jobs from earlier batches and turns,
@@ -229,8 +243,10 @@ impl BackgroundHub {
                 "status": "running",
                 "contract": "detached with one goal; the final report is delivered to you \
                              automatically as [background sub-agent result]; waiting, sleeping, \
-                             or polling cannot fetch it, so continue other work or finish; \
-                             subagent {\"cancel\":\"<job_id>\"} stops it",
+                             planning, or polling cannot fetch it, so continue independent work \
+                             or end this turn; subagent {\"status\":true} gives one harmless \
+                             snapshot; cancel only when the user asks or the job is obsolete; a \
+                             failure does not authorize spawning a replacement",
             })
             .to_string(),
             format!("{id} started · {active} active"),
@@ -240,25 +256,32 @@ impl BackgroundHub {
     /// Results move out exactly once. Removing a ready job drops all of its
     /// per-job state; the fixed pool workers remain for later submissions.
     pub fn take_ready(&self) -> Vec<ReadyResult> {
-        {
-            let mut state = self.inner.state.lock().unwrap();
-            let mut ready = Vec::new();
-            let mut i = 0;
-            while i < state.jobs.len() {
-                if state.jobs[i].state != JobState::Ready {
-                    i += 1;
-                    continue;
-                }
-                let mut job = state.jobs.remove(i);
-                let outcome = job.outcome.take().expect("a ready job has an outcome");
-                ready.push(ReadyResult {
-                    id: job.id,
-                    outcome,
-                    elapsed: job.elapsed.unwrap_or_default(),
-                });
+        let mut state = self.inner.state.lock().unwrap();
+        let mut ready = Vec::new();
+        let mut i = 0;
+        while i < state.jobs.len() {
+            if state.jobs[i].state != JobState::Ready {
+                i += 1;
+                continue;
             }
-            ready
+            let mut job = state.jobs.remove(i);
+            let outcome = job.outcome.take().expect("a ready job has an outcome");
+            ready.push(ReadyResult {
+                id: job.id,
+                outcome,
+                elapsed: job.elapsed.unwrap_or_default(),
+            });
         }
+        if !ready.is_empty() {
+            self.inner.revision.fetch_add(1, Ordering::Release);
+        }
+        if ready
+            .iter()
+            .any(|result| result.outcome.is_error || result.outcome.canceled)
+        {
+            state.spawn_paused = true;
+        }
+        ready
     }
 
     /// Wake the idle parent as soon as any terminal result is deliverable.
@@ -270,6 +293,18 @@ impl BackgroundHub {
     pub fn settled_ready(&self) -> bool {
         let state = self.inner.state.lock().unwrap();
         state.jobs.iter().any(|job| job.state == JobState::Ready)
+    }
+
+    /// Allocation-free lifecycle version for the dock's render hot path.
+    pub fn revision(&self) -> u64 {
+        self.inner.revision.load(Ordering::Acquire)
+    }
+
+    /// A real human message is the only event that can authorize considering
+    /// new work after a failure. Prompt policy still requires an explicit
+    /// retry request; this gate prevents autonomous same-turn retry loops.
+    pub(crate) fn begin_human_turn(&self) {
+        self.inner.state.lock().unwrap().spawn_paused = false;
     }
 
     pub fn snapshot(&self) -> JobsSnapshot {
@@ -324,26 +359,38 @@ impl BackgroundHub {
     }
 
     pub fn cancel(&self, id: &str) -> bool {
-        let state = self.inner.state.lock().unwrap();
+        let mut state = self.inner.state.lock().unwrap();
         let Some(job) = state
             .jobs
-            .iter()
+            .iter_mut()
             .find(|job| job.id == id && job.state != JobState::Ready)
         else {
             return false;
         };
         job.cancel.store(true, Ordering::SeqCst);
+        settle_queued_cancellation(job);
+        state.spawn_paused = true;
+        self.inner.revision.fetch_add(1, Ordering::Release);
         drop(state);
         self.inner.changed.notify_all();
         true
     }
 
     pub fn cancel_all(&self) -> usize {
-        let state = self.inner.state.lock().unwrap();
-        let active = state.jobs.iter().filter(|job| job.state != JobState::Ready);
-        let count = active.clone().count();
-        for job in active {
+        let mut state = self.inner.state.lock().unwrap();
+        let mut count = 0;
+        for job in state
+            .jobs
+            .iter_mut()
+            .filter(|job| job.state != JobState::Ready)
+        {
+            count += 1;
             job.cancel.store(true, Ordering::SeqCst);
+            settle_queued_cancellation(job);
+        }
+        if count > 0 {
+            state.spawn_paused = true;
+            self.inner.revision.fetch_add(1, Ordering::Release);
         }
         drop(state);
         self.inner.changed.notify_all();
@@ -406,6 +453,8 @@ fn worker_loop(inner: Arc<Inner>) {
                         "background sub-agent canceled before it started",
                     ));
                     job.runner.take();
+                    state.spawn_paused = true;
+                    inner.revision.fetch_add(1, Ordering::Release);
                     inner.changed.notify_all();
                     continue;
                 }
@@ -417,6 +466,7 @@ fn worker_loop(inner: Arc<Inner>) {
                 let job = &mut state.jobs[index];
                 job.state = JobState::Running;
                 job.started = Instant::now();
+                inner.revision.fetch_add(1, Ordering::Release);
                 break (
                     job.id.clone(),
                     job.started,
@@ -427,7 +477,7 @@ fn worker_loop(inner: Arc<Inner>) {
         };
 
         let (id, started, cancel, runner) = work;
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runner(cancel)))
+        let mut outcome = crate::agent::sched::catch_unwind_silent(|| runner(cancel.clone()))
             .unwrap_or_else(|_| {
                 ToolOutcome::err(
                     "the background sub-agent crashed; this is a noob bug, retry the task",
@@ -435,14 +485,41 @@ fn worker_loop(inner: Arc<Inner>) {
             });
         let mut state = inner.state.lock().unwrap();
         state.running = state.running.saturating_sub(1);
+        let mut pause_spawning = false;
         if let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) {
+            // Linearization point: cancel() accepts only while the job is not
+            // Ready and sets this flag under the same state lock. If it won
+            // before this commit, the runner cannot contradict it with `ok`.
+            if cancel.load(Ordering::SeqCst) && !outcome.canceled {
+                outcome = ToolOutcome::canceled_with("background sub-agent canceled by user");
+            }
+            pause_spawning = outcome.is_error || outcome.canceled;
             job.state = JobState::Ready;
             job.elapsed = Some(started.elapsed());
             job.outcome = Some(outcome);
+            inner.revision.fetch_add(1, Ordering::Release);
+        }
+        if pause_spawning {
+            state.spawn_paused = true;
         }
         drop(state);
         inner.changed.notify_all();
     }
+}
+
+/// Settle a job that has not been admitted to a worker. The caller holds the
+/// hub state lock, so a worker can observe either Queued or Ready, never an
+/// intermediate state and never the discarded runner.
+fn settle_queued_cancellation(job: &mut Job) {
+    if job.state != JobState::Queued {
+        return;
+    }
+    job.state = JobState::Ready;
+    job.elapsed = Some(Duration::default());
+    job.outcome = Some(ToolOutcome::canceled_with(
+        "background sub-agent canceled before it started",
+    ));
+    job.runner.take();
 }
 
 fn prompt_slice(prompt: &str) -> String {
@@ -499,23 +576,173 @@ mod tests {
         let snapshot = hub.snapshot();
         assert_eq!((snapshot.running, snapshot.queued), (1, 1));
         assert!(hub.cancel("agent-2"));
-        gate.store(true, Ordering::SeqCst);
-        wait_until(|| hub.snapshot().ready == 2);
-
-        let ready = hub.take_ready();
-        assert_eq!(ready.len(), 2);
-        assert_eq!(ready[0].id, "agent-1");
-        assert_eq!(ready[1].id, "agent-2");
-        assert!(!ready[0].outcome.is_error);
-        assert!(ready[1].outcome.canceled);
-        assert!(
-            hub.take_ready().is_empty(),
-            "results must move out exactly once"
+        let snapshot = hub.snapshot();
+        assert_eq!(
+            (snapshot.running, snapshot.queued, snapshot.ready),
+            (1, 0, 1)
         );
+        let canceled = hub.take_ready();
+        assert_eq!(canceled.len(), 1);
+        assert_eq!(canceled[0].id, "agent-2");
+        assert!(canceled[0].outcome.canceled);
+        assert!(hub.take_ready().is_empty());
         assert!(
             started_rx.try_recv().is_err(),
             "a canceled queued job must not run"
         );
+
+        gate.store(true, Ordering::SeqCst);
+        wait_until(|| hub.snapshot().ready == 1);
+
+        let ready = hub.take_ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, "agent-1");
+        assert!(!ready[0].outcome.is_error);
+        assert!(
+            hub.take_ready().is_empty(),
+            "results must move out exactly once"
+        );
+        assert!(hub.shutdown().is_empty());
+    }
+
+    #[test]
+    fn cancel_all_settles_queued_jobs_before_a_worker_is_free() {
+        let hub = BackgroundHub::new(1);
+        let (started_tx, started_rx) = mpsc::channel();
+        let gate = Arc::new(AtomicBool::new(false));
+
+        let first_gate = gate.clone();
+        let first_tx = started_tx.clone();
+        hub.submit_with("running".to_string(), move |cancel| {
+            first_tx.send("running").unwrap();
+            while !first_gate.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if cancel.load(Ordering::SeqCst) {
+                ToolOutcome::canceled()
+            } else {
+                ToolOutcome::ok("unexpected", "done")
+            }
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        for name in ["queued-one", "queued-two", "queued-three"] {
+            let tx = started_tx.clone();
+            hub.submit_with(name.to_string(), move |_| {
+                tx.send("queued").unwrap();
+                ToolOutcome::ok("unexpected", "done")
+            });
+        }
+
+        assert_eq!(hub.cancel_all(), 4);
+        let snapshot = hub.snapshot();
+        assert_eq!(
+            (snapshot.running, snapshot.queued, snapshot.ready),
+            (1, 0, 3)
+        );
+        let ready = hub.take_ready();
+        assert_eq!(
+            ready
+                .iter()
+                .map(|result| result.id.as_str())
+                .collect::<Vec<_>>(),
+            ["agent-2", "agent-3", "agent-4"]
+        );
+        assert!(ready.iter().all(|result| result.outcome.canceled));
+        assert!(hub.take_ready().is_empty());
+        assert!(started_rx.try_recv().is_err());
+
+        gate.store(true, Ordering::SeqCst);
+        wait_until(|| hub.settled_ready());
+        let running = hub.take_ready();
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].id, "agent-1");
+        assert!(running[0].outcome.canceled);
+        assert!(hub.shutdown().is_empty());
+    }
+
+    #[test]
+    fn accepted_running_cancel_wins_over_a_simultaneous_success() {
+        let hub = BackgroundHub::new(1);
+        let (started_tx, started_rx) = mpsc::channel();
+        let release = Arc::new(AtomicBool::new(false));
+        let runner_release = release.clone();
+        hub.submit_with("cancel race".to_string(), move |_| {
+            started_tx.send(()).unwrap();
+            while !runner_release.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            // Ignore the token deliberately to force the worker-commit race.
+            ToolOutcome::ok("late success", "done")
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        assert!(hub.cancel("agent-1"));
+        release.store(true, Ordering::SeqCst);
+        wait_until(|| hub.settled_ready());
+        let ready = hub.take_ready();
+        assert_eq!(ready.len(), 1);
+        assert!(ready[0].outcome.canceled);
+        assert!(ready[0].outcome.is_error);
+        assert!(!ready[0].outcome.content.contains("late success"));
+        assert!(hub.shutdown().is_empty());
+    }
+
+    #[test]
+    fn accepted_cancel_blocks_same_batch_replacement_before_delivery() {
+        let hub = BackgroundHub::new(1);
+        let (started_tx, started_rx) = mpsc::channel();
+        hub.submit_with("original".into(), move |cancel| {
+            started_tx.send(()).unwrap();
+            while !cancel.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            ToolOutcome::canceled()
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        assert!(hub.cancel("agent-1"));
+        let blocked = hub.submit_with("same batch replacement".into(), |_| {
+            ToolOutcome::ok("unexpected", "done")
+        });
+        assert!(blocked.is_error);
+        assert!(blocked.content.contains("new instruction"));
+
+        wait_until(|| hub.settled_ready());
+        assert!(hub.take_ready()[0].outcome.canceled);
+        hub.begin_human_turn();
+        let admitted = hub.submit_with("human retry".into(), |_| ToolOutcome::ok("done", "done"));
+        assert!(!admitted.is_error);
+        wait_until(|| hub.settled_ready());
+        assert_eq!(hub.take_ready().len(), 1);
+        assert!(hub.shutdown().is_empty());
+    }
+
+    #[test]
+    fn terminal_failure_blocks_same_turn_replacement_until_human_input() {
+        let hub = BackgroundHub::new(1);
+        hub.submit_with("fails".into(), |_| ToolOutcome::err("failed"));
+        wait_until(|| hub.settled_ready());
+        // Terminal commit itself closes admission. Delivery is not the
+        // linearization point and cannot leave a race window.
+        let blocked = hub.submit_with("replacement".into(), |_| {
+            ToolOutcome::ok("unexpected", "done")
+        });
+        assert!(blocked.is_error);
+        assert!(blocked.content.contains("new instruction"));
+        assert_eq!(hub.snapshot().active, 0);
+        let failed = hub.take_ready();
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].outcome.is_error);
+
+        hub.begin_human_turn();
+        let admitted = hub.submit_with("new human work".into(), |_| {
+            ToolOutcome::ok("finished", "done")
+        });
+        assert!(!admitted.is_error);
+        wait_until(|| hub.settled_ready());
+        assert_eq!(hub.take_ready().len(), 1);
+        assert!(hub.shutdown().is_empty());
     }
 
     #[test]
@@ -543,9 +770,32 @@ mod tests {
     }
 
     #[test]
-    fn panicking_job_releases_its_slot_and_becomes_a_result() {
+    fn panicking_job_is_silent_and_releases_its_slot_and_becomes_a_result() {
+        const CHILD: &str = "NOOB_TEST_SILENT_BACKGROUND_PANIC";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("panicking_job_is_silent_and_releases_its_slot_and_becomes_a_result")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "child failed:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let output = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!output.contains("background panic sentinel"), "{output}");
+            return;
+        }
+
         let hub = BackgroundHub::new(1);
-        hub.submit_with("crash".to_string(), |_| panic!("boom"));
+        hub.submit_with("crash".to_string(), |_| panic!("background panic sentinel"));
         hub.submit_with("next".to_string(), |_| ToolOutcome::ok("finished", "done"));
         wait_until(|| hub.snapshot().ready == 2);
         let results = hub.take_ready();
@@ -616,10 +866,16 @@ mod tests {
         assert_eq!(first.summary, "agent-1 started · 1 active");
         assert_eq!(second.summary, "agent-2 started · 2 active");
         let ack = serde_json::from_str::<serde_json::Value>(&second.content).unwrap();
-        assert_eq!(ack["job_id"], "agent-2", "the acknowledgment stays parseable");
+        assert_eq!(
+            ack["job_id"], "agent-2",
+            "the acknowledgment stays parseable"
+        );
         assert_eq!(ack["status"], "running");
         assert!(
-            ack["contract"].as_str().unwrap().contains("delivered to you"),
+            ack["contract"]
+                .as_str()
+                .unwrap()
+                .contains("delivered to you"),
             "the acknowledgment must carry the lifecycle contract: {ack}"
         );
         gate.store(true, Ordering::SeqCst);

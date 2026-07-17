@@ -249,13 +249,28 @@ pub fn is_read_only(name: &str) -> bool {
 /// safe to parallelize but pointless without mcp_call, so it stays out.
 pub const READ_ONLY_SET: &[&str] = &["read", "grep", "glob", "ls", "context", "skill"];
 
+/// Workspace-nonmutating research child set. Unlike plan mode, this may call
+/// the one configured web-search MCP server, but it cannot run Bash, change
+/// files, alter the plan, or delegate again.
+pub const WEB_RESEARCH_SET: &[&str] = &[
+    "read",
+    "grep",
+    "glob",
+    "ls",
+    "context",
+    "skill",
+    "mcp_connect",
+    "mcp_call",
+];
+
 /// Execute one tool call. `args` is the parsed arguments object.
 pub fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
-    // Full-tool child agents run concurrently, but their individual workspace
-    // mutations take an OS lock on the mounted directory. Root turns fail
-    // promptly when another writer is active; children wait briefly so two
-    // independent edits serialize without occupying the main conversation.
-    let _workspace_lease = if matches!(name, "write" | "edit" | "bash") {
+    // File-tool mutations take an OS lock on the mounted directory. Bash is
+    // deliberately not leased: builds, tests, searches, and status commands
+    // must remain usable while agents work, and no shell parser can reliably
+    // classify arbitrary scripts. The system contract tells agents to make
+    // source changes through write/edit, where this guard is enforceable.
+    let _workspace_lease = if matches!(name, "write" | "edit") {
         let depth = std::env::var("NOOB_DEPTH")
             .ok()
             .and_then(|value| value.parse::<u32>().ok())
@@ -533,6 +548,9 @@ mod tests {
             max_turns: 25,
             wall_clock: std::time::Duration::from_secs(300),
             verbose: false,
+            overrides: noob_provider::types::Overrides::default(),
+            yolo: false,
+            ancestor_skills: Vec::new(),
             background: None,
         };
         ctx.task = Some(cfg.clone());
@@ -552,6 +570,9 @@ mod tests {
             max_turns: 25,
             wall_clock: std::time::Duration::from_secs(300),
             verbose: false,
+            overrides: noob_provider::types::Overrides::default(),
+            yolo: false,
+            ancestor_skills: Vec::new(),
             background: None,
         });
         let child_lease =
@@ -569,6 +590,13 @@ mod tests {
                 .contains("another parent or sub-agent mutation")
         );
         assert!(!ctx.workspace.join("race.txt").exists());
+
+        let concurrent_bash = dispatch(&ctx, "bash", &json!({"cmd": "pwd"}));
+        assert!(
+            !concurrent_bash.is_error,
+            "read/build/test Bash must not contend with the file mutation lease: {}",
+            concurrent_bash.content
+        );
 
         drop(child_lease);
         let written = dispatch(

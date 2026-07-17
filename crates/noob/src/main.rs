@@ -11,12 +11,13 @@ mod subagent;
 mod tools;
 mod ui;
 
+use std::collections::HashSet;
 use std::io::Read;
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
 
 use noob_provider::http::{Client, INTERRUPTED, Timeouts};
-use noob_provider::types::Overrides;
+use noob_provider::types::{Item, Overrides};
 use serde_json::json;
 
 use agent::{Agent, RunEnd, prompt};
@@ -76,8 +77,15 @@ struct BootArgs {
     plan: bool,
     /// Register only the read-only set (read-only children).
     read_only: bool,
-    /// Relay sub-agent stderr as `[task] ...` lines.
+    /// Nonmutating research child: local reads plus the uniquely configured
+    /// web-search MCP server.
+    web_only: bool,
+    /// Relay sub-agent stderr as `[subagent] ...` diagnostics.
     verbose: bool,
+    /// Skill names already loaded by ancestor agents. A child filters these
+    /// from discovery so orchestration skills cannot recursively invoke
+    /// themselves through nested delegation.
+    excluded_skills: Vec<String>,
     /// None = no persistence; Some(None) = fresh id; Some(Some(id)) = resume.
     session: Option<Option<String>>,
 }
@@ -89,7 +97,9 @@ impl BootArgs {
             yolo,
             plan,
             read_only: false,
+            web_only: false,
             verbose: false,
+            excluded_skills: Vec::new(),
             session,
         }
     }
@@ -126,10 +136,25 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
     // so `debug prompt` and a live session print the identical head.
     let model = model_label(&config_dir, &ov);
     let skill_paths = config::skill_paths(&config_dir, &workspace);
-    let discovered = skills::discover(&workspace, &config_dir, &skill_paths);
-    let (mcp_servers, mcp_warnings) = mcp::config::load(&workspace, &config_dir);
+    let mut discovered = skills::discover(&workspace, &config_dir, &skill_paths);
+    if !boot.excluded_skills.is_empty() {
+        discovered.retain(|skill| !boot.excluded_skills.contains(&skill.name));
+    }
+    let (mut mcp_servers, mcp_warnings) = mcp::config::load(&workspace, &config_dir);
     for warning in &mcp_warnings {
         ui.note(&format!("mcp: {warning}"));
+    }
+    if boot.web_only {
+        let Some(web_server) = mcp::unique_normalized_server(
+            mcp_servers.iter().map(|server| server.name.as_str()),
+            "websearch",
+        )
+        .map(str::to_string) else {
+            return Err(
+                "web research child needs one unambiguous MCP server named websearch".to_string(),
+            );
+        };
+        mcp_servers.retain(|server| server.name == web_server);
     }
     let inputs = prompt::PromptInputs {
         cwd: workspace.display().to_string(),
@@ -140,7 +165,7 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
         skills_index: skills::index(&discovered),
         // A read-only child has no mcp_call; naming servers would only
         // tempt it into calls it cannot make.
-        mcp_line: if boot.read_only {
+        mcp_line: if boot.read_only && !boot.web_only {
             None
         } else {
             prompt::mcp_line(&mcp_servers)
@@ -164,12 +189,14 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
     if with_task {
         tool_specs.push(subagent::spec());
     }
-    if boot.read_only {
+    if boot.web_only {
+        tool_specs.retain(|t| tools::WEB_RESEARCH_SET.contains(&t.name.as_str()));
+    } else if boot.read_only {
         tool_specs.retain(|t| tools::READ_ONLY_SET.contains(&t.name.as_str()));
     }
     let mut tool_ctx = ToolCtx::new(workspace, sandbox);
     tool_ctx.skills = discovered;
-    if !mcp_servers.is_empty() && !boot.read_only {
+    if !mcp_servers.is_empty() && (!boot.read_only || boot.web_only) {
         tool_ctx.mcp = Some(mcp::Mcp::new(mcp_servers));
     }
     if with_task {
@@ -179,6 +206,9 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
             max_turns: config::task_max_turns(&config_dir),
             wall_clock: config::task_wall_clock(&config_dir),
             verbose: boot.verbose,
+            overrides: ov.clone(),
+            yolo: boot.yolo,
+            ancestor_skills: boot.excluded_skills.clone(),
             background: None,
         });
     }
@@ -836,8 +866,7 @@ fn handle_mcp(args: &str, agent: &mut Agent, ui: &mut Ui) {
             };
             match mgr.connect(rest) {
                 Ok(info) => {
-                    let names: Vec<&str> =
-                        info.tools.iter().map(|t| t.name.as_str()).collect();
+                    let names: Vec<&str> = info.tools.iter().map(|t| t.name.as_str()).collect();
                     ui.note(&format!(
                         "connected {rest} (protocol {}): {} tools: {}",
                         info.protocol,
@@ -1128,7 +1157,7 @@ fn cmd_exec(args: &[String]) -> ExitCode {
 // ---------------------------------------------------------------------------
 
 /// The sub-agent entry point. Reads ONE JSON task object from stdin
-/// (`{"prompt", "tools": "read-only"|"all", "max_turns"}`), runs a fresh
+/// (`{"prompt", "tools": "read-only"|"web"|"all", "max_turns"}`), runs a fresh
 /// scoped context with no parent history, streams progress to stderr, and
 /// writes exactly one JSON result line to stdout:
 /// `{"status": "ok"|"error", "result", "turns", "usage"}`.
@@ -1165,13 +1194,14 @@ fn cmd_child() -> ExitCode {
             None,
         );
     };
-    let read_only = match task_obj.get("tools").and_then(serde_json::Value::as_str) {
-        None | Some("read-only") => true,
-        Some("all") => false,
+    let (read_only, web_only) = match task_obj.get("tools").and_then(serde_json::Value::as_str) {
+        None | Some("read-only") => (true, false),
+        Some("web") => (true, true),
+        Some("all") => (false, false),
         Some(other) => {
             return child_result(
                 "error",
-                &format!("unknown tools mode {other:?}; use \"read-only\" or \"all\""),
+                &format!("unknown tools mode {other:?}; use \"read-only\", \"web\", or \"all\""),
                 0,
                 None,
             );
@@ -1179,8 +1209,45 @@ fn cmd_child() -> ExitCode {
     };
 
     let mut ui = Ui::new(Mode::Child);
-    let mut boot = BootArgs::new(Overrides::default(), false, false, None);
+    let runtime = task_obj.get("_noob_runtime");
+    let mut overrides = Overrides::default();
+    if let Some(runtime) = runtime {
+        overrides.base_url = runtime
+            .get("base_url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        overrides.model = runtime
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        overrides.api_style = runtime
+            .get("api_style")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+    }
+    let mut boot = BootArgs::new(
+        overrides,
+        runtime
+            .and_then(|value| value.get("yolo"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        false,
+        None,
+    );
     boot.read_only = read_only;
+    boot.web_only = web_only;
+    boot.verbose = runtime
+        .and_then(|value| value.get("verbose"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    boot.excluded_skills = runtime
+        .and_then(|value| value.get("excluded_skills"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect();
     let (mut agent, _) = match bootstrap(boot, &mut ui) {
         Ok(pair) => pair,
         Err(e) => return child_result("error", &e, 0, None),
@@ -1206,12 +1273,78 @@ fn cmd_child() -> ExitCode {
         .map(|n| (n as u32).clamp(1, env_cap))
         .unwrap_or(env_cap);
 
-    let (status, result) = match agent.run_input(prompt_text, &mut ui) {
+    let original_round_cap = agent.max_rounds;
+    let mut end = agent.run_input(prompt_text, &mut ui);
+    let mut total_rounds = agent.last_rounds;
+
+    // A web-research child must prove that it actually consulted sources.
+    // Small local models sometimes answer from memory even with the MCP tools
+    // in their schema, so give one explicit correction without extending the
+    // original child budget. Aborts and interrupts are terminal and pass
+    // through untouched.
+    if web_only
+        && matches!(&end, RunEnd::Completed(_))
+        && completed_mcp_call_count(&agent.items) < 2
+    {
+        let remaining = original_round_cap.saturating_sub(total_rounds);
+        if remaining == 0 {
+            end = RunEnd::Aborted(format!(
+                "web research returned without the required 2 mcp_call evidence calls, and the original {original_round_cap}-round budget is exhausted"
+            ));
+        } else {
+            let server = agent
+                .tool_ctx
+                .mcp
+                .as_ref()
+                .and_then(|mcp| mcp.names().into_iter().next())
+                .unwrap_or("websearch")
+                .to_string();
+            agent.max_rounds = remaining;
+            let correction = format!(
+                "[web research evidence gate] No usable web evidence was gathered. Use mcp_connect on the configured server {server:?}, then make at least 2 successful mcp_call operations that gather usable source evidence by searching and fetching primary sources before returning a corrected synthesis. Do not answer from memory."
+            );
+            end = agent.run_input(&correction, &mut ui);
+            total_rounds = total_rounds.saturating_add(agent.last_rounds);
+            if matches!(&end, RunEnd::Completed(_)) && completed_mcp_call_count(&agent.items) < 2 {
+                end = RunEnd::Aborted(
+                    "web research returned without the required 2 mcp_call evidence calls after one corrective follow-up"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    let (status, result) = match end {
         RunEnd::Completed(text) => ("ok", text),
         RunEnd::Aborted(msg) => ("error", msg),
         RunEnd::Interrupted => ("error", "interrupted".to_string()),
     };
-    child_result(status, &result, agent.last_rounds, agent.last_usage())
+    child_result(status, &result, total_rounds, agent.last_usage())
+}
+
+fn completed_mcp_call_count(items: &[Item]) -> usize {
+    let call_ids: HashSet<&str> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Assistant { tool_calls, .. } => Some(tool_calls),
+            _ => None,
+        })
+        .flatten()
+        .filter(|call| call.name == "mcp_call")
+        .map(|call| call.id.as_str())
+        .collect();
+    let completed_ids: HashSet<&str> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::ToolResult { call_id, content }
+                if content.starts_with("[untrusted content from MCP server ") =>
+            {
+                Some(call_id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    call_ids.intersection(&completed_ids).count()
 }
 
 /// The single stdout line; everything else this process printed went to

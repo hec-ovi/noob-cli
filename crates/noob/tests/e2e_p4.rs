@@ -146,7 +146,7 @@ fn no_mcp_config_means_no_line_and_no_tools() {
     ok(&rig.run(&["exec", "-p", "hello"]));
     let reqs = rig.api_requests();
     let system = reqs[0]["messages"][0]["content"].as_str().unwrap();
-    assert!(!system.contains("MCP servers"));
+    assert!(!system.contains("MCP servers (use mcp_connect)"));
     assert_eq!(reqs[0]["tools"].as_array().unwrap().len(), 10);
     rig.server.assert_clean();
 }

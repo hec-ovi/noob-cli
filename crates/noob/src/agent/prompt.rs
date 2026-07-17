@@ -254,7 +254,10 @@ mod tests {
         // never carries schemas or URLs.
         assert!(s.ends_with("MCP servers (use mcp_connect): fs, websearch"));
         assert!(!s.contains("localhost:8000"));
-        assert!(s.find("# Skills (resolver)").unwrap() < s.find("MCP servers").unwrap());
+        assert!(
+            s.find("# Skills (resolver)").unwrap()
+                < s.find("MCP servers (use mcp_connect)").unwrap()
+        );
     }
 
     #[test]

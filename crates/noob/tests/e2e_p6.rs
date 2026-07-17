@@ -8,6 +8,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use noob_testkit::mcp::{McpHttpServer, echo_tools};
 use noob_testkit::{MockServer, RawStep, chat_stream_datas, sse_headers};
 use serde_json::Value;
 
@@ -216,6 +217,262 @@ fn read_only_child_refuses_hallucinated_mutations() {
     rig.server.assert_clean();
 }
 
+/// The web profile keeps real MCP research available while structurally
+/// refusing the stray file write caught in the installed research skill.
+#[test]
+fn web_child_has_only_local_reads_and_one_web_mcp() {
+    let rig = rig();
+    let web = McpHttpServer::start(echo_tools());
+    std::fs::write(
+        rig.config.path().join("mcp.json"),
+        format!(
+            r#"{{"servers":{{"Web_Search":{{"url":"{}"}}}}}}"#,
+            web.url()
+        ),
+    )
+    .unwrap();
+    rig.server.enqueue_stream_toolcalls(
+        &[(
+            "m1",
+            "write",
+            r#"{"path":"stray-findings.md","content":"must not land"}"#,
+        )],
+        None,
+    );
+    rig.server.enqueue_stream_toolcalls(
+        &[("connect", "mcp_connect", r#"{"server":"Web_Search"}"#)],
+        None,
+    );
+    rig.server.enqueue_stream_toolcalls(
+        &[
+            (
+                "search",
+                "mcp_call",
+                r#"{"server":"Web_Search","tool":"echo","args":{"text":"search primary docs"}}"#,
+            ),
+            (
+                "fetch",
+                "mcp_call",
+                r#"{"server":"Web_Search","tool":"echo","args":{"text":"fetch source"}}"#,
+            ),
+        ],
+        None,
+    );
+    rig.server
+        .enqueue_stream_completion("returning the sourced synthesis instead");
+
+    let out = rig.run_child(
+        r#"{"prompt":"research and return findings","tools":"web"}"#,
+        None,
+    );
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!rig.work.path().join("stray-findings.md").exists());
+
+    let reqs = rig.api_requests();
+    assert_eq!(
+        tool_names(&reqs[0]),
+        [
+            "read",
+            "grep",
+            "glob",
+            "ls",
+            "context",
+            "mcp_connect",
+            "mcp_call"
+        ]
+    );
+    assert!(
+        reqs[0]["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("MCP servers (use mcp_connect): Web_Search")
+    );
+    let refusal = reqs[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap();
+    assert!(refusal.contains("this sub-agent is read-only"), "{refusal}");
+    assert_eq!(web.calls().len(), 2);
+    web.assert_clean();
+    rig.server.assert_clean();
+}
+
+/// A memory-only first answer is not accepted. The child gets one internal
+/// correction, uses the configured MCP server twice, and reports only the
+/// evidence-backed completion while staying inside the original round cap.
+#[test]
+fn web_child_corrects_an_unsupported_completion_with_real_mcp_evidence() {
+    let rig = rig();
+    let web = McpHttpServer::start(echo_tools());
+    std::fs::write(
+        rig.config.path().join("mcp.json"),
+        format!(
+            r#"{{"servers":{{"Web_Search":{{"url":"{}"}}}}}}"#,
+            web.url()
+        ),
+    )
+    .unwrap();
+
+    rig.server
+        .enqueue_stream_completion("unsupported answer from memory");
+    rig.server.enqueue_stream_toolcalls(
+        &[("connect", "mcp_connect", r#"{"server":"Web_Search"}"#)],
+        None,
+    );
+    rig.server.enqueue_stream_toolcalls(
+        &[
+            (
+                "search",
+                "mcp_call",
+                r#"{"server":"Web_Search","tool":"echo","args":{"text":"search official docs"}}"#,
+            ),
+            (
+                "fetch",
+                "mcp_call",
+                r#"{"server":"Web_Search","tool":"echo","args":{"text":"fetch primary source"}}"#,
+            ),
+        ],
+        None,
+    );
+    rig.server
+        .enqueue_stream_completion("evidence-backed answer");
+
+    let out = rig.run_child(
+        r#"{"prompt":"research current behavior","tools":"web","max_turns":4}"#,
+        None,
+    );
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["result"], "evidence-backed answer");
+    assert_eq!(result["turns"], 4);
+    assert_eq!(web.calls().len(), 2);
+
+    let requests = rig.api_requests();
+    let corrective = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| {
+            message["role"] == "user"
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("web research evidence gate"))
+        })
+        .expect("internal evidence correction")["content"]
+        .as_str()
+        .unwrap();
+    assert!(corrective.contains("Web_Search"), "{corrective}");
+    assert!(
+        corrective.contains("at least 2 successful mcp_call"),
+        "{corrective}"
+    );
+    assert!(
+        corrective.contains("Do not answer from memory"),
+        "{corrective}"
+    );
+    web.assert_clean();
+    rig.server.assert_clean();
+}
+
+/// One ignored corrective follow-up is terminal. A second unsupported
+/// completion becomes a structured child error instead of false success.
+#[test]
+fn web_child_rejects_a_second_completion_without_mcp_evidence() {
+    let rig = rig();
+    let web = McpHttpServer::start(echo_tools());
+    std::fs::write(
+        rig.config.path().join("mcp.json"),
+        format!(r#"{{"servers":{{"websearch":{{"url":"{}"}}}}}}"#, web.url()),
+    )
+    .unwrap();
+    rig.server.enqueue_stream_toolcalls(
+        &[
+            (
+                "unconnected-search",
+                "mcp_call",
+                r#"{"server":"websearch","tool":"echo","args":{"text":"search"}}"#,
+            ),
+            (
+                "unconnected-fetch",
+                "mcp_call",
+                r#"{"server":"websearch","tool":"echo","args":{"text":"fetch"}}"#,
+            ),
+        ],
+        None,
+    );
+    rig.server.enqueue_stream_completion("first memory answer");
+    rig.server.enqueue_stream_completion("second memory answer");
+
+    let out = rig.run_child(
+        r#"{"prompt":"research this","tools":"web","max_turns":4}"#,
+        None,
+    );
+    assert!(!out.status.success());
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["status"], "error");
+    assert_eq!(result["turns"], 3);
+    assert!(
+        result["result"]
+            .as_str()
+            .unwrap()
+            .contains("without the required 2 mcp_call evidence calls after one corrective"),
+        "{result}"
+    );
+    assert!(web.calls().is_empty());
+    web.assert_clean();
+    rig.server.assert_clean();
+}
+
+/// The evidence correction cannot silently grant extra inference rounds. If
+/// the first unsupported answer consumes the original budget, the child
+/// fails immediately without another provider request.
+#[test]
+fn web_child_does_not_extend_an_exhausted_round_budget() {
+    let rig = rig();
+    let web = McpHttpServer::start(echo_tools());
+    std::fs::write(
+        rig.config.path().join("mcp.json"),
+        format!(r#"{{"servers":{{"websearch":{{"url":"{}"}}}}}}"#, web.url()),
+    )
+    .unwrap();
+    rig.server
+        .enqueue_stream_completion("unsupported one-round answer");
+
+    let out = rig.run_child(
+        r#"{"prompt":"research this","tools":"web","max_turns":1}"#,
+        None,
+    );
+    assert!(!out.status.success());
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["status"], "error");
+    assert_eq!(result["turns"], 1);
+    assert!(
+        result["result"]
+            .as_str()
+            .unwrap()
+            .contains("original 1-round budget is exhausted"),
+        "{result}"
+    );
+    assert_eq!(rig.api_requests().len(), 1);
+    assert!(web.calls().is_empty());
+    web.assert_clean();
+    rig.server.assert_clean();
+}
+
 /// A malformed payload never hangs or crashes: one error line, exit 1.
 #[test]
 fn child_rejects_bad_payloads_with_one_line() {
@@ -326,6 +583,277 @@ fn child_fanout() {
         );
     }
     rig.server.assert_clean();
+}
+
+/// Provider and sandbox choices are part of the child protocol. CLI flags
+/// outrank `.env` for the root and must keep that precedence after the
+/// process boundary instead of silently sending detached work elsewhere.
+#[test]
+fn child_inherits_root_cli_provider_model_and_yolo() {
+    let selected = MockServer::start();
+    selected.allow_interleaving();
+    let ignored = MockServer::start();
+    let config = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    write_env(config.path(), &ignored.base_url());
+
+    selected.enqueue_stream_toolcalls(
+        &[(
+            "spawn",
+            "subagent",
+            r#"{"prompt":"check inherited runtime"}"#,
+        )],
+        None,
+    );
+    selected.enqueue_stream_completion("child used root runtime");
+    selected.enqueue_stream_completion("parent collected child");
+
+    let out = noob(config.path(), work.path())
+        .args([
+            "exec",
+            "-p",
+            "delegate once",
+            "--base-url",
+            &selected.base_url(),
+            "--model",
+            "root-selected-model",
+            "--yolo",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let requests: Vec<Value> = selected
+        .recorded()
+        .iter()
+        .filter(|request| request.path.ends_with("/chat/completions"))
+        .map(|request| request.json().unwrap())
+        .collect();
+    assert_eq!(requests.len(), 3, "root twice plus one child");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["model"] == "root-selected-model")
+    );
+    let child = requests
+        .iter()
+        .find(|request| request["messages"][1]["content"] == "check inherited runtime")
+        .expect("child request");
+    assert!(
+        child["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("sandbox: off (--yolo)")
+    );
+    assert!(
+        ignored.recorded().is_empty(),
+        "child contacted the .env server"
+    );
+    selected.assert_clean();
+}
+
+/// A skill that delegates is parent orchestration context. Once loaded, its
+/// name is excluded from the child resolver so an all-tools child cannot
+/// rediscover and recursively execute the same workflow.
+#[test]
+fn loaded_orchestration_skill_is_not_rediscovered_by_child() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let skill = rig.work.path().join(".noob/skills/research");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: research\ndescription: delegate deep investigations\n---\n\
+         Load this and delegate one investigation with run_in_background.\n",
+    )
+    .unwrap();
+
+    rig.server
+        .enqueue_stream_toolcalls(&[("load", "skill", r#"{"name":"research"}"#)], None);
+    rig.server.enqueue_stream_toolcalls(
+        &[(
+            "spawn",
+            "subagent",
+            r#"{"prompt":"inspect without recursion","tools":"all"}"#,
+        )],
+        None,
+    );
+    rig.server
+        .enqueue_stream_completion("child did not recurse");
+    rig.server.enqueue_stream_completion("research collected");
+
+    let out = noob(rig.config.path(), rig.work.path())
+        .args(["exec", "-p", "use research"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let requests = rig.api_requests();
+    let child = requests
+        .iter()
+        .find(|request| request["messages"][1]["content"] == "inspect without recursion")
+        .expect("child request");
+    let names = tool_names(child);
+    assert!(!names.contains(&"skill".to_string()), "{names:?}");
+    assert!(
+        names.contains(&"subagent".to_string()),
+        "all-tools child stays capable"
+    );
+    assert!(
+        !child["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("- research:"),
+        "the loaded orchestration skill leaked into the child resolver"
+    );
+    rig.server.assert_clean();
+}
+
+/// Runtime overrides and loaded-skill exclusions cross every process boundary,
+/// not only the first one. The root loads `research`, its all-tools child loads
+/// `domain`, and the grandchild must inherit the selected endpoint/model/yolo
+/// while seeing neither ancestor orchestration skill.
+#[test]
+fn nested_children_inherit_runtime_and_transitive_skill_exclusions() {
+    let selected = MockServer::start();
+    selected.allow_interleaving();
+    let ignored = MockServer::start();
+    let config = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    write_env(config.path(), &ignored.base_url());
+
+    for (name, description) in [
+        ("research", "delegate research investigations"),
+        ("domain", "delegate domain inspections"),
+    ] {
+        let dir = work.path().join(".noob/skills").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\n{name} workflow\n"),
+        )
+        .unwrap();
+    }
+
+    // Root: load research, then delegate to an all-tools child.
+    selected.enqueue_stream_toolcalls(&[("root-load", "skill", r#"{"name":"research"}"#)], None);
+    selected.enqueue_stream_toolcalls(
+        &[(
+            "root-spawn",
+            "subagent",
+            r#"{"prompt":"child stage","tools":"all"}"#,
+        )],
+        None,
+    );
+    // Child: research is excluded, but domain remains loadable. Loading domain
+    // adds it to the exclusion chain before the nested process is spawned.
+    selected.enqueue_stream_toolcalls(&[("child-load", "skill", r#"{"name":"domain"}"#)], None);
+    selected.enqueue_stream_toolcalls(
+        &[(
+            "child-spawn",
+            "subagent",
+            r#"{"prompt":"grandchild stage","tools":"all"}"#,
+        )],
+        None,
+    );
+    selected.enqueue_stream_completion("grandchild inherited runtime");
+    selected.enqueue_stream_completion("child collected grandchild");
+    selected.enqueue_stream_completion("root collected child");
+
+    let out = noob(config.path(), work.path())
+        .args([
+            "exec",
+            "-p",
+            "exercise nested inheritance",
+            "--base-url",
+            &selected.base_url(),
+            "--model",
+            "root-selected-model",
+            "--yolo",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let requests: Vec<Value> = selected
+        .recorded()
+        .iter()
+        .filter(|request| request.path.ends_with("/chat/completions"))
+        .map(|request| request.json().unwrap())
+        .collect();
+    assert_eq!(requests.len(), 7, "root x3, child x3, grandchild x1");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["model"] == "root-selected-model"),
+        "a descendant lost the root model override: {requests:?}"
+    );
+
+    let initial = |prompt: &str| {
+        requests
+            .iter()
+            .find(|request| {
+                request["messages"]
+                    .as_array()
+                    .is_some_and(|messages| messages.len() == 2 && messages[1]["content"] == prompt)
+            })
+            .unwrap_or_else(|| panic!("missing initial request for {prompt:?}"))
+    };
+    let child = initial("child stage");
+    let child_system = child["messages"][0]["content"].as_str().unwrap();
+    assert!(child_system.contains("sandbox: off (--yolo)"));
+    assert!(!child_system.contains("- research:"), "{child_system}");
+    assert!(child_system.contains("- domain:"), "{child_system}");
+    let child_tools = tool_names(child);
+    assert!(
+        child_tools.contains(&"skill".to_string()),
+        "{child_tools:?}"
+    );
+    assert!(
+        child_tools.contains(&"subagent".to_string()),
+        "{child_tools:?}"
+    );
+
+    let grandchild = initial("grandchild stage");
+    let grandchild_system = grandchild["messages"][0]["content"].as_str().unwrap();
+    assert!(grandchild_system.contains("sandbox: off (--yolo)"));
+    assert!(
+        !grandchild_system.contains("- research:"),
+        "{grandchild_system}"
+    );
+    assert!(
+        !grandchild_system.contains("- domain:"),
+        "{grandchild_system}"
+    );
+    let grandchild_tools = tool_names(grandchild);
+    assert!(
+        !grandchild_tools.contains(&"skill".to_string()),
+        "{grandchild_tools:?}"
+    );
+    assert!(
+        !grandchild_tools.contains(&"subagent".to_string()),
+        "depth-2 grandchild retained delegation: {grandchild_tools:?}"
+    );
+
+    assert!(
+        ignored.recorded().is_empty(),
+        "a descendant contacted the .env endpoint"
+    );
+    selected.assert_clean();
 }
 
 /// Byte-identity guard for the agents fan-out panel: a headless surface (exec)

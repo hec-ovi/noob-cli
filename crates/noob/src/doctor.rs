@@ -1,6 +1,6 @@
 //! `noob doctor` (P7): diagnose the setup and print the one-line fix for
 //! every problem. Checks run in dependency order (config dir, .env,
-//! endpoint, wire shape, mcp.json, workspace, sandbox); nothing here
+//! endpoint, llama.cpp capacity, wire shape, mcp.json, workspace, sandbox); nothing here
 //! mutates state beyond a writability probe file that is removed again.
 //! Exit code 0 when everything needed for a working chat is in place, 1
 //! when at least one FAIL line printed.
@@ -134,7 +134,7 @@ fn check_endpoint(config_dir: &Path) -> Vec<Check> {
         ApiStyle::Chat => "chat",
         ApiStyle::Responses => "responses",
     };
-    match noob_provider::http::get_status(
+    let reachable = match noob_provider::http::get_status(
         &format!("{}/models", ep.base_url),
         &ep.api_key,
         REACH_TIMEOUT,
@@ -144,6 +144,7 @@ fn check_endpoint(config_dir: &Path) -> Vec<Check> {
                 "endpoint {} answers /models (HTTP {status}); model {:?}, style {style}",
                 ep.base_url, ep.model
             )));
+            true
         }
         Ok((s @ (401 | 403), _)) => {
             checks.push(Check::Fail(format!(
@@ -151,6 +152,7 @@ fn check_endpoint(config_dir: &Path) -> Vec<Check> {
                  config .env",
                 ep.base_url
             )));
+            false
         }
         Ok((status, _)) => {
             checks.push(Check::Fail(format!(
@@ -158,6 +160,7 @@ fn check_endpoint(config_dir: &Path) -> Vec<Check> {
                  NOOB_BASE_URL points at an OpenAI-compatible /v1 base",
                 ep.base_url
             )));
+            false
         }
         Err(e) => {
             checks.push(Check::Fail(format!(
@@ -165,7 +168,11 @@ fn check_endpoint(config_dir: &Path) -> Vec<Check> {
                  NOOB_BASE_URL in the config .env",
                 ep.base_url
             )));
+            false
         }
+    };
+    if reachable {
+        checks.extend(check_llama_slots(config_dir, &ep));
     }
     // Wire-shape sanity: the responses style outside api.openai.com is
     // usually a misconfiguration (llama.cpp and friends do not serve it).
@@ -177,6 +184,139 @@ fn check_endpoint(config_dir: &Path) -> Vec<Check> {
         )));
     }
     checks
+}
+
+/// llama.cpp documents `total_slots` on GET `/props` as the capacity set by
+/// `--parallel`. The parent consumes one inference slot while it is thinking,
+/// so fully concurrent detached work needs one more slot than the configured
+/// child cap. Other OpenAI-compatible providers are silent here: a missing,
+/// rejected, malformed, or non-llama `/props` response is not a diagnosis.
+fn check_llama_slots(config_dir: &Path, ep: &noob_provider::types::Endpoint) -> Vec<Check> {
+    // OpenAI is known not to expose llama.cpp properties. Avoid an irrelevant
+    // request (and its latency) against the first-party endpoint entirely.
+    if ep.base_url.contains("api.openai.com") {
+        return Vec::new();
+    }
+    let root = ep.base_url.strip_suffix("/v1").unwrap_or(&ep.base_url);
+    let model = encode_query_component(&ep.model);
+    // Router GETs auto-load an unloaded model unless this per-request switch
+    // is present. Diagnosis must remain read-only and must not consume VRAM.
+    let url = format!("{root}/props?model={model}&autoload=false");
+    let Ok((status, body)) = noob_provider::http::get_status(&url, &ep.api_key, REACH_TIMEOUT)
+    else {
+        return Vec::new();
+    };
+    if !(200..300).contains(&status) {
+        return Vec::new();
+    }
+    let Some(props) = llama_properties(&body) else {
+        return Vec::new();
+    };
+
+    let children = config::task_concurrency(config_dir) as u64;
+    let needed = children + 1;
+    let mut checks = Vec::new();
+    if props.slots >= needed {
+        checks.push(Check::Ok(format!(
+            "llama.cpp slots: {} available; enough for the parent + {children} detached sub-agents",
+            props.slots
+        )));
+    } else {
+        let alternative = match props.slots.checked_sub(1) {
+            Some(max_children @ 1..) => format!(
+                "restart llama-server with --parallel {needed}, adequate --ctx-size, and \
+                 --kv-unified where appropriate, or set NOOB_TASK_CONCURRENCY={max_children}"
+            ),
+            _ => format!(
+                "restart llama-server with --parallel {needed}, adequate --ctx-size, and \
+                 --kv-unified where appropriate; one slot cannot run the parent and a detached \
+                 sub-agent together"
+            ),
+        };
+        checks.push(Check::Warn(format!(
+            "llama.cpp has {} slot(s), but the parent + {children} configured detached sub-agents need {needed}; fix: {alternative}",
+            props.slots
+        )));
+    }
+
+    let expected_ctx = config::ctx_tokens(config_dir);
+    if let Some(n_ctx) = props.n_ctx
+        && n_ctx < expected_ctx
+    {
+        checks.push(Check::Warn(format!(
+            "llama.cpp reports n_ctx={n_ctx}, below NOOB_CTX={expected_ctx}; fix: set \
+             NOOB_CTX={n_ctx}, or raise llama-server --ctx-size while preserving enough context \
+             across its parallel slots"
+        )));
+    }
+
+    if props.supports_tools == Some(false) || props.supports_tool_calls == Some(false) {
+        checks.push(Check::Warn(
+            "llama.cpp chat template reports tool calling disabled; multi-agent calls may fail; \
+             fix: use a model/template whose /props chat_template_caps enables supports_tools \
+             and supports_tool_calls"
+                .to_string(),
+        ));
+    } else if children > 1 && props.supports_parallel_tool_calls == Some(false) {
+        checks.push(Check::Warn(
+            "llama.cpp chat template reports parallel tool calls disabled; sub-agent fan-out may \
+             serialize; fix: use a model/template whose /props chat_template_caps enables \
+             supports_parallel_tool_calls"
+                .to_string(),
+        ));
+    }
+    checks
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LlamaProperties {
+    slots: u64,
+    n_ctx: Option<u64>,
+    supports_tools: Option<bool>,
+    supports_tool_calls: Option<bool>,
+    supports_parallel_tool_calls: Option<bool>,
+}
+
+/// Require multiple documented llama.cpp `/props` fields before treating an
+/// arbitrary OpenAI-compatible endpoint as llama.cpp. Types are deliberately
+/// strict: ambiguous provider JSON must not create a false warning.
+fn llama_properties(body: &str) -> Option<LlamaProperties> {
+    let props: serde_json::Value = serde_json::from_str(body).ok()?;
+    let defaults = props.get("default_generation_settings")?.as_object()?;
+    if props.get("build_info")?.as_str()?.is_empty() {
+        return None;
+    }
+    let caps = props
+        .get("chat_template_caps")
+        .and_then(|value| value.as_object());
+    Some(LlamaProperties {
+        slots: props.get("total_slots")?.as_u64()?,
+        n_ctx: defaults.get("n_ctx").and_then(serde_json::Value::as_u64),
+        supports_tools: caps
+            .and_then(|value| value.get("supports_tools"))
+            .and_then(serde_json::Value::as_bool),
+        supports_tool_calls: caps
+            .and_then(|value| value.get("supports_tool_calls"))
+            .and_then(serde_json::Value::as_bool),
+        supports_parallel_tool_calls: caps
+            .and_then(|value| value.get("supports_parallel_tool_calls"))
+            .and_then(serde_json::Value::as_bool),
+    })
+}
+
+fn encode_query_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[(byte >> 4) as usize]));
+            encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
+        }
+    }
+    encoded
 }
 
 fn check_mcp(workspace: &Path, config_dir: &Path) -> Vec<Check> {
@@ -232,5 +372,53 @@ fn check_workspace(workspace: &Path) -> Check {
              uid (./dev.sh repl does) or chown the mounted folder",
             workspace.display()
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn llama_capacity_requires_the_documented_props_shape_and_integer_slots() {
+        assert_eq!(
+            llama_properties(
+                r#"{"default_generation_settings":{},"build_info":"b1-test","total_slots":5}"#
+            )
+            .map(|props| props.slots),
+            Some(5)
+        );
+        for body in [
+            r#"{"total_slots":5}"#,
+            r#"{"default_generation_settings":{},"build_info":"","total_slots":5}"#,
+            r#"{"default_generation_settings":{},"build_info":"b1-test","total_slots":"5"}"#,
+            r#"{"default_generation_settings":{},"build_info":"b1-test","total_slots":-1}"#,
+            "not json",
+        ] {
+            assert_eq!(llama_properties(body), None, "accepted {body}");
+        }
+    }
+
+    #[test]
+    fn llama_properties_reads_context_and_explicit_tool_capabilities() {
+        let props = llama_properties(
+            r#"{"default_generation_settings":{"n_ctx":32768},"build_info":"b1-test",
+                "total_slots":3,"chat_template_caps":{"supports_tools":true,
+                "supports_tool_calls":false,"supports_parallel_tool_calls":false}}"#,
+        )
+        .unwrap();
+        assert_eq!(props.slots, 3);
+        assert_eq!(props.n_ctx, Some(32768));
+        assert_eq!(props.supports_tools, Some(true));
+        assert_eq!(props.supports_tool_calls, Some(false));
+        assert_eq!(props.supports_parallel_tool_calls, Some(false));
+    }
+
+    #[test]
+    fn model_query_component_is_percent_encoded() {
+        assert_eq!(
+            encode_query_component("org/model:Q4 K/ñ"),
+            "org%2Fmodel%3AQ4%20K%2F%C3%B1"
+        );
     }
 }

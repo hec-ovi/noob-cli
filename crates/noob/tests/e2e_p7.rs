@@ -15,9 +15,24 @@ fn noob(config_dir: &std::path::Path, workspace: &std::path::Path) -> Command {
         .env_remove("NOOB_MODEL")
         .env_remove("NOOB_API_STYLE")
         .env_remove("NOOB_CTX")
+        .env_remove("NOOB_TASK_CONCURRENCY")
         .env_remove("NOOB_SANDBOX")
         .env_remove("NOOB_DEPTH");
     cmd
+}
+
+fn llama_props(slots: u64, padding: usize) -> serde_json::Value {
+    json!({
+        "default_generation_settings": {"n_ctx": 131_072},
+        "total_slots": slots,
+        "chat_template": "x".repeat(padding),
+        "chat_template_caps": {
+            "supports_tools": true,
+            "supports_tool_calls": true,
+            "supports_parallel_tool_calls": true
+        },
+        "build_info": "b10015-test"
+    })
 }
 
 #[test]
@@ -43,6 +58,10 @@ fn doctor_healthy_setup_exits_zero() {
         200,
         json!({"object": "list", "data": [{"id": "mockmodel"}]}),
     );
+    // Real llama.cpp properties include the chat template and exceed the old
+    // 4 KiB doctor body limit. Keep this fixture large enough to guard that
+    // regression while remaining tiny by test-suite standards.
+    server.enqueue_json(200, llama_props(5, 16 * 1024));
 
     let out = noob(config.path(), work.path())
         .arg("doctor")
@@ -55,6 +74,7 @@ fn doctor_healthy_setup_exits_zero() {
         ".env parsed (2 keys)",
         "answers /models (HTTP 200)",
         "style chat",
+        "llama.cpp slots: 5 available; enough for the parent + 4 detached sub-agents",
         "mcp.json: 1 server(s) configured (websearch)",
         "ok    workspace",
         "ok    sandbox:",
@@ -62,6 +82,112 @@ fn doctor_healthy_setup_exits_zero() {
         assert!(stdout.contains(needle), "missing {needle:?} in:\n{stdout}");
     }
     assert!(!stdout.contains("FAIL"), "{stdout}");
+}
+
+#[test]
+fn doctor_warns_when_llamacpp_slots_cannot_cover_configured_fanout() {
+    let server = MockServer::start();
+    let config = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config.path().join(".env"),
+        format!(
+            "NOOB_BASE_URL={}\nNOOB_MODEL=org/model:Q4_K\nNOOB_TASK_CONCURRENCY=4\n",
+            server.base_url()
+        ),
+    )
+    .unwrap();
+    server.enqueue_json(200, json!({"object": "list", "data": []}));
+    server.enqueue_json(200, llama_props(2, 16 * 1024));
+
+    let out = noob(config.path(), work.path())
+        .arg("doctor")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.contains(
+            "warn  llama.cpp has 2 slot(s), but the parent + 4 configured detached sub-agents need 5"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("restart llama-server with --parallel 5"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("set NOOB_TASK_CONCURRENCY=1"), "{stdout}");
+
+    let paths: Vec<String> = server.recorded().into_iter().map(|r| r.path).collect();
+    assert_eq!(
+        paths,
+        [
+            "/v1/models".to_string(),
+            "/props?model=org%2Fmodel%3AQ4_K&autoload=false".to_string()
+        ]
+    );
+}
+
+#[test]
+fn doctor_warns_about_context_and_tool_template_limits() {
+    let server = MockServer::start();
+    let config = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config.path().join(".env"),
+        format!(
+            "NOOB_BASE_URL={}\nNOOB_MODEL=mockmodel\nNOOB_CTX=131072\nNOOB_TASK_CONCURRENCY=3\n",
+            server.base_url()
+        ),
+    )
+    .unwrap();
+    server.enqueue_json(200, json!({"object": "list", "data": []}));
+    let mut props = llama_props(4, 0);
+    props["default_generation_settings"]["n_ctx"] = json!(32_768);
+    props["chat_template_caps"]["supports_parallel_tool_calls"] = json!(false);
+    server.enqueue_json(200, props);
+
+    let out = noob(config.path(), work.path())
+        .arg("doctor")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("n_ctx=32768, below NOOB_CTX=131072"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("parallel tool calls disabled")
+            && stdout.contains("supports_parallel_tool_calls"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn doctor_ignores_non_llama_props_with_a_similar_field() {
+    let server = MockServer::start();
+    let config = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config.path().join(".env"),
+        format!(
+            "NOOB_BASE_URL={}\nNOOB_MODEL=mockmodel\n",
+            server.base_url()
+        ),
+    )
+    .unwrap();
+    server.enqueue_json(200, json!({"object": "list", "data": []}));
+    server.enqueue_json(200, json!({"total_slots": 1, "provider": "not-llama"}));
+
+    let out = noob(config.path(), work.path())
+        .arg("doctor")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(!stdout.contains("llama.cpp"), "{stdout}");
+    assert!(!stdout.contains("NOOB_TASK_CONCURRENCY"), "{stdout}");
 }
 
 #[test]

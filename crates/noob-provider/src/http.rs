@@ -844,9 +844,11 @@ pub fn probe(url: &str, timeout: Duration) -> bool {
     config.new_agent().get(url).call().is_ok()
 }
 
-/// One-shot GET returning (status, body head). `noob doctor`'s reachability
-/// check; only ever called against the user's configured endpoint.
+/// One-shot GET returning (status, bounded body). `noob doctor`'s endpoint
+/// checks are the only caller. llama.cpp's `/props` includes the chat template,
+/// so a healthy response is commonly larger than a few KiB.
 pub fn get_status(url: &str, api_key: &str, timeout: Duration) -> Result<(u16, String), String> {
+    const DOCTOR_BODY_LIMIT: u64 = 256 * 1024;
     let config = Config::builder()
         .http_status_as_error(false)
         .proxy(None)
@@ -862,7 +864,7 @@ pub fn get_status(url: &str, api_key: &str, timeout: Duration) -> Result<(u16, S
             let body = resp
                 .body_mut()
                 .with_config()
-                .limit(4 * 1024)
+                .limit(DOCTOR_BODY_LIMIT)
                 .read_to_string()
                 .unwrap_or_default();
             Ok((status, body))

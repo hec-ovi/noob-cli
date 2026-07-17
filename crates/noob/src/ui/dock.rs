@@ -98,6 +98,12 @@ const PLAN_STEP_ROWS: usize = 6;
 /// screen (where relative cursor moves would clamp at the top and desync).
 const FRAME_RESERVE_ROWS: usize = 4;
 
+#[derive(Clone, Copy)]
+struct FinalRegionState {
+    canceled: bool,
+    elapsed: Duration,
+}
+
 // ---------------------------------------------------------------------------
 // The output column tracker
 // ---------------------------------------------------------------------------
@@ -528,7 +534,19 @@ impl DockSession {
         self.draw_idle_prompt(ui, plan, width, &agent_rows);
         let mut input_dirty = true;
         loop {
-            if background.is_some_and(crate::subagent::BackgroundHub::settled_ready) {
+            // Keyboard input wins a race with a completing child. Drain what
+            // the reader has already accepted before considering automatic
+            // continuation, and never steal a prompt that the human is in the
+            // middle of composing. Their normal turn integrates ready packets
+            // first, so no result is delayed or lost.
+            while let Ok(ev) = self.rx.try_recv() {
+                self.absorb_idle(ev);
+            }
+            if !self.reader_gone
+                && self.draft.is_empty()
+                && self.pending.is_empty()
+                && background.is_some_and(crate::subagent::BackgroundHub::settled_ready)
+            {
                 self.erase_idle_prompt(ui, agent_rows.len());
                 return Input::BackgroundReady;
             }
@@ -593,7 +611,11 @@ impl DockSession {
             let received = if let Some(hub) = background {
                 match self.rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(ev) => Some(ev),
-                    Err(RecvTimeoutError::Timeout) if hub.settled_ready() => {
+                    Err(RecvTimeoutError::Timeout)
+                        if self.draft.is_empty()
+                            && self.pending.is_empty()
+                            && hub.settled_ready() =>
+                    {
                         self.erase_idle_prompt(ui, agent_rows.len());
                         return Input::BackgroundReady;
                     }
@@ -715,8 +737,7 @@ impl DockSession {
                 // Always send the End barrier, including a panic path, so the
                 // terminal-owning thread cannot wait forever. The scoped
                 // thread rethrows after the render loop has restored the dock.
-                let outcome =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut turn_ui)));
+                let outcome = crate::agent::sched::catch_unwind_silent(|| f(&mut turn_ui));
                 match outcome {
                     Ok(end) => {
                         *slot.lock().unwrap() = Some(end);
@@ -764,6 +785,9 @@ impl DockSession {
         let mut agents_block: Option<String> = None;
         let mut region_rows: Vec<String> = Vec::new();
         let mut drawn_r: usize = 0;
+        let mut background_revision = background
+            .map(crate::subagent::BackgroundHub::revision)
+            .unwrap_or_default();
 
         // A running turn always owns a stable frame: a top status row, any live
         // regions, the editable draft, and a queue/cancel row. They are
@@ -794,6 +818,9 @@ impl DockSession {
                     background,
                     width,
                 );
+                background_revision = background
+                    .map(crate::subagent::BackgroundHub::revision)
+                    .unwrap_or_default();
                 self.draw_active_frame(
                     ui,
                     plan,
@@ -827,6 +854,9 @@ impl DockSession {
                             background,
                             width,
                         );
+                        background_revision = background
+                            .map(crate::subagent::BackgroundHub::revision)
+                            .unwrap_or_default();
                         if refreshed != region_rows {
                             region_rows = refreshed;
                             self.redraw_regions(
@@ -861,6 +891,7 @@ impl DockSession {
             match first {
                 Ev::Render(event) => {
                     let mut regions_dirty = false;
+                    let mut background_dirty = false;
                     Self::absorb_render(
                         self.reword_for_steering(event),
                         &mut active_tools,
@@ -901,14 +932,23 @@ impl DockSession {
                     // Recompute the pinned region view before any redraw, so the
                     // frame that write_above or the region redraw paints already
                     // reflects the new plan/panel at the current width.
-                    if regions_dirty {
-                        region_rows = self.region_rows(
+                    let next_background_revision = background
+                        .map(crate::subagent::BackgroundHub::revision)
+                        .unwrap_or_default();
+                    let background_changed = next_background_revision != background_revision;
+                    if background_changed {
+                        background_revision = next_background_revision;
+                    }
+                    if regions_dirty || background_changed {
+                        let refreshed = self.region_rows(
                             ui,
                             plan_block.as_deref(),
                             agents_block.as_deref(),
                             background,
                             width,
                         );
+                        background_dirty = refreshed != region_rows;
+                        region_rows = refreshed;
                     }
                     let batch = renderer.take();
                     if !batch.is_empty() {
@@ -928,7 +968,7 @@ impl DockSession {
                             &region_rows,
                             &mut drawn_r,
                         );
-                    } else if regions_dirty {
+                    } else if regions_dirty || background_dirty {
                         self.redraw_regions(
                             ui,
                             plan,
@@ -1152,9 +1192,12 @@ impl DockSession {
                         ui,
                         plan_block.as_deref(),
                         agents_block.as_deref(),
+                        background,
                         width,
-                        cancel.committed,
-                        started.elapsed(),
+                        FinalRegionState {
+                            canceled: cancel.committed,
+                            elapsed: started.elapsed(),
+                        },
                     );
                     self.erase_dock(ui, drawn_r);
                     if !final_rows.is_empty() {
@@ -1258,9 +1301,10 @@ impl DockSession {
         }
 
         // The event block for detached work captures only its admission-time
-        // count. Derive open and closed views from the hub on every repaint so
-        // completion/cancellation cannot leave a stale "running" row. The
-        // event block remains the fallback for non-background panels.
+        // count. Derive open and closed views from the hub after lifecycle
+        // revisions and on the display heartbeat, so completion/cancellation
+        // cannot leave a stale "running" row without allocating on every
+        // streamed token. The event block remains the non-background fallback.
         let snapshot_block = background.and_then(|hub| {
             let snapshot = hub.snapshot();
             if self.agent_view {
@@ -1322,9 +1366,9 @@ impl DockSession {
         ui: &Ui,
         plan_block: Option<&str>,
         agents_block: Option<&str>,
+        background: Option<&crate::subagent::BackgroundHub>,
         width: usize,
-        canceled: bool,
-        elapsed: Duration,
+        final_state: FinalRegionState,
     ) -> Vec<String> {
         if !ui.regions_enabled() {
             return Vec::new();
@@ -1334,8 +1378,8 @@ impl DockSession {
             let counts = checklist_counts(text);
             let summary_elapsed = plan_elapsed(text)
                 .map(str::to_owned)
-                .unwrap_or_else(|| elapsed_label(elapsed));
-            if canceled {
+                .unwrap_or_else(|| elapsed_label(final_state.elapsed));
+            if final_state.canceled {
                 rows.push(PinnedRegionRow::summary(
                     ui,
                     format!(
@@ -1365,7 +1409,20 @@ impl DockSession {
                 rows.extend(capped_plan_rows(ui, text, width));
             }
         }
-        if let Some(block) = agents_block {
+        let snapshot_block = background.and_then(|hub| {
+            let snapshot = hub.snapshot();
+            if self.agent_view {
+                expanded_agent_snapshot_block(&snapshot)
+            } else {
+                collapsed_agent_snapshot_block(&snapshot)
+            }
+        });
+        let shown_agents = if background.is_some() {
+            snapshot_block.as_deref()
+        } else {
+            agents_block
+        };
+        if let Some(block) = shown_agents {
             rows.extend(checklist_pinned_rows(
                 ui,
                 block,
@@ -1374,7 +1431,7 @@ impl DockSession {
             ));
         }
         let counts = checklist_counts(plan_block.unwrap_or_default())
-            .plus(checklist_counts(agents_block.unwrap_or_default()));
+            .plus(checklist_counts(shown_agents.unwrap_or_default()));
         self.cap_region_rows(ui, rows, counts, width)
     }
 
@@ -1875,7 +1932,10 @@ fn plan_cap_selection(steps: &[&str]) -> Option<(std::ops::Range<usize>, usize, 
 
 fn plan_cap_label(hidden_done: usize, hidden_queued: usize) -> String {
     let hidden = hidden_done + hidden_queued;
-    let mut label = format!("… +{hidden} more step{}", if hidden == 1 { "" } else { "s" });
+    let mut label = format!(
+        "… +{hidden} more step{}",
+        if hidden == 1 { "" } else { "s" }
+    );
     if hidden_done > 0 {
         label.push_str(&format!(" · {hidden_done} done"));
     }

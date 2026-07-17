@@ -10,9 +10,9 @@
 //! human is typing and restored to cooked before the agent runs, so keystrokes
 //! never reach the model (it sees the message once, on Enter) and prefill and
 //! decode throughput are untouched. Three hooks restore the terminal so a
-//! crash never leaves the shell raw: the RAII guard on the normal return, the
-//! panic hook (release is `panic = "abort"`, so `Drop` does not run on a
-//! panic), and the SIGINT handler before its `_exit(130)`.
+//! crash never leaves the shell raw: the RAII guard on normal return or
+//! unwind, the panic hook as a backstop, and the SIGINT handler before its
+//! `_exit(130)`.
 //!
 //! Display-only, like everything under `ui/`: the reader never rewrites request
 //! bodies, the session log, or the wire protocol. The submitted line is handed
@@ -870,7 +870,7 @@ fn classify_csi(params: &[u8], fin: u8) -> EscKind {
 // ---------------------------------------------------------------------------
 // Raw mode: entry/exit and the three restore hooks. The saved terminal state
 // lives in a signal-reachable global so the panic hook and the SIGINT handler
-// can restore it too (a `Drop` alone is not enough under `panic = "abort"`).
+// can restore it too if a fault occurs outside the guarded editor lifetime.
 // ---------------------------------------------------------------------------
 
 /// Restore the terminal to cooked mode if the editor is active. Safe to call
@@ -921,8 +921,8 @@ impl Drop for RawGuard {
 }
 
 /// Install the panic hook exactly once: restore the terminal, then run the
-/// previous hook so the panic message still prints. Needed because
-/// `panic = "abort"` skips `Drop`.
+/// previous hook so the panic message still prints. This is a backstop for
+/// faults outside the worker boundaries; normal unwinding also runs RawGuard.
 fn install_panic_hook() {
     use std::sync::Once;
     static ONCE: Once = Once::new();

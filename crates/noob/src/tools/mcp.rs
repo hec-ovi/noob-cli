@@ -50,18 +50,19 @@ pub fn call_spec() -> ToolSpec {
 }
 
 pub fn run_connect(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
-    let server = match need_str(args, "server") {
+    let requested_server = match need_str(args, "server") {
         Ok(s) => s,
         Err(e) => return ToolOutcome::err(e),
     };
     let Some(mcp) = &ctx.mcp else {
         return ToolOutcome::err(no_servers());
     };
-    match mcp.connect(server) {
+    let server = resolve_server_name(mcp, requested_server);
+    match mcp.connect(&server) {
         Ok(info) => {
             let n = info.tools.len();
             ToolOutcome::ok(
-                render_catalog(server, &info),
+                render_catalog(&server, &info),
                 format!("mcp_connect {server} ({n} tools)"),
             )
         }
@@ -71,7 +72,7 @@ pub fn run_connect(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
 }
 
 pub fn run_call(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
-    let server = match need_str(args, "server") {
+    let requested_server = match need_str(args, "server") {
         Ok(s) => s,
         Err(e) => return ToolOutcome::err(e),
     };
@@ -101,8 +102,9 @@ pub fn run_call(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     let Some(mcp) = &ctx.mcp else {
         return ToolOutcome::err(no_servers());
     };
-    let Some(conn) = mcp.connection(server) else {
-        if mcp.names().contains(&server) {
+    let server = resolve_server_name(mcp, requested_server);
+    let Some(conn) = mcp.connection(&server) else {
+        if mcp.names().contains(&server.as_str()) {
             return ToolOutcome::err(format!(
                 "{server} is not connected; connect first with mcp_connect \
                  {{\"server\":\"{server}\"}}"
@@ -135,7 +137,7 @@ pub fn run_call(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     match mcp.call(&conn, tool, &call_args) {
         Ok(result) => {
             let (text, is_error) = render_result(&result);
-            let content = wrap_untrusted(server, &mcp_cap(&text));
+            let content = wrap_untrusted(&server, &mcp_cap(&text));
             let flag = if is_error { " (tool error)" } else { "" };
             ToolOutcome {
                 content,
@@ -148,6 +150,20 @@ pub fn run_call(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
         Err(e) if INTERRUPTED.load(Ordering::SeqCst) => ToolOutcome::canceled_with(e),
         Err(e) => ToolOutcome::err(e),
     }
+}
+
+/// Resolve harmless spelling variants produced by small models without
+/// guessing between genuinely different server names. Exact names always win;
+/// otherwise hyphens and underscores are ignored case-insensitively, and the
+/// alias is accepted only when it identifies exactly one configured server.
+fn resolve_server_name(mcp: &crate::mcp::Mcp, requested: &str) -> String {
+    let names = mcp.names();
+    if names.contains(&requested) {
+        return requested.to_string();
+    }
+    crate::mcp::unique_normalized_server(names, requested)
+        .unwrap_or(requested)
+        .to_string()
 }
 
 fn no_servers() -> String {
@@ -390,6 +406,36 @@ mod tests {
         let out = run_call(&ctx, &json!({"server": "ghost", "tool": "echo"}));
         assert!(out.content.contains("unknown MCP server \"ghost\""));
         assert!(out.content.contains("configured servers: mock"));
+    }
+
+    #[test]
+    fn normalized_server_aliases_resolve_but_ambiguous_names_do_not() {
+        let server = McpHttpServer::start(echo_tools());
+        let (_tmp, ctx) = ctx_with_server(&server);
+        let out = run_connect(&ctx, &json!({"server": "M_O-C-K"}));
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(out.summary, "mcp_connect mock (1 tools)");
+        let out = run_call(
+            &ctx,
+            &json!({"server": "m_o-c_k", "tool": "echo", "args": {"text": "alias"}}),
+        );
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(out.summary, "mcp mock.echo");
+
+        let ambiguous = Mcp::new(vec![
+            ServerConfig {
+                name: "web-search".into(),
+                transport: TransportConfig::Http { url: server.url() },
+                timeout: Duration::from_secs(5),
+            },
+            ServerConfig {
+                name: "web_search".into(),
+                transport: TransportConfig::Http { url: server.url() },
+                timeout: Duration::from_secs(5),
+            },
+        ]);
+        assert_eq!(resolve_server_name(&ambiguous, "websearch"), "websearch");
+        server.assert_clean();
     }
 
     #[test]

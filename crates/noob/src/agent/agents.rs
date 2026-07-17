@@ -303,7 +303,6 @@ fn digest_of(content: &str) -> Option<String> {
     Some(super::clip(&flat, DIGEST))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,12 +1,17 @@
 //! Batch scheduler: within one assistant tool batch, consecutive read-only
 //! calls run concurrently on scoped threads (cap 8), consecutive task calls
-//! form one fan-out group run concurrently up to the child cap, and any
-//! other mutating call is a sequential barrier executed alone, in order.
+//! form one fan-out group, and any other mutating call is a sequential barrier
+//! executed alone, in order. Detached task admissions stay ordered while the
+//! background hub runs their children concurrently; inline tasks use the
+//! child cap directly.
 //! Results always come back in emission order regardless of completion
 //! order: parallelism where it is free, total determinism where it matters
 //! (two edits to one file can never race).
 
 use std::ops::Range;
+use std::sync::Once;
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -17,6 +22,9 @@ use noob_provider::http::INTERRUPTED;
 use crate::tools::{self, ToolCtx, ToolOutcome};
 
 const READ_CONCURRENCY: usize = 8;
+
+#[cfg(test)]
+static TEST_TASK_ADMISSIONS: AtomicU64 = AtomicU64::new(0);
 
 /// One call, pre-processed by the loop: either execute (name, args) or
 /// return a canned outcome (doom-loop intercept, unparseable arguments).
@@ -31,7 +39,8 @@ enum Kind {
     /// Canned outcomes execute nothing; they join any group.
     Free,
     Read,
-    /// task calls: one fan-out group, concurrent up to the child cap.
+    /// Task calls: one fan-out group. Its execution mode depends on whether
+    /// the surface has a detached hub.
     Task,
     /// Everything else mutates: alone, in order.
     Mutating,
@@ -42,6 +51,12 @@ fn kind(planned: &Planned) -> Kind {
         Planned::Canned(_) => Kind::Free,
         #[cfg(test)]
         Planned::Run { name, .. } if name == "__test_wait" => Kind::Read,
+        #[cfg(test)]
+        Planned::Run { name, .. } if name == "__test_panic" => Kind::Read,
+        #[cfg(test)]
+        Planned::Run { name, .. } if name == "__test_mutating_panic" => Kind::Mutating,
+        #[cfg(test)]
+        Planned::Run { name, .. } if name == "__test_task" => Kind::Task,
         Planned::Run { name, .. } if name == "subagent" => Kind::Task,
         Planned::Run { name, .. } if tools::is_read_only(name) => Kind::Read,
         Planned::Run { .. } => Kind::Mutating,
@@ -156,13 +171,55 @@ pub fn run_batch_with(
             } else {
                 None
             };
-            let outcome = execute(ctx, planned);
+            let outcome = catch_unwind_silent(|| execute(ctx, planned)).unwrap_or_else(|_| {
+                ToolOutcome::err(
+                    "the tool crashed while running; this is a noob bug, try a different approach",
+                )
+            });
             on_progress(Progress::Finished {
                 index,
                 outcome: &outcome,
                 elapsed: started.map(|at| at.elapsed()),
             });
             slots[index] = Some(outcome);
+            continue;
+        }
+        // Detached subagent calls are admissions or controls, not the child
+        // work itself. Execute them in model emission order so job IDs are
+        // deterministic and a cancel in the same batch cannot overtake a
+        // spawn. The hub's bounded workers provide the actual concurrency.
+        if group.kind == Kind::Task && detached_tasks(ctx) {
+            for index in group.range.clone() {
+                if INTERRUPTED.load(Ordering::SeqCst) {
+                    let outcome = ToolOutcome::canceled();
+                    on_progress(Progress::Finished {
+                        index,
+                        outcome: &outcome,
+                        elapsed: None,
+                    });
+                    slots[index] = Some(outcome);
+                    continue;
+                }
+                let planned = batch[index].take().unwrap();
+                let started = if matches!(&planned, Planned::Run { .. }) {
+                    on_progress(Progress::Started { index });
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                let outcome = catch_unwind_silent(|| execute(ctx, planned)).unwrap_or_else(|_| {
+                    ToolOutcome::err(
+                        "the tool crashed while running; this is a noob bug, try a different \
+                         approach",
+                    )
+                });
+                on_progress(Progress::Finished {
+                    index,
+                    outcome: &outcome,
+                    elapsed: started.map(|at| at.elapsed()),
+                });
+                slots[index] = Some(outcome);
+            }
             continue;
         }
         let cap = match group.kind {
@@ -207,10 +264,7 @@ pub fn run_batch_with(
                             running += 1;
                             let tx = done_tx.clone();
                             scope.spawn(move || {
-                                let outcome =
-                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        execute_ref(ctx, planned)
-                                    }))
+                                let outcome = catch_unwind_silent(|| execute_ref(ctx, planned))
                                     .unwrap_or_else(|_| {
                                         ToolOutcome::err(
                                             "the tool crashed while running; this is a noob bug, \
@@ -240,6 +294,50 @@ pub fn run_batch_with(
     slots.into_iter().map(Option::unwrap).collect()
 }
 
+fn detached_tasks(ctx: &ToolCtx) -> bool {
+    ctx.task
+        .as_ref()
+        .and_then(|task| task.background.as_ref())
+        .is_some()
+}
+
+thread_local! {
+    /// The process panic hook is global, but suppression must apply only to
+    /// the worker whose panic is converted into a ToolOutcome.
+    static SILENCE_CAUGHT_PANIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Catch an unwind without letting the default hook write a red panic report
+/// into the dock. A permanent hook wrapper avoids swapping the process-global
+/// hook while other scheduler/background threads are running.
+pub(crate) fn catch_unwind_silent<F, R>(f: F) -> std::thread::Result<R>
+where
+    F: FnOnce() -> R,
+{
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !SILENCE_CAUGHT_PANIC.with(std::cell::Cell::get) {
+                previous(info);
+            }
+        }));
+    });
+
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SILENCE_CAUGHT_PANIC.with(|silent| silent.set(self.0));
+        }
+    }
+
+    let previous = SILENCE_CAUGHT_PANIC.with(|silent| silent.replace(true));
+    let restore = Restore(previous);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    drop(restore);
+    result
+}
+
 fn execute(ctx: &ToolCtx, planned: Planned) -> ToolOutcome {
     match planned {
         Planned::Canned(out) => out,
@@ -266,6 +364,24 @@ fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
         let millis = args.get("millis").and_then(Value::as_u64).unwrap_or(1);
         std::thread::sleep(std::time::Duration::from_millis(millis));
         return ToolOutcome::ok(millis.to_string(), format!("waited {millis}ms"));
+    }
+    #[cfg(test)]
+    if name == "__test_task" {
+        let millis = args.get("millis").and_then(Value::as_u64).unwrap_or(0);
+        std::thread::sleep(std::time::Duration::from_millis(millis));
+        if args.get("action").and_then(Value::as_str) == Some("control") {
+            let admitted = TEST_TASK_ADMISSIONS.load(Ordering::SeqCst);
+            return ToolOutcome::ok(
+                format!("control-after-{admitted}"),
+                "controlled detached task",
+            );
+        }
+        let id = TEST_TASK_ADMISSIONS.fetch_add(1, Ordering::SeqCst) + 1;
+        return ToolOutcome::ok(format!("agent-{id}"), "admitted detached task");
+    }
+    #[cfg(test)]
+    if matches!(name, "__test_panic" | "__test_mutating_panic") {
+        panic!("scheduler panic sentinel");
     }
     tools::dispatch(ctx, name, args)
 }
@@ -296,6 +412,13 @@ mod tests {
         Planned::Run {
             name: "read".into(),
             args: json!({"path": path}),
+        }
+    }
+
+    fn test_task(action: &str, millis: u64) -> Planned {
+        Planned::Run {
+            name: "__test_task".into(),
+            args: json!({"action": action, "millis": millis}),
         }
     }
 
@@ -360,6 +483,106 @@ mod tests {
         assert_eq!(out[0].content, "80");
         assert_eq!(out[1].content, "5");
         assert!(durations.iter().all(|elapsed| !elapsed.is_zero()));
+    }
+
+    #[test]
+    fn detached_task_admissions_and_controls_follow_emission_order() {
+        TEST_TASK_ADMISSIONS.store(0, Ordering::SeqCst);
+        let (_t, mut ctx) = ctx();
+        let hub = crate::subagent::BackgroundHub::new(2);
+        ctx.task = Some(crate::subagent::TaskCfg {
+            depth: 0,
+            concurrency: 2,
+            max_turns: 10,
+            wall_clock: Duration::from_secs(30),
+            verbose: false,
+            overrides: Default::default(),
+            yolo: false,
+            ancestor_skills: Vec::new(),
+            background: Some(hub.clone()),
+        });
+        let mut events = Vec::new();
+        let out = run_batch_with(
+            &ctx,
+            vec![
+                test_task("spawn", 60),
+                test_task("control", 0),
+                test_task("spawn", 0),
+            ],
+            |event| match event {
+                Progress::Started { index } => events.push(("start", index)),
+                Progress::Finished { index, .. } => events.push(("done", index)),
+            },
+        );
+
+        assert_eq!(
+            events,
+            vec![
+                ("start", 0),
+                ("done", 0),
+                ("start", 1),
+                ("done", 1),
+                ("start", 2),
+                ("done", 2),
+            ]
+        );
+        assert_eq!(out[0].content, "agent-1");
+        assert_eq!(out[1].content, "control-after-1");
+        assert_eq!(out[2].content, "agent-2");
+        assert!(hub.shutdown().is_empty());
+    }
+
+    #[test]
+    fn caught_scheduler_panic_does_not_reach_the_process_hook() {
+        const CHILD: &str = "NOOB_TEST_SILENT_SCHEDULER_PANIC";
+        if std::env::var_os(CHILD).is_some() {
+            let (_t, ctx) = ctx();
+            let out = run_batch(
+                &ctx,
+                vec![Planned::Run {
+                    name: "__test_panic".into(),
+                    args: json!({}),
+                }],
+            );
+            assert_eq!(out.len(), 1);
+            assert!(out[0].is_error);
+            assert!(out[0].content.contains("tool crashed"));
+            return;
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("caught_scheduler_panic_does_not_reach_the_process_hook")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.contains("scheduler panic sentinel"), "{output}");
+    }
+
+    #[test]
+    fn mutating_tool_panic_becomes_one_typed_result() {
+        let (_t, ctx) = ctx();
+        let out = run_batch(
+            &ctx,
+            vec![Planned::Run {
+                name: "__test_mutating_panic".into(),
+                args: json!({}),
+            }],
+        );
+        assert_eq!(out.len(), 1);
+        assert!(out[0].is_error);
+        assert!(out[0].content.contains("tool crashed"));
     }
 
     #[test]

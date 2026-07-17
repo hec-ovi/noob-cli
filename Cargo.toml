@@ -25,6 +25,8 @@ tiktoken-rs = "0.12"
 [profile.release]
 opt-level = "s"
 lto = "fat"
-panic = "abort"
+# Worker and dock fault boundaries convert panics into typed outcomes and
+# restore the terminal. Production must unwind for those boundaries to exist.
+panic = "unwind"
 strip = true
 codegen-units = 1

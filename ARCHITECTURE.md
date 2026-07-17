@@ -67,6 +67,8 @@ If no base URL is configured, startup probes loopback ports 8090, 8080, 11434, 1
 
 Sandbox selection is explicit `NOOB_SANDBOX` first, then container detection. Container mode permits workspace tools to use the mounted environment. Workspace mode confines write and edit targets to the project and rejects symlink escapes. `--yolo` explicitly lifts that restriction.
 
+`noob doctor` first checks the configured `/models` endpoint. For a response that matches llama.cpp's documented `/props` shape, it then compares `total_slots` with one parent plus `NOOB_TASK_CONCURRENCY`, compares the reported `n_ctx` with `NOOB_CTX`, and checks the chat template's tool-call capabilities. Router diagnosis uses `GET /props?model=<model>&autoload=false`, so it cannot load a model as a side effect. Missing, rejected, malformed, or non-llama `/props` responses do not produce a llama.cpp diagnosis.
+
 ## Provider boundary
 
 `noob-provider` accepts a neutral transcript and returns semantic events plus a complete `Turn`.
@@ -121,8 +123,8 @@ The user-facing agent permits at most 50 inference rounds per input. Doom-loop c
 The scheduler partitions one assistant tool batch in emission order:
 
 - Consecutive read-only calls run on scoped threads, up to eight at once.
-- Consecutive `subagent` calls form one fan-out group limited by child concurrency. Depth-1 agents retain delegation but run one nested child at a time, so root fan-out cannot multiply into a second full fan-out per child. Calls acknowledge quickly in the dock and run inline on headless or classic surfaces.
-- The model manages its own fleet: `subagent {"cancel":"agent-N"}` stops a detached job through the same path as the human's `/agents cancel`, and the canceled child still delivers one terminal packet so the transcript never dangles. Children remain bounded regardless: per-child turn caps and a wall clock the parent enforces by killing the process group.
+- Consecutive detached `subagent` admissions and controls execute in model emission order; the background hub runs admitted children concurrently up to the child cap. This keeps job IDs deterministic and prevents same-batch cancellation from overtaking spawn. An accepted cancellation closes the replacement gate under the same hub lock, so a later spawn in that batch is rejected until a new human turn. Detached children are structural leaves, so the visible root fleet is the whole concurrent inference fleet and cannot silently oversubscribe llama.cpp slots. Inline depth-1 agents retain one-at-a-time nested delegation on headless and classic surfaces.
+- The model manages its own fleet: `subagent {"cancel":"agent-N"}` stops a detached job through the same path as the human's `/agents cancel`, and the canceled child still delivers one terminal packet so the transcript never dangles. A terminal child failure or cancellation also closes the replacement gate before delivery. Children remain bounded regardless: per-child turn caps and a wall clock the parent enforces by killing the process group.
 - A bash command that leads with `sleep` is refused while detached sub-agents run. Reports are delivered event-driven between rounds and at the idle prompt, so such a sleep can never observe anything an end-of-turn would not deliver sooner; it only blocks the conversation. Pacing sleeps after real work in the same command line stay allowed, as does any sleep when no children are active.
 - Every other mutation is a sequential barrier.
 - Results are returned and appended in emission order.
@@ -158,7 +160,7 @@ Important mechanics:
 - `write` and `edit` use read-before-write stamps, same-directory temporary files, `fsync`, and rename. Existing mode bits are preserved.
 - `edit` applies exact matching first, then trailing-whitespace, typographic, uniform-indent, and CRLF-compatible shadows. Every stage rejects ambiguity.
 - `bash` merges stdout and stderr at the file-descriptor level, drains output continuously into a bounded 8 KiB head plus 16 KiB tail, and kills its process group on timeout or cancellation.
-- Each `write`, `edit`, or `bash` call takes an advisory lock on the workspace directory inode. This lock crosses parent and child processes without adding a project file. One leased call runs at a time. Detached children wait for a bounded interval and receive a conflict if it stays busy; the parent reports a conflict immediately so the main conversation is not held behind a child mutation. This is call-level coordination, not a transaction covering a child's whole task. The lease ends when the tool call returns and does not cover unmanaged or deliberately detached processes.
+- Each `write` or `edit` call takes an advisory lock on the workspace directory inode. This lock crosses parent and child processes without adding a project file. One leased call runs at a time. Detached children wait for a bounded interval and receive a conflict if it stays busy; the parent reports a conflict immediately so the main conversation is not held behind a child file mutation. Bash stays available for builds, tests, searches, and status commands; the system contract directs source changes through write/edit. Shell commands that mutate files are outside the lease guarantee. This is call-level coordination, not a transaction covering a child's whole task. The lease ends when the tool call returns and does not cover unmanaged or deliberately detached processes.
 - `grep`, `glob`, and `ls` cap retained result entries or bytes and include an actionable continuation marker.
 - Tool truncation occurs once before transcript insertion. It does not alter the underlying command or file operation.
 
@@ -210,11 +212,19 @@ Server catalogs and results are wrapped as untrusted content before transcript i
 
 The `subagent` tool spawns `current_exe() child` with a JSON task on stdin. The child gets a fresh prompt and no parent history. It writes progress to stderr and exactly one JSON result line to stdout.
 
-In the default interactive dock, every child call detaches into a session-scoped background hub. This includes `tools: "all"` jobs that can use Bash, MCP, web search, and file mutation. The original tool call receives one immediate `{"job_id":"agent-N","status":"running"}` result, preserving Chat and Responses call/result adjacency. The final child output later enters once as a synthetic user result packet, never as a second tool result. Its framing and the system prompt mark it as untrusted report data, not a human instruction. The owner thread alone appends that packet, persists it, and invokes a parent continuation as soon as any result is ready. One slow child cannot hold an unrelated completed report.
+In the default interactive dock, every child call detaches into a session-scoped background hub. The original tool call receives one immediate `{"job_id":"agent-N","status":"running"}` result, preserving Chat and Responses call/result adjacency. The final child output later enters exactly once as a synthetic user result packet, never as a second tool result. Its framing and the system prompt mark it as untrusted report data, not a human instruction. Background workers never mutate the parent transcript, session, provider, or UI; the owner thread alone appends and persists ready packets.
 
-The hub uses a fixed FIFO worker pool and applies `NOOB_TASK_CONCURRENCY` to its detached work. It distinguishes queued, running, and ready jobs, bounds the undelivered queue, and exposes per-job cancellation through `/agents`. Tab toggles a persistent bounded view of child stderr, including recent tool activity, while final reports remain uncapped. Shutdown cancels, signals, reaps, and joins all child processes. On Linux, parent-death cleanup also kills descendants still attached to the child before exit. `exec`, piped input, nested children, and the classic prompt retain inline behavior.
+The main agent can run ordinary human turns while multiple children remain in flight, and a child completion never interrupts an active parent turn. At an idle prompt, a successful ready batch starts parent inference only when no human draft or submitted message is waiting. Otherwise the human input wins and its ordinary turn integrates ready packets first. Any error or cancellation in the drained batch, including a batch mixed with success, leaves the prompt idle. One slow child cannot hold an unrelated completed report.
 
-Defaults are four concurrent children, 25 rounds, 300 seconds, and recursion depth two. The parent starts the wall clock before sending the task. Child stdin is nonblocking and cancellation-aware, the final result line is read without an output-length cap, and optional progress retention is bounded at 64 KiB while both streams continue to drain.
+The hub uses a fixed FIFO worker pool and applies `NOOB_TASK_CONCURRENCY` to detached work. It distinguishes queued, running, and ready jobs, bounds the undelivered queue, and exposes per-job cancellation through `/agents`. Cancel acceptance and terminal error commit set a mutex-protected replacement gate immediately; further child admissions fail until `run_input` begins a new human turn. The canceled or failed job still contributes its one terminal packet. Background jobs and the foreground plan are independent state machines that may coexist; their dock regions remain separate, and detached-job lifecycle is never mirrored into plan items.
+
+Child tool profiles are structural. `tools: "read-only"` exposes `read`, `grep`, `glob`, `ls`, `context`, and `skill` when a skill is available. `tools: "web"` adds `mcp_connect` and `mcp_call`, requires exactly one configured server whose name normalizes to `websearch` case-insensitively with `-` and `_` ignored, and filters the child's MCP manager to that server. It exposes no Bash, write, edit, plan, or subagent tool. `tools: "all"` exposes the full registered set; a dock child is still a leaf. Loaded ancestor skills are excluded from child discovery so orchestration instructions cannot recursively activate themselves.
+
+A completed `tools: "web"` report is accepted only after the child transcript contains at least two distinct `mcp_call` IDs whose later tool results carry the server-originated MCP wrapper. Local validation, connection, and transport failures do not count; a server-declared tool error does because it proves a real round trip. If the first completion has fewer, noob gives that same child one corrective instruction to connect and gather usable search and source evidence, using only the unused part of the original inference-round budget. An exhausted budget or a second completion still below the evidence threshold returns a child error. Aborted and interrupted runs are not retried.
+
+Tab toggles a persistent bounded view of child stderr, including recent tool activity, while final reports remain uncapped. Shutdown cancels, signals, reaps, and joins all child processes. On Linux, parent-death cleanup also kills descendants still attached to the child before exit. `exec`, piped input, nested children, and the classic prompt retain inline behavior.
+
+Defaults are four concurrent children, 25 rounds, 300 seconds, and recursion depth two on inline surfaces. Dock children are leaves. The parent starts the wall clock before sending the task. Child stdin is nonblocking and cancellation-aware. The live dock retains the newest 2 KiB and at most 12 stderr lines per child; `--verbose` retains at most 64 KiB as completion diagnostics. Final stdout results are uncapped, and both pipes always drain.
 
 These are loop and transport budgets, not output-token limits.
 
@@ -257,10 +267,10 @@ The enforced release budgets are:
 
 | Budget | Limit | Current validation |
 |---|---:|---:|
-| Static release binary | 8 MiB | 3,892,096 bytes |
+| Static release binary | 8 MiB | 4,313,984 bytes |
 | Runtime dependency graph | 45 crates | 40 crates |
 | Fixed prompt plus schemas | 1,500 tokens | Offline and live tokenizer checks |
-| Offline tests | None | 658 passed; 9 live checks remain opt-in |
+| Offline tests | None | 701 passed; 9 live checks remain opt-in |
 
 The required local gates are:
 

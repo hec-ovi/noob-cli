@@ -44,8 +44,7 @@ const PLAN_TOOLS: &[&str] = tools::READ_ONLY_SET;
 /// Spells out that mutation is structurally absent: a small model given a
 /// "do X" prompt otherwise tries to act, finds no write/edit/bash schema,
 /// and grinds the remaining read-only tools into the doom-loop breakers.
-pub const PLAN_ENTER_MSG: &str =
-    "[plan mode] Read-only: write, edit, and bash are disabled until the user \
+pub const PLAN_ENTER_MSG: &str = "[plan mode] Read-only: write, edit, and bash are disabled until the user \
      approves with /go. Explore with the read-only tools, then present a \
      numbered implementation plan as plain text. If the request asks for a \
      change, plan it instead of attempting it.";
@@ -543,6 +542,9 @@ impl Agent {
     /// Process one user input to completion (or breaker / interrupt).
     pub fn run_input(&mut self, input: &str, ui: &mut Ui) -> RunEnd {
         self.integrate_background_results(ui);
+        if let Some(hub) = self.background_hub() {
+            hub.begin_human_turn();
+        }
         self.push_item(Item::User(input.to_string()));
         self.show_session_warning(ui);
         self.drive(ui)
@@ -551,7 +553,20 @@ impl Agent {
     /// Continue after detached sub-agents settle without inventing a second
     /// human instruction. Their synthetic user result packet is the input.
     pub fn continue_after_background(&mut self, ui: &mut Ui) -> RunEnd {
-        if self.integrate_background_results(ui) == 0 {
+        let Some(hub) = self.background_hub() else {
+            return RunEnd::Completed(String::new());
+        };
+        let results = hub.take_ready();
+        let all_success = !results.is_empty()
+            && results
+                .iter()
+                .all(|result| !result.outcome.is_error && !result.outcome.canceled);
+        if self.install_background_results(results, ui) == 0 || !all_success {
+            // Error and cancellation packets, including a batch mixed with a
+            // successful report, are already visible and durable. Keeping the
+            // prompt idle prevents a local model from turning one failed child
+            // into an unrequested replacement loop. Every packet remains in
+            // context for the human's next ordinary turn.
             return RunEnd::Completed(String::new());
         }
         self.drive(ui)
@@ -923,6 +938,9 @@ impl Agent {
     ) -> usize {
         let count = results.len();
         for result in results {
+            if let Some(warning) = &result.outcome.warning {
+                ui.note(&format!("{} diagnostics:\n{warning}", result.id));
+            }
             let status = if result.outcome.canceled {
                 "canceled"
             } else if result.outcome.is_error {
@@ -1068,7 +1086,11 @@ impl Agent {
         // interrupt as having killed their research.
         let active = self.background_snapshot().active;
         if active > 0 {
-            let plural = if active == 1 { "agent keeps" } else { "agents keep" };
+            let plural = if active == 1 {
+                "agent keeps"
+            } else {
+                "agents keep"
+            };
             ui.note(&format!(
                 "[interrupted] ({active} detached {plural} running; Tab or /agents to view)"
             ));
@@ -1163,27 +1185,30 @@ impl Agent {
         // Defense in depth behind the structural gate: even a hallucinated
         // call to an absent schema is refused while planning or when this
         // agent is a read-only child.
-        if !PLAN_TOOLS.contains(&call.name.as_str()) {
-            if self.plan {
-                return (
-                    sched::Planned::Canned(ToolOutcome::err(format!(
-                        "plan mode is read-only: {} is unavailable; present your plan \
-                         as text and wait for the user to approve it",
-                        call.name
-                    ))),
-                    args,
-                );
-            }
-            if self.read_only {
-                return (
-                    sched::Planned::Canned(ToolOutcome::err(format!(
-                        "this sub-agent is read-only: {} is unavailable; finish the \
-                         task with the read-only tools and report what you found",
-                        call.name
-                    ))),
-                    args,
-                );
-            }
+        if self.plan && !PLAN_TOOLS.contains(&call.name.as_str()) {
+            return (
+                sched::Planned::Canned(ToolOutcome::err(format!(
+                    "plan mode is read-only: {} is unavailable; present your plan \
+                     as text and wait for the user to approve it",
+                    call.name
+                ))),
+                args,
+            );
+        }
+        let child_allowed = if self.tool_ctx.mcp.is_some() {
+            tools::WEB_RESEARCH_SET
+        } else {
+            tools::READ_ONLY_SET
+        };
+        if self.read_only && !child_allowed.contains(&call.name.as_str()) {
+            return (
+                sched::Planned::Canned(ToolOutcome::err(format!(
+                    "this sub-agent is read-only: {} is unavailable; finish the \
+                     task with the read-only tools and report what you found",
+                    call.name
+                ))),
+                args,
+            );
         }
         // A detached child's report arrives on its own between rounds, so a
         // parent that sleeps to "wait for it" can never observe anything a
@@ -1453,7 +1478,12 @@ mod tests {
 
     #[test]
     fn leading_sleep_flags_waits_and_spares_pacing() {
-        for waiting in ["sleep 30", "sleep 30 && echo waited", "  sleep 5; ls", "\nsleep 1"] {
+        for waiting in [
+            "sleep 30",
+            "sleep 30 && echo waited",
+            "  sleep 5; ls",
+            "\nsleep 1",
+        ] {
             assert!(leading_sleep(waiting), "{waiting:?}");
         }
         for working in [
@@ -1539,6 +1569,9 @@ mod tests {
             max_turns: 10,
             wall_clock: std::time::Duration::from_secs(30),
             verbose: false,
+            overrides: noob_provider::types::Overrides::default(),
+            yolo: false,
+            ancestor_skills: Vec::new(),
             background: None,
         });
         let items = vec![

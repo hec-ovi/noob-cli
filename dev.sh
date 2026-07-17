@@ -38,7 +38,10 @@ case "${1:-}" in
   # there is no CI.
   test)
     dev_image
-    "${RUN[@]}" cargo test --workspace
+    # Never share native test artifacts with a host Rust toolchain. A glibc
+    # binary under target/debug is not runnable in the Alpine dev container,
+    # and Cargo can otherwise mistake it for a fresh artifact.
+    "${RUN[@]}" env CARGO_TARGET_DIR=/src/target/docker-dev cargo test --workspace
     ;;
   # Static release binary (same flags as the runtime image build).
   build)
@@ -54,6 +57,7 @@ case "${1:-}" in
     dev_image
     docker run --rm --network host --user "$UIDGID" \
       -e CARGO_HOME=/src/.cargo-home -e NOOB_LIVE=1 \
+      -e CARGO_TARGET_DIR=/src/target/docker-dev \
       -e NOOB_LIVE_BASE_URL -e NOOB_LIVE_MCP_URL \
       -v "$PWD":/src -w /src "$DEV_IMG" \
       cargo test --workspace -- --ignored --test-threads=1
@@ -71,13 +75,13 @@ case "${1:-}" in
     shift
     open_agent exec -p "${1:?usage: ./dev.sh exec \"prompt\"}"
     ;;
-  # Footprint budgets from ARCHITECTURE.md: stripped binary <= 8 MB,
+  # Footprint budgets from ARCHITECTURE.md: stripped binary <= 8 MiB,
   # runtime crate graph <= 45.
   size-check)
     "$0" build
     size=$(stat -c%s "$BIN")
     echo "binary: $size bytes"
-    [ "$size" -le 8388608 ] || { echo "FAIL: binary exceeds 8 MB"; exit 1; }
+    [ "$size" -le 8388608 ] || { echo "FAIL: binary exceeds 8 MiB"; exit 1; }
     crates=$("${RUN[@]}" sh -c \
       'cargo tree -p noob -e normal --prefix none | sed "s/ (\*)$//" | sort -u | wc -l')
     echo "runtime crates: $crates"
