@@ -1,6 +1,6 @@
 # noob-cli status and release plan
 
-Status date: 2026-07-15.
+Status date: 2026-07-17.
 
 noob-cli is one static Rust binary in a Docker runtime, targeting OpenAI-compatible endpoints. [ARCHITECTURE.md](ARCHITECTURE.md) describes the runtime design; this file tracks release gates and open items.
 
@@ -9,8 +9,8 @@ noob-cli is one static Rust binary in a Docker runtime, targeting OpenAI-compati
 | Gate | Result |
 |---|---|
 | Strict workspace Clippy | clean |
-| Offline suite (host and Docker) | 672 pass |
-| Pty interaction suite | 70 pass |
+| Offline suite (host and Docker) | 674 pass |
+| Pty interaction suite | 71 pass |
 | Opt-in live suite | 9 pass |
 | Static musl binary | 3,924,864 bytes, limit 8 MiB |
 | Runtime crate graph | 40 crates, limit 45 |
