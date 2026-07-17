@@ -9,10 +9,10 @@ noob-cli is one static Rust binary in a Docker runtime, targeting OpenAI-compati
 | Gate | Result |
 |---|---|
 | Strict workspace Clippy | clean |
-| Offline suite (host and Docker) | 678 pass |
-| Pty interaction suite | 73 pass |
+| Offline suite (host and Docker) | 707 pass |
+| Interactive `e2e_ui` suite | 72 pass |
 | Opt-in live suite | 9 pass |
-| Static musl binary | 3,928,960 bytes, limit 8 MiB |
+| Static musl binary | 4,313,984 bytes, limit 8 MiB |
 | Runtime crate graph | 40 crates, limit 45 |
 | Host installer and wrapper | covered |
 | Standalone `websearch web-search` | covered |
