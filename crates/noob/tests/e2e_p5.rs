@@ -134,7 +134,10 @@ fn plan_gate() {
     let msgs = reqs[0]["messages"].as_array().unwrap();
     assert_eq!(
         msgs[1]["content"],
-        "[plan mode] Explore read-only, then present a numbered implementation plan."
+        "[plan mode] Read-only: write, edit, and bash are disabled until the user \
+         approves with /go. Explore with the read-only tools, then present a \
+         numbered implementation plan as plain text. If the request asks for a \
+         change, plan it instead of attempting it."
     );
     assert_eq!(msgs[2]["content"], "plan the feature");
     // Defense in depth: the write was refused, not executed.

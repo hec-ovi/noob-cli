@@ -1042,7 +1042,9 @@ fn no_color_allowed() -> bool {
 /// session shows the human's dialogue, not internal bookkeeping. This is a
 /// display filter only; every one of these items stays in the loaded context.
 fn is_synthetic_replay_item(text: &str) -> bool {
-    text == crate::agent::PLAN_ENTER_MSG
+    // Prefix, not equality: sessions saved before a wording change carry the
+    // old enter message and must stay filtered on replay.
+    text.starts_with("[plan mode]")
         || text == crate::agent::PLAN_APPROVED_MSG
         || text == "[interrupted]"
         || text.starts_with("[skills updated]")

@@ -41,10 +41,51 @@ const PAUSE_AT: u32 = 8;
 const PLAN_TOOLS: &[&str] = tools::READ_ONLY_SET;
 
 /// The injected user-role mode message (frozen phrasing; e2e-asserted).
+/// Spells out that mutation is structurally absent: a small model given a
+/// "do X" prompt otherwise tries to act, finds no write/edit/bash schema,
+/// and grinds the remaining read-only tools into the doom-loop breakers.
 pub const PLAN_ENTER_MSG: &str =
-    "[plan mode] Explore read-only, then present a numbered implementation plan.";
+    "[plan mode] Read-only: write, edit, and bash are disabled until the user \
+     approves with /go. Explore with the read-only tools, then present a \
+     numbered implementation plan as plain text. If the request asks for a \
+     change, plan it instead of attempting it.";
 /// What /go appends when the user approves (frozen phrasing).
 pub const PLAN_APPROVED_MSG: &str = "Plan approved. Execute it.";
+
+/// The doom-loop breakers name the way out. "Take a different approach" is
+/// only actionable when a different approach exists: a gated agent has no
+/// mutating tools, so the sole exit is to stop calling tools and produce the
+/// text the mode wants (a plan, or a child's final report). The generic
+/// wording sent a live plan-mode run through eight identical retries into
+/// the consecutive-error abort.
+fn repeat_intercept_msg(plan: bool, read_only: bool) -> String {
+    if plan {
+        "repeated identical call; the result will not change; you have explored \
+         enough: present the numbered implementation plan as text now"
+    } else if read_only {
+        "repeated identical call; the result will not change; stop exploring \
+         and report what you found"
+    } else {
+        "repeated identical call; the result will not change; take a different \
+         approach"
+    }
+    .to_string()
+}
+
+/// Same mode-awareness for the four-failure course-correct nudge.
+fn nudge_note(plan: bool, read_only: bool) -> &'static str {
+    if plan {
+        "[note] the last four tool calls all failed; you are in plan mode \
+         (read-only): stop calling tools and present the numbered \
+         implementation plan as plain text"
+    } else if read_only {
+        "[note] the last four tool calls all failed; stop calling tools and \
+         report what you found with what you already have"
+    } else {
+        "[note] the last four tool calls all failed; step back and reconsider: \
+         re-read the file or take a different approach"
+    }
+}
 
 pub struct Agent {
     pub client: Client,
@@ -797,9 +838,7 @@ impl Agent {
                 }
             } else if nudge {
                 self.push_item(Item::User(
-                    "[note] the last four tool calls all failed; step back and reconsider: \
-                     re-read the file or take a different approach"
-                        .to_string(),
+                    nudge_note(self.plan, self.read_only).to_string(),
                 ));
                 self.show_session_warning(ui);
             }
@@ -1138,11 +1177,10 @@ impl Agent {
             }
             if repeats + 1 >= DOOM_REPEATS {
                 return (
-                    sched::Planned::Canned(ToolOutcome::err(
-                        "repeated identical call; the result will not change; \
-                         take a different approach"
-                            .to_string(),
-                    )),
+                    sched::Planned::Canned(ToolOutcome::err(repeat_intercept_msg(
+                        self.plan,
+                        self.read_only,
+                    ))),
                     args,
                 );
             }
@@ -1557,6 +1595,52 @@ mod tests {
                     "{name} round {round} must run, never intercept"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn gated_modes_steer_the_doom_breakers_toward_text() {
+        // A gated agent has no mutating tools, so "take a different approach"
+        // is a dead end (caught live: a plan-mode run ground the skill tool
+        // through eight identical retries into the consecutive-error abort).
+        // Both breakers must name the actual exit: produce the mode's text.
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        for (plan, read_only, wants) in [
+            (true, false, "present the numbered implementation plan"),
+            (false, true, "report what you found"),
+            (false, false, "take a different approach"),
+        ] {
+            let mut agent = test_agent(
+                vec![],
+                ToolCtx::new(ws.clone(), crate::tools::guard::Sandbox::Container),
+                tmp.path(),
+            );
+            agent.plan = plan;
+            agent.read_only = read_only;
+            let call = ToolCall {
+                id: "c".into(),
+                name: "read".into(),
+                arguments: r#"{"path":"x"}"#.into(),
+            };
+            agent.plan_call(&call);
+            agent.plan_call(&call);
+            match agent.plan_call(&call).0 {
+                sched::Planned::Canned(out) => {
+                    assert!(out.is_error);
+                    assert!(
+                        out.content.contains("repeated identical call")
+                            && out.content.contains(wants),
+                        "plan={plan} read_only={read_only}: {:?}",
+                        out.content
+                    );
+                }
+                sched::Planned::Run { .. } => panic!("third identical call must intercept"),
+            }
+            assert!(
+                nudge_note(plan, read_only).contains(wants),
+                "plan={plan} read_only={read_only} nudge"
+            );
         }
     }
 
