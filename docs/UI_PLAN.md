@@ -12,7 +12,7 @@ During a turn, the dock keeps three rows visible:
 2. Editable draft or an active confirmation question.
 3. Queue and cancellation state.
 
-The user can type while the model streams or tools run. Enter records the submitted text with a `[queued]` marker and leaves the running turn untouched; queued messages dispatch in order once the turn finishes on its own. Escape or Ctrl-C cancellation hands queued and unsubmitted text back to the editor. Escape twice within five seconds cancels; Ctrl-C cancels immediately. A second Ctrl-C during cancellation restores the terminal and exits with status 130.
+The user can type while the model streams or tools run. Enter queues the submitted text and leaves the running turn untouched: the message waits as a dim pinned `[queued]` row above the input and dispatches in order once the turn finishes on its own, echoed into the transcript as a plain `› message` record at dispatch (so no `[queued]` marker lingers after the answer). Escape or Ctrl-C cancellation hands queued and unsubmitted text back to the editor. Escape twice within five seconds cancels; Ctrl-C cancels immediately. A second Ctrl-C during cancellation restores the terminal and exits with status 130.
 
 One main-thread render loop owns terminal output. A stdin reader and the agent worker send ordered events to it. Text, reasoning, tool start, tool finish, notes, errors, questions, keys, reader loss, and turn end retain channel order. Only adjacent render events can share a short repaint window.
 
@@ -23,7 +23,7 @@ The interactive REPL also provides:
 - A `plan` checklist maintained by the model through the `plan` tool. It is pinned above the input during turns and at the idle prompt, updating in place across turn boundaries instead of re-printing into the transcript. The active glyph animates, completed actions show elapsed time, long lists are capped with counts, and a completed plan collapses to one timed line. It is agent-driven with no approval step and is separate from `/plan` mode.
 - Detached `subagent` jobs with stable IDs, cancellation through `/agents`, and one final result injected into the parent context as soon as that job is ready. This includes `tools: "all"` jobs; unrelated slow jobs do not delay a completed result.
 - Redisplay on resume: at an interactive terminal a resumed conversation is redrawn before the first prompt, with synthetic bookkeeping items filtered. Corrupt records are skipped with one bounded warning. Redisplay is display-only and never touches the request, transcript, or session log.
-- Resize reflow through SIGWINCH while idle or during an active turn. The erase walks the frame's physical height after the terminal's own rewrap (drawn cells over the new width), so shrinking the window repaints cleanly instead of leaving rule fragments.
+- Resize through SIGWINCH while idle or during an active turn resets the viewport: clear screen, home the cursor, repaint the frame. After a reflow no cursor-relative erase can reliably find the old frame, and VTE-family terminals push the cleared screen into scrollback, so the transcript stays in history and no rule fragments survive.
 
 ## Rendering
 

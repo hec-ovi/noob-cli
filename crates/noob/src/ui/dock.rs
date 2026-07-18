@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use noob_provider::http::INTERRUPTED;
 
 use super::prompt::{Decoder, Editor, Input, Key, RawGuard, Step, term_height, term_width};
-use super::style::{ColorDepth, RESET};
+use super::style::RESET;
 use super::{
     BufferedTurnRenderer, RegionTone, TurnEvent, Ui, elapsed_label, safe_terminal_text, scanner,
 };
@@ -98,34 +98,15 @@ const PLAN_STEP_ROWS: usize = 6;
 /// screen (where relative cursor moves would clamp at the top and desync).
 const FRAME_RESERVE_ROWS: usize = 4;
 
-/// The frame as it was last physically drawn, kept for the resize repaint.
-/// A reflowing terminal (VTE, kitty, alacritty, ...) rewraps every logical
-/// line longer than the new width into several physical rows the moment the
-/// window shrinks, so an erase that assumes "one drawn row = one physical
-/// row" desyncs and leaves rule fragments all over the screen. Recording the
-/// draw width and each row's display cells lets the resize erase walk the
-/// exact physical height the old frame occupies at the new width.
-struct FrameGeometry {
-    /// Display cells of every drawn row above the input row (pinned regions
-    /// and the top rule), in any order: the resize erase only needs the sum
-    /// of their wrapped heights, not their layout.
-    rows_above_cells: Vec<usize>,
-}
-
-/// Display cells of one drawn row (SGR/CSI/OSC are zero-width), the same
-/// single-width simplification as the rest of the dock.
-fn display_cells(row: &str) -> usize {
-    let mut tracker = OutTracker::default();
-    tracker.feed(row.as_bytes(), usize::MAX / 2);
-    tracker.col
-}
-
-/// Physical rows a drawn row of `cells` occupies after the terminal reflows
-/// it to `width` columns. A row always occupies at least one physical row.
-fn wrapped_rows(cells: usize, width: usize) -> usize {
-    let width = width.max(1);
-    (cells.max(1)).div_ceil(width)
-}
+/// The dock's answer to a resize: a viewport reset. A reflowing terminal
+/// (VTE, kitty, alacritty, ...) rewraps every logical line longer than the
+/// new width into several physical rows the moment the window changes, and
+/// no cursor-relative erase can reliably find the old frame afterwards
+/// (v0.3.7 walked wrap-aware geometry and real VTE still shredded rows).
+/// Clearing the screen and homing the cursor is reflow-agnostic by
+/// construction: the frame repaints from the top-left, and VTE pushes the
+/// cleared screen into scrollback so the transcript stays in history.
+const VIEWPORT_RESET: &[u8] = b"\x1b[2J\x1b[H";
 
 /// Re-read the width until it stops moving: an interactive resize drag
 /// delivers a burst of SIGWINCH, and repainting at every intermediate width
@@ -500,10 +481,10 @@ pub struct DockSession {
     /// The latest plan checklist, kept across turns so the plan stays pinned
     /// above the input at all times (during turns and at the idle prompt),
     /// updating in place instead of stacking a copy into the transcript at
-    /// every turn end. Cleared by /clear-plan.
+    /// every turn end. A plan whose every step completes is retired at turn
+    /// end: recorded once into the transcript and dropped from here. Cleared
+    /// by /clear-plan.
     plan_block: Option<String>,
-    /// The frame as last drawn, consumed by the resize repaint.
-    drawn_frame: Option<FrameGeometry>,
     /// Permanent input-stream state. The channel itself cannot disconnect
     /// while this session owns `tx`, so ReaderGone must survive the turn where
     /// it was observed and make every later prompt return EOF immediately.
@@ -528,15 +509,15 @@ impl DockSession {
             agent_view: false,
             idle_esc_armed_until: None,
             plan_block: None,
-            drawn_frame: None,
             reader_gone: false,
             _guard: guard,
         })
     }
 
-    /// Dispatch the next queued message, if any, as this prompt's input: it
-    /// was already accepted (echoed on Enter during the turn), so it is
-    /// returned without re-reading stdin, one per prompt = one per turn.
+    /// Dispatch the next queued message, if any, as this prompt's input,
+    /// without re-reading stdin: one per prompt = one per turn. The caller
+    /// echoes it into the transcript at dispatch; while it waited it was
+    /// only a pinned `[queued]` region row, which died with the turn frame.
     fn next_queued(&mut self) -> Option<Input> {
         self.queue.pop_front().map(Input::Line)
     }
@@ -576,9 +557,14 @@ impl DockSession {
         plan: bool,
         background: Option<&crate::subagent::BackgroundHub>,
     ) -> Input {
-        // Queued messages were echoed at acceptance time during the turn. Do
-        // not print them a second time when they are dispatched.
+        // A queued message becomes this prompt's input. Its pinned [queued]
+        // row disappeared with the turn frame, so echo the plain `› message`
+        // record here: the transcript then reads exactly like a typed
+        // submission, with no stale [queued] marker anywhere.
         if let Some(input) = self.next_queued() {
+            if let Input::Line(line) = &input {
+                ui.queued_dispatch_record(line);
+            }
             return input;
         }
         if self.reader_gone && self.pending.is_empty() {
@@ -610,21 +596,25 @@ impl DockSession {
             }
 
             if term_width() != width {
-                // A resize: wait out the SIGWINCH burst, then erase by the
-                // frame's physical height after the terminal's own reflow
-                // (see erase_frame_resized), never by its drawn row count.
-                let now_width = settled_width();
-                self.erase_frame_resized(ui, now_width, self.idle_cursor_col(width));
-                width = now_width;
+                // A resize: wait out the SIGWINCH burst, then reset the
+                // viewport and repaint the frame from the top-left (see
+                // VIEWPORT_RESET; the terminal's reflow makes any in-place
+                // erase of the old frame unreliable).
+                width = settled_width();
                 agent_rows = self.idle_region_rows(ui, background, width);
+                ui.begin_batch();
+                ui.out_raw(VIEWPORT_RESET);
                 self.draw_idle_prompt(ui, plan, width, &agent_rows);
+                ui.end_batch();
                 input_dirty = true;
             } else {
                 let next_agent_rows = self.idle_region_rows(ui, background, width);
                 if next_agent_rows != agent_rows {
+                    ui.begin_batch();
                     self.erase_idle_prompt(ui, agent_rows.len());
                     agent_rows = next_agent_rows;
                     self.draw_idle_prompt(ui, plan, width, &agent_rows);
+                    ui.end_batch();
                     input_dirty = true;
                 }
             }
@@ -748,6 +738,7 @@ impl DockSession {
     }
 
     fn draw_idle_prompt(&mut self, ui: &mut Ui, plan: bool, width: usize, rows: &[String]) {
+        ui.begin_batch();
         if !rows.is_empty() {
             let mut block = String::new();
             for row in rows {
@@ -758,69 +749,7 @@ impl DockSession {
             ui.out_raw(block.as_bytes());
         }
         ui.expand(plan, width);
-        // Above the input row sit the pinned rows and the top rule (a full
-        // `width` cells by construction); the bottom rule below the input
-        // needs no cells, the resize erase clears downward with `ESC[J`.
-        self.drawn_frame = Some(FrameGeometry {
-            rows_above_cells: rows
-                .iter()
-                .map(|row| display_cells(row))
-                .chain(std::iter::once(width))
-                .collect(),
-        });
-    }
-
-    /// The cell column the idle input redraw parked the cursor at, for the
-    /// frame drawn at `drawn_width`.
-    fn idle_cursor_col(&self, drawn_width: usize) -> usize {
-        self.draft.parked_col(drawn_width)
-    }
-
-    /// Same for the active frame, whose input row is either the draft or the
-    /// ask modal's question line (cursor at its end).
-    fn active_cursor_col(&self, ask: &Option<AskState>, drawn_width: usize) -> usize {
-        match ask {
-            Some(a) => {
-                let shown = format!("{} [y/N] {}", safe_terminal_text(&a.question), a.answer);
-                Editor::from_line(&shown).parked_col(drawn_width)
-            }
-            None => self.draft.parked_col(drawn_width),
-        }
-    }
-
-    /// Erase a frame drawn at an older width after the terminal resized to
-    /// `new_width`. The cursor sits on the input row at `cursor_col` cells,
-    /// where the last input redraw parked it. On a reflowing terminal (VTE,
-    /// kitty, alacritty, ...) every drawn row longer than the new width now
-    /// spans several physical rows and the cursor stayed glued to its cell,
-    /// so: hop up to the input line's first physical row, clear from there to
-    /// the end of the screen (the rest of the input line and the bottom rule
-    /// live below), then walk up over the wrapped physical height of every
-    /// drawn row above, clearing each whole line. On a non-reflowing terminal
-    /// the walk over-clears at most a few rows of transcript; it can never
-    /// leave rule fragments behind. Ends at column 0 of the topmost frame row.
-    fn erase_frame_resized(&mut self, ui: &mut Ui, new_width: usize, cursor_col: usize) {
-        let Some(frame) = self.drawn_frame.take() else {
-            ui.erase(true);
-            return;
-        };
-        let new_width = new_width.max(1);
-        let mut s = String::new();
-        let cursor_rows_above = cursor_col / new_width;
-        if cursor_rows_above > 0 {
-            s.push_str(&format!("\x1b[{cursor_rows_above}A"));
-        }
-        s.push_str("\r\x1b[J");
-        let above: usize = frame
-            .rows_above_cells
-            .iter()
-            .map(|&cells| wrapped_rows(cells, new_width))
-            .sum();
-        for _ in 0..above {
-            s.push_str("\x1b[1A\r\x1b[2K");
-        }
-        s.push('\r');
-        ui.out_raw(s.as_bytes());
+        ui.end_batch();
     }
 
     /// Clear the optional agent rows and the three-row idle box, leaving the
@@ -964,13 +893,13 @@ impl DockSession {
         loop {
             cancel.expire(Instant::now());
             if term_width() != width {
-                // A resize: wait out the SIGWINCH burst, then erase the frame
-                // by the physical height it occupies after the terminal's own
-                // reflow, never by its drawn row count (which desyncs and
-                // shreds the screen with rule fragments).
-                let now_width = settled_width();
-                self.erase_frame_resized(ui, now_width, self.active_cursor_col(&ask, width));
-                width = now_width;
+                // A resize: wait out the SIGWINCH burst, then reset the
+                // viewport and repaint the frame from the top-left (see
+                // VIEWPORT_RESET). The partial output line moved into
+                // scrollback with the rest of the screen, so the tracker
+                // restarts on a fresh row and the next batch never hops up
+                // onto a row that no longer exists.
+                width = settled_width();
                 region_rows = self.region_rows(
                     ui,
                     self.plan_block.as_deref(),
@@ -981,6 +910,9 @@ impl DockSession {
                 background_revision = background
                     .map(crate::subagent::BackgroundHub::revision)
                     .unwrap_or_default();
+                tracker = OutTracker::default();
+                ui.begin_batch();
+                ui.out_raw(VIEWPORT_RESET);
                 self.draw_active_frame(
                     ui,
                     plan,
@@ -991,6 +923,7 @@ impl DockSession {
                     &active_tools,
                     &region_rows,
                 );
+                ui.end_batch();
                 drawn_r = region_rows.len();
             }
 
@@ -1007,6 +940,14 @@ impl DockSession {
                     Ok(ev) => ev,
                     Err(RecvTimeoutError::Timeout) => {
                         cancel.expire(Instant::now());
+                        // The terminal may have resized while this loop was
+                        // blocked; a repaint at the old width would walk the
+                        // wrong rows of a reflowed screen. Skip the refresh
+                        // and let the width check at the top of the loop
+                        // reset the viewport first.
+                        if term_width() != width {
+                            continue;
+                        }
                         let refreshed = self.region_rows(
                             ui,
                             self.plan_block.as_deref(),
@@ -1168,8 +1109,7 @@ impl DockSession {
                 }
                 Ev::Key(key) => {
                     cancel.expire(Instant::now());
-                    let mut accepted_record = None;
-                    let mut agents_toggled = false;
+                    let mut regions_changed = false;
                     if ask.is_some() {
                         match key {
                             Key::Enter => {
@@ -1238,13 +1178,14 @@ impl DockSession {
                                 if !cancel.committed && !self.draft.is_empty() {
                                     // Queue only: the running turn (and any
                                     // plan or detached agent it drives) is
-                                    // never touched. The message dispatches at
-                                    // the next prompt, after the turn ends on
-                                    // its own. Esc Esc remains the only stop.
-                                    let message = self.draft.line();
-                                    self.queue.push_back(message.clone());
+                                    // never touched. The message waits as a
+                                    // dim pinned `[queued]` row and dispatches
+                                    // at the next prompt, after the turn ends
+                                    // on its own (where it is echoed into the
+                                    // transcript). Esc Esc is the only stop.
+                                    self.queue.push_back(self.draft.line());
                                     self.draft = Editor::default();
-                                    accepted_record = Some(self.queued_record(ui, &message));
+                                    regions_changed = true;
                                 }
                             }
                             Key::Eof => {
@@ -1259,10 +1200,10 @@ impl DockSession {
                                     let snapshot = hub.snapshot();
                                     if self.agent_view || !snapshot.rows.is_empty() {
                                         self.agent_view = !self.agent_view;
-                                        agents_toggled = true;
+                                        regions_changed = true;
                                     }
                                 }
-                                if !agents_toggled && !cancel.committed {
+                                if !regions_changed && !cancel.committed {
                                     super::prompt::complete_editor(&mut self.draft);
                                 }
                             }
@@ -1273,7 +1214,7 @@ impl DockSession {
                         }
                     }
 
-                    if agents_toggled {
+                    if regions_changed {
                         let refreshed = self.region_rows(
                             ui,
                             self.plan_block.as_deref(),
@@ -1306,20 +1247,6 @@ impl DockSession {
                                 &region_rows,
                             );
                         }
-                    } else if let Some(record) = accepted_record {
-                        self.write_above(
-                            ui,
-                            &mut tracker,
-                            record.as_bytes(),
-                            plan,
-                            width,
-                            &ask,
-                            &cancel,
-                            started,
-                            &active_tools,
-                            &region_rows,
-                            &mut drawn_r,
-                        );
                     } else {
                         self.refresh_active_frame(
                             ui,
@@ -1352,22 +1279,28 @@ impl DockSession {
                 Ev::End => {
                     // Tear the live frame down, regions and all, so the exact
                     // height that was on screen is cleared (not a fixed three
-                    // rows). The plan and the hub's agents view are NOT
-                    // re-recorded into the transcript: the idle prompt pins
-                    // both live, so a static copy per turn would only stack
-                    // duplicates. Only a hubless fan-out panel leaves a record.
+                    // rows). An in-progress plan and the hub's agents view are
+                    // NOT re-recorded into the transcript: the idle prompt
+                    // pins both live, so a static copy per turn would only
+                    // stack duplicates. Two records are the exception: a plan
+                    // whose every step completed retires into one transcript
+                    // summary (and unpins, instead of hugging the input
+                    // forever), and a hubless fan-out panel leaves its rows.
+                    let plan_record = self.retire_completed_plan(ui, width);
                     let final_rows =
                         self.final_region_rows(ui, agents_block.as_deref(), background, width);
+                    ui.begin_batch();
                     self.erase_dock(ui, drawn_r);
-                    if !final_rows.is_empty() {
-                        let mut block = String::new();
-                        for row in &final_rows {
-                            block.push_str("\r\x1b[2K");
-                            block.push_str(row);
-                            block.push_str("\r\n");
-                        }
+                    let mut block = String::new();
+                    for row in plan_record.iter().chain(&final_rows) {
+                        block.push_str("\r\x1b[2K");
+                        block.push_str(row);
+                        block.push_str("\r\n");
+                    }
+                    if !block.is_empty() {
                         ui.out_raw(block.as_bytes());
                     }
+                    ui.end_batch();
                     return;
                 }
                 // A resize just needs to wake the loop: the width re-check at the
@@ -1469,6 +1402,13 @@ impl DockSession {
                 RegionSource::Agents,
             ));
         }
+        // Messages queued mid-turn wait as dim pinned rows under the agents
+        // row, not as transcript records: the [queued] marker vanishes with
+        // the row the moment the message dispatches, so an already-answered
+        // message can never keep reading as still queued.
+        for message in &self.queue {
+            rows.push(queued_region_row(ui, message, width));
+        }
         let counts = checklist_counts(plan_block.unwrap_or_default())
             .plus(checklist_counts(shown_agents.unwrap_or_default()));
         self.cap_region_rows(ui, rows, counts, width)
@@ -1536,6 +1476,20 @@ impl DockSession {
             rows.push(format!("{open}{label}{reset}"));
         }
         rows
+    }
+
+    /// Retire a plan whose every step is done: one "plan completed" summary
+    /// row for the transcript, and the pinned copy is dropped, so the
+    /// finished plan lives in history instead of sticking to the input
+    /// forever. An unfinished plan returns None and stays pinned across the
+    /// turn boundary.
+    fn retire_completed_plan(&mut self, ui: &Ui, width: usize) -> Option<String> {
+        if !ui.regions_enabled() {
+            return None;
+        }
+        let label = completed_plan_label(self.plan_block.as_deref()?)?;
+        self.plan_block = None;
+        Some(ui.region_summary_row(&label, width, RegionTone::Activity))
     }
 
     /// The static rows a finished turn leaves in the transcript. Nothing when
@@ -1669,6 +1623,7 @@ impl DockSession {
         region_rows: &[String],
         drawn_r: &mut usize,
     ) {
+        ui.begin_batch();
         self.erase_dock(ui, *drawn_r);
         if !tracker.fresh {
             ui.out_raw(format!("\x1b[1A\x1b[{}G", tracker.col + 1).as_bytes());
@@ -1688,6 +1643,7 @@ impl DockSession {
             active_tools,
             region_rows,
         );
+        ui.end_batch();
         *drawn_r = region_rows.len();
     }
 
@@ -1709,6 +1665,7 @@ impl DockSession {
         region_rows: &[String],
         drawn_r: &mut usize,
     ) {
+        ui.begin_batch();
         self.erase_dock(ui, *drawn_r);
         self.draw_active_frame(
             ui,
@@ -1720,6 +1677,7 @@ impl DockSession {
             active_tools,
             region_rows,
         );
+        ui.end_batch();
         *drawn_r = region_rows.len();
     }
 
@@ -1765,19 +1723,10 @@ impl DockSession {
         s.push_str("\r\n\x1b[2K\r\n\x1b[2K");
         s.push_str(&bottom);
         s.push_str("\x1b[1A");
+        ui.begin_batch();
         ui.out_raw(s.as_bytes());
-        self.record_active_geometry(&top, region_rows);
         self.redraw_active_input(ui, width, ask);
-    }
-
-    /// Remember the display cells of every drawn row above the input (the top
-    /// rule and the pinned regions), for the wrap-aware resize erase.
-    fn record_active_geometry(&mut self, top: &str, region_rows: &[String]) {
-        self.drawn_frame = Some(FrameGeometry {
-            rows_above_cells: std::iter::once(display_cells(top))
-                .chain(region_rows.iter().map(|row| display_cells(row)))
-                .collect(),
-        });
+        ui.end_batch();
     }
 
     /// Repaint the status rows and pinned regions in place without erasing
@@ -1813,9 +1762,10 @@ impl DockSession {
         s.push_str("\x1b[2B\r\x1b[2K");
         s.push_str(&bottom);
         s.push_str("\x1b[1A\r");
+        ui.begin_batch();
         ui.out_raw(s.as_bytes());
-        self.record_active_geometry(&top, region_rows);
         self.redraw_active_input(ui, width, ask);
+        ui.end_batch();
     }
 
     fn redraw_active_input(&mut self, ui: &mut Ui, width: usize, ask: &Option<AskState>) {
@@ -1893,25 +1843,24 @@ impl DockSession {
         styled_rule(&label, width, &open)
     }
 
-    /// The `› message [queued]` acceptance record: Enter during a turn echoes
-    /// the message into the transcript immediately so the human sees it was
-    /// taken, and the [queued] note says it waits for the running turn to end
-    /// (nothing is stopped; Esc Esc remains the only cancel).
-    fn queued_record(&self, ui: &Ui, message: &str) -> String {
-        let shown: String = message
-            .chars()
-            .map(|c| if c.is_control() { ' ' } else { c })
-            .collect();
-        let prompt = ui.box_color();
-        let reset = if prompt.is_empty() { "" } else { RESET };
-        let note = if ui.depth == ColorDepth::None || !ui.color {
-            String::new()
-        } else {
-            ui.theme.note.sgr(ui.depth)
-        };
-        let note_reset = if note.is_empty() { "" } else { RESET };
-        format!("{prompt}› {reset}{shown} {note}[queued]{note_reset}\r\n")
-    }
+}
+
+/// One pinned row per queued message: a dim `› message [queued]`, clamped to
+/// one physical row like every region row. It lives only in the pinned region
+/// while the message waits; dispatch removes the row (and the [queued] marker
+/// with it) and echoes the plain `› message` record into the transcript.
+fn queued_region_row(ui: &Ui, message: &str, width: usize) -> PinnedRegionRow {
+    let shown: String = message
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    PinnedRegionRow::summary(
+        ui,
+        format!("› {shown} [queued]"),
+        width,
+        RegionTone::Dim,
+        RegionPriority::None,
+    )
 }
 
 fn frame_label(input: &str) -> String {
@@ -2009,16 +1958,12 @@ fn is_plan_step(line: &str) -> bool {
 
 /// The pinned rows for one plan checklist: the capped step window while it
 /// runs, collapsing to a one-line "plan completed" summary once every step is
-/// done. Shared by the in-turn regions and the idle prompt so the plan looks
-/// the same wherever it is pinned.
+/// done (the summary stays pinned only until the turn ends; then
+/// `retire_completed_plan` moves it into the transcript). Shared by the
+/// in-turn regions and the idle prompt so the plan looks the same wherever it
+/// is pinned.
 fn plan_region_rows(ui: &Ui, text: &str, width: usize) -> Vec<PinnedRegionRow> {
-    let counts = checklist_counts(text);
-    if counts.is_complete() {
-        let mut label = format!("plan completed · {}/{}", counts.done, counts.total());
-        if let Some(plan_elapsed) = plan_elapsed(text) {
-            label.push_str(" · ");
-            label.push_str(plan_elapsed);
-        }
+    if let Some(label) = completed_plan_label(text) {
         vec![PinnedRegionRow::summary(
             ui,
             label,
@@ -2029,6 +1974,22 @@ fn plan_region_rows(ui: &Ui, text: &str, width: usize) -> Vec<PinnedRegionRow> {
     } else {
         capped_plan_rows(ui, text, width)
     }
+}
+
+/// The one-line summary of a plan whose every step is done, shared by the
+/// mid-turn pinned row and the turn-end transcript record so both read
+/// identically. None while any step is still open.
+fn completed_plan_label(text: &str) -> Option<String> {
+    let counts = checklist_counts(text);
+    if !counts.is_complete() {
+        return None;
+    }
+    let mut label = format!("plan completed · {}/{}", counts.done, counts.total());
+    if let Some(plan_elapsed) = plan_elapsed(text) {
+        label.push_str(" · ");
+        label.push_str(plan_elapsed);
+    }
+    Some(label)
 }
 
 /// Pure window math for the plan cap. Given the step glyph lines in order,

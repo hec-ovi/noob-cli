@@ -368,6 +368,21 @@ impl Ui {
         let reset = if color.is_empty() { "" } else { RESET };
         self.out(&format!("{color}› {reset}{shown}\r\n"));
     }
+
+    /// The `› message` record for a queued message at the moment it dispatches
+    /// as the next turn: byte-for-byte the record a typed submission collapses
+    /// to, minus a frame to erase (the turn frame is already gone). Queued
+    /// messages are echoed here rather than at acceptance, so no [queued]
+    /// marker can survive in the transcript after the message is answered.
+    pub(super) fn queued_dispatch_record(&mut self, line: &str) {
+        let shown: String = line
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        let color = self.box_color();
+        let reset = if color.is_empty() { "" } else { RESET };
+        self.out(&format!("{color}› {reset}{shown}\r\n"));
+    }
 }
 
 /// The prompt marker: the arrow and a space. No side border; the frame is a top
@@ -516,15 +531,6 @@ impl Editor {
     /// carried draft should re-expand the frame.
     pub(super) fn is_empty(&self) -> bool {
         self.buf.is_empty()
-    }
-
-    /// The column (in cells) where the input redraw parks the cursor at the
-    /// given terminal width: the marker plus the cursor's offset within the
-    /// one-row window. The dock's resize erase uses it to find which physical
-    /// row of the (possibly rewrapped) input line the cursor sits on.
-    pub(super) fn parked_col(&self, width: usize) -> usize {
-        let avail = width.saturating_sub(PREFIX_CELLS).max(1);
-        PREFIX_CELLS + input_window(&self.buf, self.cursor, avail).1
     }
 
     /// An editor pre-filled with a line, cursor at its end. The dock's ask

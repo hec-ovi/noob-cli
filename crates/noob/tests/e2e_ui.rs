@@ -1529,11 +1529,16 @@ fn dock_single_esc_does_not_cancel() {
 /// Enter on a non-empty running-turn draft QUEUES the message and touches
 /// nothing: the running turn (its provider request and its tools) completes
 /// on its own, and the queued message dispatches on the next REPL iteration.
-/// The screen shows the acceptance as `› message [queued]` and never says
-/// steering, turn stopped, or interrupted; the wire carries no [interrupted]
-/// marker at all. Esc Esc remains the only way to stop a turn.
+/// While it waits, the message is a pinned `› message [queued]` row above the
+/// input; dispatch replaces it with the plain `› message` transcript record,
+/// so no [queued] marker survives once the message is answered. The screen
+/// never says steering, turn stopped, or interrupted; the wire carries no
+/// [interrupted] marker at all. Esc Esc remains the only way to stop a turn.
 #[test]
 fn dock_enter_queues_and_dispatches_after_the_turn_completes() {
+    const ROWS: u16 = 20;
+    const COLS: u16 = 80;
+
     let rig = rig();
     // Turn 1 runs a real (finite) tool. Enter mid-tool must not stop it; the
     // queued message becomes turn 2 only after turn 1 finishes naturally.
@@ -1542,22 +1547,52 @@ fn dock_enter_queues_and_dispatches_after_the_turn_completes() {
     rig.server.enqueue_stream_completion("first turn done");
     rig.server.enqueue_stream_completion("queued turn done");
 
-    let mut pty = spawn_pty_with(&rig, DOCK);
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)), &[]);
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"go\r");
     pty.wait_for("sleep 2");
     pty.send(b"queue now\r");
-    pty.wait_for("[queued]");
+    pty.wait_for("[queued]"); // the pinned acceptance row while it waits
     // The tool and its turn complete untouched, then the queued turn runs.
     pty.wait_for("first turn done");
     pty.wait_for("queued turn done");
     settle();
+    pty.drain(std::time::Duration::from_millis(400));
+    let screen = pty.screen(ROWS, COLS);
+    let rows = screen.render();
+
     pty.send(&[0x04]);
     pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    // Once answered, the message is a plain transcript record above its
+    // answer; the [queued] marker died with the pinned row.
+    let joined = rows.join("\n");
+    assert!(
+        !joined.contains("[queued]"),
+        "the [queued] marker must vanish once the message is answered:\n{}",
+        screen.dump("after the queued turn")
+    );
+    let record = rows
+        .iter()
+        .position(|r| r.contains(&format!("{MARKER} queue now")))
+        .unwrap_or_else(|| {
+            panic!(
+                "the dispatched message must be a plain record:\n{}",
+                screen.dump("after the queued turn")
+            )
+        });
+    let answer = rows
+        .iter()
+        .position(|r| r.contains("queued turn done"))
+        .expect("the queued answer is on screen");
+    assert!(
+        record < answer,
+        "the record precedes its answer (record {record}, answer {answer}):\n{}",
+        screen.dump("after the queued turn")
+    );
     for noise in ["[steering]", "turn stopped", "[interrupted]", "canceling"] {
         assert!(
             !pty.seen.contains(noise),
@@ -1589,10 +1624,15 @@ fn dock_enter_queues_and_dispatches_after_the_turn_completes() {
     rig.server.assert_clean();
 }
 
-/// Several messages queued during one turn dispatch in order, one turn each,
-/// and the bottom rule counts them while they wait.
+/// Several messages queued during one turn dispatch in order, one turn each;
+/// the bottom rule counts them while they wait, each waits as its own pinned
+/// [queued] row, and after both answers the records read as plain `› message`
+/// lines with no [queued] marker left anywhere on screen.
 #[test]
 fn dock_queues_multiple_messages_fifo() {
+    const ROWS: u16 = 20;
+    const COLS: u16 = 80;
+
     let rig = rig();
     rig.server
         .enqueue_stream_toolcalls(&[("slow-tool", "bash", r#"{"cmd":"sleep 2"}"#)], None);
@@ -1600,7 +1640,7 @@ fn dock_queues_multiple_messages_fifo() {
     rig.server.enqueue_stream_completion("answer alpha");
     rig.server.enqueue_stream_completion("answer beta");
 
-    let mut pty = spawn_pty_with(&rig, DOCK);
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)), &[]);
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"go\r");
@@ -1613,11 +1653,44 @@ fn dock_queues_multiple_messages_fifo() {
     pty.wait_for("answer alpha");
     pty.wait_for("answer beta");
     settle();
+    pty.drain(std::time::Duration::from_millis(400));
+    let screen = pty.screen(ROWS, COLS);
+    let rows = screen.render();
+
     pty.send(&[0x04]);
     pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    let joined = rows.join("\n");
+    assert!(
+        !joined.contains("[queued]"),
+        "no [queued] marker may survive the answers:\n{}",
+        screen.dump("after both queued turns")
+    );
+    for (question, answer) in [
+        ("first question", "answer alpha"),
+        ("second question", "answer beta"),
+    ] {
+        let record = rows
+            .iter()
+            .position(|r| r.contains(&format!("{MARKER} {question}")))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{question:?} must be a plain record:\n{}",
+                    screen.dump("after both queued turns")
+                )
+            });
+        let answered = rows
+            .iter()
+            .position(|r| r.contains(answer))
+            .expect("answer on screen");
+        assert!(
+            record < answered,
+            "{question:?} precedes {answer:?}:\n{}",
+            screen.dump("after both queued turns")
+        );
+    }
     let reqs = rig.api_requests();
     assert_eq!(reqs.len(), 4, "tool round, its follow-up, then both queued turns");
     assert_eq!(last_user(&reqs[2]), "first question");
@@ -3977,12 +4050,14 @@ fn dock_pins_the_plan_as_one_in_place_region() {
     );
 }
 
-/// When a turn ends, a completed plan collapses to one timed summary directly
-/// above the idle input. The individual completed rows do not consume the
-/// bottom of the terminal indefinitely.
+/// A plan whose every step completes is RETIRED at turn end: one timed
+/// "plan completed" summary goes into the transcript (exactly once) and the
+/// pinned copy is dropped, so the finished plan scrolls with history instead
+/// of sticking to the input forever. A later turn proves it: the summary
+/// stays above that turn's output rather than re-pinning below it.
 #[test]
-fn dock_leaves_the_finished_plan_visible_above_the_idle_box() {
-    const ROWS: u16 = 16;
+fn dock_retires_the_finished_plan_into_the_transcript() {
+    const ROWS: u16 = 18;
     const COLS: u16 = 64;
 
     let rig = rig();
@@ -3993,6 +4068,7 @@ fn dock_leaves_the_finished_plan_visible_above_the_idle_box() {
     rig.server
         .enqueue_stream_toolcalls(&[("p2", "plan", b)], None);
     rig.server.enqueue_stream_completion("PLAN-COMPLETE-ZZ");
+    rig.server.enqueue_stream_completion("SECOND-TURN-ZZ");
 
     let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)), &[]);
     pty.wait_for("type a task");
@@ -4000,10 +4076,13 @@ fn dock_leaves_the_finished_plan_visible_above_the_idle_box() {
     pty.send(b"do the plan\r");
     pty.wait_for("PLAN-COMPLETE-ZZ"); // the turn's final text landed
     settle();
+    pty.send(b"next task\r");
+    pty.wait_for("SECOND-TURN-ZZ");
+    settle();
     pty.drain(std::time::Duration::from_millis(400));
     let screen = pty.screen(ROWS, COLS);
     let rows = screen.render();
-    println!("\n{}", screen.dump("FINISHED PLAN PERSISTS ABOVE IDLE BOX"));
+    println!("\n{}", screen.dump("FINISHED PLAN RETIRED INTO TRANSCRIPT"));
 
     pty.send(&[0x04]);
     pty.wait_for("resume with");
@@ -4011,28 +4090,38 @@ fn dock_leaves_the_finished_plan_visible_above_the_idle_box() {
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     rig.server.assert_clean();
 
-    // The live frame is gone, but one completed summary remains above input.
     assert!(
         dock_rows(&rows).is_none(),
         "the live turn frame must be gone at idle"
     );
-    let marker = rows
+    // Exactly one summary, recorded when the plan finished, not per turn.
+    let summaries: Vec<usize> = rows
         .iter()
-        .rposition(|r| r.contains(MARKER))
-        .expect("idle input box");
-    let header = rows
+        .enumerate()
+        .filter_map(|(index, row)| row.contains("plan completed · 2/2 ·").then_some(index))
+        .collect();
+    assert_eq!(
+        summaries.len(),
+        1,
+        "the finished plan is recorded exactly once:\n{}",
+        screen.dump("end")
+    );
+    // It scrolled with history: the whole second turn sits BELOW it. A plan
+    // still pinned would instead hug the input, below SECOND-TURN-ZZ.
+    let second = rows
         .iter()
-        .position(|r| r.contains("plan completed · 2/2 ·"))
-        .unwrap_or_else(|| panic!("finished plan did not persist:\n{}", screen.dump("end")));
+        .position(|r| r.contains("SECOND-TURN-ZZ"))
+        .expect("second turn output");
     assert!(
-        header < marker,
-        "the completed plan must sit above the idle input box (header {header}, marker {marker}):\n{}",
+        summaries[0] < second,
+        "the summary must scroll with history, not stay pinned (summary {}, second turn {second}):\n{}",
+        summaries[0],
         screen.dump("end")
     );
     let joined = rows.join("\n");
     assert!(
         !joined.contains("[x] alpha") && !joined.contains("[x] beta"),
-        "completed items should collapse at idle:\n{}",
+        "completed items must collapse into the summary:\n{}",
         screen.dump("end")
     );
 }
@@ -4857,6 +4946,83 @@ fn dock_shrink_with_pinned_plan_rows_leaves_no_fragments() {
         step_row < marker,
         "the plan stays above the input box:\n{}",
         vt.dump("shrunk with plan")
+    );
+}
+
+/// The live-caught combination: a shrink in the MIDDLE of a turn that has a
+/// plan pinned (the 08-22 screenshots: offset input and rule fragments all
+/// over). After the viewport reset the screen holds exactly one clean frame:
+/// the Working rule, the plan pinned once, the input row, the bottom rule,
+/// and not a single stray fragment.
+#[test]
+fn dock_active_shrink_with_a_pinned_plan_repaints_one_clean_frame() {
+    const ROWS: u16 = 14;
+
+    let rig = rig();
+    let plan = r#"{"todos":[{"content":"alpha step","status":"in_progress"},{"content":"beta step","status":"pending"}]}"#;
+    rig.server
+        .enqueue_stream_toolcalls(&[("p1", "plan", plan)], None);
+    rig.server
+        .enqueue_raw(stalled_stream("SHRINK-TURN-ZZ", 2, 4000, true));
+
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, 100)), &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"go\r");
+    pty.wait_for("plan (0/2 done):"); // the pinned plan is on the live frame
+    pty.drain(std::time::Duration::from_millis(300));
+    let mark = pty.raw.len();
+
+    pty.resize(ROWS, 60);
+    pty.drain(std::time::Duration::from_millis(800));
+    let post = pty.raw.len();
+
+    pty.wait_for("SHRINK-TURN-ZZ");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+
+    let mut vt = vt::Vt::new(ROWS as usize, 100);
+    vt.feed(&pty.raw[..mark]);
+    vt.resize(ROWS as usize, 60);
+    vt.feed(&pty.raw[mark..post]);
+    let rows = vt.render();
+
+    let rules = rule_row_indices(&rows);
+    assert_eq!(
+        rules.len(),
+        2,
+        "exactly the frame's two rules survive a mid-turn shrink over a plan:\n{}",
+        vt.dump("after shrink")
+    );
+    assert!(
+        rows[rules[0]].contains("Working"),
+        "the top rule is the live status row:\n{}",
+        vt.dump("after shrink")
+    );
+    let step_hits = rows.iter().filter(|r| r.contains("alpha step")).count();
+    assert_eq!(
+        step_hits, 1,
+        "the pinned plan appears exactly once after the shrink:\n{}",
+        vt.dump("after shrink")
+    );
+    let header = rows
+        .iter()
+        .position(|r| r.contains("plan (0/2 done):"))
+        .unwrap_or_else(|| panic!("plan header missing:\n{}", vt.dump("after shrink")));
+    let marker = rows
+        .iter()
+        .rposition(|r| r.contains(MARKER))
+        .unwrap_or_else(|| panic!("input row missing:\n{}", vt.dump("after shrink")));
+    assert!(
+        rules[0] < header && header < marker && marker < rules[1],
+        "frame order: Working rule, plan, input, bottom rule (top {}, header {header}, input {marker}, bottom {}):\n{}",
+        rules[0],
+        rules[1],
+        vt.dump("after shrink")
     );
 }
 

@@ -218,6 +218,14 @@ pub struct Ui {
     /// panel paints; discarded at the end of the input (per-turn renderers get
     /// a fresh set, and `done` clears the persistent one).
     panel_task_ids: std::collections::HashSet<String>,
+    /// Repaint batching. While `batch_depth > 0`, `out`/`out_raw` append here
+    /// instead of reaching the sink, and closing the outermost batch emits the
+    /// whole cycle as one write+flush. A terminal then renders an
+    /// erase-and-redraw as a single frame: without this, each flushed step of
+    /// a dock repaint could be rendered on its own, and the pinned plan
+    /// visibly blinked on every streamed batch.
+    batch: Vec<u8>,
+    batch_depth: usize,
     /// Test seam for the confirmation flow: unit tests cannot own a tty.
     #[cfg(test)]
     pub forced_ask: Option<bool>,
@@ -248,6 +256,8 @@ impl Ui {
             scanner: None,
             turn_tx: None,
             panel_task_ids: std::collections::HashSet::new(),
+            batch: Vec::new(),
+            batch_depth: 0,
             #[cfg(test)]
             forced_ask: None,
         }
@@ -272,6 +282,8 @@ impl Ui {
             scanner: None,
             turn_tx: Some(tx),
             panel_task_ids: std::collections::HashSet::new(),
+            batch: Vec::new(),
+            batch_depth: 0,
             #[cfg(test)]
             forced_ask: None,
         }
@@ -297,6 +309,8 @@ impl Ui {
                 scanner: None,
                 turn_tx: None,
                 panel_task_ids: std::collections::HashSet::new(),
+                batch: Vec::new(),
+                batch_depth: 0,
                 #[cfg(test)]
                 forced_ask: None,
             },
@@ -349,6 +363,10 @@ impl Ui {
         // joins the animation thread (which clears its line) before this writes,
         // so the two never interleave. A no-op when none is running.
         self.stop_scanner();
+        if self.batch_depth > 0 {
+            self.batch.extend_from_slice(s.as_bytes());
+            return;
+        }
         let _ = self.out.write_all(s.as_bytes());
         let _ = self.out.flush();
     }
@@ -358,8 +376,31 @@ impl Ui {
     /// avoids a pointless lossy round trip).
     pub(super) fn out_raw(&mut self, bytes: &[u8]) {
         self.stop_scanner();
+        if self.batch_depth > 0 {
+            self.batch.extend_from_slice(bytes);
+            return;
+        }
         let _ = self.out.write_all(bytes);
         let _ = self.out.flush();
+    }
+
+    /// Open a repaint batch. Nestable: only the close of the outermost batch
+    /// emits, so composite draw paths can wrap themselves defensively without
+    /// caring whether a caller already opened one.
+    pub(super) fn begin_batch(&mut self) {
+        self.batch_depth += 1;
+    }
+
+    /// Close a repaint batch; at depth zero the collected bytes go out as one
+    /// write+flush, so the terminal renders the whole cycle as a single frame.
+    pub(super) fn end_batch(&mut self) {
+        debug_assert!(self.batch_depth > 0, "end_batch without begin_batch");
+        self.batch_depth = self.batch_depth.saturating_sub(1);
+        if self.batch_depth == 0 && !self.batch.is_empty() {
+            let bytes = std::mem::take(&mut self.batch);
+            let _ = self.out.write_all(&bytes);
+            let _ = self.out.flush();
+        }
     }
 
     /// Open a dock session: the persistent-input REPL driver (fable.md).
@@ -1147,6 +1188,56 @@ mod tests {
         }
     }
 
+    /// A sink that records every write call separately, so a test can assert
+    /// how many terminal-visible writes a repaint cycle produced (the batch
+    /// contract: one).
+    #[derive(Clone, Default)]
+    struct CountingBuf(Arc<Mutex<Vec<Vec<u8>>>>);
+
+    impl Write for CountingBuf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().push(b.to_vec());
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn batched_repaint_reaches_the_sink_as_one_ordered_write() {
+        let sink = CountingBuf::default();
+        let (mut ui, _out, _err) = harness(Mode::Repl, true, true);
+        ui.out = Box::new(sink.clone());
+
+        // An empty batch emits nothing at all.
+        ui.begin_batch();
+        ui.end_batch();
+        assert!(sink.0.lock().unwrap().is_empty(), "empty batch wrote bytes");
+
+        ui.begin_batch();
+        ui.out_raw(b"\x1b[2K");
+        ui.out("hello");
+        ui.begin_batch(); // a nested composite draw inside the cycle
+        ui.out_raw(b" world");
+        ui.end_batch(); // inner close: still inside the outer batch
+        assert!(
+            sink.0.lock().unwrap().is_empty(),
+            "bytes reached the terminal mid-batch"
+        );
+        ui.out("!");
+        ui.end_batch();
+        {
+            let writes = sink.0.lock().unwrap();
+            assert_eq!(writes.len(), 1, "one repaint cycle must be one write");
+            assert_eq!(writes[0], b"\x1b[2Khello world!".to_vec());
+        }
+
+        // Outside a batch, writes pass straight through again.
+        ui.out("after");
+        assert_eq!(sink.0.lock().unwrap().len(), 2);
+    }
+
     /// A `Ui` wired to in-memory sinks with mode/color/ansi forced independent
     /// of any real terminal (the suite runs piped, so `is_terminal()` is false
     /// and the styled path would otherwise get zero coverage). Truecolor depth
@@ -1172,6 +1263,8 @@ mod tests {
             scanner: None,
             turn_tx: None,
             panel_task_ids: std::collections::HashSet::new(),
+            batch: Vec::new(),
+            batch_depth: 0,
             forced_ask: None,
         };
         (ui, out, err)
