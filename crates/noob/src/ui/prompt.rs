@@ -518,6 +518,15 @@ impl Editor {
         self.buf.is_empty()
     }
 
+    /// The column (in cells) where the input redraw parks the cursor at the
+    /// given terminal width: the marker plus the cursor's offset within the
+    /// one-row window. The dock's resize erase uses it to find which physical
+    /// row of the (possibly rewrapped) input line the cursor sits on.
+    pub(super) fn parked_col(&self, width: usize) -> usize {
+        let avail = width.saturating_sub(PREFIX_CELLS).max(1);
+        PREFIX_CELLS + input_window(&self.buf, self.cursor, avail).1
+    }
+
     /// An editor pre-filled with a line, cursor at its end. The dock's ask
     /// modal renders its question through the same one-row window as any
     /// input, so a long question scrolls instead of wrapping the frame.

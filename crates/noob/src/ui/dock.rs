@@ -98,10 +98,50 @@ const PLAN_STEP_ROWS: usize = 6;
 /// screen (where relative cursor moves would clamp at the top and desync).
 const FRAME_RESERVE_ROWS: usize = 4;
 
-#[derive(Clone, Copy)]
-struct FinalRegionState {
-    canceled: bool,
-    elapsed: Duration,
+/// The frame as it was last physically drawn, kept for the resize repaint.
+/// A reflowing terminal (VTE, kitty, alacritty, ...) rewraps every logical
+/// line longer than the new width into several physical rows the moment the
+/// window shrinks, so an erase that assumes "one drawn row = one physical
+/// row" desyncs and leaves rule fragments all over the screen. Recording the
+/// draw width and each row's display cells lets the resize erase walk the
+/// exact physical height the old frame occupies at the new width.
+struct FrameGeometry {
+    /// Display cells of every drawn row above the input row (pinned regions
+    /// and the top rule), in any order: the resize erase only needs the sum
+    /// of their wrapped heights, not their layout.
+    rows_above_cells: Vec<usize>,
+}
+
+/// Display cells of one drawn row (SGR/CSI/OSC are zero-width), the same
+/// single-width simplification as the rest of the dock.
+fn display_cells(row: &str) -> usize {
+    let mut tracker = OutTracker::default();
+    tracker.feed(row.as_bytes(), usize::MAX / 2);
+    tracker.col
+}
+
+/// Physical rows a drawn row of `cells` occupies after the terminal reflows
+/// it to `width` columns. A row always occupies at least one physical row.
+fn wrapped_rows(cells: usize, width: usize) -> usize {
+    let width = width.max(1);
+    (cells.max(1)).div_ceil(width)
+}
+
+/// Re-read the width until it stops moving: an interactive resize drag
+/// delivers a burst of SIGWINCH, and repainting at every intermediate width
+/// multiplies the chances of racing the terminal's own reflow. Bounded, so a
+/// pathological drag cannot wedge the loop.
+fn settled_width() -> usize {
+    let mut width = term_width();
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(30));
+        let now = term_width();
+        if now == width {
+            break;
+        }
+        width = now;
+    }
+    width
 }
 
 // ---------------------------------------------------------------------------
@@ -445,9 +485,10 @@ pub struct DockSession {
     /// line per turn; the tail waits here, replacing the old CARRYOVER).
     pending: VecDeque<Key>,
     draft: Editor,
-    /// Messages submitted with Enter while a turn ran. Submission interrupts
-    /// that turn as steering; the next prompt dispatches one message at once.
-    /// Explicit Esc/Ctrl-C cancellation still drains them back into the draft.
+    /// Messages submitted with Enter while a turn ran. Submission queues the
+    /// message without touching the running turn; the next prompt dispatches
+    /// one message at once, oldest first. Explicit Esc/Ctrl-C cancellation
+    /// drains them back into the draft instead of firing them.
     queue: VecDeque<String>,
     /// Tab toggles this persistent view. It survives turn boundaries so a
     /// background child remains inspectable both while the parent runs and at
@@ -456,10 +497,13 @@ pub struct DockSession {
     /// Idle double-ESC arm: a first ESC at the idle prompt while detached
     /// agents run arms this window; a second ESC inside it stops the fleet.
     idle_esc_armed_until: Option<Instant>,
-    /// True when this turn's interrupt came from a submitted steering message,
-    /// not explicit Esc/Ctrl-C cancellation. The REPL consumes it after the
-    /// worker ends to decide whether queued input should dispatch or be restored.
-    steering: bool,
+    /// The latest plan checklist, kept across turns so the plan stays pinned
+    /// above the input at all times (during turns and at the idle prompt),
+    /// updating in place instead of stacking a copy into the transcript at
+    /// every turn end. Cleared by /clear-plan.
+    plan_block: Option<String>,
+    /// The frame as last drawn, consumed by the resize repaint.
+    drawn_frame: Option<FrameGeometry>,
     /// Permanent input-stream state. The channel itself cannot disconnect
     /// while this session owns `tx`, so ReaderGone must survive the turn where
     /// it was observed and make every later prompt return EOF immediately.
@@ -483,7 +527,8 @@ impl DockSession {
             queue: VecDeque::new(),
             agent_view: false,
             idle_esc_armed_until: None,
-            steering: false,
+            plan_block: None,
+            drawn_frame: None,
             reader_gone: false,
             _guard: guard,
         })
@@ -511,11 +556,10 @@ impl DockSession {
         self.draft = Editor::from_line(&parts.join("\n"));
     }
 
-    /// Consume whether the most recent turn was interrupted by an Enter
-    /// submission. Call this after every dock turn (including a completion
-    /// racing the interrupt) so the marker cannot leak into a later turn.
-    pub fn take_steering(&mut self) -> bool {
-        std::mem::take(&mut self.steering)
+    /// Drop the pinned plan (the /clear-plan command): the next prompt and
+    /// turn draw without a plan region until the model posts a new checklist.
+    pub fn clear_plan(&mut self) {
+        self.plan_block = None;
     }
 
     /// Read one line at the idle prompt, event-driven with the semantics of the
@@ -544,7 +588,7 @@ impl DockSession {
         // live rows are pinned immediately above that box; the editor remains
         // on the same single input row and stays fully usable.
         let mut width = term_width();
-        let mut agent_rows = self.idle_agent_rows(ui, background, width);
+        let mut agent_rows = self.idle_region_rows(ui, background, width);
         self.draw_idle_prompt(ui, plan, width, &agent_rows);
         let mut input_dirty = true;
         loop {
@@ -565,14 +609,24 @@ impl DockSession {
                 return Input::BackgroundReady;
             }
 
-            let now_width = term_width();
-            let next_agent_rows = self.idle_agent_rows(ui, background, now_width);
-            if now_width != width || next_agent_rows != agent_rows {
-                self.erase_idle_prompt(ui, agent_rows.len());
+            if term_width() != width {
+                // A resize: wait out the SIGWINCH burst, then erase by the
+                // frame's physical height after the terminal's own reflow
+                // (see erase_frame_resized), never by its drawn row count.
+                let now_width = settled_width();
+                self.erase_frame_resized(ui, now_width, self.idle_cursor_col(width));
                 width = now_width;
-                agent_rows = next_agent_rows;
+                agent_rows = self.idle_region_rows(ui, background, width);
                 self.draw_idle_prompt(ui, plan, width, &agent_rows);
                 input_dirty = true;
+            } else {
+                let next_agent_rows = self.idle_region_rows(ui, background, width);
+                if next_agent_rows != agent_rows {
+                    self.erase_idle_prompt(ui, agent_rows.len());
+                    agent_rows = next_agent_rows;
+                    self.draw_idle_prompt(ui, plan, width, &agent_rows);
+                    input_dirty = true;
+                }
             }
 
             while let Some(key) = self.pending.pop_front() {
@@ -608,7 +662,7 @@ impl DockSession {
                         if self.agent_view || !snapshot.rows.is_empty() {
                             self.erase_idle_prompt(ui, agent_rows.len());
                             self.agent_view = !self.agent_view;
-                            agent_rows = self.idle_agent_rows(ui, background, width);
+                            agent_rows = self.idle_region_rows(ui, background, width);
                             self.draw_idle_prompt(ui, plan, width, &agent_rows);
                             continue;
                         }
@@ -704,6 +758,69 @@ impl DockSession {
             ui.out_raw(block.as_bytes());
         }
         ui.expand(plan, width);
+        // Above the input row sit the pinned rows and the top rule (a full
+        // `width` cells by construction); the bottom rule below the input
+        // needs no cells, the resize erase clears downward with `ESC[J`.
+        self.drawn_frame = Some(FrameGeometry {
+            rows_above_cells: rows
+                .iter()
+                .map(|row| display_cells(row))
+                .chain(std::iter::once(width))
+                .collect(),
+        });
+    }
+
+    /// The cell column the idle input redraw parked the cursor at, for the
+    /// frame drawn at `drawn_width`.
+    fn idle_cursor_col(&self, drawn_width: usize) -> usize {
+        self.draft.parked_col(drawn_width)
+    }
+
+    /// Same for the active frame, whose input row is either the draft or the
+    /// ask modal's question line (cursor at its end).
+    fn active_cursor_col(&self, ask: &Option<AskState>, drawn_width: usize) -> usize {
+        match ask {
+            Some(a) => {
+                let shown = format!("{} [y/N] {}", safe_terminal_text(&a.question), a.answer);
+                Editor::from_line(&shown).parked_col(drawn_width)
+            }
+            None => self.draft.parked_col(drawn_width),
+        }
+    }
+
+    /// Erase a frame drawn at an older width after the terminal resized to
+    /// `new_width`. The cursor sits on the input row at `cursor_col` cells,
+    /// where the last input redraw parked it. On a reflowing terminal (VTE,
+    /// kitty, alacritty, ...) every drawn row longer than the new width now
+    /// spans several physical rows and the cursor stayed glued to its cell,
+    /// so: hop up to the input line's first physical row, clear from there to
+    /// the end of the screen (the rest of the input line and the bottom rule
+    /// live below), then walk up over the wrapped physical height of every
+    /// drawn row above, clearing each whole line. On a non-reflowing terminal
+    /// the walk over-clears at most a few rows of transcript; it can never
+    /// leave rule fragments behind. Ends at column 0 of the topmost frame row.
+    fn erase_frame_resized(&mut self, ui: &mut Ui, new_width: usize, cursor_col: usize) {
+        let Some(frame) = self.drawn_frame.take() else {
+            ui.erase(true);
+            return;
+        };
+        let new_width = new_width.max(1);
+        let mut s = String::new();
+        let cursor_rows_above = cursor_col / new_width;
+        if cursor_rows_above > 0 {
+            s.push_str(&format!("\x1b[{cursor_rows_above}A"));
+        }
+        s.push_str("\r\x1b[J");
+        let above: usize = frame
+            .rows_above_cells
+            .iter()
+            .map(|&cells| wrapped_rows(cells, new_width))
+            .sum();
+        for _ in 0..above {
+            s.push_str("\x1b[1A\r\x1b[2K");
+        }
+        s.push('\r');
+        ui.out_raw(s.as_bytes());
     }
 
     /// Clear the optional agent rows and the three-row idle box, leaving the
@@ -814,21 +931,25 @@ impl DockSession {
         // The live regions pinned between the top status and the input row: the
         // plan checklist and the fan-out panel. Each is held as its raw block
         // text and re-rendered in place as it changes, so the console never
-        // stacks a fresh copy of the plan on every update. `region_rows` is the
-        // styled, width-clamped view (one physical row each); `drawn_r` is how
-        // many region rows are actually on screen, so an erase always clears the
-        // exact height the frame currently occupies even as it grows or shrinks.
-        let mut plan_block: Option<String> = None;
+        // stacks a fresh copy of the plan on every update. The plan text lives
+        // on the session (it survives turn boundaries and stays pinned at the
+        // idle prompt); the fan-out event block is per turn. `region_rows` is
+        // the styled, width-clamped view (one physical row each); `drawn_r` is
+        // how many region rows are actually on screen, so an erase always
+        // clears the exact height the frame currently occupies even as it
+        // grows or shrinks.
         let mut agents_block: Option<String> = None;
-        let mut region_rows: Vec<String> = Vec::new();
-        let mut drawn_r: usize = 0;
+        let mut region_rows: Vec<String> =
+            self.region_rows(ui, self.plan_block.as_deref(), None, background, width);
+        let mut drawn_r: usize = region_rows.len();
         let mut background_revision = background
             .map(crate::subagent::BackgroundHub::revision)
             .unwrap_or_default();
 
         // A running turn always owns a stable frame: a top status row, any live
         // regions, the editable draft, and a queue/cancel row. They are
-        // independent, so typing can never hide liveness again.
+        // independent, so typing can never hide liveness again. A plan pinned
+        // by an earlier turn is part of the frame from the first paint.
         self.draw_active_frame(
             ui,
             plan,
@@ -839,18 +960,20 @@ impl DockSession {
             &active_tools,
             &region_rows,
         );
-        // The initial frame carries no regions yet, so `drawn_r` stays 0 until
-        // the first plan or panel arrives.
 
         loop {
             cancel.expire(Instant::now());
-            let now_width = term_width();
-            if now_width != width {
-                self.erase_dock(ui, drawn_r);
+            if term_width() != width {
+                // A resize: wait out the SIGWINCH burst, then erase the frame
+                // by the physical height it occupies after the terminal's own
+                // reflow, never by its drawn row count (which desyncs and
+                // shreds the screen with rule fragments).
+                let now_width = settled_width();
+                self.erase_frame_resized(ui, now_width, self.active_cursor_col(&ask, width));
                 width = now_width;
                 region_rows = self.region_rows(
                     ui,
-                    plan_block.as_deref(),
+                    self.plan_block.as_deref(),
                     agents_block.as_deref(),
                     background,
                     width,
@@ -886,7 +1009,7 @@ impl DockSession {
                         cancel.expire(Instant::now());
                         let refreshed = self.region_rows(
                             ui,
-                            plan_block.as_deref(),
+                            self.plan_block.as_deref(),
                             agents_block.as_deref(),
                             background,
                             width,
@@ -930,10 +1053,10 @@ impl DockSession {
                     let mut regions_dirty = false;
                     let mut background_dirty = false;
                     Self::absorb_render(
-                        self.reword_for_steering(event),
+                        event,
                         &mut active_tools,
                         &mut renderer,
-                        &mut plan_block,
+                        &mut self.plan_block,
                         &mut agents_block,
                         &mut regions_dirty,
                     );
@@ -950,10 +1073,10 @@ impl DockSession {
                         match self.rx.recv_timeout(remaining) {
                             Ok(Ev::Render(event)) => {
                                 Self::absorb_render(
-                                    self.reword_for_steering(event),
+                                    event,
                                     &mut active_tools,
                                     &mut renderer,
-                                    &mut plan_block,
+                                    &mut self.plan_block,
                                     &mut agents_block,
                                     &mut regions_dirty,
                                 );
@@ -979,7 +1102,7 @@ impl DockSession {
                     if regions_dirty || background_changed {
                         let refreshed = self.region_rows(
                             ui,
-                            plan_block.as_deref(),
+                            self.plan_block.as_deref(),
                             agents_block.as_deref(),
                             background,
                             width,
@@ -1058,7 +1181,6 @@ impl DockSession {
                             Key::Interrupt => {
                                 let a = ask.take().expect("ask exists");
                                 let _ = a.reply.send(false);
-                                self.steering = false;
                                 if cancel.interrupt() == InterruptAction::HardExit {
                                     hard_exit();
                                 }
@@ -1067,7 +1189,6 @@ impl DockSession {
                                 if !cancel.committed && cancel.disarm() {
                                     let a = ask.take().expect("ask exists");
                                     let _ = a.reply.send(false);
-                                    self.steering = false;
                                     // Fleet first, then the interrupt flag, so
                                     // the worker's interrupt note already sees
                                     // the children as stopping.
@@ -1095,7 +1216,6 @@ impl DockSession {
                     } else {
                         match key {
                             Key::Interrupt => {
-                                self.steering = false;
                                 if cancel.interrupt() == InterruptAction::HardExit {
                                     hard_exit();
                                 }
@@ -1104,7 +1224,6 @@ impl DockSession {
                                 if cancel.committed {
                                     // Already canceling.
                                 } else if cancel.disarm() {
-                                    self.steering = false;
                                     // Fleet first, then the interrupt flag, so
                                     // the worker's interrupt note already sees
                                     // the children as stopping.
@@ -1117,11 +1236,15 @@ impl DockSession {
                             Key::Enter => {
                                 cancel.disarm();
                                 if !cancel.committed && !self.draft.is_empty() {
+                                    // Queue only: the running turn (and any
+                                    // plan or detached agent it drives) is
+                                    // never touched. The message dispatches at
+                                    // the next prompt, after the turn ends on
+                                    // its own. Esc Esc remains the only stop.
                                     let message = self.draft.line();
                                     self.queue.push_back(message.clone());
                                     self.draft = Editor::default();
-                                    self.commit_steering();
-                                    accepted_record = Some(self.steering_record(ui, &message));
+                                    accepted_record = Some(self.queued_record(ui, &message));
                                 }
                             }
                             Key::Eof => {
@@ -1153,7 +1276,7 @@ impl DockSession {
                     if agents_toggled {
                         let refreshed = self.region_rows(
                             ui,
-                            plan_block.as_deref(),
+                            self.plan_block.as_deref(),
                             agents_block.as_deref(),
                             background,
                             width,
@@ -1229,21 +1352,12 @@ impl DockSession {
                 Ev::End => {
                     // Tear the live frame down, regions and all, so the exact
                     // height that was on screen is cleared (not a fixed three
-                    // rows). Then leave the final plan/panel as a static record
-                    // above the idle prompt, so a finished plan stays visible at
-                    // the bottom instead of vanishing with the frame. A turn with
-                    // no region tears down exactly as before (byte-identical).
-                    let final_rows = self.final_region_rows(
-                        ui,
-                        plan_block.as_deref(),
-                        agents_block.as_deref(),
-                        background,
-                        width,
-                        FinalRegionState {
-                            canceled: cancel.committed,
-                            elapsed: started.elapsed(),
-                        },
-                    );
+                    // rows). The plan and the hub's agents view are NOT
+                    // re-recorded into the transcript: the idle prompt pins
+                    // both live, so a static copy per turn would only stack
+                    // duplicates. Only a hubless fan-out panel leaves a record.
+                    let final_rows =
+                        self.final_region_rows(ui, agents_block.as_deref(), background, width);
                     self.erase_dock(ui, drawn_r);
                     if !final_rows.is_empty() {
                         let mut block = String::new();
@@ -1326,23 +1440,7 @@ impl DockSession {
         }
         let mut rows: Vec<PinnedRegionRow> = Vec::new();
         if let Some(text) = plan_block {
-            let counts = checklist_counts(text);
-            if counts.is_complete() {
-                let mut label = format!("plan completed · {}/{}", counts.done, counts.total());
-                if let Some(plan_elapsed) = plan_elapsed(text) {
-                    label.push_str(" · ");
-                    label.push_str(plan_elapsed);
-                }
-                rows.push(PinnedRegionRow::summary(
-                    ui,
-                    label,
-                    width,
-                    RegionTone::Activity,
-                    RegionPriority::Plan,
-                ));
-            } else {
-                rows.extend(capped_plan_rows(ui, text, width));
-            }
+            rows.extend(plan_region_rows(ui, text, width));
         }
 
         // The event block for detached work captures only its admission-time
@@ -1376,111 +1474,36 @@ impl DockSession {
         self.cap_region_rows(ui, rows, counts, width)
     }
 
-    fn idle_agent_rows(
+    /// The pinned rows for the idle prompt: the persistent plan checklist,
+    /// then the live agents view. Same construction as the in-turn regions,
+    /// so the frame reads identically between and during turns and nothing is
+    /// ever re-recorded into the scrolling transcript.
+    fn idle_region_rows(
         &self,
         ui: &Ui,
         background: Option<&crate::subagent::BackgroundHub>,
         width: usize,
-    ) -> Vec<String> {
-        if !ui.regions_enabled() {
-            return Vec::new();
-        }
-        let Some(hub) = background else {
-            return Vec::new();
-        };
-        // Mirror the in-turn region selection: the expanded panel behind Tab,
-        // otherwise the one-line running/ready counter. Closing the panel must
-        // fall back to the counter, never to nothing, or live background work
-        // becomes invisible at the idle prompt.
-        let snapshot = hub.snapshot();
-        let block = if self.agent_view {
-            expanded_agent_snapshot_block(&snapshot)
-        } else {
-            collapsed_agent_snapshot_block(&snapshot)
-        };
-        let Some(block) = block else {
-            return Vec::new();
-        };
-        let counts = checklist_counts(&block);
-        let rows = checklist_pinned_rows(ui, &block, width, RegionSource::Agents);
-        let mut rows = self.cap_region_rows(ui, rows, counts, width);
-        // The armed idle double-ESC shows its own confirmation hint, mirroring
-        // the in-turn "press ESC again to cancel" row. The 100ms idle tick
-        // re-diffs these rows, so lapse of the window removes it on its own.
-        if snapshot.active > 0
-            && self
-                .idle_esc_armed_until
-                .is_some_and(|until| Instant::now() < until)
-        {
-            let open = ui.theme.error.sgr(ui.depth);
-            let reset = if open.is_empty() { "" } else { RESET };
-            rows.push(format!("{open}press ESC again to stop all agents{reset}"));
-        }
-        rows
-    }
-
-    fn final_region_rows(
-        &self,
-        ui: &Ui,
-        plan_block: Option<&str>,
-        agents_block: Option<&str>,
-        background: Option<&crate::subagent::BackgroundHub>,
-        width: usize,
-        final_state: FinalRegionState,
     ) -> Vec<String> {
         if !ui.regions_enabled() {
             return Vec::new();
         }
         let mut rows: Vec<PinnedRegionRow> = Vec::new();
-        if let Some(text) = plan_block {
-            let counts = checklist_counts(text);
-            let summary_elapsed = plan_elapsed(text)
-                .map(str::to_owned)
-                .unwrap_or_else(|| elapsed_label(final_state.elapsed));
-            if final_state.canceled {
-                rows.push(PinnedRegionRow::summary(
-                    ui,
-                    format!(
-                        "plan canceled · {}/{} completed · {}",
-                        counts.done,
-                        counts.total(),
-                        summary_elapsed,
-                    ),
-                    width,
-                    RegionTone::Error,
-                    RegionPriority::Plan,
-                ));
-            } else if counts.is_complete() {
-                rows.push(PinnedRegionRow::summary(
-                    ui,
-                    format!(
-                        "plan completed · {}/{} · {}",
-                        counts.done,
-                        counts.total(),
-                        summary_elapsed,
-                    ),
-                    width,
-                    RegionTone::Activity,
-                    RegionPriority::Plan,
-                ));
-            } else {
-                rows.extend(capped_plan_rows(ui, text, width));
-            }
+        if let Some(text) = self.plan_block.as_deref() {
+            rows.extend(plan_region_rows(ui, text, width));
         }
-        let snapshot_block = background.and_then(|hub| {
-            let snapshot = hub.snapshot();
+        // Mirror the in-turn region selection: the expanded panel behind Tab,
+        // otherwise the one-line running/ready counter. Closing the panel must
+        // fall back to the counter, never to nothing, or live background work
+        // becomes invisible at the idle prompt.
+        let snapshot = background.map(|hub| hub.snapshot());
+        let block = snapshot.as_ref().and_then(|snapshot| {
             if self.agent_view {
-                expanded_agent_snapshot_block(&snapshot)
+                expanded_agent_snapshot_block(snapshot)
             } else {
-                collapsed_agent_snapshot_block(&snapshot)
+                collapsed_agent_snapshot_block(snapshot)
             }
         });
-        let shown_agents = if background.is_some() {
-            snapshot_block.as_deref()
-        } else {
-            agents_block
-        };
-        if let Some(block) = shown_agents {
+        if let Some(block) = block.as_deref() {
             rows.extend(checklist_pinned_rows(
                 ui,
                 block,
@@ -1488,8 +1511,54 @@ impl DockSession {
                 RegionSource::Agents,
             ));
         }
-        let counts = checklist_counts(plan_block.unwrap_or_default())
-            .plus(checklist_counts(shown_agents.unwrap_or_default()));
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        let counts = checklist_counts(self.plan_block.as_deref().unwrap_or_default())
+            .plus(checklist_counts(block.as_deref().unwrap_or_default()));
+        let mut rows = self.cap_region_rows(ui, rows, counts, width);
+        // The armed idle double-ESC shows its own confirmation hint, mirroring
+        // the in-turn "press ESC again to cancel" row. The 100ms idle tick
+        // re-diffs these rows, so lapse of the window removes it on its own.
+        if snapshot.as_ref().is_some_and(|s| s.active > 0)
+            && self
+                .idle_esc_armed_until
+                .is_some_and(|until| Instant::now() < until)
+        {
+            let open = ui.theme.error.sgr(ui.depth);
+            let reset = if open.is_empty() { "" } else { RESET };
+            // Clamped to the width like every other pinned row: a wrapped
+            // hint would occupy two physical rows while the erase counts one.
+            let label: String = "press ESC again to stop all agents"
+                .chars()
+                .take(width.max(1))
+                .collect();
+            rows.push(format!("{open}{label}{reset}"));
+        }
+        rows
+    }
+
+    /// The static rows a finished turn leaves in the transcript. Nothing when
+    /// a background hub exists: the idle prompt pins the live plan and agents
+    /// view, so a static copy would only duplicate it (the historical
+    /// "[N] agents running" line stacked after every turn). The event-block
+    /// fallback still records a hubless fan-out panel, which no idle region
+    /// would otherwise keep visible.
+    fn final_region_rows(
+        &self,
+        ui: &Ui,
+        agents_block: Option<&str>,
+        background: Option<&crate::subagent::BackgroundHub>,
+        width: usize,
+    ) -> Vec<String> {
+        if !ui.regions_enabled() || background.is_some() {
+            return Vec::new();
+        }
+        let Some(block) = agents_block else {
+            return Vec::new();
+        };
+        let rows = checklist_pinned_rows(ui, block, width, RegionSource::Agents);
+        let counts = checklist_counts(block);
         self.cap_region_rows(ui, rows, counts, width)
     }
 
@@ -1697,7 +1766,18 @@ impl DockSession {
         s.push_str(&bottom);
         s.push_str("\x1b[1A");
         ui.out_raw(s.as_bytes());
+        self.record_active_geometry(&top, region_rows);
         self.redraw_active_input(ui, width, ask);
+    }
+
+    /// Remember the display cells of every drawn row above the input (the top
+    /// rule and the pinned regions), for the wrap-aware resize erase.
+    fn record_active_geometry(&mut self, top: &str, region_rows: &[String]) {
+        self.drawn_frame = Some(FrameGeometry {
+            rows_above_cells: std::iter::once(display_cells(top))
+                .chain(region_rows.iter().map(|row| display_cells(row)))
+                .collect(),
+        });
     }
 
     /// Repaint the status rows and pinned regions in place without erasing
@@ -1734,6 +1814,7 @@ impl DockSession {
         s.push_str(&bottom);
         s.push_str("\x1b[1A\r");
         ui.out_raw(s.as_bytes());
+        self.record_active_geometry(&top, region_rows);
         self.redraw_active_input(ui, width, ask);
     }
 
@@ -1743,7 +1824,7 @@ impl DockSession {
             let ed = Editor::from_line(&shown);
             ui.redraw_input_row(&ed, width);
         } else {
-            ui.redraw_input_row_hint(&self.draft, width, "type to steer the turn");
+            ui.redraw_input_row_hint(&self.draft, width, "type a message; Enter queues it");
         }
     }
 
@@ -1789,11 +1870,6 @@ impl DockSession {
     ) -> String {
         let (label, open) = if cancel.committed {
             ("canceling".to_string(), ui.theme.error.sgr(ui.depth))
-        } else if self.steering {
-            (
-                "steering · stopping current turn".to_string(),
-                ui.box_color(),
-            )
         } else if cancel.is_armed() {
             (
                 "press ESC again to cancel".to_string(),
@@ -1817,37 +1893,11 @@ impl DockSession {
         styled_rule(&label, width, &open)
     }
 
-    /// Display-only rewording for the steering handoff. The agent finalizes
-    /// a steered turn exactly like a cancel and notes "[interrupted]", but on
-    /// this path the stop is a handoff: the accepted message dispatches next.
-    /// Showing the word "interrupted" here read as lost work in a live
-    /// session. The transcript item keeps its frozen "[interrupted]" phrasing
-    /// (replay filter, cache identity); only the on-screen note changes, and
-    /// any suffix (surviving detached agents) is preserved.
-    fn reword_for_steering(&self, event: TurnEvent) -> TurnEvent {
-        if !self.steering {
-            return event;
-        }
-        match event {
-            TurnEvent::Note(line) if line.starts_with("[interrupted]") => {
-                let suffix = line.strip_prefix("[interrupted]").unwrap_or_default();
-                TurnEvent::Note(format!(
-                    "[steering] turn stopped · your message is next{suffix}"
-                ))
-            }
-            other => other,
-        }
-    }
-
-    fn commit_steering(&mut self) {
-        // Unit tests keep the process-global flag isolated; PTY tests execute
-        // the shipped path and exercise the real provider/tool interruption.
-        #[cfg(not(test))]
-        INTERRUPTED.store(true, Ordering::SeqCst);
-        self.steering = true;
-    }
-
-    fn steering_record(&self, ui: &Ui, message: &str) -> String {
+    /// The `› message [queued]` acceptance record: Enter during a turn echoes
+    /// the message into the transcript immediately so the human sees it was
+    /// taken, and the [queued] note says it waits for the running turn to end
+    /// (nothing is stopped; Esc Esc remains the only cancel).
+    fn queued_record(&self, ui: &Ui, message: &str) -> String {
         let shown: String = message
             .chars()
             .map(|c| if c.is_control() { ' ' } else { c })
@@ -1860,7 +1910,7 @@ impl DockSession {
             ui.theme.note.sgr(ui.depth)
         };
         let note_reset = if note.is_empty() { "" } else { RESET };
-        format!("{prompt}› {reset}{shown} {note}[steering]{note_reset}\r\n")
+        format!("{prompt}› {reset}{shown} {note}[queued]{note_reset}\r\n")
     }
 }
 
@@ -1955,6 +2005,30 @@ fn is_plan_step(line: &str) -> bool {
         || line.starts_with("[!]")
         || line.starts_with("[~]")
         || line.starts_with("[ ]")
+}
+
+/// The pinned rows for one plan checklist: the capped step window while it
+/// runs, collapsing to a one-line "plan completed" summary once every step is
+/// done. Shared by the in-turn regions and the idle prompt so the plan looks
+/// the same wherever it is pinned.
+fn plan_region_rows(ui: &Ui, text: &str, width: usize) -> Vec<PinnedRegionRow> {
+    let counts = checklist_counts(text);
+    if counts.is_complete() {
+        let mut label = format!("plan completed · {}/{}", counts.done, counts.total());
+        if let Some(plan_elapsed) = plan_elapsed(text) {
+            label.push_str(" · ");
+            label.push_str(plan_elapsed);
+        }
+        vec![PinnedRegionRow::summary(
+            ui,
+            label,
+            width,
+            RegionTone::Activity,
+            RegionPriority::Plan,
+        )]
+    } else {
+        capped_plan_rows(ui, text, width)
+    }
 }
 
 /// Pure window math for the plan cap. Given the step glyph lines in order,

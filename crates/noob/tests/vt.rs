@@ -36,6 +36,11 @@ pub struct Vt {
     rows: usize,
     cols: usize,
     grid: Vec<Vec<char>>,
+    /// Soft-wrap flags, one per row: true when the row's content continues
+    /// onto the next row (the terminal wrapped a long logical line there
+    /// rather than the program writing a newline). `resize` re-flows these
+    /// logical lines the way VTE-family terminals do.
+    wrapped: Vec<bool>,
     row: usize,
     col: usize,
     /// DECAWM deferred-wrap latch: the last glyph filled the final column and
@@ -64,6 +69,7 @@ impl Vt {
             rows,
             cols,
             grid: vec![vec![' '; cols]; rows],
+            wrapped: vec![false; rows],
             row: 0,
             col: 0,
             wrap_pending: false,
@@ -72,6 +78,104 @@ impl Vt {
             utf8: Vec::new(),
             utf8_left: 0,
         }
+    }
+
+    /// Resize the screen with VTE-style reflow, the behavior of the terminals
+    /// noob actually runs in (GNOME Terminal, kitty, alacritty, ...): every
+    /// logical line (a run of rows joined by soft-wrap flags) is re-wrapped to
+    /// the new width, and the cursor stays glued to the CELL it sat on, not to
+    /// its absolute row/column. Overflowing rows scroll off the top (into the
+    /// discarded scrollback); missing rows pad at the bottom. This is what
+    /// turns a naive "one drawn row = one physical row" erase into on-screen
+    /// garbage, so the dock's resize test replays through it.
+    pub fn resize(&mut self, new_rows: usize, new_cols: usize) {
+        assert!(new_rows > 0 && new_cols > 0);
+        // Gather logical lines and find the cursor's (line, cell) position.
+        let mut logical: Vec<Vec<char>> = Vec::new();
+        let mut cursor_line = 0usize;
+        let mut cursor_cell = 0usize;
+        let mut r = 0usize;
+        while r < self.rows {
+            let mut line: Vec<char> = Vec::new();
+            loop {
+                let continues = self.wrapped[r] && r + 1 < self.rows;
+                let content: &[char] = if continues {
+                    &self.grid[r][..]
+                } else {
+                    let len = self
+                        .grid[r]
+                        .iter()
+                        .rposition(|&c| c != ' ')
+                        .map_or(0, |p| p + 1);
+                    &self.grid[r][..len]
+                };
+                if self.row == r {
+                    cursor_line = logical.len();
+                    cursor_cell = line.len() + self.col;
+                }
+                line.extend_from_slice(content);
+                if continues {
+                    r += 1;
+                } else {
+                    break;
+                }
+            }
+            logical.push(line);
+            r += 1;
+        }
+        // Re-flow every logical line into chunks of the new width.
+        let mut grid: Vec<Vec<char>> = Vec::new();
+        let mut wrapped: Vec<bool> = Vec::new();
+        let mut cursor = (0usize, 0usize);
+        for (index, line) in logical.iter().enumerate() {
+            let chunks = if line.is_empty() {
+                1
+            } else {
+                line.len().div_ceil(new_cols)
+            };
+            for chunk in 0..chunks {
+                let start = chunk * new_cols;
+                let end = ((chunk + 1) * new_cols).min(line.len());
+                let mut row: Vec<char> = line[start..end].to_vec();
+                row.resize(new_cols, ' ');
+                let last = chunk + 1 == chunks;
+                grid.push(row);
+                wrapped.push(!last);
+                if index == cursor_line {
+                    let in_chunk = cursor_cell >= start && (cursor_cell < end || last);
+                    if in_chunk {
+                        cursor = (grid.len() - 1, (cursor_cell - start).min(new_cols - 1));
+                    }
+                }
+            }
+        }
+        // Fit the height. Trailing blank rows are not content: a real
+        // terminal does not push text off the top to preserve them, so drop
+        // those first (never past the cursor), then scroll from the top.
+        while grid.len() > new_rows {
+            let last_blank = grid
+                .last()
+                .is_some_and(|row| row.iter().all(|&c| c == ' '));
+            if last_blank && cursor.0 + 1 < grid.len() {
+                grid.pop();
+                wrapped.pop();
+            } else {
+                grid.remove(0);
+                wrapped.remove(0);
+                cursor.0 = cursor.0.saturating_sub(1);
+            }
+        }
+        while grid.len() < new_rows {
+            grid.push(vec![' '; new_cols]);
+            wrapped.push(false);
+        }
+        self.grid = grid;
+        self.wrapped = wrapped;
+        self.rows = new_rows;
+        self.cols = new_cols;
+        self.row = cursor.0.min(new_rows - 1);
+        self.col = cursor.1.min(new_cols - 1);
+        self.wrap_pending = false;
     }
 
     /// Apply a run of bytes to the screen. Safe on any input; never panics.
@@ -120,7 +224,11 @@ impl Vt {
                 self.col = 0;
                 self.wrap_pending = false;
             }
-            b'\n' => self.line_feed(),
+            b'\n' => {
+                // A hard newline breaks the logical line here.
+                self.wrapped[self.row] = false;
+                self.line_feed();
+            }
             0x08 => {
                 self.col = self.col.saturating_sub(1);
                 self.wrap_pending = false;
@@ -212,6 +320,10 @@ impl Vt {
                 for c in a..b.min(self.cols) {
                     self.grid[self.row][c] = ' ';
                 }
+                // Erasing through the end of the row ends its logical line.
+                if mode != 1 {
+                    self.wrapped[self.row] = false;
+                }
             }
             b'J' => {
                 let mode = nums.first().copied().unwrap_or(0);
@@ -221,6 +333,7 @@ impl Vt {
                             for c in 0..self.cols {
                                 self.grid[r][c] = ' ';
                             }
+                            self.wrapped[r] = false;
                         }
                     }
                     _ => {
@@ -228,10 +341,12 @@ impl Vt {
                         for c in self.col..self.cols {
                             self.grid[self.row][c] = ' ';
                         }
+                        self.wrapped[self.row] = false;
                         for r in (self.row + 1)..self.rows {
                             for c in 0..self.cols {
                                 self.grid[r][c] = ' ';
                             }
+                            self.wrapped[r] = false;
                         }
                     }
                 }
@@ -243,6 +358,8 @@ impl Vt {
     /// Place one printed glyph, honoring the deferred-wrap latch.
     fn put(&mut self, ch: char) {
         if self.wrap_pending {
+            // The terminal wraps a long logical line: mark the continuation.
+            self.wrapped[self.row] = true;
             self.line_feed();
             self.col = 0;
             self.wrap_pending = false;
@@ -266,6 +383,8 @@ impl Vt {
         } else {
             self.grid.remove(0);
             self.grid.push(vec![' '; self.cols]);
+            self.wrapped.remove(0);
+            self.wrapped.push(false);
         }
     }
 
@@ -371,6 +490,36 @@ mod tests {
         assert_eq!(lines(&vt)[0], "");
         vt.feed(b"abc\x1b[1G_"); // CHA to column 1 (1-based), overwrite
         assert_eq!(lines(&vt)[0], "_bc");
+    }
+
+    #[test]
+    fn shrink_reflows_a_long_hard_line_and_anchors_the_cursor() {
+        let mut vt = Vt::new(6, 10);
+        // A 10-cell rule (fills its row exactly, hard newline), then an input
+        // row where the cursor parks at column 2.
+        vt.feed("──────────\r\n".as_bytes());
+        vt.feed(b"> hello");
+        vt.feed(b"\r\x1b[2C"); // park at column 2
+        vt.resize(6, 6);
+        // The rule now spans two physical rows (6 + 4 cells), and the input
+        // line wraps too ("> hell" + "o").
+        assert_eq!(lines(&vt)[0], "──────");
+        assert_eq!(lines(&vt)[1], "────");
+        assert_eq!(lines(&vt)[2], "> hell");
+        assert_eq!(lines(&vt)[3], "o");
+        // The cursor stayed glued to its cell on the input line.
+        assert_eq!((vt.row, vt.col), (2, 2));
+    }
+
+    #[test]
+    fn widen_rejoins_soft_wrapped_rows() {
+        let mut vt = Vt::new(4, 5);
+        vt.feed(b"abcdefg\r\nnext");
+        assert_eq!(lines(&vt)[0], "abcde");
+        assert_eq!(lines(&vt)[1], "fg");
+        vt.resize(4, 12);
+        assert_eq!(lines(&vt)[0], "abcdefg");
+        assert_eq!(lines(&vt)[1], "next");
     }
 
     #[test]

@@ -758,7 +758,6 @@ impl Ui {
     pub(super) fn region_summary_row(&self, text: &str, width: usize, tone: RegionTone) -> String {
         let open = match tone {
             RegionTone::Activity => self.theme.activity.sgr(self.depth),
-            RegionTone::Error => self.theme.error.sgr(self.depth),
             RegionTone::Dim => DIM.to_string(),
         };
         format!(
@@ -967,7 +966,6 @@ impl Ui {
 #[derive(Clone, Copy)]
 pub(super) enum RegionTone {
     Activity,
-    Error,
     Dim,
 }
 
@@ -1431,15 +1429,6 @@ mod tests {
                     .is_empty()
             );
         }
-    }
-
-    #[test]
-    fn canceled_plan_summary_uses_the_error_tone() {
-        let (ui, _, _) = harness(Mode::Repl, true, true);
-        let row = ui.region_summary_row("plan canceled · 1/3", 80, RegionTone::Error);
-        assert!(row.contains(&ui.theme.error.sgr(ui.depth)), "{row:?}");
-        assert!(row.contains("plan canceled · 1/3"));
-        assert!(row.ends_with(RESET));
     }
 
     #[test]

@@ -103,14 +103,14 @@ Interactive commands:
 | `/mcp connect <name>` | Connect now and print the server's tool catalog |
 | `/quit`, `exit`, or `quit` | Leave the REPL |
 
-During a turn the input stays live: typing edits the next message, and Enter steers immediately by stopping the current parent turn and dispatching the accepted message. The dock keeps plan and agent status visible while output scrolls above it.
+During a turn the input stays live: typing edits the next message, and Enter queues it with a `[queued]` marker without touching the running turn. Queued messages dispatch in order once the turn finishes. Only double-Escape (or Ctrl-C) stops a turn. The dock keeps plan and agent status pinned above the input while output scrolls above it.
 
 ## Features
 
 - Nine core tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `context`, and `plan`.
 - Conditional SKILL.md, MCP, and self-spawned child-agent tools.
 - Parallel read-only calls with sequential mutation barriers and actual lifecycle timing.
-- Detached sub-agents in the interactive dock. The original call receives a running acknowledgment, then one final report enters context exactly once. A model response that only spawns agents ends its turn right after the acknowledgments, and status polling is answered once per input before the turn is closed for it, so the prompt frees seconds after a spawn instead of sitting behind a waiting loop. The prompt remains usable for ordinary main-agent work while several children run, and a child completion never interrupts an active parent turn. Tab shows bounded live child activity; both the user (`/agents cancel`) and the model (`subagent {"cancel":"agent-N"}`) can cancel a job, and double-Escape stops the whole fleet while steering and Ctrl-C leave it running. An accepted cancellation or terminal child failure blocks same-turn replacement spawns until the next human instruction.
+- Detached sub-agents in the interactive dock. The original call receives a running acknowledgment, then one final report enters context exactly once. A model response that only spawns agents ends its turn right after the acknowledgments, and status polling is answered once per input before the turn is closed for it, so the prompt frees seconds after a spawn instead of sitting behind a waiting loop. The prompt remains usable for ordinary main-agent work while several children run, and a child completion never interrupts an active parent turn. Tab shows bounded live child activity; both the user (`/agents cancel`) and the model (`subagent {"cancel":"agent-N"}`) can cancel a job, and double-Escape stops the whole fleet while a queued message and Ctrl-C leave it running. An accepted cancellation or terminal child failure blocks same-turn replacement spawns until the next human instruction.
 - Three child tool profiles: the default `tools: "read-only"` for local inspection, `tools: "web"` for local inspection plus one unambiguous web-search MCP server, and `tools: "all"` for the full registered tool set. Web children cannot run Bash, mutate files, change the plan, or delegate. Dock children are leaves in every profile.
 - A cross-process workspace lease around each `write` or `edit` call. File-tool mutations do not overlap, while inference, Bash, file inspection, and MCP calls remain concurrent. A child waits for the lease for a bounded time; a parent file mutation reports the active conflict promptly instead of blocking the conversation. Shell commands that mutate files are outside this guarantee, so the agent contract reserves Bash for builds, tests, and exploration.
 - Read-before-write stamps, atomic writes, deterministic edit fallbacks, and ambiguity rejection.
@@ -118,7 +118,7 @@ During a turn the input stays live: typing edits the next message, and Enter ste
 - Read-only plan mode through `/plan`, followed by `/go`.
 - Lazy MCP over stdio and Streamable HTTP. Server schemas enter context only after connection, and `/mcp add` installs a server mid-session.
 - Runtime skill discovery and atomic `/skills add`, `remove`, and `reload`.
-- A default terminal dock with elapsed status, active tools, editable steering, confirmations, cancellation, Tab completion for slash commands, live in-place plan and agents panels, and reflow on terminal resize.
+- A default terminal dock with elapsed status, active tools, mid-turn message queueing, confirmations, cancellation, Tab completion for slash commands, persistent in-place plan and agents panels, and a reflow-aware repaint on terminal resize (shrinking no longer shreds the screen).
 - Interactive Markdown for headings, emphasis, lists, fenced code, JSON, and width-aware tables.
 - Matrix, ocean, amber, and violet display themes.
 
@@ -156,11 +156,11 @@ The external [research-skill](https://github.com/hec-ovi/research-skill) shows t
 
 Three small things the persistent dock does while a turn streams above it.
 
-**📋 Plan.** The `plan` tool is the live checklist the model and user both see. The active `[~]` box spins while work runs, and each completed action shows its elapsed time. Long lists show at most six steps windowed on the active one, plus one `… +N more` row with done and queued counts. A finished or canceled plan collapses to one timed line; cancellation uses the theme's red error style. `/clear-plan` replaces historical plan arguments and results with small placeholders while keeping provider-valid call/result pairs.
+**📋 Plan.** The `plan` tool is the live checklist the model and user both see. The active `[~]` box spins while work runs, and each completed action shows its elapsed time. Long lists show at most six steps windowed on the active one, plus one `… +N more` row with done and queued counts. A finished plan collapses to one timed line; canceling a turn leaves the plan pinned in its actual state. The checklist stays pinned above the input across turns and at the idle prompt, updating in place instead of re-printing into the transcript. `/clear-plan` unpins it and replaces historical plan arguments and results with small placeholders while keeping provider-valid call/result pairs.
 
-**👥 Agents.** Sub-agents detach after an immediate job acknowledgment, so the prompt becomes usable while they work. Use `tools: "read-only"` for inspection, `tools: "web"` for nonmutating MCP research, and `tools: "all"` for coding or shell work. Background jobs and the foreground plan are independent state machines that may coexist; the dock renders separate regions, and agent lifecycle is never copied into plan steps. Press Tab on an empty draft for persistent job details and recent activity, or use `/agents`. Double-Escape, during a turn or at the idle prompt, cancels every running agent after a visible confirmation hint; a lone Ctrl-C or a steering message stops only the parent turn. Each terminal result is removed from its child instance and injected once into the parent context. A message already being composed wins the completion race and receives ready reports before its own text in the ordinary turn. A failed or canceled report, including one coalesced with a success, leaves the prompt idle instead of invoking parent inference. Cancellation and failure also reject autonomous replacement spawns until a new human turn begins.
+**👥 Agents.** Sub-agents detach after an immediate job acknowledgment, so the prompt becomes usable while they work. Use `tools: "read-only"` for inspection, `tools: "web"` for nonmutating MCP research, and `tools: "all"` for coding or shell work. Background jobs and the foreground plan are independent state machines that may coexist; the dock renders separate regions, and agent lifecycle is never copied into plan steps. Press Tab on an empty draft for persistent job details and recent activity, or use `/agents`. Double-Escape, during a turn or at the idle prompt, cancels every running agent after a visible confirmation hint; a lone Ctrl-C stops only the parent turn; a typed message stops nothing, it just queues. Each terminal result is removed from its child instance and injected once into the parent context. A message already being composed wins the completion race and receives ready reports before its own text in the ordinary turn. A failed or canceled report, including one coalesced with a success, leaves the prompt idle instead of invoking parent inference. Cancellation and failure also reject autonomous replacement spawns until a new human turn begins.
 
-**⌨️ Steering.** Type while a parent turn is running. Enter records the message with a `[steering]` marker, interrupts that turn, and dispatches the message on the next loop. Escape or Ctrl-C cancellation keeps unsubmitted text in the editor instead of firing it.
+**⌨️ Queueing.** Type while a parent turn is running. Enter records the message with a `[queued]` marker and leaves the turn, its tools, the plan, and every sub-agent untouched; the message dispatches as the next turn once the current one finishes. Escape or Ctrl-C cancellation hands queued and unsubmitted text back to the editor instead of firing it.
 
 **⎋ Cancel.** Escape twice within five seconds cancels a running turn; Ctrl-C cancels at once. A second Ctrl-C during cancellation restores the terminal and exits with status 130.
 
@@ -219,7 +219,7 @@ The server-side framing figure is the model's own chat template (qwen3 re-wraps 
 
 ## Output surfaces
 
-- Interactive REPL: terminal dock, Markdown, live steering, and confirmations.
+- Interactive REPL: terminal dock, Markdown, mid-turn queueing, and confirmations.
 - `exec`: assistant text on stdout and progress on stderr.
 - `exec --json`: one JSON object per event.
 - `child`: one JSON result line on stdout and progress on stderr.

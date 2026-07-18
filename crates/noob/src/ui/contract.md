@@ -13,11 +13,11 @@ Terminal input and rendering for REPL, exec, JSONL, and child surfaces. The modu
 - One main-thread render loop as the sole terminal writer.
 - One ordered channel for keys, semantic render events, questions, reader loss, and turn end.
 
-The active frame always shows status, editable draft or question, and steering/cancel state. Enter accepts a non-empty steering message, interrupts the current parent turn, and dispatches the message on the next loop. Explicit cancellation preserves unsubmitted text in the draft. Escape twice within five seconds cancels; Ctrl-C commits cancellation immediately.
+The active frame always shows status, editable draft or question, and queue/cancel state. Enter accepts a non-empty message as queued, leaving the running turn untouched; queued messages dispatch in order once the turn ends. Explicit cancellation hands queued and unsubmitted text back to the draft. Escape twice within five seconds cancels; Ctrl-C commits cancellation immediately.
 
 Typeahead received before a question cannot answer it. EOF and reader errors persist as closed-input state and deny questions without deadlock.
 
-Tab completes a `/`-prefixed command in the input editor; a dim hint lists candidates for an ambiguous prefix and never enters the buffer. With an empty draft and detached jobs, Tab toggles a persistent view of their IDs, state, elapsed time, prompt slices, and bounded recent activity. The view survives parent-turn boundaries while the editor stays usable; when closed, a one-line live running/ready counter stays pinned above the idle input instead of vanishing. While a turn runs and the buffer is empty, the input row shows a steering placeholder. Completion, agent details, and the placeholder are input-side only: the model receives a draft only on submission.
+Tab completes a `/`-prefixed command in the input editor; a dim hint lists candidates for an ambiguous prefix and never enters the buffer. With an empty draft and detached jobs, Tab toggles a persistent view of their IDs, state, elapsed time, prompt slices, and bounded recent activity. The view survives parent-turn boundaries while the editor stays usable; when closed, a one-line live running/ready counter stays pinned above the idle input instead of vanishing. While a turn runs and the buffer is empty, the input row shows a queueing placeholder. Completion, agent details, and the placeholder are input-side only: the model receives a draft only on submission.
 
 ## Semantic rendering
 
@@ -25,7 +25,7 @@ Tab completes a `/`-prefixed command in the input editor; a dim hint lists candi
 
 Tool requests remain JSONL planning events. Interactive tool start lines are emitted only when the scheduler begins execution, and finish lines follow real completion order.
 
-The `plan` checklist and sub-agent status are independent state machines that may coexist in the themed REPL's bounded region. The active plan glyph animates display-only. Completed actions carry their own times. Long plans end in a counted summary and reserve the active step plus an agent status row; completed and canceled plans collapse to one timed line, with cancellation using the theme's red error style. The closed agents view derives its count from the live hub snapshot instead of a stale acknowledgment. Covered per-subagent activity lines are suppressed. On resume, `replay_transcript` redraws the prior conversation before the first prompt while filtering synthetic bookkeeping items; it never mutates the transcript or session.
+The `plan` checklist and sub-agent status are independent state machines that may coexist in the themed REPL's bounded region. The active plan glyph animates display-only. Completed actions carry their own times. Long plans end in a counted summary and reserve the active step plus an agent status row; a fully completed plan collapses to one timed line, and a canceled turn leaves the plan pinned in its actual state. The plan text survives turn boundaries on the session and stays pinned at the idle prompt; turn end re-records neither the plan nor the hub-backed agents view into the transcript. The closed agents view derives its count from the live hub snapshot instead of a stale acknowledgment. Covered per-subagent activity lines are suppressed. On resume, `replay_transcript` redraws the prior conversation before the first prompt while filtering synthetic bookkeeping items; it never mutates the transcript or session.
 
 ## Markdown and tables
 

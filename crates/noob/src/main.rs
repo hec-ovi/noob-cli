@@ -383,6 +383,9 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                 )),
                 "sessions" => show_sessions(&agent.config_dir, &mut ui),
                 "clear-plan" => {
+                    if let Some(d) = dock.as_mut() {
+                        d.clear_plan();
+                    }
                     let updates = agent.clear_plan_history(&mut ui);
                     if updates == 0 {
                         ui.note("no plan payloads in the current context");
@@ -416,8 +419,7 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                             d.run_turn(&mut ui, plan, background.as_ref(), |tui| {
                                 agent.compact(tui)
                             });
-                            let steered = d.take_steering();
-                            if INTERRUPTED.swap(false, Ordering::SeqCst) && !steered {
+                            if INTERRUPTED.swap(false, Ordering::SeqCst) {
                                 d.drain_queue_to_draft();
                             }
                         }
@@ -457,8 +459,7 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                                 d.run_turn(&mut ui, plan, background.as_ref(), |tui| {
                                     handle_mcp(args, &mut agent, tui)
                                 });
-                                let steered = d.take_steering();
-                                if INTERRUPTED.swap(false, Ordering::SeqCst) && !steered {
+                                if INTERRUPTED.swap(false, Ordering::SeqCst) {
                                     d.drain_queue_to_draft();
                                 }
                             }
@@ -484,8 +485,7 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                                 d.run_turn(&mut ui, plan, background.as_ref(), |tui| {
                                     handle_skills(args, &mut agent, tui)
                                 });
-                                let steered = d.take_steering();
-                                if INTERRUPTED.swap(false, Ordering::SeqCst) && !steered {
+                                if INTERRUPTED.swap(false, Ordering::SeqCst) {
                                     d.drain_queue_to_draft();
                                 }
                             }
@@ -544,16 +544,15 @@ fn run_repl_turn(
             let end = d.run_turn(ui, plan, background.as_ref(), |tui| {
                 agent.run_input(input, tui)
             });
-            // Enter during a turn is explicit steering and leaves the queued
-            // message ready for immediate dispatch. Ctrl-C still hands any
-            // type-ahead back to the editor.
-            let steered = d.take_steering();
-            if steered {
-                // The worker normally consumes the interrupt. Clear the
-                // shared tail explicitly for abort/error races after the
-                // steering message was already accepted.
-                INTERRUPTED.store(false, Ordering::SeqCst);
-            } else if matches!(end, RunEnd::Interrupted) {
+            // Enter during a turn only queues; the messages dispatch at the
+            // next prompt once the turn ends on its own. An explicit Esc/Ctrl-C
+            // cancel instead hands them back to the editor ("stop, I'll
+            // drive"), INCLUDING a cancel committed in the instant the turn
+            // completes on its own: the worker never consumed that interrupt,
+            // so the still-set flag is the only record of the stop gesture.
+            // Consuming it here also keeps the residue of an abort/error race
+            // out of the next turn.
+            if matches!(end, RunEnd::Interrupted) || INTERRUPTED.swap(false, Ordering::SeqCst) {
                 d.drain_queue_to_draft();
             }
             end
@@ -583,10 +582,7 @@ fn run_repl_background(
             let end = d.run_turn(ui, plan, background.as_ref(), |tui| {
                 agent.continue_after_background(tui)
             });
-            let steered = d.take_steering();
-            if steered {
-                INTERRUPTED.store(false, Ordering::SeqCst);
-            } else if matches!(end, RunEnd::Interrupted) {
+            if matches!(end, RunEnd::Interrupted) || INTERRUPTED.swap(false, Ordering::SeqCst) {
                 d.drain_queue_to_draft();
             }
             end

@@ -1439,8 +1439,15 @@ fn dock_double_esc_cancels_a_running_turn() {
     rig.server.assert_clean();
 }
 
+/// An Esc Esc cancel does not throw the plan away: it stays pinned above the
+/// idle input in its actual state (the in-progress step still marked), so the
+/// human can resume where the canceled turn left off. Nothing claims the plan
+/// itself was "canceled"; only the turn was.
 #[test]
-fn dock_collapses_an_interrupted_plan_to_a_canceled_summary() {
+fn dock_keeps_the_pinned_plan_after_an_interrupted_turn() {
+    const ROWS: u16 = 16;
+    const COLS: u16 = 64;
+
     let rig = rig();
     let plan = r#"{"todos":[{"content":"finished","status":"completed"},{"content":"still working","status":"in_progress"},{"content":"later","status":"pending"}]}"#;
     rig.server
@@ -1448,7 +1455,7 @@ fn dock_collapses_an_interrupted_plan_to_a_canceled_summary() {
     rig.server
         .enqueue_raw(stalled_stream("WAITING END-NEVER", 2, 8000, false));
 
-    let mut pty = spawn_pty_with(&rig, DOCK);
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)), &[]);
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"run the plan\r");
@@ -1457,18 +1464,30 @@ fn dock_collapses_an_interrupted_plan_to_a_canceled_summary() {
     pty.wait_for("press ESC again to cancel");
     pty.send(&[0x1b]);
     pty.wait_for("[interrupted]");
-    pty.wait_for("plan canceled");
     settle();
+    pty.drain(std::time::Duration::from_millis(400));
+    let screen = pty.screen(ROWS, COLS);
+    let rows = screen.render();
+
     pty.send(&[0x04]);
     pty.wait_for("resume with");
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    let marker = rows
+        .iter()
+        .rposition(|r| r.contains(MARKER))
+        .unwrap_or_else(|| panic!("idle input box missing:\n{}", screen.dump("idle")));
+    let step = rows
+        .iter()
+        .position(|r| r.contains("[~] still working"))
+        .unwrap_or_else(|| panic!("the plan must stay pinned after a cancel:\n{}", screen.dump("idle")));
     assert!(
-        pty.seen.contains("plan canceled · 1/3 completed"),
-        "{}",
-        pty.seen
+        step < marker,
+        "the pinned plan sits above the idle input:\n{}",
+        screen.dump("idle")
     );
+    assert!(!pty.seen.contains("plan canceled"), "{}", pty.seen);
     assert!(!pty.seen.contains("END-NEVER"));
     rig.server.assert_clean();
 }
@@ -1507,29 +1526,92 @@ fn dock_single_esc_does_not_cancel() {
     rig.server.assert_clean();
 }
 
-/// Enter on a non-empty running-turn draft is steering: it interrupts the
-/// current provider request and dispatches the accepted message on the next
-/// REPL iteration instead of waiting for the old turn to finish.
+/// Enter on a non-empty running-turn draft QUEUES the message and touches
+/// nothing: the running turn (its provider request and its tools) completes
+/// on its own, and the queued message dispatches on the next REPL iteration.
+/// The screen shows the acceptance as `› message [queued]` and never says
+/// steering, turn stopped, or interrupted; the wire carries no [interrupted]
+/// marker at all. Esc Esc remains the only way to stop a turn.
 #[test]
-fn dock_enter_steers_and_dispatches_on_the_next_loop() {
+fn dock_enter_queues_and_dispatches_after_the_turn_completes() {
     let rig = rig();
-    // Turn 1 enters a real long-running tool. Enter must stop it; turn 2 is the
-    // steering message, not passive type-ahead.
+    // Turn 1 runs a real (finite) tool. Enter mid-tool must not stop it; the
+    // queued message becomes turn 2 only after turn 1 finishes naturally.
     rig.server
-        .enqueue_stream_toolcalls(&[("slow-tool", "bash", r#"{"cmd":"sleep 8"}"#)], None);
-    rig.server.enqueue_stream_completion("second done");
+        .enqueue_stream_toolcalls(&[("slow-tool", "bash", r#"{"cmd":"sleep 2"}"#)], None);
+    rig.server.enqueue_stream_completion("first turn done");
+    rig.server.enqueue_stream_completion("queued turn done");
 
     let mut pty = spawn_pty_with(&rig, DOCK);
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"go\r");
-    pty.wait_for("sleep 8");
-    pty.send(b"steer now\r");
-    pty.wait_for("[steering]");
-    // The display note is reworded for the handoff (the transcript item stays
-    // "[interrupted]"; asserted below on the wire).
-    pty.wait_for("[steering] turn stopped · your message is next");
-    pty.wait_for("second");
+    pty.wait_for("sleep 2");
+    pty.send(b"queue now\r");
+    pty.wait_for("[queued]");
+    // The tool and its turn complete untouched, then the queued turn runs.
+    pty.wait_for("first turn done");
+    pty.wait_for("queued turn done");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    for noise in ["[steering]", "turn stopped", "[interrupted]", "canceling"] {
+        assert!(
+            !pty.seen.contains(noise),
+            "a queued message must not surface {noise:?}:\n{}",
+            pty.seen
+        );
+    }
+    let reqs = rig.api_requests();
+    assert_eq!(
+        reqs.len(),
+        3,
+        "the tool round, its completing follow-up, then the queued turn"
+    );
+    assert_eq!(last_user(&reqs[0]), "go");
+    assert_eq!(last_user(&reqs[2]), "queue now");
+    let messages = reqs[2]["messages"].as_array().unwrap();
+    assert!(
+        messages
+            .iter()
+            .all(|message| message["content"] != "[interrupted]"),
+        "queueing must not interrupt anything in-band: {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| { message["role"] == "tool" && message["tool_call_id"] == "slow-tool" }),
+        "the tool call completed and its result reached the wire: {messages:?}"
+    );
+    rig.server.assert_clean();
+}
+
+/// Several messages queued during one turn dispatch in order, one turn each,
+/// and the bottom rule counts them while they wait.
+#[test]
+fn dock_queues_multiple_messages_fifo() {
+    let rig = rig();
+    rig.server
+        .enqueue_stream_toolcalls(&[("slow-tool", "bash", r#"{"cmd":"sleep 2"}"#)], None);
+    rig.server.enqueue_stream_completion("turn one done");
+    rig.server.enqueue_stream_completion("answer alpha");
+    rig.server.enqueue_stream_completion("answer beta");
+
+    let mut pty = spawn_pty_with(&rig, DOCK);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"go\r");
+    pty.wait_for("sleep 2");
+    pty.send(b"first question\r");
+    pty.wait_for("[queued]");
+    pty.send(b"second question\r");
+    pty.wait_for("2 queued");
+    pty.wait_for("turn one done");
+    pty.wait_for("answer alpha");
+    pty.wait_for("answer beta");
     settle();
     pty.send(&[0x04]);
     pty.wait_for("resume with");
@@ -1537,45 +1619,28 @@ fn dock_enter_steers_and_dispatches_on_the_next_loop() {
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     let reqs = rig.api_requests();
-    assert_eq!(
-        reqs.len(),
-        2,
-        "the interrupted turn + immediate steering turn"
-    );
-    assert_eq!(last_user(&reqs[0]), "go");
-    assert_eq!(last_user(&reqs[1]), "steer now");
-    let messages = reqs[1]["messages"].as_array().unwrap();
-    assert!(
-        messages
-            .iter()
-            .any(|message| message["role"] == "user" && message["content"] == "[interrupted]"),
-        "the interrupted turn must close in-band before steering: {messages:?}"
-    );
-    assert!(
-        messages
-            .iter()
-            .any(|message| { message["role"] == "tool" && message["tool_call_id"] == "slow-tool" }),
-        "the interrupted tool call must have a matching result: {messages:?}"
-    );
+    assert_eq!(reqs.len(), 4, "tool round, its follow-up, then both queued turns");
+    assert_eq!(last_user(&reqs[2]), "first question");
+    assert_eq!(last_user(&reqs[3]), "second question");
     rig.server.assert_clean();
 }
 
 /// The live-caught combination: a detached child is running AND the parent
-/// turn is inside a slow bash when the user steers. The steering must stop
-/// only the parent's bash, dispatch the message as a normal answered turn
-/// (exactly one [interrupted] marker), and leave the child running to
-/// deliver its report afterward.
+/// turn is inside a real bash when the user types a follow-up. The message
+/// queues; the bash, its turn, and the child are all untouched; the queued
+/// message is answered as the next turn; and the child still delivers its
+/// report afterward. No [interrupted] marker exists anywhere on the wire.
 #[test]
-fn dock_steering_during_bash_with_a_running_agent_answers_the_message() {
+fn dock_queue_during_bash_with_a_running_agent_answers_after_the_turn() {
     let rig = rig();
     rig.server.allow_interleaving();
     let parent = || RequestMatch::HasTool("subagent".to_string());
     let child = || RequestMatch::LacksTool("subagent".to_string());
 
-    // One MIXED batch: the spawn is paired with a long-running REAL command
-    // (a spawn-only round would end the input under the detached contract,
-    // and a leading sleep would be refused by the agent-wait block; steering
-    // must still work when genuine work is in flight after a spawn).
+    // One MIXED batch: the spawn is paired with a finite REAL command (a
+    // spawn-only round would end the input under the detached contract, and
+    // a leading sleep would be refused by the agent-wait block; queueing
+    // must work when genuine work is in flight after a spawn).
     rig.server.enqueue_stream_toolcalls_for(
         parent(),
         &[
@@ -1584,7 +1649,7 @@ fn dock_steering_during_bash_with_a_running_agent_answers_the_message() {
                 "subagent",
                 r#"{"prompt":"slow standalone research"}"#,
             ),
-            ("wait-call", "bash", r#"{"cmd":"tail -f /dev/null"}"#),
+            ("wait-call", "bash", r#"{"cmd":"sleep 2"}"#),
         ],
         None,
     );
@@ -1593,7 +1658,9 @@ fn dock_steering_during_bash_with_a_running_agent_answers_the_message() {
         stalled_stream("CHILD-RESULT-UNIQUE", 1, 2500, true),
     );
     rig.server
-        .enqueue_stream_completion_for(parent(), "STEERED-END");
+        .enqueue_stream_completion_for(parent(), "PARENT-TURN-END");
+    rig.server
+        .enqueue_stream_completion_for(parent(), "QUEUED-ANSWER-END");
     rig.server
         .enqueue_stream_completion_for(parent(), "AGENT-COLLECTED-END");
 
@@ -1602,17 +1669,16 @@ fn dock_steering_during_bash_with_a_running_agent_answers_the_message() {
     pty.wait_for(RAW_READY);
     pty.send(b"start research\r");
     pty.wait_for("[1] agents running (Tab to view)");
-    // Steer off the spinner's live "· bash" label, not the scrollback start
+    // Queue off the spinner's live "· bash" label, not the scrollback start
     // line: the dock emits that line before repainting the pinned agents row,
     // so a wait on the row would already have consumed past it.
     pty.wait_for("· bash");
-    pty.send(b"steer now\r");
-    pty.wait_for("[steering]");
-    // The reworded handoff note plus the surviving-child suffix, so a
-    // steering human is neither told "interrupted" nor left believing the
-    // stop killed their detached work.
-    pty.wait_for("[steering] turn stopped · your message is next (1 detached agent keeps running");
-    pty.wait_for("STEERED-END");
+    pty.send(b"queue now\r");
+    pty.wait_for("[queued]");
+    // The parent's bash and turn complete untouched, the queued message is
+    // answered next, and the child's report still arrives on its own.
+    pty.wait_for("PARENT-TURN-END");
+    pty.wait_for("QUEUED-ANSWER-END");
     pty.wait_for("AGENT-COLLECTED-END");
     settle();
     pty.send(&[0x04]);
@@ -1620,21 +1686,27 @@ fn dock_steering_during_bash_with_a_running_agent_answers_the_message() {
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    for noise in ["[steering]", "turn stopped", "[interrupted]", "canceling"] {
+        assert!(
+            !pty.seen.contains(noise),
+            "a queued message must not surface {noise:?}:\n{}",
+            pty.seen
+        );
+    }
     let requests = rig.api_requests();
-    let steered = requests
+    let queued = requests
         .iter()
-        .find(|request| last_user(request) == "steer now")
-        .expect("steered turn request");
-    let interrupts = steered["messages"]
+        .find(|request| last_user(request) == "queue now")
+        .expect("queued turn request");
+    let interrupts = queued["messages"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|message| message["role"] == "user" && message["content"] == "[interrupted]")
         .count();
     assert_eq!(
-        interrupts, 1,
-        "exactly one interrupt: the bash cancel; the steered turn itself \
-         must run, not phantom-cancel: {steered}"
+        interrupts, 0,
+        "queueing interrupts nothing, ever: {queued}"
     );
     rig.server.assert_clean();
 }
@@ -2895,10 +2967,14 @@ fn idle_prompt_keeps_the_running_agents_counter_after_closing_the_tab_view() {
     pty.wait_for("[2] agents running (Tab to view)");
 
     // The fast child settles and is collected; the slow child keeps running,
-    // so the next idle prompt has exactly one live background agent.
+    // so the next idle prompt has exactly one live background agent. Wait for
+    // the pinned row itself, then DRAIN (not just sleep): the counter is only
+    // pinned now (turn end records nothing), and a sleep without reading can
+    // snapshot the byte stream between an in-place repaint's erase and its
+    // redraw.
     pty.wait_for("FIRST-COLLECTED-END");
-    pty.wait_for("type a message");
-    settle();
+    pty.wait_for("[1] agents running (Tab to view)");
+    pty.drain(std::time::Duration::from_millis(400));
 
     // Idle, view closed: the pinned counter reads the LIVE count of 1 (all
     // frozen records above say "[2]"; pre-fix there was no idle row at all).
@@ -3736,7 +3812,7 @@ fn dock_input_row_survives_a_scrolling_stream_at_the_screen_level() {
 }
 
 /// The input row is a visible affordance during a turn: while the draft is
-/// empty the dock shows a dim "type to steer the turn" placeholder (so the row
+/// empty the dock shows a dim "type a message; Enter queues it" placeholder (so the row
 /// never reads as absent, the reported "input disappears during activity"), and
 /// the first keystroke replaces it with the draft rather than sitting beside it.
 #[test]
@@ -3766,7 +3842,7 @@ fn dock_input_row_shows_a_placeholder_when_empty_and_replaces_it_on_typing() {
     let (top, _bottom) = dock_rows(&empty_rows)
         .unwrap_or_else(|| panic!("dock rules missing:\n{}", empty.dump("empty")));
     assert!(
-        empty_rows[top + 1].contains("type to steer the turn"),
+        empty_rows[top + 1].contains("type a message; Enter queues it"),
         "the empty input row shows no placeholder affordance: {:?}\n{}",
         empty_rows[top + 1],
         empty.dump("empty")
@@ -3781,7 +3857,7 @@ fn dock_input_row_shows_a_placeholder_when_empty_and_replaces_it_on_typing() {
         .unwrap_or_else(|| panic!("dock rules missing after typing:\n{}", typed.dump("typed")));
     let tinput = &typed_rows[ttop + 1];
     assert!(
-        tinput.contains("my note") && !tinput.contains("type to steer the turn"),
+        tinput.contains("my note") && !tinput.contains("type a message"),
         "typing did not replace the placeholder: {tinput:?}\n{}",
         typed.dump("typed")
     );
@@ -3958,6 +4034,134 @@ fn dock_leaves_the_finished_plan_visible_above_the_idle_box() {
         !joined.contains("[x] alpha") && !joined.contains("[x] beta"),
         "completed items should collapse at idle:\n{}",
         screen.dump("end")
+    );
+}
+
+/// The plan is pinned once, permanently: it stays above the input across
+/// turn boundaries (a later turn that updates it repaints the same pinned
+/// region), and no copy is ever re-recorded into the scrolling transcript at
+/// turn end. Two turns each touch the plan; afterward every step appears
+/// exactly once on screen, in its latest state, above the idle input.
+#[test]
+fn dock_pins_the_plan_across_turns_with_a_single_copy_on_screen() {
+    const ROWS: u16 = 18;
+    const COLS: u16 = 64;
+
+    let rig = rig();
+    let first = r#"{"todos":[{"content":"alpha","status":"in_progress"},{"content":"beta","status":"pending"}]}"#;
+    let second = r#"{"todos":[{"content":"alpha","status":"completed"},{"content":"beta","status":"in_progress"}]}"#;
+    rig.server
+        .enqueue_stream_toolcalls(&[("p1", "plan", first)], None);
+    rig.server.enqueue_stream_completion("TURN-ONE-END");
+    rig.server
+        .enqueue_stream_toolcalls(&[("p2", "plan", second)], None);
+    rig.server.enqueue_stream_completion("TURN-TWO-END");
+
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)), &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"make a plan\r");
+    pty.wait_for("TURN-ONE-END");
+    settle();
+    pty.send(b"advance the plan\r");
+    pty.wait_for("TURN-TWO-END");
+    settle();
+    pty.drain(std::time::Duration::from_millis(400));
+    let screen = pty.screen(ROWS, COLS);
+    let rows = screen.render();
+
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+
+    let marker = rows
+        .iter()
+        .rposition(|r| r.contains(MARKER))
+        .unwrap_or_else(|| panic!("idle input box missing:\n{}", screen.dump("idle")));
+    for (step, glyph) in [("alpha", "[x]"), ("beta", "[~]")] {
+        let hits: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| row.contains(step).then_some(index))
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "step {step:?} must appear exactly once (pinned), not per turn:\n{}",
+            screen.dump("idle")
+        );
+        assert!(
+            hits[0] < marker,
+            "the pinned {step:?} row sits above the idle input:\n{}",
+            screen.dump("idle")
+        );
+        assert!(
+            rows[hits[0]].contains(glyph),
+            "the pinned {step:?} row shows its LATEST state {glyph:?}: {:?}\n{}",
+            rows[hits[0]],
+            screen.dump("idle")
+        );
+    }
+}
+
+/// The collapsed `[N] agents running` counter lives in exactly one place: the
+/// pinned row above the input. A finished spawn turn must not also record a
+/// static copy into the transcript (the historical duplicate stacked after
+/// every turn).
+#[test]
+fn dock_shows_the_agents_row_exactly_once_at_idle() {
+    const ROWS: u16 = 14;
+    const COLS: u16 = 72;
+
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+    let child = || RequestMatch::LacksTool("subagent".to_string());
+
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[(
+            "bg-call",
+            "subagent",
+            r#"{"prompt":"slow standalone research"}"#,
+        )],
+        None,
+    );
+    rig.server.enqueue_raw_for(
+        child(),
+        stalled_stream("CHILD-RESULT-UNIQUE", 1, 3000, true),
+    );
+    rig.server
+        .enqueue_stream_completion_for(parent(), "AGENT-COLLECTED-END");
+
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)), &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"start research\r");
+    pty.wait_for("[1] agents running (Tab to view)");
+    settle();
+    pty.drain(std::time::Duration::from_millis(500));
+    let screen = pty.screen(ROWS, COLS);
+    let rows = screen.render();
+
+    pty.wait_for("AGENT-COLLECTED-END");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+
+    let hits = rows
+        .iter()
+        .filter(|row| row.contains("agents running (Tab to view)"))
+        .count();
+    assert_eq!(
+        hits, 1,
+        "the agents counter appears exactly once (the pinned row):\n{}",
+        screen.dump("idle with agent")
     );
 }
 
@@ -4342,6 +4546,318 @@ fn dock_idle_box_reflows_on_resize_without_a_keystroke() {
     let status = pty.finish();
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
     rig.server.assert_clean();
+}
+
+/// Rows of a reflowed screen that carry a rule-sized run of `─` (20 or more):
+/// the box/frame rules. The 12-dash logo underline and `── plan` heads stay
+/// under the threshold, so any extra hit is a stale fragment of a badly
+/// erased frame (the tested screens are 60 columns wide, so even a wrapped
+/// remainder of a 100-col rule is a 40-dash run).
+fn rule_row_indices(rows: &[String]) -> Vec<usize> {
+    rows.iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            let mut run = 0usize;
+            let mut best = 0usize;
+            for ch in row.chars() {
+                if ch == '─' {
+                    run += 1;
+                    best = best.max(run);
+                } else {
+                    run = 0;
+                }
+            }
+            (best >= 20).then_some(index)
+        })
+        .collect()
+}
+
+/// SHRINKING the terminal must not shred the screen. A reflowing terminal
+/// (VTE and friends, i.e. what noob actually runs in) rewraps the full-width
+/// box rules into several physical rows the moment the window narrows; the
+/// old erase walked "one drawn row = one physical row", desynced, and left
+/// rule fragments scattered over the whole screen (the 07-03-37 screenshot).
+/// Replay the exact bytes through the reflow-aware emulator and require the
+/// screen to hold exactly the idle box afterward: two full-width rules around
+/// the input row and not a single stray fragment.
+#[test]
+fn dock_idle_box_shrink_resize_leaves_no_rule_fragments() {
+    const ROWS: u16 = 14;
+
+    let rig = rig();
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, 100)), &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.drain(std::time::Duration::from_millis(300));
+    let mark = pty.raw.len();
+
+    pty.resize(ROWS, 60);
+    pty.drain(std::time::Duration::from_millis(800));
+    let post = pty.raw.len();
+
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+
+    // Replay: everything up to the resize at 100 cols, then reflow to 60 the
+    // way the real terminal does, then the repaint bytes.
+    let mut vt = vt::Vt::new(ROWS as usize, 100);
+    vt.feed(&pty.raw[..mark]);
+    vt.resize(ROWS as usize, 60);
+    vt.feed(&pty.raw[mark..post]);
+    let rows = vt.render();
+
+    let rules = rule_row_indices(&rows);
+    assert_eq!(
+        rules.len(),
+        2,
+        "exactly the box's two rules survive a shrink, no fragments:\n{}",
+        vt.dump("after shrink")
+    );
+    let marker = rows
+        .iter()
+        .rposition(|r| r.contains(MARKER))
+        .unwrap_or_else(|| panic!("idle input row missing:\n{}", vt.dump("after shrink")));
+    assert_eq!(
+        (rules[0], rules[1]),
+        (marker - 1, marker + 1),
+        "the surviving rules are the box around the input row:\n{}",
+        vt.dump("after shrink")
+    );
+    for index in rules {
+        let dashes = rows[index].chars().filter(|&c| c == '─').count();
+        assert_eq!(
+            dashes, 60,
+            "each rule spans the new width exactly:\n{}",
+            vt.dump("after shrink")
+        );
+    }
+}
+
+/// The same shrink guarantee mid-turn: the active frame (top status rule,
+/// input row, bottom rule) is erased by its physical reflowed height and
+/// repainted at the new width, leaving no fragments and no duplicated frame.
+#[test]
+fn dock_active_frame_shrink_resize_leaves_no_rule_fragments() {
+    const ROWS: u16 = 14;
+
+    let rig = rig();
+    // A stream that stalls long enough to resize mid-turn, then finishes.
+    let text = "aa-line\nbb-line\nZZEND";
+    rig.server.enqueue_raw(stalled_stream(text, 2, 4000, true));
+
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, 100)), &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"go\r");
+    pty.wait_for("Working");
+    pty.wait_for("aa-line"); // inside the stall
+    pty.drain(std::time::Duration::from_millis(300));
+    let mark = pty.raw.len();
+
+    pty.resize(ROWS, 60);
+    pty.drain(std::time::Duration::from_millis(800));
+    let post = pty.raw.len();
+
+    pty.wait_for("ZZEND");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+
+    let mut vt = vt::Vt::new(ROWS as usize, 100);
+    vt.feed(&pty.raw[..mark]);
+    vt.resize(ROWS as usize, 60);
+    vt.feed(&pty.raw[mark..post]);
+    let rows = vt.render();
+
+    let rules = rule_row_indices(&rows);
+    assert_eq!(
+        rules.len(),
+        2,
+        "exactly the active frame's two rules survive a mid-turn shrink:\n{}",
+        vt.dump("after shrink")
+    );
+    let (top, bottom) = (rules[0], rules[1]);
+    assert!(
+        rows[top].contains("Working") && rows[bottom].contains("Esc Esc to cancel"),
+        "the surviving rules are the live frame's status rows:\n{}",
+        vt.dump("after shrink")
+    );
+    assert_eq!(
+        bottom - top,
+        2,
+        "the frame is exactly top rule, input row, bottom rule:\n{}",
+        vt.dump("after shrink")
+    );
+}
+
+/// Shrinking with a TYPED DRAFT wider than the new width, then widening back.
+/// The draft makes the input line itself rewrap, so the erase must first hop
+/// up to the line's first physical row (the cursor-hop branch that an empty
+/// draft never exercises), and the widen leg proves the round trip repaints
+/// cleanly in both directions. The draft buffer must survive untouched.
+#[test]
+fn dock_shrink_with_typed_draft_then_widen_repaints_cleanly() {
+    const ROWS: u16 = 14;
+
+    let rig = rig();
+    rig.server.enqueue_stream_completion("DRAFT-TURN-END");
+
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, 100)), &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    // 80 draft chars: the input row is 82 cells, one row at 100 columns but
+    // two at 60, so the resize erase must hop up one physical row first.
+    let draft = "d123456789".repeat(8);
+    pty.send(draft.as_bytes());
+    pty.drain(std::time::Duration::from_millis(400));
+    let mark_shrink = pty.raw.len();
+
+    pty.resize(ROWS, 60);
+    pty.drain(std::time::Duration::from_millis(800));
+    let mark_widen = pty.raw.len();
+
+    pty.resize(ROWS, 100);
+    pty.drain(std::time::Duration::from_millis(800));
+    let post = pty.raw.len();
+
+    // The surviving draft submits whole.
+    pty.send(b"\r");
+    pty.wait_for("DRAFT-TURN-END");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+
+    // Shrink leg: the box holds, the draft tail is on the input row.
+    let mut vt = vt::Vt::new(ROWS as usize, 100);
+    vt.feed(&pty.raw[..mark_shrink]);
+    vt.resize(ROWS as usize, 60);
+    vt.feed(&pty.raw[mark_shrink..mark_widen]);
+    let rows = vt.render();
+    let rules = rule_row_indices(&rows);
+    assert_eq!(
+        rules.len(),
+        2,
+        "no fragments after shrinking over a wide draft:\n{}",
+        vt.dump("shrunk with draft")
+    );
+    let marker = rows
+        .iter()
+        .rposition(|r| r.contains(MARKER))
+        .unwrap_or_else(|| panic!("input row missing:\n{}", vt.dump("shrunk with draft")));
+    assert_eq!((rules[0], rules[1]), (marker - 1, marker + 1));
+    assert!(
+        rows[marker].contains("d123456789"),
+        "the draft window survives the shrink: {:?}\n{}",
+        rows[marker],
+        vt.dump("shrunk with draft")
+    );
+
+    // Widen leg: clean again at the full width.
+    vt.resize(ROWS as usize, 100);
+    vt.feed(&pty.raw[mark_widen..post]);
+    let rows = vt.render();
+    let rules = rule_row_indices(&rows);
+    assert_eq!(
+        rules.len(),
+        2,
+        "no fragments after widening back:\n{}",
+        vt.dump("widened back")
+    );
+    for index in rules {
+        assert_eq!(
+            rows[index].chars().filter(|&c| c == '─').count(),
+            100,
+            "rules span the restored width:\n{}",
+            vt.dump("widened back")
+        );
+    }
+
+    // The full 80-char draft reached the agent despite two reflows.
+    let reqs = rig.api_requests();
+    assert_eq!(reqs.len(), 1);
+    assert_eq!(last_user(&reqs[0]), draft);
+    rig.server.assert_clean();
+}
+
+/// Shrinking while pinned region rows are on screen: a plan with one step
+/// clamped to the full old width contributes MULTIPLE wrapped physical rows
+/// to the erase walk, the arithmetic an empty frame never exercises. After
+/// the shrink the plan is still pinned exactly once above an intact box.
+#[test]
+fn dock_shrink_with_pinned_plan_rows_leaves_no_fragments() {
+    const ROWS: u16 = 14;
+
+    let rig = rig();
+    let long = "investigate the long running renderer path and verify the erase walk keeps every physical row accounted for";
+    let plan = format!(
+        r#"{{"todos":[{{"content":"{long}","status":"in_progress"}},{{"content":"short step","status":"pending"}}]}}"#
+    );
+    rig.server
+        .enqueue_stream_toolcalls(&[("p1", "plan", plan.as_str())], None);
+    rig.server.enqueue_stream_completion("PLAN-PINNED-END");
+
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, 100)), &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"make the plan\r");
+    pty.wait_for("PLAN-PINNED-END");
+    settle();
+    pty.drain(std::time::Duration::from_millis(400));
+    let mark = pty.raw.len();
+
+    pty.resize(ROWS, 60);
+    pty.drain(std::time::Duration::from_millis(800));
+    let post = pty.raw.len();
+
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+
+    let mut vt = vt::Vt::new(ROWS as usize, 100);
+    vt.feed(&pty.raw[..mark]);
+    vt.resize(ROWS as usize, 60);
+    vt.feed(&pty.raw[mark..post]);
+    let rows = vt.render();
+
+    let rules = rule_row_indices(&rows);
+    assert_eq!(
+        rules.len(),
+        2,
+        "no fragments after shrinking with pinned plan rows:\n{}",
+        vt.dump("shrunk with plan")
+    );
+    let marker = rows
+        .iter()
+        .rposition(|r| r.contains(MARKER))
+        .unwrap_or_else(|| panic!("input row missing:\n{}", vt.dump("shrunk with plan")));
+    let step_hits = rows
+        .iter()
+        .filter(|r| r.contains("investigate the long"))
+        .count();
+    assert_eq!(
+        step_hits, 1,
+        "the pinned plan appears exactly once after the shrink:\n{}",
+        vt.dump("shrunk with plan")
+    );
+    let step_row = rows
+        .iter()
+        .position(|r| r.contains("investigate the long"))
+        .expect("pinned step");
+    assert!(
+        step_row < marker,
+        "the plan stays above the input box:\n{}",
+        vt.dump("shrunk with plan")
+    );
 }
 
 /// The same guarantee for logical lines LONGER than the terminal width, which

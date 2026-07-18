@@ -10,20 +10,20 @@ During a turn, the dock keeps three rows visible:
 
 1. Animated status with elapsed time, plan mode, and active tools.
 2. Editable draft or an active confirmation question.
-3. Steering and cancellation state.
+3. Queue and cancellation state.
 
-The user can type while the model streams or tools run. Enter records the submitted text with a `[steering]` marker, interrupts the current parent turn, and dispatches the message on the next loop. Escape or Ctrl-C cancellation keeps unsubmitted text in the editor. Escape twice within five seconds cancels; Ctrl-C cancels immediately. A second Ctrl-C during cancellation restores the terminal and exits with status 130.
+The user can type while the model streams or tools run. Enter records the submitted text with a `[queued]` marker and leaves the running turn untouched; queued messages dispatch in order once the turn finishes on its own. Escape or Ctrl-C cancellation hands queued and unsubmitted text back to the editor. Escape twice within five seconds cancels; Ctrl-C cancels immediately. A second Ctrl-C during cancellation restores the terminal and exits with status 130.
 
 One main-thread render loop owns terminal output. A stdin reader and the agent worker send ordered events to it. Text, reasoning, tool start, tool finish, notes, errors, questions, keys, reader loss, and turn end retain channel order. Only adjacent render events can share a short repaint window.
 
 The interactive REPL also provides:
 
 - Tab completion for a `/`-prefixed command, with a dim hint that lists candidates for an ambiguous prefix. On an empty draft, Tab instead opens a persistent, bounded view of detached sub-agent state and recent activity.
-- A dim `type to steer the turn` placeholder on the input row while a turn runs and the buffer is empty.
-- A `plan` checklist maintained by the model through the `plan` tool. The active glyph animates, completed actions show elapsed time, long lists are capped with counts, and completed or canceled plans collapse to one timed line. It is agent-driven with no approval step and is separate from `/plan` mode.
+- A dim `type a message; Enter queues it` placeholder on the input row while a turn runs and the buffer is empty.
+- A `plan` checklist maintained by the model through the `plan` tool. It is pinned above the input during turns and at the idle prompt, updating in place across turn boundaries instead of re-printing into the transcript. The active glyph animates, completed actions show elapsed time, long lists are capped with counts, and a completed plan collapses to one timed line. It is agent-driven with no approval step and is separate from `/plan` mode.
 - Detached `subagent` jobs with stable IDs, cancellation through `/agents`, and one final result injected into the parent context as soon as that job is ready. This includes `tools: "all"` jobs; unrelated slow jobs do not delay a completed result.
 - Redisplay on resume: at an interactive terminal a resumed conversation is redrawn before the first prompt, with synthetic bookkeeping items filtered. Corrupt records are skipped with one bounded warning. Redisplay is display-only and never touches the request, transcript, or session log.
-- Immediate resize reflow through SIGWINCH while idle or during an active turn.
+- Resize reflow through SIGWINCH while idle or during an active turn. The erase walks the frame's physical height after the terminal's own rewrap (drawn cells over the new width), so shrinking the window repaints cleanly instead of leaving rule fragments.
 
 ## Rendering
 
