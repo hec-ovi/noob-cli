@@ -108,6 +108,13 @@ const FRAME_RESERVE_ROWS: usize = 4;
 /// cleared screen into scrollback so the transcript stays in history.
 const VIEWPORT_RESET: &[u8] = b"\x1b[2J\x1b[H";
 
+/// The spinner tick for the idle prompt's pinned rows, on the same cadence as
+/// the active frame's comet so the glyph does not change speed across a turn
+/// boundary.
+fn idle_tick(started: Instant) -> usize {
+    (started.elapsed().as_millis() / COMET_MS as u128) as usize
+}
+
 /// Re-read the width until it stops moving: an interactive resize drag
 /// delivers a burst of SIGWINCH, and repainting at every intermediate width
 /// multiplies the chances of racing the terminal's own reflow. Bounded, so a
@@ -574,8 +581,10 @@ impl DockSession {
         // live rows are pinned immediately above that box; the editor remains
         // on the same single input row and stays fully usable.
         let mut width = term_width();
+        let idle_started = Instant::now();
+        let mut drawn_tick = 0usize;
         let mut agent_rows = self.idle_region_rows(ui, background, width);
-        self.draw_idle_prompt(ui, plan, width, &agent_rows);
+        self.draw_idle_prompt(ui, plan, width, &agent_rows, drawn_tick);
         let mut input_dirty = true;
         loop {
             // Keyboard input wins a race with a completing child. Drain what
@@ -602,20 +611,32 @@ impl DockSession {
                 // erase of the old frame unreliable).
                 width = settled_width();
                 agent_rows = self.idle_region_rows(ui, background, width);
+                drawn_tick = idle_tick(idle_started);
                 ui.begin_batch();
                 ui.out_raw(VIEWPORT_RESET);
-                self.draw_idle_prompt(ui, plan, width, &agent_rows);
+                self.draw_idle_prompt(ui, plan, width, &agent_rows, drawn_tick);
                 ui.end_batch();
                 input_dirty = true;
             } else {
                 let next_agent_rows = self.idle_region_rows(ui, background, width);
+                let tick = idle_tick(idle_started);
                 if next_agent_rows != agent_rows {
                     ui.begin_batch();
                     self.erase_idle_prompt(ui, agent_rows.len());
                     agent_rows = next_agent_rows;
-                    self.draw_idle_prompt(ui, plan, width, &agent_rows);
+                    drawn_tick = tick;
+                    self.draw_idle_prompt(ui, plan, width, &agent_rows, tick);
                     ui.end_batch();
                     input_dirty = true;
+                } else if tick != drawn_tick && agent_rows.iter().any(|row| row.contains("[~]")) {
+                    // An in-progress plan step or agent row is pinned: keep
+                    // its glyph spinning between turns too. A frozen [~] at
+                    // the idle prompt reads as the work having stalled (the
+                    // live stage-3 freeze), when only the parent turn had
+                    // ended; the next typed or background turn "un-froze" it,
+                    // which made the pin look unstable.
+                    drawn_tick = tick;
+                    self.refresh_idle_regions(ui, &agent_rows, tick, width);
                 }
             }
 
@@ -650,10 +671,13 @@ impl DockSession {
                     {
                         let snapshot = hub.snapshot();
                         if self.agent_view || !snapshot.rows.is_empty() {
+                            ui.begin_batch();
                             self.erase_idle_prompt(ui, agent_rows.len());
                             self.agent_view = !self.agent_view;
                             agent_rows = self.idle_region_rows(ui, background, width);
-                            self.draw_idle_prompt(ui, plan, width, &agent_rows);
+                            drawn_tick = idle_tick(idle_started);
+                            self.draw_idle_prompt(ui, plan, width, &agent_rows, drawn_tick);
+                            ui.end_batch();
                             continue;
                         }
                     }
@@ -689,19 +713,27 @@ impl DockSession {
                 ui.redraw_idle_input(&self.draft, width);
                 input_dirty = false;
             }
-            let received = if let Some(hub) = background {
+            // A hub needs the periodic wake for elapsed times and settled
+            // reports; a pinned in-progress row needs it for its spinner even
+            // WITHOUT a hub (an interrupted turn's plan, for example), so the
+            // idle prompt only blocks indefinitely when there is nothing live
+            // to keep moving.
+            let animated = agent_rows.iter().any(|row| row.contains("[~]"));
+            let received = if background.is_some() || animated {
                 match self.rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(ev) => Some(ev),
                     Err(RecvTimeoutError::Timeout)
                         if self.draft.is_empty()
                             && self.pending.is_empty()
-                            && hub.settled_ready() =>
+                            && background
+                                .is_some_and(crate::subagent::BackgroundHub::settled_ready) =>
                     {
                         self.erase_idle_prompt(ui, agent_rows.len());
                         return Input::BackgroundReady;
                     }
-                    // Wake the outer loop to refresh elapsed time and recent
-                    // child activity even when the keyboard is untouched.
+                    // Wake the outer loop to refresh elapsed time, recent
+                    // child activity, and the spinner glyphs even when the
+                    // keyboard is untouched.
                     Err(RecvTimeoutError::Timeout) => continue,
                     Err(RecvTimeoutError::Disconnected) => {
                         self.reader_gone = true;
@@ -737,18 +769,53 @@ impl DockSession {
         }
     }
 
-    fn draw_idle_prompt(&mut self, ui: &mut Ui, plan: bool, width: usize, rows: &[String]) {
+    fn draw_idle_prompt(
+        &mut self,
+        ui: &mut Ui,
+        plan: bool,
+        width: usize,
+        rows: &[String],
+        tick: usize,
+    ) {
         ui.begin_batch();
         if !rows.is_empty() {
             let mut block = String::new();
             for row in rows {
                 block.push_str("\r\x1b[2K");
-                block.push_str(row);
+                block.push_str(&animated_region_row(row, tick));
                 block.push_str("\r\n");
             }
             ui.out_raw(block.as_bytes());
         }
         ui.expand(plan, width);
+        ui.end_batch();
+    }
+
+    /// Repaint the pinned rows above the idle box in place, advancing the
+    /// spinner glyph, then repark the cursor with a fresh input redraw.
+    /// Height-exact by contract: callers refresh only while the row SET is
+    /// unchanged (a changed set goes through erase + draw). This is what
+    /// keeps an in-progress plan step or agent row visibly alive BETWEEN
+    /// turns; the active loop's comet refresh covers only a running turn.
+    fn refresh_idle_regions(&mut self, ui: &mut Ui, rows: &[String], tick: usize, width: usize) {
+        if rows.is_empty() {
+            return;
+        }
+        ui.begin_batch();
+        let mut s = format!("\r\x1b[{}A", 1 + rows.len());
+        let mut first = true;
+        for row in rows {
+            if !first {
+                s.push_str("\x1b[1B\r");
+            }
+            first = false;
+            s.push_str("\x1b[2K");
+            s.push_str(&animated_region_row(row, tick));
+        }
+        // Two rows down skips the top rule and lands back on the input row.
+        s.push_str("\x1b[2B\r");
+        ui.out_raw(s.as_bytes());
+        ui.redraw_idle_input(&self.draft, width);
         ui.end_batch();
     }
 
@@ -1845,10 +1912,12 @@ impl DockSession {
 
 }
 
-/// One pinned row per queued message: a dim `› message [queued]`, clamped to
-/// one physical row like every region row. It lives only in the pinned region
-/// while the message waits; dispatch removes the row (and the [queued] marker
-/// with it) and echoes the plain `› message` record into the transcript.
+/// One pinned row per queued message: `› message [queued]` in the strong
+/// prompt green (it is the human's own text, not background chrome), clamped
+/// to one physical row like every region row. It lives only in the pinned
+/// region while the message waits; dispatch removes the row (and the [queued]
+/// marker with it) and echoes the plain `› message` record into the
+/// transcript.
 fn queued_region_row(ui: &Ui, message: &str, width: usize) -> PinnedRegionRow {
     let shown: String = message
         .chars()
@@ -1858,7 +1927,7 @@ fn queued_region_row(ui: &Ui, message: &str, width: usize) -> PinnedRegionRow {
         ui,
         format!("› {shown} [queued]"),
         width,
-        RegionTone::Dim,
+        RegionTone::Accent,
         RegionPriority::None,
     )
 }

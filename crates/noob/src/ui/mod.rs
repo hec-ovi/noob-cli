@@ -800,6 +800,7 @@ impl Ui {
         let open = match tone {
             RegionTone::Activity => self.theme.activity.sgr(self.depth),
             RegionTone::Dim => DIM.to_string(),
+            RegionTone::Accent => self.theme.prompt.sgr(self.depth),
         };
         format!(
             "{open}{}{RESET}",
@@ -1008,6 +1009,9 @@ impl Ui {
 pub(super) enum RegionTone {
     Activity,
     Dim,
+    /// The strong prompt green, for rows that should read as the human's own
+    /// text (the pinned `› message [queued]` rows).
+    Accent,
 }
 
 /// Make display text harmless before surrounding it with terminal controls.
@@ -1236,6 +1240,20 @@ mod tests {
         // Outside a batch, writes pass straight through again.
         ui.out("after");
         assert_eq!(sink.0.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn region_tones_map_to_their_theme_colors() {
+        let (ui, _out, _err) = harness(Mode::Repl, true, true);
+        let accent = ui.region_summary_row("x", 10, RegionTone::Accent);
+        assert!(
+            accent.starts_with(&ui.theme.prompt.sgr(ui.depth)),
+            "Accent must open with the strong prompt green: {accent:?}"
+        );
+        let activity = ui.region_summary_row("x", 10, RegionTone::Activity);
+        assert!(activity.starts_with(&ui.theme.activity.sgr(ui.depth)));
+        let dim = ui.region_summary_row("x", 10, RegionTone::Dim);
+        assert!(dim.starts_with(DIM));
     }
 
     /// A `Ui` wired to in-memory sinks with mode/color/ansi forced independent

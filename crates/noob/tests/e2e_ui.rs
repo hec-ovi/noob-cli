@@ -1442,7 +1442,9 @@ fn dock_double_esc_cancels_a_running_turn() {
 /// An Esc Esc cancel does not throw the plan away: it stays pinned above the
 /// idle input in its actual state (the in-progress step still marked), so the
 /// human can resume where the canceled turn left off. Nothing claims the plan
-/// itself was "canceled"; only the turn was.
+/// itself was "canceled"; only the turn was. The in-progress glyph keeps
+/// SPINNING at the idle prompt (the live stage-3 freeze: a frozen [~]
+/// between turns read as the work having stalled).
 #[test]
 fn dock_keeps_the_pinned_plan_after_an_interrupted_turn() {
     const ROWS: u16 = 16;
@@ -1469,6 +1471,21 @@ fn dock_keeps_the_pinned_plan_after_an_interrupted_turn() {
     let screen = pty.screen(ROWS, COLS);
     let rows = screen.render();
 
+    // At the idle prompt (no hub, no turn) the pinned step must keep ticking:
+    // over ~700ms of pure idleness the spinner passes through several frames.
+    let mark = pty.raw.len();
+    pty.drain(std::time::Duration::from_millis(700));
+    let idle_bytes = &pty.raw[mark..];
+    let distinct_frames = ["[|]", "[/]", "[-]", "[\\]"]
+        .iter()
+        .filter(|frame| {
+            let needle = format!("{frame} still working");
+            idle_bytes
+                .windows(needle.len())
+                .any(|w| w == needle.as_bytes())
+        })
+        .count();
+
     pty.send(&[0x04]);
     pty.wait_for("resume with");
     let status = pty.finish();
@@ -1480,12 +1497,22 @@ fn dock_keeps_the_pinned_plan_after_an_interrupted_turn() {
         .unwrap_or_else(|| panic!("idle input box missing:\n{}", screen.dump("idle")));
     let step = rows
         .iter()
-        .position(|r| r.contains("[~] still working"))
+        .position(|r| {
+            SPINNER_FRAMES
+                .iter()
+                .any(|frame| r.contains(&format!("{frame} still working")))
+        })
         .unwrap_or_else(|| panic!("the plan must stay pinned after a cancel:\n{}", screen.dump("idle")));
     assert!(
         step < marker,
         "the pinned plan sits above the idle input:\n{}",
         screen.dump("idle")
+    );
+    assert!(
+        distinct_frames >= 2,
+        "the pinned in-progress step must keep spinning at the idle prompt \
+         ({distinct_frames} distinct frames seen):\n{}",
+        pty.seen
     );
     assert!(!pty.seen.contains("plan canceled"), "{}", pty.seen);
     assert!(!pty.seen.contains("END-NEVER"));
@@ -3752,6 +3779,11 @@ fn skills_remove_announces_and_the_tool_rejects_the_gone_skill() {
 /// The U+203A input marker the dock's input row always leads with.
 const MARKER: &str = "\u{203a}";
 
+/// Every glyph an in-progress `[~]` row may show: the raw glyph plus the four
+/// animation frames the dock substitutes on its comet cadence (during turns
+/// AND at the idle prompt).
+const SPINNER_FRAMES: [&str; 5] = ["[~]", "[|]", "[/]", "[-]", "[\\]"];
+
 /// Find the dock's three rows in a rendered screen: the "Working" top rule, the
 /// "Esc Esc to cancel" bottom rule, and the input row between them. Returns the
 /// row indices if the top and bottom rules are both present.
@@ -4169,7 +4201,10 @@ fn dock_pins_the_plan_across_turns_with_a_single_copy_on_screen() {
         .iter()
         .rposition(|r| r.contains(MARKER))
         .unwrap_or_else(|| panic!("idle input box missing:\n{}", screen.dump("idle")));
-    for (step, glyph) in [("alpha", "[x]"), ("beta", "[~]")] {
+    for (step, glyphs) in [
+        ("alpha", &["[x]"][..]),
+        ("beta", &SPINNER_FRAMES[..]),
+    ] {
         let hits: Vec<usize> = rows
             .iter()
             .enumerate()
@@ -4187,8 +4222,8 @@ fn dock_pins_the_plan_across_turns_with_a_single_copy_on_screen() {
             screen.dump("idle")
         );
         assert!(
-            rows[hits[0]].contains(glyph),
-            "the pinned {step:?} row shows its LATEST state {glyph:?}: {:?}\n{}",
+            glyphs.iter().any(|glyph| rows[hits[0]].contains(glyph)),
+            "the pinned {step:?} row shows its LATEST state {glyphs:?}: {:?}\n{}",
             rows[hits[0]],
             screen.dump("idle")
         );

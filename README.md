@@ -103,7 +103,7 @@ Interactive commands:
 | `/mcp connect <name>` | Connect now and print the server's tool catalog |
 | `/quit`, `exit`, or `quit` | Leave the REPL |
 
-During a turn the input stays live: typing edits the next message, and Enter queues it without touching the running turn. The queued message waits as a dim `[queued]` row above the input and dispatches in order once the turn finishes, landing in the transcript as a normal `› message` line. Only double-Escape (or Ctrl-C) stops a turn. The dock keeps plan and agent status pinned above the input while output scrolls above it.
+During a turn the input stays live: typing edits the next message, and Enter queues it without touching the running turn. The queued message waits as a green `› message [queued]` row above the input and dispatches in order once the turn finishes, landing in the transcript as a normal `› message` line. Only double-Escape (or Ctrl-C) stops a turn. The dock keeps plan and agent status pinned above the input while output scrolls above it.
 
 ## Features
 
@@ -118,7 +118,9 @@ During a turn the input stays live: typing edits the next message, and Enter que
 - Read-only plan mode through `/plan`, followed by `/go`.
 - Lazy MCP over stdio and Streamable HTTP. Server schemas enter context only after connection, and `/mcp add` installs a server mid-session.
 - Runtime skill discovery and atomic `/skills add`, `remove`, and `reload`.
-- A default terminal dock with elapsed status, active tools, mid-turn message queueing, confirmations, cancellation, Tab completion for slash commands, persistent in-place plan and agents panels, single-write batched repaints (no flicker while output streams), and a viewport reset on terminal resize (the frame repaints clean; the old screen scrolls into history).
+- A default terminal dock with elapsed status, active tools, mid-turn message queueing, confirmations, cancellation, Tab completion for slash commands, persistent in-place plan and agents panels that stay animated between turns, and single-write batched repaints (no flicker while output streams).
+
+Known issue (minor edge case): resizing the terminal window is still unstable. The dock resets the viewport and repaints, but repeated resizes leave stale idle frames and blank gaps in the scrollback history. Pending a proper fix; avoid resizing mid-demo.
 - Interactive Markdown for headings, emphasis, lists, fenced code, JSON, and width-aware tables.
 - Matrix, ocean, amber, and violet display themes.
 
@@ -156,11 +158,11 @@ The external [research-skill](https://github.com/hec-ovi/research-skill) shows t
 
 Three small things the persistent dock does while a turn streams above it.
 
-**📋 Plan.** The `plan` tool is the live checklist the model and user both see. The active `[~]` box spins while work runs, and each completed action shows its elapsed time. Long lists show at most six steps windowed on the active one, plus one `… +N more` row with done and queued counts. A finished plan collapses to one timed line and moves into the chat history at turn end instead of staying stuck to the input; canceling a turn leaves an unfinished plan pinned in its actual state. The unfinished checklist stays pinned above the input across turns and at the idle prompt, updating in place instead of re-printing into the transcript. `/clear-plan` unpins it and replaces historical plan arguments and results with small placeholders while keeping provider-valid call/result pairs.
+**📋 Plan.** The `plan` tool is the live checklist the model and user both see. The active `[~]` box spins while work runs, and each completed action shows its elapsed time. Long lists show at most six steps windowed on the active one, plus one `… +N more` row with done and queued counts. A finished plan collapses to one timed line and moves into the chat history at turn end instead of staying stuck to the input; canceling a turn leaves an unfinished plan pinned in its actual state. The unfinished checklist stays pinned above the input across turns and at the idle prompt, updating in place instead of re-printing into the transcript, and the active step keeps spinning between turns (a step delegated to a still-running sub-agent stays visibly alive while the parent waits at the prompt). `/clear-plan` unpins it and replaces historical plan arguments and results with small placeholders while keeping provider-valid call/result pairs.
 
 **👥 Agents.** Sub-agents detach after an immediate job acknowledgment, so the prompt becomes usable while they work. Use `tools: "read-only"` for inspection, `tools: "web"` for nonmutating MCP research, and `tools: "all"` for coding or shell work. Background jobs and the foreground plan are independent state machines that may coexist; the dock renders separate regions, and agent lifecycle is never copied into plan steps. Press Tab on an empty draft for persistent job details and recent activity, or use `/agents`. Double-Escape, during a turn or at the idle prompt, cancels every running agent after a visible confirmation hint; a lone Ctrl-C stops only the parent turn; a typed message stops nothing, it just queues. Each terminal result is removed from its child instance and injected once into the parent context. A message already being composed wins the completion race and receives ready reports before its own text in the ordinary turn. A failed or canceled report, including one coalesced with a success, leaves the prompt idle instead of invoking parent inference. Cancellation and failure also reject autonomous replacement spawns until a new human turn begins.
 
-**⌨️ Queueing.** Type while a parent turn is running. Enter queues the message and leaves the turn, its tools, the plan, and every sub-agent untouched; it waits as a dim `[queued]` row above the input, then dispatches as the next turn once the current one finishes and shows up in the history as a plain `› message` line. Escape or Ctrl-C cancellation hands queued and unsubmitted text back to the editor instead of firing it.
+**⌨️ Queueing.** Type while a parent turn is running. Enter queues the message and leaves the turn, its tools, the plan, and every sub-agent untouched; it waits as a green `› message [queued]` row above the input, then dispatches as the next turn once the current one finishes and shows up in the history as a plain `› message` line. Escape or Ctrl-C cancellation hands queued and unsubmitted text back to the editor instead of firing it.
 
 **⎋ Cancel.** Escape twice within five seconds cancels a running turn; Ctrl-C cancels at once. A second Ctrl-C during cancellation restores the terminal and exits with status 130.
 
