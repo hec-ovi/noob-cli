@@ -425,6 +425,16 @@ fn hard_exit() -> ! {
     unsafe { libc::_exit(130) }
 }
 
+/// Double-ESC is the human's stop-everything gesture: committing it also
+/// cancels every detached child (each still delivers its one terminal
+/// packet). Steering and Ctrl-C keep their narrower contract - they stop
+/// only the parent turn and the fleet keeps running.
+fn stop_fleet(background: Option<&crate::subagent::BackgroundHub>) {
+    if let Some(hub) = background {
+        hub.cancel_all();
+    }
+}
+
 /// One dock REPL session: raw mode held for its lifetime, a persistent
 /// stdin reader, and the draft editor that survives across turns (typing
 /// while the agent works lands here and is waiting at the next prompt).
@@ -443,6 +453,9 @@ pub struct DockSession {
     /// background child remains inspectable both while the parent runs and at
     /// the otherwise-idle prompt.
     agent_view: bool,
+    /// Idle double-ESC arm: a first ESC at the idle prompt while detached
+    /// agents run arms this window; a second ESC inside it stops the fleet.
+    idle_esc_armed_until: Option<Instant>,
     /// True when this turn's interrupt came from a submitted steering message,
     /// not explicit Esc/Ctrl-C cancellation. The REPL consumes it after the
     /// worker ends to decide whether queued input should dispatch or be restored.
@@ -469,6 +482,7 @@ impl DockSession {
             draft: Editor::default(),
             queue: VecDeque::new(),
             agent_view: false,
+            idle_esc_armed_until: None,
             steering: false,
             reader_gone: false,
             _guard: guard,
@@ -563,6 +577,29 @@ impl DockSession {
 
             while let Some(key) = self.pending.pop_front() {
                 input_dirty = true;
+                if key == Key::Esc {
+                    // Double-ESC at the idle prompt stops every detached
+                    // agent (the stop-everything gesture works whether or
+                    // not a turn is in flight). Each canceled child still
+                    // delivers its one terminal packet, which the idle loop
+                    // surfaces on its own. With no agents, ESC stays the
+                    // editor no-op it always was.
+                    let now = Instant::now();
+                    let armed = self
+                        .idle_esc_armed_until
+                        .take()
+                        .is_some_and(|until| now < until);
+                    let active = background.map(|hub| hub.snapshot().active).unwrap_or(0);
+                    if active > 0 {
+                        if armed {
+                            stop_fleet(background);
+                        } else {
+                            self.idle_esc_armed_until = Some(now + CANCEL_WINDOW);
+                        }
+                    }
+                    continue;
+                }
+                self.idle_esc_armed_until = None;
                 if key == Key::Tab {
                     if self.draft.is_empty()
                         && let Some(hub) = background
@@ -1031,6 +1068,10 @@ impl DockSession {
                                     let a = ask.take().expect("ask exists");
                                     let _ = a.reply.send(false);
                                     self.steering = false;
+                                    // Fleet first, then the interrupt flag, so
+                                    // the worker's interrupt note already sees
+                                    // the children as stopping.
+                                    stop_fleet(background);
                                     cancel.commit();
                                 } else if !cancel.committed {
                                     cancel.armed_until = Some(Instant::now() + CANCEL_WINDOW);
@@ -1064,6 +1105,10 @@ impl DockSession {
                                     // Already canceling.
                                 } else if cancel.disarm() {
                                     self.steering = false;
+                                    // Fleet first, then the interrupt flag, so
+                                    // the worker's interrupt note already sees
+                                    // the children as stopping.
+                                    stop_fleet(background);
                                     cancel.commit();
                                 } else {
                                     cancel.armed_until = Some(Instant::now() + CANCEL_WINDOW);
@@ -1358,7 +1403,20 @@ impl DockSession {
         };
         let counts = checklist_counts(&block);
         let rows = checklist_pinned_rows(ui, &block, width, RegionSource::Agents);
-        self.cap_region_rows(ui, rows, counts, width)
+        let mut rows = self.cap_region_rows(ui, rows, counts, width);
+        // The armed idle double-ESC shows its own confirmation hint, mirroring
+        // the in-turn "press ESC again to cancel" row. The 100ms idle tick
+        // re-diffs these rows, so lapse of the window removes it on its own.
+        if snapshot.active > 0
+            && self
+                .idle_esc_armed_until
+                .is_some_and(|until| Instant::now() < until)
+        {
+            let open = ui.theme.error.sgr(ui.depth);
+            let reset = if open.is_empty() { "" } else { RESET };
+            rows.push(format!("{open}press ESC again to stop all agents{reset}"));
+        }
+        rows
     }
 
     fn final_region_rows(
@@ -2012,6 +2070,15 @@ fn expanded_agent_snapshot_block(snapshot: &crate::subagent::JobsSnapshot) -> Op
 
 fn collapsed_agent_snapshot_block(snapshot: &crate::subagent::JobsSnapshot) -> Option<String> {
     if snapshot.active > 0 {
+        // After an explicit stop-everything cancel the whole fleet is
+        // winding down; "running" would misread as the cancel having been
+        // ignored while the workers reap the children.
+        if snapshot.stopping == snapshot.active {
+            return Some(format!(
+                "[{}] agents stopping (Tab to view)",
+                snapshot.active
+            ));
+        }
         Some(format!(
             "[{}] agents running (Tab to view)",
             snapshot.active
@@ -2410,6 +2477,7 @@ mod tests {
                 id: "agent-1".into(),
                 lines: vec!["* read src/lib.rs".into(), "* write src/lib.rs".into()],
             }],
+            ..crate::subagent::JobsSnapshot::default()
         };
         let block = agent_snapshot_block(&snapshot);
         let lines: Vec<&str> = block.lines().collect();
@@ -2430,6 +2498,26 @@ mod tests {
         assert_eq!(
             collapsed_agent_snapshot_block(&ready).as_deref(),
             Some("[1] agents ready (Tab to view)")
+        );
+        // A stop-everything cancel flips the whole fleet to "stopping"; a
+        // single targeted cancel among others keeps the running label.
+        let stopping = crate::subagent::JobsSnapshot {
+            active: 2,
+            stopping: 2,
+            ..crate::subagent::JobsSnapshot::default()
+        };
+        assert_eq!(
+            collapsed_agent_snapshot_block(&stopping).as_deref(),
+            Some("[2] agents stopping (Tab to view)")
+        );
+        let partial = crate::subagent::JobsSnapshot {
+            active: 2,
+            stopping: 1,
+            ..crate::subagent::JobsSnapshot::default()
+        };
+        assert_eq!(
+            collapsed_agent_snapshot_block(&partial).as_deref(),
+            Some("[2] agents running (Tab to view)")
         );
         assert!(
             collapsed_agent_snapshot_block(&crate::subagent::JobsSnapshot::default()).is_none()

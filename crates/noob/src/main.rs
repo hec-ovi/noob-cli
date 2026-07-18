@@ -1272,6 +1272,10 @@ fn cmd_child() -> ExitCode {
         .and_then(serde_json::Value::as_u64)
         .map(|n| (n as u32).clamp(1, env_cap))
         .unwrap_or(env_cap);
+    // A child that runs out of rounds mid-gathering delivers nothing; nudge
+    // it to write the report while budget remains (also covers the web
+    // evidence-gate correction run, which reuses the unused budget).
+    agent.budget_nudge = true;
 
     let original_round_cap = agent.max_rounds;
     let mut end = agent.run_input(prompt_text, &mut ui);

@@ -137,6 +137,14 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
             return ToolOutcome::err("no detached sub-agents on this surface; no status available");
         };
         let snapshot = hub.snapshot();
+        // The digest carries the fleet's real elapsed (its longest-running
+        // child). The generic per-call timing is suppressed for detached
+        // subagent calls, because a hub snapshot returns in microseconds and
+        // its "0.0s" read as a broken child elapsed on screen.
+        let mut summary = format!("{} active · {} ready", snapshot.active, snapshot.ready);
+        if let Some((id, elapsed)) = &snapshot.oldest_active {
+            summary.push_str(&format!(" · {id} {}", crate::ui::elapsed_label(*elapsed)));
+        }
         return ToolOutcome::ok(
             json!({
                 "active": snapshot.active,
@@ -144,10 +152,14 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
                 "running": snapshot.running,
                 "ready": snapshot.ready,
                 "active_ids": snapshot.active_ids,
+                "oldest_active": snapshot
+                    .oldest_active
+                    .as_ref()
+                    .map(|(id, elapsed)| json!({"job_id": id, "elapsed_s": elapsed.as_secs()})),
                 "contract": "snapshot only; final reports arrive automatically; do not poll",
             })
             .to_string(),
-            format!("{} active · {} ready", snapshot.active, snapshot.ready),
+            summary,
         );
     }
     // Fleet control without a second tool schema: {"cancel": "agent-N"} stops
@@ -169,6 +181,16 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
                 "no active job {id:?}; job ids come from your spawn acknowledgments"
             ))
         };
+    }
+    // A bare {"status": false} is schema-legal but does nothing; the generic
+    // missing-prompt error below misread as "add a prompt" and seeded small-
+    // model retry loops. A padded status:false alongside a real prompt or
+    // cancel still takes those paths untouched.
+    if args.get("status") == Some(&Value::Bool(false)) && !has_prompt {
+        return ToolOutcome::err(
+            "status:false does nothing: use status:true for one snapshot, prompt to spawn, \
+             or cancel with a job id",
+        );
     }
     let prompt = match need_str(args, "prompt") {
         Ok(p) if !p.trim().is_empty() => p.to_string(),
@@ -205,8 +227,7 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     // Both sides enforce the turn cap: the parent clamps the request here,
     // the child clamps again against its own environment.
     let max_turns = match opt_u64(args, "max_turns") {
-        Ok(Some(n)) => clamp_max_turns(n, cfg.max_turns),
-        Ok(None) => cfg.max_turns,
+        Ok(requested) => child_round_budget(requested, cfg.max_turns, research_investigation),
         Err(e) => return ToolOutcome::err(e),
     };
 
@@ -473,6 +494,18 @@ fn run_task(
 
 fn clamp_max_turns(requested: u64, configured: u32) -> u32 {
     requested.clamp(1, u64::from(configured.max(1))) as u32
+}
+
+/// The rounds a child is granted. A recognized research-workflow brief gets
+/// the full configured budget regardless of the requested value: small
+/// models pad optional fields, and a padded low cap starved a live research
+/// child into a cap abort mid-investigation. Every other child keeps the
+/// requested cap, clamped to the configured ceiling.
+fn child_round_budget(requested: Option<u64>, configured: u32, research: bool) -> u32 {
+    match requested {
+        Some(n) if !research => clamp_max_turns(n, configured),
+        _ => configured,
+    }
 }
 
 enum ChildInputError {
@@ -845,6 +878,65 @@ mod tests {
         let out = run(&ctx, &json!({"cancel": "agent-1"}));
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("canceling"));
+        let results = hub.shutdown();
+        assert!(results.iter().all(|r| r.outcome.canceled));
+    }
+
+    #[test]
+    fn research_children_get_the_full_round_budget_despite_padded_caps() {
+        // Ordinary children keep their requested cap, clamped to the ceiling.
+        assert_eq!(child_round_budget(Some(3), 25, false), 3);
+        assert_eq!(child_round_budget(Some(99), 25, false), 25);
+        assert_eq!(child_round_budget(None, 25, false), 25);
+        // A recognized research brief ignores a padded low cap entirely.
+        assert_eq!(child_round_budget(Some(3), 25, true), 25);
+        assert_eq!(child_round_budget(None, 25, true), 25);
+    }
+
+    #[test]
+    fn bare_status_false_is_taught_not_mistaken_for_a_missing_prompt() {
+        let (_tmp, mut ctx) = test_ctx();
+        ctx.task = Some(cfg());
+        let out = run(&ctx, &json!({"status": false}));
+        assert!(out.is_error);
+        assert!(out.content.contains("status:false does nothing"), "{}", out.content);
+        assert!(
+            !out.content.contains("missing required parameter"),
+            "{}",
+            out.content
+        );
+        // Padded status:false alongside a real control still routes there.
+        let out = run(&ctx, &json!({"status": false, "cancel": "agent-1"}));
+        assert!(out.content.contains("nothing to cancel"), "{}", out.content);
+    }
+
+    #[test]
+    fn status_digest_names_the_longest_running_child() {
+        let (_tmp, mut ctx) = test_ctx();
+        ctx.task = Some(cfg());
+        let hub = BackgroundHub::new(1);
+        if let Some(task) = ctx.task.as_mut() {
+            task.background = Some(hub.clone());
+        }
+        let _ack = hub.submit_with("probe".to_string(), |cancel| {
+            while !cancel.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            crate::tools::ToolOutcome::canceled()
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while hub.snapshot().running == 0 {
+            assert!(Instant::now() < deadline, "child never started running");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let out = run(&ctx, &json!({"status": true}));
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.summary.starts_with("1 active · 0 ready · agent-1 "),
+            "digest must carry the fleet elapsed: {}",
+            out.summary
+        );
+        assert!(out.content.contains("\"job_id\":\"agent-1\""), "{}", out.content);
         let results = hub.shutdown();
         assert!(results.iter().all(|r| r.outcome.canceled));
     }

@@ -1572,21 +1572,20 @@ fn dock_steering_during_bash_with_a_running_agent_answers_the_message() {
     let parent = || RequestMatch::HasTool("subagent".to_string());
     let child = || RequestMatch::LacksTool("subagent".to_string());
 
+    // One MIXED batch: the spawn is paired with a long-running REAL command
+    // (a spawn-only round would end the input under the detached contract,
+    // and a leading sleep would be refused by the agent-wait block; steering
+    // must still work when genuine work is in flight after a spawn).
     rig.server.enqueue_stream_toolcalls_for(
         parent(),
-        &[(
-            "bg-call",
-            "subagent",
-            r#"{"prompt":"slow standalone research"}"#,
-        )],
-        None,
-    );
-    // After the ack the parent starts a long-running REAL command (a leading
-    // sleep would be refused by the agent-wait block; steering must still
-    // work when genuine work is in flight).
-    rig.server.enqueue_stream_toolcalls_for(
-        parent(),
-        &[("wait-call", "bash", r#"{"cmd":"tail -f /dev/null"}"#)],
+        &[
+            (
+                "bg-call",
+                "subagent",
+                r#"{"prompt":"slow standalone research"}"#,
+            ),
+            ("wait-call", "bash", r#"{"cmd":"tail -f /dev/null"}"#),
+        ],
         None,
     );
     rig.server.enqueue_raw_for(
@@ -1652,9 +1651,15 @@ fn sleep_wait_is_refused_and_the_prompt_frees_without_steering() {
     let parent = || RequestMatch::HasTool("subagent".to_string());
     let child = || RequestMatch::LacksTool("subagent".to_string());
 
+    // A spawn-only round now ends the input on its own, so the sleep idiom
+    // is only reachable from a turn that spawned AND kept real work: pair
+    // the spawn with a quick command in one mixed batch.
     rig.server.enqueue_stream_toolcalls_for(
         parent(),
-        &[("bg-call", "subagent", r#"{"prompt":"deep research"}"#)],
+        &[
+            ("bg-call", "subagent", r#"{"prompt":"deep research"}"#),
+            ("prime-call", "bash", r#"{"cmd":"echo prime-ok"}"#),
+        ],
         None,
     );
     rig.server.enqueue_stream_toolcalls_for(
@@ -1731,6 +1736,299 @@ fn sleep_wait_is_refused_and_the_prompt_frees_without_steering() {
     rig.server.assert_clean();
 }
 
+/// The v0.3.5 live screenshot bug: after spawning a detached researcher the
+/// model polled subagent {"status":true} every round, painting two scrollback
+/// lines per poll for 1m41s while the human's follow-up turned into a
+/// steering interrupt. The cap answers the first snapshot (so a "how is it
+/// going?" question stays answerable), cans the second, and ends the input:
+/// the follow-up is a plain turn and the report still arrives on its own.
+#[test]
+fn status_poll_loop_is_capped_and_the_prompt_frees() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+    let child = || RequestMatch::LacksTool("subagent".to_string());
+
+    // A spawn-only round would end the input immediately; pair the spawn
+    // with a quick command so the turn survives into the poll rounds this
+    // test exists to cap.
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[
+            ("bg-call", "subagent", r#"{"prompt":"deep research"}"#),
+            ("prime-call", "bash", r#"{"cmd":"echo prime-ok"}"#),
+        ],
+        None,
+    );
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[("poll-1", "subagent", r#"{"status":true}"#)],
+        None,
+    );
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[("poll-2", "subagent", r#"{"status":true}"#)],
+        None,
+    );
+    rig.server.enqueue_raw_for(
+        child(),
+        stalled_stream("CHILD-RESULT-UNIQUE", 1, 2500, true),
+    );
+    rig.server
+        .enqueue_stream_completion_for(parent(), "STILL-HERE-END");
+    rig.server
+        .enqueue_stream_completion_for(parent(), "COLLECTED-END");
+
+    let mut pty = spawn_pty_with(&rig, DOCK);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"research it\r");
+    // Poll 1 gets a real snapshot (the first word is styled separately, so
+    // match the tail on its own). The pinned agents row paints later, so it
+    // is asserted on the final screen instead of waited on here.
+    pty.wait_for("active · 0 ready");
+    // Poll 2 is the cap: a calm canned skip, and the input ends right after.
+    pty.wait_for("prompt freed");
+    // The prompt is free while the child still runs: a plain message.
+    pty.wait_for("type a message");
+    pty.send(b"still there?\r");
+    pty.wait_for("STILL-HERE-END");
+    pty.wait_for("agent-1 ok");
+    pty.wait_for("COLLECTED-END");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+
+    for noise in ["[steering]", "[interrupted]", "canceled", "round cap"] {
+        assert!(
+            !pty.seen.contains(noise),
+            "{noise:?} appeared in a capped-poll flow:\n{}",
+            pty.seen
+        );
+    }
+    // The snapshot digest painted exactly once: no per-poll scrollback spam.
+    assert_eq!(
+        pty.seen.matches("active · 0 ready").count(),
+        1,
+        "the status digest must appear exactly once:\n{}",
+        pty.seen
+    );
+    assert!(
+        pty.seen.contains("[1] agents running (Tab to view)"),
+        "the compact fleet row never rendered:\n{}",
+        pty.seen
+    );
+    let requests = rig.api_requests();
+    // The canned cap reached the model as poll-2's tool result.
+    assert!(
+        requests.iter().any(|request| {
+            request["messages"].as_array().unwrap().iter().any(|m| {
+                m["role"] == "tool"
+                    && m["tool_call_id"] == "poll-2"
+                    && m["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("polling stopped"))
+            })
+        }),
+        "the poll cap never reached the model"
+    );
+    // And the follow-up dispatched as an ordinary turn.
+    assert!(
+        requests
+            .iter()
+            .any(|request| last_user(request) == "still there?"),
+        "the free-prompt message never dispatched"
+    );
+    // Input one spent exactly three rounds (spawn, answered poll, capped
+    // poll); the follow-up and the report collection add one each. A poll
+    // loop grinding to the 50-round cap would blow this count.
+    let parent_requests = requests
+        .iter()
+        .filter(|request| {
+            request["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == "subagent")
+        })
+        .count();
+    assert_eq!(parent_requests, 5, "the poll loop burned extra rounds");
+    rig.server.assert_clean();
+}
+
+/// Double-ESC is the stop-everything gesture. At the idle prompt, with the
+/// fleet running and no turn in flight, the first ESC arms a visible hint and
+/// the second cancels every detached child; each still delivers exactly one
+/// canceled terminal packet, and the canceled batch spends no parent
+/// inference.
+#[test]
+fn double_esc_at_idle_stops_all_detached_agents() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+    let child = || RequestMatch::LacksTool("subagent".to_string());
+
+    // The two-spawn round ends the input by itself under the detached
+    // contract; the idle prompt follows immediately.
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[
+            ("bg-1", "subagent", r#"{"prompt":"alpha research"}"#),
+            ("bg-2", "subagent", r#"{"prompt":"beta research"}"#),
+        ],
+        None,
+    );
+    rig.server
+        .enqueue_raw_for(child(), stalled_stream("NEVER-A", 1, 30_000, true));
+    rig.server
+        .enqueue_raw_for(child(), stalled_stream("NEVER-B", 1, 30_000, true));
+
+    let mut pty = spawn_pty_with(&rig, DOCK);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"start two researchers\r");
+    // Only press ESC once the idle prompt is provably up, or the key would be
+    // consumed as an in-turn cancel arm during teardown.
+    pty.wait_for("type a message");
+    pty.send(&[0x1b]);
+    pty.wait_for("press ESC again to stop all agents");
+    pty.send(&[0x1b]);
+    // Both canceled packets surface at the idle prompt on their own.
+    pty.wait_for("agent-1 canceled");
+    pty.wait_for("agent-2 canceled");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+
+    assert!(
+        !pty.seen.contains("NEVER-A") && !pty.seen.contains("NEVER-B"),
+        "a canceled child's output leaked:\n{}",
+        pty.seen
+    );
+    // The canceled batch keeps the prompt idle: exactly the spawn round, no
+    // continuation inference (the other recorded requests belong to the
+    // killed children themselves).
+    let parent_requests = rig
+        .api_requests()
+        .iter()
+        .filter(|request| {
+            request["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == "subagent")
+        })
+        .count();
+    assert_eq!(
+        parent_requests, 1,
+        "a canceled batch must not trigger parent inference"
+    );
+    let session_path = std::fs::read_dir(rig.config.path().join("sessions"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let saved = std::fs::read_to_string(session_path).unwrap();
+    for id in ["agent-1", "agent-2"] {
+        assert_eq!(
+            saved
+                .matches(&format!("[background sub-agent result {id}]"))
+                .count(),
+            1,
+            "{id} terminal packet missing or duplicated: {saved}"
+        );
+    }
+    assert!(saved.contains(r#"\"status\":\"canceled\""#), "{saved}");
+    rig.server.assert_clean();
+}
+
+/// Double-ESC during a running turn now stops the fleet along with the turn,
+/// and the interrupt note stops claiming the children "keep running". The
+/// canceled child still delivers its one terminal packet.
+#[test]
+fn double_esc_during_a_turn_stops_the_fleet_too() {
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+    let child = || RequestMatch::LacksTool("subagent".to_string());
+
+    // One MIXED batch keeps the turn alive after the spawn (a spawn-only
+    // round would end the input before the ESC presses land).
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[
+            ("bg-call", "subagent", r#"{"prompt":"doomed research"}"#),
+            ("wait-call", "bash", r#"{"cmd":"tail -f /dev/null"}"#),
+        ],
+        None,
+    );
+    rig.server
+        .enqueue_raw_for(child(), stalled_stream("NEVER-DELIVERED", 1, 30_000, true));
+
+    let mut pty = spawn_pty_with(&rig, DOCK);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"start then get stuck\r");
+    pty.wait_for("[1] agents running (Tab to view)");
+    pty.wait_for("· bash");
+    pty.send(&[0x1b]);
+    pty.wait_for("press ESC again to cancel");
+    pty.send(&[0x1b]);
+    pty.wait_for("[interrupted]");
+    pty.wait_for("agent-1 canceled");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+
+    assert!(
+        !pty.seen.contains("keeps running") && !pty.seen.contains("keep running"),
+        "the interrupt note lied about a stopped fleet:\n{}",
+        pty.seen
+    );
+    assert!(
+        !pty.seen.contains("NEVER-DELIVERED"),
+        "the canceled child's output leaked:\n{}",
+        pty.seen
+    );
+    let parent_requests = rig
+        .api_requests()
+        .iter()
+        .filter(|request| {
+            request["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == "subagent")
+        })
+        .count();
+    assert_eq!(
+        parent_requests, 1,
+        "the canceled turn must not spend further inference"
+    );
+    let session_path = std::fs::read_dir(rig.config.path().join("sessions"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let saved = std::fs::read_to_string(session_path).unwrap();
+    assert_eq!(
+        saved
+            .matches("[background sub-agent result agent-1]")
+            .count(),
+        1,
+        "canceled terminal packet missing or duplicated: {saved}"
+    );
+    rig.server.assert_clean();
+}
+
 /// The model manages its own fleet: subagent {"cancel":"agent-N"} stops a
 /// detached child through the same path as /agents cancel, the ack names the
 /// canceling job, and the child's terminal packet still closes the loop. A
@@ -1761,11 +2059,17 @@ fn model_cancels_its_own_subagent() {
     let mut pty = spawn_pty_with(&rig, DOCK);
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
-    pty.send(b"start then stop it\r");
+    // The spawn round ends the input on its own; the cancel is what the
+    // model does with the user's NEXT instruction.
+    pty.send(b"start the research\r");
+    pty.wait_for("[1] agents running (Tab to view)");
+    pty.wait_for("type a message");
+    pty.send(b"actually stop it\r");
     // The done-line renderer styles the summary's first word separately, so
-    // the two halves are matched on their own.
+    // the two halves are matched on their own. Detached subagent digests
+    // carry no per-call elapsed (a hub control returns in microseconds).
     pty.wait_for("canceling");
-    pty.wait_for("agent-1 · ");
+    pty.wait_for("agent-1");
     pty.wait_for("STOPPED-END");
     // Ctrl-D only lands once the idle prompt is back; a byte sent during turn
     // teardown is consumed as an in-turn key and dropped.
@@ -1862,7 +2166,13 @@ fn cancel_then_spawn_in_one_batch_blocks_the_replacement() {
     let mut pty = spawn_pty_with(&rig, DOCK);
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
-    pty.send(b"start, cancel, and wrongly replace\r");
+    // The spawn round ends its input; the [cancel, replace] control batch
+    // rides the user's next instruction (a control batch is not a spawn-only
+    // round, so that turn survives to REPLACEMENT-BLOCKED-END).
+    pty.send(b"start the slow child\r");
+    pty.wait_for("[1] agents running (Tab to view)");
+    pty.wait_for("type a message");
+    pty.send(b"cancel it and wrongly replace\r");
     pty.wait_for("canceling");
     pty.wait_for("do not spawn a replacement until the human gives a new instruction");
     pty.wait_for("REPLACEMENT-BLOCKED-END");
@@ -1956,8 +2266,6 @@ fn dock_renders_a_detached_multi_agent_detail_view() {
         ],
         None,
     );
-    rig.server
-        .enqueue_stream_completion_for(parent(), "PARENT-FANOUT-END");
     for (tail, result, delay) in [
         ("ALPHATAIL", "ALPHA-RESULT one", 800),
         ("BETATAIL", "BETA-RESULT two", 1800),
@@ -1980,7 +2288,8 @@ fn dock_renders_a_detached_multi_agent_detail_view() {
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"fan out\r");
-    pty.wait_for("PARENT-FANOUT-END");
+    // The three-spawn round ends the input by itself; the pinned row is the
+    // signal that all three admissions landed.
     pty.wait_for("[3] agents running (Tab to view)");
     pty.send(b"\t");
     pty.wait_for("agents (3 active, 0 ready):");
@@ -2030,8 +2339,6 @@ fn background_agent_view_stays_pinned_while_the_prompt_remains_usable() {
         )],
         None,
     );
-    rig.server
-        .enqueue_raw_for(parent(), stalled_stream("AGENT-STARTED-END", 1, 600, true));
     rig.server.enqueue_raw_for(
         child(),
         stalled_stream("CHILD-RESULT-UNIQUE", 1, 2500, true),
@@ -2046,10 +2353,12 @@ fn background_agent_view_stays_pinned_while_the_prompt_remains_usable() {
     pty.wait_for(RAW_READY);
     pty.send(b"start research\r");
     pty.wait_for("[1] agents running (Tab to view)");
+    // The spawn-only round has ended the input; the Tab view opens over the
+    // idle prompt and must stay pinned while the human types.
+    pty.wait_for("type a message");
     pty.send(b"\t");
     pty.wait_for("agents (1 active, 0 ready):");
     pty.wait_for("slow standalone research");
-    pty.wait_for("AGENT-STARTED-END");
     pty.send(b"answer me while it runs");
     pty.drain(std::time::Duration::from_millis(300));
     let open_view = pty.screen(18, 90);
@@ -2112,7 +2421,7 @@ fn background_agent_view_stays_pinned_while_the_prompt_remains_usable() {
         ack["contract"]
             .as_str()
             .unwrap()
-            .contains("polling cannot fetch it"),
+            .contains("listing files cannot fetch it"),
         "{ack}"
     );
     let packets: Vec<&str> = messages
@@ -2198,8 +2507,6 @@ fn main_turn_runs_while_three_background_children_remain_in_flight() {
         None,
     );
     rig.server
-        .enqueue_stream_completion_for(parent(), "PARENT-THREE-YIELDED");
-    rig.server
         .enqueue_stream_completion_for(parent(), "MAIN-WHILE-THREE");
     for (prompt, result, delay) in [
         ("THREE-CHILD-A", "THREE-RESULT-A", 3500),
@@ -2222,7 +2529,8 @@ fn main_turn_runs_while_three_background_children_remain_in_flight() {
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"start three background children\r");
-    pty.wait_for("PARENT-THREE-YIELDED");
+    // The three-spawn round ends the input on its own.
+    pty.wait_for("[3] agents running (Tab to view)");
     pty.wait_for("type a message");
     pty.send(b"human main work\r");
     pty.wait_for("MAIN-WHILE-THREE");
@@ -2351,8 +2659,6 @@ fn typed_idle_followup_wins_the_race_with_a_ready_child() {
         None,
     );
     rig.server
-        .enqueue_stream_completion_for(parent(), "PARENT-YIELDED");
-    rig.server
         .enqueue_raw_for(child(), stalled_stream("RACE-CHILD-DONE", 1, 1200, true));
     rig.server
         .enqueue_stream_completion_for(parent(), "FOLLOWUP-WITH-RESULT-END");
@@ -2361,7 +2667,7 @@ fn typed_idle_followup_wins_the_race_with_a_ready_child() {
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"start race child\r");
-    pty.wait_for("PARENT-YIELDED");
+    // The spawn-only round ends the input on its own.
     pty.wait_for("type a message");
     pty.send(b"human follow");
     pty.wait_for("human follow");
@@ -2382,7 +2688,7 @@ fn typed_idle_followup_wins_the_race_with_a_ready_child() {
         })
         .count();
     assert_eq!(
-        parent_before_enter, 2,
+        parent_before_enter, 1,
         "a background continuation stole the typed prompt: {before_enter:?}"
     );
 
@@ -2428,8 +2734,6 @@ fn failed_background_child_leaves_the_idle_prompt_free_without_auto_retry() {
         &[("fail-agent", "subagent", r#"{"prompt":"hit the cap"}"#)],
         None,
     );
-    rig.server
-        .enqueue_stream_completion_for(parent(), "PARENT-AFTER-ACK");
     // With one child round, this tool call executes and then the child reaches
     // its configured inference cap before it can produce a final response.
     rig.server
@@ -2439,7 +2743,6 @@ fn failed_background_child_leaves_the_idle_prompt_free_without_auto_retry() {
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"start failing child\r");
-    pty.wait_for("PARENT-AFTER-ACK");
     pty.wait_for("agent-1 error");
     pty.wait_for("type a message");
     settle();
@@ -2456,7 +2759,7 @@ fn failed_background_child_leaves_the_idle_prompt_free_without_auto_retry() {
         })
         .count();
     assert_eq!(
-        parent_requests, 2,
+        parent_requests, 1,
         "the failed child triggered an unrequested parent retry"
     );
 
@@ -2493,8 +2796,6 @@ fn mixed_success_and_failure_leave_the_idle_prompt_without_auto_retry() {
         ],
         None,
     );
-    rig.server
-        .enqueue_stream_completion_for(parent(), "PARENT-AFTER-MIXED-ACK");
     rig.server.enqueue_raw_for(
         RequestMatch::UserPrompt("mixed successful child".to_string()),
         stalled_stream("MIXED-CHILD-OK", 1, 1200, true),
@@ -2518,7 +2819,8 @@ fn mixed_success_and_failure_leave_the_idle_prompt_without_auto_retry() {
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"start mixed children\r");
-    pty.wait_for("PARENT-AFTER-MIXED-ACK");
+    // The two-spawn round ends the input on its own.
+    pty.wait_for("[2] agents running (Tab to view)");
     pty.wait_for("type a message");
     pty.send(b"hold completion");
     pty.wait_for("hold completion");
@@ -2544,7 +2846,7 @@ fn mixed_success_and_failure_leave_the_idle_prompt_without_auto_retry() {
         })
         .count();
     assert_eq!(
-        parent_requests, 2,
+        parent_requests, 1,
         "a mixed terminal batch triggered parent inference"
     );
 
@@ -2577,8 +2879,6 @@ fn idle_prompt_keeps_the_running_agents_counter_after_closing_the_tab_view() {
         None,
     );
     rig.server
-        .enqueue_stream_completion_for(parent(), "PARENT-IDLE-END");
-    rig.server
         .enqueue_raw_for(child(), stalled_stream("FAST-CHILD-DONE", 1, 1200, true));
     rig.server
         .enqueue_raw_for(child(), stalled_stream("SLOW-CHILD-DONE", 1, 8000, true));
@@ -2591,7 +2891,8 @@ fn idle_prompt_keeps_the_running_agents_counter_after_closing_the_tab_view() {
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"start two idle children\r");
-    pty.wait_for("PARENT-IDLE-END");
+    // The two-spawn round ends the input on its own.
+    pty.wait_for("[2] agents running (Tab to view)");
 
     // The fast child settles and is collected; the slow child keeps running,
     // so the next idle prompt has exactly one live background agent.
@@ -2754,8 +3055,6 @@ fn detached_all_tools_child_writes_a_file_and_reports_once() {
         )],
         None,
     );
-    rig.server
-        .enqueue_stream_completion_for(parent(), "PARENT-DETACHED-END");
 
     // Hold the child's first model response so the parent must finish before
     // the write can happen. Then the child calls the real write entry point.
@@ -2785,12 +3084,11 @@ fn detached_all_tools_child_writes_a_file_and_reports_once() {
     pty.wait_for("type a task");
     pty.wait_for(RAW_READY);
     pty.send(b"delegate single file\r");
-    pty.wait_for("PARENT-DETACHED-END");
+    pty.wait_for("[1] agents running (Tab to view)");
     assert!(
         !output.exists(),
         "the delayed child mutated the workspace before the parent turn ended"
     );
-    pty.wait_for("[1] agents running (Tab to view)");
     pty.wait_for("agent-1 ok");
     pty.wait_for("ALL-TOOLS-COLLECTED-END");
     pty.wait_for("type a message");
@@ -2884,8 +3182,6 @@ fn responses_background_result_preserves_one_call_output_and_one_report() {
             r#"{"prompt":"responses child task"}"#,
         ),
     );
-    rig.server
-        .enqueue_raw_for(parent(), responses_completion_stream("RESPONSES-ACK", 0));
     rig.server.enqueue_raw_for(
         child(),
         responses_completion_stream("RESPONSES-CHILD-RESULT", 600),
@@ -2898,7 +3194,8 @@ fn responses_background_result_preserves_one_call_output_and_one_report() {
     let mut pty = spawn_pty_with(&rig, &[("NOOB_API_STYLE", "responses")]);
     pty.wait_for(RAW_READY);
     pty.send(b"start responses helper\r");
-    pty.wait_for("RESPONSES-ACK");
+    // The spawn-only round ends the input under the Responses adapter too.
+    pty.wait_for("[1] agents running (Tab to view)");
     pty.wait_for("agent-1 ok");
     pty.wait_for("RESPONSES-COLLECTED");
     pty.send(&[0x04]);
@@ -2957,14 +3254,11 @@ fn resume_repairs_a_persisted_background_ack_after_hard_exit_once() {
         None,
     );
     rig.server
-        .enqueue_stream_completion_for(parent(), "ACK-PERSISTED");
-    rig.server
         .enqueue_raw_for(child(), stalled_stream("NEVER-COLLECTED", 1, 10_000, true));
 
     let mut first = spawn_pty_with(&rig, &[]);
     first.wait_for(RAW_READY);
     first.send(b"launch orphan\r");
-    first.wait_for("ACK-PERSISTED");
     first.wait_for("[1] agents running (Tab to view)");
     let pid = first.child.as_ref().unwrap().id() as libc::pid_t;
     unsafe { libc::kill(pid, libc::SIGKILL) };
@@ -3005,8 +3299,6 @@ fn agents_cancel_kills_a_detached_child_and_keeps_the_prompt_usable() {
         &[("cancel-call", "subagent", r#"{"prompt":"wait forever"}"#)],
         None,
     );
-    rig.server
-        .enqueue_raw_for(parent(), stalled_stream("CANCEL-JOB-STARTED", 1, 600, true));
     rig.server.enqueue_raw_for(
         child(),
         stalled_stream("NEVER-SHOULD-FINISH", 1, 20_000, true),
@@ -3018,8 +3310,10 @@ fn agents_cancel_kills_a_detached_child_and_keeps_the_prompt_usable() {
     pty.wait_for(RAW_READY);
     pty.send(b"start doomed helper\r");
     pty.wait_for("[1] agents running (Tab to view)");
+    // The spawn-only round has ended the input, so the command lands at the
+    // idle prompt as an ordinary slash command, not a steering interrupt.
+    pty.wait_for("type a message");
     pty.send(b"/agents cancel agent-1\r");
-    pty.wait_for("[steering]");
     pty.wait_for("canceling agent-1");
     pty.wait_for("agent-1 canceled");
     pty.wait_for("type a message");

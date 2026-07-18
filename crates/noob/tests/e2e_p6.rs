@@ -520,6 +520,60 @@ fn child_errors_at_the_turn_cap() {
     rig.server.assert_clean();
 }
 
+/// Two rounds before the cap the child receives exactly one budget nudge,
+/// so a model that follows it delivers a final report instead of running
+/// into the cap abort mid-gathering (the live research-child failure).
+#[test]
+fn child_budget_nudge_lands_once_and_the_report_still_ships() {
+    let rig = rig();
+    std::fs::write(rig.work.path().join("f"), "content\n").unwrap();
+    rig.server
+        .enqueue_stream_toolcalls(&[("t1", "read", r#"{"path":"f"}"#)], None);
+    rig.server.enqueue_stream_toolcalls(
+        &[("t2", "grep", r#"{"pattern":"content","path":"f"}"#)],
+        None,
+    );
+    rig.server
+        .enqueue_stream_completion("FINAL-REPORT after the nudge");
+
+    let out = rig.run_child(r#"{"prompt": "inspect then report", "max_turns": 4}"#, None);
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let result: Value =
+        serde_json::from_str(stdout.lines().find(|l| !l.trim().is_empty()).unwrap()).unwrap();
+    assert_eq!(result["status"], "ok");
+    assert!(
+        result["result"].as_str().unwrap().contains("FINAL-REPORT"),
+        "{result}"
+    );
+
+    // Injected exactly once, exactly two rounds before the cap: rounds one
+    // and two see no nudge, round three carries one.
+    let requests = rig.api_requests();
+    assert_eq!(requests.len(), 3);
+    let nudges = |req: &Value| {
+        req["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| {
+                m["role"] == "user"
+                    && m["content"]
+                        .as_str()
+                        .is_some_and(|c| c.starts_with("[budget]"))
+            })
+            .count()
+    };
+    assert_eq!(nudges(&requests[0]), 0);
+    assert_eq!(nudges(&requests[1]), 0);
+    assert_eq!(nudges(&requests[2]), 1);
+    rig.server.assert_clean();
+}
+
 /// child_fanout: three task calls in one batch come back as three results
 /// in emission order; each child ran a fresh context. Concurrency 1 makes
 /// the response-to-child mapping deterministic.

@@ -94,12 +94,21 @@ fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> Tool
     // vocabulary. Give the model a mechanical mapping before the untrusted
     // body so compatibility does not depend on improvisation. Loaded skill
     // names are also withheld from descendants by the subagent protocol.
-    let runtime = "[noob runtime mapping: use subagent(prompt, tools, max_turns) for delegation; \
-                   dock subagents are already detached, so ignore model, description, and \
-                   run_in_background fields from other harnesses. Translate foreign web-tool \
-                   names to registered noob tools. Use tools:\"web\" for a nonmutating research \
-                   child with web MCP access. This loaded skill is not exposed again inside \
-                   descendants.]";
+    // ctx.task is Some exactly when the subagent tool is registered here.
+    // Advertising delegation where the schema is absent (a leaf child, the
+    // depth ceiling) steered small models into refused calls.
+    let runtime = if ctx.task.is_some() {
+        "[noob runtime mapping: use subagent(prompt, tools, max_turns) for delegation; \
+         dock subagents are already detached, so ignore model, description, and \
+         run_in_background fields from other harnesses. Translate foreign web-tool \
+         names to registered noob tools. Use tools:\"web\" for a nonmutating research \
+         child with web MCP access. This loaded skill is not exposed again inside \
+         descendants.]"
+    } else {
+        "[noob runtime mapping: delegation (subagent, agents, tasks) is unavailable in \
+         this context; do the delegated work yourself with your registered tools. \
+         Translate foreign web-tool names to registered noob tools.]"
+    };
     // Repeat the operational part after the untrusted body. Large skills can
     // contain many later harness-specific directives, and small local models
     // follow the nearest instruction more reliably than an early disclaimer.
@@ -151,6 +160,19 @@ mod tests {
             "pdf-tools",
             "# PDF tools\n\nUse pdftotext first.\n",
         );
+        // The subagent tool is registered on this surface, so the mapping
+        // advertises delegation.
+        ctx.task = Some(crate::subagent::TaskCfg {
+            depth: 0,
+            concurrency: crate::subagent::DEFAULT_CONCURRENCY,
+            max_turns: crate::subagent::DEFAULT_MAX_TURNS,
+            wall_clock: std::time::Duration::from_secs(crate::subagent::DEFAULT_WALL_CLOCK_S),
+            verbose: false,
+            overrides: Default::default(),
+            yolo: false,
+            ancestor_skills: Vec::new(),
+            background: None,
+        });
         let out = run(&ctx, &json!({"name": "pdf-tools"}));
         assert!(!out.is_error, "{}", out.content);
         assert!(
@@ -169,6 +191,22 @@ mod tests {
         assert!(
             !out.content.contains("description: test skill"),
             "frontmatter must be stripped"
+        );
+        // Without a registered subagent tool (a leaf child, the depth
+        // ceiling) the mapping must not advertise delegation the schema
+        // cannot honor.
+        ctx.task = None;
+        let leaf = run(&ctx, &json!({"name": "pdf-tools"}));
+        assert!(!leaf.is_error, "{}", leaf.content);
+        assert!(
+            leaf.content.contains("delegation (subagent, agents, tasks) is unavailable"),
+            "{}",
+            leaf.content
+        );
+        assert!(
+            !leaf.content.contains("use subagent(prompt"),
+            "a leaf must not be steered into refused delegation calls: {}",
+            leaf.content
         );
         assert!(out.warning.is_none());
         assert_eq!(

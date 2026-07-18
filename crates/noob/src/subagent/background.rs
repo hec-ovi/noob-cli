@@ -131,6 +131,13 @@ pub struct JobsSnapshot {
     pub queued: usize,
     pub running: usize,
     pub ready: usize,
+    /// Active jobs whose cancellation was requested but whose worker has not
+    /// yet committed the terminal result. Display-only: the interrupt note
+    /// and the collapsed dock row say "stopping" instead of "running".
+    pub stopping: usize,
+    /// The longest-running active child, for a status digest with a real
+    /// fleet elapsed instead of the poll call's own ~0s duration.
+    pub oldest_active: Option<(String, Duration)>,
     pub active_ids: Vec<String>,
     pub undelivered_ids: Vec<String>,
     pub rows: Vec<String>,
@@ -243,10 +250,11 @@ impl BackgroundHub {
                 "status": "running",
                 "contract": "detached with one goal; the final report is delivered to you \
                              automatically as [background sub-agent result]; waiting, sleeping, \
-                             planning, or polling cannot fetch it, so continue independent work \
-                             or end this turn; subagent {\"status\":true} gives one harmless \
-                             snapshot; cancel only when the user asks or the job is obsolete; a \
-                             failure does not authorize spawning a replacement",
+                             polling, or listing files cannot fetch it, so do unrelated work or \
+                             end this turn; spawn every sibling agent in one response; subagent \
+                             {\"status\":true} gives one harmless snapshot; cancel only when the \
+                             user asks or the job is obsolete; a failure does not authorize \
+                             spawning a replacement",
             })
             .to_string(),
             format!("{id} started · {active} active"),
@@ -317,7 +325,7 @@ impl BackgroundHub {
                 JobState::Running => job.started.elapsed(),
                 JobState::Ready => job.elapsed.unwrap_or_default(),
             };
-            let status = match job.state {
+            let mut status = match job.state {
                 JobState::Queued => {
                     snapshot.queued += 1;
                     snapshot.active += 1;
@@ -328,6 +336,13 @@ impl BackgroundHub {
                     snapshot.running += 1;
                     snapshot.active += 1;
                     snapshot.active_ids.push(job.id.clone());
+                    if snapshot
+                        .oldest_active
+                        .as_ref()
+                        .is_none_or(|(_, oldest)| elapsed > *oldest)
+                    {
+                        snapshot.oldest_active = Some((job.id.clone(), elapsed));
+                    }
                     "running"
                 }
                 JobState::Ready => {
@@ -335,6 +350,10 @@ impl BackgroundHub {
                     "ready"
                 }
             };
+            if job.state != JobState::Ready && job.cancel.load(Ordering::SeqCst) {
+                snapshot.stopping += 1;
+                status = "canceling";
+            }
             let mut row = format!(
                 "{} · {status} · {} · {}",
                 job.id,
@@ -603,6 +622,45 @@ mod tests {
             "results must move out exactly once"
         );
         assert!(hub.shutdown().is_empty());
+    }
+
+    #[test]
+    fn cancel_all_reports_stopping_and_snapshot_names_the_oldest_running_child() {
+        let hub = BackgroundHub::new(2);
+        for _ in 0..2 {
+            hub.submit_with("stubborn".to_string(), move |cancel| {
+                while !cancel.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                ToolOutcome::canceled()
+            });
+        }
+        wait_until(|| hub.snapshot().running == 2);
+        let snapshot = hub.snapshot();
+        assert_eq!(snapshot.stopping, 0);
+        assert!(
+            snapshot.oldest_active.is_some(),
+            "a running fleet must expose its longest-running child"
+        );
+        assert_eq!(hub.cancel_all(), 2);
+        let snapshot = hub.snapshot();
+        assert_eq!(
+            snapshot.stopping, snapshot.active,
+            "every still-active job is stopping after cancel_all"
+        );
+        assert!(
+            snapshot
+                .rows
+                .iter()
+                .filter(|row| !row.contains("· ready ·"))
+                .all(|row| row.contains("· canceling ·")),
+            "active rows must read canceling: {:?}",
+            snapshot.rows
+        );
+        wait_until(|| hub.snapshot().ready == 2);
+        let results = hub.take_ready();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| result.outcome.canceled));
     }
 
     #[test]

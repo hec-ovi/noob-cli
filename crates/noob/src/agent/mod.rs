@@ -51,6 +51,15 @@ pub const PLAN_ENTER_MSG: &str = "[plan mode] Read-only: write, edit, and bash a
 /// What /go appends when the user approves (frozen phrasing).
 pub const PLAN_APPROVED_MSG: &str = "Plan approved. Execute it.";
 
+/// Injected once, two rounds before a child's round cap (frozen phrasing;
+/// e2e-asserted). A child that hits its cap mid-gathering delivers nothing;
+/// this converts the cap from a silent cliff into a deliverable report. The
+/// live catch: a research child's evidence-gate correction run spent its
+/// whole remaining budget searching and aborted with no final message.
+pub const BUDGET_NUDGE_MSG: &str = "[budget] Only 2 inference rounds remain. Stop gathering: reply next with \
+     ONE final message carrying your complete report from the evidence you \
+     already have.";
+
 /// The doom-loop breakers name the way out. "Take a different approach" is
 /// only actionable when a different approach exists: a gated agent has no
 /// mutating tools, so the sole exit is to stop calling tools and produce the
@@ -102,6 +111,10 @@ pub struct Agent {
     /// Permanently read-only (read-only children): like plan mode's gate
     /// but with no /go; a hallucinated mutating call must never execute.
     pub read_only: bool,
+    /// Child agents only: two rounds before the cap, inject one user nudge
+    /// telling the model to stop gathering and write its final report, so a
+    /// bounded child finishes with a deliverable instead of a cap abort.
+    pub budget_nudge: bool,
     pub items: Vec<Item>,
     pub tool_ctx: ToolCtx,
     /// Skill names present at session start (the set the frozen prompt-head
@@ -125,6 +138,15 @@ pub struct Agent {
     chars_since_usage: usize,
     recent_calls: VecDeque<u64>,
     consec_errors: u32,
+    /// Rounds in the current input whose tool batch was nothing but
+    /// `subagent {"status":true}` snapshots. The first is answered so a
+    /// "how are the agents doing?" question can be reported; from the
+    /// second on the batch is a poll loop and the input ends after it.
+    status_only_rounds: u32,
+    /// Set per batch before planning: this batch is a status poll past the
+    /// allowance, so its calls are canned and the input ends after the
+    /// batch unless a ready child report arrived with it.
+    cap_status_batch: bool,
     /// After a transport-level compaction failure, auto-compaction waits
     /// until the estimate passes this mark instead of re-firing every
     /// round (the compression-loop trap). 0 = no backoff.
@@ -203,6 +225,7 @@ impl Agent {
             tools,
             plan: false,
             read_only: false,
+            budget_nudge: false,
             items,
             tool_ctx,
             initial_skills,
@@ -216,6 +239,8 @@ impl Agent {
             chars_since_usage: replayed_chars,
             recent_calls: VecDeque::new(),
             consec_errors: 0,
+            status_only_rounds: 0,
+            cap_status_batch: false,
             compact_backoff: 0,
         };
         agent.sync_context();
@@ -575,10 +600,19 @@ impl Agent {
     fn drive(&mut self, ui: &mut Ui) -> RunEnd {
         self.consec_errors = 0;
         self.last_rounds = 0;
+        self.status_only_rounds = 0;
+        self.cap_status_batch = false;
         let mut emergency_used = false;
 
         for round in 0..self.max_rounds {
             self.last_rounds = round + 1;
+            // A bounded child approaching its cap gets one explicit budget
+            // nudge before this round's request, so its remaining rounds go
+            // to the final report instead of more gathering.
+            if self.budget_nudge && self.max_rounds >= 2 && round + 2 == self.max_rounds {
+                self.push_item(Item::User(BUDGET_NUDGE_MSG.to_string()));
+                self.show_session_warning(ui);
+            }
             let estimate = self.context_estimate();
             if estimate >= self.ctx_tokens.saturating_mul(3) / 4 && estimate >= self.compact_backoff
             {
@@ -710,6 +744,16 @@ impl Agent {
                 return self.finish_interrupt(ui, &turn.tool_calls);
             }
 
+            // A round that only inspects sub-agent status is a wait, not
+            // work. Answer the first per input; from the second on the model
+            // is polling (the live screenshot loop: two scrollback lines per
+            // poll for 1m41s while the human could not type), so those calls
+            // are canned and the input ends after the batch below.
+            let status_batch = turn.tool_calls.iter().all(is_status_poll);
+            if status_batch {
+                self.status_only_rounds += 1;
+            }
+            self.cap_status_batch = status_batch && self.status_only_rounds >= 2;
             // Plan the batch: doom-loop intercepts and argument parsing
             // happen up front, in emission order.
             let mut batch = Vec::new();
@@ -780,7 +824,16 @@ impl Agent {
                             ui.agents(&render.block, &render.ids);
                         }
                         let visible = visible_tool_summary(&call.name, outcome);
-                        let summary = timed_summary(&call.name, &visible, elapsed);
+                        // A detached subagent call (admission ack, snapshot,
+                        // cancel) returns from the hub in microseconds; its
+                        // own duration renders as a constant "0.0s" that
+                        // reads like a broken child elapsed. Inline children
+                        // keep their real runtime.
+                        let summary = if detached_panel && call.name == "subagent" {
+                            visible
+                        } else {
+                            timed_summary(&call.name, &visible, elapsed)
+                        };
                         ui.tool_done(&call.id, &summary, outcome.is_error && !outcome.canceled);
                         // The plan tool's result is a checklist; show it as a
                         // visible block on the themed REPL (a no-op elsewhere).
@@ -826,7 +879,26 @@ impl Agent {
             // model round. A model that (wrongly) tries to wait for a report
             // still receives it at its next step, so a sleep/poll idiom can
             // never spin a turn against children that are already done.
-            self.integrate_background_results(ui);
+            let delivered = self.integrate_background_results(ui);
+            // A batch that only spawned detached children also ends the
+            // input: the parent has nothing to wait for (reports restart
+            // inference on their own), and a small model left in-turn after
+            // spawning reliably invents a wait idiom - status polls, bash ls
+            // probes of the child's expected output, leading sleeps - that
+            // spams the scrollback and turns the human's follow-up into a
+            // steering interrupt (the live v0.3.5 loop). Mixed batches keep
+            // the turn: pairing a spawn with real work stays legitimate.
+            let spawned_only = detached_panel
+                && turn.tool_calls.iter().all(|call| call.name == "subagent")
+                && outcomes.iter().all(is_running_ack);
+            if (self.cap_status_batch || spawned_only) && delivered == 0 {
+                // Nothing was delivered with the batch, nothing arrives by
+                // waiting, and the results told the model reports come on
+                // their own. Free the prompt so the human's next message is
+                // an ordinary turn instead of a steering interrupt.
+                ui.done(self.last_usage);
+                return RunEnd::Completed(turn.text);
+            }
             if self.consec_errors >= PAUSE_AT {
                 let last = outcomes
                     .iter()
@@ -1084,15 +1156,25 @@ impl Agent {
         // frozen phrasing); only the display note reassures. Live catch: a
         // user canceled a turn while detached agents ran and read the
         // interrupt as having killed their research.
-        let active = self.background_snapshot().active;
-        if active > 0 {
-            let plural = if active == 1 {
+        let snapshot = self.background_snapshot();
+        let stopping = snapshot.stopping;
+        let running = snapshot.active.saturating_sub(stopping);
+        if running > 0 {
+            let plural = if running == 1 {
                 "agent keeps"
             } else {
                 "agents keep"
             };
             ui.note(&format!(
-                "[interrupted] ({active} detached {plural} running; Tab or /agents to view)"
+                "[interrupted] ({running} detached {plural} running; Tab or /agents to view)"
+            ));
+        } else if stopping > 0 {
+            // An explicit ESC-ESC / Ctrl-C cancel also stopped the fleet;
+            // saying they "keep running" here would be a lie while the
+            // workers reap them.
+            let plural = if stopping == 1 { "agent" } else { "agents" };
+            ui.note(&format!(
+                "[interrupted] (stopping {stopping} detached {plural})"
             ));
         } else {
             ui.note("[interrupted]");
@@ -1232,6 +1314,28 @@ impl Agent {
                      their own the moment a child finishes, so there is \
                      nothing to wait for; do other work or end your turn now",
                     "sleep skipped (agents report on their own)",
+                )),
+                args,
+            );
+        }
+        // Structural close of the status-poll loop: the second status-only
+        // round in one input gets a calm canned snapshot instead of a fresh
+        // one, and the input ends after the batch (drive checks the flag).
+        // The advisory "do not poll" contract alone did not stop a small
+        // model from burning rounds two scrollback lines at a time.
+        if call.name == "subagent" && self.cap_status_batch {
+            let snapshot = self.background_snapshot();
+            return (
+                sched::Planned::Canned(ToolOutcome::ok(
+                    json!({
+                        "active": snapshot.active,
+                        "ready": snapshot.ready,
+                        "contract": "polling stopped; each report is delivered to you \
+                                     automatically the moment that agent finishes; this \
+                                     input is over and the user has the prompt",
+                    })
+                    .to_string(),
+                    "agents report on their own (prompt freed)",
                 )),
                 args,
             );
@@ -1412,6 +1516,42 @@ fn leading_sleep(cmd: &str) -> bool {
         .find(|segment| !segment.trim().is_empty())
         .and_then(|segment| segment.split_whitespace().next())
         == Some("sleep")
+}
+
+/// A successful detached admission: the `{"job_id":"agent-N","status":
+/// "running"}` acknowledgment the hub returns. Status snapshots, cancels,
+/// errors, cancellations, and inline child results all fail this shape.
+fn is_running_ack(outcome: &ToolOutcome) -> bool {
+    if outcome.is_error || outcome.canceled {
+        return false;
+    }
+    let Ok(content) = serde_json::from_str::<Value>(&outcome.content) else {
+        return false;
+    };
+    content.get("status").and_then(Value::as_str) == Some("running")
+        && content
+            .get("job_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.starts_with("agent-"))
+}
+
+/// A `subagent {"status":true}` snapshot call: the only argument shape whose
+/// repetition is pure waiting. Spawns (prompt) and controls (cancel) are
+/// never classified here, including malformed mixes, which the tool itself
+/// rejects with a parameter error.
+fn is_status_poll(call: &ToolCall) -> bool {
+    if call.name != "subagent" {
+        return false;
+    }
+    let Ok(args) = serde_json::from_str::<Value>(&call.arguments) else {
+        return false;
+    };
+    let blank = |key: &str| {
+        args.get(key)
+            .and_then(Value::as_str)
+            .is_none_or(|v| v.trim().is_empty())
+    };
+    args.get("status") == Some(&Value::Bool(true)) && blank("prompt") && blank("cancel")
 }
 
 fn timed_summary(name: &str, summary: &str, elapsed: Option<std::time::Duration>) -> String {
@@ -1682,6 +1822,53 @@ mod tests {
                 assert!(out.content.contains("repeated identical call"));
             }
             sched::Planned::Run { .. } => panic!("third X within 12 must intercept"),
+        }
+    }
+
+    #[test]
+    fn a_capped_status_batch_is_canned_calm_and_freed() {
+        // Shape detection first: only a pure snapshot call counts as a poll.
+        let call = |args: &str| ToolCall {
+            id: "c".into(),
+            name: "subagent".into(),
+            arguments: args.into(),
+        };
+        assert!(is_status_poll(&call(r#"{"status":true}"#)));
+        assert!(
+            is_status_poll(&call(r#"{"status":true,"prompt":"","cancel":" "}"#)),
+            "padded blank strings are still a poll"
+        );
+        assert!(!is_status_poll(&call(r#"{"prompt":"go"}"#)));
+        assert!(!is_status_poll(&call(r#"{"cancel":"agent-1"}"#)));
+        assert!(!is_status_poll(&call(r#"{"status":false}"#)));
+        assert!(!is_status_poll(&call(r#"{"status":true,"prompt":"go"}"#)));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let mut agent = Agent::new(
+            Client::new(Timeouts::default()),
+            tmp.path().to_path_buf(),
+            Overrides::default(),
+            "sys".into(),
+            vec![],
+            vec![],
+            ToolCtx::new(ws, crate::tools::guard::Sandbox::Container),
+            None,
+            131_072,
+        );
+        let poll = call(r#"{"status":true}"#);
+        assert!(
+            matches!(agent.plan_call(&poll).0, sched::Planned::Run { .. }),
+            "an uncapped status call runs normally"
+        );
+        agent.cap_status_batch = true;
+        match agent.plan_call(&poll).0 {
+            sched::Planned::Canned(out) => {
+                assert!(!out.is_error, "the cap is a calm skip, not an error");
+                assert!(out.summary.contains("prompt freed"), "{}", out.summary);
+                assert!(out.content.contains("polling stopped"), "{}", out.content);
+            }
+            _ => panic!("the second status-only round must be canned"),
         }
     }
 

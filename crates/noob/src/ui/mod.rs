@@ -1072,9 +1072,21 @@ fn replay_result_digest(content: &str) -> String {
 
 /// The most telling argument for the one-line activity display.
 pub(crate) fn brief_args(name: &str, args: &Value) -> String {
+    let cancel_brief;
     let s = match name {
         "bash" => args.get("cmd").and_then(Value::as_str).unwrap_or(""),
-        "subagent" => args.get("prompt").and_then(Value::as_str).unwrap_or(""),
+        // A control call has no prompt; a bare "* subagent" row said nothing.
+        "subagent" => match args.get("prompt").and_then(Value::as_str) {
+            Some(prompt) if !prompt.trim().is_empty() => prompt,
+            _ => match args.get("cancel").and_then(Value::as_str) {
+                Some(id) if !id.trim().is_empty() => {
+                    cancel_brief = format!("cancel {}", id.trim());
+                    &cancel_brief
+                }
+                _ if args.get("status") == Some(&Value::Bool(true)) => "status",
+                _ => "",
+            },
+        },
         _ => args
             .get("path")
             .or_else(|| args.get("pattern"))
@@ -1174,6 +1186,17 @@ mod tests {
             "cargo test"
         );
         assert_eq!(brief_args("edit", &json!({"path": "src/a.rs"})), "src/a.rs");
+        // Subagent control calls name themselves; "* subagent" alone said
+        // nothing when a model polled or canceled.
+        assert_eq!(
+            brief_args("subagent", &json!({"prompt": "research keto"})),
+            "research keto"
+        );
+        assert_eq!(brief_args("subagent", &json!({"status": true})), "status");
+        assert_eq!(
+            brief_args("subagent", &json!({"cancel": "agent-3"})),
+            "cancel agent-3"
+        );
         assert_eq!(
             brief_args("grep", &json!({"pattern": "fn main"})),
             "fn main"
