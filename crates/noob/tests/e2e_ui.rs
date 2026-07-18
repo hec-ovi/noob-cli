@@ -3029,6 +3029,95 @@ fn mixed_success_and_failure_leave_the_idle_prompt_without_auto_retry() {
     rig.server.assert_clean();
 }
 
+/// The 11-13 screenshot: at the idle prompt with the `[1] agents running`
+/// counter pinned, the counter must sit INSIDE the frame (below the top rule,
+/// above the input row), exactly like the active frame lays it out, and
+/// typing a draft must keep the whole frame exact. The live complaint was the
+/// idle counter floating ABOVE the box, reading as loose transcript text.
+#[test]
+fn idle_box_stays_exact_while_typing_with_a_pinned_agents_row() {
+    const ROWS: u16 = 16;
+    const COLS: u16 = 90;
+
+    let rig = rig();
+    rig.server.allow_interleaving();
+    let parent = || RequestMatch::HasTool("subagent".to_string());
+    let child = || RequestMatch::LacksTool("subagent".to_string());
+
+    rig.server.enqueue_stream_toolcalls_for(
+        parent(),
+        &[("bg-a", "subagent", r#"{"prompt":"slow typing child"}"#)],
+        None,
+    );
+    rig.server
+        .enqueue_raw_for(child(), stalled_stream("TYPING-CHILD-DONE", 1, 8000, true));
+    rig.server
+        .enqueue_stream_completion_for(parent(), "TYPING-COLLECTED-END");
+
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, COLS)), &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"start one child\r");
+    // The spawn-only round ends the turn; the idle box pins the counter.
+    pty.wait_for("[1] agents running (Tab to view)");
+    pty.drain(std::time::Duration::from_millis(500));
+
+    // Type a draft at the idle prompt, spread over the idle tick cadence so
+    // periodic repaints interleave with the keystrokes, then let it sit.
+    for chunk in [&b"okey did"[..], &b" it"[..], &b" finished?"[..]] {
+        pty.send(chunk);
+        pty.drain(std::time::Duration::from_millis(250));
+    }
+    pty.drain(std::time::Duration::from_millis(600));
+    let screen = pty.screen(ROWS, COLS);
+    let rows = screen.render();
+
+    let draft_row = rows
+        .iter()
+        .rposition(|r| r.contains("okey did it finished?"))
+        .unwrap_or_else(|| panic!("typed draft missing:\n{}", screen.dump("typing idle")));
+    assert!(
+        rows[draft_row].contains(MARKER),
+        "the draft renders on the input row, after the marker: {:?}\n{}",
+        rows[draft_row],
+        screen.dump("typing idle")
+    );
+    let rules = rule_row_indices(&rows);
+    assert_eq!(
+        rules.len(),
+        2,
+        "exactly the frame's two rules while typing:\n{}",
+        screen.dump("typing idle")
+    );
+    assert_eq!(
+        (rules[0], rules[1]),
+        (draft_row - 2, draft_row + 1),
+        "frame order: top rule, agents row, draft, bottom rule:\n{}",
+        screen.dump("typing idle")
+    );
+    let counter = rows
+        .iter()
+        .position(|r| r.contains("[1] agents running (Tab to view)"))
+        .unwrap_or_else(|| panic!("agents counter missing:\n{}", screen.dump("typing idle")));
+    assert_eq!(
+        counter,
+        draft_row - 1,
+        "the agents row sits INSIDE the frame, above the input (counter {counter}, draft {draft_row}):\n{}",
+        screen.dump("typing idle")
+    );
+
+    // Ctrl-C clears the draft so the settled child's report can be collected,
+    // then the session ends cleanly.
+    pty.send(&[0x03]);
+    pty.wait_for("TYPING-COLLECTED-END");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+}
+
 /// The running-agents counter must survive the idle prompt: while a detached
 /// child still runs, the collapsed `[N] agents running` row stays pinned above
 /// the idle box, Tab expands the panel, and Tab again falls back to the live
@@ -3777,6 +3866,29 @@ fn skills_remove_announces_and_the_tool_rejects_the_gone_skill() {
 // ---------------------------------------------------------------------------
 
 /// The U+203A input marker the dock's input row always leads with.
+/// Diagnostic replay: feed a captured raw byte file (NOOB_REPLAY, with
+/// NOOB_REPLAY_ROWS/COLS) through the reflow emulator and print the screen.
+/// Ignored in normal runs; used to inspect live-terminal captures with the
+/// exact same emulator the tests trust.
+#[test]
+#[ignore]
+fn replay_captured_bytes() {
+    let path = std::env::var("NOOB_REPLAY").expect("set NOOB_REPLAY to a raw capture file");
+    let rows: usize = std::env::var("NOOB_REPLAY_ROWS")
+        .unwrap_or_else(|_| "24".into())
+        .parse()
+        .unwrap();
+    let cols: usize = std::env::var("NOOB_REPLAY_COLS")
+        .unwrap_or_else(|_| "100".into())
+        .parse()
+        .unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let mut vt = vt::Vt::new(rows, cols);
+    vt.feed(&bytes);
+    println!("{}", vt.dump(&path));
+    panic!("replay dump above (ignored test, run on demand)");
+}
+
 const MARKER: &str = "\u{203a}";
 
 /// Every glyph an in-progress `[~]` row may show: the raw glyph plus the four

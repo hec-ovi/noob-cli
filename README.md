@@ -103,7 +103,7 @@ Interactive commands:
 | `/mcp connect <name>` | Connect now and print the server's tool catalog |
 | `/quit`, `exit`, or `quit` | Leave the REPL |
 
-During a turn the input stays live: typing edits the next message, and Enter queues it without touching the running turn. The queued message waits as a green `› message [queued]` row above the input and dispatches in order once the turn finishes, landing in the transcript as a normal `› message` line. Only double-Escape (or Ctrl-C) stops a turn. The dock keeps plan and agent status pinned above the input while output scrolls above it.
+During a turn the input stays live: typing edits the next message, and Enter queues it without touching the running turn. The queued message waits as a normal `› message` row with a green `[queued]` tag above the input and dispatches in order once the turn finishes, landing in the transcript as a plain `› message` line. Only double-Escape (or Ctrl-C) stops a turn. The dock keeps plan and agent status pinned inside the input frame, in-turn and at the idle prompt alike, while output scrolls above it.
 
 ## Features
 
@@ -162,7 +162,7 @@ Three small things the persistent dock does while a turn streams above it.
 
 **👥 Agents.** Sub-agents detach after an immediate job acknowledgment, so the prompt becomes usable while they work. Use `tools: "read-only"` for inspection, `tools: "web"` for nonmutating MCP research, and `tools: "all"` for coding or shell work. Background jobs and the foreground plan are independent state machines that may coexist; the dock renders separate regions, and agent lifecycle is never copied into plan steps. Press Tab on an empty draft for persistent job details and recent activity, or use `/agents`. Double-Escape, during a turn or at the idle prompt, cancels every running agent after a visible confirmation hint; a lone Ctrl-C stops only the parent turn; a typed message stops nothing, it just queues. Each terminal result is removed from its child instance and injected once into the parent context. A message already being composed wins the completion race and receives ready reports before its own text in the ordinary turn. A failed or canceled report, including one coalesced with a success, leaves the prompt idle instead of invoking parent inference. Cancellation and failure also reject autonomous replacement spawns until a new human turn begins.
 
-**⌨️ Queueing.** Type while a parent turn is running. Enter queues the message and leaves the turn, its tools, the plan, and every sub-agent untouched; it waits as a green `› message [queued]` row above the input, then dispatches as the next turn once the current one finishes and shows up in the history as a plain `› message` line. Escape or Ctrl-C cancellation hands queued and unsubmitted text back to the editor instead of firing it.
+**⌨️ Queueing.** Type while a parent turn is running. Enter queues the message and leaves the turn, its tools, the plan, and every sub-agent untouched; it waits as a normal `› message` row with a green `[queued]` tag above the input, then dispatches as the next turn once the current one finishes and shows up in the history as a plain `› message` line. Escape or Ctrl-C cancellation hands queued and unsubmitted text back to the editor instead of firing it.
 
 **⎋ Cancel.** Escape twice within five seconds cancels a running turn; Ctrl-C cancels at once. A second Ctrl-C during cancellation restores the terminal and exits with status 130.
 

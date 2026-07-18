@@ -12,7 +12,7 @@ During a turn, the dock keeps three rows visible:
 2. Editable draft or an active confirmation question.
 3. Queue and cancellation state.
 
-The user can type while the model streams or tools run. Enter queues the submitted text and leaves the running turn untouched: the message waits as a pinned `[queued]` row (strong prompt green) above the input and dispatches in order once the turn finishes on its own, echoed into the transcript as a plain `› message` record at dispatch (so no `[queued]` marker lingers after the answer). Escape or Ctrl-C cancellation hands queued and unsubmitted text back to the editor. Escape twice within five seconds cancels; Ctrl-C cancels immediately. A second Ctrl-C during cancellation restores the terminal and exits with status 130.
+The user can type while the model streams or tools run. Enter queues the submitted text and leaves the running turn untouched: the message waits as a pinned row styled like a normal `› message` with a green `[queued]` tag, above the input, and dispatches in order once the turn finishes on its own, echoed into the transcript as a plain `› message` record at dispatch (so no `[queued]` marker lingers after the answer). Escape or Ctrl-C cancellation hands queued and unsubmitted text back to the editor. Escape twice within five seconds cancels; Ctrl-C cancels immediately. A second Ctrl-C during cancellation restores the terminal and exits with status 130.
 
 One main-thread render loop owns terminal output. A stdin reader and the agent worker send ordered events to it. Text, reasoning, tool start, tool finish, notes, errors, questions, keys, reader loss, and turn end retain channel order. Only adjacent render events can share a short repaint window.
 

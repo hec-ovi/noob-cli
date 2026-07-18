@@ -405,9 +405,9 @@ fn raw_enabled_by_env() -> bool {
 
 /// A horizontal rule spanning the full width, `─────...─────`, or
 /// `── plan ──...──` in plan mode. No corners and no side borders: the frame is
-/// just a top and a bottom line. Shared by both rules and the resize re-fit so
-/// they never disagree.
-fn box_rule(plan: bool, width: usize) -> String {
+/// just a top and a bottom line. Shared by both rules, the resize re-fit, and
+/// the dock's idle frame so they never disagree.
+pub(super) fn box_rule(plan: bool, width: usize) -> String {
     let head = if plan { "── plan " } else { "" };
     let mut rule = String::from(head);
     for _ in head.chars().count()..width {

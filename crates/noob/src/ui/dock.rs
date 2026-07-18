@@ -769,6 +769,11 @@ impl DockSession {
         }
     }
 
+    /// The idle frame, laid out exactly like the active one so pinned rows
+    /// read as part of the prompt in both states: top rule, region rows
+    /// INSIDE the frame, input row, bottom rule, cursor parked on the input
+    /// row. (They used to sit above the top rule at idle, which read as the
+    /// agents row floating loose in the transcript.)
     fn draw_idle_prompt(
         &mut self,
         ui: &mut Ui,
@@ -777,21 +782,24 @@ impl DockSession {
         rows: &[String],
         tick: usize,
     ) {
-        ui.begin_batch();
-        if !rows.is_empty() {
-            let mut block = String::new();
-            for row in rows {
-                block.push_str("\r\x1b[2K");
-                block.push_str(&animated_region_row(row, tick));
-                block.push_str("\r\n");
-            }
-            ui.out_raw(block.as_bytes());
+        let color = ui.box_color();
+        let reset = if color.is_empty() { "" } else { RESET };
+        let top = super::prompt::box_rule(plan, width);
+        let bottom = super::prompt::box_rule(false, width);
+        let mut s = format!("\r\x1b[2K{color}{top}{reset}");
+        for row in rows {
+            s.push_str("\r\n\x1b[2K");
+            s.push_str(&animated_region_row(row, tick));
         }
-        ui.expand(plan, width);
+        s.push_str("\r\n\x1b[2K\r\n\x1b[2K");
+        s.push_str(&format!("{color}{bottom}{reset}"));
+        s.push_str("\x1b[1A");
+        ui.begin_batch();
+        ui.out_raw(s.as_bytes());
         ui.end_batch();
     }
 
-    /// Repaint the pinned rows above the idle box in place, advancing the
+    /// Repaint the pinned rows inside the idle frame in place, advancing the
     /// spinner glyph, then repark the cursor with a fresh input redraw.
     /// Height-exact by contract: callers refresh only while the row SET is
     /// unchanged (a changed set goes through erase + draw). This is what
@@ -802,39 +810,26 @@ impl DockSession {
             return;
         }
         ui.begin_batch();
-        let mut s = format!("\r\x1b[{}A", 1 + rows.len());
-        let mut first = true;
-        for row in rows {
-            if !first {
+        let mut s = format!("\r\x1b[{}A", rows.len());
+        for (index, row) in rows.iter().enumerate() {
+            if index > 0 {
                 s.push_str("\x1b[1B\r");
             }
-            first = false;
             s.push_str("\x1b[2K");
             s.push_str(&animated_region_row(row, tick));
         }
-        // Two rows down skips the top rule and lands back on the input row.
-        s.push_str("\x1b[2B\r");
+        // One row down from the last region row is the input row.
+        s.push_str("\x1b[1B\r");
         ui.out_raw(s.as_bytes());
         ui.redraw_idle_input(&self.draft, width);
         ui.end_batch();
     }
 
-    /// Clear the optional agent rows and the three-row idle box, leaving the
-    /// cursor at the topmost row they occupied. With no agent rows this emits
-    /// exactly the ordinary prompt erasure.
+    /// Clear the whole idle frame (top rule, pinned rows, input row, bottom
+    /// rule), leaving the cursor at column 0 of its top row. The idle frame
+    /// shares the active frame's geometry, so this is exactly the dock erase.
     fn erase_idle_prompt(&mut self, ui: &mut Ui, region_count: usize) {
-        ui.erase(true);
-        if region_count == 0 {
-            return;
-        }
-        let mut block = format!("\x1b[{region_count}A\r\x1b[2K");
-        for _ in 1..region_count {
-            block.push_str("\x1b[1B\r\x1b[2K");
-        }
-        if region_count > 1 {
-            block.push_str(&format!("\x1b[{}A\r", region_count - 1));
-        }
-        ui.out_raw(block.as_bytes());
+        self.erase_dock(ui, region_count);
     }
 
     /// File an idle-time event: keys queue for the editor, a straggler from a
@@ -1912,24 +1907,37 @@ impl DockSession {
 
 }
 
-/// One pinned row per queued message: `› message [queued]` in the strong
-/// prompt green (it is the human's own text, not background chrome), clamped
-/// to one physical row like every region row. It lives only in the pinned
-/// region while the message waits; dispatch removes the row (and the [queued]
-/// marker with it) and echoes the plain `› message` record into the
-/// transcript.
+/// One pinned row per queued message, styled exactly like the `› message`
+/// record it will become (green marker, plain text) with only the trailing
+/// `[queued]` tag in the non-bold activity green. Clamped to one physical row
+/// like every region row. It lives only in the pinned region while the
+/// message waits; dispatch removes the row (and the tag with it) and echoes
+/// the plain `› message` record into the transcript.
 fn queued_region_row(ui: &Ui, message: &str, width: usize) -> PinnedRegionRow {
+    const TAG: &str = "[queued]";
     let shown: String = message
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    PinnedRegionRow::summary(
-        ui,
-        format!("› {shown} [queued]"),
-        width,
-        RegionTone::Accent,
-        RegionPriority::None,
-    )
+    // Marker (2 cells) + text + one space + tag must fit one physical row.
+    let avail = width.max(1).saturating_sub(2 + 1 + TAG.len());
+    let mut text: String = shown.chars().take(avail).collect();
+    if shown.chars().count() > avail && !text.is_empty() {
+        text.pop();
+        text.push('…');
+    }
+    let marker = ui.box_color();
+    let marker_reset = if marker.is_empty() { "" } else { RESET };
+    let tag = if ui.regions_enabled() {
+        ui.theme.activity.sgr(ui.depth)
+    } else {
+        String::new()
+    };
+    let tag_reset = if tag.is_empty() { "" } else { RESET };
+    PinnedRegionRow {
+        rendered: format!("{marker}› {marker_reset}{text} {tag}{TAG}{tag_reset}"),
+        priority: RegionPriority::None,
+    }
 }
 
 fn frame_label(input: &str) -> String {
