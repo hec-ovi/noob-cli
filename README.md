@@ -2,11 +2,27 @@
 
 noob-cli is a compact Rust agent for OpenAI-compatible model endpoints. It runs in an isolated Docker container against the current project directory, with persistent configuration and sessions stored outside the image.
 
-The static release binary is 4,313,984 bytes (4.11 MiB) with 40 runtime crates. There is no async runtime or TUI framework.
+The static release binary is 4,330,368 bytes (4.13 MiB) with 40 runtime crates. There is no async runtime or TUI framework.
+
+## Showcase
+
+Recorded against a live qwen3.6-35b-a3b endpoint. Idle waits are sped up; the interactions themselves play close to real time.
+
+The `context` tool reports token use on demand:
+
+![noob answering with its own context use through the context tool](docs/media/showcase-context.gif)
+
+Install a skill straight from a GitHub repo, hand it a research task, and keep talking while the detached sub-agent works. Tab opens its live view, here the sub-agent running web search in the background:
+
+![Installing the research skill, then a sub-agent web-searching while the prompt stays live](docs/media/showcase-skills-agents.gif)
+
+Ask for a three-step plan, then queue two follow-up messages while it builds. The plan finishes on its own and the queued messages dispatch in order, the first one right after the plan completes:
+
+![A plan building three files while two typed messages wait queued, then dispatch in order](docs/media/showcase-plan-queue.gif)
 
 ## Install
 
-The host needs Linux, Bash, Git, and a running Docker Engine available to your user. amd64 and arm64 are supported. Development from the checkout also needs the Docker Compose plugin. The first build needs network access to pull the Rust and Alpine images, Alpine runtime packages, and the pinned websearch package.
+You need Docker and Git. Everything else, including the Rust toolchain, lives inside the container, so the first build pulls the base images and packages and needs network access. Tested on Linux (amd64 and arm64); running from the checkout with `./dev.sh` also wants the Docker Compose plugin.
 
 ```bash
 git clone https://github.com/hec-ovi/noob-cli.git
@@ -251,7 +267,7 @@ NOOB_LIVE_MCP_URL=http://localhost:18000/mcp \
 
 Beyond the offline suite, the stack was driven against the local qwen endpoint. A fresh session created and completed its own visible plan, wrote and verified a file, resumed in a new process, called the context tool, and accurately explained the prior work. The backing llama.cpp server was also exercised with five simultaneous uncapped requests, matching one parent plus four detached children.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the runtime design and [PLAN.md](PLAN.md) for verified release status. The terminal design was cross-checked against source snapshots from [Zero](https://github.com/Gitlawb/zero/tree/1af58828eb3c22567599c000736c913a290959d2) and [Codex](https://github.com/openai/codex/tree/5c19155cbd93bfa099016e7487259f61669823ff).
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the runtime design.
 
 ## License
 
