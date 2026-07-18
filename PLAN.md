@@ -2,6 +2,8 @@
 
 Status date: 2026-07-17.
 
+noob 0.3.6 hardens detached sub-agents for small models: a spawn-only round frees the prompt, a repeated status poll is capped after one snapshot, a bounded child is nudged to report before its round cap (and a recognized research brief keeps its full budget), double-Escape stops the whole fleet, and the agent digests carry the fleet's real elapsed instead of a constant 0.0s.
+
 noob-cli is one static Rust binary in a Docker runtime, targeting OpenAI-compatible endpoints. [ARCHITECTURE.md](ARCHITECTURE.md) describes the runtime design; this file tracks release gates and open items.
 
 ## Verification
@@ -9,10 +11,10 @@ noob-cli is one static Rust binary in a Docker runtime, targeting OpenAI-compati
 | Gate | Result |
 |---|---|
 | Strict workspace Clippy | clean |
-| Offline suite (host and Docker) | 707 pass |
-| Interactive `e2e_ui` suite | 72 pass |
+| Offline suite (host and Docker) | 716 pass |
+| Interactive `e2e_ui` suite | 75 pass |
 | Opt-in live suite | 9 pass |
-| Static musl binary | 4,313,984 bytes, limit 8 MiB |
+| Static musl binary | 4,326,272 bytes, limit 8 MiB |
 | Runtime crate graph | 40 crates, limit 45 |
 | Host installer and wrapper | covered |
 | Standalone `websearch web-search` | covered |
