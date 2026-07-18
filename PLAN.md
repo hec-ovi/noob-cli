@@ -1,8 +1,8 @@
 # noob-cli status and release plan
 
-Status date: 2026-07-17.
+Status date: 2026-07-18.
 
-noob 0.3.6 hardens detached sub-agents for small models: a spawn-only round frees the prompt, a repeated status poll is capped after one snapshot, a bounded child is nudged to report before its round cap (and a recognized research brief keeps its full budget), double-Escape stops the whole fleet, and the agent digests carry the fleet's real elapsed instead of a constant 0.0s.
+noob 0.3.7 makes the dock keep its promises under interaction: a message typed during a turn queues ([queued]) instead of interrupting, so the turn, its plan, and every sub-agent keep running and the message is answered next; only double-Escape or Ctrl-C stops a turn. The plan checklist and the agents counter are pinned once above the input, across turns and at the idle prompt, and are no longer re-recorded into the transcript at every turn end. Resizing the terminal now erases the frame by its physical reflowed height (VTE-style rewrap aware), so shrinking the window repaints cleanly instead of shredding the screen with rule fragments.
 
 noob-cli is one static Rust binary in a Docker runtime, targeting OpenAI-compatible endpoints. [ARCHITECTURE.md](ARCHITECTURE.md) describes the runtime design; this file tracks release gates and open items.
 
@@ -11,8 +11,8 @@ noob-cli is one static Rust binary in a Docker runtime, targeting OpenAI-compati
 | Gate | Result |
 |---|---|
 | Strict workspace Clippy | clean |
-| Offline suite (host and Docker) | 716 pass |
-| Interactive `e2e_ui` suite | 75 pass |
+| Offline suite (host and Docker) | 726 pass |
+| Interactive `e2e_ui` suite | 84 pass |
 | Opt-in live suite | 9 pass |
 | Static musl binary | 4,326,272 bytes, limit 8 MiB |
 | Runtime crate graph | 40 crates, limit 45 |
