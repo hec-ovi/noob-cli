@@ -42,7 +42,8 @@ fn run_inner(
 
     // Retain only the entries that can be shown while still counting every
     // match. This keeps a huge workspace from becoming a huge allocation.
-    let mut hits: Vec<(SystemTime, String)> = Vec::with_capacity(LIST_ENTRY_CAP);
+    let entry_cap = ctx.caps.list_entries;
+    let mut hits: Vec<(SystemTime, String)> = Vec::with_capacity(entry_cap.min(LIST_ENTRY_CAP));
     let mut total = 0usize;
     let walk = ignore::WalkBuilder::new(&ctx.workspace)
         .overrides(over)
@@ -69,7 +70,7 @@ fn run_inner(
             .unwrap_or(entry.path());
         total = total.saturating_add(1);
         let candidate = (mtime, rel.display().to_string());
-        if hits.len() < LIST_ENTRY_CAP {
+        if hits.len() < entry_cap {
             hits.push(candidate);
         } else if let Some((worst, _)) = hits
             .iter()
@@ -190,5 +191,18 @@ mod tests {
         assert!(out.content.starts_with("f000.txt\n"));
         assert!(out.content.contains("f199.txt\n230 files"));
         assert!(!out.content.contains("f200.txt"));
+    }
+
+    #[test]
+    fn uncapped_ctx_returns_every_match() {
+        let (_t, mut ctx) = test_ctx();
+        ctx.caps = super::super::truncate::Caps::uncapped();
+        for i in 0..230 {
+            std::fs::write(ctx.workspace.join(format!("f{i:03}.txt")), "").unwrap();
+        }
+        let out = run(&ctx, &json!({"pattern": "*.txt"}));
+        assert!(!out.content.contains("showing"), "{}", out.content);
+        assert_eq!(out.content.lines().count(), 230);
+        assert!(out.content.contains("f229.txt"));
     }
 }

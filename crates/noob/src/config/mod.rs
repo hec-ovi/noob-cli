@@ -24,6 +24,7 @@ pub const EDITABLE: &[(&str, &str)] = &[
     ("task-concurrency", "NOOB_TASK_CONCURRENCY"),
     ("task-max-turns", "NOOB_TASK_MAX_TURNS"),
     ("task-wall-clock", "NOOB_TASK_WALL_CLOCK_S"),
+    ("tool-caps", "NOOB_TOOL_CAPS"),
 ];
 
 /// Resolution order: NOOB_CONFIG_DIR > /config (the container bind mount) >
@@ -203,13 +204,15 @@ fn validate_setting(name: &str, value: &str) -> Result<(), String> {
         "task-concurrency" => range(1, 16),
         "task-max-turns" => range(1, 50),
         "task-wall-clock" => range(1, 3_600),
-        "autodetect"
+        "autodetect" | "tool-caps"
             if !matches!(
                 value.to_ascii_lowercase().as_str(),
                 "0" | "1" | "true" | "false" | "on" | "off" | "yes" | "no"
             ) =>
         {
-            Err("autodetect must be on/off, true/false, yes/no, or 1/0".to_string())
+            Err(format!(
+                "{name} must be on/off, true/false, yes/no, or 1/0"
+            ))
         }
         _ => Ok(()),
     }
@@ -279,6 +282,24 @@ pub fn task_wall_clock(config_dir: &Path) -> std::time::Duration {
         .unwrap_or(crate::subagent::DEFAULT_WALL_CLOCK_S)
         .min(3_600);
     std::time::Duration::from_secs(secs)
+}
+
+/// NOOB_TOOL_CAPS: the tool-result truncation policy. 0/off/false/no lifts
+/// every cap (read, bash, grep, glob/ls, skill, and MCP results flow through
+/// whole, so no truncation marker ever renders); anything else, or unset,
+/// keeps the shipped defaults. Resolved once at bootstrap.
+pub fn tool_caps(config_dir: &Path) -> crate::tools::truncate::Caps {
+    let off = setting(config_dir, "NOOB_TOOL_CAPS").is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        )
+    });
+    if off {
+        crate::tools::truncate::Caps::uncapped()
+    } else {
+        crate::tools::truncate::Caps::default()
+    }
 }
 
 /// Two states, no permission DSL: the container is the wall. An explicit
@@ -482,6 +503,31 @@ mod tests {
         assert_eq!(
             skill_paths(cfg.path(), ws.path()),
             vec![ws.path().join("cli")]
+        );
+    }
+
+    #[test]
+    fn tool_caps_zero_or_off_lifts_every_cap() {
+        use crate::tools::truncate::Caps;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Unset: the shipped defaults.
+        assert_eq!(tool_caps(tmp.path()), Caps::default());
+        for off in ["0", "off", "false", "no", " OFF "] {
+            std::fs::write(tmp.path().join(".env"), format!("NOOB_TOOL_CAPS={off}\n")).unwrap();
+            assert_eq!(tool_caps(tmp.path()), Caps::uncapped(), "{off}");
+        }
+        // Anything else (on, 1, junk) keeps the defaults.
+        for on in ["1", "on", "true", "yes", "potato"] {
+            std::fs::write(tmp.path().join(".env"), format!("NOOB_TOOL_CAPS={on}\n")).unwrap();
+            assert_eq!(tool_caps(tmp.path()), Caps::default(), "{on}");
+        }
+        // The /config alias validates like the other switches.
+        assert!(write_setting(tmp.path(), "tool-caps", Some("off")).is_ok());
+        assert!(
+            write_setting(tmp.path(), "tool-caps", Some("potato"))
+                .unwrap_err()
+                .contains("tool-caps")
         );
     }
 

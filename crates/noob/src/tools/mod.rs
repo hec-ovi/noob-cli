@@ -106,6 +106,10 @@ pub struct ToolCtx {
     /// This is display state only and never enters a provider request except via
     /// the rendered plan tool result.
     pub(crate) plan_timing: Mutex<PlanTiming>,
+    /// Truncation policy for every tool result (NOOB_TOOL_CAPS). Defaults to
+    /// the shipped caps; bootstrap swaps in Caps::uncapped() when the setting
+    /// says 0/off. Copy semantics, read-only after bootstrap.
+    pub caps: truncate::Caps,
     /// Context accounting shared with the model-callable `context` tool.
     /// The agent refreshes the estimate at transcript boundaries; the tool
     /// only reads these atomics, so concurrent read batches stay lock-free.
@@ -128,6 +132,7 @@ impl ToolCtx {
             task: None,
             todos: Mutex::new(Vec::new()),
             plan_timing: Mutex::new(PlanTiming::default()),
+            caps: truncate::Caps::default(),
             context_used: AtomicU64::new(0),
             context_total: AtomicU64::new(0),
         }

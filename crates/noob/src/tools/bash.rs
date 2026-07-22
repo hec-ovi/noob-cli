@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use noob_provider::http::INTERRUPTED;
 
-use super::truncate::{BASH_HEAD, BASH_TAIL, HeadTailBuffer};
+use super::truncate::HeadTailBuffer;
 use super::{ToolCtx, ToolOutcome, need_str, opt_u64};
 
 const DEFAULT_TIMEOUT_S: u64 = 120;
@@ -99,7 +99,10 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     // survivor holds the pipe open past the grace window, the partial output
     // is still recoverable without joining.
     let mut reader = unsafe { std::fs::File::from_raw_fd(read_fd) };
-    let collected = Arc::new(Mutex::new(HeadTailBuffer::new(BASH_HEAD, BASH_TAIL)));
+    let collected = Arc::new(Mutex::new(HeadTailBuffer::new(
+        ctx.caps.bash_head,
+        ctx.caps.bash_tail,
+    )));
     let eof_seen = Arc::new(AtomicBool::new(false));
     // Set when the tool gives up on the pipe (a setsid escapee can hold it
     // open forever): the collector then discards instead of buffering, so
@@ -306,6 +309,8 @@ mod tests {
 
     #[test]
     fn big_output_is_head_tail_truncated() {
+        use super::super::truncate::{BASH_HEAD, BASH_TAIL};
+
         let (_t, ctx) = test_ctx();
         let out = run(&ctx, &json!({"cmd": "seq 1 20000"}));
         assert!(!out.is_error);
@@ -313,6 +318,19 @@ mod tests {
         assert!(out.content.starts_with("1\n2\n"));
         assert!(out.content.trim_end().ends_with("20000"));
         assert!(out.content.contains("[output truncated:"));
+    }
+
+    #[test]
+    fn uncapped_ctx_keeps_big_output_whole() {
+        let (_t, mut ctx) = test_ctx();
+        ctx.caps = super::super::truncate::Caps::uncapped();
+        let out = run(&ctx, &json!({"cmd": "seq 1 20000"}));
+        assert!(!out.is_error);
+        assert!(!out.content.contains("[output truncated:"));
+        // seq 1..20000 is ~108 KiB; the whole stream survives.
+        assert!(out.content.starts_with("1\n2\n"));
+        assert!(out.content.contains("\n10000\n"));
+        assert!(out.content.trim_end().ends_with("20000"));
     }
 
     #[test]

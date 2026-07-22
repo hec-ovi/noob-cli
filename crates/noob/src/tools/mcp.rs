@@ -13,7 +13,7 @@ use noob_provider::types::ToolSpec;
 
 use crate::mcp::{ConnectInfo, schema};
 
-use super::truncate::{MCP_HEAD, MCP_TAIL, head_tail_with, mcp_cap};
+use super::truncate::{Caps, head_tail_with, mcp_cap};
 use super::{ToolCtx, ToolOutcome, need_str};
 
 /// Frozen delimiters around server-originated text. The closing marker is
@@ -62,7 +62,7 @@ pub fn run_connect(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
         Ok(info) => {
             let n = info.tools.len();
             ToolOutcome::ok(
-                render_catalog(&server, &info),
+                render_catalog(&server, &info, &ctx.caps),
                 format!("mcp_connect {server} ({n} tools)"),
             )
         }
@@ -137,7 +137,7 @@ pub fn run_call(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     match mcp.call(&conn, tool, &call_args) {
         Ok(result) => {
             let (text, is_error) = render_result(&result);
-            let content = wrap_untrusted(&server, &mcp_cap(&text));
+            let content = wrap_untrusted(&server, &mcp_cap(&text, &ctx.caps));
             let flag = if is_error { " (tool error)" } else { "" };
             ToolOutcome {
                 content,
@@ -172,7 +172,7 @@ fn no_servers() -> String {
 
 /// The compact catalog `mcp_connect` returns: one trusted header line, then
 /// the server-originated tool list inside untrusted delimiters.
-fn render_catalog(server: &str, info: &ConnectInfo) -> String {
+fn render_catalog(server: &str, info: &ConnectInfo, caps: &Caps) -> String {
     let header = format!(
         "connected to {server}: {} tools (protocol {}); call with mcp_call \
          {{\"server\":\"{server}\",\"tool\":\"<name>\",\"args\":{{...}}}}",
@@ -206,8 +206,8 @@ fn render_catalog(server: &str, info: &ConnectInfo) -> String {
     // here; the real next move is that mcp_call accepts any exact name.
     let listing = head_tail_with(
         &lines.join("\n"),
-        MCP_HEAD,
-        MCP_TAIL,
+        caps.mcp_head,
+        caps.mcp_tail,
         "some tools in the middle are not listed; mcp_call still accepts any \
          exact tool name",
     )
@@ -346,6 +346,26 @@ mod tests {
                 .trim_end()
                 .ends_with("[end of untrusted content]")
         );
+    }
+
+    #[test]
+    fn uncapped_ctx_returns_oversized_results_whole() {
+        let server = McpHttpServer::start(echo_tools());
+        // 64 KiB of payload: three times the default 20 KiB head+tail cap.
+        let big = "x".repeat(64 * 1024);
+        server.enqueue_call_result(json!({
+            "content": [{"type": "text", "text": big}], "isError": false
+        }));
+        let (_tmp, mut ctx) = ctx_with_server(&server);
+        ctx.caps = super::super::truncate::Caps::uncapped();
+        run_connect(&ctx, &json!({"server": "mock"}));
+        let out = run_call(
+            &ctx,
+            &json!({"server": "mock", "tool": "echo", "args": {"text": "ignored"}}),
+        );
+        assert!(!out.is_error, "{}", out.content);
+        assert!(!out.content.contains("[output truncated:"));
+        assert!(out.content.contains(&big));
     }
 
     #[test]

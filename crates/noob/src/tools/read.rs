@@ -10,7 +10,7 @@ use noob_provider::http::INTERRUPTED;
 use serde_json::Value;
 
 use super::guard::{FileStamp, fnv1a64, fnv1a64_extend};
-use super::truncate::{READ_BYTE_CAP, READ_LINE_CAP, READ_LINE_CHAR_CAP, read_byte_cap_marker};
+use super::truncate::{READ_LINE_CHAR_CAP, read_byte_cap_marker};
 use super::{ToolCtx, ToolOutcome, display_path, need_str, opt_u64};
 
 pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
@@ -25,8 +25,8 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     let raw = need_str(args, "path")?;
     let path = super::guard::resolve_path(&ctx.workspace, raw);
     let offset = opt_u64(args, "offset")?.unwrap_or(1).max(1) as usize;
-    let limit = opt_u64(args, "limit")?.unwrap_or(READ_LINE_CAP as u64) as usize;
-    let limit = limit.clamp(1, READ_LINE_CAP);
+    let limit = opt_u64(args, "limit")?.unwrap_or(ctx.caps.read_lines as u64) as usize;
+    let limit = limit.clamp(1, ctx.caps.read_lines);
     let shown_path = display_path(ctx, &path);
 
     // O_NONBLOCK prevents a path swapped to a FIFO between lookup and open
@@ -51,7 +51,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     let mut last_emitted = offset.saturating_sub(1); // one-based, before page
     let mut capped = false;
     let mut line_no = 1usize;
-    let mut preview = LinePreview::default();
+    let mut preview = LinePreview::with_cap(ctx.caps.line_chars);
     let mut hash = fnv1a64(&[]);
     let mut byte_count = 0u64;
     let mut saw_any = false;
@@ -94,6 +94,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
                     &mut capped,
                     line_no,
                     preview.finish(),
+                    ctx.caps.read_bytes,
                 );
             }
             preview.clear();
@@ -117,6 +118,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
                 &mut capped,
                 line_no,
                 preview.finish(),
+                ctx.caps.read_bytes,
             );
         }
         line_no
@@ -161,8 +163,9 @@ fn push_page_line(
     capped: &mut bool,
     line_no: usize,
     line: String,
+    byte_cap: usize,
 ) {
-    if page.len().saturating_add(line.len()).saturating_add(1) > READ_BYTE_CAP {
+    if page.len().saturating_add(line.len()).saturating_add(1) > byte_cap {
         *capped = true;
         return;
     }
@@ -171,10 +174,11 @@ fn push_page_line(
     *last_emitted = line_no;
 }
 
-/// UTF-8-lossy preview of one selected line. It retains only the first 500
-/// characters while still counting the full line for the clipping marker.
-#[derive(Default)]
+/// UTF-8-lossy preview of one selected line. It retains only the first
+/// `cap` characters (500 under the default policy; everything when
+/// uncapped) while still counting the full line for the clipping marker.
 struct LinePreview {
+    cap: usize,
     shown: String,
     shown_chars: usize,
     total_chars: usize,
@@ -182,7 +186,24 @@ struct LinePreview {
     pending_utf8: Vec<u8>,
 }
 
+impl Default for LinePreview {
+    fn default() -> Self {
+        LinePreview::with_cap(READ_LINE_CHAR_CAP)
+    }
+}
+
 impl LinePreview {
+    fn with_cap(cap: usize) -> Self {
+        LinePreview {
+            cap,
+            shown: String::new(),
+            shown_chars: 0,
+            total_chars: 0,
+            last_char: None,
+            pending_utf8: Vec::new(),
+        }
+    }
+
     fn feed(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
@@ -233,7 +254,7 @@ impl LinePreview {
     fn push_char(&mut self, c: char) {
         self.total_chars = self.total_chars.saturating_add(1);
         self.last_char = Some(c);
-        if self.shown_chars < READ_LINE_CHAR_CAP {
+        if self.shown_chars < self.cap {
             self.shown.push(c);
             self.shown_chars += 1;
         }
@@ -254,7 +275,7 @@ impl LinePreview {
                 self.shown_chars = self.shown_chars.saturating_sub(1);
             }
         }
-        if self.total_chars > READ_LINE_CHAR_CAP {
+        if self.total_chars > self.cap {
             format!(
                 "{} [line clipped; {} chars total]",
                 self.shown, self.total_chars
@@ -265,7 +286,7 @@ impl LinePreview {
     }
 
     fn clear(&mut self) {
-        *self = LinePreview::default();
+        *self = LinePreview::with_cap(self.cap);
     }
 }
 
@@ -350,6 +371,8 @@ mod tests {
 
     #[test]
     fn long_lines_are_clipped_and_byte_cap_pages() {
+        use super::super::truncate::READ_BYTE_CAP;
+
         let (_t, ctx) = test_ctx();
         // 200 lines x ~600 chars: hits the 40 KiB cap well before 200 lines.
         let body: String = (0..200)
@@ -364,6 +387,23 @@ mod tests {
                 .contains("[output capped at 40 KiB; continue with offset=")
         );
         assert!(out.content.len() <= READ_BYTE_CAP + 200);
+    }
+
+    #[test]
+    fn uncapped_ctx_reads_the_whole_file_with_no_clipping() {
+        let (_t, mut ctx) = test_ctx();
+        ctx.caps = super::super::truncate::Caps::uncapped();
+        // The same fixture that pages and clips under the default policy.
+        let body: String = (0..200)
+            .map(|i| format!("{i:03}{}\n", "x".repeat(600)))
+            .collect();
+        write(&ctx, "big.txt", &body);
+        let out = run(&ctx, &json!({"path": "big.txt"}));
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.starts_with("big.txt lines 1-200 of 200\n"));
+        assert!(!out.content.contains("[line clipped;"));
+        assert!(!out.content.contains("[output capped"));
+        assert!(out.content.contains(&format!("199{}", "x".repeat(600))));
     }
 
     #[test]

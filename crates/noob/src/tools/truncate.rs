@@ -17,6 +17,63 @@ pub const SKILL_BYTE_CAP: usize = 24 * 1024; // skill body per load
 pub const MCP_HEAD: usize = 8 * 1024; // mcp results: 20 KiB head+tail,
 pub const MCP_TAIL: usize = 12 * 1024; // tail-heavy like bash
 
+/// The session's truncation policy, resolved once at bootstrap from
+/// NOOB_TOOL_CAPS. `default()` is the shipped policy above; `uncapped()`
+/// (NOOB_TOOL_CAPS=0/off) sets every limit to usize::MAX so tool results
+/// flow through whole and no truncation marker can ever render. Uncapped
+/// mode is for large-context setups; on a small window it trades the
+/// bounded pages for raw output the compactor then has to swallow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Caps {
+    pub read_lines: usize,
+    pub line_chars: usize,
+    pub read_bytes: usize,
+    pub bash_head: usize,
+    pub bash_tail: usize,
+    pub grep_matches: usize,
+    pub grep_bytes: usize,
+    pub list_entries: usize,
+    pub skill_bytes: usize,
+    pub mcp_head: usize,
+    pub mcp_tail: usize,
+}
+
+impl Default for Caps {
+    fn default() -> Self {
+        Caps {
+            read_lines: READ_LINE_CAP,
+            line_chars: READ_LINE_CHAR_CAP,
+            read_bytes: READ_BYTE_CAP,
+            bash_head: BASH_HEAD,
+            bash_tail: BASH_TAIL,
+            grep_matches: GREP_MATCH_CAP,
+            grep_bytes: GREP_BYTE_CAP,
+            list_entries: LIST_ENTRY_CAP,
+            skill_bytes: SKILL_BYTE_CAP,
+            mcp_head: MCP_HEAD,
+            mcp_tail: MCP_TAIL,
+        }
+    }
+}
+
+impl Caps {
+    pub fn uncapped() -> Self {
+        Caps {
+            read_lines: usize::MAX,
+            line_chars: usize::MAX,
+            read_bytes: usize::MAX,
+            bash_head: usize::MAX,
+            bash_tail: usize::MAX,
+            grep_matches: usize::MAX,
+            grep_bytes: usize::MAX,
+            list_entries: usize::MAX,
+            skill_bytes: usize::MAX,
+            mcp_head: usize::MAX,
+            mcp_tail: usize::MAX,
+        }
+    }
+}
+
 /// Streaming head+tail retention. Producers can emit without a size limit;
 /// this keeps only the bytes that can appear in the final bounded result.
 /// It is byte-oriented because process output is not guaranteed to be UTF-8.
@@ -34,8 +91,10 @@ impl HeadTailBuffer {
         Self {
             head_cap,
             tail_cap,
-            head: Vec::with_capacity(head_cap),
-            tail: Vec::with_capacity(tail_cap),
+            // Uncapped mode passes usize::MAX; pre-allocate only up to the
+            // shipped defaults and let the vectors grow with real input.
+            head: Vec::with_capacity(head_cap.min(BASH_HEAD)),
+            tail: Vec::with_capacity(tail_cap.min(BASH_TAIL)),
             total: 0,
         }
     }
@@ -122,15 +181,16 @@ pub fn ceil_char_boundary(s: &str, at: usize) -> usize {
     i
 }
 
-/// Clip one line to `READ_LINE_CHAR_CAP` characters.
-pub fn clip_line(line: &str) -> Cow<'_, str> {
+/// Clip one line to `cap` characters (READ_LINE_CHAR_CAP under the default
+/// policy; usize::MAX when uncapped, which never clips).
+pub fn clip_line(line: &str, cap: usize) -> Cow<'_, str> {
     let total = line.chars().count();
-    if total <= READ_LINE_CHAR_CAP {
+    if total <= cap {
         return Cow::Borrowed(line);
     }
     let cut: usize = line
         .char_indices()
-        .nth(READ_LINE_CHAR_CAP)
+        .nth(cap)
         .map(|(i, _)| i)
         .unwrap_or(line.len());
     Cow::Owned(format!(
@@ -155,7 +215,7 @@ pub fn head_tail(s: &str, head: usize, tail: usize) -> Cow<'_, str> {
 /// Same shape with a caller-supplied next action, because the marker is API
 /// surface: "narrow the command" teaches nothing on an MCP result.
 pub fn head_tail_with<'a>(s: &'a str, head: usize, tail: usize, next_action: &str) -> Cow<'a, str> {
-    if s.len() <= head + tail {
+    if s.len() <= head.saturating_add(tail) {
         return Cow::Borrowed(s);
     }
     let head_end = floor_char_boundary(s, head);
@@ -169,12 +229,13 @@ pub fn head_tail_with<'a>(s: &'a str, head: usize, tail: usize, next_action: &st
     ))
 }
 
-/// The MCP result cap: 20 KiB head+tail with an MCP-appropriate next action.
-pub fn mcp_cap(s: &str) -> Cow<'_, str> {
+/// The MCP result cap: 20 KiB head+tail by default, pass-through when
+/// uncapped, with an MCP-appropriate next action.
+pub fn mcp_cap<'a>(s: &'a str, caps: &Caps) -> Cow<'a, str> {
     head_tail_with(
         s,
-        MCP_HEAD,
-        MCP_TAIL,
+        caps.mcp_head,
+        caps.mcp_tail,
         "ask the tool for less data if you need the omitted part",
     )
 }
@@ -218,12 +279,17 @@ mod tests {
     #[test]
     fn golden_clip_line() {
         let long: String = "x".repeat(600);
-        let clipped = clip_line(&long);
+        let clipped = clip_line(&long, READ_LINE_CHAR_CAP);
         assert_eq!(
             clipped,
             format!("{} [line clipped; 600 chars total]", "x".repeat(500))
         );
-        assert!(matches!(clip_line("short"), Cow::Borrowed("short")));
+        assert!(matches!(
+            clip_line("short", READ_LINE_CHAR_CAP),
+            Cow::Borrowed("short")
+        ));
+        // Uncapped: never clips, whatever the length.
+        assert!(matches!(clip_line(&long, usize::MAX), Cow::Borrowed(_)));
     }
 
     #[test]
@@ -289,7 +355,7 @@ mod tests {
             "b".repeat(64),
             "c".repeat(MCP_TAIL)
         );
-        let out = mcp_cap(&s);
+        let out = mcp_cap(&s, &Caps::default());
         assert!(
             out.contains(
                 "[output truncated: 64 bytes omitted from the middle; the start and \
@@ -298,7 +364,49 @@ mod tests {
             "{}",
             &out[MCP_HEAD..MCP_HEAD + 200]
         );
-        assert!(matches!(mcp_cap("small"), Cow::Borrowed(_)));
+        assert!(matches!(mcp_cap("small", &Caps::default()), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn uncapped_mcp_results_pass_through_whole() {
+        let s = format!("{}{}", "a".repeat(MCP_HEAD + MCP_TAIL), "b".repeat(4096));
+        let out = mcp_cap(&s, &Caps::uncapped());
+        assert!(matches!(out, Cow::Borrowed(_)));
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn uncapped_head_tail_never_truncates_and_never_overflows() {
+        let s = "x".repeat(64 * 1024);
+        let out = head_tail_with(&s, usize::MAX, usize::MAX, "unused");
+        assert!(matches!(out, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn uncapped_streaming_buffer_retains_everything() {
+        let mut out = HeadTailBuffer::new(usize::MAX, usize::MAX);
+        for _ in 0..1_000 {
+            out.extend(b"abcdefghijklmnopqrstuvwxyz");
+        }
+        let rendered = out.render();
+        assert_eq!(rendered.len(), 26_000);
+        assert!(!rendered.contains("[output truncated:"));
+    }
+
+    #[test]
+    fn caps_defaults_mirror_the_constants() {
+        let caps = Caps::default();
+        assert_eq!(caps.read_lines, READ_LINE_CAP);
+        assert_eq!(caps.line_chars, READ_LINE_CHAR_CAP);
+        assert_eq!(caps.read_bytes, READ_BYTE_CAP);
+        assert_eq!(caps.bash_head, BASH_HEAD);
+        assert_eq!(caps.bash_tail, BASH_TAIL);
+        assert_eq!(caps.grep_matches, GREP_MATCH_CAP);
+        assert_eq!(caps.grep_bytes, GREP_BYTE_CAP);
+        assert_eq!(caps.list_entries, LIST_ENTRY_CAP);
+        assert_eq!(caps.skill_bytes, SKILL_BYTE_CAP);
+        assert_eq!(caps.mcp_head, MCP_HEAD);
+        assert_eq!(caps.mcp_tail, MCP_TAIL);
     }
 
     #[test]

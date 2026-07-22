@@ -39,7 +39,8 @@ fn run_inner(
 
     let entries = std::fs::read_dir(&path)
         .map_err(|e| format!("cannot list {shown}: {e}; check the path"))?;
-    let mut names: Vec<String> = Vec::with_capacity(LIST_ENTRY_CAP);
+    let entry_cap = ctx.caps.list_entries;
+    let mut names: Vec<String> = Vec::with_capacity(entry_cap.min(LIST_ENTRY_CAP));
     let mut total = 0usize;
     for entry in entries.flatten() {
         if interrupted() {
@@ -50,7 +51,7 @@ fn run_inner(
             name.push('/');
         }
         total = total.saturating_add(1);
-        if names.len() < LIST_ENTRY_CAP {
+        if names.len() < entry_cap {
             names.push(name);
         } else if let Some((largest, _)) = names.iter().enumerate().max_by(|a, b| a.1.cmp(b.1))
             && name < names[largest]
@@ -122,6 +123,19 @@ mod tests {
         assert!(out.content.starts_with(".:\nf000\n"));
         assert!(out.content.contains("f199\n250 entries"));
         assert!(!out.content.contains("f200\n"));
+    }
+
+    #[test]
+    fn uncapped_ctx_lists_every_entry() {
+        let (_t, mut ctx) = test_ctx();
+        ctx.caps = super::super::truncate::Caps::uncapped();
+        for i in 0..250 {
+            std::fs::write(ctx.workspace.join(format!("f{i:03}")), "").unwrap();
+        }
+        let out = run(&ctx, &json!({}));
+        assert!(!out.content.contains("showing"), "{}", out.content);
+        assert_eq!(out.content.lines().count(), 251);
+        assert!(out.content.contains("f249"));
     }
 
     #[test]

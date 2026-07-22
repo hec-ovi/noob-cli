@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use noob_provider::http::INTERRUPTED;
 use serde_json::Value;
 
-use super::truncate::{GREP_BYTE_CAP, GREP_MATCH_CAP, clip_line, grep_trailer};
+use super::truncate::{clip_line, grep_trailer};
 use super::{ToolCtx, ToolOutcome, display_path, need_str, opt_bool, opt_str};
 
 const CANCELED: &str = "grep canceled by user";
@@ -122,10 +122,10 @@ fn scan_file(
             continue;
         }
         *total += 1;
-        if *shown < GREP_MATCH_CAP && out.len() < GREP_BYTE_CAP {
+        if *shown < ctx.caps.grep_matches && out.len() < ctx.caps.grep_bytes {
             out.push_str(&rel);
             out.push_str(": ");
-            out.push_str(clip_line(line.trim_end()).as_ref());
+            out.push_str(clip_line(line.trim_end(), ctx.caps.line_chars).as_ref());
             out.push('\n');
             *shown += 1;
         }
@@ -196,6 +196,24 @@ mod tests {
                 .ends_with("312 matches, showing 100; narrow the pattern or add a glob")
         );
         assert_eq!(out.content.lines().count(), 101);
+    }
+
+    #[test]
+    fn uncapped_ctx_shows_every_match_unclipped() {
+        let (_t, mut ctx) = test_ctx();
+        ctx.caps = super::super::truncate::Caps::uncapped();
+        let body: String = (0..312).map(|i| format!("needle {i}\n")).collect();
+        std::fs::write(ctx.workspace.join("big.txt"), body).unwrap();
+        std::fs::write(
+            ctx.workspace.join("long.txt"),
+            format!("needle {}\n", "y".repeat(700)),
+        )
+        .unwrap();
+        let out = run(&ctx, &json!({"pattern": "needle"}));
+        assert!(out.content.ends_with("313 matches"), "{}", out.content);
+        assert_eq!(out.content.lines().count(), 314);
+        assert!(!out.content.contains("[line clipped;"));
+        assert!(out.content.contains(&"y".repeat(700)));
     }
 
     #[test]

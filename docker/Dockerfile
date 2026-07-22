@@ -30,7 +30,7 @@ RUN case "${TARGETARCH:-$(uname -m)}" in \
 # No config, state, cache, or keys are baked into the image.
 FROM alpine:3.22 AS runtime
 RUN apk add --no-cache bash git ca-certificates python3 uv
-ARG WEBSEARCH_SKILL_VERSION=0.2.1
+ARG WEBSEARCH_SKILL_VERSION=0.2.2
 RUN UV_CACHE_DIR=/tmp/uv-cache \
     UV_TOOL_DIR=/opt/noob/uv-tools \
     UV_TOOL_BIN_DIR=/usr/local/bin \

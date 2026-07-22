@@ -77,6 +77,7 @@ fn installer_builds_image_installs_launcher_and_forwards_restore() {
         .env("WEBSEARCH_PROXY", "nordvpn")
         .env("NORDVPN_USER", "svc-user")
         .env("NORDVPN_PASS", "svc-pass")
+        .env("NOOB_TOOL_CAPS", "0")
         .env("DOCKER_LOG", &log)
         .output()
         .unwrap();
@@ -111,6 +112,9 @@ fn installer_builds_image_installs_launcher_and_forwards_restore() {
     assert!(calls.contains("--env\nWEBSEARCH_PROXY\n"), "{calls}");
     assert!(calls.contains("--env\nNORDVPN_USER\n"), "{calls}");
     assert!(calls.contains("--env\nNORDVPN_PASS\n"), "{calls}");
+    // The truncation-caps switch forwards too, so `NOOB_TOOL_CAPS=0 noob`
+    // lifts the caps inside the container without touching /config/.env.
+    assert!(calls.contains("--env\nNOOB_TOOL_CAPS\n"), "{calls}");
     assert!(
         calls.contains("noob:local\n--restore\nsaved-session\n"),
         "{calls}"

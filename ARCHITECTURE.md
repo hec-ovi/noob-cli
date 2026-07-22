@@ -165,6 +165,7 @@ Important mechanics:
 - Each `write` or `edit` call takes an advisory lock on the workspace directory inode. This lock crosses parent and child processes without adding a project file. One leased call runs at a time. Detached children wait for a bounded interval and receive a conflict if it stays busy; the parent reports a conflict immediately so the main conversation is not held behind a child file mutation. Bash stays available for builds, tests, searches, and status commands; the system contract directs source changes through write/edit. Shell commands that mutate files are outside the lease guarantee. This is call-level coordination, not a transaction covering a child's whole task. The lease ends when the tool call returns and does not cover unmanaged or deliberately detached processes.
 - `grep`, `glob`, and `ls` cap retained result entries or bytes and include an actionable continuation marker.
 - Tool truncation occurs once before transcript insertion. It does not alter the underlying command or file operation.
+- `NOOB_TOOL_CAPS=0` (or `off`) lifts every truncation cap for the session: read pages, bash output, grep matches, glob/ls entries, skill bodies, and MCP results flow through whole and no truncation marker renders. Resolved once at bootstrap into the shared tool context; children read their own configuration, so the setting propagates through the environment.
 
 The read and Bash loops check the shared interrupt flag. Partial Bash output can be retained in a structurally canceled outcome.
 

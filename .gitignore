@@ -4,6 +4,7 @@
 # build caches (docker bind mounts, user-owned)
 /target
 /.cargo-home
+/.rustup-home
 /workspace/
 
 # real config lives here when the repo checkout is used as the /config mount;

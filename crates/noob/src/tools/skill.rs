@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use noob_provider::types::ToolSpec;
 
-use super::truncate::{SKILL_BYTE_CAP, floor_char_boundary, skill_cap_marker};
+use super::truncate::{floor_char_boundary, skill_cap_marker};
 use super::{ToolCtx, ToolOutcome, display_path, need_str};
 
 pub fn spec() -> ToolSpec {
@@ -60,8 +60,8 @@ fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> Tool
 
     let mut shown = body;
     let mut marker = String::new();
-    if body.len() > SKILL_BYTE_CAP {
-        let cut = floor_char_boundary(body, SKILL_BYTE_CAP);
+    if body.len() > ctx.caps.skill_bytes {
+        let cut = floor_char_boundary(body, ctx.caps.skill_bytes);
         shown = &body[..cut];
         // Continue on the file line holding the cut (re-reading a partial
         // line beats losing it); file lines are 1-based.
@@ -238,6 +238,22 @@ mod tests {
         assert!(out.canceled);
         assert!(out.is_error);
         assert!(ctx.loaded_skills.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn uncapped_ctx_loads_the_whole_oversize_body() {
+        let (_tmp, mut ctx) = test_ctx();
+        ctx.caps = crate::tools::truncate::Caps::uncapped();
+        // The same 30 KiB fixture that gets cut at 24 KiB under the defaults.
+        let body: String = (0..3000).map(|i| format!("body line {i}\n")).collect();
+        install_skill(&mut ctx, "big", &body);
+        let out = run(&ctx, &json!({"name": "big"}));
+        assert!(!out.is_error);
+        assert!(!out.content.contains("[skill body capped"));
+        assert!(out.content.contains("body line 2999\n"));
+        // The oversize UI warning is about the skills standard, not the cap,
+        // so it still fires.
+        assert!(out.warning.is_some());
     }
 
     #[test]
