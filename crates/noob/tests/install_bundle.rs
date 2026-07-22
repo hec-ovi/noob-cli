@@ -74,6 +74,9 @@ fn installer_builds_image_installs_launcher_and_forwards_restore() {
         .env("NOOB_CONFIG_HOME", &config)
         .env("NOOB_MODEL", "mock-model")
         .env("NOOB_API_KEY", "host-secret-must-not-be-forwarded")
+        .env("WEBSEARCH_PROXY", "nordvpn")
+        .env("NORDVPN_USER", "svc-user")
+        .env("NORDVPN_PASS", "svc-pass")
         .env("DOCKER_LOG", &log)
         .output()
         .unwrap();
@@ -103,6 +106,11 @@ fn installer_builds_image_installs_launcher_and_forwards_restore() {
         !calls.contains("NOOB_API_KEY"),
         "the launcher must not expose a host API key to tools: {calls}"
     );
+    // The websearch egress-proxy switch and the NordVPN service credentials it expands
+    // are part of the fixed forward set, so `WEBSEARCH_PROXY=nordvpn noob` just works.
+    assert!(calls.contains("--env\nWEBSEARCH_PROXY\n"), "{calls}");
+    assert!(calls.contains("--env\nNORDVPN_USER\n"), "{calls}");
+    assert!(calls.contains("--env\nNORDVPN_PASS\n"), "{calls}");
     assert!(
         calls.contains("noob:local\n--restore\nsaved-session\n"),
         "{calls}"

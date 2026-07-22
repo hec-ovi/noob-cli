@@ -154,6 +154,8 @@ websearch github "repository topic" --language Rust
 websearch mcp
 ```
 
+The tool takes an optional egress proxy, off by default: set `WEBSEARCH_PROXY` to a proxy URL (`socks5h://user:pass@host:1080`), to `nordvpn`, or to `off`. The `nordvpn` shorthand builds the SOCKS5 URL from the `NORDVPN_USER` and `NORDVPN_PASS` service credentials, with `NORDVPN_HOST` selecting a server. The launcher forwards these four variables into the container, so exporting them before running `noob` is all it takes.
+
 The **skill** is a `SKILL.md` in the config that tells the model when to search and which subcommand to reach for. The model runs `websearch` through `bash`, or through the MCP server when one is configured. The installer seeds both and enables the stdio server without a sidecar; the bundled skill is the standalone Bash fallback. From the checkout, turn on the same MCP config with:
 
 ```bash
