@@ -39,10 +39,13 @@ fn debug_prompt(with_skill: bool, with_mcp: bool) -> Value {
         )
         .unwrap();
     }
-    let out = Command::new(env!("CARGO_BIN_EXE_noob"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_noob"));
+    // Scrub every NOOB_* variable the binary reads: a host-exported setting
+    // (NOOB_SKILL_PATHS, NOOB_CTX, ...) would change the artifact under test.
+    noob_testkit::scrub_noob_env(&mut cmd);
+    let out = cmd
         .env("NOOB_CONFIG_DIR", config.path())
         .env("NOOB_SANDBOX", "container")
-        .env_remove("NOOB_BASE_URL")
         .current_dir(work.path())
         .args(["debug", "prompt", "--json"])
         .output()

@@ -15,6 +15,16 @@ use crate::{config, mcp};
 
 const REACH_TIMEOUT: Duration = Duration::from_secs(2);
 
+// Load-bearing literals: doctor classifies producer errors by matching their
+// prose, so these strings MUST stay substrings of the producer's message.
+// MISSING_BASE_URL is emitted by noob-provider resolve_endpoint (lib.rs, the
+// missing-NOOB_BASE_URL Config error); MCP_INVALID_JSON by mcp::config::load
+// (the unparseable-mcp.json warning). The tests below build the real producer
+// errors, so rewording either producer breaks a test instead of silently
+// changing doctor's classification.
+const MISSING_BASE_URL: &str = "NOOB_BASE_URL is not set";
+const MCP_INVALID_JSON: &str = "not valid JSON";
+
 /// One check's outcome; doctor renders each as a single line.
 enum Check {
     Ok(String),
@@ -102,7 +112,7 @@ fn check_endpoint(config_dir: &Path) -> Vec<Check> {
         Ok(ep) => Some(ep),
         // Only the missing-URL case falls through to autodetect; a broken
         // .env (also a Config error) must surface, not be papered over.
-        Err(ProviderError::Config(msg)) if !msg.contains("NOOB_BASE_URL is not set") => {
+        Err(ProviderError::Config(msg)) if !msg.contains(MISSING_BASE_URL) => {
             checks.push(Check::Fail(format!("endpoint config: {msg}")));
             None
         }
@@ -345,7 +355,7 @@ fn check_mcp(workspace: &Path, config_dir: &Path) -> Vec<Check> {
     let (servers, warnings) = mcp::config::load(workspace, config_dir);
     for w in warnings {
         // The invalid-JSON case already failed above; entry skips warn here.
-        if !w.contains("not valid JSON") {
+        if !w.contains(MCP_INVALID_JSON) {
             checks.push(Check::Warn(format!("mcp.json: {w}")));
         }
     }
@@ -412,6 +422,40 @@ mod tests {
         assert_eq!(props.supports_tools, Some(true));
         assert_eq!(props.supports_tool_calls, Some(false));
         assert_eq!(props.supports_parallel_tool_calls, Some(false));
+    }
+
+    #[test]
+    fn missing_base_url_classifier_matches_the_real_provider_error() {
+        // A host-exported URL makes the error unproducible in-process; the
+        // spawned-binary suites scrub, but this test shares the harness env.
+        if std::env::var("NOOB_BASE_URL").is_ok_and(|v| !v.is_empty()) {
+            return;
+        }
+        let config = tempfile::tempdir().unwrap();
+        let err = noob_provider::resolve_endpoint(config.path(), &Overrides::default())
+            .expect_err("no base URL is configured");
+        match err {
+            ProviderError::Config(msg) => assert!(
+                msg.contains(MISSING_BASE_URL),
+                "resolve_endpoint reworded its missing-URL error; update \
+                 MISSING_BASE_URL and check_endpoint: {msg}"
+            ),
+            other => panic!("expected a Config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_json_classifier_matches_the_real_mcp_loader_warning() {
+        let config = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(config.path().join("mcp.json"), "{not json").unwrap();
+        let (servers, warnings) = mcp::config::load(workspace.path(), config.path());
+        assert!(servers.is_empty());
+        assert!(
+            warnings.iter().any(|w| w.contains(MCP_INVALID_JSON)),
+            "mcp::config::load reworded its invalid-JSON warning; update \
+             MCP_INVALID_JSON and check_mcp: {warnings:?}"
+        );
     }
 
     #[test]

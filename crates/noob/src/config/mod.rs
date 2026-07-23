@@ -129,7 +129,12 @@ pub fn write_setting(
             lines.push(line.to_string());
         }
     }
-    if !found && let Some(value) = value {
+    if !found {
+        let Some(value) = value else {
+            // Unsetting an absent key: say so instead of rewriting the file
+            // and promising a restart that changes nothing.
+            return Err(format!("{name} is not set; nothing to unset"));
+        };
         lines.push(format!("{key}={value}"));
     }
     let mut next = lines.join("\n");
@@ -200,7 +205,14 @@ fn validate_setting(name: &str, value: &str) -> Result<(), String> {
         "api-style" if !matches!(value, "chat" | "responses") => {
             Err("api-style must be chat or responses".to_string())
         }
-        "ctx" => range(4_096, u64::MAX),
+        // No meaningful upper bound; naming u64::MAX in the error only
+        // confuses, so the message states the floor.
+        "ctx" => value
+            .parse::<u64>()
+            .ok()
+            .filter(|&n| n >= 4_096)
+            .map(|_| ())
+            .ok_or_else(|| "ctx must be an integer of at least 4096".to_string()),
         "task-concurrency" => range(1, 16),
         "task-max-turns" => range(1, 50),
         "task-wall-clock" => range(1, 3_600),
@@ -419,6 +431,35 @@ mod tests {
                 .contains("chat")
         );
         assert!(!tmp.path().join(".env").exists());
+    }
+
+    #[test]
+    fn ctx_validation_names_the_floor_not_the_u64_ceiling() {
+        let tmp = tempfile::tempdir().unwrap();
+        for bad in ["potato", "100", "-1", "4095"] {
+            let error = write_setting(tmp.path(), "ctx", Some(bad)).unwrap_err();
+            assert_eq!(error, "ctx must be an integer of at least 4096", "{bad}");
+        }
+        // No upper bound: any integer at or above the floor is accepted.
+        assert!(write_setting(tmp.path(), "ctx", Some("4096")).is_ok());
+        assert!(write_setting(tmp.path(), "ctx", Some(&u64::MAX.to_string())).is_ok());
+    }
+
+    #[test]
+    fn unset_of_an_absent_key_says_so_and_rewrites_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No .env at all: no file appears.
+        let error = write_setting(tmp.path(), "model", None).unwrap_err();
+        assert_eq!(error, "model is not set; nothing to unset");
+        assert!(!tmp.path().join(".env").exists());
+        // A file without the key stays byte-identical.
+        std::fs::write(tmp.path().join(".env"), "# note\nNOOB_CTX=8192\n").unwrap();
+        let error = write_setting(tmp.path(), "model", None).unwrap_err();
+        assert_eq!(error, "model is not set; nothing to unset");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(".env")).unwrap(),
+            "# note\nNOOB_CTX=8192\n"
+        );
     }
 
     #[cfg(unix)]

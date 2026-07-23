@@ -9,15 +9,10 @@ use serde_json::json;
 
 fn noob(config_dir: &std::path::Path, workspace: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_noob"));
-    cmd.env("NOOB_CONFIG_DIR", config_dir)
-        .current_dir(workspace)
-        .env_remove("NOOB_BASE_URL")
-        .env_remove("NOOB_MODEL")
-        .env_remove("NOOB_API_STYLE")
-        .env_remove("NOOB_CTX")
-        .env_remove("NOOB_TASK_CONCURRENCY")
-        .env_remove("NOOB_SANDBOX")
-        .env_remove("NOOB_DEPTH");
+    // Scrub every NOOB_* variable the binary reads so host-exported
+    // settings never leak into assertions, then pin the config dir.
+    noob_testkit::scrub_noob_env(&mut cmd);
+    cmd.env("NOOB_CONFIG_DIR", config_dir).current_dir(workspace);
     cmd
 }
 

@@ -19,12 +19,10 @@ fn write_env(dir: &std::path::Path, base_url: &str, key: &str, model: &str) {
 
 fn noob(config_dir: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_noob"));
+    // Keep host/process env from leaking settings into assertions: scrub
+    // every NOOB_* variable the binary reads, then pin the config dir.
+    noob_testkit::scrub_noob_env(&mut cmd);
     cmd.env("NOOB_CONFIG_DIR", config_dir);
-    // Keep host/process env from leaking settings into assertions.
-    cmd.env_remove("NOOB_BASE_URL")
-        .env_remove("NOOB_MODEL")
-        .env_remove("NOOB_API_STYLE")
-        .env_remove("NOOB_AUTODETECT");
     cmd
 }
 

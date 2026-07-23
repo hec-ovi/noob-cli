@@ -63,6 +63,10 @@ if [[ -n "${NOOB_ENV:-}" ]]; then
     IFS=',' read -ra extra_env <<<"$NOOB_ENV"
     for name in "${extra_env[@]}"; do
         name="${name//[[:space:]]/}"   # tolerate "A, B" spacing
+        case "$name" in
+            # image-owned or secret; .env is the sanctioned key path
+            NOOB_API_KEY|NOOB_CONFIG_DIR|NOOB_SANDBOX) continue ;;
+        esac
         if [[ -n "$name" && -v "$name" ]]; then
             args+=(--env "$name")
         fi

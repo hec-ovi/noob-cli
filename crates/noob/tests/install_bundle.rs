@@ -69,6 +69,8 @@ fn installer_builds_image_installs_launcher_and_forwards_restore() {
     let ran = Command::new(&launcher)
         .args(["--restore", "saved-session"])
         .current_dir(&workspace)
+        .env_remove("NOOB_IMAGE")
+        .env_remove("NOOB_WORKSPACE")
         .env("PATH", &path)
         .env("HOME", tmp.path().join("home"))
         .env("NOOB_CONFIG_HOME", &config)
@@ -78,6 +80,15 @@ fn installer_builds_image_installs_launcher_and_forwards_restore() {
         .env("NORDVPN_USER", "svc-user")
         .env("NORDVPN_PASS", "svc-pass")
         .env("NOOB_TOOL_CAPS", "0")
+        // The NOOB_ENV allowlist names one benign extra plus the secret and
+        // the two image-owned variables; only the extra may forward.
+        .env(
+            "NOOB_ENV",
+            "NOOB_API_KEY, NOOB_CONFIG_DIR, NOOB_SANDBOX, CENSURADO_WORK",
+        )
+        .env("NOOB_CONFIG_DIR", "/host/config-must-stay-image-owned")
+        .env("NOOB_SANDBOX", "workspace")
+        .env("CENSURADO_WORK", "/work/.censurado")
         .env("DOCKER_LOG", &log)
         .output()
         .unwrap();
@@ -115,6 +126,11 @@ fn installer_builds_image_installs_launcher_and_forwards_restore() {
     // The truncation-caps switch forwards too, so `NOOB_TOOL_CAPS=0 noob`
     // lifts the caps inside the container without touching /config/.env.
     assert!(calls.contains("--env\nNOOB_TOOL_CAPS\n"), "{calls}");
+    // NOOB_ENV forwards the benign extra it names, but never the secret or
+    // image-owned variables, even when they are listed explicitly.
+    assert!(calls.contains("--env\nCENSURADO_WORK\n"), "{calls}");
+    assert!(!calls.contains("--env\nNOOB_CONFIG_DIR\n"), "{calls}");
+    assert!(!calls.contains("--env\nNOOB_SANDBOX\n"), "{calls}");
     assert!(
         calls.contains("noob:local\n--restore\nsaved-session\n"),
         "{calls}"
@@ -133,6 +149,8 @@ fn installer_refuses_to_replace_an_unmanaged_command_without_force() {
     let output = Command::new("bash")
         .arg(repo_root().join("install.sh"))
         .args(["--prefix", prefix.to_str().unwrap()])
+        // A host-exported config home would leak real config into the run.
+        .env_remove("NOOB_CONFIG_HOME")
         .env("PATH", path)
         .env("HOME", tmp.path().join("home"))
         .env("DOCKER_LOG", &log)
@@ -175,6 +193,8 @@ fn live_runner_forwards_endpoint_overrides_to_docker() {
     assert!(calls.contains("-e\nNOOB_LIVE_BASE_URL\n"), "{calls}");
     assert!(calls.contains("-e\nNOOB_LIVE_MCP_URL\n"), "{calls}");
     assert!(calls.contains("--ignored\n--test-threads=1\n"), "{calls}");
+    // Gating is `--ignored` alone; nothing reads a NOOB_LIVE switch.
+    assert!(!calls.contains("NOOB_LIVE=1\n"), "{calls}");
 }
 
 #[test]
@@ -188,6 +208,10 @@ fn dev_runner_creates_and_mounts_an_isolated_default_workspace() {
 
     let output = Command::new("bash")
         .arg(checkout.join("dev.sh"))
+        // Host-exported workspace overrides would defeat the isolation
+        // default under test.
+        .env_remove("NOOB_WORKSPACE")
+        .env_remove("WORKSPACE")
         .env("PATH", path)
         .env("DOCKER_LOG", &log)
         .output()

@@ -1,7 +1,11 @@
 .git
 .research
+.noob
 .cargo-home
+.rustup-home
 target
+workspace
 config
 docs
 *.md
+.env

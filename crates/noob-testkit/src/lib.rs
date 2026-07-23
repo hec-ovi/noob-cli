@@ -355,7 +355,7 @@ pub fn chat_stream_datas(text: &str) -> Vec<String> {
         let cut = rest
             .char_indices()
             .filter(|(i, c)| *i > 0 && c.is_whitespace())
-            .map(|(i, _)| i + 1)
+            .map(|(i, c)| i + c.len_utf8())
             .find(|&i| i < rest.len())
             .unwrap_or(rest.len());
         let (piece, tail) = rest.split_at(cut.min(rest.len()));
@@ -447,6 +447,41 @@ impl MockServer {
         }
         self.enqueue_raw_for(matcher, steps);
     }
+}
+
+/// Every NOOB_* variable the compiled binary reads from the process
+/// environment, directly (std::env::var) or through the env-first settings
+/// lookup. E2E suites that spawn the binary scrub these so host-exported
+/// settings never leak into assertions; a driver re-sets the ones its test
+/// needs (NOOB_CONFIG_DIR etc.) after scrubbing.
+pub const NOOB_ENV_VARS: &[&str] = &[
+    "NOOB_API_KEY",
+    "NOOB_API_STYLE",
+    "NOOB_AUTODETECT",
+    "NOOB_BASE_URL",
+    "NOOB_CONFIG_DIR",
+    "NOOB_CTX",
+    "NOOB_DEPTH",
+    "NOOB_DOCK",
+    "NOOB_MODEL",
+    "NOOB_RAW",
+    "NOOB_SANDBOX",
+    "NOOB_SKILL_PATHS",
+    "NOOB_TASK_CONCURRENCY",
+    "NOOB_TASK_MAX_TURNS",
+    "NOOB_TASK_WALL_CLOCK_S",
+    "NOOB_TEST_SILENT_BACKGROUND_PANIC",
+    "NOOB_TEST_SILENT_SCHEDULER_PANIC",
+    "NOOB_THEME",
+    "NOOB_TOOL_CAPS",
+];
+
+/// Remove every known NOOB_* variable from a spawned command's environment.
+pub fn scrub_noob_env(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    for name in NOOB_ENV_VARS {
+        cmd.env_remove(name);
+    }
+    cmd
 }
 
 /// Load an SSE fixture and split it into TCP-chunk byte vectors at every
@@ -970,6 +1005,23 @@ mod tests {
             body: body.to_string().into_bytes(),
             arrived: std::time::Instant::now(),
         }
+    }
+
+    #[test]
+    fn chat_stream_datas_cuts_multibyte_whitespace_on_char_boundaries() {
+        // U+00A0 (2 bytes) and U+2028 (3 bytes) are whitespace; cutting at
+        // byte index + 1 used to panic split_at on a non-boundary.
+        let text = "caf\u{e9}\u{a0}bord \u{2028}fin";
+        let datas = chat_stream_datas(text);
+        let mut assembled = String::new();
+        for data in &datas {
+            if let Ok(v) = serde_json::from_str::<Value>(data)
+                && let Some(piece) = v["choices"][0]["delta"]["content"].as_str()
+            {
+                assembled.push_str(piece);
+            }
+        }
+        assert_eq!(assembled, text);
     }
 
     #[test]
