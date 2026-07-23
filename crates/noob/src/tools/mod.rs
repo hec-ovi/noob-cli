@@ -96,7 +96,7 @@ pub struct ToolCtx {
     /// MCP manager; Some only when mcp.json configured at least one server
     /// (and then mcp_connect/mcp_call are registered). Set at bootstrap.
     pub mcp: Option<crate::mcp::Mcp>,
-    /// Sub-agent settings; Some only when the task tool is registered
+    /// Sub-agent settings; Some only when the subagent tool is registered
     /// (depth below the ceiling, full tool set). Set at bootstrap.
     pub task: Option<crate::subagent::TaskCfg>,
     /// The agentic checklist the `plan` tool maintains for this session.
@@ -113,8 +113,12 @@ pub struct ToolCtx {
     /// Context accounting shared with the model-callable `context` tool.
     /// The agent refreshes the estimate at transcript boundaries; the tool
     /// only reads these atomics, so concurrent read batches stay lock-free.
+    /// The threshold is the EFFECTIVE compaction trigger: 75% of the window,
+    /// raised while a failed or empty compaction is backing off, so the tool
+    /// never promises a compaction that the backoff is currently deferring.
     context_used: AtomicU64,
     context_total: AtomicU64,
+    context_threshold: AtomicU64,
 }
 
 impl ToolCtx {
@@ -135,18 +139,21 @@ impl ToolCtx {
             caps: truncate::Caps::default(),
             context_used: AtomicU64::new(0),
             context_total: AtomicU64::new(0),
+            context_threshold: AtomicU64::new(0),
         }
     }
 
-    pub(crate) fn set_context(&self, used: u64, total: u64) {
+    pub(crate) fn set_context(&self, used: u64, total: u64, threshold: u64) {
         self.context_used.store(used, Ordering::Relaxed);
         self.context_total.store(total, Ordering::Relaxed);
+        self.context_threshold.store(threshold, Ordering::Relaxed);
     }
 
-    pub(crate) fn context(&self) -> (u64, u64) {
+    pub(crate) fn context(&self) -> (u64, u64, u64) {
         (
             self.context_used.load(Ordering::Relaxed),
             self.context_total.load(Ordering::Relaxed),
+            self.context_threshold.load(Ordering::Relaxed),
         )
     }
 

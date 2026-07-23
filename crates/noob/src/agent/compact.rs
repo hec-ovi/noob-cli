@@ -494,9 +494,12 @@ impl Agent {
         self.recent_calls.clear();
         self.last_usage = None;
         self.chars_since_usage = self.items.iter().map(item_chars).sum();
-        self.tool_ctx
-            .set_context(self.context_estimate(), self.ctx_tokens);
         self.compact_backoff = 0;
+        self.tool_ctx.set_context(
+            self.context_estimate(),
+            self.ctx_tokens,
+            self.effective_compact_threshold(),
+        );
         let failure = self
             .session
             .as_mut()

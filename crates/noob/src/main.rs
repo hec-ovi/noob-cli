@@ -380,6 +380,7 @@ fn cmd_repl(args: &[String]) -> ExitCode {
                 "context" => ui.note(&tools::context::report(
                     agent.context_estimate(),
                     agent.ctx_tokens,
+                    agent.effective_compact_threshold(),
                 )),
                 "sessions" => show_sessions(&agent.config_dir, &mut ui),
                 "clear-plan" => {

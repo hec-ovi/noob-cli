@@ -551,9 +551,19 @@ impl Agent {
         base + (self.chars_since_usage / 4) as u64
     }
 
+    /// The compaction trigger that will actually fire next: 75% of the
+    /// window, raised to the backoff mark while a failed or empty compaction
+    /// is deferring the retry. Mirrors the drive-loop condition exactly.
+    pub(crate) fn effective_compact_threshold(&self) -> u64 {
+        (self.ctx_tokens.saturating_mul(3) / 4).max(self.compact_backoff)
+    }
+
     fn sync_context(&self) {
-        self.tool_ctx
-            .set_context(self.context_estimate(), self.ctx_tokens);
+        self.tool_ctx.set_context(
+            self.context_estimate(),
+            self.ctx_tokens,
+            self.effective_compact_threshold(),
+        );
     }
 
     fn push_item(&mut self, item: Item) {
