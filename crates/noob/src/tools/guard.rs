@@ -243,8 +243,21 @@ pub fn resolve_real(path: &Path) -> Result<PathBuf, String> {
 }
 
 /// Atomic write: temp file in the same directory, fsync, rename over the
-/// target. Preserves the target's mode when it already exists.
+/// target. Preserves the target's mode when it already exists. A symlink
+/// destination is written THROUGH, never replaced: the staleness stamp and
+/// mode checks all followed the target, and renaming onto the link itself
+/// would silently swap the link for a regular file. A dangling link is an
+/// error, not a link replacement.
 pub fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        let real = path.canonicalize().map_err(|e| {
+            format!(
+                "cannot write {}: it is a symlink that cannot be resolved: {e}",
+                path.display()
+            )
+        })?;
+        return atomic_write(&real, content);
+    }
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
     let dir = dir.ok_or_else(|| format!("{} has no parent directory", path.display()))?;
     fs::create_dir_all(dir)
@@ -415,6 +428,41 @@ mod tests {
         assert_eq!(mode & 0o777, 0o755);
         // No temp litter left behind.
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn atomic_write_through_a_symlink_updates_the_target_and_keeps_the_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("real.txt");
+        std::fs::write(&target, "old").unwrap();
+        let link = tmp.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        atomic_write(&link, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link must survive as a link, not become a regular file"
+        );
+    }
+
+    #[test]
+    fn atomic_write_refuses_a_dangling_symlink_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dangling = tmp.path().join("dangling.txt");
+        std::os::unix::fs::symlink(tmp.path().join("missing.txt"), &dangling).unwrap();
+        let err = atomic_write(&dangling, b"x").unwrap_err();
+        assert!(err.contains("cannot be resolved"), "{err}");
+        assert!(
+            std::fs::symlink_metadata(&dangling)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "a dangling link must not be silently replaced"
+        );
+        assert!(!tmp.path().join("missing.txt").exists());
     }
 
     #[test]

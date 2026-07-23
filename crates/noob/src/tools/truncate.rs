@@ -263,9 +263,16 @@ pub fn grep_trailer(total: usize, shown: usize) -> String {
     }
 }
 
-/// Trailer for glob and ls when the entry cap bites.
+/// Trailer for glob when the entry cap bites ("narrow the pattern" is the
+/// right remedy only for a pattern-taking tool; ls passes its own).
 pub fn list_trailer(kind: &str, total: usize, shown: usize) -> Option<String> {
-    (total > shown).then(|| format!("{total} {kind}, showing {shown}; narrow the pattern"))
+    list_trailer_with(kind, total, shown, "narrow the pattern")
+}
+
+/// Same shape with a caller-supplied remedy, because the trailer is API
+/// surface: ls has no pattern to narrow.
+pub fn list_trailer_with(kind: &str, total: usize, shown: usize, remedy: &str) -> Option<String> {
+    (total > shown).then(|| format!("{total} {kind}, showing {shown}; {remedy}"))
 }
 
 #[cfg(test)]
@@ -364,7 +371,10 @@ mod tests {
             "{}",
             &out[MCP_HEAD..MCP_HEAD + 200]
         );
-        assert!(matches!(mcp_cap("small", &Caps::default()), Cow::Borrowed(_)));
+        assert!(matches!(
+            mcp_cap("small", &Caps::default()),
+            Cow::Borrowed(_)
+        ));
     }
 
     #[test]
@@ -444,5 +454,13 @@ mod tests {
             Some("431 files, showing 200; narrow the pattern".to_string())
         );
         assert_eq!(list_trailer("entries", 5, 5), None);
+        assert_eq!(
+            list_trailer_with("entries", 250, 200, "list a subdirectory instead"),
+            Some("250 entries, showing 200; list a subdirectory instead".to_string())
+        );
+        assert_eq!(
+            list_trailer_with("entries", 5, 5, "list a subdirectory instead"),
+            None
+        );
     }
 }

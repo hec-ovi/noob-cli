@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use noob_provider::http::INTERRUPTED;
 use serde_json::Value;
 
-use super::truncate::{LIST_ENTRY_CAP, list_trailer};
+use super::truncate::{LIST_ENTRY_CAP, list_trailer_with};
 use super::{ToolCtx, ToolOutcome, display_path, opt_str};
 
 const CANCELED: &str = "ls canceled by user";
@@ -69,7 +69,9 @@ fn run_inner(
     let shown_count = names.len();
     let mut content = format!("{shown}:\n");
     content.push_str(&names.join("\n"));
-    if let Some(trailer) = list_trailer("entries", total, shown_count) {
+    // ls takes no pattern, so its capped-listing remedy names one it has.
+    let remedy = "list a subdirectory instead";
+    if let Some(trailer) = list_trailer_with("entries", total, shown_count, remedy) {
         content.push('\n');
         content.push_str(&trailer);
     }
@@ -117,7 +119,9 @@ mod tests {
         let out = run(&ctx, &json!({}));
         assert!(
             out.content
-                .ends_with("250 entries, showing 200; narrow the pattern")
+                .ends_with("250 entries, showing 200; list a subdirectory instead"),
+            "{}",
+            out.content
         );
         assert_eq!(out.content.lines().count(), 202);
         assert!(out.content.starts_with(".:\nf000\n"));

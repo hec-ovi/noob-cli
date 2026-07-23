@@ -18,14 +18,22 @@ pub struct Session {
     id: String,
     path: PathBuf,
     file: std::fs::File,
+    /// Set when persisting the resume-time transcript repair failed: the
+    /// session continues in memory only and append() degrades to a no-op,
+    /// mirroring how the agent detaches on a later append failure.
+    detached: bool,
 }
 
 const REPLAY_SKIP_CAP: u16 = 999;
+const FRESH_ID_ATTEMPTS: usize = 8;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReplayReport {
     skipped: u16,
     capped: bool,
+    /// The one warning for a resume whose durable repair failed and
+    /// detached the session (see Session::detached).
+    detached: Option<String>,
 }
 
 impl ReplayReport {
@@ -37,23 +45,31 @@ impl ReplayReport {
         }
     }
 
-    pub fn warning(self) -> Option<String> {
-        if self.skipped == 0 {
-            return None;
+    pub fn warning(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if self.skipped > 0 {
+            let count = if self.capped {
+                format!("{}+", self.skipped)
+            } else {
+                self.skipped.to_string()
+            };
+            let record = if self.skipped == 1 && !self.capped {
+                "record"
+            } else {
+                "records"
+            };
+            parts.push(format!(
+                "session recovery warning: skipped {count} unreadable or malformed session {record}; restored valid history"
+            ));
         }
-        let count = if self.capped {
-            format!("{}+", self.skipped)
+        if let Some(detail) = &self.detached {
+            parts.push(detail.clone());
+        }
+        if parts.is_empty() {
+            None
         } else {
-            self.skipped.to_string()
-        };
-        let record = if self.skipped == 1 && !self.capped {
-            "record"
-        } else {
-            "records"
-        };
-        Some(format!(
-            "session recovery warning: skipped {count} unreadable or malformed session {record}; restored valid history"
-        ))
+            Some(parts.join("\n"))
+        }
     }
 }
 
@@ -124,38 +140,53 @@ impl Session {
         let dir = config_dir.join("sessions");
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        let id = match id {
-            Some(id) if !id.is_empty() => sanitize(id)?,
-            _ => fresh_id(),
-        };
-        let path = dir.join(format!("{id}.jsonl"));
         let mut items = Vec::new();
         let mut replay_report = ReplayReport::default();
-        let existed = path.is_file();
-        if existed {
-            let input = std::fs::File::open(&path)
-                .map_err(|e| format!("cannot read session {}: {e}", path.display()))?;
-            (items, replay_report) = replay(BufReader::new(input));
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|e| format!("cannot open session {}: {e}", path.display()))?;
+        let (id, path, mut file, existed) = match id {
+            Some(id) if !id.is_empty() => {
+                let id = sanitize(id)?;
+                let path = dir.join(format!("{id}.jsonl"));
+                let existed = path.is_file();
+                if existed {
+                    let input = std::fs::File::open(&path)
+                        .map_err(|e| format!("cannot read session {}: {e}", path.display()))?;
+                    (items, replay_report) = replay(BufReader::new(input));
+                }
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .map_err(|e| format!("cannot open session {}: {e}", path.display()))?;
+                (id, path, file, existed)
+            }
+            // Fresh ids claim their file exclusively (create_new) so two
+            // processes that mint the same id can never interleave one file.
+            _ => {
+                let (id, path, file) = claim_fresh(
+                    &dir,
+                    std::iter::repeat_with(fresh_id).take(FRESH_ID_ATTEMPTS),
+                )?;
+                (id, path, file, false)
+            }
+        };
         if !existed {
             let meta = json!({"t": "meta", "v": 1, "id": id, "created_ms": now_ms()});
             writeln!(file, "{meta}")
                 .and_then(|_| file.flush())
                 .map_err(|e| format!("cannot initialize session {}: {e}", path.display()))?;
         }
-        let mut session = Session { id, path, file };
+        let mut session = Session {
+            id,
+            path,
+            file,
+            detached: false,
+        };
         // A session killed mid-tool-batch (second Ctrl-C, SIGKILL, power
         // loss) ends with unanswered tool calls; replaying that verbatim
         // would make every future request API-invalid. Heal it here, in the
         // file too, so the repair is durable.
-        for repair in repair_dangling_calls(&mut items) {
-            session.log_item(&repair)?;
-        }
+        let repair = repair_dangling_calls(&mut items);
+        persist_repair(&mut session, &items, &repair, &mut replay_report);
         Ok((session, items, existed, replay_report))
     }
 
@@ -181,41 +212,115 @@ impl Session {
     }
 
     fn append(&mut self, line: &Value) -> Result<(), String> {
+        // A detached session already surfaced its one persistence warning;
+        // later items continue in memory only, without fresh errors.
+        if self.detached {
+            return Ok(());
+        }
         writeln!(self.file, "{line}")
             .and_then(|_| self.file.flush())
             .map_err(|e| format!("cannot append session {}: {e}", self.path.display()))
     }
 }
 
-/// Synthetic results for tool calls the replayed transcript never answered.
-/// Appended to `items` AND returned so the caller can persist them.
-fn repair_dangling_calls(items: &mut Vec<Item>) -> Vec<Item> {
-    let mut pending: Vec<String> = Vec::new();
-    for item in items.iter() {
-        match item {
-            Item::Assistant { tool_calls, .. } => {
-                pending = tool_calls.iter().map(|c| c.id.clone()).collect();
-            }
-            Item::ToolResult { call_id, .. } => {
-                pending.retain(|id| id != call_id);
-            }
-            Item::User(_) => pending.clear(),
-        }
-    }
-    let repairs: Vec<Item> = pending
-        .into_iter()
-        .map(|call_id| Item::ToolResult {
-            call_id,
-            content: "canceled: the session ended before this call finished".to_string(),
-        })
-        .collect();
-    items.extend(repairs.iter().cloned());
-    repairs
+/// What healing did to the replayed transcript, and how to persist it.
+enum Repair {
+    /// Already healthy; nothing to write.
+    None,
+    /// Synthetic results appended at the very end (a session killed
+    /// mid-batch); persisted as ordinary appends.
+    Tail(Vec<Item>),
+    /// The middle changed: a dangling assistant block got its synthetic
+    /// results spliced in place, or an orphan ToolResult was dropped (one
+    /// corrupt tool-result line skipped on replay produces both shapes).
+    /// Only a reset record can persist a rewrite of the middle.
+    Splice,
 }
 
-/// Session ids become file names; keep them boring.
+/// Heal a transcript whose tool calls and results do not pair up; either
+/// shape is API-invalid and would 400 every future request. Calls left
+/// unanswered when the next Assistant or User item arrives (or the
+/// transcript ends) get synthetic terminal results spliced directly after
+/// their block's real ones; a ToolResult with no preceding matching call
+/// is dropped.
+fn repair_dangling_calls(items: &mut Vec<Item>) -> Repair {
+    let synthetic = |call_id: String| Item::ToolResult {
+        call_id,
+        content: "canceled: the session ended before this call finished".to_string(),
+    };
+    let mut out: Vec<Item> = Vec::with_capacity(items.len());
+    let mut pending: Vec<String> = Vec::new();
+    let mut spliced = false;
+    for item in items.drain(..) {
+        match &item {
+            Item::Assistant { tool_calls, .. } => {
+                if !pending.is_empty() {
+                    spliced = true;
+                    out.extend(pending.drain(..).map(synthetic));
+                }
+                pending = tool_calls.iter().map(|c| c.id.clone()).collect();
+                out.push(item);
+            }
+            Item::ToolResult { call_id, .. } => {
+                if let Some(at) = pending.iter().position(|id| id == call_id) {
+                    pending.remove(at);
+                    out.push(item);
+                } else {
+                    spliced = true; // orphan: no live call to answer
+                }
+            }
+            Item::User(_) => {
+                if !pending.is_empty() {
+                    spliced = true;
+                    out.extend(pending.drain(..).map(synthetic));
+                }
+                out.push(item);
+            }
+        }
+    }
+    let tail: Vec<Item> = pending.drain(..).map(synthetic).collect();
+    out.extend(tail.iter().cloned());
+    *items = out;
+    if spliced {
+        Repair::Splice
+    } else if tail.is_empty() {
+        Repair::None
+    } else {
+        Repair::Tail(tail)
+    }
+}
+
+/// Durably persist a transcript repair. Tail-only repairs append (cheap);
+/// a splice rewrites the whole state as a reset record, which replay then
+/// applies idempotently. A persistence failure detaches the session and
+/// leaves the one warning on the report instead of aborting the resume,
+/// the same degradation the agent applies when a later append fails.
+fn persist_repair(
+    session: &mut Session,
+    items: &[Item],
+    repair: &Repair,
+    report: &mut ReplayReport,
+) {
+    let persisted = match repair {
+        Repair::None => Ok(()),
+        Repair::Tail(tail) => tail.iter().try_for_each(|item| session.log_item(item)),
+        Repair::Splice => session.log_reset(items),
+    };
+    if let Err(error) = persisted {
+        session.detached = true;
+        report.detached = Some(format!(
+            "session persistence failed while repairing the transcript: {error}; \
+             continuing in memory without a saved session"
+        ));
+    }
+}
+
+/// Session ids become file names; keep them boring. "latest" is reserved:
+/// the resume flag resolves it to the newest saved session, so a session
+/// actually named that could never be addressed again.
 fn sanitize(id: &str) -> Result<String, String> {
-    if id.len() <= 64
+    if id != "latest"
+        && id.len() <= 64
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -223,7 +328,8 @@ fn sanitize(id: &str) -> Result<String, String> {
         Ok(id.to_string())
     } else {
         Err(format!(
-            "session id {id:?} is invalid; use letters, digits, - and _ (max 64 chars)"
+            "session id {id:?} is invalid; use letters, digits, - and _ \
+             (max 64 chars; \"latest\" is reserved)"
         ))
     }
 }
@@ -238,7 +344,61 @@ fn now_ms() -> u128 {
 fn fresh_id() -> String {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("{:x}-{:x}-{serial:x}", now_ms(), std::process::id())
+    format!(
+        "{:x}-{:x}-{serial:x}-{:08x}",
+        now_ms(),
+        std::process::id(),
+        entropy()
+    )
+}
+
+/// Four random bytes so two same-millisecond starts with equal pids (two
+/// containers sharing /config both run as pid 1) mint different ids.
+/// /dev/urandom, with a hash of per-process entropy sources as the
+/// fallback; create_new in claim_fresh stays the correctness backstop.
+fn entropy() -> u32 {
+    let mut bytes = [0u8; 4];
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut bytes))
+        .is_ok()
+    {
+        return u32::from_le_bytes(bytes);
+    }
+    let stack = &bytes as *const _ as usize as u64; // ASLR-shifted address
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    crate::tools::guard::fnv1a64(&(stack ^ nanos.wrapping_mul(0x9E37_79B9_7F4A_7C15)).to_le_bytes())
+        as u32
+}
+
+/// Claim a brand-new session file. create_new makes the filesystem the
+/// arbiter: when two processes mint the same fresh id, the loser
+/// regenerates instead of silently interleaving two sessions in one file.
+fn claim_fresh(
+    dir: &Path,
+    candidates: impl IntoIterator<Item = String>,
+) -> Result<(String, PathBuf, std::fs::File), String> {
+    let mut last_collision = String::new();
+    for id in candidates {
+        let path = dir.join(format!("{id}.jsonl"));
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((id, path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_collision = format!("{} already exists", path.display());
+            }
+            Err(e) => return Err(format!("cannot create session {}: {e}", path.display())),
+        }
+    }
+    Err(format!(
+        "cannot create a fresh session in {}: every generated id collided ({last_collision})",
+        dir.display()
+    ))
 }
 
 fn replay(mut reader: impl BufRead) -> (Vec<Item>, ReplayReport) {
@@ -603,11 +763,187 @@ mod tests {
             id: "full".into(),
             path: PathBuf::from("/dev/full"),
             file,
+            detached: false,
         };
         let error = session
             .log_item(&Item::User("important".into()))
             .unwrap_err();
         assert!(error.contains("cannot append session"), "{error}");
+    }
+
+    #[test]
+    fn mid_transcript_dangle_is_repaired_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _, _, _) = Session::open(tmp.path(), Some("t5")).unwrap();
+        s.log_item(&Item::User("go".into())).unwrap();
+        s.log_item(&Item::Assistant {
+            text: String::new(),
+            tool_calls: vec![
+                ToolCall {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                },
+                ToolCall {
+                    id: "c2".into(),
+                    name: "read".into(),
+                    arguments: "{}".into(),
+                },
+            ],
+            raw_items: vec![],
+        })
+        .unwrap();
+        s.log_item(&Item::ToolResult {
+            call_id: "c1".into(),
+            content: "partial".into(),
+        })
+        .unwrap();
+        // c2's result line was corrupted and skipped on replay; the turn
+        // continued, so the dangle sits in the MIDDLE of the transcript
+        // and a tail-only repair would leave every request API-invalid.
+        s.log_item(&Item::User("next".into())).unwrap();
+        s.log_item(&Item::Assistant {
+            text: "done".into(),
+            tool_calls: vec![],
+            raw_items: vec![],
+        })
+        .unwrap();
+        drop(s);
+
+        let (_s2, items, _, report) = Session::open(tmp.path(), Some("t5")).unwrap();
+        assert!(report.warning().is_none());
+        assert_eq!(items.len(), 6, "one synthetic result spliced in place");
+        match &items[3] {
+            Item::ToolResult { call_id, content } => {
+                assert_eq!(call_id, "c2");
+                assert!(content.contains("session ended before this call finished"));
+            }
+            other => panic!("wrong splice {other:?}"),
+        }
+        assert!(matches!(&items[4], Item::User(t) if t == "next"));
+        // Durable via a reset record and idempotent on the next open.
+        let (_s3, items, _, report) = Session::open(tmp.path(), Some("t5")).unwrap();
+        assert_eq!(items.len(), 6);
+        assert!(report.warning().is_none());
+        match &items[3] {
+            Item::ToolResult { call_id, .. } => assert_eq!(call_id, "c2"),
+            other => panic!("wrong replayed splice {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orphan_tool_result_is_dropped_and_the_drop_is_durable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _, _, _) = Session::open(tmp.path(), Some("t6")).unwrap();
+        s.log_item(&Item::User("go".into())).unwrap();
+        // No preceding assistant call carries this id (its call line was
+        // the corrupt record); replaying the result verbatim is API-invalid.
+        s.log_item(&Item::ToolResult {
+            call_id: "ghost".into(),
+            content: "x".into(),
+        })
+        .unwrap();
+        s.log_item(&Item::User("next".into())).unwrap();
+        drop(s);
+        let (_s2, items, _, _) = Session::open(tmp.path(), Some("t6")).unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0], Item::User(t) if t == "go"));
+        assert!(matches!(&items[1], Item::User(t) if t == "next"));
+        let (_s3, items, _, _) = Session::open(tmp.path(), Some("t6")).unwrap();
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn repair_drops_a_result_answering_an_already_answered_call() {
+        let mut items = vec![
+            Item::Assistant {
+                text: String::new(),
+                tool_calls: vec![call()],
+                raw_items: vec![],
+            },
+            Item::ToolResult {
+                call_id: "call_1".into(),
+                content: "one".into(),
+            },
+            Item::ToolResult {
+                call_id: "call_1".into(),
+                content: "dup".into(),
+            },
+        ];
+        let repair = repair_dangling_calls(&mut items);
+        assert!(matches!(repair, Repair::Splice));
+        assert_eq!(items.len(), 2, "the duplicate answer is dropped");
+        assert!(matches!(&items[1], Item::ToolResult { content, .. } if content == "one"));
+    }
+
+    #[test]
+    fn failed_durable_repair_detaches_with_a_warning_instead_of_aborting() {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        let mut session = Session {
+            id: "full".into(),
+            path: PathBuf::from("/dev/full"),
+            file,
+            detached: false,
+        };
+        let mut items = vec![Item::Assistant {
+            text: String::new(),
+            tool_calls: vec![call()],
+            raw_items: vec![],
+        }];
+        let mut report = ReplayReport::default();
+        let repair = repair_dangling_calls(&mut items);
+        persist_repair(&mut session, &items, &repair, &mut report);
+        assert_eq!(items.len(), 2, "the in-memory repair still applies");
+        let warning = report.warning().unwrap();
+        assert!(warning.contains("session persistence failed"), "{warning}");
+        // Detached: later appends degrade to in-memory no-ops, no new errors.
+        assert!(session.log_item(&Item::User("more".into())).is_ok());
+    }
+
+    #[test]
+    fn fresh_ids_carry_an_entropy_component() {
+        let id = fresh_id();
+        assert_eq!(id.split('-').count(), 4, "{id}");
+        let entropies: std::collections::HashSet<String> = (0..8)
+            .map(|_| fresh_id().rsplit('-').next().unwrap().to_string())
+            .collect();
+        assert!(entropies.len() > 1, "the entropy component never varies");
+    }
+
+    #[test]
+    fn fresh_open_never_adopts_an_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("dup.jsonl"), "{\"t\":\"meta\",\"v\":1}\n").unwrap();
+        // Two processes minted the same id: the loser must regenerate, not
+        // silently interleave into the winner's file.
+        let ids = ["dup".to_string(), "dup".to_string(), "fresh2".to_string()];
+        let (id, path, _file) = claim_fresh(&dir, ids).unwrap();
+        assert_eq!(id, "fresh2");
+        assert!(path.ends_with("fresh2.jsonl"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("dup.jsonl")).unwrap(),
+            "{\"t\":\"meta\",\"v\":1}\n",
+            "the colliding file must be untouched"
+        );
+        let err = claim_fresh(&dir, ["dup".to_string()]).unwrap_err();
+        assert!(err.contains("collided"), "{err}");
+    }
+
+    #[test]
+    fn latest_is_reserved_as_a_session_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = match Session::open(tmp.path(), Some("latest")) {
+            Err(e) => e,
+            Ok(_) => panic!("the reserved id \"latest\" was accepted"),
+        };
+        assert!(err.contains("invalid"), "{err}");
+        assert!(err.contains("latest"), "{err}");
+        assert!(!tmp.path().join("sessions/latest.jsonl").exists());
     }
 
     #[test]

@@ -199,7 +199,8 @@ mod tests {
         let leaf = run(&ctx, &json!({"name": "pdf-tools"}));
         assert!(!leaf.is_error, "{}", leaf.content);
         assert!(
-            leaf.content.contains("delegation (subagent, agents, tasks) is unavailable"),
+            leaf.content
+                .contains("delegation (subagent, agents, tasks) is unavailable"),
             "{}",
             leaf.content
         );

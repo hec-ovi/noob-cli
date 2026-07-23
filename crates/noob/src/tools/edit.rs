@@ -13,6 +13,7 @@
 use serde_json::Value;
 
 use super::guard::{FileStamp, atomic_write, check_write_allowed, fnv1a64, resolve_path};
+use super::truncate::clip_line;
 use super::{ToolCtx, ToolOutcome, display_path, need_str, opt_bool};
 
 pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
@@ -66,6 +67,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
             atomic_write(&path, applied.content.as_bytes())?;
             ctx.seen
                 .record(&path, FileStamp::of(applied.content.as_bytes()));
+            ctx.consume_skills_write_grant(raw);
             ctx.edit_failures.lock().unwrap().remove(&fail_key);
             let n = applied.count;
             let mut msg = if n == 1 {
@@ -106,7 +108,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
             *count += 1;
             let attempt = *count;
             drop(fails);
-            Err(teach(&shown, &text, old, attempt))
+            Err(teach(&shown, &text, old, attempt, ctx.caps.line_chars))
         }
     }
 }
@@ -460,11 +462,48 @@ fn reindent(new: &str, delta: &Delta) -> String {
 
 // --- failure teaching ---------------------------------------------------------
 
+/// Byte budget for a teach-path file region. This is an error-path
+/// diagnostic, not tool output: it never flows through the truncate layer,
+/// so the budget applies even when NOOB_TOOL_CAPS=0 lifts the per-line clip
+/// (a multi-MB minified line must not land whole in the transcript).
+const TEACH_REGION_BYTES: usize = 4 * 1024;
+
+/// Render a teach-path file region: each line clipped to `line_chars`, the
+/// joined region capped at TEACH_REGION_BYTES with a note naming what was
+/// left out. The budget binds every line, the first included: with the
+/// per-line clip lifted (NOOB_TOOL_CAPS=0) a single minified line can be
+/// megabytes.
+fn teach_region(lines: &[&str], line_chars: usize) -> String {
+    let mut region = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        let clipped = clip_line(line, line_chars);
+        let sep = usize::from(!region.is_empty());
+        if region.len() + sep + clipped.len() > TEACH_REGION_BYTES {
+            if sep == 1 {
+                region.push('\n');
+            }
+            region.push_str(&format!(
+                "[region truncated at {TEACH_REGION_BYTES} bytes; {} of {} lines not shown]",
+                lines.len() - i,
+                lines.len()
+            ));
+            return region;
+        }
+        if sep == 1 {
+            region.push('\n');
+        }
+        region.push_str(&clipped);
+    }
+    region
+}
+
 /// The whole ladder missed: locate the closest region by anchor-line match
 /// and put the ground truth in the error. Escalates with repeated failures
 /// of the same (path, old): 2nd returns up to 40 file lines around the
-/// anchor, 3rd tells the model to re-read and rewrite the region.
-fn teach(shown: &str, text: &str, old: &str, attempt: u32) -> String {
+/// anchor, 3rd tells the model to re-read and rewrite the region. Every
+/// shown file line goes through clip_line and the joined region through
+/// the TEACH_REGION_BYTES budget.
+fn teach(shown: &str, text: &str, old: &str, attempt: u32, line_chars: usize) -> String {
     if attempt >= 3 {
         return format!(
             "edit failed {attempt} times: old still matches nothing in {shown}; \
@@ -489,20 +528,25 @@ fn teach(shown: &str, text: &str, old: &str, attempt: u32) -> String {
             "edit failed again: old still matches nothing in {shown}. The actual file \
              content around the closest match is:\n---\n{}\n---\nmake old an exact \
              copy of the lines to replace",
-            file_lines[from..to].join("\n")
+            teach_region(&file_lines[from..to], line_chars)
         );
     }
     let mut msg = format!(
         "old matched nothing in {shown} (tried exact, whitespace, punctuation, and \
          indent matching). Closest region ({score} of {} lines match):\n---\n{}\n---",
         old_lines.len(),
-        file_lines[anchor..(anchor + old_lines.len()).min(file_lines.len())].join("\n"),
+        teach_region(
+            &file_lines[anchor..(anchor + old_lines.len()).min(file_lines.len())],
+            line_chars
+        ),
     );
     if let Some((j, col, o, f)) = first_difference(&file_lines[anchor..], &old_lines) {
         msg.push_str(&format!(
             "\nfirst difference on line {} of old: old has {o:?} but the file has \
              {f:?} (they differ at character {col})",
-            j + 1
+            j + 1,
+            o = clip_line(o, line_chars),
+            f = clip_line(f, line_chars),
         ));
     }
     msg.push_str("\nfix old to match the file exactly, then retry");
@@ -788,6 +832,96 @@ mod tests {
             &json!({"path": "f.txt", "old": "line number 30\n", "new": "thirty\n"}),
         );
         assert!(!ok.is_error, "{}", ok.content);
+    }
+
+    #[test]
+    fn teach_region_clips_long_lines_and_caps_the_total_bytes() {
+        let (_t, ctx) = test_ctx();
+        // 60 lines of 900 chars each: unclipped, the second-attempt region
+        // would embed 40 raw lines (36 KiB) in the transcript.
+        let body: String = (0..60)
+            .map(|i| format!("line number {i} {}\n", "z".repeat(900)))
+            .collect();
+        seed(&ctx, "f.txt", &body);
+        // The first old line anchors on line 30 exactly; the junk line
+        // forces the whole ladder to miss so the teach path renders.
+        let call = json!({
+            "path": "f.txt",
+            "old": format!("line number 30 {}\nEXTRA JUNK", "z".repeat(900)),
+            "new": "x"
+        });
+        let first = run(&ctx, &call);
+        assert!(first.is_error);
+        assert!(
+            first.content.len() < TEACH_REGION_BYTES + 2048,
+            "first teach is {} bytes",
+            first.content.len()
+        );
+        assert!(
+            first.content.contains("[line clipped;"),
+            "{}",
+            first.content
+        );
+        let second = run(&ctx, &call);
+        assert!(
+            second
+                .content
+                .contains("The actual file content around the closest match")
+        );
+        assert!(
+            second.content.len() < TEACH_REGION_BYTES + 2048,
+            "second teach is {} bytes",
+            second.content.len()
+        );
+        assert!(
+            second.content.contains("[region truncated at 4096 bytes;"),
+            "{}",
+            second.content
+        );
+        assert!(
+            second.content.contains("lines not shown]"),
+            "{}",
+            second.content
+        );
+    }
+
+    #[test]
+    fn failed_edit_does_not_burn_the_skills_write_grant() {
+        let (_t, ctx) = test_ctx();
+        std::fs::create_dir_all(ctx.workspace.join(".claude/skills/x")).unwrap();
+        seed(&ctx, ".claude/skills/x/SKILL.md", "real content\n");
+        let target =
+            super::super::guard::skill_write_target(&ctx.workspace, ".claude/skills/x/SKILL.md")
+                .unwrap();
+        ctx.approved_skill_writes
+            .lock()
+            .unwrap()
+            .insert(target.clone(), 1);
+        // A miss must not consume the one grant...
+        let miss = run(
+            &ctx,
+            &json!({"path": ".claude/skills/x/SKILL.md", "old": "no such text", "new": "y"}),
+        );
+        assert!(miss.is_error);
+        assert!(!miss.content.contains("refused"), "{}", miss.content);
+        // ...so the corrected retry still applies, and only then consumes it.
+        let ok = run(
+            &ctx,
+            &json!({"path": ".claude/skills/x/SKILL.md", "old": "real content", "new": "fixed"}),
+        );
+        assert!(!ok.is_error, "{}", ok.content);
+        assert!(
+            !ctx.approved_skill_writes
+                .lock()
+                .unwrap()
+                .contains_key(&target)
+        );
+        let refused = run(
+            &ctx,
+            &json!({"path": ".claude/skills/x/SKILL.md", "old": "fixed", "new": "again"}),
+        );
+        assert!(refused.is_error);
+        assert!(refused.content.contains("refused"), "{}", refused.content);
     }
 
     #[test]

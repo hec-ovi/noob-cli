@@ -27,7 +27,15 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     if path.is_dir() {
         return Err(format!("{shown} is a directory; write needs a file path"));
     }
-    if let Ok(current) = std::fs::read(&path) {
+    // Only a confirmed-absent file skips the read-before-write guard; any
+    // other read failure (permissions, EIO) must not silently authorize an
+    // overwrite of content the model has never seen.
+    let current = match std::fs::read(&path) {
+        Ok(current) => Some(current),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("cannot read {shown} before overwriting it: {e}")),
+    };
+    if let Some(current) = current {
         // The file exists: the staleness rules apply.
         match ctx.seen.get(&path) {
             None => {
@@ -46,6 +54,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     }
     atomic_write(&path, content.as_bytes())?;
     ctx.seen.record(&path, FileStamp::of(content.as_bytes()));
+    ctx.consume_skills_write_grant(raw);
     Ok(ToolOutcome::ok(
         format!("wrote {shown} ({} bytes)", content.len()),
         format!("write {shown} ({} bytes)", content.len()),
@@ -81,6 +90,28 @@ mod tests {
             std::fs::read_to_string(ctx.workspace.join("f.txt")).unwrap(),
             "precious"
         );
+    }
+
+    #[test]
+    fn unreadable_existing_file_is_an_error_not_a_silent_overwrite() {
+        // Root reads through any mode; the guard is only observable unprivileged.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let (_t, ctx) = test_ctx();
+        let p = ctx.workspace.join("f.txt");
+        std::fs::write(&p, "precious").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o200)).unwrap();
+        let out = run(&ctx, &json!({"path": "f.txt", "content": "clobber"}));
+        assert!(out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("cannot read f.txt before overwriting"),
+            "{}",
+            out.content
+        );
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "precious");
     }
 
     #[test]

@@ -166,17 +166,20 @@ impl ToolCtx {
     /// whose real target lands in a skills directory unless the user
     /// confirmed exactly that target. Returns the refusal message, or None
     /// when the write may proceed. Closes the plan-time-vs-execution-time
-    /// gap a same-batch symlink would otherwise open.
+    /// gap a same-batch symlink would otherwise open. Check only: the grant
+    /// is consumed by `consume_skills_write_grant` once the mutation has
+    /// applied, so a call that fails validation (stale file, missed edit)
+    /// keeps it for the retry; the batch-end clear in the agent still
+    /// enforces one-use-per-batch.
     pub(crate) fn skills_write_refusal(&self, raw: &str) -> Option<String> {
         let target = guard::skill_write_target(&self.workspace, raw)?;
-        let mut approvals = self.approved_skill_writes.lock().unwrap();
-        if let std::collections::hash_map::Entry::Occupied(mut entry) = approvals.entry(target) {
-            if *entry.get() > 1 {
-                *entry.get_mut() -= 1;
-            } else {
-                entry.remove();
-            }
-            return None; // exactly one grant consumed for this operation
+        if self
+            .approved_skill_writes
+            .lock()
+            .unwrap()
+            .contains_key(&target)
+        {
+            return None;
         }
         Some(
             "refused: writing into a skills directory needs the user's confirmation \
@@ -184,6 +187,24 @@ impl ToolCtx {
              without them"
                 .to_string(),
         )
+    }
+
+    /// Consume exactly one grant for a skills-dir mutation that applied.
+    /// Counts preserve two explicit approvals for two calls to the same
+    /// path while preventing either grant from covering a third operation.
+    /// No-op for non-skills paths.
+    pub(crate) fn consume_skills_write_grant(&self, raw: &str) {
+        let Some(target) = guard::skill_write_target(&self.workspace, raw) else {
+            return;
+        };
+        let mut approvals = self.approved_skill_writes.lock().unwrap();
+        if let std::collections::hash_map::Entry::Occupied(mut entry) = approvals.entry(target) {
+            if *entry.get() > 1 {
+                *entry.get_mut() -= 1;
+            } else {
+                entry.remove();
+            }
+        }
     }
 }
 
@@ -604,11 +625,22 @@ mod tests {
         );
 
         drop(child_lease);
-        let written = dispatch(
-            &ctx,
-            "write",
-            &json!({"path": "race.txt", "content": "parent"}),
-        );
+        // Release is observed with a bounded retry: any concurrently spawned
+        // test child inherits the flock'd lease fd between fork and exec
+        // (CLOEXEC clears it only at exec), so under scheduler pressure the
+        // lock can outlive the drop by a few milliseconds.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let written = loop {
+            let written = dispatch(
+                &ctx,
+                "write",
+                &json!({"path": "race.txt", "content": "parent"}),
+            );
+            if !written.is_error || std::time::Instant::now() >= deadline {
+                break written;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        };
         assert!(!written.is_error, "{}", written.content);
         assert_eq!(
             std::fs::read_to_string(ctx.workspace.join("race.txt")).unwrap(),

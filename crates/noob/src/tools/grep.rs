@@ -63,6 +63,7 @@ fn run_inner(
 
     let mut total = 0usize;
     let mut shown = 0usize;
+    let mut capped = false;
     let mut out = String::new();
     for entry in walk.build().flatten() {
         if interrupted() {
@@ -78,6 +79,7 @@ fn run_inner(
             &re,
             &mut total,
             &mut shown,
+            &mut capped,
             &mut out,
             interrupted,
         ) {
@@ -97,12 +99,14 @@ fn run_inner(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_file(
     ctx: &ToolCtx,
     path: &Path,
     re: &regex::Regex,
     total: &mut usize,
     shown: &mut usize,
+    capped: &mut bool,
     out: &mut String,
     interrupted: &impl Fn() -> bool,
 ) -> bool {
@@ -122,13 +126,23 @@ fn scan_file(
             continue;
         }
         *total += 1;
-        if *shown < ctx.caps.grep_matches && out.len() < ctx.caps.grep_bytes {
-            out.push_str(&rel);
-            out.push_str(": ");
-            out.push_str(clip_line(line.trim_end(), ctx.caps.line_chars).as_ref());
-            out.push('\n');
-            *shown += 1;
+        if *shown >= ctx.caps.grep_matches || *capped {
+            continue;
         }
+        // The byte cap is checked against the WHOLE rendered line before it
+        // is appended, so the result can never overshoot the budget; the
+        // first line that does not fit closes the output for good (shown
+        // stays a contiguous prefix of the matches, as the trailer states).
+        let clipped = clip_line(line.trim_end(), ctx.caps.line_chars);
+        if out.len() + rel.len() + 2 + clipped.len() + 1 > ctx.caps.grep_bytes {
+            *capped = true;
+            continue;
+        }
+        out.push_str(&rel);
+        out.push_str(": ");
+        out.push_str(clipped.as_ref());
+        out.push('\n');
+        *shown += 1;
     }
     true
 }
@@ -196,6 +210,35 @@ mod tests {
                 .ends_with("312 matches, showing 100; narrow the pattern or add a glob")
         );
         assert_eq!(out.content.lines().count(), 101);
+    }
+
+    #[test]
+    fn byte_cap_never_overshoots_by_a_rendered_line() {
+        use super::super::truncate::GREP_BYTE_CAP;
+
+        let (_t, ctx) = test_ctx();
+        // 50 matches of 410 rendered bytes each ("big.txt: " + 400 + '\n'):
+        // 39 fit in 16 KiB, the 40th would land at 16400 and must be
+        // rejected BEFORE it is appended, not after.
+        let body: String = (0..50)
+            .map(|i| format!("needle{i:03}{}\n", "x".repeat(391)))
+            .collect();
+        std::fs::write(ctx.workspace.join("big.txt"), body).unwrap();
+        let out = run(&ctx, &json!({"pattern": "needle"}));
+        assert!(!out.is_error);
+        assert!(
+            out.content
+                .ends_with("50 matches, showing 39; narrow the pattern or add a glob"),
+            "{}",
+            &out.content[out.content.len().saturating_sub(120)..]
+        );
+        // +1 restores the final newline rsplit_once consumed.
+        let (matches, _trailer) = out.content.rsplit_once('\n').unwrap();
+        let rendered = matches.len() + 1;
+        assert!(
+            rendered <= GREP_BYTE_CAP,
+            "rendered matches overshoot the byte cap: {rendered} bytes"
+        );
     }
 
     #[test]

@@ -136,30 +136,36 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     let deadline = started + Duration::from_secs(timeout_s);
     let mut timed_out = false;
     let mut interrupted = false;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) => {}
+    let mut group_killed = false;
+    // Exit is detected with waitid(WNOWAIT), which leaves the leader a
+    // zombie: the zombie pins the pgid, so every group SIGKILL below
+    // (including the post-exit straggler kill) fires before the leader is
+    // reaped and can never hit a recycled process group. The real reap
+    // (child.wait) happens once, after the last possible group kill.
+    loop {
+        match leader_exited(pid) {
+            Ok(true) => break,
+            Ok(false) => {}
             Err(_) => {
                 unsafe { libc::kill(-pid, libc::SIGKILL) };
-                let _ = child.wait();
-                break None;
+                group_killed = true;
+                break;
             }
         }
         if INTERRUPTED.load(Ordering::SeqCst) {
             interrupted = true;
             unsafe { libc::kill(-pid, libc::SIGKILL) };
-            let _ = child.wait();
-            break None;
+            group_killed = true;
+            break;
         }
         if Instant::now() >= deadline {
             timed_out = true;
             unsafe { libc::kill(-pid, libc::SIGKILL) };
-            let _ = child.wait();
-            break None;
+            group_killed = true;
+            break;
         }
         std::thread::sleep(Duration::from_millis(20));
-    };
+    }
     let elapsed = started.elapsed();
 
     // EOF comes when every write end closes. A backgrounded survivor
@@ -177,8 +183,21 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     let mut stragglers_killed = false;
     if !timed_out && !interrupted && !wait_eof(Duration::from_millis(200)) {
         unsafe { libc::kill(-pid, libc::SIGKILL) };
+        group_killed = true;
         stragglers_killed = true;
     }
+    // Group kills are done: reap the leader (SIGKILL on the zombie above
+    // was a no-op, so a real exit code survives the straggler kill), then
+    // collect group members that reparented to this process.
+    let status = child.wait().ok();
+    reap_group_zombies(
+        pid,
+        if group_killed {
+            Duration::from_millis(500)
+        } else {
+            Duration::ZERO
+        },
+    );
     let eof = wait_eof(Duration::from_millis(500));
     if eof {
         let _ = collector.join();
@@ -239,6 +258,54 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     };
     out.warning = warning;
     Ok(out)
+}
+
+/// Has the leader exited? Polled with waitid + WNOWAIT so the process stays
+/// an unreaped zombie: reaping it would free its pgid for reuse and a later
+/// kill(-pid) could reach an unrelated, freshly spawned group.
+fn leader_exited(pid: i32) -> Result<bool, ()> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if rc != 0 {
+        return Err(());
+    }
+    // WNOHANG with no state change returns 0 and leaves si_pid zeroed.
+    Ok(unsafe { info.si_pid() } == pid)
+}
+
+/// Collect every already-exited member of the command's process group that
+/// reparented to this process. When noob is pid 1 (the container case)
+/// orphaned grandchildren land here as zombies and nothing else ever waits
+/// on them. waitpid on the NEGATIVE pgid reaps exactly those, without ever
+/// touching children other threads own (MCP servers and sub-agents run in
+/// their own groups), and errors with ECHILD on a host run where orphans
+/// reparent to the real init instead. Must run AFTER the leader was reaped:
+/// -pgid matches the leader too, and stealing its status would break the
+/// exit code. Best-effort within `window`: a member that survives (setsid
+/// escapee, an unkilled background process) stays unreaped until it exits
+/// after a later call or the process ends; that residue is a known limit.
+fn reap_group_zombies(pgid: i32, window: Duration) {
+    let deadline = Instant::now() + window;
+    loop {
+        match unsafe { libc::waitpid(-pgid, std::ptr::null_mut(), libc::WNOHANG) } {
+            0 => {
+                // Members remain but none is waitable yet.
+                if Instant::now() >= deadline {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            rc if rc > 0 => {} // reaped one member; keep draining
+            _ => return,       // ECHILD: nothing of ours left in the group
+        }
+    }
 }
 
 /// First few words of the command for the one-line UI summary.
@@ -358,6 +425,38 @@ mod tests {
                 .contains("[background processes left by the command were killed"),
             "{}",
             out.content
+        );
+    }
+
+    #[test]
+    fn straggler_kill_preserves_the_leader_exit_code() {
+        let (_t, ctx) = test_ctx();
+        // The leader exits 7 before the straggler group kill; reaping is
+        // deferred until after that kill (the zombie pins the pgid) and
+        // the real exit code must survive the deferral.
+        let out = run(&ctx, &json!({"cmd": "sleep 30 & echo started; exit 7"}));
+        assert!(out.is_error);
+        assert!(out.content.starts_with("exit code 7\n"), "{}", out.content);
+        assert!(out.content.contains("were killed"), "{}", out.content);
+    }
+
+    #[test]
+    fn group_zombies_reparented_to_this_process_are_reaped() {
+        let (_t, ctx) = test_ctx();
+        // Mimic the container, where noob runs as pid 1 and orphaned
+        // grandchildren reparent to it: a subreaper receives them the same
+        // way without needing to be pid 1.
+        unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1u64) };
+        let out = run(&ctx, &json!({"cmd": "echo $$; sleep 30 &"}));
+        assert!(!out.is_error, "{}", out.content);
+        let leader: i32 = out.content.lines().next().unwrap().trim().parse().unwrap();
+        // The backgrounded sleep was group-killed and reparented here; the
+        // post-kill drain must have reaped it, leaving nothing waitable in
+        // the command's group.
+        let rc = unsafe { libc::waitpid(-leader, std::ptr::null_mut(), libc::WNOHANG) };
+        assert_eq!(
+            rc, -1,
+            "an unreaped zombie from the command's group remains"
         );
     }
 
