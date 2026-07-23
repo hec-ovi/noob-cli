@@ -1,5 +1,5 @@
 //! Live smoke against local endpoints. Opt-in: `./dev.sh smoke` runs
-//! `cargo test -- --ignored` with NOOB_LIVE=1 and host networking.
+//! `cargo test -- --ignored` with host networking (`./dev.sh smoke`).
 //!
 //! This is PLAN's top P1 risk gate: qwen tool-calling through the
 //! llama.cpp jinja template, driven by the real adapters, both wire
@@ -57,7 +57,7 @@ fn second_leg(call: &ToolCall, raw_items: Vec<serde_json::Value>) -> TurnRequest
 /// Chat shape: streamed tool call out, tool result back through the jinja
 /// template, final answer built on the result.
 #[test]
-#[ignore = "live: requires qwen at :8090 (NOOB_LIVE=1 ./dev.sh smoke)"]
+#[ignore = "live: requires qwen at :8090 (./dev.sh smoke)"]
 fn live_chat_toolcall_roundtrip() {
     let client = Client::new(Timeouts::default());
     let ep = live_endpoint(ApiStyle::Chat);
@@ -95,7 +95,7 @@ fn live_chat_toolcall_roundtrip() {
 
 /// Parallel tool calls in one inference (indexes 0 and 1, distinct ids).
 #[test]
-#[ignore = "live: requires qwen at :8090 (NOOB_LIVE=1 ./dev.sh smoke)"]
+#[ignore = "live: requires qwen at :8090 (./dev.sh smoke)"]
 fn live_chat_parallel_toolcalls() {
     let client = Client::new(Timeouts::default());
     let ep = live_endpoint(ApiStyle::Chat);
@@ -129,7 +129,7 @@ fn live_chat_parallel_toolcalls() {
 /// /v1/responses): function call out, function_call_output back, final
 /// answer; raw_items replayed verbatim.
 #[test]
-#[ignore = "live: requires qwen at :8090 (NOOB_LIVE=1 ./dev.sh smoke)"]
+#[ignore = "live: requires qwen at :8090 (./dev.sh smoke)"]
 fn live_responses_toolcall_roundtrip() {
     let client = Client::new(Timeouts::default());
     let ep = live_endpoint(ApiStyle::Responses);

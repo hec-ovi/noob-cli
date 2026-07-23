@@ -1,4 +1,4 @@
-//! Live P2 smoke (opt-in: NOOB_LIVE=1, `./dev.sh smoke`): the compiled
+//! Live P2 smoke (opt-in: `./dev.sh smoke`): the compiled
 //! binary driving the whole agent loop against the real qwen endpoint.
 //! This is the P2 slice of the all-terrain gauntlet: a real edit
 //! round-trip, and prefix-cache reuse proven from the endpoint's own
@@ -66,7 +66,7 @@ fn noob(config: &std::path::Path, work: &std::path::Path, args: &[&str]) -> std:
 /// Live smoke: qwen reads a file, edits it with the edit tool, and the
 /// change lands on disk. The whole loop, through the shipped binary.
 #[test]
-#[ignore = "live: needs qwen at :8090 (NOOB_LIVE=1)"]
+#[ignore = "live: needs qwen at :8090 (./dev.sh smoke)"]
 fn live_edit_round_trip() {
     let (config, work) = rig();
     std::fs::write(
@@ -103,7 +103,7 @@ fn live_edit_round_trip() {
 /// reports a high cached-prompt share, proving the append-only prefix
 /// discipline reaches llama.cpp's KV cache end to end.
 #[test]
-#[ignore = "live: needs qwen at :8090 (NOOB_LIVE=1)"]
+#[ignore = "live: needs qwen at :8090 (./dev.sh smoke)"]
 fn live_session_cache_reuse() {
     let (config, work) = rig();
     std::fs::write(work.path().join("notes.txt"), "the magic word is plover\n").unwrap();
@@ -160,7 +160,7 @@ fn live_session_cache_reuse() {
 /// qwen tokenizer via llama-server /tokenize, against the same ceilings the
 /// offline tiktoken test enforces.
 #[test]
-#[ignore = "live: needs qwen at :8090 (NOOB_LIVE=1)"]
+#[ignore = "live: needs qwen at :8090 (./dev.sh smoke)"]
 fn live_tokenizer_budget() {
     let (config, work) = rig();
     let out = noob(config.path(), work.path(), &["debug", "prompt", "--json"]);
@@ -193,7 +193,7 @@ fn live_tokenizer_budget() {
 /// visible plan, performs a file change, then a fresh resumed process can use
 /// the context tool and accurately explain what the preceding turn did.
 #[test]
-#[ignore = "live: needs qwen at :8090 (NOOB_LIVE=1)"]
+#[ignore = "live: needs qwen at :8090 (./dev.sh smoke)"]
 fn live_plan_context_and_followup_awareness() {
     let (config, work) = rig();
     let session = "live-requirements-awareness";

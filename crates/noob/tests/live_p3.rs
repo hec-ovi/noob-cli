@@ -1,4 +1,4 @@
-//! Live P3 smoke (opt-in: NOOB_LIVE=1, `./dev.sh smoke`): a real skill
+//! Live P3 smoke (opt-in: `./dev.sh smoke`): a real skill
 //! load-and-use round trip against qwen, through the shipped binary. This
 //! is gauntlet item 5: the resolver index routes the model to the skill,
 //! the body arrives as a tool result, and its content shapes the answer.
@@ -39,7 +39,7 @@ fn noob(config: &std::path::Path, work: &std::path::Path, args: &[&str]) -> std:
 /// nowhere else, and use it. Proves the whole chain on a small model:
 /// resolver index -> skill tool call -> body as tool result -> answer.
 #[test]
-#[ignore = "live: needs qwen at :8090 (NOOB_LIVE=1)"]
+#[ignore = "live: needs qwen at :8090 (./dev.sh smoke)"]
 fn live_skill_load_and_use() {
     let (config, work) = rig();
     let dir = work.path().join(".claude/skills/release-tags");

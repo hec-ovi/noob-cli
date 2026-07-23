@@ -52,6 +52,14 @@ pub struct Vt {
     /// In-flight UTF-8 lead+continuation bytes for one printable character.
     utf8: Vec<u8>,
     utf8_left: usize,
+    /// Rows that left the top of the viewport, oldest first, trailing blanks
+    /// trimmed: pushed by scroll-at-bottom, by reflow overflow on resize, and
+    /// by `ED 2`, which VTE-family terminals implement as "shift the WHOLE
+    /// viewport into scrollback and start clean" rather than blanking in
+    /// place. Modeling that shift is what makes the resize symptom the dock
+    /// used to have (archived stale frames and blank gaps in history)
+    /// visible to a test at all; the visible grid alone cannot show it.
+    scrollback: Vec<String>,
 }
 
 enum State {
@@ -77,7 +85,13 @@ impl Vt {
             csi: Vec::new(),
             utf8: Vec::new(),
             utf8_left: 0,
+            scrollback: Vec::new(),
         }
+    }
+
+    /// One viewport row as trimmed text, for the scrollback ring.
+    fn row_text(row: &[char]) -> String {
+        row.iter().collect::<String>().trim_end().to_string()
     }
 
     /// Resize the screen with VTE-style reflow, the behavior of the terminals
@@ -160,6 +174,7 @@ impl Vt {
                 grid.pop();
                 wrapped.pop();
             } else {
+                self.scrollback.push(Self::row_text(&grid[0]));
                 grid.remove(0);
                 wrapped.remove(0);
                 cursor.0 = cursor.0.saturating_sub(1);
@@ -329,11 +344,18 @@ impl Vt {
                 let mode = nums.first().copied().unwrap_or(0);
                 match mode {
                     2 | 3 => {
+                        // VTE semantics: the whole viewport (blank tail
+                        // included) shifts into scrollback; ED 3 then also
+                        // clears the scrollback itself.
                         for r in 0..self.rows {
+                            self.scrollback.push(Self::row_text(&self.grid[r]));
                             for c in 0..self.cols {
                                 self.grid[r][c] = ' ';
                             }
                             self.wrapped[r] = false;
+                        }
+                        if mode == 3 {
+                            self.scrollback.clear();
                         }
                     }
                     _ => {
@@ -381,6 +403,7 @@ impl Vt {
         if self.row + 1 < self.rows {
             self.row += 1;
         } else {
+            self.scrollback.push(Self::row_text(&self.grid[0]));
             self.grid.remove(0);
             self.grid.push(vec![' '; self.cols]);
             self.wrapped.remove(0);
@@ -401,6 +424,14 @@ impl Vt {
         let all = self.render();
         let start = all.len().saturating_sub(n);
         all[start..].to_vec()
+    }
+
+    /// Everything that scrolled or was archived off the top, oldest first.
+    /// This is what a human sees when they scroll up: resize regressions
+    /// (stale frame copies, screen-sized blank gaps) live here, not on the
+    /// visible grid.
+    pub fn scrollback(&self) -> &[String] {
+        &self.scrollback
     }
 
     /// A framed dump for `--nocapture` inspection: every row inside a ruler so
@@ -520,6 +551,30 @@ mod tests {
         vt.resize(4, 12);
         assert_eq!(lines(&vt)[0], "abcdefg");
         assert_eq!(lines(&vt)[1], "next");
+    }
+
+    #[test]
+    fn ed2_archives_the_whole_viewport_into_scrollback() {
+        // VTE-family semantics: ESC[2J shifts the entire viewport (content
+        // AND blank tail) into scrollback. This is what makes a resize-time
+        // viewport reset archive garbage screens, so any dock path that
+        // still resets shows up in the storm tests' scrollback assertions.
+        let mut vt = Vt::new(4, 10);
+        vt.feed("──────────\r\ntext".as_bytes());
+        vt.feed(b"\x1b[2J\x1b[H");
+        assert_eq!(lines(&vt), vec!["", "", "", ""]);
+        assert_eq!(vt.scrollback(), ["──────────", "text", "", ""]);
+        // ED 3 clears the scrollback itself.
+        vt.feed(b"later\x1b[3J");
+        assert!(vt.scrollback().is_empty());
+    }
+
+    #[test]
+    fn scroll_at_bottom_pushes_the_top_row_into_scrollback() {
+        let mut vt = Vt::new(2, 8);
+        vt.feed(b"one\r\ntwo\r\nthree");
+        assert_eq!(lines(&vt), vec!["two", "three"]);
+        assert_eq!(vt.scrollback(), ["one"]);
     }
 
     #[test]

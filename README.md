@@ -134,9 +134,7 @@ During a turn the input stays live: typing edits the next message, and Enter que
 - Read-only plan mode through `/plan`, followed by `/go`.
 - Lazy MCP over stdio and Streamable HTTP. Server schemas enter context only after connection, and `/mcp add` installs a server mid-session.
 - Runtime skill discovery and atomic `/skills add`, `remove`, and `reload`.
-- A default terminal dock with elapsed status, active tools, mid-turn message queueing, confirmations, cancellation, Tab completion for slash commands, persistent in-place plan and agents panels that stay animated between turns, and single-write batched repaints (no flicker while output streams).
-
-Known issue (minor edge case): resizing the terminal window is still unstable. The dock resets the viewport and repaints, but repeated resizes leave stale idle frames and blank gaps in the scrollback history. Pending a proper fix; avoid resizing mid-demo.
+- A default terminal dock with elapsed status, active tools, mid-turn message queueing, confirmations, cancellation, Tab completion for slash commands, persistent in-place plan and agents panels that stay animated between turns, and single-write batched repaints (no flicker while output streams). On resize the dock erases the frame at its reflowed height and repaints in place, mid-turn and at the idle prompt, so repeated resizes leave no stale frames or blank gaps in scrollback.
 - Interactive Markdown for headings, emphasis, lists, fenced code, JSON, and width-aware tables.
 - Matrix, ocean, amber, and violet display themes.
 

@@ -1,4 +1,4 @@
-//! Live P4 smoke (opt-in: NOOB_LIVE=1, `./dev.sh smoke`): a real call
+//! Live P4 smoke (opt-in: `./dev.sh smoke`): a real call
 //! through the websearch MCP server at :8000, driven by qwen through the
 //! shipped binary. This is live smoke item 6: the prompt line routes the
 //! model to mcp_connect, the catalog routes it to mcp_call, and the
@@ -17,7 +17,7 @@ fn websearch_url() -> String {
 }
 
 #[test]
-#[ignore = "live: needs qwen at :8090 and the websearch MCP at :8000 (NOOB_LIVE=1)"]
+#[ignore = "live: needs qwen at :8090 and the websearch MCP at :8000 (./dev.sh smoke)"]
 fn live_websearch_through_mcp() {
     let config = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();

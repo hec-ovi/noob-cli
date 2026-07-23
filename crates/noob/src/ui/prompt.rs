@@ -28,7 +28,7 @@ use std::sync::atomic::Ordering;
 use noob_provider::http::INTERRUPTED;
 
 use super::style::{DIM, RESET};
-use super::{Mode, Ui, commands};
+use super::{Mode, Ui, commands, table};
 
 thread_local! {
     /// Keys decoded past a submitted Enter within a single read (a multi-line
@@ -252,8 +252,8 @@ impl Ui {
     /// line scrolls horizontally instead of wrapping), so the frame is always
     /// exactly three rows and every in-place redraw (this, expand, refit,
     /// erase_frame) stays exact.
-    pub(super) fn redraw_input_row(&mut self, ed: &Editor, width: usize) {
-        self.redraw_input_row_hint(ed, width, "");
+    pub(super) fn redraw_input_row(&mut self, ed: &Editor, width: usize) -> InputExtent {
+        self.redraw_input_row_hint(ed, width, "")
     }
 
     /// Redraw the input line, showing a dim `hint` placeholder when the buffer is
@@ -262,7 +262,12 @@ impl Ui {
     /// the buffer and is never submitted, and the first keystroke replaces it.
     /// The clear-to-end-of-line (`\x1b[K`) is emitted AFTER the content, not
     /// before, so each frame overwrites the row in place with no blank flash.
-    pub(super) fn redraw_input_row_hint(&mut self, ed: &Editor, width: usize, hint: &str) {
+    pub(super) fn redraw_input_row_hint(
+        &mut self,
+        ed: &Editor,
+        width: usize,
+        hint: &str,
+    ) -> InputExtent {
         let color = self.box_color();
         let reset = if color.is_empty() { "" } else { RESET };
         let avail = width.saturating_sub(PREFIX_CELLS).max(1);
@@ -274,7 +279,10 @@ impl Ui {
             self.out(&format!(
                 "\r{color}{PREFIX}{reset}{dim}{shown}{dim_reset}\x1b[K\r\x1b[{PREFIX_CELLS}C"
             ));
-            return;
+            return InputExtent {
+                cells: PREFIX_CELLS + table::cell_width(&shown),
+                col: PREFIX_CELLS,
+            };
         }
         let (shown, cur) = input_window(&ed.buf, ed.cursor, avail);
         let mut s = format!("\r{color}{PREFIX}{reset}{shown}\x1b[K");
@@ -285,6 +293,10 @@ impl Ui {
             s.push_str(&format!("\x1b[{col}C"));
         }
         self.out(&s);
+        InputExtent {
+            cells: PREFIX_CELLS + table::cell_width(&shown),
+            col,
+        }
     }
 
     /// Redraw the input row, adding a dim slash-command completion hint after
@@ -292,7 +304,7 @@ impl Ui {
     /// back to the plain redraw for a non-command line, so nothing changes off
     /// the completion path. The reader calls this in place of `redraw_input_row`
     /// at the idle prompt.
-    pub(super) fn redraw_input_with_completion(&mut self, ed: &Editor, width: usize) {
+    pub(super) fn redraw_input_with_completion(&mut self, ed: &Editor, width: usize) -> InputExtent {
         match commands::hint(&ed.line()) {
             Some(hint) => self.redraw_input_row_completion(ed, width, &hint),
             None => self.redraw_input_row(ed, width),
@@ -304,7 +316,7 @@ impl Ui {
     /// lone marker, so the box always reads as a live input between turns rather
     /// than collapsing to a bare `›`. A `/`-prefixed draft still shows its
     /// slash-command completion. Display-only: the hint never enters the buffer.
-    pub(super) fn redraw_idle_input(&mut self, ed: &Editor, width: usize) {
+    pub(super) fn redraw_idle_input(&mut self, ed: &Editor, width: usize) -> InputExtent {
         match commands::hint(&ed.line()) {
             Some(hint) => self.redraw_input_row_completion(ed, width, &hint),
             None => self.redraw_input_row_hint(ed, width, "type a message"),
@@ -317,12 +329,17 @@ impl Ui {
     /// the combined width never exceeds the terminal and can never wrap. The
     /// cursor parks right after the token (before the hint), so typing extends
     /// the command. The hint is display-only, never part of the buffer.
-    pub(super) fn redraw_input_row_completion(&mut self, ed: &Editor, width: usize, hint: &str) {
+    pub(super) fn redraw_input_row_completion(
+        &mut self,
+        ed: &Editor,
+        width: usize,
+        hint: &str,
+    ) -> InputExtent {
         let color = self.box_color();
         let reset = if color.is_empty() { "" } else { RESET };
         let avail = width.saturating_sub(PREFIX_CELLS).max(1);
         let (shown, cur) = input_window(&ed.buf, ed.cursor, avail);
-        let hint_room = avail.saturating_sub(shown.chars().count());
+        let hint_room = avail.saturating_sub(table::cell_width(&shown));
         let shown_hint: String = hint.chars().take(hint_room).collect();
         let dim = if self.color { DIM } else { "" };
         let dim_reset = if self.color { RESET } else { "" };
@@ -333,6 +350,10 @@ impl Ui {
         self.out(&format!(
             "\r{color}{PREFIX}{reset}{shown}{dim}{shown_hint}{dim_reset}\x1b[K\r\x1b[{col}C"
         ));
+        InputExtent {
+            cells: PREFIX_CELLS + table::cell_width(&shown) + table::cell_width(&shown_hint),
+            col,
+        }
     }
 
     /// Wipe the three frame rows (the input line, the bottom rule below it, the
@@ -391,6 +412,17 @@ const PREFIX: &str = "› ";
 /// Its display width in columns (arrow and space, each single-width).
 const PREFIX_CELLS: usize = 2;
 
+/// The painted extent of one input row, in terminal cells: how many columns
+/// the row's visible content spans (marker included) and the column the
+/// cursor parked on. The dock records the extent of the row it last painted
+/// so a resize can retire the frame by its reflowed physical height instead
+/// of resetting the viewport.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct InputExtent {
+    pub(super) cells: usize,
+    pub(super) col: usize,
+}
+
 /// `NOOB_RAW=0|false|off|no` forces the cooked reader; anything else (including
 /// unset) leaves the editor on. A rebuild-free escape hatch for odd terminals.
 fn raw_enabled_by_env() -> bool {
@@ -418,30 +450,53 @@ pub(super) fn box_rule(plan: bool, width: usize) -> String {
 
 /// A one-physical-row view of the input buffer: the visible slice (control
 /// chars, including any pasted newline, shown as spaces so nothing wraps or
-/// moves the cursor unexpectedly) and the cursor's column within it. `avail` is
-/// the number of columns available for text. The window holds the cursor: it
-/// stays left-anchored until the cursor would fall off the right edge, then
-/// scrolls so the cursor rides the right. Keeping the input to one row is what
-/// lets every in-place redraw assume a two-row box. Pure, so unit-testable.
+/// moves the cursor unexpectedly) and the cursor's column within it, in
+/// terminal cells. `avail` is the number of columns available for text. The
+/// window holds the cursor: it stays left-anchored until the cursor would fall
+/// off the right edge, then scrolls so the cursor rides the right. Keeping the
+/// input to one row is what lets every in-place redraw assume a two-row box.
+/// Pure, so unit-testable.
 ///
-/// Widths are counted in `char`s, i.e. one column per character: this carries no
-/// unicode-width table (a deliberate zero-dependency choice), so a run of
-/// double-width CJK or emoji glyphs is the one case that can still spill past the
-/// row and nudge the cursor. Plain single-width text (paths, code, prose) is
-/// exact, and the buffer and the submitted line are always correct regardless.
+/// Widths are counted in display cells via the same table the pinned-region
+/// clamp uses, so a run of double-width CJK or emoji glyphs windows to fewer
+/// characters instead of spilling past the row and desyncing the frame's
+/// one-physical-row contract. On ASCII this is exactly the old per-char count.
 fn input_window(buf: &[char], cursor: usize, avail: usize) -> (String, usize) {
     let avail = avail.max(1);
-    let start = if cursor >= avail {
-        cursor - avail + 1
-    } else {
-        0
+    // A control char is shown as one space, so it costs one cell.
+    let cw = |c: char| {
+        if c.is_control() {
+            1
+        } else {
+            table::char_width(c)
+        }
     };
-    let end = (start + avail).min(buf.len());
+    let head: usize = buf[..cursor].iter().map(|&c| cw(c)).sum();
+    let mut start = 0usize;
+    if head >= avail {
+        // Scroll left-off chars until the cursor rides the right edge.
+        let mut shed = head + 1 - avail;
+        while start < cursor && shed > 0 {
+            shed = shed.saturating_sub(cw(buf[start]));
+            start += 1;
+        }
+    }
+    let mut used: usize = buf[start..cursor].iter().map(|&c| cw(c)).sum();
+    let mut end = cursor;
+    while end < buf.len() {
+        let w = cw(buf[end]);
+        if used + w > avail {
+            break;
+        }
+        used += w;
+        end += 1;
+    }
     let shown: String = buf[start..end]
         .iter()
         .map(|&c| if c.is_control() { ' ' } else { c })
         .collect();
-    (shown, cursor - start)
+    let cur_cells: usize = buf[start..cursor].iter().map(|&c| cw(c)).sum();
+    (shown, cur_cells)
 }
 
 /// Terminal width in columns via the window-size ioctl; 80 when it is

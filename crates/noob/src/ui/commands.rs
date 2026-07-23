@@ -83,9 +83,11 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
 ];
 
-/// The command list as the banner and the unknown-command notice show it:
-/// `/plan /clear-plan /go /status /sessions /agents /config /compact /skills /quit`. Both callers read this, so the
-/// two can never drift from the list completion uses.
+/// The command list as the banner and the unknown-command notice show it,
+/// every registered command in order (`/plan /clear-plan /go /status
+/// /context /sessions /agents /config /compact /skills /mcp /quit`). Both
+/// callers read this, so the two can never drift from the list completion
+/// uses.
 pub(crate) fn banner() -> String {
     COMMANDS
         .iter()

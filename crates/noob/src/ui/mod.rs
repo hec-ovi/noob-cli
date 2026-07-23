@@ -349,11 +349,12 @@ impl Ui {
     /// `NO_COLOR` removes SGR while headings, lists, code, tables, and control
     /// sanitization remain readable. Piped and headless surfaces stay raw.
     fn rich_text(&self) -> bool {
-        self.mode == Mode::Repl && self.ansi
+        self.is_interactive()
     }
 
     /// True at an interactive REPL terminal. Gates the exit session hint, which
-    /// a piped REPL neither needs nor should print (it must stay byte-identical).
+    /// a piped REPL neither needs nor should print (it must stay byte-identical),
+    /// and is the same predicate rich text keys off.
     pub fn is_interactive(&self) -> bool {
         self.mode == Mode::Repl && self.ansi
     }

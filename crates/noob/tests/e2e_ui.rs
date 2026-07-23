@@ -3865,15 +3865,19 @@ fn skills_remove_announces_and_the_tool_rejects_the_gone_skill() {
 // human would, both mid-turn (frame live) and at idle (frame torn down).
 // ---------------------------------------------------------------------------
 
-/// The U+203A input marker the dock's input row always leads with.
 /// Diagnostic replay: feed a captured raw byte file (NOOB_REPLAY, with
 /// NOOB_REPLAY_ROWS/COLS) through the reflow emulator and print the screen.
-/// Ignored in normal runs; used to inspect live-terminal captures with the
-/// exact same emulator the tests trust.
+/// Ignored in normal runs, and a no-op without NOOB_REPLAY set: `./dev.sh
+/// smoke` runs every `--ignored` test, so this must pass quietly there
+/// instead of failing each smoke run on an unset diagnostic variable. Run it
+/// on demand with `--nocapture` to see the dump.
 #[test]
 #[ignore]
 fn replay_captured_bytes() {
-    let path = std::env::var("NOOB_REPLAY").expect("set NOOB_REPLAY to a raw capture file");
+    let Ok(path) = std::env::var("NOOB_REPLAY") else {
+        eprintln!("replay: set NOOB_REPLAY to a raw capture file to use this diagnostic");
+        return;
+    };
     let rows: usize = std::env::var("NOOB_REPLAY_ROWS")
         .unwrap_or_else(|_| "24".into())
         .parse()
@@ -3886,9 +3890,9 @@ fn replay_captured_bytes() {
     let mut vt = vt::Vt::new(rows, cols);
     vt.feed(&bytes);
     println!("{}", vt.dump(&path));
-    panic!("replay dump above (ignored test, run on demand)");
 }
 
+/// The U+203A input marker the dock's input row always leads with.
 const MARKER: &str = "\u{203a}";
 
 /// Every glyph an in-progress `[~]` row may show: the raw glyph plus the four
@@ -4930,6 +4934,162 @@ fn dock_active_frame_shrink_resize_leaves_no_rule_fragments() {
         "the frame is exactly top rule, input row, bottom rule:\n{}",
         vt.dump("after shrink")
     );
+}
+
+/// Scrollback must hold no archived frame garbage: no rule-sized `─` run (a
+/// stale frame copy) and no screen-height run of blank rows (the gap a
+/// viewport reset used to archive below the frame). Legitimate history (the
+/// banner, scrolled transcript) passes; the pre-fix resize path fails on its
+/// first reset, which VTE-family terminals turn into one archived garbage
+/// screen per resize.
+fn assert_scrollback_clean(vt: &vt::Vt, screen_rows: usize, label: &str) {
+    let back = vt.scrollback().to_vec();
+    let stale_rules = rule_row_indices(&back);
+    assert!(
+        stale_rules.is_empty(),
+        "{label}: archived frame rules in scrollback at rows {stale_rules:?}:\n{back:#?}"
+    );
+    let mut run = 0usize;
+    let mut worst = 0usize;
+    for row in &back {
+        if row.is_empty() {
+            run += 1;
+            worst = worst.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    assert!(
+        worst < screen_rows,
+        "{label}: a {worst}-row blank gap was archived into scrollback:\n{back:#?}"
+    );
+}
+
+/// REPEATED resizes at the idle prompt leave scrollback untouched. The old
+/// path reset the viewport per resize and VTE-family terminals archive the
+/// whole cleared screen (reflowed stale frame plus blank tail) into history,
+/// so a resize storm stacked one garbage screen per step: the README's
+/// former known issue. The frame is now retired wrap-aware and repainted in
+/// place, so after shrink-widen-shrink the scrollback holds nothing new and
+/// the screen holds exactly one idle box at the final width.
+#[test]
+fn dock_repeated_resizes_archive_nothing_into_scrollback() {
+    const ROWS: u16 = 14;
+
+    let rig = rig();
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, 100)), &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.drain(std::time::Duration::from_millis(300));
+
+    let mut vt = vt::Vt::new(ROWS as usize, 100);
+    let mut mark = pty.raw.len();
+    vt.feed(&pty.raw[..mark]);
+    for &cols in &[60u16, 100, 50] {
+        pty.resize(ROWS, cols);
+        pty.drain(std::time::Duration::from_millis(800));
+        vt.resize(ROWS as usize, cols as usize);
+        vt.feed(&pty.raw[mark..]);
+        mark = pty.raw.len();
+    }
+
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+
+    assert_scrollback_clean(&vt, ROWS as usize, "idle resize storm");
+    let rows = vt.render();
+    let rules = rule_row_indices(&rows);
+    assert_eq!(
+        rules.len(),
+        2,
+        "exactly the idle box's two rules survive the storm:\n{}",
+        vt.dump("after storm")
+    );
+    let marker = rows
+        .iter()
+        .rposition(|r| r.contains(MARKER))
+        .unwrap_or_else(|| panic!("idle input row missing:\n{}", vt.dump("after storm")));
+    assert_eq!(
+        (rules[0], rules[1]),
+        (marker - 1, marker + 1),
+        "the surviving rules are the box around the input row:\n{}",
+        vt.dump("after storm")
+    );
+    for index in rules {
+        let dashes = rows[index].chars().filter(|&c| c == '─').count();
+        assert_eq!(
+            dashes, 50,
+            "each rule spans the final width exactly:\n{}",
+            vt.dump("after storm")
+        );
+    }
+}
+
+/// The same storm mid-turn: the streamed transcript above the frame must
+/// survive the resizes on screen (not archived, not duplicated, not
+/// shredded), and scrollback must gain no frame garbage. This is the
+/// scenario where the old viewport reset was most destructive: it archived
+/// the partial transcript together with the stale frame on every step.
+#[test]
+fn dock_mid_turn_repeated_resizes_keep_the_transcript_clean() {
+    const ROWS: u16 = 14;
+
+    let rig = rig();
+    let text = "aa-line\nbb-line\nZZEND";
+    rig.server.enqueue_raw(stalled_stream(text, 2, 6000, true));
+
+    let mut pty = spawn_pty_sized(&rig, DOCK, Some((ROWS, 100)), &[]);
+    pty.wait_for("type a task");
+    pty.wait_for(RAW_READY);
+    pty.send(b"go\r");
+    pty.wait_for("Working");
+    pty.wait_for("aa-line"); // inside the stall
+    pty.drain(std::time::Duration::from_millis(300));
+
+    let mut vt = vt::Vt::new(ROWS as usize, 100);
+    let mut mark = pty.raw.len();
+    vt.feed(&pty.raw[..mark]);
+    for &cols in &[60u16, 100, 50] {
+        pty.resize(ROWS, cols);
+        pty.drain(std::time::Duration::from_millis(700));
+        vt.resize(ROWS as usize, cols as usize);
+        vt.feed(&pty.raw[mark..]);
+        mark = pty.raw.len();
+    }
+
+    pty.wait_for("ZZEND");
+    settle();
+    pty.send(&[0x04]);
+    pty.wait_for("resume with");
+    let status = pty.finish();
+    assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen);
+    rig.server.assert_clean();
+    vt.feed(&pty.raw[mark..]);
+
+    assert_scrollback_clean(&vt, ROWS as usize, "mid-turn resize storm");
+    // Every streamed line survives exactly once across screen + history: the
+    // old resets archived transcript copies with the garbage, and a
+    // shredded stale-geometry erase could duplicate or destroy them.
+    let everything: Vec<String> = vt
+        .scrollback()
+        .iter()
+        .cloned()
+        .chain(vt.render())
+        .collect();
+    for needle in ["aa-line", "bb-line", "ZZEND"] {
+        let count = everything
+            .iter()
+            .filter(|row| row.contains(needle))
+            .count();
+        assert_eq!(
+            count, 1,
+            "{needle} must appear exactly once after the storm:\n{}",
+            vt.dump("after storm")
+        );
+    }
 }
 
 /// Shrinking with a TYPED DRAFT wider than the new width, then widening back.

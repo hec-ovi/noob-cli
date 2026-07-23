@@ -16,8 +16,11 @@ use std::time::{Duration, Instant};
 
 use noob_provider::http::INTERRUPTED;
 
-use super::prompt::{Decoder, Editor, Input, Key, RawGuard, Step, term_height, term_width};
+use super::prompt::{
+    Decoder, Editor, Input, InputExtent, Key, RawGuard, Step, term_height, term_width,
+};
 use super::style::RESET;
+use super::table;
 use super::{
     BufferedTurnRenderer, RegionTone, TurnEvent, Ui, elapsed_label, safe_terminal_text, scanner,
 };
@@ -98,15 +101,73 @@ const PLAN_STEP_ROWS: usize = 6;
 /// screen (where relative cursor moves would clamp at the top and desync).
 const FRAME_RESERVE_ROWS: usize = 4;
 
-/// The dock's answer to a resize: a viewport reset. A reflowing terminal
-/// (VTE, kitty, alacritty, ...) rewraps every logical line longer than the
-/// new width into several physical rows the moment the window changes, and
-/// no cursor-relative erase can reliably find the old frame afterwards
-/// (v0.3.7 walked wrap-aware geometry and real VTE still shredded rows).
-/// Clearing the screen and homing the cursor is reflow-agnostic by
-/// construction: the frame repaints from the top-left, and VTE pushes the
-/// cleared screen into scrollback so the transcript stays in history.
+/// The dock's LAST-RESORT answer to a resize. VTE-family terminals implement
+/// `ED 2` by pushing the whole viewport (the reflowed stale frame AND the
+/// blank rows below it) into scrollback, so every reset permanently archives
+/// one garbage screen into history: the "stale idle frames and blank gaps"
+/// of the old known issue. The primary path is now `retire_frame_reflowed`,
+/// which erases the frame wrap-aware using the recorded extent of the rows
+/// actually painted; this reset remains only for the pathological case where
+/// the reflowed frame cannot fit the new screen and a relative-move erase
+/// could clamp at an edge and desync.
 const VIEWPORT_RESET: &[u8] = b"\x1b[2J\x1b[H";
+
+/// The physical extent of the frame currently on screen, recorded at paint
+/// time: the display width of every painted row (top rule, pinned region
+/// rows, input row, bottom rule) plus the parked cursor column. A resize
+/// erases the frame by walking these widths reflowed at the NEW width
+/// (`phys(w) = max(1, ceil(w / new))`, exact under DECAWM deferred wrap
+/// because every painted row ends in an explicit newline), instead of
+/// resetting the viewport. The cursor is glued to its cell by the reflow, so
+/// its physical offset within the input row is `col / new`.
+#[derive(Clone, Debug, Default)]
+struct DrawnFrame {
+    /// Visible cells of the top rule and each pinned region row, in order.
+    rows_above_input: Vec<usize>,
+    /// Visible cells and parked cursor column of the input row.
+    input: InputExtent,
+    /// Visible cells of the bottom rule.
+    bottom: usize,
+}
+
+/// Display cells of a styled row: SGR/CSI and OSC sequences are zero-width,
+/// everything else counts through the shared width table. The frame records
+/// its painted rows through this, so the resize retire and the paint always
+/// measure identically.
+fn visible_width(s: &str) -> usize {
+    let mut cells = 0usize;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            cells += table::char_width(c);
+            continue;
+        }
+        match chars.peek() {
+            Some('[') => {
+                chars.next();
+                // CSI: parameter/intermediate bytes, then one final byte.
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                chars.next();
+                // OSC: swallowed through BEL or ESC-backslash.
+                while let Some(c) = chars.next() {
+                    if c == '\u{07}' || (c == '\u{1b}' && chars.peek() == Some(&'\\')) {
+                        break;
+                    }
+                }
+            }
+            _ => {
+                chars.next();
+            }
+        }
+    }
+    cells
+}
 
 /// The spinner tick for the idle prompt's pinned rows, on the same cadence as
 /// the active frame's comet so the glyph does not change speed across a turn
@@ -320,6 +381,12 @@ fn reader(tx: SyncSender<Ev>) {
     let mut dec = Decoder::default();
     let mut buf = [0u8; 1024];
     loop {
+        // A signal that landed while this thread was decoding or sending
+        // (not blocked in read) still set the flag; check before blocking
+        // again, or the resize would sit unnoticed until the next keypress.
+        if WINCH.swap(false, Ordering::SeqCst) && tx.send(Ev::Resize).is_err() {
+            return;
+        }
         let n = unsafe {
             libc::read(
                 libc::STDIN_FILENO,
@@ -371,7 +438,15 @@ fn reader(tx: SyncSender<Ev>) {
                 return;
             }
             // ready > 0: the sequence tail is waiting, the next read joins
-            // it; ready < 0 (EINTR): the next read's error path handles it.
+            // it. ready < 0 (EINTR): the signal was consumed HERE, not by a
+            // blocked read, so surface it now; the loop-top check covers the
+            // resize flag and the interrupt must not wait for a keypress.
+            if ready < 0
+                && INTERRUPTED.load(Ordering::SeqCst)
+                && tx.send(Ev::Key(Key::Interrupt)).is_err()
+            {
+                return;
+            }
         }
     }
 }
@@ -496,6 +571,10 @@ pub struct DockSession {
     /// while this session owns `tx`, so ReaderGone must survive the turn where
     /// it was observed and make every later prompt return EOF immediately.
     reader_gone: bool,
+    /// Extent of the frame currently painted, None when no frame is on
+    /// screen. Every frame paint records it; every full erase clears it. The
+    /// resize path retires the frame through it (see `DrawnFrame`).
+    drawn_frame: Option<DrawnFrame>,
     _guard: RawGuard,
 }
 
@@ -517,6 +596,7 @@ impl DockSession {
             idle_esc_armed_until: None,
             plan_block: None,
             reader_gone: false,
+            drawn_frame: None,
             _guard: guard,
         })
     }
@@ -581,12 +661,18 @@ impl DockSession {
         // live rows are pinned immediately above that box; the editor remains
         // on the same single input row and stays fully usable.
         let mut width = term_width();
+        let mut height = term_height();
         let idle_started = Instant::now();
         let mut drawn_tick = 0usize;
         let mut agent_rows = self.idle_region_rows(ui, background, width);
         self.draw_idle_prompt(ui, plan, width, &agent_rows, drawn_tick);
         let mut input_dirty = true;
         loop {
+            // Geometry first: everything below (the settled-ready erase, the
+            // key-driven erases) walks the frame by relative moves, which are
+            // only exact while the paint geometry still matches the terminal.
+            let resized = term_width() != width || term_height() != height;
+
             // Keyboard input wins a race with a completing child. Drain what
             // the reader has already accepted before considering automatic
             // continuation, and never steal a prompt that the human is in the
@@ -595,7 +681,8 @@ impl DockSession {
             while let Ok(ev) = self.rx.try_recv() {
                 self.absorb_idle(ev);
             }
-            if !self.reader_gone
+            if !resized
+                && !self.reader_gone
                 && self.draft.is_empty()
                 && self.pending.is_empty()
                 && background.is_some_and(crate::subagent::BackgroundHub::settled_ready)
@@ -604,16 +691,20 @@ impl DockSession {
                 return Input::BackgroundReady;
             }
 
-            if term_width() != width {
-                // A resize: wait out the SIGWINCH burst, then reset the
-                // viewport and repaint the frame from the top-left (see
-                // VIEWPORT_RESET; the terminal's reflow makes any in-place
-                // erase of the old frame unreliable).
+            if resized {
+                // A resize: wait out the SIGWINCH burst, retire the reflowed
+                // frame wrap-aware, and repaint in place at the new geometry.
+                // The transcript above survives on screen; nothing is pushed
+                // into scrollback. Only when the reflowed frame cannot fit
+                // the new screen does the viewport reset remain as fallback.
                 width = settled_width();
+                height = term_height();
                 agent_rows = self.idle_region_rows(ui, background, width);
                 drawn_tick = idle_tick(idle_started);
                 ui.begin_batch();
-                ui.out_raw(VIEWPORT_RESET);
+                if !self.retire_frame_reflowed(ui, width, height) {
+                    ui.out_raw(VIEWPORT_RESET);
+                }
                 self.draw_idle_prompt(ui, plan, width, &agent_rows, drawn_tick);
                 ui.end_batch();
                 input_dirty = true;
@@ -710,7 +801,8 @@ impl DockSession {
                 return Input::Eof;
             }
             if input_dirty {
-                ui.redraw_idle_input(&self.draft, width);
+                let extent = ui.redraw_idle_input(&self.draft, width);
+                self.note_input(extent);
                 input_dirty = false;
             }
             // A hub needs the periodic wake for elapsed times and settled
@@ -787,9 +879,11 @@ impl DockSession {
         let top = super::prompt::box_rule(plan, width);
         let bottom = super::prompt::box_rule(false, width);
         let mut s = format!("\r\x1b[2K{color}{top}{reset}");
+        let mut rows_above_input = vec![visible_width(&top)];
         for row in rows {
             s.push_str("\r\n\x1b[2K");
             s.push_str(&animated_region_row(row, tick));
+            rows_above_input.push(visible_width(row));
         }
         s.push_str("\r\n\x1b[2K\r\n\x1b[2K");
         s.push_str(&format!("{color}{bottom}{reset}"));
@@ -797,6 +891,13 @@ impl DockSession {
         ui.begin_batch();
         ui.out_raw(s.as_bytes());
         ui.end_batch();
+        // The input row paints blank here; the idle loop's input redraw runs
+        // before any wait and refreshes the recorded extent via note_input.
+        self.drawn_frame = Some(DrawnFrame {
+            rows_above_input,
+            input: InputExtent::default(),
+            bottom: visible_width(&bottom),
+        });
     }
 
     /// Repaint the pinned rows inside the idle frame in place, advancing the
@@ -821,7 +922,8 @@ impl DockSession {
         // One row down from the last region row is the input row.
         s.push_str("\x1b[1B\r");
         ui.out_raw(s.as_bytes());
-        ui.redraw_idle_input(&self.draft, width);
+        let extent = ui.redraw_idle_input(&self.draft, width);
+        self.note_input(extent);
         ui.end_batch();
     }
 
@@ -853,6 +955,7 @@ impl DockSession {
     /// the per-prompt editor), collapse the frame to the message record,
     /// and hand the line out. The draft resets for the next prompt.
     fn submit(&mut self, ui: &mut Ui, expanded: bool) -> Input {
+        self.drawn_frame = None;
         if INTERRUPTED.swap(false, Ordering::SeqCst) {
             ui.erase(expanded);
             self.draft = Editor::default();
@@ -912,6 +1015,7 @@ impl DockSession {
     ) {
         let mut tracker = OutTracker::default();
         let mut width = term_width();
+        let mut height = term_height();
         let mut ask: Option<AskState> = None;
         let mut cancel = Cancel::default();
         let mut renderer = ui.buffered_turn_renderer();
@@ -954,14 +1058,18 @@ impl DockSession {
 
         loop {
             cancel.expire(Instant::now());
-            if term_width() != width {
-                // A resize: wait out the SIGWINCH burst, then reset the
-                // viewport and repaint the frame from the top-left (see
-                // VIEWPORT_RESET). The partial output line moved into
-                // scrollback with the rest of the screen, so the tracker
-                // restarts on a fresh row and the next batch never hops up
-                // onto a row that no longer exists.
+            if term_width() != width || term_height() != height {
+                // A resize: wait out the SIGWINCH burst, retire the reflowed
+                // frame wrap-aware, and repaint in place at the new geometry.
+                // The transcript above the frame survives on screen; nothing
+                // is archived into scrollback. The partial output line
+                // reflowed with the terminal and the tracker's column math
+                // predates it, so the tracker restarts on a fresh row either
+                // way. A height-only change matters too: the region cap is
+                // computed from the screen height, and a frame taller than
+                // the screen would clamp its relative moves and desync.
                 width = settled_width();
+                height = term_height();
                 region_rows = self.region_rows(
                     ui,
                     self.plan_block.as_deref(),
@@ -974,7 +1082,9 @@ impl DockSession {
                     .unwrap_or_default();
                 tracker = OutTracker::default();
                 ui.begin_batch();
-                ui.out_raw(VIEWPORT_RESET);
+                if !self.retire_frame_reflowed(ui, width, height) {
+                    ui.out_raw(VIEWPORT_RESET);
+                }
                 self.draw_active_frame(
                     ui,
                     plan,
@@ -1003,11 +1113,11 @@ impl DockSession {
                     Err(RecvTimeoutError::Timeout) => {
                         cancel.expire(Instant::now());
                         // The terminal may have resized while this loop was
-                        // blocked; a repaint at the old width would walk the
-                        // wrong rows of a reflowed screen. Skip the refresh
-                        // and let the width check at the top of the loop
-                        // reset the viewport first.
-                        if term_width() != width {
+                        // blocked; a repaint at the old geometry would walk
+                        // the wrong rows of a reflowed screen. Skip the
+                        // refresh and let the check at the top of the loop
+                        // retire and repaint first.
+                        if term_width() != width || term_height() != height {
                             continue;
                         }
                         let refreshed = self.region_rows(
@@ -1050,6 +1160,19 @@ impl DockSession {
                     Err(RecvTimeoutError::Disconnected) => return,
                 },
             };
+
+            // A resize may have landed while recv blocked. Every arm below
+            // erases or repaints by relative moves at the recorded geometry,
+            // so an event processed at stale geometry would shred the
+            // reflowed frame one write before the loop-top branch could
+            // retire it. Park the event and retire first; Ev::Resize itself
+            // is only a wake and is consumed by the loop-top check.
+            if !matches!(first, Ev::Resize)
+                && (term_width() != width || term_height() != height)
+            {
+                deferred = Some(first);
+                continue;
+            }
 
             match first {
                 Ev::Render(event) => {
@@ -1757,6 +1880,61 @@ impl DockSession {
         }
         s.push_str(&format!("\x1b[{}A\r", height - 1));
         ui.out_raw(s.as_bytes());
+        self.drawn_frame = None;
+    }
+
+    /// Erase the on-screen frame AFTER a resize, when the terminal's reflow
+    /// has rewrapped the painted rows: each recorded row of `w` cells now
+    /// occupies `max(1, ceil(w / new_width))` physical rows (exact under
+    /// DECAWM deferred wrap, since every painted row ended in an explicit
+    /// newline and a parked latch never fires), and the cursor stayed glued
+    /// to its cell, `col / new_width` physical rows into the input row. Walk
+    /// up to the frame's first physical row, clear every reflowed row, and
+    /// return to the top, leaving the transcript above untouched: nothing is
+    /// archived into scrollback, which is what the old viewport reset got
+    /// wrong. Returns false, leaving the screen alone, when no extent is
+    /// recorded or the reflowed frame cannot fit the new screen (relative
+    /// moves would clamp at an edge and desync); the caller then falls back
+    /// to VIEWPORT_RESET.
+    fn retire_frame_reflowed(&mut self, ui: &mut Ui, new_width: usize, new_height: usize) -> bool {
+        let Some(frame) = self.drawn_frame.take() else {
+            return false;
+        };
+        let n = new_width.max(1);
+        let phys = |w: usize| w.div_ceil(n).max(1);
+        let above: usize = frame.rows_above_input.iter().map(|&w| phys(w)).sum();
+        // The cursor's cell is always within the input row's painted span,
+        // but keep the max as a structural guarantee for the walk below.
+        let input_rows = phys(frame.input.cells.max(frame.input.col + 1));
+        let total = above + input_rows + phys(frame.bottom);
+        if total + 1 > new_height {
+            return false;
+        }
+        let up = above + frame.input.col / n;
+        let mut s = String::from("\r");
+        if up > 0 {
+            s.push_str(&format!("\x1b[{up}A"));
+        }
+        s.push_str("\x1b[2K");
+        for _ in 1..total {
+            s.push_str("\x1b[1B\r\x1b[2K");
+        }
+        if total > 1 {
+            s.push_str(&format!("\x1b[{}A", total - 1));
+        }
+        s.push('\r');
+        ui.out_raw(s.as_bytes());
+        true
+    }
+
+    /// Record the input row's freshly painted extent on the current frame.
+    /// The input row is the only frame row repainted on its own (every
+    /// keystroke), so its extent is kept current here while the other rows
+    /// keep the widths recorded at the last full frame paint.
+    fn note_input(&mut self, extent: InputExtent) {
+        if let Some(frame) = self.drawn_frame.as_mut() {
+            frame.input = extent;
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1778,16 +1956,24 @@ impl DockSession {
         // status, advancing into fresh rows with \r\n and clearing each (a no-op
         // on the blank rows write_above just opened, self-healing otherwise).
         let mut s = format!("\r\x1b[2K{top}");
+        let mut rows_above_input = vec![visible_width(&top)];
         for row in region_rows {
             s.push_str("\r\n\x1b[2K");
             s.push_str(&animated_region_row(row, tick));
+            rows_above_input.push(visible_width(row));
         }
         s.push_str("\r\n\x1b[2K\r\n\x1b[2K");
         s.push_str(&bottom);
         s.push_str("\x1b[1A");
         ui.begin_batch();
         ui.out_raw(s.as_bytes());
-        self.redraw_active_input(ui, width, ask);
+        self.drawn_frame = Some(DrawnFrame {
+            rows_above_input,
+            input: InputExtent::default(),
+            bottom: visible_width(&bottom),
+        });
+        let extent = self.redraw_active_input(ui, width, ask);
+        self.note_input(extent);
         ui.end_batch();
     }
 
@@ -1813,6 +1999,7 @@ impl DockSession {
         let tick = (started.elapsed().as_millis() / COMET_MS as u128) as usize;
         let up = 1 + region_rows.len();
         let mut s = format!("\r\x1b[{up}A\r\x1b[2K{top}");
+        let mut rows_above_input = vec![visible_width(&top)];
         for row in region_rows {
             // Clear the whole line before writing the row (one atomic write, so
             // no flash): a trailing clear-to-end would instead sit on the parked
@@ -1820,23 +2007,30 @@ impl DockSession {
             // its last glyph on every repaint.
             s.push_str("\x1b[1B\r\x1b[2K");
             s.push_str(&animated_region_row(row, tick));
+            rows_above_input.push(visible_width(row));
         }
         s.push_str("\x1b[2B\r\x1b[2K");
         s.push_str(&bottom);
         s.push_str("\x1b[1A\r");
         ui.begin_batch();
         ui.out_raw(s.as_bytes());
-        self.redraw_active_input(ui, width, ask);
+        self.drawn_frame = Some(DrawnFrame {
+            rows_above_input,
+            input: InputExtent::default(),
+            bottom: visible_width(&bottom),
+        });
+        let extent = self.redraw_active_input(ui, width, ask);
+        self.note_input(extent);
         ui.end_batch();
     }
 
-    fn redraw_active_input(&mut self, ui: &mut Ui, width: usize, ask: &Option<AskState>) {
+    fn redraw_active_input(&mut self, ui: &mut Ui, width: usize, ask: &Option<AskState>) -> InputExtent {
         if let Some(a) = ask {
             let shown = format!("{} [y/N] {}", safe_terminal_text(&a.question), a.answer);
             let ed = Editor::from_line(&shown);
-            ui.redraw_input_row(&ed, width);
+            ui.redraw_input_row(&ed, width)
         } else {
-            ui.redraw_input_row_hint(&self.draft, width, "type a message; Enter queues it");
+            ui.redraw_input_row_hint(&self.draft, width, "type a message; Enter queues it")
         }
     }
 
@@ -1920,12 +2114,27 @@ fn queued_region_row(ui: &Ui, message: &str, width: usize) -> PinnedRegionRow {
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
     // Marker (2 cells) + text + one space + tag must fit one physical row.
+    // Budgeted in display cells like every region row (clamp_to_row), so a
+    // wide CJK/emoji message cannot wrap the pinned row and desync the
+    // frame-height bookkeeping every later erase relies on.
     let avail = width.max(1).saturating_sub(2 + 1 + TAG.len());
-    let mut text: String = shown.chars().take(avail).collect();
-    if shown.chars().count() > avail && !text.is_empty() {
-        text.pop();
-        text.push('…');
-    }
+    let text = if table::cell_width(&shown) <= avail {
+        shown
+    } else {
+        let budget = avail.saturating_sub(1);
+        let mut used = 0usize;
+        let mut clipped = String::new();
+        for c in shown.chars() {
+            let w = table::char_width(c);
+            if used + w > budget {
+                break;
+            }
+            clipped.push(c);
+            used += w;
+        }
+        clipped.push('…');
+        clipped
+    };
     let marker = ui.box_color();
     let marker_reset = if marker.is_empty() { "" } else { RESET };
     let tag = if ui.regions_enabled() {
