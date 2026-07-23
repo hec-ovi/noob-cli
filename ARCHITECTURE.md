@@ -105,6 +105,7 @@ Within a stable mode, each provider request is an exact byte-prefix extension of
 
 - Plan-mode entry and exit, which change the available schemas.
 - First registration of the skill tool during an in-session skill reload.
+- First registration of the two MCP tools when `/mcp add` takes the server set from zero to some.
 - Context compaction.
 - Explicit `/clear-plan` cleanup, which replaces historical plan payloads.
 
@@ -171,7 +172,7 @@ The read and Bash loops check the shared interrupt flag. Partial Bash output can
 
 ## Sessions
 
-Sessions are append-only JSONL files under `<config>/sessions`. Fresh IDs contain hexadecimal time, process, and per-process serial components to avoid same-millisecond collisions.
+Sessions are append-only JSONL files under `<config>/sessions`. Fresh IDs contain hexadecimal time, process, per-process serial, and entropy components, and are created with `create_new` semantics, so two containers sharing one config directory cannot adopt or interleave each other's files.
 
 Every append, flush, reset, and repair error is propagated. If persistence fails during a live run, the agent detaches the broken session, keeps the valid in-memory transcript, and shows one ordered warning. It never silently claims that an item was saved.
 
@@ -183,7 +184,7 @@ Discovery checks project `.noob/skills`, `.claude/skills`, `.agents/skills`, the
 
 The prompt contains a bounded name and description index. The `skill` tool loads the body on demand, and ordinary `read` loads referenced files.
 
-`/skills add` accepts one local directory, one bare `SKILL.md`, or one Git URL. Candidate files must be bounded regular, non-symlink files; frontmatter parsing stops after a 64 KiB budget. Installation skips `.git`, copies into a hidden sibling staging directory, and publishes with one rename. A failed or canceled copy cannot expose a partial skill. Git clone runs in its own process group with bounded diagnostic capture, a 120-second wall clock, and cancellation. The dock remains active during installation.
+`/skills add` accepts one local directory, one bare `SKILL.md`, one Git URL, or an `owner/repo` GitHub shorthand. Candidate files must be bounded regular, non-symlink files; frontmatter parsing stops after a 64 KiB budget. Installation skips `.git`, copies into a hidden sibling staging directory, and publishes with one rename. A failed or canceled copy cannot expose a partial skill. Git clone runs in its own process group with bounded diagnostic capture, a 120-second wall clock, and cancellation. The dock remains active during installation.
 
 Agent-authored write or edit targets inside a skills directory require a real terminal confirmation. Headless and child modes deny the operation. This is a guardrail on persistent instructions; Docker remains the security boundary for Bash.
 
@@ -223,7 +224,7 @@ The hub uses a fixed FIFO worker pool and applies `NOOB_TASK_CONCURRENCY` to det
 
 Child tool profiles are structural. `tools: "read-only"` exposes `read`, `grep`, `glob`, `ls`, `context`, and `skill` when a skill is available. `tools: "web"` adds `mcp_connect` and `mcp_call`, requires exactly one configured server whose name normalizes to `websearch` case-insensitively with `-` and `_` ignored, and filters the child's MCP manager to that server. It exposes no Bash, write, edit, plan, or subagent tool. `tools: "all"` exposes the full registered set; a dock child is still a leaf. Loaded ancestor skills are excluded from child discovery so orchestration instructions cannot recursively activate themselves.
 
-A completed `tools: "web"` report is accepted only after the child transcript contains at least two distinct `mcp_call` IDs whose later tool results carry the server-originated MCP wrapper. Local validation, connection, and transport failures do not count; a server-declared tool error does because it proves a real round trip. If the first completion has fewer, noob gives that same child one corrective instruction to connect and gather usable search and source evidence, using only the unused part of the original inference-round budget. An exhausted budget or a second completion still below the evidence threshold returns a child error. Aborted and interrupted runs are not retried.
+A completed `tools: "web"` report is accepted only after at least two `mcp_call` round trips returned successful server-originated results, counted live as results arrive so child-side compaction cannot erase the evidence. Local validation, connection, and transport failures do not count, and neither does a server-declared tool error (marked `(tool error)` before its untrusted wrapper). If the first completion has fewer, noob gives that same child one corrective instruction to connect and gather usable search and source evidence, using only the unused part of the original inference-round budget. An exhausted budget or a second completion still below the evidence threshold returns a child error. Aborted and interrupted runs are not retried.
 
 Tab toggles a persistent bounded view of child stderr, including recent tool activity, while final reports remain uncapped. Shutdown cancels, signals, reaps, and joins all child processes. On Linux, parent-death cleanup also kills descendants still attached to the child before exit. `exec`, piped input, nested children, and the classic prompt retain inline behavior.
 
@@ -262,6 +263,8 @@ Assistant Markdown is parsed only for the interactive REPL. The line-streaming r
 
 Two display-only artifacts share the bounded region: the `plan` checklist and sub-agent status. Both are pinned inside the frame, between the top rule and the input row, during turns AND at the idle prompt (the two frames share one layout), updating in place; a finished turn re-records neither into the transcript (an unfinished plan survives turn boundaries on the session, cleared by `/clear-plan`). The active plan glyph animates during turns and at the idle prompt alike (a pinned in-progress row never freezes between turns), each completed action records its own elapsed time, and long plans pin at most six steps windowed on the active one plus a counted `… +N more` row. A fully completed plan collapses to one line with total elapsed time and is retired at turn end: recorded once into the transcript and unpinned, so it scrolls with history instead of hugging the input. A canceled turn leaves an unfinished plan pinned in its actual state. Detached agents occupy one live `[N] agents running (Tab to view)` row, which reads `stopping` while a stop-everything cancel winds the whole fleet down; empty-draft Tab toggles persistent details with stable IDs, state (including `canceling`), elapsed time, prompt slices, and bounded recent activity. Region capping reserves both the active plan step and an agent summary. Slash-command Tab completion still applies when a draft is nonempty. None of these alter the transcript or headless bytes.
 
+On resize the dock records the display width of every painted frame row and the parked cursor column, erases exactly the physical rows the terminal's reflow left behind (`max(1, ceil(width / new_width))` per row, exact under DECAWM deferred wrap), and repaints in place at the new geometry, during turns and at the idle prompt alike. The transcript above the frame stays on screen and nothing is pushed into scrollback; a viewport reset remains only as the fallback when the reflowed frame cannot fit the new screen. Height-only changes trigger the same path because the pinned-region cap derives from the screen height. Events that arrive across a resize are deferred until the frame is retired, so no erase walks stale geometry.
+
 Model text and all untrusted summaries are sanitized so control bytes cannot execute terminal commands. `NO_COLOR` removes color without removing structure, liveness, or reasoning text.
 
 Piped REPL, `exec`, `exec --json`, and `child` bypass the rich renderer. Their protocol bytes remain plain and stable.
@@ -272,10 +275,10 @@ The enforced release budgets are:
 
 | Budget | Limit | Current validation |
 |---|---:|---:|
-| Static release binary | 8 MiB | 4,313,984 bytes |
+| Static release binary | 8 MiB | 4,354,944 bytes |
 | Runtime dependency graph | 45 crates | 40 crates |
 | Fixed prompt plus schemas | 1,500 tokens | Offline and live tokenizer checks |
-| Offline tests | None | 701 passed; 9 live checks remain opt-in |
+| Offline tests | None | 800 passed; 9 live checks and 1 on-demand diagnostic stay opt-in |
 
 The required local gates are:
 
