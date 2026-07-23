@@ -282,6 +282,80 @@ fn compat_400_strips_the_named_field_and_remembers() {
     server.assert_clean();
 }
 
+/// A server killed mid-generation closes the socket cleanly: EOF with no
+/// [DONE] and no finish_reason. The truncated output must surface as a turn
+/// error, never as a complete Stop answer.
+#[test]
+fn eof_without_done_or_finish_reason_is_an_error() {
+    let server = MockServer::start();
+    let delta = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"half an ans\"}}]}\n\n";
+    server.enqueue_raw(vec![
+        RawStep::Bytes(sse_headers()),
+        RawStep::Bytes(delta.as_bytes().to_vec()),
+    ]);
+    let client = Client::new(Timeouts::default());
+
+    let turn = chat::stream(
+        &client,
+        &endpoint(&server, ApiStyle::Chat),
+        &user_turn("go"),
+        &mut |_| {},
+    )
+    .unwrap();
+
+    assert_eq!(turn.text, "half an ans");
+    assert!(
+        matches!(turn.finish, Finish::Error(_)),
+        "severed stream finished as {:?}",
+        turn.finish
+    );
+    server.assert_clean();
+}
+
+/// The compat-strip memory is per endpoint URL: a field one server 400s on
+/// still goes to the next server after a hot `.env` endpoint switch.
+#[test]
+fn compat_strip_is_per_endpoint_not_per_client() {
+    let a = MockServer::start();
+    let b = MockServer::start();
+    a.enqueue_json(
+        400,
+        json!({"error": {
+        "message": "Unknown parameter: 'stream_options'", "type": "invalid_request_error"}}),
+    );
+    a.enqueue_stream_completion("a ok");
+    b.enqueue_stream_completion("b ok");
+    let client = Client::new(Timeouts::default());
+
+    let turn = chat::stream(
+        &client,
+        &endpoint(&a, ApiStyle::Chat),
+        &user_turn("go"),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(turn.text, "a ok");
+    let turn = chat::stream(
+        &client,
+        &endpoint(&b, ApiStyle::Chat),
+        &user_turn("go"),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(turn.text, "b ok");
+
+    assert!(
+        a.recorded()[1].json().unwrap().get("stream_options").is_none(),
+        "server A keeps its strip"
+    );
+    assert!(
+        b.recorded()[0].json().unwrap().get("stream_options").is_some(),
+        "server B must still receive the field server A rejected"
+    );
+    a.assert_clean();
+    b.assert_clean();
+}
+
 /// A 400 that does NOT name anything strippable surfaces immediately.
 #[test]
 fn ordinary_400_is_not_retried() {

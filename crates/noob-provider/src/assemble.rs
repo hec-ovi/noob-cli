@@ -41,6 +41,10 @@ pub struct Assembler {
     usage: Option<Usage>,
     finish_reason: Option<String>,
     error: Option<String>,
+    /// Set when the transport hit EOF without `[DONE]`. Truncated output
+    /// must not finish as a clean Stop; a finish_reason on the last chunk
+    /// still counts as a terminal signal (some servers skip `[DONE]`).
+    severed: bool,
 }
 
 impl Assembler {
@@ -48,11 +52,20 @@ impl Assembler {
         Assembler::default()
     }
 
+    /// The transport hit EOF before `[DONE]`. Without a finish_reason (or a
+    /// carried in-band error) the completion is truncated and `finish` must
+    /// report an error, not a clean Stop. The Responses adapter already
+    /// guards this; the guard here keeps the two wire shapes symmetric.
+    pub fn mark_severed(&mut self) {
+        self.severed = true;
+    }
+
     /// Absorb one parsed SSE chunk, emitting events as they materialize.
     pub fn on_chunk(&mut self, chunk: &Value, on: &mut dyn FnMut(Event)) {
         // In-band mid-stream error payloads (OpenRouter emits these after
-        // streaming starts): a turn error, never a panic.
-        if let Some(err) = chunk.get("error") {
+        // streaming starts): a turn error, never a panic. `"error": null`
+        // is not an error, same as the `"usage": null` filler below.
+        if let Some(err) = chunk.get("error").filter(|e| !e.is_null()) {
             let msg = err
                 .get("message")
                 .and_then(Value::as_str)
@@ -152,8 +165,19 @@ impl Assembler {
                 return *w;
             }
             // A distinct new id is a new call (an open call always has an
-            // id: real or synthesized at open).
-            return self.calls.iter().map(|(w, _)| w + 1).max().unwrap_or(0);
+            // id: real or synthesized at open). Saturate and dodge occupied
+            // slots so a hostile u64::MAX index can neither overflow nor
+            // silently merge two distinct calls.
+            let mut next = self
+                .calls
+                .iter()
+                .map(|(w, _)| w.saturating_add(1))
+                .max()
+                .unwrap_or(0);
+            while self.calls.iter().any(|(w, _)| *w == next) {
+                next = next.wrapping_sub(1);
+            }
+            return next;
         }
         self.last_wire_index.unwrap_or(0)
     }
@@ -203,6 +227,12 @@ impl Assembler {
             });
         }
 
+        // A non-delta message repeating an already-streamed call must not
+        // append its full arguments onto the accumulated fragments (streamed
+        // text has the same dedup above); positional == non-delta.
+        if positional.is_some() && started && !call.arguments.is_empty() {
+            return;
+        }
         match f.and_then(|f| f.get("arguments")) {
             Some(Value::String(s)) if !s.is_empty() => {
                 call.arguments.push_str(s);
@@ -243,6 +273,14 @@ impl Assembler {
 
         let finish = if let Some(msg) = self.error {
             Finish::Error(msg)
+        } else if self.severed && self.finish_reason.is_none() {
+            // A dead socket mid-generation looks like clean EOF. Truncated
+            // output must not be presented as a complete answer.
+            Finish::Error(
+                "the stream ended before the completion finished (no finish_reason, no [DONE]); \
+                 the server or connection dropped mid-response"
+                    .to_string(),
+            )
         } else {
             match self.finish_reason.as_deref() {
                 Some("tool_calls") | Some("function_call") => Finish::ToolCalls,
@@ -476,6 +514,73 @@ mod tests {
         ]);
         assert_eq!(turn.tool_calls.len(), 1);
         assert_eq!(turn.tool_calls[0].arguments, "{\"a\":1}");
+    }
+
+    #[test]
+    fn severed_eof_without_finish_reason_is_an_error() {
+        // Socket died mid-generation: content streamed, then clean EOF with
+        // no [DONE] and no finish_reason. Must not present as a clean Stop.
+        let mut asm = Assembler::new();
+        asm.on_chunk(&delta(json!({"content": "half an ans"})), &mut |_| {});
+        asm.mark_severed();
+        let turn = asm.finish(&mut |_| {});
+        assert_eq!(turn.text, "half an ans");
+        assert!(matches!(turn.finish, Finish::Error(_)), "{:?}", turn.finish);
+    }
+
+    #[test]
+    fn severed_after_finish_reason_still_finishes_clean() {
+        // Servers that skip [DONE] but send finish_reason on the last chunk
+        // close the turn cleanly; EOF alone is not an error then.
+        let mut asm = Assembler::new();
+        asm.on_chunk(
+            &json!({"choices": [{"index": 0, "delta": {"content": "done"},
+                "finish_reason": "stop"}]}),
+            &mut |_| {},
+        );
+        asm.mark_severed();
+        let turn = asm.finish(&mut |_| {});
+        assert_eq!(turn.finish, Finish::Stop);
+    }
+
+    #[test]
+    fn error_null_is_filler_not_an_error() {
+        // Mirror of "usage": null: a proxy emitting "error": null on every
+        // chunk must not turn the stream into an error or drop content.
+        let (turn, _) = drive(&[
+            json!({"choices": [{"index": 0, "delta": {"content": "fine"}}], "error": null}),
+            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "error": null}),
+        ]);
+        assert_eq!(turn.text, "fine");
+        assert_eq!(turn.finish, Finish::Stop);
+    }
+
+    #[test]
+    fn final_message_repeating_streamed_tool_call_does_not_duplicate_args() {
+        // The quirk the text dedup exists for, on the tool-call side: deltas
+        // stream the call, then a final non-delta message repeats it whole.
+        let (turn, _) = drive(&[
+            delta(json!({"tool_calls": [{"index": 0, "id": "c1",
+                "function": {"name": "read", "arguments": "{\"path\":\"a\"}"}}]})),
+            json!({"choices": [{"index": 0, "finish_reason": "tool_calls",
+                "message": {"tool_calls": [{"id": "c1",
+                    "function": {"name": "read", "arguments": "{\"path\":\"a\"}"}}]}}]}),
+        ]);
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].arguments, "{\"path\":\"a\"}");
+    }
+
+    #[test]
+    fn huge_wire_index_does_not_overflow() {
+        // Server-supplied u64::MAX index followed by an index-less delta
+        // with a new id: the next-slot math must saturate, not wrap.
+        let (turn, _) = drive(&[
+            delta(json!({"tool_calls": [{"index": u64::MAX, "id": "c1",
+                "function": {"name": "a", "arguments": "{}"}}]})),
+            delta(json!({"tool_calls": [{"id": "c2",
+                "function": {"name": "b", "arguments": "{}"}}]})),
+        ]);
+        assert_eq!(turn.tool_calls.len(), 2);
     }
 
     #[test]

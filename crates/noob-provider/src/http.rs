@@ -15,7 +15,7 @@
 //!   prompt, which is why header bytes must not start the idle clock.
 //! - Streaming: between body bytes, budget = idle, reset on every read.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,7 +57,7 @@ impl Default for Timeouts {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Trip {
+enum Trip {
     Interrupted,
     FirstByte,
     Idle,
@@ -196,7 +196,7 @@ fn trip_io_error(trip: Trip) -> io::Error {
 // Transport
 // ---------------------------------------------------------------------------
 
-pub struct TickTransport {
+struct TickTransport {
     stream: TcpStream,
     buffers: LazyBuffers,
     ctl: WatchdogCtl,
@@ -312,7 +312,7 @@ fn probe_open(stream: &mut TcpStream) -> io::Result<bool> {
 }
 
 #[derive(Debug)]
-pub struct TickTcpConnector {
+struct TickTcpConnector {
     ctl: WatchdogCtl,
     connect_timeout: Duration,
 }
@@ -327,24 +327,46 @@ impl<In: Transport> Connector<In> for TickTcpConnector {
     ) -> Result<Option<Self::Out>, ureq::Error> {
         let mut last: Option<io::Error> = None;
         for addr in &details.addrs {
-            match TcpStream::connect_timeout(addr, self.connect_timeout) {
-                Ok(stream) => {
-                    stream.set_nodelay(true)?;
-                    stream.set_read_timeout(Some(TICK))?;
-                    // Short writes are watchdog ticks. `transmit_output`
-                    // preserves the independent 30 s no-progress ceiling.
-                    stream.set_write_timeout(Some(TICK))?;
-                    let buffers = LazyBuffers::new(
-                        details.config.input_buffer_size(),
-                        details.config.output_buffer_size(),
-                    );
-                    return Ok(Some(TickTransport {
-                        stream,
-                        buffers,
-                        ctl: self.ctl.clone(),
-                    }));
+            // A blocking connect_timeout cannot be interrupted from another
+            // thread, so slice it into 1 s attempts with a watchdog check
+            // between them: Ctrl-C lands within a tick even against a
+            // black-holed address, same contract as reads and writes.
+            let deadline = Instant::now() + self.connect_timeout;
+            let stream = loop {
+                if let Some(trip) = self.ctl.check() {
+                    return Err(ureq::Error::Io(trip_io_error(trip)));
                 }
-                Err(e) => last = Some(e),
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break None;
+                }
+                match TcpStream::connect_timeout(addr, left.min(TICK)) {
+                    Ok(stream) => break Some(stream),
+                    Err(e) => {
+                        let timed_out =
+                            matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock);
+                        last = Some(e);
+                        if !timed_out {
+                            break None; // refused/unreachable: next address
+                        }
+                    }
+                }
+            };
+            if let Some(stream) = stream {
+                stream.set_nodelay(true)?;
+                stream.set_read_timeout(Some(TICK))?;
+                // Short writes are watchdog ticks. `transmit_output`
+                // preserves the independent 30 s no-progress ceiling.
+                stream.set_write_timeout(Some(TICK))?;
+                let buffers = LazyBuffers::new(
+                    details.config.input_buffer_size(),
+                    details.config.output_buffer_size(),
+                );
+                return Ok(Some(TickTransport {
+                    stream,
+                    buffers,
+                    ctl: self.ctl.clone(),
+                }));
             }
         }
         Err(ureq::Error::Io(last.unwrap_or_else(|| {
@@ -461,9 +483,12 @@ pub struct Client {
     ctl: WatchdogCtl,
     timeouts: Timeouts,
     retry: RetryPolicy,
-    /// Fields the endpoint 400ed on, remembered for this client's lifetime
-    /// only (one client per process; no persisted quirk registry).
-    compat_stripped: Mutex<HashSet<String>>,
+    /// Fields the endpoint 400ed on, remembered per request URL for this
+    /// client's lifetime only (one client per process; no persisted quirk
+    /// registry). Keyed by URL because hot `.env` reload can repoint the
+    /// same client at a different endpoint mid-session, and a field one
+    /// server rejects (e.g. `store`) may be one another server requires.
+    compat_stripped: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 impl Client {
@@ -501,17 +526,13 @@ impl Client {
             ctl,
             timeouts,
             retry,
-            compat_stripped: Mutex::new(HashSet::new()),
+            compat_stripped: Mutex::new(HashMap::new()),
         }
     }
 
     /// Watchdog handle, for wiring an interrupt source other than SIGINT.
     pub fn ctl(&self) -> WatchdogCtl {
         self.ctl.clone()
-    }
-
-    pub fn timeouts(&self) -> Timeouts {
-        self.timeouts
     }
 
     /// POST a JSON body, read the whole response through the watchdog.
@@ -570,9 +591,10 @@ impl Client {
         headers: &[(String, String)],
         body: &mut serde_json::Value,
     ) -> Result<StreamBody, ProviderError> {
-        // Drop fields this client already learned the endpoint rejects.
-        if let Some(map) = body.as_object_mut() {
-            let known = self.compat_stripped.lock().unwrap();
+        // Drop fields this client already learned THIS endpoint rejects.
+        if let Some(map) = body.as_object_mut()
+            && let Some(known) = self.compat_stripped.lock().unwrap().get(url)
+        {
             map.retain(|k, _| !known.contains(k));
         }
 
@@ -637,7 +659,12 @@ impl Client {
                 && !compat_retried
                 && let Some(field) = compat_field(body, &text)
             {
-                self.compat_stripped.lock().unwrap().insert(field.clone());
+                self.compat_stripped
+                    .lock()
+                    .unwrap()
+                    .entry(url.to_string())
+                    .or_default()
+                    .insert(field.clone());
                 if let Some(map) = body.as_object_mut() {
                     map.remove(&field);
                 }
@@ -772,6 +799,10 @@ impl StreamBody {
     /// up and the connection is not reused, same as not draining.
     pub fn drain_for_reuse(&mut self, window: Duration) {
         self.ctl.begin_drain(window);
+        // The reader's on_bytes resets the watchdog on every chunk, so a
+        // trickling server would extend the drain indefinitely; the window
+        // is an absolute budget, enforced here as a fixed deadline.
+        let deadline = Instant::now() + window;
         let mut buf = [0u8; 4096];
         let mut total = 0usize;
         loop {
@@ -779,7 +810,7 @@ impl StreamBody {
                 Ok(0) => return,
                 Ok(n) => {
                     total += n;
-                    if total > 16 * 1024 {
+                    if total > 16 * 1024 || Instant::now() >= deadline {
                         return;
                     }
                 }

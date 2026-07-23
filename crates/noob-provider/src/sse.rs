@@ -127,8 +127,10 @@ impl SseParser {
     }
 }
 
-/// Parse a whole buffer in one call (fixtures, tests).
-pub fn parse_all(bytes: &[u8]) -> Vec<SseEvent> {
+/// Parse a whole buffer in one call. Test convenience only; production
+/// paths drive `SseParser` incrementally.
+#[cfg(test)]
+fn parse_all(bytes: &[u8]) -> Vec<SseEvent> {
     let mut p = SseParser::new();
     let mut out = Vec::new();
     p.feed(bytes, &mut out);

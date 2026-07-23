@@ -77,7 +77,11 @@ pub fn stream_ref(
             asm.on_chunk(&chunk, on);
         }
         if n == 0 {
-            break; // stream ended without [DONE]; finish() handles it
+            // Stream ended without [DONE]. A finish_reason already absorbed
+            // still closes the turn cleanly; a bare EOF is a severed stream
+            // and finish() reports it as an error instead of a clean Stop.
+            asm.mark_severed();
+            break;
         }
     }
     // Consume the trailing bytes after [DONE] (normally just the chunked
@@ -230,9 +234,13 @@ pub(crate) fn parse_completion(bytes: &[u8]) -> Result<Turn, ProviderError> {
         _ => Finish::Stop,
     };
 
-    let usage = v.get("usage").and_then(|u| {
-        Some(Usage {
-            prompt_tokens: u.get("prompt_tokens")?.as_u64().unwrap_or(0),
+    // `"usage": null` means no usage; a usage object with a missing field
+    // defaults that field to 0, matching the streaming assembler.
+    let usage = v
+        .get("usage")
+        .filter(|u| u.is_object())
+        .map(|u| Usage {
+            prompt_tokens: u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0),
             completion_tokens: u
                 .get("completion_tokens")
                 .and_then(Value::as_u64)
@@ -242,8 +250,7 @@ pub(crate) fn parse_completion(bytes: &[u8]) -> Result<Turn, ProviderError> {
                 .and_then(|d| d.get("cached_tokens"))
                 .and_then(Value::as_u64)
                 .unwrap_or(0),
-        })
-    });
+        });
 
     Ok(Turn {
         text,
@@ -289,6 +296,22 @@ mod tests {
         // Ids must never collide across turns within one transcript.
         let turn2 = parse_completion(body.as_bytes()).unwrap();
         assert_ne!(turn.tool_calls[0].id, turn2.tool_calls[0].id);
+    }
+
+    #[test]
+    fn usage_missing_fields_default_to_zero_and_null_is_none() {
+        // A usage object missing prompt_tokens must not drop the present
+        // completion_tokens (matches the streaming assembler's defaults).
+        let body = r#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],
+            "usage":{"completion_tokens":7}}"#;
+        let turn = parse_completion(body.as_bytes()).unwrap();
+        let u = turn.usage.unwrap();
+        assert_eq!(u.prompt_tokens, 0);
+        assert_eq!(u.completion_tokens, 7);
+        // "usage": null means no usage, not an all-zero one.
+        let body = r#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],
+            "usage":null}"#;
+        assert!(parse_completion(body.as_bytes()).unwrap().usage.is_none());
     }
 
     #[test]

@@ -56,8 +56,10 @@ fn clean_value(raw: &str) -> String {
         }
     }
     // Unquoted values may carry a trailing comment: KEY=value  # note
-    match v.find(" #") {
-        Some(pos) => v[..pos].trim_end().to_string(),
+    // Any whitespace before the hash starts the comment, tabs included.
+    match v.char_indices().find(|&(i, c)| c == '#' && v[..i].ends_with(|p: char| p.is_whitespace()))
+    {
+        Some((pos, _)) => v[..pos].trim_end().to_string(),
         None => v.to_string(),
     }
 }
@@ -97,9 +99,10 @@ mod tests {
 
     #[test]
     fn strips_trailing_comment_on_unquoted_values() {
-        let map = parse("A=value  # note\nB=no#comment-without-space\n").unwrap();
+        let map = parse("A=value  # note\nB=no#comment-without-space\nC=v\t# tab note\n").unwrap();
         assert_eq!(map["A"], "value");
         assert_eq!(map["B"], "no#comment-without-space");
+        assert_eq!(map["C"], "v");
     }
 
     #[test]

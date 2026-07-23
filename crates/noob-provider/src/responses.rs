@@ -183,7 +183,7 @@ impl State {
                             .and_then(Value::as_str)
                             .filter(|s| !s.is_empty())
                             .map(str::to_string)
-                            .unwrap_or_else(|| format!("call_resp_{}", self.calls.len())),
+                            .unwrap_or_else(|| crate::assemble::synth_call_id(self.calls.len())),
                         name: item
                             .get("name")
                             .and_then(Value::as_str)
@@ -330,7 +330,7 @@ impl State {
                                     .and_then(Value::as_str)
                                     .filter(|s| !s.is_empty())
                                     .map(str::to_string)
-                                    .unwrap_or_else(|| format!("call_resp_{}", self.calls.len())),
+                                    .unwrap_or_else(|| crate::assemble::synth_call_id(self.calls.len())),
                                 name: item
                                     .get("name")
                                     .and_then(Value::as_str)
@@ -733,7 +733,7 @@ mod tests {
             ),
         ]);
         let id = &turn.tool_calls[0].id;
-        assert!(id.starts_with("call_resp_"), "{id}");
+        assert!(id.starts_with("call_"), "{id}");
         assert_eq!(turn.raw_items[0]["call_id"], json!(id.as_str()));
     }
 
