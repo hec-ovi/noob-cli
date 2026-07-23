@@ -90,6 +90,12 @@ struct State {
     /// Failure/cancellation and the next human turn are ordered by the same
     /// mutex as admission. This closes the terminal-commit-to-drain race.
     spawn_paused: bool,
+    /// Monotonic human-turn counter, bumped by `begin_human_turn` under this
+    /// same mutex. Jobs are stamped with it at admission; only a failure or
+    /// cancellation from the CURRENT epoch may (re-)arm `spawn_paused`, so a
+    /// stale child failing (or being drained by `take_ready`) after the human
+    /// already moved on cannot block the new turn's authorized spawns.
+    epoch: u64,
 }
 
 struct Job {
@@ -102,6 +108,8 @@ struct Job {
     elapsed: Option<Duration>,
     runner: Option<Runner>,
     progress: ProgressLog,
+    /// Human-turn epoch this job was admitted in (see `State::epoch`).
+    epoch: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,6 +223,7 @@ impl BackgroundHub {
         }
         let ordinal = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let id = format!("agent-{ordinal}");
+        let epoch = state.epoch;
         state.jobs.push(Job {
             id: id.clone(),
             prompt,
@@ -225,6 +234,7 @@ impl BackgroundHub {
             elapsed: None,
             runner: Some(Box::new(runner)),
             progress,
+            epoch,
         });
         self.inner.revision.fetch_add(1, Ordering::Release);
         // This summary is display metadata only; the tool-result JSON remains
@@ -265,7 +275,9 @@ impl BackgroundHub {
     /// per-job state; the fixed pool workers remain for later submissions.
     pub fn take_ready(&self) -> Vec<ReadyResult> {
         let mut state = self.inner.state.lock().unwrap();
+        let current_epoch = state.epoch;
         let mut ready = Vec::new();
+        let mut rearm = false;
         let mut i = 0;
         while i < state.jobs.len() {
             if state.jobs[i].state != JobState::Ready {
@@ -274,6 +286,10 @@ impl BackgroundHub {
             }
             let mut job = state.jobs.remove(i);
             let outcome = job.outcome.take().expect("a ready job has an outcome");
+            // Only a failure/cancellation from the CURRENT human turn may
+            // re-arm the replacement gate: a stale child's failure delivered
+            // mid-turn must not block spawns the human already authorized.
+            rearm |= (outcome.is_error || outcome.canceled) && job.epoch == current_epoch;
             ready.push(ReadyResult {
                 id: job.id,
                 outcome,
@@ -283,10 +299,7 @@ impl BackgroundHub {
         if !ready.is_empty() {
             self.inner.revision.fetch_add(1, Ordering::Release);
         }
-        if ready
-            .iter()
-            .any(|result| result.outcome.is_error || result.outcome.canceled)
-        {
+        if rearm {
             state.spawn_paused = true;
         }
         ready
@@ -311,8 +324,13 @@ impl BackgroundHub {
     /// A real human message is the only event that can authorize considering
     /// new work after a failure. Prompt policy still requires an explicit
     /// retry request; this gate prevents autonomous same-turn retry loops.
+    /// Bumping the epoch under the same mutex as admission demotes every
+    /// still-outstanding job to "stale": its later failure can no longer
+    /// close the gate on the new turn (see `State::epoch`).
     pub(crate) fn begin_human_turn(&self) {
-        self.inner.state.lock().unwrap().spawn_paused = false;
+        let mut state = self.inner.state.lock().unwrap();
+        state.epoch += 1;
+        state.spawn_paused = false;
     }
 
     pub fn snapshot(&self) -> JobsSnapshot {
@@ -465,6 +483,7 @@ fn worker_loop(inner: Arc<Inner>) {
                     continue;
                 };
                 if state.jobs[index].cancel.load(Ordering::SeqCst) {
+                    let current_epoch = state.epoch;
                     let job = &mut state.jobs[index];
                     job.state = JobState::Ready;
                     job.elapsed = Some(Duration::default());
@@ -472,7 +491,12 @@ fn worker_loop(inner: Arc<Inner>) {
                         "background sub-agent canceled before it started",
                     ));
                     job.runner.take();
-                    state.spawn_paused = true;
+                    // Epoch-gated like the terminal commit below: a stale
+                    // job settled after the human moved on must not close
+                    // the current turn's replacement gate.
+                    if job.epoch == current_epoch {
+                        state.spawn_paused = true;
+                    }
                     inner.revision.fetch_add(1, Ordering::Release);
                     inner.changed.notify_all();
                     continue;
@@ -504,6 +528,7 @@ fn worker_loop(inner: Arc<Inner>) {
             });
         let mut state = inner.state.lock().unwrap();
         state.running = state.running.saturating_sub(1);
+        let current_epoch = state.epoch;
         let mut pause_spawning = false;
         if let Some(job) = state.jobs.iter_mut().find(|job| job.id == id) {
             // Linearization point: cancel() accepts only while the job is not
@@ -512,7 +537,10 @@ fn worker_loop(inner: Arc<Inner>) {
             if cancel.load(Ordering::SeqCst) && !outcome.canceled {
                 outcome = ToolOutcome::canceled_with("background sub-agent canceled by user");
             }
-            pause_spawning = outcome.is_error || outcome.canceled;
+            // Terminal commit closes admission only for the human turn the
+            // job belongs to; a stale child failing mid-current-turn cannot
+            // block spawns the new turn already authorized.
+            pause_spawning = (outcome.is_error || outcome.canceled) && job.epoch == current_epoch;
             job.state = JobState::Ready;
             job.elapsed = Some(started.elapsed());
             job.outcome = Some(outcome);
@@ -801,6 +829,64 @@ mod tests {
         wait_until(|| hub.settled_ready());
         assert_eq!(hub.take_ready().len(), 1);
         assert!(hub.shutdown().is_empty());
+    }
+
+    #[test]
+    fn a_stale_epoch_failure_does_not_block_the_current_turns_spawns() {
+        // F-58 regression: a child spawned in one human turn that fails while
+        // a LATER turn is active used to close the replacement gate (both at
+        // the worker's terminal commit and again in take_ready), blocking the
+        // current turn's authorized spawns until yet another human message.
+        let hub = BackgroundHub::new(1);
+        let release = Arc::new(AtomicBool::new(false));
+        let gate = release.clone();
+        hub.begin_human_turn(); // epoch 1: the turn that spawned the child
+        hub.submit_with("old turn child".into(), move |_| {
+            while !gate.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            ToolOutcome::err("stale failure")
+        });
+        wait_until(|| hub.snapshot().running == 1);
+
+        hub.begin_human_turn(); // epoch 2: the human moved on; child still runs
+        release.store(true, Ordering::SeqCst);
+        wait_until(|| hub.settled_ready());
+        // The stale terminal commit must not close the gate. Hold the
+        // admitted current-turn job so it stays active across the drain.
+        let hold = Arc::new(AtomicBool::new(false));
+        let hold_gate = hold.clone();
+        let admitted = hub.submit_with("current turn work".into(), move |cancel| {
+            while !hold_gate.load(Ordering::SeqCst) && !cancel.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            ToolOutcome::ok("a", "done")
+        });
+        assert!(!admitted.is_error, "{}", admitted.content);
+        // ...and neither may draining the stale failure mid-current-turn.
+        let drained = hub.take_ready();
+        assert_eq!(drained.len(), 1);
+        assert!(drained[0].outcome.is_error);
+        let admitted = hub.submit_with("still current turn".into(), |_| {
+            ToolOutcome::ok("b", "done")
+        });
+        assert!(
+            !admitted.is_error,
+            "delivery of a stale failure re-armed the gate: {}",
+            admitted.content
+        );
+        hold.store(true, Ordering::SeqCst);
+        wait_until(|| hub.snapshot().ready == 2);
+        assert_eq!(hub.take_ready().len(), 2);
+        // A failure from the CURRENT epoch still closes the gate.
+        hub.submit_with("current turn failure".into(), |_| ToolOutcome::err("boom"));
+        wait_until(|| hub.settled_ready());
+        let blocked = hub.submit_with("replacement".into(), |_| {
+            ToolOutcome::ok("unexpected", "done")
+        });
+        assert!(blocked.is_error);
+        assert!(blocked.content.contains("new instruction"));
+        assert_eq!(hub.shutdown().len(), 1);
     }
 
     #[test]

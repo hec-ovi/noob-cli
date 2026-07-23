@@ -94,6 +94,16 @@ impl Rig {
     }
 }
 
+/// Scripted stall before each child's model-response body in the two
+/// concurrency tests below. The stall is the overlap witness: the server
+/// cannot complete a child's response earlier than its arrival + STALL, so a
+/// sibling request that ARRIVES within one stall of another provably
+/// overlapped it, and a request that had to wait for a slot cannot arrive
+/// before a full stall has elapsed. The assertions compare recorded arrival
+/// gaps against this constant, not a hand-tuned margin; it is sized so even a
+/// loaded host spawns a child process well inside one stall.
+const CHILD_STALL: Duration = Duration::from_millis(2_000);
+
 fn tool_names(req: &Value) -> Vec<String> {
     req["tools"]
         .as_array()
@@ -996,10 +1006,10 @@ fn fanout_respects_the_concurrency_cap() {
         ],
         None,
     );
-    // Each child's model response takes ~400 ms: the third child cannot
-    // even START (and thus send its request) until a slot frees.
+    // Each child's model response stalls for CHILD_STALL: the third child
+    // cannot even START (and thus send its request) until a slot frees.
     for text in ["one done", "two done", "three done"] {
-        rig.enqueue_slow_completion(text, 400);
+        rig.enqueue_slow_completion(text, CHILD_STALL.as_millis() as u64);
     }
     rig.server.enqueue_stream_completion("all collected");
 
@@ -1034,12 +1044,17 @@ fn fanout_respects_the_concurrency_cap() {
     assert_eq!(child_arrivals.len(), 3);
     let first_two_gap = child_arrivals[1].duration_since(child_arrivals[0]);
     let third_gap = child_arrivals[2].duration_since(child_arrivals[0]);
+    // Structural overlap: the second request arrived while the first child's
+    // response was still inside its stall, i.e. before the first child could
+    // possibly have completed.
     assert!(
-        first_two_gap < Duration::from_millis(350),
+        first_two_gap < CHILD_STALL,
         "the first two children must overlap; gap was {first_two_gap:?}"
     );
+    // Structural queueing: a slot frees no earlier than one full stall after
+    // the first arrival, and the third child cannot send before that.
     assert!(
-        third_gap >= Duration::from_millis(350),
+        third_gap >= CHILD_STALL,
         "the third child must wait for a slot; gap was {third_gap:?}"
     );
     // Queued is queued, not dropped: all three results returned.
@@ -1072,7 +1087,7 @@ fn nested_fanout_is_serial_without_disabling_nested_agents() {
         None,
     );
     for text in ["nested one done", "nested two done", "nested three done"] {
-        rig.enqueue_slow_completion(text, 400);
+        rig.enqueue_slow_completion(text, CHILD_STALL.as_millis() as u64);
     }
     rig.server
         .enqueue_stream_completion("nested results collected");
@@ -1107,10 +1122,13 @@ fn nested_fanout_is_serial_without_disabling_nested_agents() {
         .collect();
     arrivals.sort();
     assert_eq!(arrivals.len(), 3, "all nested calls must still execute");
+    // Structural seriality: each next nested request can only be sent after
+    // the previous child's stalled response completed, so consecutive
+    // arrivals must be at least one full stall apart.
     for pair in arrivals.windows(2) {
         let gap = pair[1].duration_since(pair[0]);
         assert!(
-            gap >= Duration::from_millis(350),
+            gap >= CHILD_STALL,
             "nested calls overlapped despite the depth-1 clamp; gap was {gap:?}"
         );
     }

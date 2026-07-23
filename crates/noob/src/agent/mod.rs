@@ -40,6 +40,12 @@ const PAUSE_AT: u32 = 8;
 /// so it cannot tempt a small model into rejected round trips.
 const PLAN_TOOLS: &[&str] = tools::READ_ONLY_SET;
 
+/// Serializes unit tests that stream from a mock provider with tests that
+/// toggle the process-global INTERRUPTED flag, so one test's transient
+/// interrupt can never abort another test's in-flight stream.
+#[cfg(test)]
+pub(crate) static TEST_PROVIDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The injected user-role mode message (frozen phrasing; e2e-asserted).
 /// Spells out that mutation is structurally absent: a small model given a
 /// "do X" prompt otherwise tries to act, finds no write/edit/bash schema,
@@ -151,6 +157,12 @@ pub struct Agent {
     /// until the estimate passes this mark instead of re-firing every
     /// round (the compression-loop trap). 0 = no backoff.
     pub(crate) compact_backoff: u64,
+    /// Test seam: counts down once per drive round after the post-batch
+    /// background delivery, raising INTERRUPTED when it hits zero, as if a
+    /// Ctrl-C landed between that delivery and the status-cap/spawned-only
+    /// early return (the window the post-batch check cannot see).
+    #[cfg(test)]
+    pub(crate) test_interrupt_after_delivery: Option<u32>,
 }
 
 pub enum RunEnd {
@@ -242,6 +254,8 @@ impl Agent {
             status_only_rounds: 0,
             cap_status_batch: false,
             compact_backoff: 0,
+            #[cfg(test)]
+            test_interrupt_after_delivery: None,
         };
         agent.sync_context();
         agent
@@ -766,12 +780,12 @@ impl Agent {
                 batch.push(planned);
                 if INTERRUPTED.load(Ordering::SeqCst) {
                     self.tool_ctx.approved_skill_writes.lock().unwrap().clear();
-                    return self.finish_interrupt(ui, &turn.tool_calls);
+                    return self.finish_interrupt_mid_planning(ui, &turn.tool_calls, batch.len());
                 }
             }
-            // Multi-agent fan-out: group the batch's consecutive task calls so
-            // a fan-out renders one live checklist of agents instead of N
-            // identical truncated lines. Off the token path; display-only.
+            // Multi-agent fan-out: group the batch's consecutive subagent
+            // calls so a fan-out renders one live checklist of agents instead
+            // of N identical truncated lines. Off the token path; display-only.
             // Every sub-agent call detaches in the dock. Writable children are
             // protected by the shared workspace writer lease, so they use the
             // same compact running panel as read-only children.
@@ -785,8 +799,8 @@ impl Agent {
                 sched::run_batch_with(&self.tool_ctx, batch, |progress| match progress {
                     sched::Progress::Started { index } => {
                         // Open the agents panel (registering its ids) before the
-                        // task's own activity line, so the themed REPL can suppress
-                        // the now-redundant `* task` line in favor of the block.
+                        // call's own activity line, so the themed REPL can suppress
+                        // the now-redundant `* subagent` line in favor of the block.
                         if let Some(render) = panels.on_started(index) {
                             ui.agents(&render.block, &render.ids);
                         }
@@ -808,9 +822,9 @@ impl Agent {
                         }
                         let call = &turn.tool_calls[index];
                         // Re-render the agents panel first, so it registers its ids
-                        // and the themed REPL suppresses the now-redundant `* task`
+                        // and the themed REPL suppresses the now-redundant `* subagent`
                         // done line even when a fan-out member finishes without a
-                        // prior Started (a canned or interrupted task). on_finished
+                        // prior Started (a canned or interrupted call). on_finished
                         // returns None for non-panel calls, so every other tool is
                         // unaffected and its done line renders as before.
                         if let Some(render) = panels.on_finished(
@@ -880,6 +894,17 @@ impl Agent {
             // still receives it at its next step, so a sleep/poll idiom can
             // never spin a turn against children that are already done.
             let delivered = self.integrate_background_results(ui);
+            // Test seam for the F-61 window: simulate a Ctrl-C landing
+            // between the delivery above and the early return below, the
+            // spot the post-batch INTERRUPTED check can no longer see.
+            #[cfg(test)]
+            if let Some(rounds) = self.test_interrupt_after_delivery.as_mut() {
+                *rounds -= 1;
+                if *rounds == 0 {
+                    self.test_interrupt_after_delivery = None;
+                    INTERRUPTED.store(true, Ordering::SeqCst);
+                }
+            }
             // A batch that only spawned detached children also ends the
             // input: the parent has nothing to wait for (reports restart
             // inference on their own), and a small model left in-turn after
@@ -896,6 +921,11 @@ impl Agent {
                 // waiting, and the results told the model reports come on
                 // their own. Free the prompt so the human's next message is
                 // an ordinary turn instead of a steering interrupt.
+                // A Ctrl-C that landed after the post-batch check above has
+                // nothing left to cancel; consume it exactly like the plain
+                // completion return, or it phantom-cancels the next REPL
+                // input (and a second press hard-exits).
+                INTERRUPTED.store(false, Ordering::SeqCst);
                 ui.done(self.last_usage);
                 return RunEnd::Completed(turn.text);
             }
@@ -1099,16 +1129,14 @@ impl Agent {
                         completed.insert(id.to_string());
                         max_ordinal = max_ordinal.max(background_ordinal(id));
                     }
+                    // Only the exact pin compaction writes counts (compact.rs
+                    // emits "results pending" for every undelivered id, ready
+                    // or still running); accepting any wider phrasing would
+                    // let arbitrary text fabricate canceled result packets.
                     for line in text.lines() {
-                        let ids = [
-                            "[background sub-agent results pending: ",
-                            "[background sub-agents still running: ",
-                        ]
-                        .into_iter()
-                        .find_map(|prefix| {
-                            line.strip_prefix(prefix)
-                                .and_then(|line| line.strip_suffix(']'))
-                        });
+                        let ids = line
+                            .strip_prefix("[background sub-agent results pending: ")
+                            .and_then(|line| line.strip_suffix(']'));
                         if let Some(ids) = ids {
                             for id in ids.split(", ").filter(|id| background_ordinal(id) > 0) {
                                 acknowledged.insert(id.to_string());
@@ -1136,6 +1164,26 @@ impl Agent {
             )));
         }
         missing.len()
+    }
+
+    /// Interrupt epilogue for a Ctrl-C that landed while the batch was
+    /// still being planned (the skills-write ask is a real blocking
+    /// window): the first `planned` calls entered the doom window via
+    /// plan_call but never executed, so their records are dropped before
+    /// the common epilogue - the same invariant as the canceled-outcome
+    /// forget at the execution stage. Without this a legitimate
+    /// post-interrupt retry is doom-intercepted one attempt early, because
+    /// the window still counts the never-executed attempt.
+    fn finish_interrupt_mid_planning(
+        &mut self,
+        ui: &mut Ui,
+        calls: &[ToolCall],
+        planned: usize,
+    ) -> RunEnd {
+        for call in &calls[..planned] {
+            self.forget_recent_call(call);
+        }
+        self.finish_interrupt(ui, calls)
     }
 
     /// Common interrupt epilogue: synthetic results for any unexecuted
@@ -1757,6 +1805,10 @@ mod tests {
                 .count(),
             1,
         );
+        // F-62: "[background sub-agents still running: ...]" is a prefix no
+        // code path ever writes (compact.rs emits only "results pending");
+        // treating it as a pin would let arbitrary summary text fabricate
+        // canceled result packets, so it must NOT be repaired.
         assert_eq!(
             agent
                 .items
@@ -1765,7 +1817,7 @@ mod tests {
                     Item::User(text) if background_result_id(text) == Some("agent-4")
                 ))
                 .count(),
-            1,
+            0,
         );
         assert_eq!(agent.repair_orphaned_background_results(), 0);
         assert_eq!(
@@ -2150,6 +2202,98 @@ mod tests {
             sched::Planned::Canned(out) => assert!(out.content.contains("refused")),
             sched::Planned::Run { .. } => panic!("symlink route into skills must be gated"),
         }
+    }
+
+    #[test]
+    fn a_mid_planning_interrupt_forgets_the_planned_calls() {
+        // F-57 regression: a Ctrl-C observed mid-planning (the skills-write
+        // ask is a real blocking window) returned through finish_interrupt
+        // with the batch's plan_call records still in the doom window, so a
+        // legitimate post-interrupt retry was intercepted one attempt early.
+        let _provider = TEST_PROVIDER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let mut agent = test_agent(
+            vec![],
+            ToolCtx::new(ws, crate::tools::guard::Sandbox::Container),
+            tmp.path(),
+        );
+        let mut ui = crate::ui::Ui::new(crate::ui::Mode::Exec);
+        let call = |id: &str| ToolCall {
+            id: id.into(),
+            name: "read".into(),
+            arguments: r#"{"path":"x"}"#.into(),
+        };
+        // The drive planning loop up to the interrupt check: both calls of
+        // the batch entered the doom window.
+        let calls = vec![call("c0"), call("c1")];
+        for planned in &calls {
+            agent.plan_call(planned);
+        }
+        match agent.finish_interrupt_mid_planning(&mut ui, &calls, calls.len()) {
+            RunEnd::Interrupted => {}
+            _ => panic!("the epilogue reports an interrupt"),
+        }
+        // Retry twice: the interrupted attempts never executed and must not
+        // count toward the three-within-the-window intercept threshold.
+        let retry = call("r");
+        assert!(
+            matches!(agent.plan_call(&retry).0, sched::Planned::Run { .. }),
+            "first post-interrupt retry must run"
+        );
+        assert!(
+            matches!(agent.plan_call(&retry).0, sched::Planned::Run { .. }),
+            "second post-interrupt retry was doom-intercepted one attempt early"
+        );
+    }
+
+    #[test]
+    fn the_status_cap_early_return_consumes_a_late_interrupt() {
+        // F-61 regression: the status-cap/spawned-only early return did not
+        // clear INTERRUPTED the way the plain completion return does, so a
+        // Ctrl-C landing between the post-batch check and that return
+        // phantom-canceled the next REPL input.
+        let _provider = TEST_PROVIDER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let server = noob_testkit::MockServer::start();
+        // Round 1: the first status-only batch is answered normally.
+        server.enqueue_stream_toolcalls(&[("s1", "subagent", r#"{"status":true}"#)], None);
+        // Round 2: the second status-only batch trips the poll cap and ends
+        // the input through the early return under test.
+        server.enqueue_stream_toolcalls(&[("s2", "subagent", r#"{"status":true}"#)], None);
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let mut agent = Agent::new(
+            Client::new(Timeouts::default()),
+            tmp.path().to_path_buf(),
+            Overrides {
+                base_url: Some(server.base_url()),
+                model: Some("mockmodel".into()),
+                api_style: Some("chat".into()),
+            },
+            "sys".into(),
+            vec![],
+            vec![],
+            ToolCtx::new(ws, crate::tools::guard::Sandbox::Container),
+            None,
+            131_072,
+        );
+        // Fire the simulated Ctrl-C in round 2's post-delivery window.
+        agent.test_interrupt_after_delivery = Some(2);
+        let mut ui = crate::ui::Ui::new(crate::ui::Mode::Exec);
+        match agent.run_input("how are the agents doing?", &mut ui) {
+            RunEnd::Completed(_) => {}
+            RunEnd::Interrupted => panic!("the late interrupt must not convert the completion"),
+            RunEnd::Aborted(reason) => panic!("aborted: {reason}"),
+        }
+        assert!(
+            !INTERRUPTED.load(Ordering::SeqCst),
+            "the early return must consume the interrupt like the plain completion path"
+        );
+        server.assert_clean();
     }
 
     #[test]

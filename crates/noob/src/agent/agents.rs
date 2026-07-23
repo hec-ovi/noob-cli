@@ -1,10 +1,11 @@
 //! The multi-agent fan-out panel (P2): a legible, live checklist of the
-//! sub-agents a `task` batch spawned. It exists because a fan-out used to
-//! render N identical truncated `* task ...` lines and then only `* task done`,
-//! so a human could not tell which agent was doing what or read any result.
+//! sub-agents a `subagent` batch spawned. It exists because a fan-out used to
+//! render N identical truncated `* subagent ...` lines and then only
+//! `* subagent done`, so a human could not tell which agent was doing what or
+//! read any result.
 //!
-//! This module is pure state + text: it groups the batch's consecutive `task`
-//! calls (a run of two or more is a panel), gives each a stable ordinal and a
+//! This module is pure state + text: it groups the batch's consecutive
+//! `subagent` calls (a run of two or more is a panel), gives each a stable ordinal and a
 //! distinguishing prompt slice, and folds the scheduler's Started/Finished
 //! transitions into a re-rendered checklist block. The block reuses the exact
 //! `[~]`/`[x]` glyph vocabulary the `plan` tool renders, so the themed REPL
@@ -17,8 +18,8 @@ use std::time::Duration;
 
 /// One re-render of a panel: the plain checklist text (header + one glyph line
 /// per agent) and the call ids the panel covers. The ids let the themed REPL
-/// suppress the now-redundant per-task `* task` activity lines in favor of the
-/// block; byte-identity surfaces ignore both.
+/// suppress the now-redundant per-call `* subagent` activity lines in favor of
+/// the block; byte-identity surfaces ignore both.
 pub(crate) struct AgentsRender {
     pub block: String,
     pub ids: Vec<String>,
@@ -41,7 +42,8 @@ struct Member {
     digest: Option<String>,
 }
 
-/// One fan-out group: a maximal run of two or more consecutive `task` calls.
+/// One fan-out group: a maximal run of two or more consecutive `subagent`
+/// calls.
 struct Group {
     members: Vec<Member>,
     ids: Vec<String>,
@@ -74,8 +76,8 @@ const TAIL: usize = 30;
 const DIGEST: usize = 72;
 
 impl Panels {
-    /// Group the batch's consecutive `task` calls; a run of two or more becomes
-    /// a panel (a lone task keeps its classic single activity line).
+    /// Group the batch's consecutive `subagent` calls; a run of two or more
+    /// becomes a panel (a lone call keeps its classic single activity line).
     pub(crate) fn build(calls: &[ToolCall], concurrency: usize) -> Panels {
         Self::build_with(calls, concurrency, false)
     }
@@ -98,7 +100,7 @@ impl Panels {
                 i += 1;
             }
             if i - start < 2 && !collapsed {
-                continue; // a lone task is not a fan-out; leave it as-is
+                continue; // a lone subagent call is not a fan-out; leave it as-is
             }
             let g = groups.len();
             let mut members = Vec::new();
@@ -132,7 +134,7 @@ impl Panels {
         }
     }
 
-    /// A task in this group is starting. Inline fan-outs open immediately.
+    /// A subagent call in this group is starting. Inline fan-outs open immediately.
     /// Detached calls wait for their successful hub acknowledgment: registering
     /// the id here would suppress the only useful diagnostic when validation,
     /// queue admission, or cancellation fails before a job exists.
@@ -148,9 +150,9 @@ impl Panels {
         Some(self.render(g))
     }
 
-    /// A task in this group finished: flip its row to done with the turn count
-    /// and a one-line result digest, then re-render the whole block. Opens the
-    /// group if a canned outcome finished it before any real start.
+    /// A subagent call in this group finished: flip its row to done with the
+    /// turn count and a one-line result digest, then re-render the whole block.
+    /// Opens the group if a canned outcome finished it before any real start.
     pub(crate) fn on_finished(
         &mut self,
         index: usize,
@@ -265,8 +267,9 @@ fn background_ack_active(
     Some((ordinal, active))
 }
 
-/// The `prompt` argument of a `task` call, empty when absent or unparseable
-/// (the tool itself reports a missing prompt; the panel just shows a blank).
+/// The `prompt` argument of a `subagent` call, empty when absent or
+/// unparseable (the tool itself reports a missing prompt; the panel just
+/// shows a blank).
 fn prompt_of(call: &ToolCall) -> String {
     serde_json::from_str::<serde_json::Value>(&call.arguments)
         .ok()

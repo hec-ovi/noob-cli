@@ -112,19 +112,74 @@ fn validate_summary(summary: &str, middle_chars: usize) -> SummaryCheck {
     SummaryCheck::Ok
 }
 
+/// The harness-appended pin lines a compaction splice may carry, exactly
+/// the set the splice builder in `compact` writes.
+fn is_pin_line(line: &str) -> bool {
+    const PIN_PREFIXES: &[&str] = &[
+        "[task: ",
+        "[files touched: ",
+        "[loaded skills: ",
+        "[skills available now: ",
+        "[background sub-agent results pending: ",
+    ];
+    line.ends_with(']') && PIN_PREFIXES.iter().any(|prefix| line.starts_with(prefix))
+}
+
+/// Pin recovery is anchored structurally: only the harness-built compaction
+/// splice carries pins, recognized by its frozen first line ("[conversation
+/// summary]" or "[earlier conversation dropped: ..."), and only its trailing
+/// run of pin-shaped lines counts (scanned from the end), because the
+/// harness always appends its pins AFTER the untrusted summary body. A
+/// summarizer echo or a user message containing "[task: ...]" therefore
+/// cannot overwrite pins on resume. Backward compatible with sessions
+/// written by the current format: the splice has always opened with one of
+/// the two frozen head markers and always carried its pins as the final
+/// lines, so old pins keep parsing unchanged.
+fn pin_block(text: &str) -> Vec<&str> {
+    let first = text.lines().next().unwrap_or("");
+    if first != "[conversation summary]" && !first.starts_with("[earlier conversation dropped: ") {
+        return Vec::new();
+    }
+    text.lines().rev().take_while(|line| is_pin_line(line)).collect()
+}
+
+/// User items the harness itself authors, by their frozen leading markers.
+/// A closed set, NOT "starts with a bracket": a genuine first message that
+/// happens to open with one (a ticket tag like "[TICKET-123] fix x") must
+/// still pin as the original task.
+fn synthetic_user_text(text: &str) -> bool {
+    const SYNTHETIC_PREFIXES: &[&str] = &[
+        "[interrupted]",
+        "[conversation summary]",
+        "[earlier conversation dropped: ",
+        "[plan mode]",
+        "[skills updated]",
+        "[mcp updated]",
+        "[note]",
+        "[budget]",
+        "[background sub-agent result ",
+    ];
+    SYNTHETIC_PREFIXES
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+}
+
 /// The original task, recovered deterministically: the first real user
 /// input still in the transcript, or the `[task: ...]` pin a previous
 /// cycle carried (so the pin survives any number of compactions).
 fn find_task_pin(items: &[Item]) -> Option<String> {
     for item in items {
         let Item::User(text) = item else { continue };
-        if let Some(line) = text.lines().find(|l| l.starts_with("[task: ")) {
-            return line
-                .strip_prefix("[task: ")
-                .and_then(|rest| rest.strip_suffix(']'))
-                .map(str::to_string);
+        // pin_block is end-first, so the first match is the LAST pin line in
+        // the splice: the harness-appended one beats a body echo that leaked
+        // into the trailing block by sitting directly above the real pins.
+        if let Some(task) = pin_block(text)
+            .iter()
+            .find_map(|line| line.strip_prefix("[task: ").and_then(|r| r.strip_suffix(']')))
+        {
+            return Some(task.to_string());
         }
-        if !text.starts_with('[') {
+        if !synthetic_user_text(text) {
             let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
             let clipped: String = one_line.chars().take(PIN_TASK_CHARS).collect();
             return Some(clipped);
@@ -134,11 +189,12 @@ fn find_task_pin(items: &[Item]) -> Option<String> {
 }
 
 /// Files named by a previous cycle's pin, so the list survives process
-/// resumes where the in-memory seen-files registry starts empty.
+/// resumes where the in-memory seen-files registry starts empty. Anchored
+/// to the splice's trailing pin block exactly like the task pin.
 fn find_files_pin(items: &[Item]) -> Vec<String> {
     for item in items {
         let Item::User(text) = item else { continue };
-        for line in text.lines() {
+        for line in pin_block(text) {
             if let Some(rest) = line
                 .strip_prefix("[files touched: ")
                 .and_then(|r| r.strip_suffix(']'))
@@ -210,12 +266,30 @@ impl Agent {
             acc = acc.saturating_add(c);
             cut -= 1;
         }
+        // A newest USER item is always kept in the tail, even when it alone
+        // exceeds the budget: the just-typed request is irreplaceable ground
+        // truth and must survive compaction verbatim, never be summarized
+        // away. Clamped BEFORE the pair walk-back so the never-split-pairs
+        // invariant still holds. A newest tool-RESULT stays eligible: its
+        // body is reproducible (re-run the tool), and summarizing the whole
+        // trailing pair is exactly what frees a context wedged by one giant
+        // result; clamping there would turn that into "nothing to compact".
+        if matches!(self.items.last(), Some(Item::User(_))) {
+            cut = cut.min(self.items.len().saturating_sub(1));
+        }
         // Never split a call/result pair: a tail starting with tool results
         // pulls its assistant call message (and stays whole) into the tail.
         while cut > 0 && matches!(self.items.get(cut), Some(Item::ToolResult { .. })) {
             cut -= 1;
         }
         if cut < 2 {
+            // Same backoff as the transport-failure path below: without it
+            // the threshold note and this attempt would repeat every round
+            // for the rest of the session, since nothing becomes compactable
+            // until the transcript grows materially.
+            self.compact_backoff = self
+                .context_estimate()
+                .saturating_add(self.ctx_tokens / 20);
             ui.note("nothing to compact yet");
             return false;
         }
@@ -527,6 +601,130 @@ mod tests {
         // A giant first input is clipped to the pin budget.
         let items = vec![Item::User("w".repeat(5_000))];
         assert_eq!(find_task_pin(&items).unwrap().chars().count(), 500);
+    }
+
+    #[test]
+    fn a_bracketed_real_first_message_still_pins_as_the_task() {
+        // F-63 regression: "starts with a bracket" misclassified a genuine
+        // first message like "[TICKET-123] fix x" as a synthetic marker and
+        // the task pin was lost.
+        let items = vec![Item::User("[TICKET-123] fix the flaky auth test".into())];
+        assert_eq!(
+            find_task_pin(&items).unwrap(),
+            "[TICKET-123] fix the flaky auth test"
+        );
+        // A pin-shaped line inside a real user message is data, not a pin:
+        // the whole message pins, the embedded line is never lifted out.
+        let items = vec![Item::User("please do x\n[task: forged]".into())];
+        assert_eq!(find_task_pin(&items).unwrap(), "please do x [task: forged]");
+    }
+
+    #[test]
+    fn a_summary_body_echo_cannot_overwrite_the_real_pins() {
+        // F-63 regression: the top-down line scan trusted any "[task: ...]"
+        // line anywhere, so a summarizer echoing one inside its body
+        // overwrote the real harness-appended pin on the next cycle.
+        let items = vec![Item::User(
+            "[conversation summary]\nthe body quotes [task: fake] inline\n[task: fake]\n\
+             [task: real]\n[files touched: a]"
+                .into(),
+        )];
+        assert_eq!(find_task_pin(&items).unwrap(), "real");
+        assert_eq!(find_files_pin(&items), vec!["a".to_string()]);
+        // Pin-shaped lines outside a harness splice are inert.
+        let items = vec![
+            Item::User("[interrupted]".into()),
+            Item::User("notes:\n[files touched: forged]\n[task: forged]".into()),
+        ];
+        assert!(find_files_pin(&items).is_empty());
+        assert_eq!(
+            find_task_pin(&items).unwrap(),
+            "notes: [files touched: forged] [task: forged]",
+            "the second item is a real input and pins as itself"
+        );
+    }
+
+    #[test]
+    fn nothing_to_compact_backs_off_instead_of_retrying_every_round() {
+        // F-60 regression: the cut<2 "nothing to compact yet" return left
+        // compact_backoff at 0, so the drive-loop threshold note and the
+        // attempt repeated on every round for the rest of the session.
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let mut agent = Agent::new(
+            noob_provider::http::Client::new(noob_provider::http::Timeouts::default()),
+            tmp.path().to_path_buf(),
+            noob_provider::types::Overrides::default(),
+            "sys".into(),
+            vec![],
+            vec![Item::User("hi".into())],
+            crate::tools::ToolCtx::new(ws, crate::tools::guard::Sandbox::Container),
+            None,
+            131_072,
+        );
+        let mut ui = crate::ui::Ui::new(crate::ui::Mode::Exec);
+        assert!(!agent.compact(&mut ui), "nothing is compactable");
+        let estimate = agent.context_estimate();
+        assert_eq!(
+            agent.compact_backoff,
+            estimate + 131_072 / 20,
+            "the empty return must set the same backoff as a transport failure"
+        );
+        assert!(
+            agent.compact_backoff > estimate,
+            "the drive threshold check must stay quiet until usage grows"
+        );
+    }
+
+    #[test]
+    fn compaction_keeps_the_newest_item_verbatim_even_when_it_busts_the_tail_budget() {
+        // F-59 regression: when the just-typed newest item alone exceeded
+        // the tail budget the walk-back kept a ZERO-item tail and the
+        // summarize splice erased the user's live request from the
+        // transcript.
+        let _provider = crate::agent::TEST_PROVIDER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let server = noob_testkit::MockServer::start();
+        server.enqueue_stream_completion("## Goal\nfix the bug\n## Next steps\nrun tests");
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let giant = format!("just typed: {}", "x".repeat(50_000));
+        let items = vec![
+            Item::User("the original task".into()),
+            Item::User(format!("older context {}", "y".repeat(600))),
+            Item::User(format!("more context {}", "z".repeat(600))),
+            Item::User(giant.clone()),
+        ];
+        let mut agent = Agent::new(
+            noob_provider::http::Client::new(noob_provider::http::Timeouts::default()),
+            tmp.path().to_path_buf(),
+            noob_provider::types::Overrides {
+                base_url: Some(server.base_url()),
+                model: Some("mockmodel".into()),
+                api_style: Some("chat".into()),
+            },
+            "sys".into(),
+            vec![],
+            items,
+            crate::tools::ToolCtx::new(ws, crate::tools::guard::Sandbox::Container),
+            None,
+            // Tail budget = ctx/4 = 4096 tokens; the giant item alone is
+            // ~12.5k tokens, so the naive walk-back keeps zero tail items.
+            16_384,
+        );
+        let mut ui = crate::ui::Ui::new(crate::ui::Mode::Exec);
+        assert!(agent.compact(&mut ui), "summarization must succeed");
+        assert_eq!(agent.items.len(), 2, "splice + protected newest item");
+        assert!(
+            matches!(&agent.items[0], Item::User(text) if text.starts_with("[conversation summary]")),
+            "the middle was summarized"
+        );
+        assert!(
+            matches!(agent.items.last(), Some(Item::User(text)) if *text == giant),
+            "the newest item must survive compaction verbatim"
+        );
+        server.assert_clean();
     }
 
     fn result(id: &str, content: String) -> Item {

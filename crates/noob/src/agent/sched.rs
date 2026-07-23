@@ -1,9 +1,9 @@
 //! Batch scheduler: within one assistant tool batch, consecutive read-only
-//! calls run concurrently on scoped threads (cap 8), consecutive task calls
-//! form one fan-out group, and any other mutating call is a sequential barrier
-//! executed alone, in order. Detached task admissions stay ordered while the
-//! background hub runs their children concurrently; inline tasks use the
-//! child cap directly.
+//! calls run concurrently on scoped threads (cap 8), consecutive subagent
+//! calls form one fan-out group, and any other mutating call is a sequential
+//! barrier executed alone, in order. Detached subagent admissions stay ordered
+//! while the background hub runs their children concurrently; inline subagent
+//! calls use the child cap directly.
 //! Results always come back in emission order regardless of completion
 //! order: parallelism where it is free, total determinism where it matters
 //! (two edits to one file can never race).
