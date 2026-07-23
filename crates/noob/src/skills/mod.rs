@@ -184,9 +184,41 @@ fn install_root(workspace: &Path) -> PathBuf {
 /// is parsed and validated before anything is committed, so a malformed skill
 /// is rejected with a reason and nothing is copied. Returns the installed name.
 pub fn install(workspace: &Path, source: &str) -> Result<String, String> {
+    sweep_stale_staging(workspace);
     match git_url_for(source, Path::new(source).exists()) {
         Some(url) => install_git(workspace, &url),
         None => install_path(workspace, Path::new(source)),
+    }
+}
+
+/// Remove sibling staging leftovers (`.noob/.skill-*`) whose embedded pid is
+/// no longer alive: a killed install can never clean up after itself, so the
+/// next install does. Entries whose pid is still alive (a concurrent install)
+/// or whose name does not parse are kept.
+fn sweep_stale_staging(workspace: &Path) {
+    let Ok(entries) = std::fs::read_dir(workspace.join(".noob")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix(".skill-")) else {
+            continue;
+        };
+        // `.skill-{kind}-{pid}-{stamp:x}-{serial:x}`; the pid segment never
+        // contains a hyphen, so a parse failure means "not ours: keep".
+        let Some(pid) = rest
+            .split('-')
+            .nth(1)
+            .and_then(|p| p.parse::<libc::pid_t>().ok())
+            .filter(|&p| p > 0)
+        else {
+            continue;
+        };
+        let dead = unsafe { libc::kill(pid, 0) } != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if dead {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
     }
 }
 
@@ -405,21 +437,30 @@ fn find_skill_dir(root: &Path) -> Result<PathBuf, String> {
     }
 }
 
-/// Remove an installed skill's directory. Confined to the workspace tree: a
-/// global or ecosystem skill (outside the workspace) is refused rather than
-/// deleted, so `/skills remove` can never nuke a shared install.
+/// Remove an installed skill's directory. Confined to the workspace install
+/// root: only a directory DIRECTLY under `.noob/skills` is ever deleted. Any
+/// other discovered skill (a configured NOOB_SKILL_PATHS entry, a `.claude`/
+/// `.agents` ecosystem dir, a global skill, a workspace-root SKILL.md whose
+/// dir IS the workspace) can point at real project source, so `/skills
+/// remove` refuses it by name instead of deleting code.
 pub fn remove(workspace: &Path, skill_dir: &Path) -> Result<(), String> {
-    let ws = workspace
-        .canonicalize()
-        .map_err(|e| format!("cannot resolve the workspace: {e}"))?;
+    let refusal = |dir: &Path| {
+        format!(
+            "{} is not under {}; only skills installed there (/skills add) can be \
+             removed, delete anything else by hand",
+            dir.display(),
+            install_root(workspace).display()
+        )
+    };
+    // No install root means nothing was ever installed, so nothing to remove.
+    let Ok(root) = install_root(workspace).canonicalize() else {
+        return Err(refusal(skill_dir));
+    };
     let dir = skill_dir
         .canonicalize()
         .map_err(|e| format!("{}: {e}", skill_dir.display()))?;
-    if !dir.starts_with(&ws) {
-        return Err(format!(
-            "{} is outside the workspace (a global or ecosystem skill); remove it by hand",
-            skill_dir.display()
-        ));
+    if dir.parent() != Some(root.as_path()) {
+        return Err(refusal(&dir));
     }
     std::fs::remove_dir_all(&dir).map_err(|e| format!("removing the skill failed: {e}"))
 }
@@ -487,16 +528,41 @@ fn copy_file(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// Read only the fenced metadata needed for discovery and validation. The
 /// file must be a real regular file: following a FIFO, device, or symlink here
 /// could block startup or consume unbounded memory before cancellation exists.
+/// The check is on the opened fd, not the path (the tools/read.rs pattern):
+/// O_NOFOLLOW fails a symlink at open, O_NONBLOCK keeps a FIFO swapped in
+/// after the lookup from blocking on a writer, and the fstat below judges the
+/// same object the bytes come from, so no TOCTOU window remains.
 fn read_frontmatter_file(path: &Path) -> std::io::Result<String> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_file() {
-        return Err(std::io::Error::new(
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let not_regular = || {
+        std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "SKILL.md must be a regular non-symlink file",
-        ));
+        )
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| {
+            if e.raw_os_error() == Some(libc::ELOOP) {
+                not_regular()
+            } else {
+                e
+            }
+        })?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(not_regular());
     }
-
-    let mut file = std::fs::File::open(path)?;
+    // A verified regular file: clear O_NONBLOCK so the reads below are
+    // ordinary blocking file reads.
+    let fd = file.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags >= 0 {
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) };
+    }
     let mut kept = Vec::with_capacity(8 * 1024);
     let mut chunk = [0u8; 8 * 1024];
     let mut line_start = 0usize;
@@ -1123,19 +1189,98 @@ mod tests {
     }
 
     #[test]
-    fn remove_refuses_paths_outside_the_workspace() {
+    fn remove_deletes_only_dirs_directly_under_the_install_root() {
         let ws = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let global = outside.path().join("skills/demo");
         std::fs::create_dir_all(&global).unwrap();
         let err = remove(ws.path(), &global).unwrap_err();
-        assert!(err.contains("outside the workspace"), "{err}");
+        assert!(err.contains("is not under"), "{err}");
         assert!(global.exists(), "an outside skill must not be deleted");
-        // A workspace skill is removed.
+        // An installed skill is removed; its bundled files go with it.
         let inside = ws.path().join(".noob/skills/demo");
         std::fs::create_dir_all(&inside).unwrap();
         assert!(remove(ws.path(), &inside).is_ok());
         assert!(!inside.exists());
+    }
+
+    #[test]
+    fn remove_refuses_a_configured_resolver_skill_and_deletes_nothing() {
+        // A NOOB_SKILL_PATHS entry resolves workspace-relative and may point
+        // at real project source (here `cli/` holding code next to SKILL.md);
+        // /skills remove must refuse it even though it is inside the
+        // workspace and even though installed skills exist.
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(ws.path().join(".noob/skills/installed")).unwrap();
+        write_skill(ws.path(), "cli", &skill_md("censurado", "d"));
+        std::fs::write(ws.path().join("cli/main.rs"), "fn main() {}\n").unwrap();
+        let err = remove(ws.path(), &ws.path().join("cli")).unwrap_err();
+        assert!(err.contains("is not under"), "{err}");
+        assert!(err.contains("cli"), "the refusal must name the dir: {err}");
+        assert!(
+            ws.path().join("cli/main.rs").is_file(),
+            "project source must survive the refusal"
+        );
+        // Nesting deeper than one level under the root is refused too.
+        let nested = ws.path().join(".noob/skills/a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(remove(ws.path(), &nested).is_err());
+        assert!(nested.exists());
+    }
+
+    #[test]
+    fn remove_refuses_a_workspace_root_skill() {
+        // A SKILL.md at the workspace root makes the skill's dir == the
+        // workspace; removal would delete the entire project.
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("SKILL.md"), skill_md("root-skill", "d")).unwrap();
+        std::fs::write(ws.path().join("code.rs"), "// project code\n").unwrap();
+        std::fs::create_dir_all(ws.path().join(".noob/skills/other")).unwrap();
+        let err = remove(ws.path(), ws.path()).unwrap_err();
+        assert!(err.contains("is not under"), "{err}");
+        assert!(
+            ws.path().join("code.rs").is_file(),
+            "the workspace must survive removing a root skill"
+        );
+    }
+
+    #[test]
+    fn stale_staging_from_dead_pids_is_swept_by_the_next_install() {
+        let ws = tempfile::tempdir().unwrap();
+        let noob = ws.path().join(".noob");
+        // A pid far above any Linux pid_max: kill(pid, 0) fails with ESRCH.
+        let stale = noob.join(".skill-install-999999999-abc-0");
+        let live = noob.join(format!(".skill-git-{}-abc-0", std::process::id()));
+        let unparsed = noob.join(".skill-strange");
+        for dir in [&stale, &live, &unparsed] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let src = ws.path().join("src");
+        write_skill(ws.path(), "src", &skill_md("swept", "d"));
+        install(ws.path(), src.to_str().unwrap()).unwrap();
+        assert!(!stale.exists(), "dead-pid staging must be swept");
+        assert!(live.exists(), "live-pid staging must be kept");
+        assert!(unparsed.exists(), "unattributable entries must be kept");
+    }
+
+    #[test]
+    fn frontmatter_open_rejects_fifo_and_symlink_at_the_fd_level() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fifo = tmp.path().join("SKILL.md");
+        let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        // Must not block waiting for a writer, and must carry the message.
+        let err = read_frontmatter_file(&fifo).unwrap_err();
+        assert!(err.to_string().contains("regular non-symlink"), "{err}");
+
+        let real = tmp.path().join("real.md");
+        std::fs::write(&real, skill_md("s", "d")).unwrap();
+        let linked = tmp.path().join("linked-SKILL.md");
+        symlink(&real, &linked).unwrap();
+        let err = read_frontmatter_file(&linked).unwrap_err();
+        assert!(err.to_string().contains("regular non-symlink"), "{err}");
     }
 
     #[test]

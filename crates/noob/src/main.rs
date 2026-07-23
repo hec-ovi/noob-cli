@@ -11,13 +11,12 @@ mod subagent;
 mod tools;
 mod ui;
 
-use std::collections::HashSet;
 use std::io::Read;
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
 
 use noob_provider::http::{Client, INTERRUPTED, Timeouts};
-use noob_provider::types::{Item, Overrides};
+use noob_provider::types::Overrides;
 use serde_json::json;
 
 use agent::{Agent, RunEnd, prompt};
@@ -1042,8 +1041,14 @@ fn handle_config(args: &str, agent: &Agent, ui: &mut Ui) {
                 "NOOB_BASE_URL" if verb == "unset" => {
                     "restart noob to run localhost autodetect; an exported variable or CLI flag still overrides it"
                 }
+                // ov.base_url is set either by the --base-url flag or by
+                // startup autodetect pinning; argv tells the two apart.
                 "NOOB_BASE_URL" if agent.ov.base_url.is_some() => {
-                    "restart noob without a CLI override to apply it; this process is pinned to its startup endpoint"
+                    if std::env::args().any(|arg| arg == "--base-url") {
+                        "restart noob without a CLI override to apply it; this process is pinned to its startup endpoint"
+                    } else {
+                        "restart noob to apply it; this process is pinned to the endpoint autodetected at startup"
+                    }
                 }
                 "NOOB_BASE_URL" => {
                     "applies on the next model request unless an exported variable overrides it"
@@ -1160,12 +1165,12 @@ fn cmd_exec(args: &[String]) -> ExitCode {
 /// `{"status": "ok"|"error", "result", "turns", "usage"}`.
 fn cmd_child() -> ExitCode {
     subagent::install_parent_death_cleanup();
-    /// Bound on the task payload; a parent never sends anything near this.
-    const STDIN_CAP: u64 = 8 * 1024 * 1024;
+    // Bound on the task payload; the parent pre-checks against the same
+    // constant before spawning, so nothing near this ever arrives.
     let mut payload = String::new();
     let read = std::io::stdin()
         .lock()
-        .take(STDIN_CAP)
+        .take(subagent::CHILD_STDIN_CAP)
         .read_to_string(&mut payload);
     let parsed: Option<serde_json::Value> = match read {
         Ok(_) => serde_json::from_str(payload.trim()).ok(),
@@ -1283,10 +1288,7 @@ fn cmd_child() -> ExitCode {
     // in their schema, so give one explicit correction without extending the
     // original child budget. Aborts and interrupts are terminal and pass
     // through untouched.
-    if web_only
-        && matches!(&end, RunEnd::Completed(_))
-        && completed_mcp_call_count(&agent.items) < 2
-    {
+    if web_only && matches!(&end, RunEnd::Completed(_)) && mcp_evidence_calls(&agent) < 2 {
         let remaining = original_round_cap.saturating_sub(total_rounds);
         if remaining == 0 {
             end = RunEnd::Aborted(format!(
@@ -1306,7 +1308,7 @@ fn cmd_child() -> ExitCode {
             );
             end = agent.run_input(&correction, &mut ui);
             total_rounds = total_rounds.saturating_add(agent.last_rounds);
-            if matches!(&end, RunEnd::Completed(_)) && completed_mcp_call_count(&agent.items) < 2 {
+            if matches!(&end, RunEnd::Completed(_)) && mcp_evidence_calls(&agent) < 2 {
                 end = RunEnd::Aborted(
                     "web research returned without the required 2 mcp_call evidence calls after one corrective follow-up"
                         .to_string(),
@@ -1323,29 +1325,17 @@ fn cmd_child() -> ExitCode {
     child_result(status, &result, total_rounds, agent.last_usage())
 }
 
-fn completed_mcp_call_count(items: &[Item]) -> usize {
-    let call_ids: HashSet<&str> = items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Assistant { tool_calls, .. } => Some(tool_calls),
-            _ => None,
-        })
-        .flatten()
-        .filter(|call| call.name == "mcp_call")
-        .map(|call| call.id.as_str())
-        .collect();
-    let completed_ids: HashSet<&str> = items
-        .iter()
-        .filter_map(|item| match item {
-            Item::ToolResult { call_id, content }
-                if content.starts_with("[untrusted content from MCP server ") =>
-            {
-                Some(call_id.as_str())
-            }
-            _ => None,
-        })
-        .collect();
-    call_ids.intersection(&completed_ids).count()
+/// Successful mcp_call round trips, read from the live counter the mcp_call
+/// tool maintains as results arrive (isError results never increment it).
+/// The FINAL transcript is deliberately NOT re-scanned: child-side
+/// compaction can summarize evidence items away and abort a compliant
+/// child, and wrapped isError results would read as evidence.
+fn mcp_evidence_calls(agent: &Agent) -> usize {
+    agent
+        .tool_ctx
+        .mcp
+        .as_ref()
+        .map_or(0, |mcp| mcp.evidence_call_count())
 }
 
 /// The single stdout line; everything else this process printed went to

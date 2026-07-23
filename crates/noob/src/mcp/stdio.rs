@@ -51,6 +51,24 @@ struct Proc {
 }
 
 impl Proc {
+    /// True while the child still runs. Observing the exit here REAPS the
+    /// pid, so the kill path is disarmed first: a later Drop would otherwise
+    /// SIGKILL a process group the kernel may already have handed to an
+    /// unrelated process (pid reuse).
+    fn poll_alive(&mut self) -> bool {
+        match self.child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(_)) => {
+                self.live = false;
+                false
+            }
+            // Unknown state: keep the kill path armed. Without an observed
+            // exit the pid cannot have been recycled, and killing our own
+            // live child twice is safe.
+            Err(_) => false,
+        }
+    }
+
     /// SIGKILL the whole process group and reap. The group exists because
     /// the child was spawned with `process_group(0)`, so a server that
     /// forked helpers cannot leave them behind.
@@ -121,7 +139,7 @@ impl StdioTransport {
 
     fn ensure_locked(&self, state: &mut State) -> Result<(), String> {
         let alive = match &mut state.proc {
-            Some(proc) => proc.child.try_wait().map(|s| s.is_none()).unwrap_or(false),
+            Some(proc) => proc.poll_alive(),
             None => false,
         };
         if alive {
@@ -458,6 +476,37 @@ done
         );
         assert!(t.ensure_ready().unwrap_err().contains("first init failed"));
         assert_eq!(t.ensure_ready().unwrap(), "2025-11-25");
+    }
+
+    #[test]
+    fn observed_exit_disarms_the_kill_path_before_drop() {
+        // try_wait reaping an exited child frees its pid; the subsequent
+        // Drop must not SIGKILL the (possibly reused) process group.
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let (_tx, rx) = mpsc::sync_channel::<Value>(1);
+        let mut proc = Proc {
+            child,
+            stdin,
+            rx,
+            live: true,
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while proc.poll_alive() {
+            assert!(Instant::now() < deadline, "child never exited");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            !proc.live,
+            "a try_wait-observed exit must disarm kill_group"
+        );
     }
 
     #[test]

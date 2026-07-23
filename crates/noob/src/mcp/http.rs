@@ -101,10 +101,16 @@ impl HttpTransport {
                 .to_string(),
         );
         // notifications/initialized completes the handshake; servers answer
-        // 202 with no body.
+        // 202 with no body. A failed note leaves the server side
+        // uninitialized, so the local half rolls back too: keeping
+        // protocol/session here would make every later call skip the
+        // handshake against a session the server never completed.
         let note = proto::notification("notifications/initialized");
-        self.post_and_parse(state, &note, None)
-            .map_err(RpcFailure::into_message)?;
+        if let Err(e) = self.post_and_parse(state, &note, None) {
+            state.protocol = None;
+            state.session = None;
+            return Err(RpcFailure::into_message(e));
+        }
         Ok(())
     }
 
@@ -165,9 +171,7 @@ impl HttpTransport {
             return Ok((Some(outcome), session));
         }
         // Default: a single JSON body.
-        let bytes = stream
-            .read_to_end_bounded(MAX_MCP_JSON_BODY)
-            .map_err(|e| self.map_error(e))?;
+        let bytes = self.read_json_bounded(&mut stream)?;
         if want_id.is_none() {
             return Ok((None, session));
         }
@@ -187,6 +191,39 @@ impl HttpTransport {
                  response to this request",
                 self.url
             ))),
+        }
+    }
+
+    /// Read a plain-JSON body to its end under the same ABSOLUTE per-call
+    /// deadline scan_sse enforces: the provider watchdog's idle clock resets
+    /// on every byte, so a server trickling the body one byte at a time
+    /// would otherwise pin the call far past its timeout.
+    fn read_json_bounded(&self, stream: &mut StreamBody) -> Result<Vec<u8>, RpcFailure> {
+        let deadline = Instant::now() + self.timeout;
+        let mut bytes = Vec::new();
+        let mut buf = [0u8; 8 * 1024];
+        loop {
+            if Instant::now() >= deadline {
+                return Err(RpcFailure::Other(format!(
+                    "the MCP call timed out after {}s: the server at {} kept trickling \
+                     the response without finishing it; retry or raise timeout_s in \
+                     mcp.json",
+                    self.timeout.as_secs(),
+                    self.url
+                )));
+            }
+            let n = stream.read(&mut buf).map_err(|e| self.map_error(e))?;
+            if n == 0 {
+                return Ok(bytes);
+            }
+            if bytes.len().saturating_add(n) > MAX_MCP_JSON_BODY {
+                return Err(RpcFailure::Other(format!(
+                    "the MCP server at {} sent more than 8 MiB in one response; ask \
+                     the tool for less data or fix the server response",
+                    self.url
+                )));
+            }
+            bytes.extend_from_slice(&buf[..n]);
         }
     }
 
@@ -413,6 +450,124 @@ mod tests {
             )
             .unwrap();
         assert!(ok["content"][0]["text"].as_str().unwrap().contains("back"));
+    }
+
+    /// Minimal raw-TCP MCP endpoint: answers initialize with framed plain
+    /// JSON, 202s notifications, and trickles every other response body one
+    /// byte at a time forever over a close-delimited application/json
+    /// response. That is the shape only an absolute per-call deadline can
+    /// bound: the provider idle watchdog resets on every byte.
+    fn json_trickle_server() -> String {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                std::thread::spawn(move || {
+                    loop {
+                        let mut head = Vec::new();
+                        let mut byte = [0u8; 1];
+                        while !head.ends_with(b"\r\n\r\n") {
+                            match stream.read(&mut byte) {
+                                Ok(1) => head.extend_from_slice(&byte),
+                                _ => return,
+                            }
+                        }
+                        let head_text = String::from_utf8_lossy(&head).to_ascii_lowercase();
+                        let len: usize = head_text
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                        let mut body = vec![0u8; len];
+                        if stream.read_exact(&mut body).is_err() {
+                            return;
+                        }
+                        let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                        match body.get("method").and_then(Value::as_str).unwrap_or("") {
+                            "initialize" => {
+                                let msg = json!({"jsonrpc": "2.0", "id": body["id"],
+                                    "result": {"protocolVersion": "2025-11-25"}})
+                                .to_string();
+                                let reply = format!(
+                                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                                     content-length: {}\r\n\r\n{msg}",
+                                    msg.len()
+                                );
+                                if stream.write_all(reply.as_bytes()).is_err() {
+                                    return;
+                                }
+                            }
+                            m if m.starts_with("notifications/") => {
+                                let reply = "HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\n\r\n";
+                                if stream.write_all(reply.as_bytes()).is_err() {
+                                    return;
+                                }
+                            }
+                            _ => {
+                                let head =
+                                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n";
+                                if stream.write_all(head.as_bytes()).is_err() {
+                                    return;
+                                }
+                                loop {
+                                    if stream.write_all(b"x").is_err() || stream.flush().is_err() {
+                                        return;
+                                    }
+                                    std::thread::sleep(Duration::from_millis(25));
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn plain_json_byte_trickle_hits_the_absolute_deadline() {
+        let url = json_trickle_server();
+        let t = HttpTransport::new(&url, Duration::from_secs(1));
+        t.ensure_ready().unwrap();
+        let started = Instant::now();
+        let err = t
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"text": "x"}}),
+            )
+            .unwrap_err();
+        assert!(err.contains("timed out after 1s"), "{err}");
+        assert!(err.contains("trickling"), "{err}");
+        // Bounded by the deadline plus one read, never per-byte-reset idle.
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn failed_initialized_note_rolls_back_for_a_full_re_handshake() {
+        let server = McpHttpServer::start(echo_tools());
+        let t = transport(&server);
+        // The note is the first non-initialize request; dropping the session
+        // 404s it, so the handshake fails after initialize succeeded.
+        server.drop_session_once();
+        assert!(t.ensure_ready().is_err());
+        // Half-committed state must not survive: the next attempt re-runs
+        // the whole handshake instead of reporting ready off a session the
+        // server never completed.
+        assert_eq!(t.ensure_ready().unwrap(), "2025-11-25");
+        assert_eq!(
+            server.initialize_count(),
+            2,
+            "the retry must re-initialize, not reuse half-committed state"
+        );
+        server.assert_clean();
     }
 
     #[test]

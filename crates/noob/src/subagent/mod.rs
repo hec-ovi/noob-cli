@@ -31,6 +31,11 @@ pub const DEFAULT_CONCURRENCY: usize = 4;
 pub const DEFAULT_MAX_TURNS: u32 = 25;
 /// Per-child wall clock; the parent kills the whole process group on expiry.
 pub const DEFAULT_WALL_CLOCK_S: u64 = 300;
+/// The child's stdin bound: `noob child` reads its task via
+/// `take(CHILD_STDIN_CAP)`, so a bigger payload arrives truncated, fails to
+/// parse, and surfaces as a misleading "no task" error. The parent
+/// pre-checks against the same bound and reports the real reason instead.
+pub(crate) const CHILD_STDIN_CAP: u64 = 8 * 1024 * 1024;
 
 /// Child progress is UI-only and can be noisy. Keep a bounded head while
 /// draining the rest so parallel children cannot grow parent memory.
@@ -323,6 +328,32 @@ fn run_task(
     interrupted: impl Fn() -> bool + Copy,
 ) -> ToolOutcome {
     let deadline = Instant::now() + cfg.wall_clock;
+    // One JSON object in, then EOF: the child reads stdin to end. Built and
+    // bounds-checked BEFORE the spawn, so an oversized task fails with the
+    // real reason instead of the child's truncated-JSON "no task" error.
+    let payload = json!({
+        "prompt": request.prompt,
+        "tools": request.tools_mode,
+        "max_turns": request.max_turns,
+        "_noob_runtime": {
+            "base_url": cfg.overrides.base_url,
+            "model": cfg.overrides.model,
+            "api_style": cfg.overrides.api_style,
+            "yolo": cfg.yolo,
+            "verbose": cfg.verbose,
+            "excluded_skills": request.excluded_skills,
+        },
+    });
+    let bytes = format!("{payload}\n");
+    if bytes.len() as u64 > CHILD_STDIN_CAP {
+        return ToolOutcome::err(format!(
+            "the sub-agent task payload is {} bytes, above the {} MiB child input \
+             bound; send a smaller prompt (reference files by path instead of \
+             inlining their contents)",
+            bytes.len(),
+            CHILD_STDIN_CAP / (1024 * 1024)
+        ));
+    }
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => return ToolOutcome::err(format!("cannot locate the noob binary: {e}")),
@@ -358,23 +389,8 @@ fn run_task(
         Ok(child) => ChildGuard::new(child),
         Err(e) => return ToolOutcome::err(format!("cannot spawn the sub-agent: {e}")),
     };
-    // One JSON object in, then EOF: the child reads stdin to end.
-    let payload = json!({
-        "prompt": request.prompt,
-        "tools": request.tools_mode,
-        "max_turns": request.max_turns,
-        "_noob_runtime": {
-            "base_url": cfg.overrides.base_url,
-            "model": cfg.overrides.model,
-            "api_style": cfg.overrides.api_style,
-            "yolo": cfg.yolo,
-            "verbose": cfg.verbose,
-            "excluded_skills": request.excluded_skills,
-        },
-    });
     {
         let mut stdin = child.stdin.take().expect("piped stdin");
-        let bytes = format!("{payload}\n");
         if let Err(error) =
             write_child_input_with(&mut stdin, bytes.as_bytes(), deadline, interrupted)
         {
@@ -899,7 +915,11 @@ mod tests {
         ctx.task = Some(cfg());
         let out = run(&ctx, &json!({"status": false}));
         assert!(out.is_error);
-        assert!(out.content.contains("status:false does nothing"), "{}", out.content);
+        assert!(
+            out.content.contains("status:false does nothing"),
+            "{}",
+            out.content
+        );
         assert!(
             !out.content.contains("missing required parameter"),
             "{}",
@@ -936,7 +956,11 @@ mod tests {
             "digest must carry the fleet elapsed: {}",
             out.summary
         );
-        assert!(out.content.contains("\"job_id\":\"agent-1\""), "{}", out.content);
+        assert!(
+            out.content.contains("\"job_id\":\"agent-1\""),
+            "{}",
+            out.content
+        );
         let results = hub.shutdown();
         assert!(results.iter().all(|r| r.outcome.canceled));
     }
@@ -1016,6 +1040,42 @@ mod tests {
         assert_eq!(
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ESRCH)
+        );
+    }
+
+    #[test]
+    fn oversized_task_payloads_are_refused_before_spawning() {
+        // Above the child's stdin bound the task JSON would arrive truncated
+        // and misreport as "no task"; the parent must name the real reason.
+        // Post-check, run_task returns before any spawn, so this cannot
+        // accidentally exec the test binary as `noob child`.
+        let request = TaskRequest {
+            prompt: "x".repeat((CHILD_STDIN_CAP + 1) as usize),
+            tools_mode: "read-only".to_string(),
+            max_turns: 1,
+            excluded_skills: Vec::new(),
+        };
+        let run_cfg = RunCfg {
+            child_depth: 1,
+            wall_clock: Duration::from_secs(5),
+            verbose: false,
+            overrides: Overrides::default(),
+            yolo: false,
+            workspace: std::env::temp_dir(),
+            progress: None,
+        };
+        let started = Instant::now();
+        let out = run_task(&run_cfg, &request, || false);
+        assert!(out.is_error);
+        assert!(
+            out.content.contains("8 MiB child input bound"),
+            "{}",
+            out.content
+        );
+        assert!(out.content.contains("bytes"), "{}", out.content);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the refusal must not wait on a spawned child"
         );
     }
 

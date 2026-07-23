@@ -184,13 +184,12 @@ pub fn remove_server(path: &Path, name: &str) -> Result<bool, String> {
 }
 
 fn write_config(path: &Path, root: &Value) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-    }
     let mut text = serde_json::to_string_pretty(root).expect("json value serializes");
     text.push('\n');
-    std::fs::write(path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))
+    // Same-directory temp + fsync + rename (and parent creation) via the
+    // shared atomic writer: a crash mid-write must never leave a truncated
+    // mcp.json, or the next session silently drops every project server.
+    crate::tools::guard::atomic_write(path, text.as_bytes())
 }
 
 fn parse_entry(name: &str, entry: &Value) -> Result<ServerConfig, String> {
@@ -344,6 +343,31 @@ mod tests {
         let (servers, warnings) = load(ws.path(), ws.path().join("nope").as_path());
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(servers[0].timeout, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn config_writes_replace_atomically_and_leave_no_temp_behind() {
+        let ws = tempfile::tempdir().unwrap();
+        let path = project_path(ws.path());
+        write(
+            ws.path(),
+            ".noob/mcp.json",
+            r#"{"servers": {"keep": {"url": "http://x:1"}}}"#,
+        );
+        add_server(&path, "new", &parse_spec("http://y:2/mcp").unwrap()).unwrap();
+        let parsed: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(parsed["servers"].get("keep").is_some());
+        assert!(parsed["servers"].get("new").is_some());
+        assert_eq!(remove_server(&path, "keep"), Ok(true));
+        let leftovers: Vec<String> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "mcp.json")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
     }
 
     #[test]

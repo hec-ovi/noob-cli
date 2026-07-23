@@ -11,6 +11,7 @@ pub mod schema;
 pub mod stdio;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -70,6 +71,17 @@ impl Connection {
 pub struct Mcp {
     servers: Vec<ServerConfig>,
     conns: Mutex<HashMap<String, Arc<Connection>>>,
+    /// Per-name connect guards: two parallel mcp_connect to one server must
+    /// not double-spawn transports, so the second caller waits on the first
+    /// and reuses its registered connection. Never held while `conns` is
+    /// locked from the outside; `connect` takes them strictly in the order
+    /// connecting -> gate -> conns.
+    connecting: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Successful (isError:false) mcp_call round trips this session, counted
+    /// by the mcp_call tool as results arrive. The web evidence gate reads
+    /// this instead of re-scanning the final transcript, which compaction
+    /// may have summarized (and where wrapped error results would miscount).
+    evidence_calls: AtomicUsize,
 }
 
 /// tools/list pagination bound: a server streaming endless cursors is
@@ -105,7 +117,20 @@ impl Mcp {
         Mcp {
             servers,
             conns: Mutex::new(HashMap::new()),
+            connecting: Mutex::new(HashMap::new()),
+            evidence_calls: AtomicUsize::new(0),
         }
+    }
+
+    /// Record one successful mcp_call round trip (the mcp_call tool calls
+    /// this only for non-isError results).
+    pub fn record_evidence_call(&self) {
+        self.evidence_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Successful mcp_call round trips so far this session.
+    pub fn evidence_call_count(&self) -> usize {
+        self.evidence_calls.load(Ordering::Relaxed)
     }
 
     /// Configured server names, sorted (config::load sorts).
@@ -130,6 +155,18 @@ impl Mcp {
                 self.names().join(", ")
             ));
         };
+        // Serialize connects per name so a parallel second caller waits and
+        // reuses the first caller's connection instead of double-spawning a
+        // transport (two stdio children, two HTTP handshakes). Other
+        // servers' connects and calls proceed untouched.
+        let gate = self
+            .connecting
+            .lock()
+            .unwrap()
+            .entry(name.to_string())
+            .or_default()
+            .clone();
+        let _connecting = gate.lock().unwrap();
         // Reuse a live connection (its stdio child or HTTP session survives
         // a catalog refresh); build a fresh one otherwise.
         let existing = self.conns.lock().unwrap().get(name).cloned();
@@ -259,6 +296,37 @@ mod tests {
             mcp.connection("mock").is_none(),
             "a failed connect must not register a connection"
         );
+    }
+
+    #[test]
+    fn parallel_connects_to_one_name_share_a_single_handshake() {
+        let server = noob_testkit::mcp::McpHttpServer::start(noob_testkit::mcp::echo_tools());
+        let mcp = manager_with(&server.url());
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    mcp.connect("mock").unwrap();
+                });
+            }
+        });
+        assert_eq!(
+            server.initialize_count(),
+            1,
+            "parallel connects must not double-spawn transports"
+        );
+        assert!(mcp.connection("mock").is_some());
+        server.assert_clean();
+    }
+
+    #[test]
+    fn evidence_counter_accumulates_only_when_recorded() {
+        let mcp = manager_with("http://127.0.0.1:9");
+        assert_eq!(mcp.evidence_call_count(), 0);
+        mcp.record_evidence_call();
+        mcp.record_evidence_call();
+        assert_eq!(mcp.evidence_call_count(), 2);
     }
 
     #[test]

@@ -31,6 +31,22 @@ pub fn method_not_found(id: &Value) -> Value {
         "error": {"code": -32601, "message": "this client supports tools only"}})
 }
 
+/// Cap on a server-controlled `error.message` before it is rendered into an
+/// error string (and from there into transcripts): without it a hostile
+/// server could spend the whole 8 MiB inbound line bound on one message.
+const ERROR_MESSAGE_CHAR_CAP: usize = 300;
+
+fn cap_error_message(message: &str) -> std::borrow::Cow<'_, str> {
+    let total = message.chars().count();
+    if total <= ERROR_MESSAGE_CHAR_CAP {
+        return std::borrow::Cow::Borrowed(message);
+    }
+    let cut: String = message.chars().take(ERROR_MESSAGE_CHAR_CAP).collect();
+    std::borrow::Cow::Owned(format!(
+        "{cut}… [error message truncated; {total} chars total]"
+    ))
+}
+
 /// One inbound JSON-RPC message, classified.
 #[derive(Debug)]
 pub enum Inbound {
@@ -64,7 +80,10 @@ pub fn classify(msg: &Value) -> Inbound {
                     .get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown error");
-                Err(format!("server error {code}: {message}"))
+                Err(format!(
+                    "server error {code}: {}",
+                    cap_error_message(message)
+                ))
             } else {
                 Ok(msg.get("result").cloned().unwrap_or(Value::Null))
             };
@@ -127,5 +146,26 @@ mod tests {
             } => {}
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn oversized_error_messages_are_capped_with_an_elision_marker() {
+        let huge = "e".repeat(100_000);
+        match classify(&json!({"jsonrpc":"2.0","id":4,"error":{"code":-1,"message":huge}})) {
+            Inbound::Response {
+                outcome: Err(rendered),
+                ..
+            } => {
+                assert!(rendered.chars().count() < 400, "{}", rendered.len());
+                assert!(
+                    rendered.contains("[error message truncated; 100000 chars total]"),
+                    "{rendered}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        // Short messages pass through whole (the existing "boom" test above
+        // pins the uncapped shape).
+        assert_eq!(cap_error_message("short"), "short");
     }
 }
