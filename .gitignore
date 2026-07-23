@@ -1,6 +1,9 @@
 .research/
 .noob/
 
+# internal working docs, not published
+/docs/AUDIT-PLAN.md
+
 # build caches (docker bind mounts, user-owned)
 /target
 /.cargo-home
