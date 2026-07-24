@@ -185,6 +185,8 @@ Three small things the persistent dock does while a turn streams above it.
 
 **⎋ Cancel.** Escape twice within five seconds cancels a running turn; Ctrl-C cancels at once. A second Ctrl-C during cancellation restores the terminal and exits with status 130.
 
+**🔢 Session tokens (planned).** A top-right readout of the running session totals: tokens prefilled (prompt) and tokens generated (completion), summed across every turn. Fed by the `usage` block each completion already returns, so it needs no extra request. Not yet built.
+
 ## Configuration
 
 The mounted config directory contains `.env`, optional `AGENTS.md`, `mcp.json`, global `skills/`, and `sessions/`.

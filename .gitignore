@@ -1,6 +1,9 @@
 .research/
 .noob/
 
+# local agent-CLI bake-off, not published
+/competition/
+
 # internal working docs, not published
 /docs/AUDIT-PLAN.md
 
