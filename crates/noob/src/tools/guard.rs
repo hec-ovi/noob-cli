@@ -140,13 +140,33 @@ impl SeenFiles {
         }
     }
 
-    /// Record the content the model has now seen. `full` is true when the
-    /// whole file is in context (write, edit, or a read that showed every
-    /// line); a paged read passes `full = false` so a later read still prints
-    /// the parts the model has not seen. A paged read of content the model
-    /// already has in full (same stamp, same generation) never downgrades the
-    /// entry: the full body is still above.
+    /// Record the content a `read` has now shown. `full` is true when the read
+    /// showed every line; a paged read passes `full = false` so a later read
+    /// still prints the parts the model has not seen. A paged read of content
+    /// the model already has in full (same stamp, same generation) never
+    /// downgrades the entry: the full body is still above.
     pub fn record(&self, path: &Path, stamp: FileStamp, full: bool) {
+        self.insert(path, stamp, full, false);
+    }
+
+    /// Record content the model just PRODUCED with `write` or `edit`. Same as
+    /// `record` with `full = true`, except that it leaves the next whole-file
+    /// read un-stubbed, so reading your own output back always prints it.
+    ///
+    /// This edge is not a token optimization, it is a correctness one. In the
+    /// local bake-off every repair the model made came from reading a file
+    /// back after writing it (a truncated `height="512>` attribute that
+    /// swallowed the closing tag, twice), and none came from the 50 rounds of
+    /// shell checks it invented. Stubbing the read-back would save tokens by
+    /// removing the only step that caught real defects.
+    pub fn record_written(&self, path: &Path, stamp: FileStamp) {
+        self.insert(path, stamp, true, true);
+    }
+
+    /// `armed` is the stub state a fresh entry starts in, which
+    /// `stub_unchanged` then toggles: `false` means the next whole-file read
+    /// stubs, `true` means it prints and the one after it stubs.
+    fn insert(&self, path: &Path, stamp: FileStamp, full: bool, armed: bool) {
         let generation = self.generation.load(Ordering::Relaxed);
         let mut map = self.map.lock().unwrap();
         let prev = map
@@ -154,8 +174,9 @@ impl SeenFiles {
             .copied()
             .filter(|prev| prev.stamp == stamp && prev.generation == generation);
         let full = full || prev.is_some_and(|prev| prev.full);
-        // New content (or a new generation) has never been stubbed.
-        let stubbed = prev.is_some_and(|prev| prev.stubbed);
+        // Content the model has already been shown keeps its place in the
+        // toggle; new content (or a new generation) starts fresh.
+        let stubbed = prev.map_or(armed, |prev| prev.stubbed);
         map.insert(
             path.to_path_buf(),
             SeenEntry {

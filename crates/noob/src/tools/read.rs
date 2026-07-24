@@ -476,22 +476,28 @@ mod tests {
         assert_eq!(out.content, "empty.txt is empty (0 lines)");
     }
 
+    /// Reading your own output back always prints it. In the local bake-off
+    /// this is the step that caught the real defects (a truncated
+    /// `height="512>` that swallowed the closing tag), so it must not be
+    /// traded away for tokens. The read AFTER that one stubs.
     #[test]
-    fn read_right_after_the_write_tool_stubs() {
+    fn read_right_after_the_write_tool_prints() {
         let (_t, ctx) = test_ctx();
         let body = "<!DOCTYPE html>\n<html>\nhi\n</html>\n";
         let w = super::super::write::run(&ctx, &json!({"path": "g.html", "content": body}));
         assert!(!w.is_error, "{}", w.content);
         let r = run(&ctx, &json!({"path": "g.html"}));
         assert!(
-            r.content.contains("unchanged"),
-            "write-then-read must stub, got: {}",
+            r.content.contains("<!DOCTYPE html>"),
+            "reading your own write back must print, got: {}",
             r.content
         );
+        let again = run(&ctx, &json!({"path": "g.html"}));
+        assert!(again.content.contains("unchanged"), "{}", again.content);
     }
 
     #[test]
-    fn read_after_the_edit_tool_stubs() {
+    fn read_right_after_the_edit_tool_prints() {
         let (_t, ctx) = test_ctx();
         write(&ctx, "g.html", "one\ntwo\nthree\n");
         run(&ctx, &json!({"path": "g.html"})); // establishes a full read
@@ -500,10 +506,12 @@ mod tests {
         assert!(!e.is_error, "{}", e.content);
         let r = run(&ctx, &json!({"path": "g.html"}));
         assert!(
-            r.content.contains("unchanged"),
-            "read after edit must stub, got: {}",
+            r.content.contains("TWO"),
+            "reading your own edit back must print, got: {}",
             r.content
         );
+        let again = run(&ctx, &json!({"path": "g.html"}));
+        assert!(again.content.contains("unchanged"), "{}", again.content);
     }
 
     #[test]
@@ -556,15 +564,22 @@ mod tests {
 
     #[test]
     fn a_paged_read_does_not_break_a_later_whole_file_stub() {
-        // Regression: the model writes the file (seen in full), then pages
-        // through regions with offset/limit (navigation), then reads the whole
-        // file. The paged reads must not downgrade the entry, so the final
-        // whole-file read still stubs instead of re-printing the body.
+        // Regression: the model writes the file, then pages through regions
+        // with offset/limit (navigation), then reads the whole file twice. The
+        // paged reads must not downgrade the entry, so the SECOND whole-file
+        // read still stubs. (The first prints: it is the read-back of the
+        // model's own write, which paging must not consume.)
         let (_t, ctx) = test_ctx();
         let body: String = (1..=20).map(|i| format!("line{i}\n")).collect();
         super::super::write::run(&ctx, &json!({"path": "g.txt", "content": body}));
         run(&ctx, &json!({"path": "g.txt", "offset": 5, "limit": 3}));
         run(&ctx, &json!({"path": "g.txt", "offset": 12, "limit": 4}));
+        let first = run(&ctx, &json!({"path": "g.txt"}));
+        assert!(
+            first.content.contains("line20"),
+            "the read-back of a write prints even after paging, got: {}",
+            first.content
+        );
         let whole = run(&ctx, &json!({"path": "g.txt"}));
         assert!(
             whole.content.contains("unchanged"),

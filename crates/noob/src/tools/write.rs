@@ -53,7 +53,8 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         }
     }
     atomic_write(&path, content.as_bytes())?;
-    ctx.seen.record(&path, FileStamp::of(content.as_bytes()), true);
+    ctx.seen
+        .record_written(&path, FileStamp::of(content.as_bytes()));
     ctx.consume_skills_write_grant(raw);
     Ok(ToolOutcome::ok(
         format!("wrote {shown} ({} bytes)", content.len()),
