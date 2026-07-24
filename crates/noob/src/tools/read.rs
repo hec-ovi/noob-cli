@@ -124,14 +124,35 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         line_no
     };
 
+    // If the model has already seen exactly this content in the current
+    // context (a write or a prior read, not pruned by a compaction since) and
+    // this read would have shown the whole file, its body is still above:
+    // return a short note instead of re-printing it. A page request or a
+    // partially-shown file always prints, and so does an immediate repeat of
+    // the same read: asking twice is how the model overrides the note.
+    let current = FileStamp {
+        len: byte_count,
+        hash,
+    };
+    // The whole file is in context only when this read started at line 1 and
+    // printed every line (no paging, no byte cap).
+    let full = offset == 1 && total > 0 && last_emitted == total;
+    // Ask before recording: the question is whether the model held this
+    // content in full BEFORE this call, so a first-ever read has nothing to
+    // match against and prints.
+    let unchanged = full && ctx.seen.stub_unchanged(&path, current);
     // Record the stamp of the full stream, not just the retained page.
-    ctx.seen.record(
-        &path,
-        FileStamp {
-            len: byte_count,
-            hash,
-        },
-    );
+    ctx.seen.record(&path, current, full);
+    if unchanged {
+        return Ok(ToolOutcome::ok(
+            format!(
+                "{shown_path} unchanged since you last read or wrote it \
+                 ({total} lines, {byte_count} bytes); its content is already in the \
+                 conversation above. Read it again to print the body."
+            ),
+            format!("read {shown_path} (unchanged, {total} lines)"),
+        ));
+    }
 
     if total == 0 {
         return Ok(ToolOutcome::ok(
@@ -453,5 +474,131 @@ mod tests {
         let out = run(&ctx, &json!({"path": "empty.txt"}));
         assert!(!out.is_error);
         assert_eq!(out.content, "empty.txt is empty (0 lines)");
+    }
+
+    #[test]
+    fn read_right_after_the_write_tool_stubs() {
+        let (_t, ctx) = test_ctx();
+        let body = "<!DOCTYPE html>\n<html>\nhi\n</html>\n";
+        let w = super::super::write::run(&ctx, &json!({"path": "g.html", "content": body}));
+        assert!(!w.is_error, "{}", w.content);
+        let r = run(&ctx, &json!({"path": "g.html"}));
+        assert!(
+            r.content.contains("unchanged"),
+            "write-then-read must stub, got: {}",
+            r.content
+        );
+    }
+
+    #[test]
+    fn read_after_the_edit_tool_stubs() {
+        let (_t, ctx) = test_ctx();
+        write(&ctx, "g.html", "one\ntwo\nthree\n");
+        run(&ctx, &json!({"path": "g.html"})); // establishes a full read
+        let e =
+            super::super::edit::run(&ctx, &json!({"path": "g.html", "old": "two", "new": "TWO"}));
+        assert!(!e.is_error, "{}", e.content);
+        let r = run(&ctx, &json!({"path": "g.html"}));
+        assert!(
+            r.content.contains("unchanged"),
+            "read after edit must stub, got: {}",
+            r.content
+        );
+    }
+
+    #[test]
+    fn re_reading_unchanged_content_returns_a_stub() {
+        let (_t, ctx) = test_ctx();
+        write(&ctx, "f.txt", "alpha\nbeta\ngamma\n");
+        let first = run(&ctx, &json!({"path": "f.txt"}));
+        assert!(first.content.contains("alpha"), "{}", first.content);
+        let second = run(&ctx, &json!({"path": "f.txt"}));
+        assert!(!second.is_error, "{}", second.content);
+        assert!(second.content.contains("unchanged"), "{}", second.content);
+        assert!(
+            !second.content.contains("alpha"),
+            "body should be omitted: {}",
+            second.content
+        );
+    }
+
+    #[test]
+    fn asking_again_after_a_stub_prints_the_body() {
+        // The escape hatch that replaces a `force` parameter: the model is
+        // never stuck without the content, and it costs no schema tokens.
+        let (_t, ctx) = test_ctx();
+        write(&ctx, "f.txt", "alpha\nbeta\n");
+        run(&ctx, &json!({"path": "f.txt"})); // prints
+        let stub = run(&ctx, &json!({"path": "f.txt"}));
+        assert!(stub.content.contains("unchanged"), "{}", stub.content);
+        let insisted = run(&ctx, &json!({"path": "f.txt"}));
+        assert!(insisted.content.contains("alpha"), "{}", insisted.content);
+        assert!(!insisted.content.contains("unchanged"));
+        // And it re-arms: the body is above again, so the next one stubs.
+        let again = run(&ctx, &json!({"path": "f.txt"}));
+        assert!(again.content.contains("unchanged"), "{}", again.content);
+    }
+
+    #[test]
+    fn changed_content_is_reprinted_not_stubbed() {
+        let (_t, ctx) = test_ctx();
+        let p = write(&ctx, "f.txt", "alpha\n");
+        run(&ctx, &json!({"path": "f.txt"}));
+        std::fs::write(&p, "alpha\nbeta\n").unwrap();
+        let out = run(&ctx, &json!({"path": "f.txt"}));
+        assert!(
+            out.content.contains("beta"),
+            "a changed file must reprint: {}",
+            out.content
+        );
+        assert!(!out.content.contains("unchanged"));
+    }
+
+    #[test]
+    fn a_paged_read_does_not_break_a_later_whole_file_stub() {
+        // Regression: the model writes the file (seen in full), then pages
+        // through regions with offset/limit (navigation), then reads the whole
+        // file. The paged reads must not downgrade the entry, so the final
+        // whole-file read still stubs instead of re-printing the body.
+        let (_t, ctx) = test_ctx();
+        let body: String = (1..=20).map(|i| format!("line{i}\n")).collect();
+        super::super::write::run(&ctx, &json!({"path": "g.txt", "content": body}));
+        run(&ctx, &json!({"path": "g.txt", "offset": 5, "limit": 3}));
+        run(&ctx, &json!({"path": "g.txt", "offset": 12, "limit": 4}));
+        let whole = run(&ctx, &json!({"path": "g.txt"}));
+        assert!(
+            whole.content.contains("unchanged"),
+            "whole-file read after paged reads must still stub, got: {}",
+            whole.content
+        );
+    }
+
+    #[test]
+    fn a_partially_shown_file_is_not_stubbed_later() {
+        let (_t, ctx) = test_ctx();
+        let body: String = (1..=10).map(|i| format!("line{i}\n")).collect();
+        write(&ctx, "f.txt", &body);
+        // First read shows only lines 1-3 but records the full-content stamp.
+        run(&ctx, &json!({"path": "f.txt", "limit": 3}));
+        // A whole-file read must print, the model never saw lines 4-10.
+        let out = run(&ctx, &json!({"path": "f.txt"}));
+        assert!(out.content.contains("line10"), "{}", out.content);
+        assert!(!out.content.contains("unchanged"));
+    }
+
+    #[test]
+    fn compaction_invalidates_freshness_and_reprints() {
+        let (_t, ctx) = test_ctx();
+        write(&ctx, "f.txt", "alpha\nbeta\n");
+        run(&ctx, &json!({"path": "f.txt"}));
+        // Simulate a compaction pruning the earlier read body from context.
+        ctx.seen.invalidate_freshness();
+        let out = run(&ctx, &json!({"path": "f.txt"}));
+        assert!(
+            out.content.contains("alpha"),
+            "must reprint after compaction: {}",
+            out.content
+        );
+        assert!(!out.content.contains("unchanged"));
     }
 }

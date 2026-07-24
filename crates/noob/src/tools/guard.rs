@@ -8,6 +8,7 @@ use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// fnv1a64: tiny, dependency-free, good enough to detect any edit.
@@ -108,24 +109,97 @@ pub fn workspace_write_lease(
 
 /// Session-scoped registry of last-known file content, keyed by resolved
 /// path. `read` records, successful `write`/`edit` update; a mismatch means
-/// the file changed on disk behind the model's back.
+/// the file changed on disk behind the model's back. Each entry also carries
+/// the freshness generation it was recorded in. Compaction bumps the
+/// generation when it prunes tool bodies, so a stamp only counts as "still in
+/// context" (a `read` may skip re-printing the body) while its generation is
+/// current.
+/// One remembered file view: the content stamp, the freshness generation it
+/// was recorded in, whether the model saw the file in full (a write, an edit,
+/// or a whole-file read) rather than only one page of it, and whether a read
+/// has already been answered with the short "unchanged" note for this exact
+/// content.
+#[derive(Clone, Copy)]
+struct SeenEntry {
+    stamp: FileStamp,
+    generation: u64,
+    full: bool,
+    stubbed: bool,
+}
+
 pub struct SeenFiles {
-    map: Mutex<HashMap<PathBuf, FileStamp>>,
+    map: Mutex<HashMap<PathBuf, SeenEntry>>,
+    generation: AtomicU64,
 }
 
 impl SeenFiles {
     pub fn new() -> SeenFiles {
         SeenFiles {
             map: Mutex::new(HashMap::new()),
+            generation: AtomicU64::new(0),
         }
     }
 
-    pub fn record(&self, path: &Path, stamp: FileStamp) {
-        self.map.lock().unwrap().insert(path.to_path_buf(), stamp);
+    /// Record the content the model has now seen. `full` is true when the
+    /// whole file is in context (write, edit, or a read that showed every
+    /// line); a paged read passes `full = false` so a later read still prints
+    /// the parts the model has not seen. A paged read of content the model
+    /// already has in full (same stamp, same generation) never downgrades the
+    /// entry: the full body is still above.
+    pub fn record(&self, path: &Path, stamp: FileStamp, full: bool) {
+        let generation = self.generation.load(Ordering::Relaxed);
+        let mut map = self.map.lock().unwrap();
+        let prev = map
+            .get(path)
+            .copied()
+            .filter(|prev| prev.stamp == stamp && prev.generation == generation);
+        let full = full || prev.is_some_and(|prev| prev.full);
+        // New content (or a new generation) has never been stubbed.
+        let stubbed = prev.is_some_and(|prev| prev.stubbed);
+        map.insert(
+            path.to_path_buf(),
+            SeenEntry {
+                stamp,
+                generation,
+                full,
+                stubbed,
+            },
+        );
     }
 
     pub fn get(&self, path: &Path) -> Option<FileStamp> {
-        self.map.lock().unwrap().get(path).copied()
+        self.map.lock().unwrap().get(path).map(|entry| entry.stamp)
+    }
+
+    /// Decide whether a whole-file `read` may answer with the short
+    /// "unchanged" note instead of re-printing the body: true when the model
+    /// already has this exact content in full, in the current generation (not
+    /// pruned by a compaction since), AND it has not already been told so for
+    /// this content.
+    ///
+    /// The second condition is the escape hatch, and it is why `read` needs no
+    /// `force` parameter (which would cost fixed prompt tokens on every
+    /// request): a model that asks again after being told "unchanged" gets the
+    /// body. Answering stubs the first call and arms the next one; serving the
+    /// body disarms it, so a later re-read stubs again.
+    pub fn stub_unchanged(&self, path: &Path, stamp: FileStamp) -> bool {
+        let generation = self.generation.load(Ordering::Relaxed);
+        let mut map = self.map.lock().unwrap();
+        let Some(entry) = map.get_mut(path) else {
+            return false;
+        };
+        if entry.stamp != stamp || entry.generation != generation || !entry.full {
+            return false;
+        }
+        entry.stubbed = !entry.stubbed;
+        entry.stubbed
+    }
+
+    /// Called after a compaction prunes old tool bodies: content the model saw
+    /// earlier is no longer in context, so no existing stamp is "fresh". Reads
+    /// after this re-print in full until the content is seen again.
+    pub fn invalidate_freshness(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Every path seen this session, sorted. Compaction pins this list

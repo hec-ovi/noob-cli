@@ -491,6 +491,9 @@ impl Agent {
     /// the usage baseline, the failure backoff, and the session log.
     pub(crate) fn adopt(&mut self, items: Vec<Item>, ui: &mut Ui) {
         self.items = items;
+        // Pruned/summarized away old tool bodies: file content the model saw
+        // earlier is no longer in context, so no seen-file stamp is fresh.
+        self.tool_ctx.seen.invalidate_freshness();
         self.recent_calls.clear();
         self.last_usage = None;
         self.chars_since_usage = self.items.iter().map(item_chars).sum();

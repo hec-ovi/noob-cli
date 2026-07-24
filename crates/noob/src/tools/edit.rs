@@ -66,7 +66,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         Ok(applied) => {
             atomic_write(&path, applied.content.as_bytes())?;
             ctx.seen
-                .record(&path, FileStamp::of(applied.content.as_bytes()));
+                .record(&path, FileStamp::of(applied.content.as_bytes()), true);
             ctx.consume_skills_write_grant(raw);
             ctx.edit_failures.lock().unwrap().remove(&fail_key);
             let n = applied.count;
