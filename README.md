@@ -255,6 +255,7 @@ Future work, not built yet.
 - **GPU Vulkan front end.** A lightweight Rust binary that renders the UI on the GPU through Vulkan instead of the terminal, in the spirit of Zed. Each surface is a separate, isolated part that talks to the others over schema-validated data rather than shared code: the plan, the multi-agent runner, agent management, and the main window. A dedicated code-stream surface shows each generated file on its own as the model writes it.
 - **Session tokens readout.** A top-right total for the session: tokens prefilled (prompt) and tokens generated (completion), summed across turns, fed by the `usage` each completion already returns.
 - **`devkit` skill.** A working prompt packaged as a loadable `SKILL.md`.
+- **Lightweight coding skill.** An optional `SKILL.md` carrying only the directives that measurably improve code: verify a library is actually present before using it, match the file's existing style, run the project's tests and lint after changes. No tone rules, no worked examples, no boilerplate. It keeps `base.md` lean instead of baking a heavy coding preamble into every turn.
 
 ## Development and verification
 
