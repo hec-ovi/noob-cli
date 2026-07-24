@@ -185,8 +185,6 @@ Three small things the persistent dock does while a turn streams above it.
 
 **⎋ Cancel.** Escape twice within five seconds cancels a running turn; Ctrl-C cancels at once. A second Ctrl-C during cancellation restores the terminal and exits with status 130.
 
-**🔢 Session tokens (planned).** A top-right readout of the running session totals: tokens prefilled (prompt) and tokens generated (completion), summed across every turn. Fed by the `usage` block each completion already returns, so it needs no extra request. Not yet built.
-
 ## Configuration
 
 The mounted config directory contains `.env`, optional `AGENTS.md`, `mcp.json`, global `skills/`, and `sessions/`.
@@ -249,6 +247,14 @@ The server-side framing figure is the model's own chat template (qwen3 re-wraps 
 - `child`: one JSON result line on stdout and progress on stderr.
 
 Formatting never changes requests, transcripts, sessions, or cache-prefix bytes.
+
+## Planned
+
+Future work, not built yet.
+
+- **GPU Vulkan front end.** A lightweight Rust binary that renders the UI on the GPU through Vulkan instead of the terminal, in the spirit of Zed. Each surface is a separate, isolated part that talks to the others over schema-validated data rather than shared code: the plan, the multi-agent runner, agent management, and the main window. A dedicated code-stream surface shows each generated file on its own as the model writes it.
+- **Session tokens readout.** A top-right total for the session: tokens prefilled (prompt) and tokens generated (completion), summed across turns, fed by the `usage` each completion already returns.
+- **`devkit` skill.** A working prompt packaged as a loadable `SKILL.md`.
 
 ## Development and verification
 
