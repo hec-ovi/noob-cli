@@ -20,6 +20,51 @@ use super::{ToolCtx, ToolOutcome, need_str, opt_u64};
 const DEFAULT_TIMEOUT_S: u64 = 120;
 const MAX_TIMEOUT_S: u64 = 600;
 
+/// Interpreters and toolchains worth naming when a command is not found.
+/// Deliberately short: this is a hint after a failure, not a catalog.
+const PROBED: &[&str] = &[
+    "python3", "node", "deno", "bun", "ruby", "perl", "go", "cargo", "gcc", "make", "jq",
+];
+
+/// What of `PROBED` is actually on PATH, resolved once per process.
+///
+/// A sandbox the model cannot see gets probed instead: in the local bake-off
+/// 9 of 50 shell rounds were spent discovering the image (`which node`,
+/// `ls /usr/bin/node*`) against a runtime that ships bash, git, python3 and
+/// uv. Naming the set costs nothing until a command actually fails, which is
+/// why it lives here and not in the environment block, where it would be paid
+/// on every request forever.
+fn available() -> &'static str {
+    static AVAILABLE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    AVAILABLE.get_or_init(|| {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let dirs: Vec<_> = std::env::split_paths(&path).collect();
+        PROBED
+            .iter()
+            .filter(|name| {
+                dirs.iter().any(|dir| {
+                    let candidate = dir.join(name);
+                    std::fs::metadata(&candidate).is_ok_and(|m| m.is_file())
+                })
+            })
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
+}
+
+/// Exit 127 is "command not found". Answer the question the model is about to
+/// spend a round asking.
+fn not_found_hint(code: i32, body: &str) -> Option<String> {
+    if code != 127 || !body.contains("not found") {
+        return None;
+    }
+    Some(match available() {
+        "" => "\nnone of the usual interpreters are on PATH here".to_string(),
+        found => format!("\navailable here: {found}"),
+    })
+}
+
 pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     match run_inner(ctx, args) {
         Ok(out) => out,
@@ -252,7 +297,8 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         }
         ToolOutcome::ok(body, summary)
     } else {
-        let mut out = ToolOutcome::err(format!("exit code {code}\n{body}"));
+        let hint = not_found_hint(code, &body).unwrap_or_default();
+        let mut out = ToolOutcome::err(format!("exit code {code}\n{body}{hint}"));
         out.summary = summary;
         out
     };
@@ -336,6 +382,35 @@ mod tests {
                 .starts_with("bash echo one; echo two >&2; echo three (")
         );
         assert!(out.summary.ends_with("exit 0)"));
+    }
+
+    /// A missing command answers the follow-up question in the same round,
+    /// instead of costing a `which`/`ls /usr/bin` discovery round.
+    #[test]
+    fn a_missing_command_names_what_is_available() {
+        let (_t, ctx) = test_ctx();
+        let out = run(&ctx, &json!({"cmd": "definitely-not-a-real-binary-xyz"}));
+        assert!(out.is_error, "{}", out.content);
+        assert!(
+            out.content.starts_with("exit code 127\n"),
+            "{}",
+            out.content
+        );
+        assert!(
+            out.content.contains("available here:")
+                || out.content.contains("none of the usual interpreters"),
+            "127 must name the sandbox contents: {}",
+            out.content
+        );
+    }
+
+    /// The hint is scoped to 127. Every other failure keeps its body clean.
+    #[test]
+    fn other_exit_codes_carry_no_inventory() {
+        let (_t, ctx) = test_ctx();
+        let out = run(&ctx, &json!({"cmd": "echo 'file not found' >&2; exit 2"}));
+        assert!(out.is_error);
+        assert!(!out.content.contains("available here:"), "{}", out.content);
     }
 
     #[test]
