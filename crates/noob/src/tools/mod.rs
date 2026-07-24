@@ -438,11 +438,30 @@ pub fn specs() -> Vec<ToolSpec> {
 
 // --- shared argument helpers -------------------------------------------------
 
+/// How much of a wrong-typed argument an error may quote back. The model
+/// already has what it sent, one line up, so echoing it whole buys nothing and
+/// costs everything: a `write` whose `content` arrives as an array of lines
+/// would otherwise put the entire file body in the error, and then again in
+/// the corrected call, so one bad guess lands three copies in the transcript.
+const ARG_ECHO_CAP: usize = 200;
+
+/// The offending value, bounded. Named as what it is, so a model that sees the
+/// marker knows the value was long rather than thinking it was mangled.
+fn bad_arg(value: &Value) -> String {
+    let rendered = value.to_string();
+    if rendered.len() <= ARG_ECHO_CAP {
+        return rendered;
+    }
+    let cut = truncate::floor_char_boundary(&rendered, ARG_ECHO_CAP);
+    format!("{}... ({} bytes)", &rendered[..cut], rendered.len())
+}
+
 pub(crate) fn need_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     match args.get(key) {
         Some(Value::String(s)) => Ok(s),
         Some(other) => Err(format!(
-            "parameter {key:?} must be a string, got {other}; resend the call"
+            "parameter {key:?} must be a string, got {}; resend the call",
+            bad_arg(other)
         )),
         None => Err(format!(
             "missing required parameter {key:?}; resend the call"
@@ -455,7 +474,8 @@ pub(crate) fn opt_str<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>,
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s)),
         Some(other) => Err(format!(
-            "parameter {key:?} must be a string, got {other}; resend the call"
+            "parameter {key:?} must be a string, got {}; resend the call",
+            bad_arg(other)
         )),
     }
 }
@@ -472,8 +492,9 @@ pub(crate) fn opt_u64(args: &Value, key: &str) -> Result<Option<u64>, String> {
                 .map(Some)
                 .ok_or_else(|| {
                     format!(
-                        "parameter {key:?} must be a non-negative integer, got {v}; \
-                         resend the call"
+                        "parameter {key:?} must be a non-negative integer, got {}; \
+                         resend the call",
+                        bad_arg(v)
                     )
                 }),
         },
@@ -487,7 +508,8 @@ pub(crate) fn opt_bool(args: &Value, key: &str) -> Result<Option<bool>, String> 
         Some(Value::String(s)) if s == "true" => Ok(Some(true)),
         Some(Value::String(s)) if s == "false" => Ok(Some(false)),
         Some(other) => Err(format!(
-            "parameter {key:?} must be true or false, got {other}; resend the call"
+            "parameter {key:?} must be true or false, got {}; resend the call",
+            bad_arg(other)
         )),
     }
 }
@@ -512,6 +534,35 @@ pub(crate) fn test_ctx() -> (tempfile::TempDir, ToolCtx) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real failure this bounds: a model sends `write`'s `content` as an
+    /// array of lines. Echoing the value whole would put the entire file in
+    /// the error, and the corrected call then puts it in again.
+    #[test]
+    fn a_wrong_typed_argument_is_not_echoed_whole() {
+        let body: Vec<String> = (0..400).map(|i| format!("line {i} of the file")).collect();
+        let args = json!({"path": "big.txt", "content": body});
+        let err = need_str(&args, "content").unwrap_err();
+        assert!(
+            err.len() < 400,
+            "error must not carry the payload, got {} bytes",
+            err.len()
+        );
+        assert!(err.contains("must be a string"), "{err}");
+        assert!(err.contains("line 0 of the file"), "keep the head: {err}");
+        assert!(!err.contains("line 399"), "drop the tail: {err}");
+        assert!(err.contains("bytes)"), "say how long it was: {err}");
+    }
+
+    #[test]
+    fn a_short_wrong_typed_argument_is_echoed_in_full() {
+        let err = need_str(&json!({"path": 7}), "path").unwrap_err();
+        assert!(err.contains("got 7;"), "{err}");
+        assert!(
+            !err.contains("bytes)"),
+            "no marker when nothing was cut: {err}"
+        );
+    }
 
     #[test]
     fn read_only_partition_matches_the_locked_decision() {
