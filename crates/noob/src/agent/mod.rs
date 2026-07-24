@@ -2483,6 +2483,57 @@ mod tests {
         );
     }
 
+    /// Clearing plan history rewrites plan payloads in place; it never drops a
+    /// file body out of context. It must therefore leave read freshness alone,
+    /// or one `/clear-plan` disarms the whole-file read short-circuit for the
+    /// rest of the session. Compaction, which really does drop bodies, must
+    /// still invalidate.
+    #[test]
+    fn clear_plan_history_keeps_read_freshness_but_compaction_drops_it() {
+        use crate::tools::guard::FileStamp;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let seen_path = ws.join("f.txt");
+        let stamp = FileStamp::of(b"alpha\n");
+        let mut agent = Agent::new(
+            Client::new(Timeouts::default()),
+            tmp.path().to_path_buf(),
+            Overrides::default(),
+            "sys".into(),
+            vec![],
+            vec![Item::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "p1".into(),
+                    name: "plan".into(),
+                    arguments: r#"{"todos":[{"content":"x","status":"completed"}]}"#.into(),
+                }],
+                raw_items: vec![],
+            }],
+            ToolCtx::new(ws, crate::tools::guard::Sandbox::Container),
+            None,
+            131_072,
+        );
+        let mut ui = crate::ui::Ui::new(crate::ui::Mode::Exec);
+        agent.tool_ctx.seen.record(&seen_path, stamp, true);
+
+        agent.clear_plan_history(&mut ui);
+        assert!(
+            agent.tool_ctx.seen.stub_unchanged(&seen_path, stamp),
+            "clearing plan history must not disarm the read short-circuit"
+        );
+
+        // Undo the toggle the assertion above consumed, then compact.
+        agent.tool_ctx.seen.record(&seen_path, stamp, true);
+        agent.tool_ctx.seen.stub_unchanged(&seen_path, stamp);
+        agent.adopt_compacted(vec![Item::User("[conversation summary]".into())], &mut ui);
+        assert!(
+            !agent.tool_ctx.seen.stub_unchanged(&seen_path, stamp),
+            "compaction drops tool bodies, so the stamp must stop being fresh"
+        );
+    }
+
     #[test]
     fn reload_skills_diffs_registers_the_tool_and_announces() {
         // A workspace that starts with one skill on disk; the agent boots with

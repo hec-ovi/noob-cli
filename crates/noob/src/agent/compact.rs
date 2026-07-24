@@ -312,7 +312,7 @@ impl Agent {
                 .zip(&self.items)
                 .filter(|(a, b)| !items_eq(a, b))
                 .count();
-            self.adopt(pruned, ui);
+            self.adopt_compacted(pruned, ui);
             ui.note(&format!(
                 "context compacted: pruned {pruned_count} old tool results without a model summary; now ~{} / {} tokens",
                 token_label(self.context_estimate()),
@@ -400,7 +400,7 @@ impl Agent {
                 // head-tail retention (prune everything prunable) beats
                 // destroying the middle.
                 if saved > 0 {
-                    self.adopt(pruned, ui);
+                    self.adopt_compacted(pruned, ui);
                     self.compact_backoff =
                         self.context_estimate().saturating_add(self.ctx_tokens / 20);
                     ui.note(&format!(
@@ -477,7 +477,7 @@ impl Agent {
 
         let mut new_items = vec![Item::User(spliced)];
         new_items.extend_from_slice(&self.items[cut..]);
-        self.adopt(new_items, ui);
+        self.adopt_compacted(new_items, ui);
         ui.note(&format!(
             "context compacted and session preserved: now ~{} / {} tokens",
             token_label(self.context_estimate()),
@@ -486,14 +486,22 @@ impl Agent {
         true
     }
 
+    /// `adopt` for the compaction ladder only: the same install, plus the
+    /// read-freshness invalidation that a transcript which actually DROPPED
+    /// tool bodies needs. File content the model saw earlier is no longer in
+    /// context, so no seen-file stamp is fresh and `read` must print in full
+    /// again. `clear_plan_history` deliberately calls plain `adopt`: it
+    /// rewrites plan payloads in place and never removes a file body.
+    pub(crate) fn adopt_compacted(&mut self, items: Vec<Item>, ui: &mut Ui) {
+        self.tool_ctx.seen.invalidate_freshness();
+        self.adopt(items, ui);
+    }
+
     /// Install a compacted transcript and reset everything the old one
     /// backed: the repeat detector (an identical call is now legitimate),
     /// the usage baseline, the failure backoff, and the session log.
     pub(crate) fn adopt(&mut self, items: Vec<Item>, ui: &mut Ui) {
         self.items = items;
-        // Pruned/summarized away old tool bodies: file content the model saw
-        // earlier is no longer in context, so no seen-file stamp is fresh.
-        self.tool_ctx.seen.invalidate_freshness();
         self.recent_calls.clear();
         self.last_usage = None;
         self.chars_since_usage = self.items.iter().map(item_chars).sum();
