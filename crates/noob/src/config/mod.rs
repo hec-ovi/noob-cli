@@ -25,6 +25,7 @@ pub const EDITABLE: &[(&str, &str)] = &[
     ("task-max-turns", "NOOB_TASK_MAX_TURNS"),
     ("task-wall-clock", "NOOB_TASK_WALL_CLOCK_S"),
     ("tool-caps", "NOOB_TOOL_CAPS"),
+    ("read-dedup", "NOOB_READ_DEDUP"),
 ];
 
 /// Resolution order: NOOB_CONFIG_DIR > /config (the container bind mount) >
@@ -216,15 +217,13 @@ fn validate_setting(name: &str, value: &str) -> Result<(), String> {
         "task-concurrency" => range(1, 16),
         "task-max-turns" => range(1, 50),
         "task-wall-clock" => range(1, 3_600),
-        "autodetect" | "tool-caps"
+        "autodetect" | "tool-caps" | "read-dedup"
             if !matches!(
                 value.to_ascii_lowercase().as_str(),
                 "0" | "1" | "true" | "false" | "on" | "off" | "yes" | "no"
             ) =>
         {
-            Err(format!(
-                "{name} must be on/off, true/false, yes/no, or 1/0"
-            ))
+            Err(format!("{name} must be on/off, true/false, yes/no, or 1/0"))
         }
         _ => Ok(()),
     }
@@ -294,6 +293,27 @@ pub fn task_wall_clock(config_dir: &Path) -> std::time::Duration {
         .unwrap_or(crate::subagent::DEFAULT_WALL_CLOCK_S)
         .min(3_600);
     std::time::Duration::from_secs(secs)
+}
+
+/// NOOB_READ_DEDUP: whether a `read` of content the model already holds in
+/// full may answer with a short note instead of the body. 0/off/false/no
+/// prints every read in full; anything else, or unset, keeps the short note.
+///
+/// This exists because the mechanism has a known failure mode in the field.
+/// Claude Code ships the same short-circuit behind a remote killswitch, and a
+/// released version of it was reported to send the model into a probe loop:
+/// it read the notice as a broken tool result and compensated by re-reading
+/// harder. noob keys on a content hash rather than mtime, which removes the
+/// "the note lies" half of that, but not the "the model distrusts the note"
+/// half. A local switch means a bad interaction with some model is a config
+/// change, not a downgrade.
+pub fn read_dedup(config_dir: &Path) -> bool {
+    !setting(config_dir, "NOOB_READ_DEDUP").is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no"
+        )
+    })
 }
 
 /// NOOB_TOOL_CAPS: the tool-result truncation policy. 0/off/false/no lifts
@@ -569,6 +589,27 @@ mod tests {
             write_setting(tmp.path(), "tool-caps", Some("potato"))
                 .unwrap_err()
                 .contains("tool-caps")
+        );
+    }
+
+    #[test]
+    fn read_dedup_defaults_on_and_switches_off() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Unset: the short-circuit is active.
+        assert!(read_dedup(tmp.path()));
+        for off in ["0", "off", "false", "no", " OFF "] {
+            std::fs::write(tmp.path().join(".env"), format!("NOOB_READ_DEDUP={off}\n")).unwrap();
+            assert!(!read_dedup(tmp.path()), "{off}");
+        }
+        for on in ["1", "on", "true", "yes", "potato"] {
+            std::fs::write(tmp.path().join(".env"), format!("NOOB_READ_DEDUP={on}\n")).unwrap();
+            assert!(read_dedup(tmp.path()), "{on}");
+        }
+        assert!(write_setting(tmp.path(), "read-dedup", Some("off")).is_ok());
+        assert!(
+            write_setting(tmp.path(), "read-dedup", Some("potato"))
+                .unwrap_err()
+                .contains("read-dedup")
         );
     }
 

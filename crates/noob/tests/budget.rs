@@ -10,9 +10,23 @@ use serde_json::Value;
 
 // The locked budget, in one place so raising it is a visible diff
 // (ARCHITECTURE.md, System prompt).
+//
+// The owner's hard limit for the whole fixed prefix is 2,000 tokens. These
+// ceilings sit below it on purpose: they are drift guards, not the budget.
+// Raise one only for a change that earns it, and never past OWNER_HARD_LIMIT.
+//
+// Note what this cost actually is. The fixed prefix is prefilled once per
+// session and then served from the provider's prompt cache; a 16-request run
+// in the local corpus computed 517 tokens on the first call and 23 to 844 on
+// each later one against a transcript that grew to 14,699. So these tokens
+// are a one-time compute plus a permanent slice of the context window, not a
+// per-request charge. What does re-cost them is anything that rewrites the
+// prefix mid-session, which is why the environment block is built once and
+// why compaction is the single sanctioned prefix break.
 const HEAD_CEILING: usize = 560; // base.md + environment block
-const TOOLS_CEILING: usize = 940; // serialized wire tools array
-const TOTAL_CEILING: usize = 1500; // total fixed first-request overhead
+const TOOLS_CEILING: usize = 1000; // serialized wire tools array
+const TOTAL_CEILING: usize = 1600; // total fixed first-request overhead
+const OWNER_HARD_LIMIT: usize = 2000; // never exceed, whatever the above say
 
 /// `with_skill` plants one skill in the workspace and `with_mcp` one
 /// configured server, so the artifact carries the FULL registered set (9
@@ -147,8 +161,20 @@ fn budget_holds_with_everything_registered() {
         "full tools array is {tools_tokens} tokens (ceiling {TOOLS_CEILING})"
     );
     assert!(head_tokens + tools_tokens <= TOTAL_CEILING);
+    assert!(
+        head_tokens + tools_tokens <= OWNER_HARD_LIMIT,
+        "the fixed prefix is {} tokens, over the owner's 2,000 hard limit",
+        head_tokens + tools_tokens
+    );
 }
 
+/// Descriptions stay terse, but a tool whose behavior the model cannot infer
+/// from its name and parameters is allowed to explain that behavior here.
+/// This is the right home for it: Anthropic's 2026 guidance is to put tool
+/// guidance in the tool's own description rather than the system prompt, and
+/// the shipped Claude Code binary does exactly that for its own read
+/// short-circuit. The ceiling is per description, and TOOLS_CEILING still
+/// bounds the total.
 #[test]
 fn tool_descriptions_stay_terse() {
     let artifact = debug_prompt(true, true);
@@ -159,7 +185,7 @@ fn tool_descriptions_stay_terse() {
         let desc = f["description"].as_str().unwrap();
         let words = desc.split_whitespace().count();
         assert!(
-            words <= 20,
+            words <= 45,
             "{} description has {words} words: {desc}",
             f["name"]
         );

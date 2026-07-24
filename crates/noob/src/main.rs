@@ -195,6 +195,7 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
     }
     let mut tool_ctx = ToolCtx::new(workspace, sandbox);
     tool_ctx.caps = config::tool_caps(&config_dir);
+    tool_ctx.read_dedup = config::read_dedup(&config_dir);
     tool_ctx.skills = discovered;
     if !mcp_servers.is_empty() && (!boot.read_only || boot.web_only) {
         tool_ctx.mcp = Some(mcp::Mcp::new(mcp_servers));

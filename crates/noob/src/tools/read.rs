@@ -140,7 +140,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     // Ask before recording: the question is whether the model held this
     // content in full BEFORE this call, so a first-ever read has nothing to
     // match against and prints.
-    let unchanged = full && ctx.seen.stub_unchanged(&path, current);
+    let unchanged = full && ctx.read_dedup && ctx.seen.stub_unchanged(&path, current);
     // Record the stamp of the full stream, not just the retained page.
     ctx.seen.record(&path, current, full);
     if unchanged {
@@ -528,6 +528,26 @@ mod tests {
             "body should be omitted: {}",
             second.content
         );
+    }
+
+    /// NOOB_READ_DEDUP=off restores the plain behavior: every read prints.
+    /// The field precedent for wanting this switch is real, a released Claude
+    /// Code shipped the same short-circuit and was reported to send the model
+    /// into a re-read loop, and its own implementation sits behind a remote
+    /// killswitch for the same reason.
+    #[test]
+    fn dedup_can_be_switched_off_entirely() {
+        let (_t, mut ctx) = test_ctx();
+        ctx.read_dedup = false;
+        write(&ctx, "f.txt", "alpha\nbeta\n");
+        for attempt in 1..=3 {
+            let out = run(&ctx, &json!({"path": "f.txt"}));
+            assert!(
+                out.content.contains("alpha") && !out.content.contains("unchanged"),
+                "read {attempt} must print in full with dedup off: {}",
+                out.content
+            );
+        }
     }
 
     #[test]

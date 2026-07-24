@@ -99,7 +99,7 @@ The system prompt is assembled once in this order:
 4. The SKILL.md resolver index when skills exist.
 5. One line naming configured MCP servers when any exist.
 
-The fixed prompt plus all registered tool schemas must remain below the 1,500-token budget enforced by offline and live tokenizer tests.
+The fixed prompt plus all registered tool schemas must remain below the 1,600-token budget enforced by offline and live tokenizer tests, against a hard limit of 2,000.
 
 Within a stable mode, each provider request is an exact byte-prefix extension of the prior request. The mock server checks serialized prefix bytes and tool-array stability on every turn. Deliberate prefix changes are limited to:
 
@@ -167,6 +167,7 @@ Important mechanics:
 - `grep`, `glob`, and `ls` cap retained result entries or bytes and include an actionable continuation marker.
 - Tool truncation occurs once before transcript insertion. It does not alter the underlying command or file operation.
 - `NOOB_TOOL_CAPS=0` (or `off`) lifts every truncation cap for the session: read pages, bash output, grep matches, glob/ls entries, skill bodies, and MCP results flow through whole and no truncation marker renders. Resolved once at bootstrap into the shared tool context; children read their own configuration, so the setting propagates through the environment.
+- A whole-file `read` of content the model already holds in full returns a one-line note instead of the body. Freshness is a content hash and length, not a modification time, so a metadata-only touch (a snapshot restore, a formatter rewriting identical bytes) cannot produce a false stale reading. The entry is keyed by resolved path and carries the generation it was recorded in; compaction bumps that generation, so a note never points at a body that pruning removed. Reading the same file again immediately prints it, which is the override and the reason `read` needs no extra parameter. `write` and `edit` record content as seen but leave the next read un-stubbed, so reading back what you just produced always prints. `NOOB_READ_DEDUP=0` (or `off`) disables the whole short-circuit.
 
 The read and Bash loops check the shared interrupt flag. Partial Bash output can be retained in a structurally canceled outcome.
 
@@ -277,7 +278,7 @@ The enforced release budgets are:
 |---|---:|---:|
 | Static release binary | 8 MiB | 4,354,944 bytes |
 | Runtime dependency graph | 45 crates | 40 crates |
-| Fixed prompt plus schemas | 1,500 tokens | Offline and live tokenizer checks |
+| Fixed prompt plus schemas | 1,600 tokens | Offline and live tokenizer checks |
 | Offline tests | None | 800 passed; 9 live checks and 1 on-demand diagnostic stay opt-in |
 
 The required local gates are:

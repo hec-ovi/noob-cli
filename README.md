@@ -202,6 +202,7 @@ The mounted config directory contains `.env`, optional `AGENTS.md`, `mcp.json`, 
 | `NOOB_TASK_MAX_TURNS` | `25` | Child inference-round limit | process start |
 | `NOOB_TASK_WALL_CLOCK_S` | `300` | Child wall-clock limit | process start |
 | `NOOB_TOOL_CAPS` | enabled | Set `0` (or `off`) to lift every tool-output truncation cap: read, bash, grep, glob/ls, skill, and MCP results flow through whole | process start |
+| `NOOB_READ_DEDUP` | enabled | Set `0` (or `off`) to print every `read` in full. On, a whole-file read of content already in context returns a one-line note instead of the body, and reading again prints it | process start |
 | `NOOB_SKILL_PATHS` | none | Colon-separated skill directories, each resolved against the workspace and registered as one resolver skill (so a `cli/SKILL.md` dispatcher is discovered without copying it into a skills root) | `.env`: `/skills reload`; environment: process start |
 | `NOOB_ENV` | none | Comma-separated allowlist of extra environment variable names the host launcher forwards into the container (for a workflow's own variables) | process start (launcher) |
 
@@ -225,19 +226,19 @@ Display variables can be set in the shell or the checkout's root `.env` for Comp
 
 ## Prompt budget
 
-The fixed first-request overhead is small and locked. `noob debug prompt --json` prints the exact system prompt and tool schemas the binary sends, and a budget test keeps that artifact under 1,500 tokens (o200k tokenizer) with every tool, a skill, and an MCP server registered.
+The fixed first-request overhead is small and locked. `noob debug prompt --json` prints the exact system prompt and tool schemas the binary sends, and a budget test keeps that artifact under 1,600 tokens (o200k tokenizer) with every tool, a skill, and an MCP server registered, against a hard limit of 2,000.
 
-Measured on the stock install (websearch skill and MCP server, all 13 tools) against qwen3.6-35b-a3b on llama.cpp:
+Measured on the stock install (web-search skill and MCP server, all 13 tools) against qwen3.6-35b-a3b on llama.cpp:
 
 | Piece | Tokens |
 |---|---|
-| System prompt | 585 |
-| Tool schemas, 13 tools | 902 |
-| noob total | 1,487 |
-| Chat template and message framing added by the server | 530 |
-| First request total | 2,017 |
+| System prompt | 610 |
+| Tool schemas, 13 tools | 934 |
+| noob total | 1,544 |
+| Chat template and message framing added by the server | 527 |
+| First request total | 2,071 |
 
-The server-side framing figure is the model's own chat template (qwen3 re-wraps the tools in its `<tools>` block with tool-calling instructions), so it changes with the model and its tokenizer; noob never sends those bytes. llama.cpp caches the prefix, so the overhead is prefilled once per slot, not on every turn. Reproduce with `noob debug prompt --json` and the server's `/tokenize` endpoint.
+The server-side framing figure is the model's own chat template (qwen3 re-wraps the tools in its `<tools>` block with tool-calling instructions), so it changes with the model and its tokenizer; noob never sends those bytes. llama.cpp caches the prefix, so the overhead is prefilled once per slot, not on every turn: in a 16-request session the server computed 517 tokens on the first call and between 23 and 844 on each later one, against a transcript that reached 14,699 tokens. Reproduce with `noob debug prompt --json` and the server's `/tokenize` endpoint.
 
 ## Output surfaces
 

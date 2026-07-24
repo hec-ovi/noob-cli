@@ -110,6 +110,10 @@ pub struct ToolCtx {
     /// the shipped caps; bootstrap swaps in Caps::uncapped() when the setting
     /// says 0/off. Copy semantics, read-only after bootstrap.
     pub caps: truncate::Caps,
+    /// NOOB_READ_DEDUP. False prints every `read` in full, even one the model
+    /// already holds; the escape hatch for a model that distrusts the note.
+    /// Set at bootstrap, read-only after.
+    pub read_dedup: bool,
     /// Context accounting shared with the model-callable `context` tool.
     /// The agent refreshes the estimate at transcript boundaries; the tool
     /// only reads these atomics, so concurrent read batches stay lock-free.
@@ -137,6 +141,7 @@ impl ToolCtx {
             todos: Mutex::new(Vec::new()),
             plan_timing: Mutex::new(PlanTiming::default()),
             caps: truncate::Caps::default(),
+            read_dedup: true,
             context_used: AtomicU64::new(0),
             context_total: AtomicU64::new(0),
             context_threshold: AtomicU64::new(0),
@@ -374,7 +379,10 @@ pub fn specs() -> Vec<ToolSpec> {
     vec![
         spec(
             "read",
-            "Read a text file as plain lines; page big files with offset and limit.",
+            "Read a text file as plain lines; page big files with offset and limit. \
+             A file you have already read stays in this conversation: re-reading \
+             unchanged content returns a short note, not the body, so work from the \
+             earlier result.",
             json!({"type": "object", "properties": {
                 "path": {"type": "string"},
                 "offset": {"type": "integer", "description": "1-based first line"},
@@ -598,9 +606,13 @@ mod tests {
             specs.iter().any(|s| s.name == "plan"),
             "plan must be a core spec"
         );
+        // Terse by default. A tool may spend more only to explain behavior the
+        // model cannot infer from the name and parameters, which is where such
+        // guidance belongs rather than in the system prompt. The same ceiling
+        // is asserted on the shipped wire artifact in tests/budget.rs.
         for s in &specs {
             let words = s.description.split_whitespace().count();
-            assert!(words <= 20, "{} description has {words} words", s.name);
+            assert!(words <= 45, "{} description has {words} words", s.name);
             assert!(s.parameters.get("type").is_some());
         }
     }
