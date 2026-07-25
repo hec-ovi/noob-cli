@@ -262,6 +262,8 @@ Future work, not built yet, in the order it will be built.
 - **Native binaries for macOS, Windows, and Linux.** Today the shipped artifact is a Linux static binary inside the runtime image, and the host command is a launcher that runs it under Docker. A real per-platform binary comes first, because the front end below has nothing to attach to until it exists.
 - **GPU Vulkan front end.** A lightweight Rust binary that renders the UI on the GPU through Vulkan instead of the terminal, in the spirit of Zed. Each surface is a separate, isolated part that talks to the others over schema-validated data rather than shared code: the plan, the multi-agent runner, agent management, and the main window. A dedicated code-stream surface shows each generated file on its own as the model writes it.
 
+What each one actually blocks on, down to the file and line, is in [`docs/NEXT.md`](docs/NEXT.md).
+
 The `devkit` skill is not part of this repository and is not open source.
 
 ## Development and verification
