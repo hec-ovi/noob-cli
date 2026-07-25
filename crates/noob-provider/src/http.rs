@@ -439,7 +439,17 @@ fn retry_after(resp: &ureq::http::Response<ureq::Body>) -> Option<Duration> {
 
 /// Fields a 400-and-strip compat retry may remove. Core fields are never
 /// eligible: stripping them cannot produce the request the caller meant.
-const COMPAT_STRIPPABLE: &[&str] = &["stream_options", "store", "include", "parallel_tool_calls"];
+/// The two thinking fields qualify because they are hints either way: a
+/// server that rejects them outright would otherwise fail every single turn,
+/// and falling back to its own reasoning default still answers the prompt.
+const COMPAT_STRIPPABLE: &[&str] = &[
+    "stream_options",
+    "store",
+    "include",
+    "parallel_tool_calls",
+    "chat_template_kwargs",
+    "reasoning_effort",
+];
 
 /// If the 400 body NAMES a strippable top-level field we sent, return it.
 /// "Names" means quoted like a field (`"stream_options"`, `'store'`,
@@ -987,6 +997,23 @@ mod tests {
         assert_eq!(compat_field(&body, "'include' is not supported"), None);
         // Core fields are never eligible even if the error quotes them.
         assert_eq!(compat_field(&body, r#"invalid value for "messages""#), None);
+    }
+
+    /// A server that rejects the thinking fields must lose them and answer,
+    /// not fail every turn for as long as the setting is configured.
+    #[test]
+    fn the_thinking_fields_are_strippable() {
+        let body = json!({"model": "m", "messages": [],
+            "chat_template_kwargs": {"enable_thinking": false},
+            "reasoning_effort": "none"});
+        assert_eq!(
+            compat_field(&body, r#"Unknown parameter: 'chat_template_kwargs'"#),
+            Some("chat_template_kwargs".to_string())
+        );
+        assert_eq!(
+            compat_field(&body, r#"Unrecognized member: "reasoning_effort""#),
+            Some("reasoning_effort".to_string())
+        );
     }
 
     #[test]

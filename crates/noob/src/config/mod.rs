@@ -19,6 +19,7 @@ pub const EDITABLE: &[(&str, &str)] = &[
     ("base-url", "NOOB_BASE_URL"),
     ("model", "NOOB_MODEL"),
     ("api-style", "NOOB_API_STYLE"),
+    ("reasoning", "NOOB_REASONING"),
     ("ctx", "NOOB_CTX"),
     ("autodetect", "NOOB_AUTODETECT"),
     ("task-concurrency", "NOOB_TASK_CONCURRENCY"),
@@ -217,7 +218,7 @@ fn validate_setting(name: &str, value: &str) -> Result<(), String> {
         "task-concurrency" => range(1, 16),
         "task-max-turns" => range(1, 50),
         "task-wall-clock" => range(1, 3_600),
-        "autodetect" | "tool-caps" | "read-dedup"
+        "autodetect" | "tool-caps" | "read-dedup" | "reasoning"
             if !matches!(
                 value.to_ascii_lowercase().as_str(),
                 "0" | "1" | "true" | "false" | "on" | "off" | "yes" | "no"

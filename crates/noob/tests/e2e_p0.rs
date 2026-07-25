@@ -209,6 +209,84 @@ fn config_precedence_flag_env_file() {
     server.assert_clean();
 }
 
+/// NOOB_REASONING reaches the wire as the thinking switch, and only when it
+/// is set: an unconfigured run must carry no thinking field at all, because
+/// some OpenAI-compatible servers reject fields they do not know.
+#[test]
+fn reasoning_setting_reaches_the_wire_and_is_absent_by_default() {
+    let server = MockServer::start();
+    server.enqueue_completion("off");
+    server.enqueue_completion("on");
+    server.enqueue_completion("unset");
+    let dir = tempfile::tempdir().unwrap();
+
+    let run = |value: Option<&str>| {
+        let mut env = format!(
+            "NOOB_BASE_URL={}\nNOOB_API_KEY=k\nNOOB_MODEL=m\n",
+            server.base_url()
+        );
+        if let Some(value) = value {
+            env.push_str(&format!("NOOB_REASONING={value}\n"));
+        }
+        std::fs::write(dir.path().join(".env"), env).unwrap();
+        let out = noob(dir.path())
+            .args(["exec", "-p", "hi"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    run(Some("off"));
+    // Each exec is a fresh session, so every later request restarts the
+    // transcript rather than extending the previous one.
+    server.expect_prefix_break();
+    run(Some("on"));
+    server.expect_prefix_break();
+    run(None);
+
+    let recorded = server.recorded();
+    assert_eq!(recorded.len(), 3);
+
+    let off = recorded[0].json().unwrap();
+    assert_eq!(off["chat_template_kwargs"]["enable_thinking"], false);
+    assert_eq!(off["reasoning_effort"], "none");
+
+    let on = recorded[1].json().unwrap();
+    assert_eq!(on["chat_template_kwargs"]["enable_thinking"], true);
+    assert!(on.get("reasoning_effort").is_none(), "{on}");
+
+    let unset = recorded[2].json().unwrap();
+    assert!(unset.get("chat_template_kwargs").is_none(), "{unset}");
+    assert!(unset.get("reasoning_effort").is_none(), "{unset}");
+    server.assert_clean();
+}
+
+/// A typo must fail loudly with the accepted values, not silently pick a side.
+#[test]
+fn bad_reasoning_value_fails_with_the_valid_values() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".env"),
+        "NOOB_BASE_URL=http://127.0.0.1:1/v1\nNOOB_AUTODETECT=0\nNOOB_REASONING=sometimes\n",
+    )
+    .unwrap();
+
+    let out = noob(dir.path())
+        .args(["exec", "-p", "hi"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("NOOB_REASONING"), "stderr: {stderr}");
+    assert!(stderr.contains("on"), "stderr: {stderr}");
+    assert!(stderr.contains("off"), "stderr: {stderr}");
+}
+
 #[test]
 fn version_prints_and_exits_zero() {
     let out = Command::new(env!("CARGO_BIN_EXE_noob"))

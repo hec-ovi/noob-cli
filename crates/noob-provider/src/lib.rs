@@ -76,6 +76,21 @@ pub fn resolve_endpoint(config_dir: &Path, ov: &Overrides) -> Result<Endpoint, P
         }
     };
 
+    let reasoning = match setting("NOOB_REASONING") {
+        None => None,
+        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "on" | "1" | "true" | "yes" => Some(true),
+            "off" | "0" | "false" | "no" => Some(false),
+            other => {
+                return Err(ProviderError::Config(format!(
+                    "NOOB_REASONING is \"{other}\"; set it to on or off \
+                     (true/false, yes/no, and 1/0 also work), or remove it to \
+                     leave thinking to the server's own flags"
+                )));
+            }
+        },
+    };
+
     Ok(Endpoint {
         base_url,
         api_key: file.get("NOOB_API_KEY").cloned().unwrap_or_default(),
@@ -85,6 +100,7 @@ pub fn resolve_endpoint(config_dir: &Path, ov: &Overrides) -> Result<Endpoint, P
             .or_else(|| setting("NOOB_MODEL"))
             .unwrap_or_else(|| "default".to_string()),
         style,
+        reasoning,
     })
 }
 

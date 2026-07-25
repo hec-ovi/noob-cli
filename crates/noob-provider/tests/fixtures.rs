@@ -25,6 +25,7 @@ fn endpoint(server: &MockServer, style: ApiStyle) -> Endpoint {
         api_key: String::new(),
         model: "qwen3.6-35b-a3b".to_string(),
         style,
+        reasoning: None,
     }
 }
 

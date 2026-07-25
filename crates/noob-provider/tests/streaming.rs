@@ -19,6 +19,7 @@ fn endpoint(server: &MockServer, style: ApiStyle) -> Endpoint {
         api_key: String::new(),
         model: "m".to_string(),
         style,
+        reasoning: None,
     }
 }
 

@@ -30,18 +30,7 @@ pub fn stream_ref(
     on: &mut dyn FnMut(Event),
 ) -> Result<Turn, ProviderError> {
     let url = format!("{}/chat/completions", ep.base_url);
-    // Never any max_tokens-family key: output is never capped, and the mock
-    // server fails any request carrying one. No parallel_tool_calls field
-    // either: several OSS servers 400 on it.
-    let mut body = json!({
-        "model": ep.model,
-        "messages": build_messages(req),
-        "stream": true,
-        "stream_options": {"include_usage": true},
-    });
-    if !req.tools.is_empty() {
-        body["tools"] = wire_tools(req.tools);
-    }
+    let mut body = build_body(ep, req);
 
     let mut resp = client.post_json_stream(&url, &ep.api_key, &mut body)?;
 
@@ -89,6 +78,39 @@ pub fn stream_ref(
     // pool instead of being torn down every turn.
     resp.drain_for_reuse(std::time::Duration::from_millis(250));
     Ok(asm.finish(on))
+}
+
+/// The full request body.
+///
+/// Never any max_tokens-family key: output is never capped, and the mock
+/// server fails any request carrying one. No parallel_tool_calls field
+/// either: several OSS servers 400 on it.
+///
+/// The thinking switch is sent only when `NOOB_REASONING` is set, so the
+/// default body is byte-identical to what it always was and no server sees
+/// a field it might reject. Off sends both keys because either one alone
+/// leaves some templates thinking anyway: `chat_template_kwargs` is what the
+/// Qwen-family template reads, and `reasoning_effort: "none"` is llama.cpp's
+/// request-level equivalent of `--reasoning-budget 0`. Both are hints. A
+/// server started with reasoning forced off (or a model with no thinking
+/// mode at all) still wins.
+fn build_body(ep: &Endpoint, req: TurnRequestRef<'_>) -> Value {
+    let mut body = json!({
+        "model": ep.model,
+        "messages": build_messages(req),
+        "stream": true,
+        "stream_options": {"include_usage": true},
+    });
+    if !req.tools.is_empty() {
+        body["tools"] = wire_tools(req.tools);
+    }
+    if let Some(on) = ep.reasoning {
+        body["chat_template_kwargs"] = json!({"enable_thinking": on});
+        if !on {
+            body["reasoning_effort"] = json!("none");
+        }
+    }
+    body
 }
 
 /// Serialize the neutral transcript into chat messages. Reasoning is never
@@ -264,9 +286,58 @@ pub(crate) fn parse_completion(bytes: &[u8]) -> Result<Turn, ProviderError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_messages, parse_completion};
-    use crate::types::{Finish, Item, ToolCall, TurnRequest};
+    use super::{build_body, build_messages, parse_completion};
+    use crate::types::{ApiStyle, Endpoint, Finish, Item, ToolCall, TurnRequest};
     use serde_json::json;
+
+    fn endpoint(reasoning: Option<bool>) -> Endpoint {
+        Endpoint {
+            base_url: "http://localhost:8080/v1".into(),
+            api_key: String::new(),
+            model: "m".into(),
+            style: ApiStyle::Chat,
+            reasoning,
+        }
+    }
+
+    fn hello() -> TurnRequest {
+        TurnRequest {
+            system: None,
+            items: vec![Item::User("hi".into())],
+            tools: vec![],
+        }
+    }
+
+    #[test]
+    fn unset_reasoning_sends_no_thinking_field() {
+        let body = build_body(&endpoint(None), hello().borrowed());
+        assert!(body.get("chat_template_kwargs").is_none(), "{body}");
+        assert!(body.get("reasoning_effort").is_none(), "{body}");
+    }
+
+    #[test]
+    fn reasoning_off_sends_both_disable_hints() {
+        let body = build_body(&endpoint(Some(false)), hello().borrowed());
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+        assert_eq!(body["reasoning_effort"], "none");
+    }
+
+    #[test]
+    fn reasoning_on_asks_the_template_for_thinking_without_an_effort() {
+        let body = build_body(&endpoint(Some(true)), hello().borrowed());
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
+        // "none" is the only reasoning_effort value llama.cpp acts on; the
+        // others are no-ops, so on sends nothing rather than noise.
+        assert!(body.get("reasoning_effort").is_none(), "{body}");
+    }
+
+    #[test]
+    fn the_thinking_switch_never_caps_output() {
+        for reasoning in [None, Some(true), Some(false)] {
+            let body = build_body(&endpoint(reasoning), hello().borrowed()).to_string();
+            assert!(!body.to_lowercase().contains("max"), "{body}");
+        }
+    }
 
     #[test]
     fn parses_plain_text_completion() {

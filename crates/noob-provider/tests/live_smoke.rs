@@ -20,6 +20,7 @@ fn live_endpoint(style: ApiStyle) -> Endpoint {
         // llama-server serves whatever it loaded under its `--alias`.
         model: std::env::var("NOOB_LIVE_MODEL").unwrap_or_else(|_| "llm".to_string()),
         style,
+        reasoning: None,
     }
 }
 

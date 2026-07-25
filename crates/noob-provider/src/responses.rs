@@ -671,6 +671,7 @@ mod tests {
             api_key: String::new(),
             model: "m".into(),
             style: crate::types::ApiStyle::Responses,
+            reasoning: None,
         };
         let body = build_body(&openai, req.borrowed());
         assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));

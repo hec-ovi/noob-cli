@@ -201,6 +201,7 @@ The mounted config directory contains `.env`, optional `AGENTS.md`, `mcp.json`, 
 | `NOOB_API_KEY` | empty | API key from `.env` only | each request |
 | `NOOB_MODEL` | `default` | Endpoint model name | `.env`: each request; CLI or environment: process |
 | `NOOB_API_STYLE` | by host | `chat` or `responses` | `.env`: each request; environment: process |
+| `NOOB_REASONING` | unset | `on` or `off`. Unset sends no thinking field and the model server decides. Set, every Chat Completions request carries `chat_template_kwargs {"enable_thinking": ...}`, and `reasoning_effort: "none"` when off. Hints only: a server started with `--reasoning off` still wins. Ignored on the responses wire shape | `.env`: each request; environment: process |
 | `NOOB_AUTODETECT` | enabled | Set `0` to disable loopback probing | process start |
 | `NOOB_CTX` | `131072` | Context window used for accounting | process start |
 | `NOOB_SANDBOX` | container detection | `container` or `workspace` | process start |

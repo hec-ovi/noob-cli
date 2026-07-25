@@ -1063,6 +1063,9 @@ fn handle_config(args: &str, agent: &Agent, ui: &mut Ui) {
                 "NOOB_MODEL" | "NOOB_API_STYLE" => {
                     "applies on the next model request unless a CLI flag or exported variable overrides it"
                 }
+                "NOOB_REASONING" => {
+                    "applies on the next model request unless an exported variable overrides it; the model server's own reasoning flags still win"
+                }
                 _ => "restart noob to apply it",
             };
             ui.note(&format!("saved {key} in {} · {reload}", path.display()));

@@ -17,6 +17,10 @@ pub struct Endpoint {
     pub api_key: String,
     pub model: String,
     pub style: ApiStyle,
+    /// Per-request thinking switch. `None` sends nothing and leaves the
+    /// decision to the server's own flags; `Some(false)` asks the endpoint
+    /// to answer without a reasoning pass, `Some(true)` asks for one.
+    pub reasoning: Option<bool>,
 }
 
 /// CLI-flag level overrides; highest precedence.

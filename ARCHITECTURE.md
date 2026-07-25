@@ -81,6 +81,7 @@ Both adapters share these rules:
 - Streamed completions have no application length cap. Whole JSON completions are also read without a length cap.
 - Chat and Responses output is normalized to text, reasoning, tool calls, usage, and a typed finish state.
 - Responses requests use stateless replay with `store: false`; captured raw output items are replayed verbatim.
+- The thinking switch is opt-in. With `NOOB_REASONING` unset, no request carries a thinking field and the model server decides. Set, every Chat Completions request carries `chat_template_kwargs` with `enable_thinking`, plus `reasoning_effort: "none"` when off; the Responses adapter ignores the setting.
 - A plain `application/json` response to a streaming request is parsed as a complete response.
 - Retries are permitted only before streamed content reaches the caller.
 - Proxy environment variables are ignored.

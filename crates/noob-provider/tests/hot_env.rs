@@ -81,6 +81,62 @@ fn bad_api_style_states_the_valid_values() {
 }
 
 #[test]
+fn reasoning_is_unset_by_default_and_reads_both_spellings() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |extra: &str| {
+        std::fs::write(
+            dir.path().join(".env"),
+            format!("NOOB_BASE_URL=http://x:1/v1\n{extra}"),
+        )
+        .unwrap();
+    };
+
+    write("");
+    assert_eq!(
+        resolve_endpoint(dir.path(), &Overrides::default())
+            .unwrap()
+            .reasoning,
+        None
+    );
+
+    for off in ["off", "OFF", "false", "no", "0", " off "] {
+        write(&format!("NOOB_REASONING={off}\n"));
+        assert_eq!(
+            resolve_endpoint(dir.path(), &Overrides::default())
+                .unwrap()
+                .reasoning,
+            Some(false),
+            "{off:?}"
+        );
+    }
+
+    for on in ["on", "true", "yes", "1"] {
+        write(&format!("NOOB_REASONING={on}\n"));
+        assert_eq!(
+            resolve_endpoint(dir.path(), &Overrides::default())
+                .unwrap()
+                .reasoning,
+            Some(true),
+            "{on:?}"
+        );
+    }
+}
+
+#[test]
+fn bad_reasoning_value_states_the_valid_values() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(".env"),
+        "NOOB_BASE_URL=http://x:1/v1\nNOOB_REASONING=maybe\n",
+    )
+    .unwrap();
+    let err = resolve_endpoint(dir.path(), &Overrides::default()).unwrap_err();
+    assert!(matches!(err, ProviderError::Config(_)));
+    let msg = err.to_string();
+    assert!(msg.contains("on") && msg.contains("off"), "{msg}");
+}
+
+#[test]
 fn trailing_slash_on_base_url_is_trimmed() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join(".env"), "NOOB_BASE_URL=http://x:1/v1/\n").unwrap();
