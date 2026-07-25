@@ -35,7 +35,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(format!("cannot read {shown} before overwriting it: {e}")),
     };
-    if let Some(current) = current {
+    if let Some(current) = current.as_deref() {
         // The file exists: the staleness rules apply.
         match ctx.seen.get(&path) {
             None => {
@@ -44,7 +44,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
                      so no unseen content is lost"
                 ));
             }
-            Some(stamp) if stamp != FileStamp::of(&current) => {
+            Some(stamp) if stamp != FileStamp::of(current) => {
                 return Err(format!(
                     "{shown} changed on disk since your last read; re-read it"
                 ));
@@ -52,14 +52,54 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
             Some(_) => {}
         }
     }
+    // Replacing a file the model already had costs one full regeneration of
+    // every byte, whether or not most of them changed. Say so, with the real
+    // numbers. In a local bake-off one task rewrote the same file four times
+    // (21,480 then 15,355 then 12,276 then 8,936 bytes) where an edit would
+    // have sent the changed span; that single behaviour was the largest share
+    // of the run's generated tokens.
+    let rewrite = current
+        .as_deref()
+        .map(|before| rewrite_note(before, content.as_bytes()));
+
     atomic_write(&path, content.as_bytes())?;
     ctx.seen
         .record_written(&path, FileStamp::of(content.as_bytes()));
     ctx.consume_skills_write_grant(raw);
     Ok(ToolOutcome::ok(
-        format!("wrote {shown} ({} bytes)", content.len()),
+        format!(
+            "wrote {shown} ({} bytes){}",
+            content.len(),
+            rewrite.unwrap_or_default()
+        ),
         format!("write {shown} ({} bytes)", content.len()),
     ))
+}
+
+/// How much of a replaced file actually changed, by line. Cheap and
+/// order-insensitive: the point is the ratio, not a diff. Silent when the
+/// rewrite genuinely replaced most of the file, so it reads as information
+/// about waste rather than a scolding on every legitimate rewrite.
+fn rewrite_note(before: &[u8], after: &[u8]) -> String {
+    let (Ok(before), Ok(after)) = (std::str::from_utf8(before), std::str::from_utf8(after)) else {
+        return String::new();
+    };
+    let old_lines: std::collections::HashSet<&str> = before.lines().collect();
+    let new_lines: Vec<&str> = after.lines().collect();
+    if new_lines.is_empty() {
+        return String::new();
+    }
+    let kept = new_lines.iter().filter(|l| old_lines.contains(*l)).count();
+    // Only speak up when the rewrite was mostly a copy of what was there.
+    if kept * 4 < new_lines.len() * 3 {
+        return String::new();
+    }
+    let changed = new_lines.len() - kept;
+    format!(
+        ", replacing a file that already existed; {changed} of {} lines differ, \
+         so edit would have sent less",
+        new_lines.len()
+    )
 }
 
 #[cfg(test)]
@@ -78,6 +118,64 @@ mod tests {
             std::fs::read_to_string(ctx.workspace.join("a/b/f.txt")).unwrap(),
             "hello"
         );
+    }
+
+    /// Rewriting a file to change a little of it says what that cost. This is
+    /// the largest single waste seen in the local bake-off: one task wrote the
+    /// same file four times rather than editing it.
+    #[test]
+    fn a_mostly_copied_rewrite_says_edit_would_have_sent_less() {
+        let (_t, ctx) = test_ctx();
+        let before: String = (1..=40).map(|i| format!("line {i}\n")).collect();
+        let out = run(&ctx, &json!({"path": "f.txt", "content": before}));
+        assert!(!out.is_error, "{}", out.content);
+        // Change two lines out of forty, but send the whole file.
+        let after: String = (1..=40)
+            .map(|i| {
+                if i == 7 || i == 9 {
+                    format!("CHANGED {i}\n")
+                } else {
+                    format!("line {i}\n")
+                }
+            })
+            .collect();
+        let out = run(&ctx, &json!({"path": "f.txt", "content": after}));
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("2 of 40 lines differ"),
+            "{}",
+            out.content
+        );
+        assert!(
+            out.content.contains("edit would have sent less"),
+            "{}",
+            out.content
+        );
+        // The one-line summary stays clean for the surfaces.
+        assert!(!out.summary.contains("differ"), "{}", out.summary);
+    }
+
+    /// A genuine full replacement is not nagged at.
+    #[test]
+    fn a_real_rewrite_gets_no_note() {
+        let (_t, ctx) = test_ctx();
+        run(
+            &ctx,
+            &json!({"path": "f.txt", "content": "alpha\nbeta\ngamma\n"}),
+        );
+        let out = run(
+            &ctx,
+            &json!({"path": "f.txt", "content": "totally\ndifferent\nthing\n"}),
+        );
+        assert!(!out.is_error, "{}", out.content);
+        assert!(!out.content.contains("differ"), "{}", out.content);
+    }
+
+    #[test]
+    fn a_brand_new_file_gets_no_note() {
+        let (_t, ctx) = test_ctx();
+        let out = run(&ctx, &json!({"path": "new.txt", "content": "one\ntwo\n"}));
+        assert_eq!(out.content, "wrote new.txt (8 bytes)");
     }
 
     #[test]

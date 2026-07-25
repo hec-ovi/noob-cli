@@ -28,8 +28,16 @@ RUN case "${TARGETARCH:-$(uname -m)}" in \
 # installed into its own uv tool environment, exposing both the standalone
 # `websearch` CLI and `websearch mcp` from the same package.
 # No config, state, cache, or keys are baked into the image.
+#
+# nodejs is here because its absence was expensive, not for completeness. Asked
+# to write a browser game, the model tried `node -e` to check its own
+# JavaScript, got "not found", and then spent twelve rounds reimplementing the
+# game's pathfinding in Python to verify it by simulation: 43,412 generated
+# tokens against 19,053 for the same task in a sandbox that had node. A
+# language runtime for the language the agent is writing pays for itself in one
+# avoided round.
 FROM alpine:3.22 AS runtime
-RUN apk add --no-cache bash git ca-certificates python3 uv
+RUN apk add --no-cache bash git ca-certificates python3 uv nodejs
 ARG WEBSEARCH_SKILL_VERSION=0.2.3
 RUN UV_CACHE_DIR=/tmp/uv-cache \
     UV_TOOL_DIR=/opt/noob/uv-tools \

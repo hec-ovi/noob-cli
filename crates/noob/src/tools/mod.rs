@@ -391,7 +391,8 @@ pub fn specs() -> Vec<ToolSpec> {
         ),
         spec(
             "write",
-            "Create or replace a file with the given content; read existing files first.",
+            "Create a file, or fully replace one you have read. For a change to an existing \
+             file use edit instead: write regenerates every byte you send.",
             json!({"type": "object", "properties": {
                 "path": {"type": "string"},
                 "content": {"type": "string"}
