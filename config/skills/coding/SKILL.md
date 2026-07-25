@@ -1,9 +1,8 @@
 ---
 name: coding
 description: >-
-  Changing code that already exists: a feature, a bug fix, a refactor, a test. Covers
-  proving a library is there, matching the file you edit, and running the project's
-  tests before calling it done.
+  Changing code that already exists: a feature, a bug fix, a refactor, a test, or
+  running a project's checks.
 ---
 
 # Changing code that already exists
