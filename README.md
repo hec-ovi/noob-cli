@@ -153,9 +153,12 @@ websearch web-open "site.example~handle" --page 2
 websearch arxiv "paper topic"
 websearch github "repository topic" --language Rust
 websearch mcp
+websearch doctor
 ```
 
-The tool takes an optional egress proxy, off by default: set `WEBSEARCH_PROXY` to a proxy URL (`socks5h://user:pass@host:1080`), to `nordvpn`, or to `off`. The `nordvpn` shorthand builds the SOCKS5 URL from the `NORDVPN_USER` and `NORDVPN_PASS` service credentials, with `NORDVPN_HOST` selecting a server. The launcher forwards these four variables into the container, so exporting them before running `noob` is all it takes.
+`websearch doctor` is the one to reach for when results dry up: it checks each engine on its own and separates a parser that can no longer read a provider from a provider that is refusing your IP, which need opposite fixes.
+
+The tool takes an optional egress proxy, off by default: set `WEBSEARCH_PROXY` to a proxy URL (`socks5h://user:pass@host:1080`), to `nordvpn`, or to `off`. The `nordvpn` shorthand builds the SOCKS5 URL from the `NORDVPN_USER` and `NORDVPN_PASS` service credentials, with `NORDVPN_HOST` selecting a server. With a proxy set, nothing leaves the container around it, including the hostname lookups the fetch guard used to do locally. `WEBSEARCH_VPN` (`nordvpn` or `any`) routes nothing itself; it declares that egress should be tunneled so the doctor verifies it instead of assuming it. The launcher forwards all of these, plus `WEBSEARCH_SEARXNG_URL`, into the container, so exporting them before running `noob` is all it takes. To keep the credentials out of your shell history, put them in `websearch.env` in the config directory instead. The tool otherwise reads `.env` from its working directory, which inside the container is your project, so the image points it at the config directory: a `.env` of your own is never read, and a `WEBSEARCH_PROXY` line in it cannot silently reroute or break every search.
 
 The **skill** is a `SKILL.md` in the config that tells the model when to search and which subcommand to reach for. The model runs `websearch` through `bash`, or through the MCP server when one is configured. The installer seeds both and enables the stdio server without a sidecar; the bundled skill is the standalone Bash fallback. From the checkout, turn on the same MCP config with:
 

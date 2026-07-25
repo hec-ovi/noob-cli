@@ -45,7 +45,7 @@ The Cargo workspace has three crates:
 
 Only `noob-provider` depends on the HTTP client. A crate-graph test enforces that boundary.
 
-The builder selects `x86_64-unknown-linux-musl` for amd64 or `aarch64-unknown-linux-musl` for arm64. The runtime image contains Alpine, Bash, Git, CA certificates, Python 3, uv, a pinned `websearch-skill` tool environment, and the static binary.
+The builder selects `x86_64-unknown-linux-musl` for amd64 or `aarch64-unknown-linux-musl` for arm64. The runtime image contains Alpine, Bash, Git, CA certificates, Python 3, uv, Node, a pinned `websearch-skill` tool environment, and the static binary. That tool reads a dotenv from its working directory and exports every key in it, so the image sets `WEBSEARCH_ENV_FILE` to `/config/websearch.env`: the agent's working directory is the user's project, and its `.env` is neither a place to configure search from nor a file whose contents belong in the environment of a process that opens sockets.
 
 ## Distribution
 

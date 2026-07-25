@@ -29,6 +29,14 @@ RUN case "${TARGETARCH:-$(uname -m)}" in \
 # `websearch` CLI and `websearch mcp` from the same package.
 # No config, state, cache, or keys are baked into the image.
 #
+# WEBSEARCH_ENV_FILE moves that tool's dotenv off its working directory. It
+# reads `.env` from the cwd and exports every key it finds, and the agent's cwd
+# is /work, the user's own project. Verified against 0.2.5: a project .env
+# naming a dead proxy made every search fail closed, while the same container
+# with no .env searched fine. A project's own secrets have no business in the
+# environment of a process that opens sockets, and the sanctioned places to
+# configure this tool are the launcher's forwarded variables and /config.
+#
 # nodejs is here because its absence was expensive, not for completeness. Asked
 # to write a browser game, the model tried `node -e` to check its own
 # JavaScript, got "not found", and then spent twelve rounds reimplementing the
@@ -38,7 +46,7 @@ RUN case "${TARGETARCH:-$(uname -m)}" in \
 # avoided round.
 FROM alpine:3.22 AS runtime
 RUN apk add --no-cache bash git ca-certificates python3 uv nodejs
-ARG WEBSEARCH_SKILL_VERSION=0.2.3
+ARG WEBSEARCH_SKILL_VERSION=0.2.5
 RUN UV_CACHE_DIR=/tmp/uv-cache \
     UV_TOOL_DIR=/opt/noob/uv-tools \
     UV_TOOL_BIN_DIR=/usr/local/bin \
@@ -54,6 +62,7 @@ ENV NOOB_SANDBOX=container \
     COLORTERM=truecolor \
     HOME=/tmp/noob-home \
     UV_CACHE_DIR=/config/cache/uv \
+    WEBSEARCH_ENV_FILE=/config/websearch.env \
     PYTHONDONTWRITEBYTECODE=1
 WORKDIR /work
 ENTRYPOINT ["noob"]

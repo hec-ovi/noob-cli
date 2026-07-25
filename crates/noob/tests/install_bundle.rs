@@ -31,6 +31,29 @@ fn fake_docker(dir: &std::path::Path) -> String {
     )
 }
 
+/// The bundled search tool reads a `.env` from its working directory and
+/// exports every key in it. Inside the image the agent's working directory is
+/// /work, the user's project, so a project `.env` would silently feed that
+/// process: `WEBSEARCH_PROXY` there reroutes or kills every search, and the
+/// rest of the file (database URLs, API keys) lands in the environment of a
+/// process that opens sockets. The image points the tool's dotenv at /config
+/// instead, where noob's own configuration lives.
+#[test]
+fn the_image_keeps_the_search_tool_dotenv_out_of_the_workspace() {
+    let dockerfile = std::fs::read_to_string(repo_root().join("docker/Dockerfile")).unwrap();
+    let value = dockerfile
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("WEBSEARCH_ENV_FILE="))
+        .expect("the runtime image must pin WEBSEARCH_ENV_FILE")
+        .trim_end_matches(" \\")
+        .to_string();
+    assert!(
+        value.starts_with("/config/"),
+        "the search tool dotenv must live in /config, not the workspace: {value}"
+    );
+    assert!(dockerfile.contains("WORKDIR /work"), "{dockerfile}");
+}
+
 #[test]
 fn installer_builds_image_installs_launcher_and_forwards_restore() {
     let tmp = tempfile::tempdir().unwrap();
@@ -77,6 +100,7 @@ fn installer_builds_image_installs_launcher_and_forwards_restore() {
         .env("NOOB_MODEL", "mock-model")
         .env("NOOB_API_KEY", "host-secret-must-not-be-forwarded")
         .env("WEBSEARCH_PROXY", "nordvpn")
+        .env("WEBSEARCH_VPN", "nordvpn")
         .env("NORDVPN_USER", "svc-user")
         .env("NORDVPN_PASS", "svc-pass")
         .env("NOOB_TOOL_CAPS", "0")
@@ -123,6 +147,10 @@ fn installer_builds_image_installs_launcher_and_forwards_restore() {
     assert!(calls.contains("--env\nWEBSEARCH_PROXY\n"), "{calls}");
     assert!(calls.contains("--env\nNORDVPN_USER\n"), "{calls}");
     assert!(calls.contains("--env\nNORDVPN_PASS\n"), "{calls}");
+    // WEBSEARCH_VPN declares that egress is expected to be tunneled. It routes
+    // nothing, so it is only worth anything if it reaches the process that runs
+    // the check, which is `websearch doctor` inside the container.
+    assert!(calls.contains("--env\nWEBSEARCH_VPN\n"), "{calls}");
     // The truncation-caps switch forwards too, so `NOOB_TOOL_CAPS=0 noob`
     // lifts the caps inside the container without touching /config/.env.
     assert!(calls.contains("--env\nNOOB_TOOL_CAPS\n"), "{calls}");
