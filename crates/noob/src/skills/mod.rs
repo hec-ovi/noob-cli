@@ -878,6 +878,61 @@ mod tests {
         std::fs::write(dir.join("SKILL.md"), content).unwrap();
     }
 
+    // --- the skills this repo ships ---
+
+    /// Every skill under `config/skills/` is copied into a real user's config by
+    /// `install.sh`, so a broken one ships broken: it is dropped from discovery
+    /// with no build failure to notice. Each must parse, validate, and fit the
+    /// index line, because a clipped description is the text the model matches
+    /// the task against and the clip lands mid-sentence.
+    #[test]
+    fn the_shipped_skills_parse_and_fit_the_resolver_index() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .join("config/skills");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&root).unwrap() {
+            let dir = entry.unwrap().path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let file = dir.join("SKILL.md");
+            let text = std::fs::read_to_string(&file)
+                .unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+            let parsed =
+                parse(&text).unwrap_or_else(|e| panic!("{} does not parse: {e}", file.display()));
+            let (name, description) = validate(&parsed.fields)
+                .unwrap_or_else(|e| panic!("{} is invalid: {e}", file.display()));
+            assert_eq!(
+                name,
+                dir.file_name().unwrap().to_str().unwrap(),
+                "{} declares a name that is not its directory",
+                file.display()
+            );
+            let line = clip_one_line(&description);
+            assert!(
+                !line.ends_with('…'),
+                "{} description is {} chars and clips at {INDEX_DESC_CLIP} in the index: {line}",
+                file.display(),
+                description
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .chars()
+                    .count()
+            );
+            assert!(
+                text.len() > parsed.body_start,
+                "{} has no body",
+                file.display()
+            );
+            seen += 1;
+        }
+        assert!(seen >= 2, "expected the shipped skills, found {seen}");
+    }
+
     // --- parser ---
 
     #[test]

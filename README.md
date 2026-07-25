@@ -174,6 +174,8 @@ The opt-in live test gives qwen a research prompt with the MCP server configured
 
 A skill is a `SKILL.md` the model activates and then carries out with the ordinary tools, so it adds a capability without adding code. Install one from a local path, a git URL, or an `owner/repo` GitHub shorthand with `/skills add` (`/skills add hec-ovi/research-skill` just works), list with `/skills`, and drop a workspace one with `/skills remove`.
 
+Two ship with the installer. `web-search` is above. `coding` loads when the task is a change to code that already exists, and carries the directives that hold up under measurement: a library exists only if the project declares it, so check the manifest before importing; read the file and one neighbour and write in their style; prefer an edit over a rewrite, since a rewrite regenerates the bytes that were already right; find the project's own test and lint commands instead of guessing them; and run the thing, because compiling, parsing, and type-checking are not running. No tone rules and no worked examples, so it costs one line in the resolver until the model loads it. Drop it with `/skills remove coding` if you would rather bring your own.
+
 The external [research-skill](https://github.com/hec-ovi/research-skill) shows the shape. With one unambiguous `websearch` MCP server configured, noob recognizes that skill's investigation brief and enforces `tools: "web"`, even if a small model requested `"all"`. That child can inspect local files and gather web evidence, but cannot run Bash, write files, change the plan, or spawn another agent. It returns the complete synthesis; the main agent validates it and alone updates the project-scoped `.research/` store. A completed web report is accepted only after at least two distinct `mcp_call` operations reached the server and returned server-originated results. Without that MCP match, the parent can use `tools: "all"` with the standalone `websearch` command when the task needs it.
 
 ## 📟 The dock up close
@@ -254,12 +256,12 @@ Formatting never changes requests, transcripts, sessions, or cache-prefix bytes.
 
 ## Planned
 
-Future work, not built yet.
+Future work, not built yet, in the order it will be built.
 
+- **Native binaries for macOS, Windows, and Linux.** Today the shipped artifact is a Linux static binary inside the runtime image, and the host command is a launcher that runs it under Docker. A real per-platform binary comes first, because the front end below has nothing to attach to until it exists.
 - **GPU Vulkan front end.** A lightweight Rust binary that renders the UI on the GPU through Vulkan instead of the terminal, in the spirit of Zed. Each surface is a separate, isolated part that talks to the others over schema-validated data rather than shared code: the plan, the multi-agent runner, agent management, and the main window. A dedicated code-stream surface shows each generated file on its own as the model writes it.
-- **Session tokens readout.** A top-right total for the session: tokens prefilled (prompt) and tokens generated (completion), summed across turns, fed by the `usage` each completion already returns.
-- **`devkit` skill.** A working prompt packaged as a loadable `SKILL.md`.
-- **Lightweight coding skill.** An optional `SKILL.md` carrying only the directives that measurably improve code: verify a library is actually present before using it, match the file's existing style, run the project's tests and lint after changes. No tone rules, no worked examples, no boilerplate. It keeps `base.md` lean instead of baking a heavy coding preamble into every turn.
+
+The `devkit` skill is not part of this repository and is not open source.
 
 ## Development and verification
 
