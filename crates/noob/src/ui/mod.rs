@@ -34,6 +34,7 @@ use markdown::Markdown;
 pub use prompt::Input;
 use style::{ColorDepth, DIM, RESET};
 use theme::Theme;
+use crate::session::SessionTokens;
 
 pub(crate) fn elapsed_label(elapsed: Duration) -> String {
     let millis = elapsed.as_millis();
@@ -96,6 +97,10 @@ pub(crate) enum TurnEvent {
     },
     Note(String),
     Error(String),
+    /// One model request's usage, sent as it lands rather than at the end of the
+    /// turn: a turn can span many requests, and only the surface that paints
+    /// keeps the running total.
+    Usage(Usage),
     Done(Option<Usage>),
 }
 
@@ -157,6 +162,10 @@ impl BufferedTurnRenderer {
             TurnEvent::Agents { block, ids } => self.ui.render_agents(&block, &ids),
             TurnEvent::Note(line) => self.ui.note(&line),
             TurnEvent::Error(line) => self.ui.error(&line),
+            // Absorbed by the dock before it reaches a renderer: this one
+            // updates a counter and prints nothing. Unreachable in practice,
+            // and silently dropping it here keeps that true if it ever is.
+            TurnEvent::Usage(_) => {}
             TurnEvent::Done(usage) => self.ui.done(usage),
         }
     }
@@ -226,9 +235,47 @@ pub struct Ui {
     /// visibly blinked on every streamed batch.
     batch: Vec<u8>,
     batch_depth: usize,
+    /// Session totals shown in the frame's top rule. On a turn `Ui` this stays
+    /// zero: the totals belong to the surface that paints, and the turn sends
+    /// each request's usage over the channel instead.
+    tokens: SessionTokens,
     /// Test seam for the confirmation flow: unit tests cannot own a tty.
     #[cfg(test)]
     pub forced_ask: Option<bool>,
+}
+
+impl SessionTokens {
+    /// Ways to say this in the top rule, widest first. The caller paints the
+    /// first one that fits and nothing at all if none do, so a narrow terminal
+    /// loses the readout rather than the frame.
+    pub(super) fn labels(&self) -> Vec<String> {
+        if self.is_zero() {
+            return Vec::new();
+        }
+        let (p, g) = (count(self.prefilled), count(self.generated));
+        vec![
+            format!("{p} prefilled · {g} generated"),
+            format!("{p} in · {g} out"),
+            format!("{p}·{g}"),
+        ]
+    }
+}
+
+/// A token count a human reads at a glance: exact under a thousand, then one
+/// decimal of thousands or millions.
+fn count(n: u64) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=999_999 => {
+            let k = n as f64 / 1_000.0;
+            if k < 10.0 {
+                format!("{k:.1}k")
+            } else {
+                format!("{k:.0}k")
+            }
+        }
+        _ => format!("{:.1}M", n as f64 / 1_000_000.0),
+    }
 }
 
 impl Ui {
@@ -258,6 +305,7 @@ impl Ui {
             panel_task_ids: std::collections::HashSet::new(),
             batch: Vec::new(),
             batch_depth: 0,
+            tokens: SessionTokens::default(),
             #[cfg(test)]
             forced_ask: None,
         }
@@ -284,6 +332,7 @@ impl Ui {
             panel_task_ids: std::collections::HashSet::new(),
             batch: Vec::new(),
             batch_depth: 0,
+            tokens: SessionTokens::default(),
             #[cfg(test)]
             forced_ask: None,
         }
@@ -311,6 +360,7 @@ impl Ui {
                 panel_task_ids: std::collections::HashSet::new(),
                 batch: Vec::new(),
                 batch_depth: 0,
+                tokens: SessionTokens::default(),
                 #[cfg(test)]
                 forced_ask: None,
             },
@@ -982,6 +1032,33 @@ impl Ui {
     }
 
     /// End of one user input's processing.
+    /// One model request's usage. Called for every request, not once per turn,
+    /// because a turn that runs ten tools pays for ten prefills and the readout
+    /// would otherwise show only the last one.
+    pub fn usage(&mut self, u: Usage) {
+        if self.send_turn(TurnEvent::Usage(u)) {
+            return;
+        }
+        self.tokens.add(u);
+    }
+
+    /// Fold a request's usage into the painting surface's totals. The dock owns
+    /// the real `Ui`; its worker sends usage over the channel and this is where
+    /// it lands.
+    pub(crate) fn add_usage(&mut self, u: Usage) {
+        self.tokens.add(u);
+    }
+
+    /// Seed the totals from a resumed session, so the readout describes the
+    /// session rather than the current process.
+    pub fn seed_tokens(&mut self, tokens: SessionTokens) {
+        self.tokens = tokens;
+    }
+
+    pub(crate) fn tokens(&self) -> SessionTokens {
+        self.tokens
+    }
+
     pub fn done(&mut self, usage: Option<Usage>) {
         if self.send_turn(TurnEvent::Done(usage)) {
             return;
@@ -1275,6 +1352,7 @@ mod tests {
             panel_task_ids: std::collections::HashSet::new(),
             batch: Vec::new(),
             batch_depth: 0,
+            tokens: SessionTokens::default(),
             forced_ask: None,
         };
         (ui, out, err)

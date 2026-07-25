@@ -751,6 +751,15 @@ impl Agent {
                 self.last_usage = Some(u);
                 self.chars_since_usage = 0;
                 self.sync_context();
+                // Session totals for the frame's readout, and durably, so a
+                // resumed session continues its count instead of restarting.
+                ui.usage(u);
+                // Best effort by design: a counter that cannot be written is
+                // not worth detaching a working session over. push_item owns
+                // that escalation, for content that would actually be lost.
+                if let Some(session) = self.session.as_mut() {
+                    let _ = session.log_usage(u);
+                }
             }
 
             if turn.tool_calls.is_empty() {

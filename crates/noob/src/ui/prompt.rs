@@ -215,8 +215,8 @@ impl Ui {
     pub(super) fn expand(&mut self, plan: bool, width: usize) {
         let color = self.box_color();
         let reset = if color.is_empty() { "" } else { RESET };
-        let top = box_rule(plan, width);
-        let bottom = box_rule(false, width);
+        let top = box_rule(plan, width, &self.tokens.labels());
+        let bottom = box_rule(false, width, &[]);
         self.out(&format!(
             "\r\x1b[2K{color}{top}{reset}\r\n\r\n{color}{bottom}{reset}\x1b[1A"
         ));
@@ -239,8 +239,8 @@ impl Ui {
         self.erase_frame();
         let color = self.box_color();
         let reset = if color.is_empty() { "" } else { RESET };
-        let top = box_rule(plan, now);
-        let bottom = box_rule(false, now);
+        let top = box_rule(plan, now, &self.tokens.labels());
+        let bottom = box_rule(false, now, &[]);
         self.out(&format!(
             "{color}{top}{reset}\r\n\r\n{color}{bottom}{reset}\x1b[1A"
         ));
@@ -439,13 +439,47 @@ fn raw_enabled_by_env() -> bool {
 /// `── plan ──...──` in plan mode. No corners and no side borders: the frame is
 /// just a top and a bottom line. Shared by both rules, the resize re-fit, and
 /// the dock's idle frame so they never disagree.
-pub(super) fn box_rule(plan: bool, width: usize) -> String {
+///
+/// `right` holds ways to label the rule's right end, widest first; the first
+/// one that leaves a readable rule behind it is inlaid, and if none do the rule
+/// is drawn plain. The label is set INTO the rule rather than appended, so the
+/// row's display width is exactly `width` either way and every in-place repaint
+/// that measured the plain rule still measures right.
+pub(super) fn box_rule(plan: bool, width: usize, right: &[String]) -> String {
     let head = if plan { "── plan " } else { "" };
     let mut rule = String::from(head);
-    for _ in head.chars().count()..width {
-        rule.push('─');
-    }
+    rule.push_str(&rule_fill(
+        width.saturating_sub(head.chars().count()),
+        right,
+    ));
     rule
+}
+
+/// Exactly `width` cells of rule, with the first label from `right` that leaves
+/// a readable run of rule behind it inlaid at the right end. Shared by the idle
+/// frame's rule and the working frame's status row so the readout sits in the
+/// same place in both.
+pub(super) fn rule_fill(width: usize, right: &[String]) -> String {
+    // Enough rule left of the label that the row still reads as a frame edge
+    // rather than a line of text. This is what makes the working row degrade to
+    // a shorter form instead of eating its own rule: that row has already spent
+    // its width on the scanner, the clock, and the running tool.
+    const MIN_FILL: usize = 20;
+    // Dashes closing the row so the label never touches the right edge.
+    const TAIL: usize = 2;
+    for label in right {
+        let label_w: usize = label.chars().map(table::char_width).sum();
+        let used = label_w + TAIL + 2; // a space each side of the label
+        if width >= used + MIN_FILL {
+            let mut s = "─".repeat(width - used);
+            s.push(' ');
+            s.push_str(label);
+            s.push(' ');
+            s.push_str(&"─".repeat(TAIL));
+            return s;
+        }
+    }
+    "─".repeat(width)
 }
 
 /// A one-physical-row view of the input buffer: the visible slice (control
@@ -1378,14 +1412,14 @@ mod tests {
     fn box_rule_spans_the_width_with_no_corners() {
         // The rule fills the terminal exactly, in plain dashes: no rounded
         // corners and no side borders (the frame is a top and a bottom line).
-        let r = box_rule(false, 80);
+        let r = box_rule(false, 80, &[]);
         assert!(
             r.chars().all(|c| c == '─'),
             "rule must be plain dashes: {r:?}"
         );
         assert_eq!(r.chars().count(), 80, "rule must span the full width");
         // Plan mode keeps the label and still fills the width.
-        let p = box_rule(true, 120);
+        let p = box_rule(true, 120, &[]);
         assert!(
             p.starts_with("── plan "),
             "plan rule must carry the label: {p:?}"
@@ -1395,6 +1429,52 @@ mod tests {
             120,
             "plan rule must still span the width"
         );
+    }
+
+    /// The session readout is inlaid INTO the rule, never appended to it. The
+    /// dock records `visible_width(&top)` and repaints the frame from that
+    /// number, so a rule that grew by the label's width would push every
+    /// in-place repaint off by that much and leave stale rows behind.
+    #[test]
+    fn a_labelled_rule_is_still_exactly_the_terminal_width() {
+        let label = String::from("12.4k prefilled · 3.1k generated");
+        for &width in &[40usize, 60, 80, 120, 200] {
+            let r = box_rule(false, width, std::slice::from_ref(&label));
+            let cells: usize = r.chars().map(table::char_width).sum();
+            assert_eq!(cells, width, "width {width} produced {cells} cells: {r:?}");
+        }
+        // Plan mode carries its own head and the label at once.
+        let p = box_rule(true, 100, std::slice::from_ref(&label));
+        assert!(p.starts_with("── plan "), "{p:?}");
+        assert!(p.contains(&label), "{p:?}");
+        assert_eq!(p.chars().map(table::char_width).sum::<usize>(), 100);
+    }
+
+    /// A narrow terminal loses the readout, not the frame: the candidates are
+    /// tried widest first and the rule is drawn plain when none fit.
+    #[test]
+    fn a_rule_too_narrow_for_the_label_stays_plain() {
+        let candidates = vec![
+            String::from("12.4k prefilled · 3.1k generated"),
+            String::from("12.4k in · 3.1k out"),
+            String::from("12.4k·3.1k"),
+        ];
+        // Wide: the fullest form wins.
+        let wide = box_rule(false, 100, &candidates);
+        assert!(wide.contains("prefilled"), "{wide:?}");
+        // Middling: the long form no longer leaves a rule, the short one does.
+        let mid = box_rule(false, 50, &candidates);
+        assert!(!mid.contains("prefilled"), "{mid:?}");
+        assert!(mid.contains("12.4k in · 3.1k out"), "{mid:?}");
+        assert_eq!(mid.chars().map(table::char_width).sum::<usize>(), 50);
+        // Tighter still: only the bare pair fits.
+        let tight = box_rule(false, 36, &candidates);
+        assert!(tight.contains("12.4k·3.1k"), "{tight:?}");
+        assert_eq!(tight.chars().map(table::char_width).sum::<usize>(), 36);
+        // Narrow: nothing fits, so the rule is plain dashes and full width.
+        let narrow = box_rule(false, 16, &candidates);
+        assert!(narrow.chars().all(|c| c == '─'), "{narrow:?}");
+        assert_eq!(narrow.chars().count(), 16);
     }
 
     #[test]

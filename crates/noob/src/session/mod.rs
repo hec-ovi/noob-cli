@@ -6,13 +6,43 @@
 //!   {"t":"meta","v":1,"id":"...","created_ms":...}
 //!   {"t":"item","item":{...}}            one transcript item appended
 //!   {"t":"reset","items":[...]}          compaction replaced the transcript
+//!   {"t":"usage","prefilled":N,"generated":N}   one request's cost
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use noob_provider::types::{Item, ToolCall};
+use noob_provider::types::{Item, ToolCall, Usage};
+
+/// What this session has cost so far, in tokens.
+///
+/// `prefilled` counts only what the server actually had to compute. Every
+/// request re-sends the whole transcript, so summing raw `prompt_tokens` would
+/// grow with the square of the conversation and describe work nobody did: a
+/// prompt token served from the provider's cache is not prefilled again. The
+/// local llama.cpp server reports the split as
+/// `prompt_tokens_details.cached_tokens`, and on a repeated prefix it reported
+/// 40 of 44 prompt tokens cached, so the difference is the whole number.
+///
+/// Kept per request rather than per turn, and on disk rather than in memory,
+/// so the count describes the session and survives a resume.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionTokens {
+    pub prefilled: u64,
+    pub generated: u64,
+}
+
+impl SessionTokens {
+    pub fn add(&mut self, u: Usage) {
+        self.prefilled += u.prompt_tokens.saturating_sub(u.cached_prompt_tokens);
+        self.generated += u.completion_tokens;
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.prefilled == 0 && self.generated == 0
+    }
+}
 
 pub struct Session {
     id: String,
@@ -22,6 +52,8 @@ pub struct Session {
     /// session continues in memory only and append() degrades to a no-op,
     /// mirroring how the agent detaches on a later append failure.
     detached: bool,
+    /// Running totals, seeded from the replayed log on a resume.
+    tokens: SessionTokens,
 }
 
 const REPLAY_SKIP_CAP: u16 = 999;
@@ -141,6 +173,7 @@ impl Session {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         let mut items = Vec::new();
+        let mut tokens = SessionTokens::default();
         let mut replay_report = ReplayReport::default();
         let (id, path, mut file, existed) = match id {
             Some(id) if !id.is_empty() => {
@@ -150,7 +183,7 @@ impl Session {
                 if existed {
                     let input = std::fs::File::open(&path)
                         .map_err(|e| format!("cannot read session {}: {e}", path.display()))?;
-                    (items, replay_report) = replay(BufReader::new(input));
+                    (items, tokens, replay_report) = replay(BufReader::new(input));
                 }
                 let file = std::fs::OpenOptions::new()
                     .create(true)
@@ -180,6 +213,7 @@ impl Session {
             path,
             file,
             detached: false,
+            tokens,
         };
         // A session killed mid-tool-batch (second Ctrl-C, SIGKILL, power
         // loss) ends with unanswered tool calls; replaying that verbatim
@@ -209,6 +243,28 @@ impl Session {
         let arr: Vec<Value> = items.iter().map(item_to_json).collect();
         let line = json!({"t": "reset", "items": arr});
         self.append(&line)
+    }
+
+    /// Record one request's cost. Written per request because a turn can make
+    /// many, and stored as the computed prefill rather than the raw prompt so
+    /// the sum stays meaningful however long the transcript grows.
+    pub fn log_usage(&mut self, u: Usage) -> Result<(), String> {
+        self.tokens.add(u);
+        let prefilled = u.prompt_tokens.saturating_sub(u.cached_prompt_tokens);
+        if prefilled == 0 && u.completion_tokens == 0 {
+            return Ok(());
+        }
+        let line = json!({
+            "t": "usage",
+            "prefilled": prefilled,
+            "generated": u.completion_tokens,
+        });
+        self.append(&line)
+    }
+
+    /// Totals for this session, including everything replayed from the log.
+    pub fn tokens(&self) -> SessionTokens {
+        self.tokens
     }
 
     fn append(&mut self, line: &Value) -> Result<(), String> {
@@ -401,8 +457,9 @@ fn claim_fresh(
     ))
 }
 
-fn replay(mut reader: impl BufRead) -> (Vec<Item>, ReplayReport) {
+fn replay(mut reader: impl BufRead) -> (Vec<Item>, SessionTokens, ReplayReport) {
     let mut items = Vec::new();
+    let mut tokens = SessionTokens::default();
     let mut report = ReplayReport::default();
     loop {
         let mut line = Vec::new();
@@ -446,10 +503,17 @@ fn replay(mut reader: impl BufRead) -> (Vec<Item>, ReplayReport) {
                 }
                 items = replacement;
             }
+            // Compaction rewrites the transcript but not the bill: tokens
+            // already spent stay spent, so a reset never clears these.
+            Some("usage") => {
+                let n = |key| v.get(key).and_then(Value::as_u64).unwrap_or(0);
+                tokens.prefilled += n("prefilled");
+                tokens.generated += n("generated");
+            }
             _ => report.record_skip(),
         }
     }
-    (items, report)
+    (items, tokens, report)
 }
 
 fn item_to_json(item: &Item) -> Value {
@@ -672,6 +736,105 @@ mod tests {
     }
 
     #[test]
+    /// Only the tokens the server actually computed are counted. Every request
+    /// re-sends the whole transcript, so counting raw prompt tokens would grow
+    /// with the square of the conversation and bill work the cache did for
+    /// free: here the second request re-sent 1,000 prompt tokens of which 950
+    /// were cached, and that is 50 of prefill, not 1,000.
+    #[test]
+    fn only_the_uncached_part_of_a_prompt_counts_as_prefill() {
+        let mut tokens = SessionTokens::default();
+        assert!(tokens.is_zero());
+        tokens.add(Usage {
+            prompt_tokens: 500,
+            completion_tokens: 120,
+            cached_prompt_tokens: 0,
+        });
+        tokens.add(Usage {
+            prompt_tokens: 1_000,
+            completion_tokens: 80,
+            cached_prompt_tokens: 950,
+        });
+        assert_eq!(tokens.prefilled, 550);
+        assert_eq!(tokens.generated, 200);
+        // A provider that reports more cached than prompt (or none at all)
+        // must not underflow a u64 into billions.
+        tokens.add(Usage {
+            prompt_tokens: 10,
+            completion_tokens: 0,
+            cached_prompt_tokens: 99,
+        });
+        assert_eq!(tokens.prefilled, 550);
+    }
+
+    /// The count belongs to the session, so a resume continues it. Compaction
+    /// rewrites the transcript but not the bill: a `reset` replaces items and
+    /// leaves the totals alone.
+    #[test]
+    fn resume_replays_the_running_token_totals_and_compaction_does_not_clear_them() {
+        let input = concat!(
+            "{\"t\":\"meta\",\"v\":1}\n",
+            "{\"t\":\"usage\",\"prefilled\":500,\"generated\":120}\n",
+            "{\"t\":\"item\",\"item\":{\"role\":\"user\",\"text\":\"before\"}}\n",
+            "{\"t\":\"usage\",\"prefilled\":50,\"generated\":80}\n",
+            "{\"t\":\"reset\",\"items\":[{\"role\":\"user\",\"text\":\"summary\"}]}\n",
+            "{\"t\":\"usage\",\"prefilled\":7}\n",
+        );
+        let (items, tokens, report) = replay(std::io::Cursor::new(input));
+        assert_eq!(tokens.prefilled, 557);
+        assert_eq!(tokens.generated, 200);
+        assert_eq!(items.len(), 1, "the reset still replaced the transcript");
+        assert_eq!(report.warning(), None, "a usage record is not a skip");
+    }
+
+    /// The whole point of writing them down: open, spend, reopen, keep counting.
+    #[test]
+    fn a_reopened_session_keeps_counting_from_what_it_spent_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut session, _, _, _) = Session::open(dir.path(), Some("resume-me")).unwrap();
+        assert!(session.tokens().is_zero());
+        session
+            .log_usage(Usage {
+                prompt_tokens: 400,
+                completion_tokens: 60,
+                cached_prompt_tokens: 0,
+            })
+            .unwrap();
+        session
+            .log_usage(Usage {
+                prompt_tokens: 900,
+                completion_tokens: 40,
+                cached_prompt_tokens: 880,
+            })
+            .unwrap();
+        assert_eq!(session.tokens().prefilled, 420);
+        drop(session);
+
+        let (session, _, existed, _) = Session::open(dir.path(), Some("resume-me")).unwrap();
+        assert!(existed);
+        assert_eq!(session.tokens().prefilled, 420);
+        assert_eq!(session.tokens().generated, 100);
+    }
+
+    /// A request that cost nothing writes nothing: a stream that ends without
+    /// usage should not pad the log with empty records.
+    #[test]
+    fn a_zero_usage_request_writes_no_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut session, _, _, _) = Session::open(dir.path(), Some("quiet")).unwrap();
+        let before = std::fs::read_to_string(session.path()).unwrap();
+        session
+            .log_usage(Usage {
+                prompt_tokens: 30,
+                completion_tokens: 0,
+                cached_prompt_tokens: 30,
+            })
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(session.path()).unwrap(), before);
+        assert!(session.tokens().is_zero());
+    }
+
+    #[test]
     fn replay_counts_each_skipped_record_and_keeps_valid_history() {
         let input = concat!(
             "{\"t\":\"meta\",\"v\":1}\n",
@@ -684,7 +847,7 @@ mod tests {
             "{\"t\":\"item\",\"item\":{\"role\":\"user\",\"text\":\"after\"}}\n",
         );
 
-        let (items, report) = replay(std::io::Cursor::new(input));
+        let (items, _tokens, report) = replay(std::io::Cursor::new(input));
 
         assert_eq!(report.skipped, 5);
         assert!(!report.capped);
@@ -697,7 +860,7 @@ mod tests {
     fn replay_skip_count_is_bounded() {
         let input = "GARBAGE\n".repeat(usize::from(REPLAY_SKIP_CAP) + 20);
 
-        let (items, report) = replay(std::io::Cursor::new(input));
+        let (items, _tokens, report) = replay(std::io::Cursor::new(input));
 
         assert!(items.is_empty());
         assert_eq!(report.skipped, REPLAY_SKIP_CAP);
@@ -714,7 +877,7 @@ mod tests {
             b"{\"t\":\"item\",\"item\":{\"role\":\"user\",\"text\":\"after\"}}\n",
         );
 
-        let (items, report) = replay(std::io::Cursor::new(input));
+        let (items, _tokens, report) = replay(std::io::Cursor::new(input));
 
         assert_eq!(report.skipped, 1);
         assert_eq!(items.len(), 2);
@@ -746,7 +909,7 @@ mod tests {
             fn consume(&mut self, _amount: usize) {}
         }
 
-        let (items, report) = replay(Unreadable);
+        let (items, _tokens, report) = replay(Unreadable);
 
         assert!(items.is_empty());
         assert_eq!(report.skipped, 1);
@@ -764,6 +927,7 @@ mod tests {
             path: PathBuf::from("/dev/full"),
             file,
             detached: false,
+            tokens: SessionTokens::default(),
         };
         let error = session
             .log_item(&Item::User("important".into()))
@@ -887,6 +1051,7 @@ mod tests {
             path: PathBuf::from("/dev/full"),
             file,
             detached: false,
+            tokens: SessionTokens::default(),
         };
         let mut items = vec![Item::Assistant {
             text: String::new(),

@@ -229,6 +229,11 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
     if let Some(warning) = replay_report.warning() {
         ui.error(&warning);
     }
+    // A resumed session keeps counting where it left off: the readout is about
+    // the session, not about this process.
+    if let Some(session) = session.as_ref() {
+        ui.seed_tokens(session.tokens());
+    }
     let mut agent = Agent::new(
         Client::new(Timeouts::default()),
         config_dir.clone(),

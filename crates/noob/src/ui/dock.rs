@@ -876,8 +876,8 @@ impl DockSession {
     ) {
         let color = ui.box_color();
         let reset = if color.is_empty() { "" } else { RESET };
-        let top = super::prompt::box_rule(plan, width);
-        let bottom = super::prompt::box_rule(false, width);
+        let top = super::prompt::box_rule(plan, width, &ui.tokens().labels());
+        let bottom = super::prompt::box_rule(false, width, &[]);
         let mut s = format!("\r\x1b[2K{color}{top}{reset}");
         let mut rows_above_input = vec![visible_width(&top)];
         for row in rows {
@@ -1179,6 +1179,7 @@ impl DockSession {
                     let mut regions_dirty = false;
                     let mut background_dirty = false;
                     Self::absorb_render(
+                        ui,
                         event,
                         &mut active_tools,
                         &mut renderer,
@@ -1199,6 +1200,7 @@ impl DockSession {
                         match self.rx.recv_timeout(remaining) {
                             Ok(Ev::Render(event)) => {
                                 Self::absorb_render(
+                                    ui,
                                     event,
                                     &mut active_tools,
                                     &mut renderer,
@@ -1516,6 +1518,7 @@ impl DockSession {
     /// though the panel block itself is never replayed there. Every other op
     /// renders through the ordinary buffered renderer exactly as before.
     fn absorb_render(
+        ui: &mut Ui,
         event: TurnEvent,
         active: &mut Vec<(String, String)>,
         renderer: &mut BufferedTurnRenderer,
@@ -1524,6 +1527,10 @@ impl DockSession {
         dirty: &mut bool,
     ) {
         match event {
+            // Usage is a counter update, not something to print: the totals
+            // ride the frame's top rule, which the idle draw repaints from the
+            // Ui the dock owns.
+            TurnEvent::Usage(u) => ui.add_usage(u),
             TurnEvent::Todos(text) => {
                 *plan_block = Some(text);
                 *dirty = true;
@@ -2060,7 +2067,10 @@ impl DockSession {
         let track = scanner::track(tick, ui.depth, &ui.theme.scanner);
         let fixed = 3 + scanner::TRACK + 1 + label.chars().count() + 1;
         if width >= fixed {
-            let fill = "─".repeat(width - fixed);
+            // The session readout rides the fill on this row too, so the number
+            // is visible while it is actually growing and not only once the
+            // turn is over.
+            let fill = super::prompt::rule_fill(width - fixed, &ui.tokens().labels());
             format!("{open}── {reset}{track}{open} {label} {fill}{reset}")
         } else {
             styled_rule(&label, width, &open)

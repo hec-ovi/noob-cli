@@ -137,6 +137,7 @@ During a turn the input stays live: typing edits the next message, and Enter que
 - Lazy MCP over stdio and Streamable HTTP. Server schemas enter context only after connection, and `/mcp add` installs a server mid-session.
 - Runtime skill discovery and atomic `/skills add`, `remove`, and `reload`.
 - A default terminal dock with elapsed status, active tools, mid-turn message queueing, confirmations, cancellation, Tab completion for slash commands, persistent in-place plan and agents panels that stay animated between turns, and single-write batched repaints (no flicker while output streams). On resize the dock erases the frame at its reflowed height and repaints in place, mid-turn and at the idle prompt, so repeated resizes leave no stale frames or blank gaps in scrollback.
+- A session token readout inlaid in the frame's rule, live while the model works and after it stops. It counts what the server actually computed, not what was sent: every request re-sends the whole transcript, so summing raw prompt tokens would grow with the square of the conversation and bill work the cache did for free. A first request measured here prefilled 1,850 tokens; the second re-sent nearly all of them and prefilled 31. The total is written to the session log, so a resumed session keeps counting instead of restarting at zero.
 - Interactive Markdown for headings, emphasis, lists, fenced code, JSON, and width-aware tables.
 - Matrix, ocean, amber, and violet display themes.
 
