@@ -2,10 +2,11 @@
 
 Written for someone picking this up cold. Everything here was checked against
 the tree it describes; where a claim rests on a specific line, the line is
-named. Two things remain on the roadmap, in this order: native binaries for the
-three desktop platforms, then the GPU front end. The second cannot start before
-the first, because there is no per-platform binary for a window to sit in front
-of yet.
+named. Three things remain on the roadmap. The first two are ordered: native
+binaries for the three desktop platforms, then the GPU front end, which cannot
+start before it because there is no per-platform binary for a window to sit in
+front of yet. The third, letting the agent run containers, is independent of
+both and can be picked up at any time.
 
 ## Where the project actually is
 
@@ -140,6 +141,42 @@ schema, add the missing ids, decide what belongs on stdout, version it, and put
 a test on it. That is one self-contained commit, it is useful on its own for
 anyone scripting noob, and it is the thing the front end will be built on top
 of. A GUI written against today's unversioned stream will encode its accidents.
+
+## Task 3: let the agent run containers
+
+The sandbox has no `docker` binary and no socket, so an agent asked to start
+anything containerized has no path at all. It does not fail cleanly either: it
+tries pip, then a public instance, then a source install, and burns the
+fifty-round cap (`TURN_CAP`, `crates/noob/src/agent/mod.rs:28`) before saying so.
+Web search was the case that surfaced this, and it got a targeted fix upstream
+(`websearch searxng up` installs SearXNG as a plain process instead), but the
+general gap is still there for databases, message queues, and anything else the
+agent might reasonably want to stand up.
+
+What is already true and worth not rediscovering:
+
+- **A detached process survives.** `setsid` plus stdio redirected off the
+  inherited pipe outlives the group kill that ends every bash call, and earns
+  neither straggler warning. Pinned by
+  `a_detached_daemon_survives_with_a_clean_result` in
+  `crates/noob/src/tools/bash.rs`. So long-running servers are already possible;
+  containers specifically are not.
+- **The bash tool is foreground-only by design** (`crates/noob/src/tools/bash.rs`,
+  the group-kill at the end of `run_inner`). That is what keeps a tool call
+  synchronous, and it should stay. Any container support has to work with it,
+  not around it.
+- **`compose.yml` already uses `network_mode: host`**, so a container started as
+  a sibling on the host is reachable from the agent on loopback with no extra
+  wiring.
+
+The decision to make first is not technical. Mounting `/var/run/docker.sock`
+gives the sandboxed agent root-equivalent control of the host, which dissolves
+the thing the sandbox exists to be. Rootless Docker or Podman, a socket proxy
+restricted to a few endpoints, or a per-run nested runtime are the alternatives,
+and each trades isolation against setup cost differently. Pick that first, then
+the tool work is small: install the client in the runtime stage of
+`docker/Dockerfile` and say so in a skill so the agent knows the capability
+exists.
 
 ## Constraints that are not obvious from the code
 

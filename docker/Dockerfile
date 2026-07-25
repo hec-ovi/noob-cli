@@ -46,7 +46,7 @@ RUN case "${TARGETARCH:-$(uname -m)}" in \
 # avoided round.
 FROM alpine:3.22 AS runtime
 RUN apk add --no-cache bash git ca-certificates python3 uv nodejs
-ARG WEBSEARCH_SKILL_VERSION=0.2.5
+ARG WEBSEARCH_SKILL_VERSION=0.2.6
 RUN UV_CACHE_DIR=/tmp/uv-cache \
     UV_TOOL_DIR=/opt/noob/uv-tools \
     UV_TOOL_BIN_DIR=/usr/local/bin \
