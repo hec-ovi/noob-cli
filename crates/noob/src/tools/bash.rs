@@ -554,6 +554,48 @@ mod tests {
         assert!(!out.content.contains("were killed"), "{}", out.content);
     }
 
+    /// The one supported way to leave a server running: setsid for its own
+    /// process group, and stdio off the pipe so the call still sees EOF. It
+    /// must survive the straggler kill and must not earn either warning.
+    #[test]
+    fn a_detached_daemon_survives_with_a_clean_result() {
+        let (_t, ctx) = test_ctx();
+        let pidfile = ctx.workspace.join("daemon.pid");
+        let started = std::time::Instant::now();
+        let out = run(
+            &ctx,
+            &json!({"cmd": format!(
+                "setsid sh -c 'echo $$ > {p}; sleep 30' </dev/null >/dev/null 2>&1 & echo up",
+                p = pidfile.display()
+            )}),
+        );
+        assert!(started.elapsed() < Duration::from_secs(2), "did not detach");
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("up"), "{}", out.content);
+        assert!(!out.content.contains("were killed"), "{}", out.content);
+        assert!(
+            !out.content.contains("is still running and holding"),
+            "redirected stdio must not hold the pipe: {}",
+            out.content
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !pidfile.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .expect("daemon wrote no pid")
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "the detached daemon was killed with the call"
+        );
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
     #[test]
     fn early_param_error_does_not_consume_the_sandbox_warning() {
         let (_t, mut ctx) = test_ctx();
