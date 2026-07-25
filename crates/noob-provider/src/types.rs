@@ -183,7 +183,7 @@ impl fmt::Display for ProviderError {
                     401 | 403 => "check NOOB_API_KEY in your config .env",
                     404 | 405 => {
                         "check that NOOB_BASE_URL points at an OpenAI-compatible /v1 base, \
-                         e.g. http://localhost:8090/v1"
+                         e.g. http://localhost:8080/v1"
                     }
                     _ => {
                         "the response body usually names the cause; check the server logs \

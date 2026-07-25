@@ -1,6 +1,6 @@
 //! Live P4 smoke (opt-in: `./dev.sh smoke`): a real call
-//! through the websearch MCP server at :8000, driven by qwen through the
-//! shipped binary. This is live smoke item 6: the prompt line routes the
+//! through the websearch MCP server at :8000, driven by the local model
+//! through the shipped binary. This is live smoke item 6: the prompt line routes the
 //! model to mcp_connect, the catalog routes it to mcp_call, and the
 //! search result shapes the answer.
 
@@ -9,7 +9,13 @@ use std::process::Command;
 use serde_json::Value;
 
 fn live_base_url() -> String {
-    std::env::var("NOOB_LIVE_BASE_URL").unwrap_or_else(|_| "http://localhost:8090/v1".to_string())
+    std::env::var("NOOB_LIVE_BASE_URL").unwrap_or_else(|_| "http://localhost:8080/v1".to_string())
+}
+
+/// llama-server serves whatever it loaded under its `--alias`; the default
+/// here matches the local server, and any other endpoint sets its own.
+fn live_model() -> String {
+    std::env::var("NOOB_LIVE_MODEL").unwrap_or_else(|_| "llm".to_string())
 }
 
 fn websearch_url() -> String {
@@ -17,15 +23,16 @@ fn websearch_url() -> String {
 }
 
 #[test]
-#[ignore = "live: needs qwen at :8090 and the websearch MCP at :8000 (./dev.sh smoke)"]
+#[ignore = "live: needs a local endpoint at :8080 and the websearch MCP at :8000 (./dev.sh smoke)"]
 fn live_websearch_through_mcp() {
     let config = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     std::fs::write(
         config.path().join(".env"),
         format!(
-            "NOOB_BASE_URL={}\nNOOB_API_KEY=noauth\nNOOB_MODEL=qwen3.6-35b-a3b\n",
-            live_base_url()
+            "NOOB_BASE_URL={}\nNOOB_API_KEY=noauth\nNOOB_MODEL={}\n",
+            live_base_url(),
+            live_model()
         ),
     )
     .unwrap();

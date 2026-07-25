@@ -50,8 +50,8 @@ pub fn resolve_endpoint(config_dir: &Path, ov: &Overrides) -> Result<Endpoint, P
         .ok_or_else(|| {
             ProviderError::Config(format!(
                 "NOOB_BASE_URL is not set and no local endpoint answered the autodetect \
-                 probes (ports 8090, 8080, 11434, 1234, 8000); add it to {} (for example \
-                 NOOB_BASE_URL=http://localhost:8090/v1)",
+                 probes (ports 8080, 8090, 11434, 1234, 8000); add it to {} (for example \
+                 NOOB_BASE_URL=http://localhost:8080/v1)",
                 env_path.display()
             ))
         })?;

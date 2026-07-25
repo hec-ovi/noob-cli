@@ -269,10 +269,11 @@ Future work, not built yet.
 
 `./dev.sh test` runs the full offline suite in the dev container. `./dev.sh size-check` enforces an 8 MiB static-binary limit and a 45-crate runtime limit. `./dev.sh smoke` runs the opt-in live model and web-search checks serially.
 
-To use non-default live endpoints:
+The live checks default to `http://localhost:8080/v1` and the model name `llm` (llama-server serves whatever it loaded under its `--alias`). To point them elsewhere:
 
 ```bash
-NOOB_LIVE_BASE_URL=http://localhost:8080/v1 \
+NOOB_LIVE_BASE_URL=http://localhost:8090/v1 \
+NOOB_LIVE_MODEL=my-model \
 NOOB_LIVE_MCP_URL=http://localhost:18000/mcp \
 ./dev.sh smoke
 ```

@@ -1,5 +1,5 @@
 //! Live P2 smoke (opt-in: `./dev.sh smoke`): the compiled
-//! binary driving the whole agent loop against the real qwen endpoint.
+//! binary driving the whole agent loop against the real local endpoint.
 //! This is the P2 slice of the all-terrain gauntlet: a real edit
 //! round-trip, and prefix-cache reuse proven from the endpoint's own
 //! cached-token counters across a resumed session.
@@ -9,7 +9,13 @@ use std::process::Command;
 use serde_json::Value;
 
 fn live_base_url() -> String {
-    std::env::var("NOOB_LIVE_BASE_URL").unwrap_or_else(|_| "http://localhost:8090/v1".to_string())
+    std::env::var("NOOB_LIVE_BASE_URL").unwrap_or_else(|_| "http://localhost:8080/v1".to_string())
+}
+
+/// llama-server serves whatever it loaded under its `--alias`; the default
+/// here matches the local server, and any other endpoint sets its own.
+fn live_model() -> String {
+    std::env::var("NOOB_LIVE_MODEL").unwrap_or_else(|_| "llm".to_string())
 }
 
 /// Minimal std-only HTTP POST for the tokenizer check: the noob crate must
@@ -45,8 +51,9 @@ fn rig() -> (tempfile::TempDir, tempfile::TempDir) {
     std::fs::write(
         config.path().join(".env"),
         format!(
-            "NOOB_BASE_URL={}\nNOOB_API_KEY=noauth\nNOOB_MODEL=qwen3.6-35b-a3b\n",
-            live_base_url()
+            "NOOB_BASE_URL={}\nNOOB_API_KEY=noauth\nNOOB_MODEL={}\n",
+            live_base_url(),
+            live_model()
         ),
     )
     .unwrap();
@@ -63,10 +70,10 @@ fn noob(config: &std::path::Path, work: &std::path::Path, args: &[&str]) -> std:
         .unwrap()
 }
 
-/// Live smoke: qwen reads a file, edits it with the edit tool, and the
+/// Live smoke: the model reads a file, edits it with the edit tool, and the
 /// change lands on disk. The whole loop, through the shipped binary.
 #[test]
-#[ignore = "live: needs qwen at :8090 (./dev.sh smoke)"]
+#[ignore = "live: needs a local endpoint at :8080 (./dev.sh smoke)"]
 fn live_edit_round_trip() {
     let (config, work) = rig();
     std::fs::write(
@@ -103,7 +110,7 @@ fn live_edit_round_trip() {
 /// reports a high cached-prompt share, proving the append-only prefix
 /// discipline reaches llama.cpp's KV cache end to end.
 #[test]
-#[ignore = "live: needs qwen at :8090 (./dev.sh smoke)"]
+#[ignore = "live: needs a local endpoint at :8080 (./dev.sh smoke)"]
 fn live_session_cache_reuse() {
     let (config, work) = rig();
     std::fs::write(work.path().join("notes.txt"), "the magic word is plover\n").unwrap();
@@ -157,10 +164,10 @@ fn live_session_cache_reuse() {
 }
 
 /// Live budget check: the assembled head and tools measured with the REAL
-/// qwen tokenizer via llama-server /tokenize, against the same ceilings the
-/// offline tiktoken test enforces.
+/// tokenizer of the served model via llama-server /tokenize, against the same
+/// ceilings the offline tiktoken test enforces.
 #[test]
-#[ignore = "live: needs qwen at :8090 (./dev.sh smoke)"]
+#[ignore = "live: needs a local endpoint at :8080 (./dev.sh smoke)"]
 fn live_tokenizer_budget() {
     let (config, work) = rig();
     let out = noob(config.path(), work.path(), &["debug", "prompt", "--json"]);
@@ -180,11 +187,11 @@ fn live_tokenizer_budget() {
     let tools_tokens = count(&artifact["tools"].to_string());
     assert!(
         head_tokens <= 560,
-        "head {head_tokens} tokens on the qwen tokenizer"
+        "head {head_tokens} tokens on the served model's tokenizer"
     );
     assert!(
         tools_tokens <= 940,
-        "tools {tools_tokens} tokens on the qwen tokenizer"
+        "tools {tools_tokens} tokens on the served model's tokenizer"
     );
     assert!(head_tokens + tools_tokens <= 1500);
 }
@@ -193,7 +200,7 @@ fn live_tokenizer_budget() {
 /// visible plan, performs a file change, then a fresh resumed process can use
 /// the context tool and accurately explain what the preceding turn did.
 #[test]
-#[ignore = "live: needs qwen at :8090 (./dev.sh smoke)"]
+#[ignore = "live: needs a local endpoint at :8080 (./dev.sh smoke)"]
 fn live_plan_context_and_followup_awareness() {
     let (config, work) = rig();
     let session = "live-requirements-awareness";

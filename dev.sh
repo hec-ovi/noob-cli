@@ -50,7 +50,7 @@ case "${1:-}" in
       sh -c 'rustup target add "$1" && cargo build --release --locked --target "$1"' \
       sh "$RUST_TARGET"
     ;;
-  # Live smoke suite against local endpoints (qwen at :8090 etc). Opt-in.
+  # Live smoke suite against local endpoints (llama.cpp at :8080 etc). Opt-in.
   # Serialized: parallel live tests share one llama-server and evict each
   # other's KV-cache slots, which flakes the cached-share assertions.
   smoke)
@@ -58,7 +58,7 @@ case "${1:-}" in
     docker run --rm --network host --user "$UIDGID" \
       -e CARGO_HOME=/src/.cargo-home \
       -e CARGO_TARGET_DIR=/src/target/docker-dev \
-      -e NOOB_LIVE_BASE_URL -e NOOB_LIVE_MCP_URL \
+      -e NOOB_LIVE_BASE_URL -e NOOB_LIVE_MODEL -e NOOB_LIVE_MCP_URL \
       -v "$PWD":/src -w /src "$DEV_IMG" \
       cargo test --workspace -- --ignored --test-threads=1
     ;;

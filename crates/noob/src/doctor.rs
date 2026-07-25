@@ -125,7 +125,7 @@ fn check_endpoint(config_dir: &Path) -> Vec<Check> {
             None => {
                 checks.push(Check::Fail(
                     "no endpoint: NOOB_BASE_URL is unset and nothing answered the \
-                         localhost probes (:8090 :8080 :11434 :1234 :8000); fix: start \
+                         localhost probes (:8080 :8090 :11434 :1234 :8000); fix: start \
                          your model server or set NOOB_BASE_URL in the config .env"
                         .to_string(),
                 ));

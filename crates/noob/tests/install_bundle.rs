@@ -175,7 +175,8 @@ fn live_runner_forwards_endpoint_overrides_to_docker() {
         .arg("smoke")
         .env("PATH", path)
         .env("DOCKER_LOG", &log)
-        .env("NOOB_LIVE_BASE_URL", "http://localhost:8080/v1")
+        .env("NOOB_LIVE_BASE_URL", "http://localhost:8090/v1")
+        .env("NOOB_LIVE_MODEL", "my-model")
         .env("NOOB_LIVE_MCP_URL", "http://localhost:18000/mcp")
         .output()
         .unwrap();
@@ -191,6 +192,7 @@ fn live_runner_forwards_endpoint_overrides_to_docker() {
         "{calls}"
     );
     assert!(calls.contains("-e\nNOOB_LIVE_BASE_URL\n"), "{calls}");
+    assert!(calls.contains("-e\nNOOB_LIVE_MODEL\n"), "{calls}");
     assert!(calls.contains("-e\nNOOB_LIVE_MCP_URL\n"), "{calls}");
     assert!(calls.contains("--ignored\n--test-threads=1\n"), "{calls}");
     // Gating is `--ignored` alone; nothing reads a NOOB_LIVE switch.

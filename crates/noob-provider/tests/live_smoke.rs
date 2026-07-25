@@ -1,7 +1,7 @@
 //! Live smoke against local endpoints. Opt-in: `./dev.sh smoke` runs
 //! `cargo test -- --ignored` with host networking (`./dev.sh smoke`).
 //!
-//! This is PLAN's top P1 risk gate: qwen tool-calling through the
+//! This is PLAN's top P1 risk gate: tool-calling through the
 //! llama.cpp jinja template, driven by the real adapters, both wire
 //! shapes, including the tool-result replay leg.
 
@@ -13,11 +13,12 @@ use noob_provider::{chat, responses};
 
 fn live_endpoint(style: ApiStyle) -> Endpoint {
     let base_url = std::env::var("NOOB_LIVE_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:8090/v1".to_string());
+        .unwrap_or_else(|_| "http://localhost:8080/v1".to_string());
     Endpoint {
         base_url,
         api_key: "noauth".to_string(),
-        model: std::env::var("NOOB_LIVE_MODEL").unwrap_or_else(|_| "qwen3.6-35b-a3b".to_string()),
+        // llama-server serves whatever it loaded under its `--alias`.
+        model: std::env::var("NOOB_LIVE_MODEL").unwrap_or_else(|_| "llm".to_string()),
         style,
     }
 }
@@ -57,7 +58,7 @@ fn second_leg(call: &ToolCall, raw_items: Vec<serde_json::Value>) -> TurnRequest
 /// Chat shape: streamed tool call out, tool result back through the jinja
 /// template, final answer built on the result.
 #[test]
-#[ignore = "live: requires qwen at :8090 (./dev.sh smoke)"]
+#[ignore = "live: requires a local endpoint at :8080 (./dev.sh smoke)"]
 fn live_chat_toolcall_roundtrip() {
     let client = Client::new(Timeouts::default());
     let ep = live_endpoint(ApiStyle::Chat);
@@ -95,7 +96,7 @@ fn live_chat_toolcall_roundtrip() {
 
 /// Parallel tool calls in one inference (indexes 0 and 1, distinct ids).
 #[test]
-#[ignore = "live: requires qwen at :8090 (./dev.sh smoke)"]
+#[ignore = "live: requires a local endpoint at :8080 (./dev.sh smoke)"]
 fn live_chat_parallel_toolcalls() {
     let client = Client::new(Timeouts::default());
     let ep = live_endpoint(ApiStyle::Chat);
@@ -129,7 +130,7 @@ fn live_chat_parallel_toolcalls() {
 /// /v1/responses): function call out, function_call_output back, final
 /// answer; raw_items replayed verbatim.
 #[test]
-#[ignore = "live: requires qwen at :8090 (./dev.sh smoke)"]
+#[ignore = "live: requires a local endpoint at :8080 (./dev.sh smoke)"]
 fn live_responses_toolcall_roundtrip() {
     let client = Client::new(Timeouts::default());
     let ep = live_endpoint(ApiStyle::Responses);

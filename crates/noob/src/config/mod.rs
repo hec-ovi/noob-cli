@@ -370,8 +370,8 @@ pub fn autodetect_base_url(config_dir: &Path) -> Option<String> {
         return None;
     }
     let candidates = [
-        "http://localhost:8090/v1",  // llama.cpp (this project's default)
-        "http://localhost:8080/v1",  // llama.cpp default port
+        "http://localhost:8080/v1",  // llama.cpp default port (this project's)
+        "http://localhost:8090/v1",  // llama.cpp on the alternate port
         "http://localhost:11434/v1", // Ollama
         "http://localhost:1234/v1",  // LM Studio
         "http://localhost:8000/v1",  // vLLM

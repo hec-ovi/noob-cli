@@ -63,7 +63,7 @@ Configuration directory precedence is:
 
 Setting precedence is CLI flag, then an allowed process environment key, then `<config>/.env`. The provider opens and parses `.env` for every model request, so configured endpoint, model, API style, and key edits apply on the next call unless a CLI or environment override pins the value. `NOOB_API_KEY` is read only from `.env` and is never exported to child tools. Context, sandbox, and task budgets are captured at bootstrap.
 
-If no base URL is configured, startup probes loopback ports 8090, 8080, 11434, 1234, and 8000 in that order. An autodetected URL is pinned for that process. `NOOB_AUTODETECT=0` disables probing for deterministic automation and shared hosts.
+If no base URL is configured, startup probes loopback ports 8080, 8090, 11434, 1234, and 8000 in that order. An autodetected URL is pinned for that process. `NOOB_AUTODETECT=0` disables probing for deterministic automation and shared hosts.
 
 Sandbox selection is explicit `NOOB_SANDBOX` first, then container detection. Container mode permits workspace tools to use the mounted environment. Workspace mode confines write and edit targets to the project and rejects symlink escapes. `--yolo` explicitly lifts that restriction.
 
@@ -290,4 +290,4 @@ cargo test --workspace --locked
 ./dev.sh size-check
 ```
 
-Live checks use `./dev.sh smoke`. By default, the websearch MCP test additionally requires its Streamable HTTP endpoint on port 8000. `NOOB_LIVE_BASE_URL` and `NOOB_LIVE_MCP_URL` select other live endpoints. Installer tests cover the host wrapper with a fake Docker process; release validation also builds and runs the real image, standalone websearch CLI, and stdio MCP handshake.
+Live checks use `./dev.sh smoke`, against `http://localhost:8080/v1` and the model name `llm` by default. The websearch MCP test additionally requires its Streamable HTTP endpoint on port 8000. `NOOB_LIVE_BASE_URL`, `NOOB_LIVE_MODEL`, and `NOOB_LIVE_MCP_URL` select other live endpoints. Installer tests cover the host wrapper with a fake Docker process; release validation also builds and runs the real image, standalone websearch CLI, and stdio MCP handshake.
