@@ -25,8 +25,10 @@ RUN case "${TARGETARCH:-$(uname -m)}" in \
 
 # Runtime: the sandbox the agent lives in. Python and uv make Python-backed
 # skills usable without touching the host. websearch-skill is pinned and
-# installed into its own uv tool environment, exposing both the standalone
-# `websearch` CLI and `websearch mcp` from the same package.
+# installed into its own uv tool environment, which puts the `websearch` CLI on
+# PATH; noob registers its `websearch` tool when it finds it there. 0.3.0
+# dropped that package's MCP server, so there is no sidecar and nothing to
+# register: one process per call, reading its config fresh every time.
 # No config, state, cache, or keys are baked into the image.
 #
 # WEBSEARCH_ENV_FILE moves that tool's dotenv off its working directory. It
@@ -46,7 +48,7 @@ RUN case "${TARGETARCH:-$(uname -m)}" in \
 # avoided round.
 FROM alpine:3.22 AS runtime
 RUN apk add --no-cache bash git ca-certificates python3 uv nodejs
-ARG WEBSEARCH_SKILL_VERSION=0.2.6
+ARG WEBSEARCH_SKILL_VERSION=0.3.0
 RUN UV_CACHE_DIR=/tmp/uv-cache \
     UV_TOOL_DIR=/opt/noob/uv-tools \
     UV_TOOL_BIN_DIR=/usr/local/bin \

@@ -80,12 +80,12 @@ fn installer_builds_image_installs_launcher_and_forwards_restore() {
     let launcher = prefix.join("bin/noob");
     assert!(launcher.is_file());
     assert!(config.join("skills/web-search/SKILL.md").is_file());
-    assert!(config.join("mcp.json").is_file());
-    assert!(
-        std::fs::read_to_string(config.join("mcp.json"))
-            .unwrap()
-            .contains("websearch")
-    );
+    // No mcp.json is seeded: the web capability is the bundled CLI plus the
+    // skill that drives it, and a config file naming a server that does not
+    // exist would only make the first mcp_connect fail.
+    assert!(!config.join("mcp.json").exists());
+    let skill = std::fs::read_to_string(config.join("skills/web-search/SKILL.md")).unwrap();
+    assert!(skill.contains("websearch init"), "{skill}");
 
     let workspace = tmp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();

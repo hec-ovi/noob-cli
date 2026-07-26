@@ -76,6 +76,7 @@ fn zero_foreign_requests() {
 
     let out = Command::new(env!("CARGO_BIN_EXE_noob"))
         .env("NOOB_CONFIG_DIR", config.path())
+        .env("NOOB_WEBSEARCH", "off")
         .current_dir(work.path())
         .args(["exec", "-p", "hi"])
         .output()

@@ -12,7 +12,8 @@ fn noob(config_dir: &std::path::Path, workspace: &std::path::Path) -> Command {
     // Scrub every NOOB_* variable the binary reads so host-exported
     // settings never leak into assertions, then pin the config dir.
     noob_testkit::scrub_noob_env(&mut cmd);
-    cmd.env("NOOB_CONFIG_DIR", config_dir).current_dir(workspace);
+    cmd.env("NOOB_CONFIG_DIR", config_dir)
+        .current_dir(workspace);
     cmd
 }
 

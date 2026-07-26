@@ -17,7 +17,6 @@
 # only the example and the contract are committed
 /config/*
 !/config/.env.example
-!/config/mcp.websearch.example.json
 !/config/skills/
 !/config/skills/web-search/
 !/config/skills/web-search/SKILL.md

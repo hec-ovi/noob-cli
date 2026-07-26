@@ -14,7 +14,7 @@ services:
       target: runtime
     image: noob
     # Host networking so the agent reaches local model servers and MCP
-    # endpoints on loopback (llama.cpp :8080, websearch MCP :8000, ...).
+    # endpoints on loopback (llama.cpp :8080, a local SearXNG :8888, ...).
     network_mode: host
     working_dir: /work
     # Files written to /work must never be root-owned on the host.

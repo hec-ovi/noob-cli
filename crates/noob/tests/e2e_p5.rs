@@ -27,7 +27,10 @@ fn noob(config_dir: &std::path::Path, workspace: &std::path::Path) -> Command {
         .env_remove("NOOB_MODEL")
         .env_remove("NOOB_API_STYLE")
         .env_remove("NOOB_CTX")
-        .env_remove("NOOB_SANDBOX");
+        .env_remove("NOOB_SANDBOX")
+        // Hermetic: a developer machine with the CLI installed must not
+        // register an extra tool and change what these assert on.
+        .env("NOOB_WEBSEARCH", "off");
     cmd
 }
 

@@ -66,9 +66,6 @@ install -m 0755 "$ROOT/scripts/noob" "$destination"
 
 config_home="${NOOB_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/noob}"
 install -d "$config_home/skills"
-if [[ ! -e "$config_home/mcp.json" ]]; then
-    install -m 0644 "$ROOT/config/mcp.websearch.example.json" "$config_home/mcp.json"
-fi
 if [[ -d "$ROOT/config/skills" ]]; then
     for skill in "$ROOT"/config/skills/*; do
         [[ -d "$skill" ]] || continue

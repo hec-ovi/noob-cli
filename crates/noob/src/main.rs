@@ -143,17 +143,18 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
     for warning in &mcp_warnings {
         ui.note(&format!("mcp: {warning}"));
     }
+    if boot.web_only && !tools::websearch::available() {
+        return Err(format!(
+            "a web research child needs the {:?} CLI on PATH; install it with \
+             `uv tool install websearch-skill`, or delegate with tools \"all\" instead",
+            tools::websearch::PROGRAM
+        ));
+    }
+    // A web child talks to the web through its own tool, never through a
+    // configured MCP server: the set of servers is the user's, and a research
+    // child restricted to reading must not inherit whatever they registered.
     if boot.web_only {
-        let Some(web_server) = mcp::unique_normalized_server(
-            mcp_servers.iter().map(|server| server.name.as_str()),
-            "websearch",
-        )
-        .map(str::to_string) else {
-            return Err(
-                "web research child needs one unambiguous MCP server named websearch".to_string(),
-            );
-        };
-        mcp_servers.retain(|server| server.name == web_server);
+        mcp_servers.clear();
     }
     let inputs = prompt::PromptInputs {
         cwd: workspace.display().to_string(),
@@ -184,6 +185,10 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
         tool_specs.push(tools::mcp::connect_spec());
         tool_specs.push(tools::mcp::call_spec());
     }
+    let websearch = tools::websearch::available();
+    if websearch {
+        tool_specs.push(tools::websearch::spec());
+    }
     let with_task = depth < subagent::MAX_DEPTH && !boot.read_only;
     if with_task {
         tool_specs.push(subagent::spec());
@@ -197,6 +202,7 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
     tool_ctx.caps = config::tool_caps(&config_dir);
     tool_ctx.read_dedup = config::read_dedup(&config_dir);
     tool_ctx.skills = discovered;
+    tool_ctx.websearch = websearch;
     if !mcp_servers.is_empty() && (!boot.read_only || boot.web_only) {
         tool_ctx.mcp = Some(mcp::Mcp::new(mcp_servers));
     }
@@ -1298,29 +1304,20 @@ fn cmd_child() -> ExitCode {
     // in their schema, so give one explicit correction without extending the
     // original child budget. Aborts and interrupts are terminal and pass
     // through untouched.
-    if web_only && matches!(&end, RunEnd::Completed(_)) && mcp_evidence_calls(&agent) < 2 {
+    if web_only && matches!(&end, RunEnd::Completed(_)) && evidence_calls(&agent) < 2 {
         let remaining = original_round_cap.saturating_sub(total_rounds);
         if remaining == 0 {
             end = RunEnd::Aborted(format!(
-                "web research returned without the required 2 mcp_call evidence calls, and the original {original_round_cap}-round budget is exhausted"
+                "web research returned without the required 2 websearch evidence calls, and the original {original_round_cap}-round budget is exhausted"
             ));
         } else {
-            let server = agent
-                .tool_ctx
-                .mcp
-                .as_ref()
-                .and_then(|mcp| mcp.names().into_iter().next())
-                .unwrap_or("websearch")
-                .to_string();
             agent.max_rounds = remaining;
-            let correction = format!(
-                "[web research evidence gate] No usable web evidence was gathered. Use mcp_connect on the configured server {server:?}, then make at least 2 successful mcp_call operations that gather usable source evidence by searching and fetching primary sources before returning a corrected synthesis. Do not answer from memory."
-            );
+            let correction = "[web research evidence gate] No usable web evidence was gathered. Use the websearch tool: at least 2 successful websearch calls that gather usable source evidence by searching and fetching primary sources, before returning a corrected synthesis. init and doctor do not count. Do not answer from memory.".to_string();
             end = agent.run_input(&correction, &mut ui);
             total_rounds = total_rounds.saturating_add(agent.last_rounds);
-            if matches!(&end, RunEnd::Completed(_)) && mcp_evidence_calls(&agent) < 2 {
+            if matches!(&end, RunEnd::Completed(_)) && evidence_calls(&agent) < 2 {
                 end = RunEnd::Aborted(
-                    "web research returned without the required 2 mcp_call evidence calls after one corrective follow-up"
+                    "web research returned without the required 2 websearch evidence calls after one corrective follow-up"
                         .to_string(),
                 );
             }
@@ -1335,17 +1332,13 @@ fn cmd_child() -> ExitCode {
     child_result(status, &result, total_rounds, agent.last_usage())
 }
 
-/// Successful mcp_call round trips, read from the live counter the mcp_call
-/// tool maintains as results arrive (isError results never increment it).
-/// The FINAL transcript is deliberately NOT re-scanned: child-side
-/// compaction can summarize evidence items away and abort a compliant
-/// child, and wrapped isError results would read as evidence.
-fn mcp_evidence_calls(agent: &Agent) -> usize {
-    agent
-        .tool_ctx
-        .mcp
-        .as_ref()
-        .map_or(0, |mcp| mcp.evidence_call_count())
+/// Successful source-gathering websearch calls, read from the live counter the
+/// tool maintains as results arrive (a failed call never increments it, and
+/// neither do init and doctor, which report on the installation rather than on
+/// the web). The FINAL transcript is deliberately NOT re-scanned: child-side
+/// compaction can summarize evidence items away and abort a compliant child.
+fn evidence_calls(agent: &Agent) -> usize {
+    agent.tool_ctx.evidence_call_count()
 }
 
 /// The single stdout line; everything else this process printed went to

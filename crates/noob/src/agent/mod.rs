@@ -1344,7 +1344,10 @@ impl Agent {
                 args,
             );
         }
-        let child_allowed = if self.tool_ctx.mcp.is_some() {
+        // A web child is a read-only child that also holds the websearch
+        // tool; the registered set is what distinguishes them, so key on that
+        // rather than on a second flag that could drift from it.
+        let child_allowed = if self.tool_ctx.websearch {
             tools::WEB_RESEARCH_SET
         } else {
             tools::READ_ONLY_SET

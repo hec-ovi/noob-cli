@@ -8,7 +8,6 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use noob_testkit::mcp::{McpHttpServer, echo_tools};
 use noob_testkit::{MockServer, RawStep, chat_stream_datas, sse_headers};
 use serde_json::Value;
 
@@ -29,6 +28,9 @@ fn noob(config_dir: &std::path::Path, workspace: &std::path::Path) -> Command {
         .env_remove("NOOB_API_STYLE")
         .env_remove("NOOB_CTX")
         .env_remove("NOOB_SANDBOX")
+        // Hermetic: a developer machine with the CLI installed must not
+        // register an extra tool and change what these assert on.
+        .env("NOOB_WEBSEARCH", "off")
         .env_remove("NOOB_DEPTH")
         .env_remove("NOOB_TASK_CONCURRENCY")
         .env_remove("NOOB_TASK_MAX_TURNS")
@@ -66,7 +68,24 @@ impl Rig {
 
     /// Run `noob child` with the given stdin payload; returns the output.
     fn run_child(&self, payload: &str, depth: Option<&str>) -> std::process::Output {
+        self.run_child_with_web(payload, depth, false)
+    }
+
+    /// Same, with the websearch tool registered against the stub binary.
+    fn run_child_web(&self, payload: &str, depth: Option<&str>) -> std::process::Output {
+        self.run_child_with_web(payload, depth, true)
+    }
+
+    fn run_child_with_web(
+        &self,
+        payload: &str,
+        depth: Option<&str>,
+        web: bool,
+    ) -> std::process::Output {
         let mut cmd = noob(self.config.path(), self.work.path());
+        if web {
+            cmd.env("NOOB_WEBSEARCH", install_websearch_stub(self.config.path()));
+        }
         cmd.arg("child")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -103,6 +122,34 @@ impl Rig {
 /// gaps against this constant, not a hand-tuned margin; it is sized so even a
 /// loaded host spawns a child process well inside one stall.
 const CHILD_STALL: Duration = Duration::from_millis(2_000);
+
+/// A stand-in for the `websearch` CLI: it records the argv it was called with
+/// and prints canned output. The tool under test builds a real argv and runs a
+/// real process, so the stub is what makes the web profile testable without
+/// the network or the Python package.
+fn install_websearch_stub(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("websearch-stub");
+    let log = dir.join("websearch-calls.log");
+    std::fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\necho \"result for: $*\"\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    bin
+}
+
+/// Every argv the stub was called with, in order.
+fn websearch_calls(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("websearch-calls.log"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
 
 fn tool_names(req: &Value) -> Vec<String> {
     req["tools"]
@@ -227,20 +274,11 @@ fn read_only_child_refuses_hallucinated_mutations() {
     rig.server.assert_clean();
 }
 
-/// The web profile keeps real MCP research available while structurally
-/// refusing the stray file write caught in the installed research skill.
+/// The web profile keeps real research available while structurally refusing
+/// the stray file write caught in the installed research skill.
 #[test]
-fn web_child_has_only_local_reads_and_one_web_mcp() {
+fn web_child_has_only_local_reads_and_the_web_tool() {
     let rig = rig();
-    let web = McpHttpServer::start(echo_tools());
-    std::fs::write(
-        rig.config.path().join("mcp.json"),
-        format!(
-            r#"{{"servers":{{"Web_Search":{{"url":"{}"}}}}}}"#,
-            web.url()
-        ),
-    )
-    .unwrap();
     rig.server.enqueue_stream_toolcalls(
         &[(
             "m1",
@@ -250,28 +288,25 @@ fn web_child_has_only_local_reads_and_one_web_mcp() {
         None,
     );
     rig.server.enqueue_stream_toolcalls(
-        &[("connect", "mcp_connect", r#"{"server":"Web_Search"}"#)],
+        &[(
+            "search",
+            "websearch",
+            r#"{"action":"search","query":"primary docs"}"#,
+        )],
         None,
     );
     rig.server.enqueue_stream_toolcalls(
-        &[
-            (
-                "search",
-                "mcp_call",
-                r#"{"server":"Web_Search","tool":"echo","args":{"text":"search primary docs"}}"#,
-            ),
-            (
-                "fetch",
-                "mcp_call",
-                r#"{"server":"Web_Search","tool":"echo","args":{"text":"fetch source"}}"#,
-            ),
-        ],
+        &[(
+            "fetch",
+            "websearch",
+            r#"{"action":"fetch","url":"https://example.test/doc"}"#,
+        )],
         None,
     );
     rig.server
         .enqueue_stream_completion("returning the sourced synthesis instead");
 
-    let out = rig.run_child(
+    let out = rig.run_child_web(
         r#"{"prompt":"research and return findings","tools":"web"}"#,
         None,
     );
@@ -285,21 +320,7 @@ fn web_child_has_only_local_reads_and_one_web_mcp() {
     let reqs = rig.api_requests();
     assert_eq!(
         tool_names(&reqs[0]),
-        [
-            "read",
-            "grep",
-            "glob",
-            "ls",
-            "context",
-            "mcp_connect",
-            "mcp_call"
-        ]
-    );
-    assert!(
-        reqs[0]["messages"][0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("MCP servers (use mcp_connect): Web_Search")
+        ["read", "grep", "glob", "ls", "context", "websearch"]
     );
     let refusal = reqs[1]["messages"]
         .as_array()
@@ -310,52 +331,94 @@ fn web_child_has_only_local_reads_and_one_web_mcp() {
         .as_str()
         .unwrap();
     assert!(refusal.contains("this sub-agent is read-only"), "{refusal}");
-    assert_eq!(web.calls().len(), 2);
-    web.assert_clean();
+    // The tool built a real argv and ran a real process, twice.
+    assert_eq!(
+        websearch_calls(rig.config.path()),
+        [
+            "web-search primary docs",
+            "web-fetch https://example.test/doc"
+        ]
+    );
+    rig.server.assert_clean();
+}
+
+/// Page text is attacker-controllable, so it enters the transcript wrapped as
+/// untrusted, exactly as an MCP result did.
+#[test]
+fn web_tool_output_reaches_the_model_as_untrusted() {
+    let rig = rig();
+    rig.server.enqueue_stream_toolcalls(
+        &[(
+            "search",
+            "websearch",
+            r#"{"action":"search","query":"rust"}"#,
+        )],
+        None,
+    );
+    rig.server.enqueue_stream_toolcalls(
+        &[(
+            "fetch",
+            "websearch",
+            r#"{"action":"fetch","url":"https://example.test/x"}"#,
+        )],
+        None,
+    );
+    rig.server.enqueue_stream_completion("done");
+
+    let out = rig.run_child_web(r#"{"prompt":"look it up","tools":"web"}"#, None);
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let reqs = rig.api_requests();
+    let result = reqs[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap();
+    assert!(
+        result.starts_with("[untrusted content from the web (websearch);"),
+        "{result}"
+    );
+    assert!(result.ends_with("[end of untrusted content]"), "{result}");
+    assert!(result.contains("result for: web-search rust"), "{result}");
     rig.server.assert_clean();
 }
 
 /// A memory-only first answer is not accepted. The child gets one internal
-/// correction, uses the configured MCP server twice, and reports only the
-/// evidence-backed completion while staying inside the original round cap.
+/// correction, gathers evidence twice, and reports only the evidence-backed
+/// completion while staying inside the original round cap.
 #[test]
-fn web_child_corrects_an_unsupported_completion_with_real_mcp_evidence() {
+fn web_child_corrects_an_unsupported_completion_with_real_evidence() {
     let rig = rig();
-    let web = McpHttpServer::start(echo_tools());
-    std::fs::write(
-        rig.config.path().join("mcp.json"),
-        format!(
-            r#"{{"servers":{{"Web_Search":{{"url":"{}"}}}}}}"#,
-            web.url()
-        ),
-    )
-    .unwrap();
-
     rig.server
         .enqueue_stream_completion("unsupported answer from memory");
     rig.server.enqueue_stream_toolcalls(
-        &[("connect", "mcp_connect", r#"{"server":"Web_Search"}"#)],
+        &[(
+            "search",
+            "websearch",
+            r#"{"action":"search","query":"official docs"}"#,
+        )],
         None,
     );
     rig.server.enqueue_stream_toolcalls(
-        &[
-            (
-                "search",
-                "mcp_call",
-                r#"{"server":"Web_Search","tool":"echo","args":{"text":"search official docs"}}"#,
-            ),
-            (
-                "fetch",
-                "mcp_call",
-                r#"{"server":"Web_Search","tool":"echo","args":{"text":"fetch primary source"}}"#,
-            ),
-        ],
+        &[(
+            "fetch",
+            "websearch",
+            r#"{"action":"fetch","url":"https://example.test/primary"}"#,
+        )],
         None,
     );
     rig.server
         .enqueue_stream_completion("evidence-backed answer");
 
-    let out = rig.run_child(
+    let out = rig.run_child_web(
         r#"{"prompt":"research current behavior","tools":"web","max_turns":4}"#,
         None,
     );
@@ -369,7 +432,7 @@ fn web_child_corrects_an_unsupported_completion_with_real_mcp_evidence() {
     assert_eq!(result["status"], "ok");
     assert_eq!(result["result"], "evidence-backed answer");
     assert_eq!(result["turns"], 4);
-    assert_eq!(web.calls().len(), 2);
+    assert_eq!(websearch_calls(rig.config.path()).len(), 2);
 
     let requests = rig.api_requests();
     let corrective = requests[1]["messages"]
@@ -385,65 +448,79 @@ fn web_child_corrects_an_unsupported_completion_with_real_mcp_evidence() {
         .expect("internal evidence correction")["content"]
         .as_str()
         .unwrap();
-    assert!(corrective.contains("Web_Search"), "{corrective}");
+    assert!(corrective.contains("websearch"), "{corrective}");
     assert!(
-        corrective.contains("at least 2 successful mcp_call"),
+        corrective.contains("at least 2 successful websearch"),
         "{corrective}"
     );
     assert!(
         corrective.contains("Do not answer from memory"),
         "{corrective}"
     );
-    web.assert_clean();
     rig.server.assert_clean();
 }
 
-/// One ignored corrective follow-up is terminal. A second unsupported
-/// completion becomes a structured child error instead of false success.
+/// An installation action is not evidence: init and doctor report on the
+/// tool, not on the web, so they must not satisfy the gate.
 #[test]
-fn web_child_rejects_a_second_completion_without_mcp_evidence() {
+fn init_and_doctor_do_not_count_as_evidence() {
     let rig = rig();
-    let web = McpHttpServer::start(echo_tools());
-    std::fs::write(
-        rig.config.path().join("mcp.json"),
-        format!(r#"{{"servers":{{"websearch":{{"url":"{}"}}}}}}"#, web.url()),
-    )
-    .unwrap();
     rig.server.enqueue_stream_toolcalls(
         &[
-            (
-                "unconnected-search",
-                "mcp_call",
-                r#"{"server":"websearch","tool":"echo","args":{"text":"search"}}"#,
-            ),
-            (
-                "unconnected-fetch",
-                "mcp_call",
-                r#"{"server":"websearch","tool":"echo","args":{"text":"fetch"}}"#,
-            ),
+            ("init", "websearch", r#"{"action":"init"}"#),
+            ("doctor", "websearch", r#"{"action":"doctor"}"#),
         ],
         None,
     );
     rig.server.enqueue_stream_completion("first memory answer");
     rig.server.enqueue_stream_completion("second memory answer");
 
-    let out = rig.run_child(
+    let out = rig.run_child_web(
         r#"{"prompt":"research this","tools":"web","max_turns":4}"#,
         None,
     );
     assert!(!out.status.success());
     let result: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(result["status"], "error");
-    assert_eq!(result["turns"], 3);
     assert!(
         result["result"]
             .as_str()
             .unwrap()
-            .contains("without the required 2 mcp_call evidence calls after one corrective"),
+            .contains("without the required 2 websearch evidence calls"),
         "{result}"
     );
-    assert!(web.calls().is_empty());
-    web.assert_clean();
+    // Both ran; neither counted. Order is not asserted: websearch is a
+    // read-only tool, so a batch of them runs concurrently.
+    let mut calls = websearch_calls(rig.config.path());
+    calls.sort();
+    assert_eq!(calls, ["doctor", "init"]);
+    rig.server.assert_clean();
+}
+
+/// One ignored corrective follow-up is terminal. A second unsupported
+/// completion becomes a structured child error instead of false success.
+#[test]
+fn web_child_rejects_a_second_completion_without_evidence() {
+    let rig = rig();
+    rig.server.enqueue_stream_completion("first memory answer");
+    rig.server.enqueue_stream_completion("second memory answer");
+
+    let out = rig.run_child_web(
+        r#"{"prompt":"research this","tools":"web","max_turns":4}"#,
+        None,
+    );
+    assert!(!out.status.success());
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["status"], "error");
+    assert_eq!(result["turns"], 2);
+    assert!(
+        result["result"]
+            .as_str()
+            .unwrap()
+            .contains("without the required 2 websearch evidence calls after one corrective"),
+        "{result}"
+    );
+    assert!(websearch_calls(rig.config.path()).is_empty());
     rig.server.assert_clean();
 }
 
@@ -453,16 +530,10 @@ fn web_child_rejects_a_second_completion_without_mcp_evidence() {
 #[test]
 fn web_child_does_not_extend_an_exhausted_round_budget() {
     let rig = rig();
-    let web = McpHttpServer::start(echo_tools());
-    std::fs::write(
-        rig.config.path().join("mcp.json"),
-        format!(r#"{{"servers":{{"websearch":{{"url":"{}"}}}}}}"#, web.url()),
-    )
-    .unwrap();
     rig.server
         .enqueue_stream_completion("unsupported one-round answer");
 
-    let out = rig.run_child(
+    let out = rig.run_child_web(
         r#"{"prompt":"research this","tools":"web","max_turns":1}"#,
         None,
     );
@@ -478,8 +549,27 @@ fn web_child_does_not_extend_an_exhausted_round_budget() {
         "{result}"
     );
     assert_eq!(rig.api_requests().len(), 1);
-    assert!(web.calls().is_empty());
-    web.assert_clean();
+    assert!(websearch_calls(rig.config.path()).is_empty());
+    rig.server.assert_clean();
+}
+
+/// Without the CLI there is no web profile at all: the child refuses to boot
+/// rather than silently research from memory.
+#[test]
+fn a_web_child_without_the_cli_is_refused() {
+    let rig = rig();
+    let out = rig.run_child(r#"{"prompt":"research this","tools":"web"}"#, None);
+    assert!(!out.status.success());
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["status"], "error");
+    assert!(
+        result["result"]
+            .as_str()
+            .unwrap()
+            .contains("needs the \"websearch\" CLI on PATH"),
+        "{result}"
+    );
+    assert!(rig.api_requests().is_empty(), "no model request was needed");
     rig.server.assert_clean();
 }
 

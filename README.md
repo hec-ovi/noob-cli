@@ -145,31 +145,29 @@ During a turn the input stays live: typing edits the next message, and Enter que
 
 Web search reaches the model as a **skill plus a tool**, not a built-in.
 
-The **tool** is `websearch`, a small Python package ([`websearch-skill`](https://github.com/hec-ovi/websearch-skill), pinned and installed in its own uv tool environment inside the runtime image). It ships a CLI and a stdio MCP server:
+The **tool** is `websearch`, a small Python package ([`websearch-skill`](https://github.com/hec-ovi/websearch-skill), pinned and installed in its own uv tool environment inside the runtime image), plus a `websearch` tool in noob that runs it:
 
 ```bash
+websearch init                     # start SearXNG, self-test, report what works
 websearch web-search "query"
 websearch web-fetch "https://example.com/page"
 websearch web-open "site.example~handle" --page 2
 websearch arxiv "paper topic"
 websearch github "repository topic" --language Rust
-websearch mcp
 websearch doctor
 ```
 
-`websearch doctor` is the one to reach for when results dry up: it checks each engine on its own and separates a parser that can no longer read a provider from a provider that is refusing your IP, which need opposite fixes.
+`websearch init` is the first call of a session: it reads the config env file, brings up a local SearXNG, runs the full self-test, and answers whether search works and with what. `websearch doctor` is the one to reach for when results dry up later: it checks each engine on its own and separates a parser that can no longer read a provider from a provider that is refusing your IP, which need opposite fixes.
+
+There is no MCP server in this path. Up to websearch-skill 0.2.6 there was one, and it was the wrong shape: an MCP server reads its configuration once at startup and caches its engine fanout, so a SearXNG or a proxy configured afterwards stayed invisible until the client restarted it, which is exactly what the optional layers here need to change at runtime. One process per call reads the environment fresh every time.
 
 The tool takes an optional egress proxy, off by default: set `WEBSEARCH_PROXY` to a proxy URL (`socks5h://user:pass@host:1080`), to `nordvpn`, or to `off`. The `nordvpn` shorthand builds the SOCKS5 URL from the `NORDVPN_USER` and `NORDVPN_PASS` service credentials, with `NORDVPN_HOST` selecting a server. With a proxy set, nothing leaves the container around it, including the hostname lookups the fetch guard used to do locally. `WEBSEARCH_VPN` (`nordvpn` or `any`) routes nothing itself; it declares that egress should be tunneled so the doctor verifies it instead of assuming it. The launcher forwards all of these, plus `WEBSEARCH_SEARXNG_URL`, into the container, so exporting them before running `noob` is all it takes. To keep the credentials out of your shell history, put them in `websearch.env` in the config directory instead. The tool otherwise reads `.env` from its working directory, which inside the container is your project, so the image points it at the config directory: a `.env` of your own is never read, and a `WEBSEARCH_PROXY` line in it cannot silently reroute or break every search.
 
-The **skill** is a `SKILL.md` in the config that tells the model when to search and which subcommand to reach for. The model runs `websearch` through `bash`, or through the MCP server when one is configured. The installer seeds both and enables the stdio server without a sidecar; the bundled skill is the standalone Bash fallback. From the checkout, turn on the same MCP config with:
+The **tool registration** is automatic: noob registers a `websearch` tool whenever the CLI is on PATH, taking an `action` (`init`, `search`, `fetch`, `open`, `arxiv`, `github`, `doctor`) plus typed fields. It builds a fixed argv and runs the binary directly, with no shell in between, so no value the model sends can become a flag or a second command. Results come back wrapped as untrusted, the same treatment MCP results got. Set `NOOB_WEBSEARCH=off` to unregister it, or to a path to point it at a different binary.
 
-```bash
-cp config/mcp.websearch.example.json config/mcp.json
-```
+The **skill** is a `SKILL.md` in the config that tells the model to run `init` first and which action to reach for after. The installer seeds it, and it doubles as the Bash instructions for a session where the tool is not registered.
 
-Point at an existing Streamable HTTP sidecar instead by setting its URL in `mcp.json`.
-
-The opt-in live test gives qwen a research prompt with the MCP server configured, then asserts that the JSON event stream contains `mcp_connect` and `mcp_call` operations targeting `websearch`.
+The opt-in live test gives qwen a research prompt and asserts that the JSON event stream contains a `websearch` search call and a grounded answer.
 
 ## 🧩 Skills: instructions the model runs
 
@@ -177,7 +175,7 @@ A skill is a `SKILL.md` the model activates and then carries out with the ordina
 
 Two ship with the installer. `web-search` is above. `coding` loads when the task is a change to code that already exists, and carries the directives that hold up under measurement: a library exists only if the project declares it, so check the manifest before importing; read the file and one neighbour and write in their style; prefer an edit over a rewrite, since a rewrite regenerates the bytes that were already right; find the project's own test and lint commands instead of guessing them; and run the thing, because compiling, parsing, and type-checking are not running. No tone rules and no worked examples, so it costs one line in the resolver until the model loads it. Drop it with `/skills remove coding` if you would rather bring your own.
 
-The external [research-skill](https://github.com/hec-ovi/research-skill) shows the shape. With one unambiguous `websearch` MCP server configured, noob recognizes that skill's investigation brief and enforces `tools: "web"`, even if a small model requested `"all"`. That child can inspect local files and gather web evidence, but cannot run Bash, write files, change the plan, or spawn another agent. It returns the complete synthesis; the main agent validates it and alone updates the project-scoped `.research/` store. A completed web report is accepted only after at least two distinct `mcp_call` operations reached the server and returned server-originated results. Without that MCP match, the parent can use `tools: "all"` with the standalone `websearch` command when the task needs it.
+The external [research-skill](https://github.com/hec-ovi/research-skill) shows the shape. With the `websearch` tool registered, noob recognizes that skill's investigation brief and enforces `tools: "web"`, even if a small model requested `"all"`. That child can inspect local files and reach the web, but cannot run Bash, write files, change the plan, or spawn another agent. It returns the complete synthesis; the main agent validates it and alone updates the project-scoped `.research/` store. A completed web report is accepted only after at least two successful `websearch` calls actually gathered sources: `init` and `doctor` report on the installation, so they do not count. Without the CLI installed there is no web profile at all, and the parent uses `tools: "all"` when a task needs the network.
 
 ## 📟 The dock up close
 
@@ -185,7 +183,7 @@ Three small things the persistent dock does while a turn streams above it.
 
 **📋 Plan.** The `plan` tool is the live checklist the model and user both see. The active `[~]` box spins while work runs, and each completed action shows its elapsed time. Long lists show at most six steps windowed on the active one, plus one `… +N more` row with done and queued counts. A finished plan collapses to one timed line and moves into the chat history at turn end instead of staying stuck to the input; canceling a turn leaves an unfinished plan pinned in its actual state. The unfinished checklist stays pinned above the input across turns and at the idle prompt, updating in place instead of re-printing into the transcript, and the active step keeps spinning between turns (a step delegated to a still-running sub-agent stays visibly alive while the parent waits at the prompt). `/clear-plan` unpins it and replaces historical plan arguments and results with small placeholders while keeping provider-valid call/result pairs.
 
-**👥 Agents.** Sub-agents detach after an immediate job acknowledgment, so the prompt becomes usable while they work. Use `tools: "read-only"` for inspection, `tools: "web"` for nonmutating MCP research, and `tools: "all"` for coding or shell work. Background jobs and the foreground plan are independent state machines that may coexist; the dock renders separate regions, and agent lifecycle is never copied into plan steps. Press Tab on an empty draft for persistent job details and recent activity, or use `/agents`. Double-Escape, during a turn or at the idle prompt, cancels every running agent after a visible confirmation hint; a lone Ctrl-C stops only the parent turn; a typed message stops nothing, it just queues. Each terminal result is removed from its child instance and injected once into the parent context. A message already being composed wins the completion race and receives ready reports before its own text in the ordinary turn. A failed or canceled report, including one coalesced with a success, leaves the prompt idle instead of invoking parent inference. Cancellation and failure also reject autonomous replacement spawns until a new human turn begins.
+**👥 Agents.** Sub-agents detach after an immediate job acknowledgment, so the prompt becomes usable while they work. Use `tools: "read-only"` for inspection, `tools: "web"` for nonmutating web research, and `tools: "all"` for coding or shell work. Background jobs and the foreground plan are independent state machines that may coexist; the dock renders separate regions, and agent lifecycle is never copied into plan steps. Press Tab on an empty draft for persistent job details and recent activity, or use `/agents`. Double-Escape, during a turn or at the idle prompt, cancels every running agent after a visible confirmation hint; a lone Ctrl-C stops only the parent turn; a typed message stops nothing, it just queues. Each terminal result is removed from its child instance and injected once into the parent context. A message already being composed wins the completion race and receives ready reports before its own text in the ordinary turn. A failed or canceled report, including one coalesced with a success, leaves the prompt idle instead of invoking parent inference. Cancellation and failure also reject autonomous replacement spawns until a new human turn begins.
 
 **⌨️ Queueing.** Type while a parent turn is running. Enter queues the message and leaves the turn, its tools, the plan, and every sub-agent untouched; it waits as a normal `› message` row with a `[queued]` tag above the input, then dispatches as the next turn once the current one finishes and shows up in the history as a plain `› message` line. Escape or Ctrl-C cancellation hands queued and unsubmitted text back to the editor instead of firing it.
 

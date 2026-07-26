@@ -1,8 +1,8 @@
-//! Live P4 smoke (opt-in: `./dev.sh smoke`): a real call
-//! through the websearch MCP server at :8000, driven by the local model
-//! through the shipped binary. This is live smoke item 6: the prompt line routes the
-//! model to mcp_connect, the catalog routes it to mcp_call, and the
-//! search result shapes the answer.
+//! Live P4 smoke (opt-in: `./dev.sh smoke`): a real web lookup through the
+//! `websearch` tool, driven by the local model through the shipped binary.
+//! This is live smoke item 6: the registered tool routes the model to a real
+//! search, and the result shapes the answer. Needs the websearch CLI on PATH
+//! (`uv tool install websearch-skill`) and working egress.
 
 use std::process::Command;
 
@@ -18,13 +18,9 @@ fn live_model() -> String {
     std::env::var("NOOB_LIVE_MODEL").unwrap_or_else(|_| "llm".to_string())
 }
 
-fn websearch_url() -> String {
-    std::env::var("NOOB_LIVE_MCP_URL").unwrap_or_else(|_| "http://localhost:8000/mcp".to_string())
-}
-
 #[test]
-#[ignore = "live: needs a local endpoint at :8080 and the websearch MCP at :8000 (./dev.sh smoke)"]
-fn live_websearch_through_mcp() {
+#[ignore = "live: needs a local endpoint at :8080 and the websearch CLI on PATH (./dev.sh smoke)"]
+fn live_websearch_through_the_tool() {
     let config = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -36,15 +32,6 @@ fn live_websearch_through_mcp() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        config.path().join("mcp.json"),
-        format!(
-            r#"{{"servers": {{"websearch": {{"url": "{}", "timeout_s": 60}}}}}}"#,
-            websearch_url()
-        ),
-    )
-    .unwrap();
-
     let out = Command::new(env!("CARGO_BIN_EXE_noob"))
         .env("NOOB_CONFIG_DIR", config.path())
         .current_dir(work.path())
@@ -53,7 +40,7 @@ fn live_websearch_through_mcp() {
             "exec",
             "--json",
             "-p",
-            "Use the websearch MCP server to search the web for \"Rust programming \
+            "Use the websearch tool to search the web for \"Rust programming \
              language\" and answer in one line: what year did Rust 1.0 come out?",
         ])
         .output()
@@ -69,21 +56,15 @@ fn live_websearch_through_mcp() {
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .collect();
-    // The model went through the whole MCP chain...
-    assert!(
-        events
-            .iter()
-            .any(|e| e["t"] == "tool" && e["name"] == "mcp_connect"),
-        "no mcp_connect call in: {stdout}"
-    );
+    // The model reached the web through the tool...
     let calls: Vec<&Value> = events
         .iter()
-        .filter(|e| e["t"] == "tool" && e["name"] == "mcp_call")
+        .filter(|e| e["t"] == "tool" && e["name"] == "websearch")
         .collect();
-    assert!(!calls.is_empty(), "no mcp_call in: {stdout}");
+    assert!(!calls.is_empty(), "no websearch call in: {stdout}");
     assert!(
-        calls.iter().any(|c| c["args"]["server"] == "websearch"),
-        "mcp_call did not target websearch: {stdout}"
+        calls.iter().any(|c| c["args"]["action"] == "search"),
+        "no websearch search action in: {stdout}"
     );
     // ...and produced a grounded answer (Rust 1.0 shipped in 2015).
     let text: String = events

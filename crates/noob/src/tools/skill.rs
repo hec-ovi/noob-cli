@@ -113,10 +113,11 @@ fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> Tool
     // contain many later harness-specific directives, and small local models
     // follow the nearest instruction more reliably than an early disclaimer.
     let reminder = "[noob runtime reminder: child briefs may name only tools registered in this \
-                    session. When MCP server websearch is configured, say to call mcp_connect \
-                    {\"server\":\"websearch\"} once and then mcp_call, and pass tools:\"web\"; \
-                    this prevents Bash/write/edit, so the child must return its complete synthesis \
-                    and never create files. Do not tell it to load a web-search skill or use \
+                    session. When the websearch tool is registered, say to call it with \
+                    {\"action\":\"init\"} once and then {\"action\":\"search\"} / \
+                    {\"action\":\"fetch\"}, and pass tools:\"web\"; this prevents \
+                    Bash/write/edit, so the child must return its complete synthesis and never \
+                    create files. Do not tell it to load a web-search skill or use \
                     WebSearch/WebFetch. Otherwise say to use Bash websearch/curl. A user-specified \
                     agent count is a hard cap; never spawn a replacement after failure unless the \
                     user explicitly requested retries.]";
@@ -183,8 +184,8 @@ mod tests {
         assert!(out.content.contains("[noob runtime mapping:"));
         assert!(out.content.contains("[noob runtime reminder:"));
         assert!(out.content.ends_with("]"));
-        assert!(out.content.contains("mcp_connect"));
-        assert!(out.content.contains("then mcp_call"));
+        assert!(out.content.contains("the websearch tool is registered"));
+        assert!(out.content.contains("{\"action\":\"init\"}"));
         assert!(out.content.contains("tools:\"web\""));
         assert!(out.content.contains("never create files"));
         assert!(out.content.contains("run_in_background"));

@@ -475,13 +475,20 @@ pub const NOOB_ENV_VARS: &[&str] = &[
     "NOOB_TEST_SILENT_SCHEDULER_PANIC",
     "NOOB_THEME",
     "NOOB_TOOL_CAPS",
+    "NOOB_WEBSEARCH",
 ];
 
 /// Remove every known NOOB_* variable from a spawned command's environment.
+///
+/// NOOB_WEBSEARCH is the one exception to "remove": unset means "look for the
+/// websearch CLI on PATH", so a developer who has it installed would register
+/// an extra tool and change what the suite asserts on. Scrubbing pins it off;
+/// a driver that wants the tool re-sets it to a stub binary afterwards.
 pub fn scrub_noob_env(cmd: &mut std::process::Command) -> &mut std::process::Command {
     for name in NOOB_ENV_VARS {
         cmd.env_remove(name);
     }
+    cmd.env("NOOB_WEBSEARCH", "off");
     cmd
 }
 

@@ -33,7 +33,10 @@ fn noob(config_dir: &std::path::Path, workspace: &std::path::Path) -> Command {
         .env_remove("NOOB_MODEL")
         .env_remove("NOOB_API_STYLE")
         .env_remove("NOOB_CTX")
-        .env_remove("NOOB_SANDBOX");
+        .env_remove("NOOB_SANDBOX")
+        // Hermetic: a developer machine with the CLI installed must not
+        // register an extra tool and change what these assert on.
+        .env("NOOB_WEBSEARCH", "off");
     cmd
 }
 
@@ -1502,7 +1505,12 @@ fn dock_keeps_the_pinned_plan_after_an_interrupted_turn() {
                 .iter()
                 .any(|frame| r.contains(&format!("{frame} still working")))
         })
-        .unwrap_or_else(|| panic!("the plan must stay pinned after a cancel:\n{}", screen.dump("idle")));
+        .unwrap_or_else(|| {
+            panic!(
+                "the plan must stay pinned after a cancel:\n{}",
+                screen.dump("idle")
+            )
+        });
     assert!(
         step < marker,
         "the pinned plan sits above the idle input:\n{}",
@@ -1719,7 +1727,11 @@ fn dock_queues_multiple_messages_fifo() {
         );
     }
     let reqs = rig.api_requests();
-    assert_eq!(reqs.len(), 4, "tool round, its follow-up, then both queued turns");
+    assert_eq!(
+        reqs.len(),
+        4,
+        "tool round, its follow-up, then both queued turns"
+    );
     assert_eq!(last_user(&reqs[2]), "first question");
     assert_eq!(last_user(&reqs[3]), "second question");
     rig.server.assert_clean();
@@ -1804,10 +1816,7 @@ fn dock_queue_during_bash_with_a_running_agent_answers_after_the_turn() {
         .iter()
         .filter(|message| message["role"] == "user" && message["content"] == "[interrupted]")
         .count();
-    assert_eq!(
-        interrupts, 0,
-        "queueing interrupts nothing, ever: {queued}"
-    );
+    assert_eq!(interrupts, 0, "queueing interrupts nothing, ever: {queued}");
     rig.server.assert_clean();
 }
 
@@ -4317,10 +4326,7 @@ fn dock_pins_the_plan_across_turns_with_a_single_copy_on_screen() {
         .iter()
         .rposition(|r| r.contains(MARKER))
         .unwrap_or_else(|| panic!("idle input box missing:\n{}", screen.dump("idle")));
-    for (step, glyphs) in [
-        ("alpha", &["[x]"][..]),
-        ("beta", &SPINNER_FRAMES[..]),
-    ] {
+    for (step, glyphs) in [("alpha", &["[x]"][..]), ("beta", &SPINNER_FRAMES[..])] {
         let hits: Vec<usize> = rows
             .iter()
             .enumerate()
@@ -4399,7 +4405,8 @@ fn dock_shows_the_agents_row_exactly_once_at_idle() {
         .filter(|row| row.contains("agents running (Tab to view)"))
         .count();
     assert_eq!(
-        hits, 1,
+        hits,
+        1,
         "the agents counter appears exactly once (the pinned row):\n{}",
         screen.dump("idle with agent")
     );
@@ -4869,7 +4876,8 @@ fn dock_idle_box_shrink_resize_leaves_no_rule_fragments() {
     for index in rules {
         let dashes = rows[index].chars().filter(|&c| c == '─').count();
         assert_eq!(
-            dashes, 60,
+            dashes,
+            60,
             "each rule spans the new width exactly:\n{}",
             vt.dump("after shrink")
         );
@@ -5021,7 +5029,8 @@ fn dock_repeated_resizes_archive_nothing_into_scrollback() {
     for index in rules {
         let dashes = rows[index].chars().filter(|&c| c == '─').count();
         assert_eq!(
-            dashes, 50,
+            dashes,
+            50,
             "each rule spans the final width exactly:\n{}",
             vt.dump("after storm")
         );
@@ -5073,19 +5082,12 @@ fn dock_mid_turn_repeated_resizes_keep_the_transcript_clean() {
     // Every streamed line survives exactly once across screen + history: the
     // old resets archived transcript copies with the garbage, and a
     // shredded stale-geometry erase could duplicate or destroy them.
-    let everything: Vec<String> = vt
-        .scrollback()
-        .iter()
-        .cloned()
-        .chain(vt.render())
-        .collect();
+    let everything: Vec<String> = vt.scrollback().iter().cloned().chain(vt.render()).collect();
     for needle in ["aa-line", "bb-line", "ZZEND"] {
-        let count = everything
-            .iter()
-            .filter(|row| row.contains(needle))
-            .count();
+        let count = everything.iter().filter(|row| row.contains(needle)).count();
         assert_eq!(
-            count, 1,
+            count,
+            1,
             "{needle} must appear exactly once after the storm:\n{}",
             vt.dump("after storm")
         );
@@ -5241,7 +5243,8 @@ fn dock_shrink_with_pinned_plan_rows_leaves_no_fragments() {
         .filter(|r| r.contains("investigate the long"))
         .count();
     assert_eq!(
-        step_hits, 1,
+        step_hits,
+        1,
         "the pinned plan appears exactly once after the shrink:\n{}",
         vt.dump("shrunk with plan")
     );
@@ -5312,7 +5315,8 @@ fn dock_active_shrink_with_a_pinned_plan_repaints_one_clean_frame() {
     );
     let step_hits = rows.iter().filter(|r| r.contains("alpha step")).count();
     assert_eq!(
-        step_hits, 1,
+        step_hits,
+        1,
         "the pinned plan appears exactly once after the shrink:\n{}",
         vt.dump("after shrink")
     );

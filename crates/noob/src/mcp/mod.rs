@@ -11,7 +11,6 @@ pub mod schema;
 pub mod stdio;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -77,11 +76,6 @@ pub struct Mcp {
     /// locked from the outside; `connect` takes them strictly in the order
     /// connecting -> gate -> conns.
     connecting: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    /// Successful (isError:false) mcp_call round trips this session, counted
-    /// by the mcp_call tool as results arrive. The web evidence gate reads
-    /// this instead of re-scanning the final transcript, which compaction
-    /// may have summarized (and where wrapped error results would miscount).
-    evidence_calls: AtomicUsize,
 }
 
 /// tools/list pagination bound: a server streaming endless cursors is
@@ -118,19 +112,7 @@ impl Mcp {
             servers,
             conns: Mutex::new(HashMap::new()),
             connecting: Mutex::new(HashMap::new()),
-            evidence_calls: AtomicUsize::new(0),
         }
-    }
-
-    /// Record one successful mcp_call round trip (the mcp_call tool calls
-    /// this only for non-isError results).
-    pub fn record_evidence_call(&self) {
-        self.evidence_calls.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Successful mcp_call round trips so far this session.
-    pub fn evidence_call_count(&self) -> usize {
-        self.evidence_calls.load(Ordering::Relaxed)
     }
 
     /// Configured server names, sorted (config::load sorts).
@@ -318,15 +300,6 @@ mod tests {
         );
         assert!(mcp.connection("mock").is_some());
         server.assert_clean();
-    }
-
-    #[test]
-    fn evidence_counter_accumulates_only_when_recorded() {
-        let mcp = manager_with("http://127.0.0.1:9");
-        assert_eq!(mcp.evidence_call_count(), 0);
-        mcp.record_evidence_call();
-        mcp.record_evidence_call();
-        assert_eq!(mcp.evidence_call_count(), 2);
     }
 
     #[test]

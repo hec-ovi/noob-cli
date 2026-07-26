@@ -5,6 +5,7 @@
 pub mod bash;
 pub mod context;
 pub mod edit;
+pub mod exec;
 pub mod glob;
 pub mod grep;
 pub mod guard;
@@ -14,6 +15,8 @@ pub mod read;
 pub mod skill;
 pub mod todo;
 pub mod truncate;
+pub mod untrusted;
+pub mod websearch;
 pub mod write;
 
 use std::collections::HashMap;
@@ -96,6 +99,10 @@ pub struct ToolCtx {
     /// MCP manager; Some only when mcp.json configured at least one server
     /// (and then mcp_connect/mcp_call are registered). Set at bootstrap.
     pub mcp: Option<crate::mcp::Mcp>,
+    /// Whether the `websearch` tool is registered this session (the CLI was
+    /// on PATH at bootstrap). Read by the subagent tool, which must not offer
+    /// a web child a tool this session does not have. Set at bootstrap.
+    pub websearch: bool,
     /// Sub-agent settings; Some only when the subagent tool is registered
     /// (depth below the ceiling, full tool set). Set at bootstrap.
     pub task: Option<crate::subagent::TaskCfg>,
@@ -123,6 +130,11 @@ pub struct ToolCtx {
     context_used: AtomicU64,
     context_total: AtomicU64,
     context_threshold: AtomicU64,
+    /// Successful source-gathering `websearch` calls this session. The web
+    /// research gate counts these to tell a child that consulted sources
+    /// apart from one that answered from memory; failures and the
+    /// installation actions (init, doctor) never increment it.
+    evidence_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl ToolCtx {
@@ -137,11 +149,13 @@ impl ToolCtx {
             loaded_skills: Mutex::new(Vec::new()),
             approved_skill_writes: Mutex::new(std::collections::HashMap::new()),
             mcp: None,
+            websearch: false,
             task: None,
             todos: Mutex::new(Vec::new()),
             plan_timing: Mutex::new(PlanTiming::default()),
             caps: truncate::Caps::default(),
             read_dedup: true,
+            evidence_calls: std::sync::atomic::AtomicUsize::new(0),
             context_used: AtomicU64::new(0),
             context_total: AtomicU64::new(0),
             context_threshold: AtomicU64::new(0),
@@ -152,6 +166,14 @@ impl ToolCtx {
         self.context_used.store(used, Ordering::Relaxed);
         self.context_total.store(total, Ordering::Relaxed);
         self.context_threshold.store(threshold, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_evidence_call(&self) {
+        self.evidence_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn evidence_call_count(&self) -> usize {
+        self.evidence_calls.load(Ordering::Relaxed)
     }
 
     pub(crate) fn context(&self) -> (u64, u64, u64) {
@@ -275,10 +297,13 @@ impl ToolOutcome {
 }
 
 /// Read-only calls run concurrently; anything else is a sequential barrier.
+/// `websearch` is here because it only reads the network: two searches in one
+/// batch cannot interfere, and waiting for engines in series is the slowest
+/// thing a research child does.
 pub fn is_read_only(name: &str) -> bool {
     matches!(
         name,
-        "read" | "grep" | "glob" | "ls" | "context" | "skill" | "mcp_connect"
+        "read" | "grep" | "glob" | "ls" | "context" | "skill" | "mcp_connect" | "websearch"
     )
 }
 
@@ -287,9 +312,11 @@ pub fn is_read_only(name: &str) -> bool {
 /// safe to parallelize but pointless without mcp_call, so it stays out.
 pub const READ_ONLY_SET: &[&str] = &["read", "grep", "glob", "ls", "context", "skill"];
 
-/// Workspace-nonmutating research child set. Unlike plan mode, this may call
-/// the one configured web-search MCP server, but it cannot run Bash, change
-/// files, alter the plan, or delegate again.
+/// Workspace-nonmutating research child set. Unlike plan mode, this may reach
+/// the web through the `websearch` tool, but it cannot run Bash, change files,
+/// alter the plan, or delegate again. The web capability is one tool and not
+/// bash on purpose: a child that can run a shell can do anything, and the
+/// evidence gate needs calls it can count.
 pub const WEB_RESEARCH_SET: &[&str] = &[
     "read",
     "grep",
@@ -297,8 +324,7 @@ pub const WEB_RESEARCH_SET: &[&str] = &[
     "ls",
     "context",
     "skill",
-    "mcp_connect",
-    "mcp_call",
+    "websearch",
 ];
 
 /// Execute one tool call. `args` is the parsed arguments object.
@@ -355,6 +381,7 @@ fn dispatch_unlocked(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
         "skill" => skill::run(ctx, args),
         // `todo` accepts historical/replayed calls; only `plan` is registered.
         "plan" | "todo" => todo::run(ctx, args),
+        "websearch" => websearch::run(ctx, args),
         "mcp_connect" => mcp::run_connect(ctx, args),
         "mcp_call" => mcp::run_call(ctx, args),
         "subagent" => crate::subagent::run(ctx, args),

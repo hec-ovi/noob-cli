@@ -202,7 +202,7 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
         Ok(_) => return ToolOutcome::err("parameter \"prompt\" is empty; resend the call"),
         Err(e) => return ToolOutcome::err(e),
     };
-    let web_mcp = configured_web_mcp(ctx);
+    let web_available = ctx.websearch;
     let requested_tools_mode = match opt_str(args, "tools") {
         Ok(None) => "read-only".to_string(),
         Ok(Some(m @ ("read-only" | "web" | "all"))) => m.to_string(),
@@ -218,15 +218,16 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     // parent. Small models sometimes still give that child `all`; recognize
     // the workflow's required brief and enforce its nonmutating web profile.
     let research_investigation = research_investigation_loaded(ctx, &prompt);
-    let tools_mode = if research_investigation && web_mcp.is_some() {
+    let tools_mode = if research_investigation && web_available {
         "web".to_string()
     } else {
         requested_tools_mode
     };
-    if tools_mode == "web" && web_mcp.is_none() {
+    if tools_mode == "web" && !web_available {
         return ToolOutcome::err(
-            "tools mode \"web\" needs one unambiguous MCP server named websearch; configure it \
-             or use \"all\" for the Bash websearch fallback",
+            "tools mode \"web\" needs the websearch CLI on PATH; install it with \
+             `uv tool install websearch-skill`, or use \"all\" so the child can reach the \
+             web through Bash",
         );
     }
     // Both sides enforce the turn cap: the parent clamps the request here,
@@ -236,9 +237,9 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
         Err(e) => return ToolOutcome::err(e),
     };
 
-    let excluded_skills = skill_exclusions(cfg, ctx, web_mcp.is_some());
+    let excluded_skills = skill_exclusions(cfg, ctx, web_available);
     let request = TaskRequest {
-        prompt: child_prompt(prompt, web_mcp.as_deref(), tools_mode == "web"),
+        prompt: child_prompt(prompt, web_available, tools_mode == "web"),
         tools_mode,
         max_turns,
         excluded_skills,
@@ -262,11 +263,6 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     run_task(&run_cfg, &request, || INTERRUPTED.load(Ordering::SeqCst))
 }
 
-fn configured_web_mcp(ctx: &ToolCtx) -> Option<String> {
-    let names = ctx.mcp.as_ref()?.names();
-    crate::mcp::unique_normalized_server(names, "websearch").map(str::to_string)
-}
-
 fn research_investigation_loaded(ctx: &ToolCtx, prompt: &str) -> bool {
     if !ctx
         .loaded_skills
@@ -288,10 +284,10 @@ fn research_investigation_loaded(ctx: &ToolCtx, prompt: &str) -> bool {
 /// Tool names copied from another harness are a common source of small-model
 /// loops. Put the actual noob calls at the start of the leaf's task, where the
 /// child can act on them without rediscovering a compatibility skill.
-fn child_prompt(prompt: String, web_mcp: Option<&str>, web_only: bool) -> String {
-    let Some(server) = web_mcp else {
+fn child_prompt(prompt: String, web_available: bool, web_only: bool) -> String {
+    if !web_available {
         return prompt;
-    };
+    }
     let mutation_rule = if web_only {
         " This is a nonmutating research child: Bash, write, and edit are unavailable. Do not \
          create files; return the complete synthesis in your final message so the parent can \
@@ -302,8 +298,9 @@ fn child_prompt(prompt: String, web_mcp: Option<&str>, web_only: bool) -> String
     format!(
         "[noob child runtime: you are one leaf agent and cannot delegate. For live web access, \
          do not load a web-search skill and do not invent WebSearch or WebFetch calls. Call \
-         mcp_connect {{\"server\":\"{server}\"}} once, then call catalog tools through \
-         mcp_call {{\"server\":\"{server}\",\"tool\":\"...\",\"args\":{{...}}}}. Use the \
+         websearch {{\"action\":\"init\"}} once, then websearch \
+         {{\"action\":\"search\",\"query\":\"...\"}} and \
+         {{\"action\":\"fetch\",\"url\":\"...\"}} to read the sources you found. Use the \
          minimum evidence required by the brief; once its requirements are met, stop gathering \
          and return the synthesis before the turn budget.{mutation_rule}]\n\n{prompt}"
     )
@@ -847,7 +844,11 @@ mod tests {
         let out = run(&ctx, &json!({"prompt": "x", "tools": "everything"}));
         assert!(out.content.contains("\"read-only\", \"web\", or \"all\""));
         let out = run(&ctx, &json!({"prompt": "x", "tools": "web"}));
-        assert!(out.is_error && out.content.contains("needs one unambiguous MCP server"));
+        assert!(
+            out.is_error && out.content.contains("needs the websearch CLI on PATH"),
+            "{}",
+            out.content
+        );
         let out = run(&ctx, &json!({"prompt": "x", "cancel": "agent-1"}));
         assert!(out.is_error);
         assert!(out.content.contains("choose exactly one"));
@@ -979,51 +980,40 @@ mod tests {
     }
 
     #[test]
-    fn configured_web_mcp_replaces_the_descendant_compatibility_skill() {
-        let (_tmp, mut ctx) = test_ctx();
-        ctx.mcp = Some(crate::mcp::Mcp::new(vec![
-            crate::mcp::config::ServerConfig {
-                name: "Web_Search".into(),
-                transport: crate::mcp::config::TransportConfig::Http {
-                    url: "http://127.0.0.1:9/mcp".into(),
-                },
-                timeout: Duration::from_secs(1),
-            },
-        ]));
-        let web = configured_web_mcp(&ctx);
-        assert_eq!(web.as_deref(), Some("Web_Search"));
-        let prompt = child_prompt("research current facts".into(), web.as_deref(), true);
+    fn the_web_tool_replaces_the_descendant_compatibility_skill() {
+        // A child that can call `websearch` must not also be handed the
+        // web-search skill: the skill exists to teach a Bash-driven fallback,
+        // and two ways to do one thing is how small models loop.
+        let (_tmp, ctx) = test_ctx();
+        let prompt = child_prompt("research current facts".into(), true, true);
         assert!(prompt.starts_with("[noob child runtime:"));
-        assert!(prompt.contains("mcp_connect {\"server\":\"Web_Search\"}"));
+        assert!(
+            prompt.contains("websearch {\"action\":\"init\"}"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("\"action\":\"fetch\""), "{prompt}");
+        assert!(!prompt.contains("mcp_connect"), "{prompt}");
         assert!(prompt.contains("stop gathering and return the synthesis"));
         assert!(prompt.contains("Do not create files"));
         assert!(prompt.ends_with("research current facts"));
         assert!(skill_exclusions(&cfg(), &ctx, true).contains(&"web-search".to_string()));
+        // Without the tool the brief is passed through untouched: the child
+        // would only be told to call something it does not have.
+        assert_eq!(
+            child_prompt("research current facts".into(), false, true),
+            "research current facts"
+        );
+    }
 
+    #[test]
+    fn a_research_investigation_brief_is_recognized() {
+        let (_tmp, ctx) = test_ctx();
         *ctx.loaded_skills.lock().unwrap() = vec!["research".into()];
         assert!(research_investigation_loaded(
             &ctx,
             "You have zero prior context. Run a CONTRARIAN pass. End with ## Sources."
         ));
         assert!(!research_investigation_loaded(&ctx, "implement the parser"));
-
-        ctx.mcp = Some(crate::mcp::Mcp::new(vec![
-            crate::mcp::config::ServerConfig {
-                name: "web-search".into(),
-                transport: crate::mcp::config::TransportConfig::Http {
-                    url: "http://127.0.0.1:9/mcp".into(),
-                },
-                timeout: Duration::from_secs(1),
-            },
-            crate::mcp::config::ServerConfig {
-                name: "web_search".into(),
-                transport: crate::mcp::config::TransportConfig::Http {
-                    url: "http://127.0.0.1:9/mcp".into(),
-                },
-                timeout: Duration::from_secs(1),
-            },
-        ]));
-        assert!(configured_web_mcp(&ctx).is_none());
     }
 
     #[test]

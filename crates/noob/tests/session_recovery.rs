@@ -6,6 +6,7 @@ fn noob(config_dir: &std::path::Path, workspace: &std::path::Path) -> Command {
         .env("NOOB_CONFIG_DIR", config_dir)
         .env("NOOB_DOCK", "0")
         .env("NO_COLOR", "1")
+        .env("NOOB_WEBSEARCH", "off")
         .env_remove("NOOB_BASE_URL")
         .env_remove("NOOB_MODEL")
         .env_remove("NOOB_API_STYLE")
