@@ -735,7 +735,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// Only the tokens the server actually computed are counted. Every request
     /// re-sends the whole transcript, so counting raw prompt tokens would grow
     /// with the square of the conversation and bill work the cache did for
