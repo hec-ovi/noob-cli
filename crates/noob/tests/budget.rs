@@ -4,6 +4,7 @@
 //! The live suite closes the loop against the real qwen tokenizer via
 //! llama-server /tokenize (P7).
 
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 use serde_json::Value;
@@ -24,16 +25,14 @@ use serde_json::Value;
 // prefix mid-session, which is why the environment block is built once and
 // why compaction is the single sanctioned prefix break.
 const HEAD_CEILING: usize = 560; // base.md + environment block
-const TOOLS_CEILING: usize = 1000; // serialized wire tools array
-const TOTAL_CEILING: usize = 1600; // total fixed first-request overhead
+const TOOLS_CEILING: usize = 1350; // serialized wire tools array
+const TOTAL_CEILING: usize = 1900; // total fixed first-request overhead
 const OWNER_HARD_LIMIT: usize = 2000; // never exceed, whatever the above say
 
-/// `with_skill` plants one skill in the workspace and `with_mcp` one
-/// configured server, so the artifact carries the FULL registered set (9
-/// core + subagent + skill + mcp_connect + mcp_call) plus the resolver section and the
-/// MCP line: the ceilings must hold with everything registered, not just
-/// the bare core.
-fn debug_prompt(with_skill: bool, with_mcp: bool) -> Value {
+/// The switches plant one skill, one configured MCP server, and one executable
+/// websearch stub, so the full artifact can carry every conditional tool. The
+/// ceilings must hold with everything registered, not just the bare core.
+fn debug_prompt(with_skill: bool, with_mcp: bool, with_websearch: bool) -> Value {
     let config = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     std::fs::write(config.path().join(".env"), "NOOB_MODEL=qwen3.6-35b-a3b\n").unwrap();
@@ -53,6 +52,11 @@ fn debug_prompt(with_skill: bool, with_mcp: bool) -> Value {
         )
         .unwrap();
     }
+    let websearch = work.path().join("websearch");
+    if with_websearch {
+        std::fs::write(&websearch, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&websearch, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_noob"));
     // Scrub every NOOB_* variable the binary reads: a host-exported setting
     // (NOOB_SKILL_PATHS, NOOB_CTX, ...) would change the artifact under test.
@@ -60,6 +64,14 @@ fn debug_prompt(with_skill: bool, with_mcp: bool) -> Value {
     let out = cmd
         .env("NOOB_CONFIG_DIR", config.path())
         .env("NOOB_SANDBOX", "container")
+        .env(
+            "NOOB_WEBSEARCH",
+            if with_websearch {
+                websearch.as_os_str()
+            } else {
+                std::ffi::OsStr::new("off")
+            },
+        )
         .current_dir(work.path())
         .args(["debug", "prompt", "--json"])
         .output()
@@ -79,7 +91,7 @@ fn tokens(text: &str) -> usize {
 
 #[test]
 fn no_output_cap_budget_and_phrasing() {
-    let artifact = debug_prompt(false, false);
+    let artifact = debug_prompt(false, false, false);
     let system = artifact["system"].as_str().unwrap();
     let head = artifact["head"].as_str().unwrap();
     let tools = artifact["tools"].to_string();
@@ -127,19 +139,23 @@ fn no_output_cap_budget_and_phrasing() {
     assert!(!tools_lower.contains("max_output_tokens"));
 }
 
-/// The ceilings hold for the full registered set: with a skill discovered
-/// and MCP configured the tools array grows to 13 (9 core, subagent, skill, the
-/// MCP pair), the system prompt gains the resolver section and the MCP line;
-/// the head itself must stay byte-identical.
+/// The ceilings hold for the full registered set: with a skill discovered,
+/// MCP configured, and websearch installed, the tools array grows to 14
+/// (9 core, subagent, skill, websearch, and the MCP pair). The system prompt
+/// gains the resolver section and MCP line; the head itself stays byte-exact.
 #[test]
 fn budget_holds_with_everything_registered() {
-    let artifact = debug_prompt(true, true);
+    let artifact = debug_prompt(true, true, true);
     let system = artifact["system"].as_str().unwrap();
     let head = artifact["head"].as_str().unwrap();
 
     let tools = artifact["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 13);
-    for name in ["skill", "mcp_connect", "mcp_call", "subagent"] {
+    let names = tools
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(tools.len(), 14, "{names:?}");
+    for name in ["skill", "websearch", "mcp_connect", "mcp_call", "subagent"] {
         assert!(
             tools.iter().any(|t| t["function"]["name"] == name),
             "{name} must be registered"
@@ -151,6 +167,7 @@ fn budget_holds_with_everything_registered() {
     assert!(system.contains("MCP servers (use mcp_connect): websearch"));
 
     let head_tokens = tokens(head);
+    let system_tokens = tokens(system);
     let tools_tokens = tokens(&artifact["tools"].to_string());
     assert!(
         head_tokens <= HEAD_CEILING,
@@ -160,11 +177,16 @@ fn budget_holds_with_everything_registered() {
         tools_tokens <= TOOLS_CEILING,
         "full tools array is {tools_tokens} tokens (ceiling {TOOLS_CEILING})"
     );
-    assert!(head_tokens + tools_tokens <= TOTAL_CEILING);
     assert!(
-        head_tokens + tools_tokens <= OWNER_HARD_LIMIT,
+        system_tokens + tools_tokens <= TOTAL_CEILING,
+        "fixed overhead is {} tokens: system {system_tokens} + tools {tools_tokens} \
+         (ceiling {TOTAL_CEILING})",
+        system_tokens + tools_tokens
+    );
+    assert!(
+        system_tokens + tools_tokens <= OWNER_HARD_LIMIT,
         "the fixed prefix is {} tokens, over the owner's 2,000 hard limit",
-        head_tokens + tools_tokens
+        system_tokens + tools_tokens
     );
 }
 
@@ -177,9 +199,13 @@ fn budget_holds_with_everything_registered() {
 /// bounds the total.
 #[test]
 fn tool_descriptions_stay_terse() {
-    let artifact = debug_prompt(true, true);
+    let artifact = debug_prompt(true, true, true);
     let tools = artifact["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 13);
+    let names = tools
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(tools.len(), 14, "{names:?}");
     for t in tools {
         let f = &t["function"];
         let desc = f["description"].as_str().unwrap();

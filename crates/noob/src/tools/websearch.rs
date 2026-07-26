@@ -81,11 +81,10 @@ pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "websearch".to_string(),
         description:
-            "Search the web, read a page as clean Markdown, or look up papers and repositories. \
-             Keyless. Call action=\"init\" once at the start of a session before searching: it \
-             starts the local SearXNG and reports what works. Then action=\"search\" to find \
-             pages and action=\"fetch\" to read one; action=\"open\" pages through a document \
-             you already fetched, by its handle."
+            "Search the web, fetch a page as clean Markdown, or find papers and repositories. \
+             Run action=\"init\" once before searching to start SearXNG and check capabilities. \
+             Use search to find pages, fetch to read one, and open with a prior handle to \
+             continue a document."
                 .to_string(),
         parameters: json!({"type": "object", "properties": {
             "action": {

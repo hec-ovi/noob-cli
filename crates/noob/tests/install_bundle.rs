@@ -116,7 +116,10 @@ fn installer_preserves_custom_websearch_config() {
 
     run_installer(&prefix, &config, tmp.path());
 
-    assert_eq!(std::fs::read_to_string(config.join("mcp.json")).unwrap(), mcp);
+    assert_eq!(
+        std::fs::read_to_string(config.join("mcp.json")).unwrap(),
+        mcp
+    );
     assert_eq!(
         std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
         skill

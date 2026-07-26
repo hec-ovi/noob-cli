@@ -76,8 +76,7 @@ struct BootArgs {
     plan: bool,
     /// Register only the read-only set (read-only children).
     read_only: bool,
-    /// Nonmutating research child: local reads plus the uniquely configured
-    /// web-search MCP server.
+    /// Nonmutating research child: local reads plus the websearch CLI tool.
     web_only: bool,
     /// Relay sub-agent stderr as `[subagent] ...` diagnostics.
     verbose: bool,
@@ -1300,8 +1299,8 @@ fn cmd_child() -> ExitCode {
     let mut total_rounds = agent.last_rounds;
 
     // A web-research child must prove that it actually consulted sources.
-    // Small local models sometimes answer from memory even with the MCP tools
-    // in their schema, so give one explicit correction without extending the
+    // Small local models sometimes answer from memory even with websearch in
+    // their schema, so give one explicit correction without extending the
     // original child budget. Aborts and interrupts are terminal and pass
     // through untouched.
     if web_only && matches!(&end, RunEnd::Completed(_)) && evidence_calls(&agent) < 2 {
@@ -1419,6 +1418,9 @@ fn cmd_debug(args: &[String]) -> ExitCode {
         if !mcp_servers.is_empty() {
             tool_specs.push(tools::mcp::connect_spec());
             tool_specs.push(tools::mcp::call_spec());
+        }
+        if tools::websearch::available() {
+            tool_specs.push(tools::websearch::spec());
         }
         if current_depth() < subagent::MAX_DEPTH {
             tool_specs.push(subagent::spec());

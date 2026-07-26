@@ -97,7 +97,7 @@ pub fn spec() -> ToolSpec {
         parameters: json!({"type": "object", "properties": {
             "prompt": {"type": "string", "description": "complete standalone instructions"},
             "tools": {"type": "string", "enum": ["read-only", "web", "all"],
-                      "description": "default read-only; web adds web-search MCP without mutations; all adds Bash and file changes"},
+                      "description": "default read-only; web adds the websearch tool without mutations; all adds Bash and file changes"},
             "max_turns": {"type": "integer"},
             "status": {"type": "boolean",
                        "description": "true returns one current snapshot; reports still arrive automatically"},
@@ -855,6 +855,11 @@ mod tests {
 
         let schema = spec().parameters;
         assert_eq!(schema["anyOf"].as_array().unwrap().len(), 3);
+        let tools = schema["properties"]["tools"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(tools.contains("websearch tool"), "{tools}");
+        assert!(!tools.contains("MCP"), "{tools}");
     }
 
     #[test]
