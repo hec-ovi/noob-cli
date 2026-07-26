@@ -30,7 +30,7 @@ cd noob-cli
 ./install.sh
 ```
 
-The installer builds `noob:local`, installs `~/.local/bin/noob`, and seeds the web-search skill plus its lazy stdio MCP configuration under `~/.config/noob`. It refuses to replace an unrelated `noob` command unless `--force` is passed.
+The installer builds `noob:local`, installs `~/.local/bin/noob`, and seeds the web-search skill under `~/.config/noob`. When upgrading, it replaces only the exact skill noob 0.5.1 used to seed and removes only the exact obsolete websearch MCP file; custom skills and MCP configuration are left alone. It refuses to replace an unrelated `noob` command unless `--force` is passed.
 
 Add `~/.local/bin` to `PATH` if your shell does not already include it, then run:
 
@@ -126,11 +126,11 @@ During a turn the input stays live: typing edits the next message, and Enter que
 ## Features
 
 - Nine core tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `ls`, `context`, and `plan`.
-- Conditional SKILL.md, MCP, and self-spawned child-agent tools.
+- Conditional websearch, SKILL.md, MCP, and self-spawned child-agent tools.
 - Parallel read-only calls with sequential mutation barriers and actual lifecycle timing.
 - Detached sub-agents in the interactive dock. The original call receives a running acknowledgment, then one final report enters context exactly once. A model response that only spawns agents ends its turn right after the acknowledgments, and status polling is answered once per input before the turn is closed for it, so the prompt frees seconds after a spawn instead of sitting behind a waiting loop. The prompt remains usable for ordinary main-agent work while several children run, and a child completion never interrupts an active parent turn. Tab shows bounded live child activity; both the user (`/agents cancel`) and the model (`subagent {"cancel":"agent-N"}`) can cancel a job, and double-Escape stops the whole fleet while a queued message and Ctrl-C leave it running. An accepted cancellation or terminal child failure blocks same-turn replacement spawns until the next human instruction.
-- Three child tool profiles: the default `tools: "read-only"` for local inspection, `tools: "web"` for local inspection plus one unambiguous web-search MCP server, and `tools: "all"` for the full registered tool set. Web children cannot run Bash, mutate files, change the plan, or delegate. Dock children are leaves in every profile.
-- A cross-process workspace lease around each `write` or `edit` call. File-tool mutations do not overlap, while inference, Bash, file inspection, and MCP calls remain concurrent. A child waits for the lease for a bounded time; a parent file mutation reports the active conflict promptly instead of blocking the conversation. Shell commands that mutate files are outside this guarantee, so the agent contract reserves Bash for builds, tests, and exploration.
+- Three child tool profiles: the default `tools: "read-only"` for local inspection, `tools: "web"` for local inspection plus the `websearch` tool, and `tools: "all"` for the full registered tool set. Web children cannot run Bash, mutate files, change the plan, or delegate. Dock children are leaves in every profile.
+- A cross-process workspace lease around each `write` or `edit` call. File-tool mutations do not overlap, while inference, Bash, file inspection, websearch, and MCP calls remain concurrent. A child waits for the lease for a bounded time; a parent file mutation reports the active conflict promptly instead of blocking the conversation. Shell commands that mutate files are outside this guarantee, so the agent contract reserves Bash for builds, tests, and exploration.
 - Read-before-write stamps, atomic writes, deterministic edit fallbacks, and ambiguity rejection.
 - JSONL sessions, newest-first discovery, `--resume latest`, on-screen replay, context compaction, cache-prefix checks, and repair of dangling calls or interrupted background jobs.
 - Read-only plan mode through `/plan`, followed by `/go`.
@@ -165,7 +165,7 @@ The tool takes an optional egress proxy, off by default: set `WEBSEARCH_PROXY` t
 
 The **tool registration** is automatic: noob registers a `websearch` tool whenever the CLI is on PATH, taking an `action` (`init`, `search`, `fetch`, `open`, `arxiv`, `github`, `doctor`) plus typed fields. It builds a fixed argv and runs the binary directly, with no shell in between, so no value the model sends can become a flag or a second command. Results come back wrapped as untrusted, the same treatment MCP results got. Set `NOOB_WEBSEARCH=off` to unregister it, or to a path to point it at a different binary.
 
-The **skill** is a `SKILL.md` in the config that tells the model to run `init` first and which action to reach for after. The installer seeds it, and it doubles as the Bash instructions for a session where the tool is not registered.
+The **skill** is a `SKILL.md` in the config that tells the model to run `init` first and which action to reach for after. The installer seeds it, upgrades the exact pre-0.3.0 copy, and leaves custom copies unchanged. It doubles as the Bash instructions for a session where the tool is not registered.
 
 The opt-in live test gives qwen a research prompt and asserts that the JSON event stream contains a `websearch` search call and a grounded answer.
 
@@ -206,7 +206,7 @@ The mounted config directory contains `.env`, optional `AGENTS.md`, `mcp.json`, 
 | `NOOB_TASK_CONCURRENCY` | `4` | Concurrent child limit | process start |
 | `NOOB_TASK_MAX_TURNS` | `25` | Child inference-round limit | process start |
 | `NOOB_TASK_WALL_CLOCK_S` | `300` | Child wall-clock limit | process start |
-| `NOOB_TOOL_CAPS` | enabled | Set `0` (or `off`) to lift every tool-output truncation cap: read, bash, grep, glob/ls, skill, and MCP results flow through whole | process start |
+| `NOOB_TOOL_CAPS` | enabled | Set `0` (or `off`) to lift every tool-output truncation cap: read, bash, grep, glob/ls, skill, websearch, and MCP results flow through whole | process start |
 | `NOOB_READ_DEDUP` | enabled | Set `0` (or `off`) to print every `read` in full. On, a whole-file read of content already in context returns a one-line note instead of the body, and reading again prints it | process start |
 | `NOOB_SKILL_PATHS` | none | Colon-separated skill directories, each resolved against the workspace and registered as one resolver skill (so a `cli/SKILL.md` dispatcher is discovered without copying it into a skills root) | `.env`: `/skills reload`; environment: process start |
 | `NOOB_ENV` | none | Comma-separated allowlist of extra environment variable names the host launcher forwards into the container (for a workflow's own variables) | process start (launcher) |
@@ -231,19 +231,9 @@ Display variables can be set in the shell or the checkout's root `.env` for Comp
 
 ## Prompt budget
 
-The fixed first-request overhead is small and locked. `noob debug prompt --json` prints the exact system prompt and tool schemas the binary sends, and a budget test keeps that artifact under 1,600 tokens (o200k tokenizer) with every tool, a skill, and an MCP server registered, against a hard limit of 2,000.
+`noob debug prompt --json` prints the exact system prompt and tool schemas the binary sends. The budget test registers all 14 tools, including websearch and both generic MCP tools, plus a skill and an MCP server. That artifact is 1,870 o200k tokens: 557 for the assembled system prompt and 1,313 for tool schemas. The locked ceiling is 1,900 and the hard limit is 2,000.
 
-Measured on the stock install (web-search skill and MCP server, all 13 tools) against qwen3.6-35b-a3b on llama.cpp:
-
-| Piece | Tokens |
-|---|---|
-| System prompt | 610 |
-| Tool schemas, 13 tools | 934 |
-| noob total | 1,544 |
-| Chat template and message framing added by the server | 527 |
-| First request total | 2,071 |
-
-The server-side framing figure is the model's own chat template (qwen3 re-wraps the tools in its `<tools>` block with tool-calling instructions), so it changes with the model and its tokenizer; noob never sends those bytes. llama.cpp caches the prefix, so the overhead is prefilled once per slot, not on every turn: in a 16-request session the server computed 517 tokens on the first call and between 23 and 844 on each later one, against a transcript that reached 14,699 tokens. Reproduce with `noob debug prompt --json` and the server's `/tokenize` endpoint.
+Model-specific chat-template framing is added by the server and is not part of those bytes. llama.cpp caches the prefix, so it is normally prefilled once per slot. Reproduce the noob side with `noob debug prompt --json`; use the server's `/tokenize` endpoint for its framing.
 
 ## Output surfaces
 
