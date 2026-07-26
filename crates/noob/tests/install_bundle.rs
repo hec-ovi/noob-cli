@@ -54,6 +54,75 @@ fn the_image_keeps_the_search_tool_dotenv_out_of_the_workspace() {
     assert!(dockerfile.contains("WORKDIR /work"), "{dockerfile}");
 }
 
+fn run_installer(prefix: &std::path::Path, config: &std::path::Path, root: &std::path::Path) {
+    let log = root.join("docker.log");
+    let path = fake_docker(root);
+    let installed = Command::new("bash")
+        .arg(repo_root().join("install.sh"))
+        .args(["--prefix", prefix.to_str().unwrap()])
+        .env("PATH", &path)
+        .env("HOME", root.join("home"))
+        .env("NOOB_CONFIG_HOME", config)
+        .env("DOCKER_LOG", &log)
+        .output()
+        .unwrap();
+    assert!(
+        installed.status.success(),
+        "installer failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+}
+
+#[test]
+fn installer_migrates_only_the_managed_websearch_mcp_and_skill() {
+    let tmp = tempfile::tempdir().unwrap();
+    let prefix = tmp.path().join("prefix");
+    let config = tmp.path().join("config");
+    let skill_dir = config.join("skills/web-search");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        config.join("mcp.json"),
+        "{\n  \"servers\": {\n    \"websearch\": {\n      \"command\": \"websearch\",\n      \"args\": [\"mcp\"],\n      \"timeout_s\": 60\n    }\n  }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        include_str!("fixtures/web-search-0.2.6.SKILL.md"),
+    )
+    .unwrap();
+
+    run_installer(&prefix, &config, tmp.path());
+
+    assert!(
+        !config.join("mcp.json").exists(),
+        "the exact obsolete managed MCP entry must be removed"
+    );
+    let skill = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
+    assert!(skill.contains("websearch init"), "{skill}");
+    assert!(!skill.contains("equivalent MCP tools"), "{skill}");
+}
+
+#[test]
+fn installer_preserves_custom_websearch_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let prefix = tmp.path().join("prefix");
+    let config = tmp.path().join("config");
+    let skill_dir = config.join("skills/web-search");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let mcp = "{\"servers\":{\"filesystem\":{\"command\":\"fs-mcp\"}}}\n";
+    let skill = "---\nname: web-search\ndescription: custom\n---\ncustom instructions\n";
+    std::fs::write(config.join("mcp.json"), mcp).unwrap();
+    std::fs::write(skill_dir.join("SKILL.md"), skill).unwrap();
+
+    run_installer(&prefix, &config, tmp.path());
+
+    assert_eq!(std::fs::read_to_string(config.join("mcp.json")).unwrap(), mcp);
+    assert_eq!(
+        std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
+        skill
+    );
+}
+
 #[test]
 fn installer_builds_image_installs_launcher_and_forwards_restore() {
     let tmp = tempfile::tempdir().unwrap();

@@ -66,12 +66,43 @@ install -m 0755 "$ROOT/scripts/noob" "$destination"
 
 config_home="${NOOB_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/noob}"
 install -d "$config_home/skills"
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+# noob 0.5.1 and earlier seeded this exact file. websearch-skill 0.3.0
+# removed its MCP server, so leaving the managed entry behind makes every
+# attempted connection run a command that no longer exists. Only remove the
+# byte-exact seeded file; a user-edited MCP configuration remains theirs.
+legacy_websearch_mcp_sha256=a833367a645cba67541f308395eccbc15c8c21aa70c0af732d5b9f2b2aa17808
+mcp_config="$config_home/mcp.json"
+if [[ -f "$mcp_config" ]] \
+    && [[ "$(sha256_file "$mcp_config" 2>/dev/null || true)" == "$legacy_websearch_mcp_sha256" ]]; then
+    rm -f -- "$mcp_config"
+    echo "Removed obsolete managed websearch MCP configuration."
+fi
+
 if [[ -d "$ROOT/config/skills" ]]; then
     for skill in "$ROOT"/config/skills/*; do
         [[ -d "$skill" ]] || continue
         target="$config_home/skills/$(basename "$skill")"
         if [[ ! -e "$target" ]]; then
             cp -R "$skill" "$target"
+        elif [[ "$(basename "$skill")" == web-search && -f "$target/SKILL.md" ]]; then
+            # Upgrade only the exact 0.2.6 skill noob used to seed. Custom
+            # copies and independently installed skills are never overwritten.
+            legacy_websearch_skill_sha256=29cedb3972661289f254f9711fa90ea983e8b8fb504de35f51c5a27e7cbf9859
+            if [[ "$(sha256_file "$target/SKILL.md" 2>/dev/null || true)" == "$legacy_websearch_skill_sha256" ]]; then
+                install -m 0644 "$skill/SKILL.md" "$target/SKILL.md"
+                echo "Updated the managed web-search skill for the CLI tool."
+            fi
         fi
     done
 fi
