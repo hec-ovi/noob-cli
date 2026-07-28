@@ -33,6 +33,12 @@ pub struct Config {
 
     pub show_activity: bool,
     pub show_files: bool,
+    /// Whether the avatar view exists at all. On by default, and the one
+    /// setting somebody is definitely going to want off.
+    pub show_avatar: bool,
+    /// A clip to play instead of the one built in. Anything `gui/asciify`
+    /// produced. Unset plays the built-in one.
+    pub avatar: Option<PathBuf>,
 
     /// Keys in the file this build does not know. Reported, never dropped.
     pub unknown: Vec<String>,
@@ -54,6 +60,8 @@ impl Default for Config {
             bar: [0x0e, 0x2e, 0x1e],
             show_activity: true,
             show_files: true,
+            show_avatar: true,
+            avatar: None,
             unknown: Vec::new(),
         }
     }
@@ -109,6 +117,15 @@ impl Config {
                 "bar" => set(&mut config.bar, color(&value)),
                 "show_activity" => set(&mut config.show_activity, boolean(&value)),
                 "show_files" => set(&mut config.show_files, boolean(&value)),
+                "show_avatar" => set(&mut config.show_avatar, boolean(&value)),
+                // Empty means the built-in clip, which is what the shipped
+                // file says, so a key left as written is not a broken path.
+                "avatar" => {
+                    config.avatar = Some(value.trim())
+                        .filter(|path| !path.is_empty())
+                        .map(PathBuf::from);
+                    true
+                }
                 _ => false,
             };
             if !known {
@@ -237,6 +254,14 @@ bar    = #0e2e1e        # the title and status bars
 # Panes. A hidden pane gives its room to the conversation.
 show_activity = true
 show_files    = true
+
+# The animated ASCII avatar, as its own view. Off removes the tab entirely.
+show_avatar = true
+
+# A clip to play instead of the one built in. Any file `gui/asciify` produced:
+#   cargo run -p asciify -- your.gif your.txt --cols 40
+# Empty plays the built-in one.
+avatar =
 ";
 
 #[cfg(test)]
@@ -271,6 +296,8 @@ mod tests {
             "bar",
             "show_activity",
             "show_files",
+            "show_avatar",
+            "avatar",
         ] {
             assert!(keys.contains(&key.to_string()), "{key} is undocumented");
         }

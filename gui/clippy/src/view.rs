@@ -400,6 +400,9 @@ pub struct Frame<'a> {
     pub hot: Option<Hit>,
     /// Shown in the title bar when the agent could not be reached.
     pub trouble: Option<&'a str>,
+    /// The avatar clip and how far into it we are. None when the settings
+    /// turned it off or the named clip could not be read.
+    pub avatar: Option<(&'a crate::avatar::Avatar, u64)>,
 }
 
 pub fn build(frame: &Frame) -> Scene {
@@ -562,7 +565,48 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
         Some(View::Hardware) => gauges(scene, frame, panel, frame.monitor.hardware(), true),
         Some(View::Llm) => gauges(scene, frame, panel, frame.monitor.llm(), false),
         Some(View::Files) => files(scene, frame, panel),
+        Some(View::Avatar) => avatar(scene, frame, panel),
     }
+}
+
+/// The avatar, centred in its panel.
+///
+/// Centred rather than pinned to a corner because it is the one view whose
+/// content does not grow: everything else is a list that starts at the top and
+/// runs down, and this is a picture.
+fn avatar(scene: &mut Scene, frame: &Frame, panel: Panel) {
+    let skin = frame.skin;
+    let Some((clip, at_ms)) = frame.avatar else {
+        text_box(
+            scene,
+            frame,
+            panel,
+            frame.pane_size,
+            vec![Run::tinted("avatar off", skin.dim)],
+        );
+        return;
+    };
+    let lines = clip.frame_at(at_ms);
+    let content = panel.inset(PAD);
+    let line_h = Text::line_for(frame.pane_size);
+    let (w, h) = (
+        clip.cols as f32 * frame.pane_column,
+        lines.len() as f32 * line_h,
+    );
+    // A clip larger than the space it is in is drawn from the top left rather
+    // than off both edges, which is what a negative offset would do.
+    let box_ = Panel::new(
+        content.x + ((content.w - w) / 2.0).max(0.0),
+        content.y + ((content.h - h) / 2.0).max(0.0),
+        w.min(content.w).max(1.0),
+        h.min(content.h).max(line_h),
+    );
+    let mut runs = Vec::new();
+    for line in lines {
+        runs.push(Run::tinted(line, skin.body));
+        runs.push(Run::plain("\n"));
+    }
+    scene.text(Text::rich(runs, box_, frame.pane_size, skin.body));
 }
 
 fn text_box(scene: &mut Scene, frame: &Frame, panel: Panel, size: f32, runs: Vec<Run>) {
@@ -1154,6 +1198,9 @@ mod tests {
         let shape = shape(dock, files);
         let layout = Layout::compute(w, h, &shape);
         let skin = Skin::from(&Config::default());
+        // The clip that ships, at a real point in its loop, so the avatar view
+        // is exercised at its actual size rather than as a placeholder.
+        let clip = crate::avatar::Avatar::built_in();
         let scene = build(&Frame {
             state,
             monitor,
@@ -1170,6 +1217,7 @@ mod tests {
             drag,
             hot: None,
             trouble: None,
+            avatar: clip.as_ref().map(|clip| (clip, 700)),
         });
         Rendered {
             scene,
@@ -1370,6 +1418,40 @@ mod tests {
         let _ = dragging.skin;
     }
 
+    /// The avatar draws, moves, and stays inside its panel. It is the one
+    /// view whose content is a fixed-size picture rather than a list, so it is
+    /// also the one that can overflow a small pane instead of scrolling.
+    #[test]
+    fn the_avatar_animates_inside_its_own_panel() {
+        let state = busy_state();
+        let mut dock = Dock::new();
+        dock.reveal(View::Avatar);
+        let body = |w: f32, h: f32| {
+            let out = render(&state, w, h, &dock, &["a.rs"]);
+            let panel = out.layout.placed(Space::BottomRight).body;
+            let drawn: Vec<String> = out
+                .scene
+                .texts
+                .iter()
+                .filter(|t| {
+                    t.at.x >= panel.x - 0.5
+                        && t.at.y >= panel.y - 0.5
+                        && t.at.x + t.at.w <= panel.x + panel.w + 0.5
+                        && t.at.y + t.at.h <= panel.y + panel.h + 0.5
+                })
+                .map(|t| t.runs.iter().map(|r| r.text.as_str()).collect::<String>())
+                .collect();
+            drawn.join("")
+        };
+        let wide = body(1400.0, 900.0);
+        assert!(wide.contains('#') || wide.contains('%'), "nothing drawn: {wide:?}");
+        // It is not a placeholder: the clip is playing.
+        assert!(!wide.contains("avatar off"), "{wide:?}");
+        // And it still fits when the pane is small, which is where a
+        // fixed-size picture would otherwise run past its panel.
+        assert!(!body(700.0, 400.0).is_empty());
+    }
+
     /// Every text box must be able to hold at least one line of its own size.
     /// A box shorter than that draws the text and clips every pixel of it,
     /// which reads as the interface being broken.
@@ -1546,6 +1628,7 @@ mod tests {
                 drag: None,
                 hot: None,
                 trouble: None,
+            avatar: None,
             });
             let body = layout.placed(Space::TopRight).body;
             let bar_right = scene
@@ -1604,6 +1687,7 @@ mod tests {
                 drag: None,
                 hot: None,
                 trouble: None,
+            avatar: None,
             });
             (layout.input, scene)
         };
@@ -1683,6 +1767,7 @@ mod tests {
             drag: None,
             hot: None,
             trouble: None,
+            avatar: None,
         });
         let text = text_of(&scene);
         assert!(text.contains("WORKING") || text.contains("THINKING"), "{text}");

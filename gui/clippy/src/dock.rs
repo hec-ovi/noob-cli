@@ -26,6 +26,9 @@ pub enum View {
     Llm,
     /// The files the agent has touched, with its own inner tab per file.
     Files,
+    /// The animated ASCII avatar. Decorative on purpose, and the one view
+    /// that shows nothing about the session.
+    Avatar,
 }
 
 impl View {
@@ -33,7 +36,7 @@ impl View {
     /// [`Dock::new`] rather than from this, so outside the tests it is the
     /// definition rather than a thing anyone iterates.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub const ALL: [View; 7] = [
+    pub const ALL: [View; 8] = [
         View::Talk,
         View::Activity,
         View::Plan,
@@ -41,6 +44,7 @@ impl View {
         View::Hardware,
         View::Llm,
         View::Files,
+        View::Avatar,
     ];
 
     pub fn label(self) -> &'static str {
@@ -52,6 +56,7 @@ impl View {
             View::Hardware => "HARDWARE",
             View::Llm => "LLM",
             View::Files => "FILES",
+            View::Avatar => "CLIPPY",
         }
     }
 }
@@ -130,6 +135,10 @@ impl Slot {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Dock {
     slots: [Slot; 3],
+    /// Views the settings turned off. Kept rather than merely absent, so a
+    /// hidden view cannot be dragged back in and so the soundness check knows
+    /// which views it is supposed to find.
+    hidden: Vec<View>,
 }
 
 impl Default for Dock {
@@ -142,7 +151,25 @@ impl Dock {
     /// The arrangement the window opens with: the conversation on the left,
     /// what the agent is doing above right, what it has touched below.
     pub fn new() -> Dock {
+        Dock::hiding(&[])
+    }
+
+    /// The same arrangement without the views the settings turned off. A
+    /// hidden view is not a folded one: it has no tab and nothing walks to it.
+    pub fn hiding(hidden: &[View]) -> Dock {
+        let mut dock = Dock::full();
+        for view in hidden {
+            for space in Space::ALL {
+                dock.slot_mut(space).remove(*view);
+            }
+        }
+        dock.hidden = hidden.to_vec();
+        dock
+    }
+
+    fn full() -> Dock {
         Dock {
+            hidden: Vec::new(),
             slots: [
                 Slot {
                     views: vec![View::Talk],
@@ -161,7 +188,10 @@ impl Dock {
                     folded: false,
                 },
                 Slot {
-                    views: vec![View::Files],
+                    // The avatar sits behind the files rather than beside the
+                    // conversation: it is the one view with nothing to say,
+                    // so it must never be what a space opens on.
+                    views: vec![View::Files, View::Avatar],
                     active: 0,
                     folded: false,
                 },
@@ -189,7 +219,7 @@ impl Dock {
     /// Dropping a view back where it already is is a no-op rather than a
     /// reorder: a drag that ends where it started should change nothing.
     pub fn move_view(&mut self, view: View, to: Space) -> bool {
-        if self.space_of(view) == Some(to) {
+        if self.hidden.contains(&view) || self.space_of(view) == Some(to) {
             return false;
         }
         for space in Space::ALL {
@@ -234,11 +264,12 @@ impl Dock {
     #[cfg(test)]
     fn is_sound(&self) -> bool {
         View::ALL.into_iter().all(|view| {
+            let want = usize::from(!self.hidden.contains(&view));
             Space::ALL
                 .into_iter()
                 .filter(|space| self.slot(*space).views.contains(&view))
                 .count()
-                == 1
+                == want
         }) && Space::ALL.into_iter().all(|space| {
             let slot = self.slot(space);
             slot.views.is_empty() || slot.active < slot.views.len()
@@ -258,6 +289,11 @@ mod tests {
         assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Activity));
         assert_eq!(dock.slot(Space::BottomRight).active(), Some(View::Files));
         assert_eq!(dock.walk().len(), View::ALL.len());
+        // The avatar is present and is not what anything opens on.
+        assert_eq!(dock.space_of(View::Avatar), Some(Space::BottomRight));
+        for space in Space::ALL {
+            assert_ne!(dock.slot(space).active(), Some(View::Avatar));
+        }
     }
 
     /// The invariant the rest of the window relies on: whatever gets dragged
@@ -356,6 +392,32 @@ mod tests {
         }
         assert_eq!(seen.len(), View::ALL.len());
         assert_eq!(dock.after(at), Some(View::Talk), "and it wraps");
+    }
+
+    /// A view the settings turned off has no tab, nothing walks to it, and it
+    /// cannot be dragged back in.
+    #[test]
+    fn a_hidden_view_is_gone_rather_than_folded() {
+        let dock = Dock::hiding(&[View::Avatar, View::Files]);
+        assert!(dock.is_sound());
+        assert_eq!(dock.space_of(View::Avatar), None);
+        assert_eq!(dock.space_of(View::Files), None);
+        assert_eq!(dock.walk().len(), View::ALL.len() - 2);
+        assert!(!dock.walk().contains(&View::Avatar));
+        // The space they were the only occupants of is empty, not broken.
+        assert!(dock.slot(Space::BottomRight).is_empty());
+        assert_eq!(dock.slot(Space::BottomRight).active(), None);
+
+        let mut dock = dock;
+        assert!(!dock.move_view(View::Avatar, Space::Left));
+        assert_eq!(dock.space_of(View::Avatar), None);
+        assert!(dock.is_sound());
+        // The views that are on still walk, and still wrap.
+        let mut at = View::Talk;
+        for _ in 0..dock.walk().len() {
+            at = dock.after(at).unwrap();
+        }
+        assert_eq!(at, View::Talk);
     }
 
     #[test]

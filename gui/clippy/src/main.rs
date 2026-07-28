@@ -17,6 +17,7 @@
 //! Usage: `clippy [workspace]`, with `NOOB_BIN` naming the agent binary when it
 //! is not `noob` on PATH. Settings live beside noob's own; see `config`.
 
+mod avatar;
 mod config;
 mod dock;
 mod link;
@@ -83,6 +84,10 @@ struct App {
     skin: Skin,
     link: Option<Link>,
     trouble: Option<String>,
+    /// The avatar clip. None when the settings turned it off, or named one
+    /// that could not be read. It plays off `epoch`, the same clock the rest
+    /// of the window measures against.
+    avatar: Option<avatar::Avatar>,
 
     input: String,
     caret: usize,
@@ -110,7 +115,32 @@ struct App {
 impl App {
     fn new(proxy: EventLoopProxy<Wake>, config: Config) -> App {
         let skin = Skin::from(&config);
+        // Read once, at startup. A clip the settings named that cannot be read
+        // falls back to the built-in one rather than to nothing: a typo in a
+        // path should not silently remove a view.
+        let avatar = config.show_avatar.then(|| {
+            config
+                .avatar
+                .as_deref()
+                .and_then(avatar::Avatar::load)
+                .or_else(avatar::Avatar::built_in)
+        });
+        // A view the settings turned off has no tab at all. Folding it away
+        // would leave a strip saying the name of something you asked not to
+        // see, which is not the same thing.
+        let mut hidden = Vec::new();
+        if !config.show_activity {
+            hidden.push(View::Activity);
+        }
+        if !config.show_files {
+            hidden.push(View::Files);
+        }
+        if !config.show_avatar {
+            hidden.push(View::Avatar);
+        }
         App {
+            dock: Dock::hiding(&hidden),
+            avatar: avatar.flatten(),
             window: None,
             gpu: None,
             renderer: None,
@@ -125,7 +155,6 @@ impl App {
             trouble: None,
             input: String::new(),
             caret: 0,
-            dock: Dock::new(),
             holding: None,
             drag: None,
             shaded: false,
@@ -538,6 +567,10 @@ impl App {
             drag: self.drag,
             hot: self.hot,
             trouble: self.trouble.as_deref(),
+            avatar: self
+                .avatar
+                .as_ref()
+                .map(|clip| (clip, self.epoch.elapsed().as_millis() as u64)),
         });
         renderer.draw(gpu, &scene, frame);
         self.dirty = false;
@@ -701,14 +734,18 @@ impl ApplicationHandler<Wake> for App {
     /// an interface showing static text should cost nothing, and polling is how
     /// a UI silently eats a GPU.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // The monitor is the one thing that changes without an event, so it is
-        // the one thing that gets a clock, and only while it is on screen.
-        let watching = !self.shaded
-            && Space::ALL.into_iter().any(|space| {
-                let slot = self.dock.slot(space);
-                !slot.folded && matches!(slot.active(), Some(View::Hardware) | Some(View::Llm))
-            });
-        if watching {
+        // The monitor and the avatar are the two things that change without an
+        // event, so they are the two things that get a clock, and only while
+        // they are on screen. Everything else redraws because something
+        // happened, which is what keeps an idle window free.
+        let showing = |wanted: &[View]| {
+            !self.shaded
+                && Space::ALL.into_iter().any(|space| {
+                    let slot = self.dock.slot(space);
+                    !slot.folded && slot.active().is_some_and(|view| wanted.contains(&view))
+                })
+        };
+        if showing(&[View::Hardware, View::Llm]) {
             let now = Instant::now();
             if self.next_sample.is_none_or(|at| now >= at) {
                 self.monitor.sample(&self.state);
@@ -718,8 +755,23 @@ impl ApplicationHandler<Wake> for App {
         } else {
             self.next_sample = None;
         }
+        // The avatar wakes for exactly one frame's delay, not on a fixed rate:
+        // a clip holding a frame for a second must not cost sixty redraws.
+        let next_frame = self
+            .avatar
+            .as_ref()
+            .filter(|_| showing(&[View::Avatar]))
+            .map(|clip| {
+                let hold = clip.hold_ms(self.epoch.elapsed().as_millis() as u64);
+                self.dirty = true;
+                Instant::now() + Duration::from_millis(hold)
+            });
         self.redraw();
-        event_loop.set_control_flow(match self.next_sample {
+        let next = match (self.next_sample, next_frame) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (only, None) | (None, only) => only,
+        };
+        event_loop.set_control_flow(match next {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
         });

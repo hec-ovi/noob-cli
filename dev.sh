@@ -110,6 +110,19 @@ case "${1:-}" in
     echo "clippy runtime crates: $crates"
     [ "$crates" -le 400 ] || { echo "FAIL: CLIppy crate graph exceeds 400"; exit 1; }
     ;;
+  avatar)
+    # Regenerate CLIppy's ASCII avatar from a GIF. The window never decodes an
+    # image: this runs once, here, and what ships is its output.
+    shift
+    [ $# -ge 1 ] || { echo "usage: ./dev.sh avatar <in.gif> [out.txt] [--cols N]" >&2; exit 2; }
+    input=$1; shift
+    case "${1-}" in
+      ""|--*) out=gui/clippy/avatar/clippy.txt ;;
+      *) out=$1; shift ;;
+    esac
+    cargo run --release --manifest-path gui/Cargo.toml -p asciify -- \
+      "$(realpath "$input")" "$(realpath -m "$out")" "$@"
+    ;;
   clean)
     rm -rf target .cargo-home gui/target
     ;;
@@ -121,6 +134,7 @@ case "${1:-}" in
     echo "  ./dev.sh install|test|build|docker|exec \"prompt\"|smoke|size-check|clean"
     echo "  ./dev.sh gui [workspace]     open CLIppy, the GPU front end"
     echo "  ./dev.sh gui-test|gui-check  CLIppy tests and its own size gate"
+    echo "  ./dev.sh avatar <in.gif>     regenerate CLIppy's ASCII avatar"
     ;;
   # Bare `./dev.sh`, or leading-dash noob flags (--session, --plan, ...): open
   # the agent. `repl` is kept as a silent alias for old muscle memory.

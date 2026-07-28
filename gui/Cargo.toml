@@ -6,7 +6,7 @@
 # they are kept apart and share exactly one thing: `crates/noob-proto`, by path.
 [workspace]
 resolver = "2"
-members = ["noob-gpu", "noob-draw", "clippy"]
+members = ["noob-gpu", "noob-draw", "clippy", "asciify"]
 
 [workspace.package]
 version = "0.1.0"
