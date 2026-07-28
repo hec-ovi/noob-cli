@@ -36,6 +36,13 @@ pub const OVERRIDE_VAR: &str = "NOOB_WEBSEARCH";
 /// engine in series; a 120s default would report those as timeouts.
 const INIT_TIMEOUT_S: u64 = 420;
 const DOCTOR_TIMEOUT_S: u64 = 240;
+/// `tor up` may download and verify the Tor Expert Bundle before waiting on a
+/// bootstrap through three relays.
+const TOR_TIMEOUT_S: u64 = 300;
+/// An onion search runs through three relays; ten to thirty seconds is normal
+/// there, and a clearnet-sized budget would report working searches as
+/// timeouts.
+const ONION_TIMEOUT_S: u64 = 180;
 const DEFAULT_TIMEOUT_S: u64 = 90;
 const MAX_TIMEOUT_S: u64 = 600;
 
@@ -81,19 +88,26 @@ pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "websearch".to_string(),
         description:
+            // Every word here is paid on every request forever, so the action
+            // enum below carries the per-action detail and this says only what
+            // the tool is and the one thing to do first.
             "Search the web, fetch a page as clean Markdown, or find papers and repositories. \
-             Run action=\"init\" once before searching to start SearXNG and check capabilities. \
-             Use search to find pages, fetch to read one, and open with a prior handle to \
-             continue a document."
+             Run action=\"init\" once before searching."
                 .to_string(),
         parameters: json!({"type": "object", "properties": {
             "action": {
                 "type": "string",
-                "enum": ["init", "search", "fetch", "open", "arxiv", "github", "doctor"],
+                "enum": ["init", "search", "fetch", "open", "arxiv", "github", "tor", "doctor"],
                 "description": "init: bring the tool online and report what works. \
                                 search: find pages. fetch: read one URL. open: another page \
                                 of a fetched document. arxiv/github: papers, repositories. \
+                                tor: route through Tor. \
                                 doctor: why searches are coming back empty."
+            },
+            "state": {"type": "string", "enum": ["up", "status", "down"]},
+            "onion": {
+                "type": "boolean",
+                "description": "search: onion services, not the clearnet; needs tor up"
             },
             "query": {"type": "string", "description": "search/arxiv/github: what to look for"},
             "url": {"type": "string", "description": "fetch: an absolute http(s) URL"},
@@ -150,6 +164,21 @@ fn optional(args: &Value, key: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// A boolean switch. Small models send `"true"` about as often as `true`, and
+/// rejecting the string spends a round teaching JSON rather than doing work.
+fn flag(args: &Value, key: &str) -> Result<bool, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(on)) => Ok(*on),
+        Some(Value::String(text)) => match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "on" | "1" => Ok(true),
+            "false" | "no" | "off" | "0" | "" => Ok(false),
+            other => Err(format!("{key} must be true or false, not {other:?}")),
+        },
+        Some(other) => Err(format!("{key} must be true or false, not {other}")),
+    }
+}
+
 fn count(args: &Value, key: &str, max: u64) -> Result<Option<u64>, String> {
     match opt_u64(args, key)? {
         None => Ok(None),
@@ -158,11 +187,16 @@ fn count(args: &Value, key: &str, max: u64) -> Result<Option<u64>, String> {
     }
 }
 
-fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
+/// Translate tool arguments into the exact argv this CLI is run with, plus
+/// whether a successful call counts as consulting a source (`init`, `doctor`
+/// and `tor` report on the installation; they are not evidence of research).
+///
+/// Split out from the process work so the argv is testable without spawning
+/// anything: this is the boundary where model-supplied text becomes a command
+/// line, and it runs with no shell.
+fn build_argv(args: &Value) -> Result<(String, Vec<String>, bool), String> {
     let action = value(args, "action")?;
     let mut argv: Vec<String> = Vec::new();
-    // Whether a successful call counts as consulting a source. init and doctor
-    // report on the installation; they are not evidence of research.
     let mut evidence = true;
     match action.as_str() {
         "init" => {
@@ -192,6 +226,9 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
                 }
                 argv.push("--freshness".into());
                 argv.push(freshness);
+            }
+            if flag(args, "onion")? {
+                argv.push("--onion".into());
             }
         }
         "fetch" => {
@@ -230,18 +267,44 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
                 argv.push(language);
             }
         }
+        "tor" => {
+            // Off by default and never implied: nothing leaves through Tor
+            // until this runs, so the model has to ask for it explicitly.
+            let state = optional(args, "state")?.unwrap_or_else(|| "status".to_string());
+            if !["up", "status", "down"].contains(&state.as_str()) {
+                return Err(format!("state {state:?} is not one of up, status, down"));
+            }
+            argv.push("tor".into());
+            argv.push(state);
+            evidence = false;
+        }
         other => {
             return Err(format!(
-                "unknown action {other:?}; use init, search, fetch, open, arxiv, github, or doctor"
+                "unknown action {other:?}; use init, search, fetch, open, arxiv, github, tor, \
+                 or doctor"
             ));
         }
     }
+    Ok((action, argv, evidence))
+}
 
-    let default_timeout = match action.as_str() {
+/// How long this call gets when the model does not say. A budget sized for a
+/// clearnet request reports a working onion search as a timeout, and one sized
+/// for onion latency lets a broken clearnet search hang.
+fn default_timeout_for(action: &str, argv: &[String]) -> u64 {
+    match action {
         "init" => INIT_TIMEOUT_S,
         "doctor" => DOCTOR_TIMEOUT_S,
+        "tor" => TOR_TIMEOUT_S,
+        _ if argv.iter().any(|arg| arg == "--onion") => ONION_TIMEOUT_S,
         _ => DEFAULT_TIMEOUT_S,
-    };
+    }
+}
+
+fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
+    let (action, argv, evidence) = build_argv(args)?;
+    let default_timeout = default_timeout_for(&action, &argv);
+
     let timeout_s = opt_u64(args, "timeout_s")?
         .unwrap_or(default_timeout)
         .clamp(1, MAX_TIMEOUT_S);
@@ -327,6 +390,77 @@ mod tests {
             "{}",
             out.content
         );
+    }
+
+    fn argv(args: Value) -> Vec<String> {
+        build_argv(&args).unwrap().1
+    }
+
+    /// Tor is a change to how every later request leaves the machine, so it is
+    /// never implied by another action: it has its own verb and defaults to
+    /// reporting rather than starting.
+    #[test]
+    fn tor_is_explicit_and_reports_by_default() {
+        assert_eq!(argv(json!({"action": "tor"})), ["tor", "status"]);
+        assert_eq!(argv(json!({"action": "tor", "state": "up"})), ["tor", "up"]);
+        assert_eq!(
+            argv(json!({"action": "tor", "state": "down"})),
+            ["tor", "down"]
+        );
+        let (_, _, evidence) = build_argv(&json!({"action": "tor", "state": "up"})).unwrap();
+        assert!(!evidence, "bringing Tor up is not research");
+    }
+
+    #[test]
+    fn an_unknown_tor_state_is_refused_before_the_wire() {
+        let error = build_argv(&json!({"action": "tor", "state": "restart"})).unwrap_err();
+        assert!(error.contains("up, status, down"), "{error}");
+    }
+
+    /// The onion switch reaches the CLI as a flag, and a string boolean is
+    /// accepted because a small model sends one about as often as a real one.
+    #[test]
+    fn an_onion_search_passes_the_flag_and_tolerates_a_string_boolean() {
+        assert_eq!(
+            argv(json!({"action": "search", "query": "market", "onion": true})),
+            ["web-search", "market", "--onion"]
+        );
+        assert_eq!(
+            argv(json!({"action": "search", "query": "market", "onion": "true"})),
+            ["web-search", "market", "--onion"]
+        );
+        assert_eq!(
+            argv(json!({"action": "search", "query": "market", "onion": false})),
+            ["web-search", "market"]
+        );
+        assert_eq!(
+            argv(json!({"action": "search", "query": "market"})),
+            ["web-search", "market"]
+        );
+    }
+
+    #[test]
+    fn a_non_boolean_onion_value_names_the_problem() {
+        let error =
+            build_argv(&json!({"action": "search", "query": "x", "onion": "maybe"})).unwrap_err();
+        assert!(error.contains("true or false"), "{error}");
+    }
+
+    /// Three relays make ten to thirty seconds normal, so an onion search
+    /// inherits a longer budget than a clearnet one or it reports working
+    /// searches as timeouts.
+    #[test]
+    fn onion_and_tor_get_their_own_timeouts() {
+        let onion = argv(json!({"action": "search", "query": "x", "onion": true}));
+        let clearnet = argv(json!({"action": "search", "query": "x"}));
+        assert_eq!(default_timeout_for("search", &onion), ONION_TIMEOUT_S);
+        assert_eq!(default_timeout_for("search", &clearnet), DEFAULT_TIMEOUT_S);
+        assert!(
+            default_timeout_for("search", &onion) > default_timeout_for("search", &clearnet),
+            "three relays need more than a clearnet budget"
+        );
+        assert_eq!(default_timeout_for("tor", &[]), TOR_TIMEOUT_S);
+        assert_eq!(default_timeout_for("init", &[]), INIT_TIMEOUT_S);
     }
 
     #[test]

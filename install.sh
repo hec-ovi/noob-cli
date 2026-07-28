@@ -96,13 +96,22 @@ if [[ -d "$ROOT/config/skills" ]]; then
         if [[ ! -e "$target" ]]; then
             cp -R "$skill" "$target"
         elif [[ "$(basename "$skill")" == web-search && -f "$target/SKILL.md" ]]; then
-            # Upgrade only the exact 0.2.6 skill noob used to seed. Custom
-            # copies and independently installed skills are never overwritten.
-            legacy_websearch_skill_sha256=29cedb3972661289f254f9711fa90ea983e8b8fb504de35f51c5a27e7cbf9859
-            if [[ "$(sha256_file "$target/SKILL.md" 2>/dev/null || true)" == "$legacy_websearch_skill_sha256" ]]; then
-                install -m 0644 "$skill/SKILL.md" "$target/SKILL.md"
-                echo "Updated the managed web-search skill for the CLI tool."
-            fi
+            # Upgrade only a copy noob itself seeded, identified byte for byte.
+            # Every previously shipped version is listed, so a user who skips
+            # releases still gets the current skill; a copy they edited matches
+            # none of these and stays theirs.
+            managed_websearch_skill_sha256=(
+                29cedb3972661289f254f9711fa90ea983e8b8fb504de35f51c5a27e7cbf9859  # 0.2.6 era
+                c74a632085bc1a7e093cd0608cf431ec5f110af094433e565a341ced34f77441  # 0.3.0 era
+            )
+            current="$(sha256_file "$target/SKILL.md" 2>/dev/null || true)"
+            for known in "${managed_websearch_skill_sha256[@]}"; do
+                if [[ "$current" == "$known" ]]; then
+                    install -m 0644 "$skill/SKILL.md" "$target/SKILL.md"
+                    echo "Updated the managed web-search skill for the CLI tool."
+                    break
+                fi
+            done
         fi
     done
 fi

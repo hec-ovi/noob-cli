@@ -154,6 +154,8 @@ websearch web-fetch "https://example.com/page"
 websearch web-open "site.example~handle" --page 2
 websearch arxiv "paper topic"
 websearch github "repository topic" --language Rust
+websearch tor up                   # off by default; then status, then down
+websearch web-search "query" --onion
 websearch doctor
 ```
 
@@ -163,9 +165,11 @@ There is no MCP server in this path. Up to websearch-skill 0.2.6 there was one, 
 
 The tool takes an optional egress proxy, off by default: set `WEBSEARCH_PROXY` to a proxy URL (`socks5h://user:pass@host:1080`), to `nordvpn`, or to `off`. The `nordvpn` shorthand builds the SOCKS5 URL from the `NORDVPN_USER` and `NORDVPN_PASS` service credentials, with `NORDVPN_HOST` selecting a server. With a proxy set, nothing leaves the container around it, including the hostname lookups the fetch guard used to do locally. `WEBSEARCH_VPN` (`nordvpn` or `any`) routes nothing itself; it declares that egress should be tunneled so the doctor verifies it instead of assuming it. The launcher forwards all of these, plus `WEBSEARCH_SEARXNG_URL`, into the container, so exporting them before running `noob` is all it takes. To keep the credentials out of your shell history, put them in `websearch.env` in the config directory instead. The tool otherwise reads `.env` from its working directory, which inside the container is your project, so the image points it at the config directory: a `.env` of your own is never read, and a `WEBSEARCH_PROXY` line in it cannot silently reroute or break every search.
 
-The **tool registration** is automatic: noob registers a `websearch` tool whenever the CLI is on PATH, taking an `action` (`init`, `search`, `fetch`, `open`, `arxiv`, `github`, `doctor`) plus typed fields. It builds a fixed argv and runs the binary directly, with no shell in between, so no value the model sends can become a flag or a second command. Results come back wrapped as untrusted, the same treatment MCP results got. Set `NOOB_WEBSEARCH=off` to unregister it, or to a path to point it at a different binary.
+Tor is a separate opt-in layer, off until `websearch tor up` runs, and on for everything after it. It uses a Tor already listening, else `tor` on PATH, else the official Expert Bundle checked against its published sha256. With a proxy also set the two chain rather than replace each other, so turning on the layer meant to add a hop never quietly drops one. `websearch tor status` answers whether traffic really leaves through Tor, which is not the same question as whether the port accepts connections. `--onion` swaps the clearnet engines for onion ones, and a `.onion` URL without the layer up fails before anything resolves rather than leaking the name to your resolver on the way to failing.
 
-The **skill** is a `SKILL.md` in the config that tells the model to run `init` first and which action to reach for after. The installer seeds it, upgrades the exact pre-0.3.0 copy, and leaves custom copies unchanged. It doubles as the Bash instructions for a session where the tool is not registered.
+The **tool registration** is automatic: noob registers a `websearch` tool whenever the CLI is on PATH, taking an `action` (`init`, `search`, `fetch`, `open`, `arxiv`, `github`, `tor`, `doctor`) plus typed fields. It builds a fixed argv and runs the binary directly, with no shell in between, so no value the model sends can become a flag or a second command. Onion searches and `tor up` get longer default timeouts than a clearnet call, since three relays make ten to thirty seconds normal and the Expert Bundle may have to be downloaded first. Results come back wrapped as untrusted, the same treatment MCP results got. Set `NOOB_WEBSEARCH=off` to unregister it, or to a path to point it at a different binary.
+
+The **skill** is a `SKILL.md` in the config that tells the model to run `init` first, which action to reach for after, and to leave Tor alone unless it was asked for. The installer seeds it and upgrades any copy it seeded before, identified byte for byte, so skipping a release still lands the current one; a copy you edited matches none of them and stays yours. It doubles as the Bash instructions for a session where the tool is not registered.
 
 The opt-in live test gives qwen a research prompt and asserts that the JSON event stream contains a `websearch` search call and a grounded answer.
 

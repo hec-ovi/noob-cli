@@ -102,6 +102,32 @@ fn installer_migrates_only_the_managed_websearch_mcp_and_skill() {
     assert!(!skill.contains("equivalent MCP tools"), "{skill}");
 }
 
+/// Someone who skipped a release still gets the current skill. Every version
+/// noob has seeded is recognised, not only the most recent one, or an upgrade
+/// silently leaves the capability behind whatever the tool can now do.
+#[test]
+fn installer_migrates_a_managed_skill_from_any_prior_release() {
+    for fixture in [
+        include_str!("fixtures/web-search-0.2.6.SKILL.md"),
+        include_str!("fixtures/web-search-0.3.0.SKILL.md"),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = tmp.path().join("prefix");
+        let config = tmp.path().join("config");
+        let skill_dir = config.join("skills/web-search");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), fixture).unwrap();
+
+        run_installer(&prefix, &config, tmp.path());
+
+        let skill = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
+        assert!(
+            skill.contains("websearch tor up"),
+            "a managed skill was left on an older version: {skill}"
+        );
+    }
+}
+
 #[test]
 fn installer_preserves_custom_websearch_config() {
     let tmp = tempfile::tempdir().unwrap();

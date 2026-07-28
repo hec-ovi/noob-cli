@@ -42,21 +42,3 @@ says instead of retrying the same query.
 PyPI is an unrelated package, this container has no docker, and a server backgrounded with `&`
 is killed when the bash call returns. `websearch searxng status` says whether one is already
 running.
-
-## Tor, only when asked
-
-Nothing goes through Tor until `websearch tor up` runs, and it stays on after that, so treat
-it as a change to how every later request leaves this machine. Turn it on when the user asks
-for it or when a `.onion` address has to be reached, not to route around a site that blocked
-you. `websearch tor status` reports whether traffic really leaves through Tor, which is a
-different question from whether the port answers.
-
-```sh
-websearch tor up                                  # then status, then down when finished
-websearch web-search "query" --onion              # onion services, not the clearnet
-```
-
-`--onion` swaps the clearnet engines for onion ones; the two sets never run together. Onion
-searches and fetches need a `timeout_s` of at least 180: three relays make ten to thirty
-seconds normal. A `.onion` URL fetched without the layer up fails closed and names the
-command that fixes it, so read that message rather than retrying.
