@@ -27,6 +27,7 @@ A space you empty gives its room to its neighbour.
 | HARDWARE | GPU, VRAM, GTT, CPU and RAM |
 | LLM | context, where compaction triggers, cache, total and last prefill and output, and the measured prefill and decode rates |
 | FILES | one tab per file touched, with the diff, a line-number gutter and syntax coloring |
+| CLIPPY | the animated ASCII avatar |
 
 The conversation is rendered as Markdown, because the model writes Markdown
 whether or not anything asked it to: headings, bold, bullets and fenced code
@@ -90,11 +91,25 @@ window down to that one strip, Winamp style: it keeps showing THINKING, WORKING
 or FINISHED with the plan count and how many files changed, so a collapsed
 window is still a status light. Double-click again to bring it back.
 
+The avatar is an animation, not an image. `gui/asciify` turns a GIF into a text
+file once:
+
+```
+./dev.sh avatar docs/clippy-black-1.gif      # writes gui/clippy/avatar/clippy.txt
+```
+
+The window never decodes an image. It plays each frame for that frame's own
+delay, through one timer, and only while the view is on screen, so an avatar
+holding a frame for a second costs one redraw rather than sixty. Point
+`avatar` in the settings at any file the converter produced, or set
+`show_avatar = false` and the tab is gone.
+
 ## Settings
 
 `~/.config/noob/clippy.conf`, written with the defaults on first run and
-commented. Opacity, the seven palette colors, and both font sizes. A key it does
-not recognise is reported in the ACTIVITY pane rather than ignored.
+commented. Opacity, the seven palette colors, both font sizes, which panes
+exist, and the avatar. A key it does not recognise is reported in the ACTIVITY
+pane rather than ignored.
 
 Opacity defaults to 88%. Lower it to see more of your desktop through the
 reading surface; below about 60% a busy wallpaper starts competing with the
@@ -112,6 +127,7 @@ black.
 | `noob-gpu` | adapter, device, surface, what this machine will actually do |
 | `noob-draw` | instanced rectangles and shaped glyphs, and nothing else |
 | `clippy` | the window shell, the layout, the panes, the agent link |
+| `asciify` | GIF to the avatar's text animation, run at authoring time only |
 
 Its own cargo workspace, deliberately. The CLI is capped at 8 MiB and 45 runtime
 crates and those are published claims; a GPU stack is several hundred crates.
@@ -119,8 +135,9 @@ One lockfile for both would put a `workspace = true` between the two budgets.
 They share exactly one thing, `crates/noob-proto`, by path.
 
 CLIppy has its own ceiling, 40 MiB and 400 crates, enforced by
-`./dev.sh gui-check` the same way the CLI's is. It currently uses 10.2 MiB and
-141 crates.
+`./dev.sh gui-check` the same way the CLI's is. It currently uses 10.3 MiB and
+141 crates. `asciify` is a fourth crate in that workspace and is never a
+dependency of the window, so its GIF decoder is not in the binary.
 
 ## Transparency is probed, never assumed
 
@@ -132,7 +149,7 @@ rather than in a log.
 
 ## What is not here yet
 
-Grid tiling, the ASCII avatar, voice, and real tree-sitter highlighting. The file pane uses a small scanner instead: comments,
+Grid tiling, voice, and real tree-sitter highlighting. The file pane uses a small scanner instead: comments,
 strings, numbers and keywords, chosen by file extension. Real grammars are the
 right answer for a full editor view and are also eight crates and several
 megabytes, which is a trade worth making later and not now.

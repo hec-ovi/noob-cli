@@ -4,7 +4,7 @@ noob-cli is a compact Rust agent for OpenAI-compatible model endpoints. It runs 
 
 **`noob tokens <path>...`** counts what a file costs through the model's own tokenizer, by asking the endpoint's `/tokenize` route. Every other token number here is an estimate; this one is the answer for the model actually loaded.
 
-The static release binary is 4,490,176 bytes (4.28 MiB) with 41 runtime crates. There is no async runtime or TUI framework.
+The static release binary is 4,498,368 bytes (4.29 MiB) with 41 runtime crates. There is no async runtime or TUI framework.
 
 ## Showcase
 
