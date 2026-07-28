@@ -140,7 +140,7 @@ pub fn build(frame: &Frame) -> Scene {
     scene.rect(layout.close.fill(skin.caret));
 
     // Title bar: who we are, what we are talking to, and where.
-    let title_box = Panel::new(12.0, 6.0, (width - 12.0 - 40.0).max(1.0), TITLE_H - 6.0);
+    let title_box = Panel::new(0.0, 0.0, width - 28.0, TITLE_H).row(12.0, Text::line_for(SMALL_SIZE));
     let mut title = vec![Run::tinted("NO0B ▸ CLIppy", skin.bright)];
     if let Some(trouble) = frame.trouble {
         title.push(Run::tinted(format!("   {trouble}"), skin.bad));
@@ -169,7 +169,9 @@ pub fn build(frame: &Frame) -> Scene {
     // The input line, with its own caret because there is no system text field.
     scene.rect(layout.input.fill(skin.input));
     scene.rect(layout.input.top_edge(skin.edge_focus));
-    let input_box = layout.input.inset(PAD);
+    // One centred line, not a margin: insetting this bar leaves a box too
+    // short to hold the text, which draws and then clips to nothing.
+    let input_box = layout.input.row(PAD, Text::line_for(BODY_SIZE));
     let prompt = if state.busy { "…" } else { "›" };
     scene.text(Text::rich(
         vec![
@@ -180,11 +182,10 @@ pub fn build(frame: &Frame) -> Scene {
         BODY_SIZE,
         skin.bright,
     ));
+    // Two columns for the prompt, then one per character typed.
     let caret_x = input_box.x + (frame.caret as f32 + 2.0) * frame.column;
     if caret_x < input_box.x + input_box.w {
-        scene.rect(
-            Panel::new(caret_x, input_box.y + 1.0, 2.0, BODY_SIZE * 1.15).fill(skin.caret),
-        );
+        scene.rect(Panel::new(caret_x, input_box.y, 2.0, input_box.h).fill(skin.caret));
     }
 
     // Status: the session budget, as a gauge and as numbers.
@@ -195,25 +196,12 @@ pub fn build(frame: &Frame) -> Scene {
     if used > 0.0 {
         scene.rect(Panel::new(0.0, gauge.y, width * used, 2.0).fill(skin.gauge));
     }
-    // Derived from the bar rather than nudged into place: a box that is moved
-    // without being shrunk runs past an edge, which is the same mistake that
-    // once put one pane's text into the next one's.
-    let line = (SMALL_SIZE * 1.42).round();
-    let status_box = layout
-        .status
-        .inset(((layout.status.h - line) * 0.5).max(0.0))
-        .inset(0.0);
     scene.text(Text::rich(
         vec![
             Run::tinted(format!("{:<12}", state.status), skin.bright),
             Run::tinted(state.budget_line(), skin.title),
         ],
-        Panel::new(
-            status_box.x + 12.0,
-            status_box.y,
-            (status_box.w - 24.0).max(1.0),
-            status_box.h,
-        ),
+        layout.status.row(12.0, Text::line_for(SMALL_SIZE)),
         SMALL_SIZE,
         skin.title,
     ));
@@ -496,7 +484,16 @@ mod tests {
                     "{:?} runs past {h}",
                     text.at
                 );
-                assert!(text.at.w >= 1.0 && text.at.h >= 1.0, "{:?}", text.at);
+                assert!(text.at.w >= 1.0, "{:?}", text.at);
+                // The bug this catches: a box shorter than its own line draws
+                // the text and then clips every pixel of it away, which reads
+                // as the keyboard not working.
+                assert!(
+                    text.at.h >= Text::line_for(text.size),
+                    "{:?} cannot hold one {}pt line at {w}x{h}",
+                    text.at,
+                    text.size
+                );
             }
         }
     }

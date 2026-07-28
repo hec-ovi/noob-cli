@@ -86,6 +86,24 @@ impl Panel {
         )
     }
 
+    /// A single centred row of text inside a bar: `pad` off each side, exactly
+    /// `line` tall, sitting in the middle of whatever height is left.
+    ///
+    /// This exists because insetting a 22-pixel bar by a 9-pixel margin leaves
+    /// a 4-pixel box, and text taller than its box is clipped to nothing. The
+    /// result looks like the text was never drawn, and the caret beside it
+    /// looks misplaced because it is the only thing still visible. A bar wants
+    /// one line centred, not a margin, so it says so.
+    pub fn row(self, pad: f32, line: f32) -> Panel {
+        let line = line.min(self.h).max(1.0);
+        Panel {
+            x: self.x + pad,
+            y: self.y + ((self.h - line) * 0.5).max(0.0).floor(),
+            w: (self.w - 2.0 * pad).max(1.0),
+            h: line,
+        }
+    }
+
     /// Split off `width` from the left, returning (taken, rest).
     pub fn split_left(self, width: f32) -> (Panel, Panel) {
         let width = width.clamp(0.0, self.w);
@@ -220,7 +238,7 @@ impl Text {
             runs,
             at,
             size,
-            line_height: (size * 1.42).round(),
+            line_height: Text::line_for(size),
             color,
             scroll_lines: 0.0,
         }
@@ -238,8 +256,13 @@ impl Text {
 
     /// Rows of this text size that fit in a panel of this height.
     pub fn rows_for(size: f32, height: f32) -> usize {
-        let line = (size * 1.42).round().max(1.0);
-        (height / line).floor().max(0.0) as usize
+        (height / Text::line_for(size)).floor().max(0.0) as usize
+    }
+
+    /// The height one line of this text size occupies. The single source of
+    /// that number: a box sized from a different one clips its own text.
+    pub fn line_for(size: f32) -> f32 {
+        (size * 1.42).round().max(1.0)
     }
 }
 
@@ -662,6 +685,33 @@ mod tests {
         assert!(left.contains(9.9, 5.0));
         assert!(!left.contains(10.0, 5.0));
         assert!(right.contains(10.0, 5.0));
+    }
+
+    /// The bug this was written for: a 22-pixel bar inset by a 9-pixel margin
+    /// leaves a 4-pixel box, and a 20-pixel line drawn into it is clipped to
+    /// nothing. A row is one line, centred, whatever the margin would have done.
+    #[test]
+    fn a_row_is_exactly_one_line_tall_and_centred() {
+        let bar = Panel::new(6.0, 700.0, 400.0, 22.0);
+        let line = Text::line_for(14.0);
+        let row = bar.row(9.0, line);
+        assert_eq!(row.h, line);
+        assert_eq!(row.x, 15.0);
+        assert_eq!(row.w, 382.0);
+        assert!(row.y >= bar.y && row.y + row.h <= bar.y + bar.h, "{row:?}");
+        // For comparison, the mistake it replaces.
+        assert!(bar.inset(9.0).h < line, "the margin version cannot hold a line");
+    }
+
+    /// A bar shorter than one line gives up its padding rather than producing a
+    /// box that clips, and never escapes the bar.
+    #[test]
+    fn a_row_in_a_bar_too_short_for_it_is_clamped() {
+        let bar = Panel::new(0.0, 0.0, 100.0, 8.0);
+        let row = bar.row(9.0, 20.0);
+        assert_eq!(row.h, 8.0);
+        assert!(row.y + row.h <= bar.y + bar.h);
+        assert!(row.w >= 1.0);
     }
 
     #[test]
