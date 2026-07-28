@@ -55,6 +55,11 @@ else
     install -d "$prefix/bin" "$apps" "$scalable" "$symbolic"
     install -m 0755 "$HERE/clippy" "$prefix/bin/clippy"
     install -m 0644 "$HERE/$APP_ID.desktop" "$apps/$APP_ID.desktop"
+    # The launcher runs the binary by its full path rather than by name. A
+    # desktop session does not necessarily have ~/.local/bin on its PATH even
+    # when your shell does, and the failure is the worst kind: the icon is
+    # there, clicking it does nothing, and nothing anywhere says why.
+    sed -i "s|^Exec=clippy|Exec=$prefix/bin/clippy|" "$apps/$APP_ID.desktop"
     install -m 0644 "$HERE/$APP_ID.svg" "$scalable/$APP_ID.svg"
     install -m 0644 "$HERE/$APP_ID-symbolic.svg" "$symbolic/$APP_ID-symbolic.svg"
     echo "Installed $prefix/bin/clippy"
@@ -70,10 +75,17 @@ command -v gtk-update-icon-cache >/dev/null 2>&1 \
 
 ((uninstall)) && exit 0
 
-cat <<EOF
+# Only say this when it is true. Advice about a thing you already have is
+# noise, and noise is how output stops being read.
+if ! command -v "${NOOB_BIN:-noob}" >/dev/null 2>&1; then
+    cat <<'EOF'
 
-CLIppy needs the agent on PATH. Install it with the repository's own
+The agent itself is not on PATH. Install it with the repository's own
 install.sh, or point CLIppy at a build with NOOB_BIN=/path/to/noob.
+EOF
+fi
+
+cat <<'EOF'
 
 Run it from a project directory:  clippy
 Or name one:                      clippy ~/some/project
