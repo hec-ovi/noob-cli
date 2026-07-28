@@ -10,8 +10,19 @@ use noob_provider::http::INTERRUPTED;
 use serde_json::Value;
 
 use super::guard::{FileStamp, fnv1a64, fnv1a64_extend};
+use super::outline;
 use super::truncate::{READ_LINE_CHAR_CAP, read_byte_cap_marker};
-use super::{ToolCtx, ToolOutcome, display_path, need_str, opt_u64};
+use super::{ToolCtx, ToolOutcome, display_path, need_str, opt_str, opt_u64};
+
+/// Whole-file ceiling for the symbol path. Outlining needs the text in one
+/// piece, unlike the paging path below, which streams and never holds it.
+const SYMBOL_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// When a whole-file read is big enough that addressing one part of it would
+/// have been cheaper, say so. Below these a hint is noise: the file was
+/// already the right thing to read.
+const OUTLINE_HINT_LINES: usize = 120;
+const OUTLINE_HINT_SYMBOLS: usize = 3;
 
 pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     match run_inner(ctx, args) {
@@ -44,6 +55,12 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         return Err(format!(
             "cannot read {shown_path}: it is not a regular file; use read only for text files"
         ));
+    }
+
+    // Naming a part of the file skips paging entirely: the point is to pay for
+    // one function instead of the file that contains it.
+    if let Some(wanted) = opt_str(args, "symbol")? {
+        return symbol_page(ctx, &mut file, &path, &shown_path, wanted, metadata.len());
     }
 
     let page_end = offset.saturating_add(limit);
@@ -171,10 +188,85 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     if capped {
         content.push_str(&read_byte_cap_marker(last_emitted + 1));
     }
+    // Name the cheaper route, once, at the moment it would have paid.
+    //
+    // Measured on 2026-07-28: asked to rewrite one named function in a
+    // 321-line file, the model grepped twice, read all 321 lines (4,824 prompt
+    // tokens) and then edited. It never used `symbol`, because nothing told it
+    // the option existed. Putting that in the fixed prompt would charge every
+    // session for a hint that matters on large files only; putting it in the
+    // result charges nothing until a large file is actually read.
+    if full && total >= OUTLINE_HINT_LINES {
+        let symbols = outline::outline(&path, &page);
+        if symbols.len() >= OUTLINE_HINT_SYMBOLS {
+            content.push_str(&format!(
+                "\n[{} symbols here; read symbol:\"name\" for one, symbol:\"*\" to list \
+                 them, and edit symbol:\"name\" to replace one whole]\n",
+                symbols.len()
+            ));
+        }
+    }
     let shown = last_emitted.saturating_sub(offset).saturating_add(1);
     Ok(ToolOutcome::ok(
         content,
         format!("read {shown_path} ({shown} of {total} lines)"),
+    ))
+}
+
+/// Return one named part of the file, or the table of what it contains.
+///
+/// `symbol` of `*` asks for the table itself, which is the cheap way to
+/// orient in a long file: a few hundred tokens of names and line ranges
+/// instead of the whole body.
+fn symbol_page(
+    ctx: &ToolCtx,
+    file: &mut std::fs::File,
+    path: &std::path::Path,
+    shown: &str,
+    wanted: &str,
+    size: u64,
+) -> Result<ToolOutcome, String> {
+    if size > SYMBOL_MAX_BYTES {
+        return Err(format!(
+            "{shown} is {size} bytes, too large to outline; page it with offset and limit"
+        ));
+    }
+    let mut bytes = Vec::with_capacity(size as usize);
+    file.read_to_end(&mut bytes)
+        .map_err(|e| format!("cannot read {shown}: {e}"))?;
+    // The stamp is over the whole file, so a later edit of this file passes
+    // its freshness check without a second full read.
+    ctx.seen
+        .record(path, FileStamp::of(&bytes), /* full */ false);
+    let text = String::from_utf8(bytes)
+        .map_err(|_| format!("{shown} is not valid UTF-8; symbol reads need a text file"))?;
+    let total = text.lines().count();
+    let symbols = outline::outline(path, &text);
+
+    if wanted == "*" {
+        return Ok(ToolOutcome::ok(
+            format!("{shown} outline\n{}", outline::render(&symbols, total)),
+            format!("read {shown} (outline, {} symbols)", symbols.len()),
+        ));
+    }
+    if symbols.is_empty() {
+        return Err(format!(
+            "no addressable symbols in {shown}; read it with offset and limit instead"
+        ));
+    }
+    let found = outline::find(&symbols, wanted)?;
+    let body: String = text
+        .lines()
+        .skip(found.start - 1)
+        .take(found.lines())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(ToolOutcome::ok(
+        format!(
+            "{shown} {} {} (lines {}-{} of {total})\n{body}",
+            found.kind, found.name, found.start, found.end
+        ),
+        format!("read {shown} {} ({} lines)", found.name, found.lines()),
     ))
 }
 
@@ -331,6 +423,113 @@ mod tests {
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(out.content, "f.txt lines 1-3 of 3\nalpha\nbeta\ngamma\n");
         assert_eq!(out.summary, "read f.txt (3 of 3 lines)");
+    }
+
+    const SAMPLE: &str = "\
+use std::fmt;
+
+fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+fn multiply(a: i64, b: i64) -> i64 {
+    a * b
+}
+";
+
+    /// The whole point: pay for one function instead of the file holding it.
+    #[test]
+    fn a_named_symbol_returns_only_its_own_lines() {
+        let (_t, ctx) = test_ctx();
+        write(&ctx, "calc.rs", SAMPLE);
+        let out = run(&ctx, &json!({"path": "calc.rs", "symbol": "multiply"}));
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("lines 7-9 of 9"), "{}", out.content);
+        assert!(out.content.contains("a * b"), "{}", out.content);
+        assert!(
+            !out.content.contains("a + b"),
+            "the other function leaked in: {}",
+            out.content
+        );
+    }
+
+    /// Orienting in a long file for a few hundred tokens instead of all of it.
+    #[test]
+    fn a_star_symbol_lists_what_the_file_contains() {
+        let (_t, ctx) = test_ctx();
+        write(&ctx, "calc.rs", SAMPLE);
+        let out = run(&ctx, &json!({"path": "calc.rs", "symbol": "*"}));
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("3-5 fn add"), "{}", out.content);
+        assert!(out.content.contains("7-9 fn multiply"), "{}", out.content);
+        // The table is the answer; the bodies are not in it.
+        assert!(!out.content.contains("a + b"), "{}", out.content);
+    }
+
+    /// A symbol read still stamps the whole file, so a follow-up edit passes
+    /// its freshness check without a second full read. Without this the cheap
+    /// path would cost an extra whole-file read on every edit.
+    #[test]
+    fn a_symbol_read_stamps_the_whole_file_for_a_later_edit() {
+        let (_t, ctx) = test_ctx();
+        let path = write(&ctx, "calc.rs", SAMPLE);
+        run(&ctx, &json!({"path": "calc.rs", "symbol": "add"}));
+        assert_eq!(
+            ctx.seen.get(&path),
+            Some(FileStamp::of(SAMPLE.as_bytes())),
+            "the stamp must cover the file, not the span"
+        );
+    }
+
+    /// A whole-file read of something big names the cheaper route once, at the
+    /// moment it would have paid. Small files say nothing: there the whole file
+    /// was the right thing to read and a hint is noise.
+    #[test]
+    fn a_big_whole_file_read_names_the_cheaper_route() {
+        let (_t, ctx) = test_ctx();
+        let big: String = (1..=40)
+            .map(|i| format!("fn handler_{i}() {{\n    {i}\n}}\n\n"))
+            .collect();
+        write(&ctx, "big.rs", &big);
+        let out = run(&ctx, &json!({"path": "big.rs"}));
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("40 symbols here"), "{}", out.content);
+        assert!(out.content.contains("symbol:\"*\""), "{}", out.content);
+
+        write(&ctx, "small.rs", SAMPLE);
+        let out = run(&ctx, &json!({"path": "small.rs"}));
+        assert!(!out.content.contains("symbols here"), "{}", out.content);
+    }
+
+    /// The hint is for whole-file reads only: a paged read already narrowed,
+    /// and telling it to narrow again is noise on every page.
+    #[test]
+    fn a_paged_read_gets_no_hint() {
+        let (_t, ctx) = test_ctx();
+        let big: String = (1..=40)
+            .map(|i| format!("fn handler_{i}() {{\n    {i}\n}}\n\n"))
+            .collect();
+        write(&ctx, "big.rs", &big);
+        let out = run(&ctx, &json!({"path": "big.rs", "offset": 5, "limit": 20}));
+        assert!(!out.content.contains("symbols here"), "{}", out.content);
+    }
+
+    #[test]
+    fn an_unknown_symbol_lists_the_real_ones() {
+        let (_t, ctx) = test_ctx();
+        write(&ctx, "calc.rs", SAMPLE);
+        let out = run(&ctx, &json!({"path": "calc.rs", "symbol": "divide"}));
+        assert!(out.is_error);
+        assert!(out.content.contains("add, multiply"), "{}", out.content);
+    }
+
+    #[test]
+    fn a_file_with_no_structure_says_so_instead_of_guessing() {
+        let (_t, ctx) = test_ctx();
+        write(&ctx, "notes.txt", "just prose\nand more prose\n");
+        let out = run(&ctx, &json!({"path": "notes.txt", "symbol": "anything"}));
+        assert!(out.is_error);
+        assert!(out.content.contains("offset and limit"), "{}", out.content);
     }
 
     #[test]

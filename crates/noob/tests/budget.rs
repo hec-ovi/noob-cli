@@ -24,9 +24,20 @@ use serde_json::Value;
 // per-request charge. What does re-cost them is anything that rewrites the
 // prefix mid-session, which is why the environment block is built once and
 // why compaction is the single sanctioned prefix break.
+// These count with tiktoken, which no served model here uses. They are a drift
+// alarm, not the real budget: measured against the live endpoint on 2026-07-28,
+// the same fixed prefix with every tool registered is 2,335 tokens through
+// Laguna S 2.1's tokenizer and about 1,938 through qwen's. A "2,000 token
+// prompt" is therefore a statement about a tokenizer, not about this prompt,
+// and only the offline number below is comparable run to run.
+//
+// Raise a ceiling only alongside a capability that pays for itself, and say
+// which one in the commit. TOOLS_CEILING went 1350 -> 1375 for symbol-addressed
+// read and edit, which removes whole-file reads and whole-function `old`
+// strings from every structured edit.
 const HEAD_CEILING: usize = 560; // base.md + environment block
-const TOOLS_CEILING: usize = 1350; // serialized wire tools array
-const TOTAL_CEILING: usize = 1900; // total fixed first-request overhead
+const TOOLS_CEILING: usize = 1375; // serialized wire tools array
+const TOTAL_CEILING: usize = 1925; // total fixed first-request overhead
 const OWNER_HARD_LIMIT: usize = 2000; // never exceed, whatever the above say
 
 /// The switches plant one skill, one configured MCP server, and one executable

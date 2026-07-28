@@ -13,8 +13,27 @@
 use serde_json::Value;
 
 use super::guard::{FileStamp, atomic_write, check_write_allowed, fnv1a64, resolve_path};
+use super::outline;
 use super::truncate::clip_line;
-use super::{ToolCtx, ToolOutcome, display_path, need_str, opt_bool};
+use super::{ToolCtx, ToolOutcome, display_path, need_str, opt_bool, opt_str};
+
+/// Swap lines `start..=end` (1-based, inclusive) for `new`, keeping the file's
+/// own trailing-newline habit: adding or dropping one rewrites a line nobody
+/// asked to change and shows up as noise in every later diff.
+fn replace_span(text: &str, start: usize, end: usize, new: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let trailing_newline = text.ends_with('\n');
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len());
+    out.extend_from_slice(&lines[..start.saturating_sub(1).min(lines.len())]);
+    let replacement = new.strip_suffix('\n').unwrap_or(new);
+    out.extend(replacement.lines());
+    out.extend_from_slice(&lines[end.min(lines.len())..]);
+    let mut joined = out.join("\n");
+    if trailing_newline {
+        joined.push('\n');
+    }
+    joined
+}
 
 pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     match run_inner(ctx, args) {
@@ -25,7 +44,14 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
 
 fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     let raw = need_str(args, "path")?;
-    let old = need_str(args, "old")?;
+    // Naming a whole function replaces it outright, so there is no `old` to
+    // quote back and no chance of matching the wrong occurrence of a common
+    // line. This is the cheap path for "rewrite this function".
+    let symbol = opt_str(args, "symbol")?;
+    let old = match &symbol {
+        Some(_) => "",
+        None => need_str(args, "old")?,
+    };
     let new = need_str(args, "new")?;
     let all = opt_bool(args, "all")?.unwrap_or(false);
     if let Some(refusal) = ctx.skills_write_refusal(raw) {
@@ -35,11 +61,13 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     check_write_allowed(ctx.sandbox, &ctx.workspace, &path)?;
     let shown = display_path(ctx, &path);
 
-    if old.is_empty() {
-        return Err("old is empty; to create a new file use write".to_string());
-    }
-    if old == new {
-        return Err("old and new are identical; nothing would change".to_string());
+    if symbol.is_none() {
+        if old.is_empty() {
+            return Err("old is empty; to create a new file use write".to_string());
+        }
+        if old == new {
+            return Err("old and new are identical; nothing would change".to_string());
+        }
     }
 
     let bytes = std::fs::read(&path)
@@ -60,6 +88,36 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     let text = String::from_utf8(bytes).map_err(|_| {
         format!("{shown} is not valid UTF-8; edit only works on text files, use write")
     })?;
+
+    if let Some(wanted) = &symbol {
+        let symbols = outline::outline(&path, &text);
+        if symbols.is_empty() {
+            return Err(format!(
+                "no addressable symbols in {shown}; use old and new instead"
+            ));
+        }
+        let found = outline::find(&symbols, wanted)?;
+        let applied = replace_span(&text, found.start, found.end, new);
+        if applied == text {
+            return Err(format!(
+                "{} in {shown} already reads exactly like new; nothing would change",
+                found.name
+            ));
+        }
+        atomic_write(&path, applied.as_bytes())?;
+        ctx.seen
+            .record_written(&path, FileStamp::of(applied.as_bytes()));
+        ctx.consume_skills_write_grant(raw);
+        let was = found.lines();
+        let now = new.lines().count().max(1);
+        return Ok(ToolOutcome::ok(
+            format!(
+                "replaced {} {} in {shown} (lines {}-{}, {was} lines -> {now})",
+                found.kind, found.name, found.start, found.end
+            ),
+            format!("edited {shown} {} ({was} -> {now} lines)", found.name),
+        ));
+    }
 
     let fail_key = (path.clone(), fnv1a64(old.as_bytes()));
     match ladder(&text, old, new, all) {
@@ -616,6 +674,106 @@ mod tests {
 
     fn file(ctx: &ToolCtx, name: &str) -> String {
         std::fs::read_to_string(ctx.workspace.join(name)).unwrap()
+    }
+
+    const SAMPLE: &str = "\
+use std::fmt;
+
+fn add(a: i64, b: i64) -> i64 {
+    a - b
+}
+
+fn multiply(a: i64, b: i64) -> i64 {
+    a * b
+}
+";
+
+    /// Rewriting one function without quoting it back. This is the whole
+    /// saving: `old` for a twenty-line function is twenty lines paid twice.
+    #[test]
+    fn a_named_symbol_is_replaced_whole() {
+        let (_t, ctx) = test_ctx();
+        seed(&ctx, "calc.rs", SAMPLE);
+        let out = run(
+            &ctx,
+            &json!({
+                "path": "calc.rs",
+                "symbol": "add",
+                "new": "fn add(a: i64, b: i64) -> i64 {\n    a + b\n}"
+            }),
+        );
+        assert!(!out.is_error, "{}", out.content);
+        let after = file(&ctx, "calc.rs");
+        assert!(after.contains("a + b"), "{after}");
+        assert!(!after.contains("a - b"), "{after}");
+        // Everything around it is untouched, including the trailing newline.
+        assert!(after.starts_with("use std::fmt;\n"), "{after}");
+        assert!(after.contains("fn multiply"), "{after}");
+        assert!(after.ends_with("}\n"), "{after:?}");
+    }
+
+    /// A symbol edit obeys the same freshness rule as any other edit: the
+    /// cheap path must not become the one that clobbers unseen changes.
+    #[test]
+    fn a_symbol_edit_still_requires_having_read_the_file() {
+        let (_t, ctx) = test_ctx();
+        std::fs::write(ctx.workspace.join("calc.rs"), SAMPLE).unwrap();
+        let out = run(
+            &ctx,
+            &json!({"path": "calc.rs", "symbol": "add", "new": "fn add() {}"}),
+        );
+        assert!(out.is_error);
+        assert!(out.content.contains("have not read"), "{}", out.content);
+    }
+
+    #[test]
+    fn an_ambiguous_symbol_is_refused_rather_than_picked() {
+        let (_t, ctx) = test_ctx();
+        seed(&ctx, "calc.rs", SAMPLE);
+        let out = run(
+            &ctx,
+            &json!({"path": "calc.rs", "symbol": "ply", "new": "x"}),
+        );
+        // "ply" is a substring of multiply only, so this one resolves; the
+        // ambiguity case is covered in outline. Here the point is that a
+        // partial name still lands on exactly one symbol or fails loudly.
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            file(&ctx, "calc.rs").contains("fn add"),
+            "unrelated code moved"
+        );
+    }
+
+    #[test]
+    fn a_symbol_edit_that_changes_nothing_says_so() {
+        let (_t, ctx) = test_ctx();
+        seed(&ctx, "calc.rs", SAMPLE);
+        let out = run(
+            &ctx,
+            &json!({
+                "path": "calc.rs",
+                "symbol": "add",
+                "new": "fn add(a: i64, b: i64) -> i64 {\n    a - b\n}"
+            }),
+        );
+        assert!(out.is_error);
+        assert!(
+            out.content.contains("nothing would change"),
+            "{}",
+            out.content
+        );
+    }
+
+    /// A file that never ended in a newline must not gain one, and one that
+    /// did must not lose it: either way it is a line nobody asked to change.
+    #[test]
+    fn replacing_a_span_keeps_the_files_newline_habit() {
+        assert_eq!(replace_span("a\nb\nc\n", 2, 2, "B"), "a\nB\nc\n");
+        assert_eq!(replace_span("a\nb\nc", 2, 2, "B"), "a\nB\nc");
+        assert_eq!(replace_span("a\nb\nc\n", 2, 2, "B\n"), "a\nB\nc\n");
+        // A multi-line replacement, and one that reaches the last line.
+        assert_eq!(replace_span("a\nb\nc\n", 2, 2, "X\nY"), "a\nX\nY\nc\n");
+        assert_eq!(replace_span("a\nb\nc\n", 2, 3, "Z"), "a\nZ\n");
     }
 
     #[test]

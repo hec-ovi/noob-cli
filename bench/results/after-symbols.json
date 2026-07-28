@@ -1,0 +1,72 @@
+{
+  "model": "laguna-s21-iq4xs",
+  "binary": "/home/hec/workspace/noob-cli/target/debug/noob",
+  "tasks": {
+    "read-one-file": {
+      "rounds": 2,
+      "prefilled": 1754,
+      "generated": 29,
+      "context_end": 1778,
+      "tool_calls": 1,
+      "tool_errors": 0,
+      "seconds": 8.5,
+      "passed": 3,
+      "runs": 3
+    },
+    "misspelled-dir": {
+      "rounds": 2,
+      "prefilled": 1728,
+      "generated": 33,
+      "context_end": 1753,
+      "tool_calls": 1,
+      "tool_errors": 0,
+      "seconds": 9.0,
+      "passed": 3,
+      "runs": 3
+    },
+    "fix-failing-test": {
+      "rounds": 5,
+      "prefilled": 1964,
+      "generated": 354,
+      "context_end": 2129,
+      "tool_calls": 6,
+      "tool_errors": 1,
+      "seconds": 22.0,
+      "passed": 3,
+      "runs": 3
+    },
+    "rename-across-files": {
+      "rounds": 5,
+      "prefilled": 2405,
+      "generated": 616,
+      "context_end": 2596,
+      "tool_calls": 11,
+      "tool_errors": 0,
+      "seconds": 30.5,
+      "passed": 3,
+      "runs": 3
+    },
+    "error-in-noise": {
+      "rounds": 4,
+      "prefilled": 2356,
+      "generated": 314,
+      "context_end": 2554,
+      "tool_calls": 4,
+      "tool_errors": 0,
+      "seconds": 20.8,
+      "passed": 3,
+      "runs": 3
+    },
+    "big-file-one-function": {
+      "rounds": 10,
+      "prefilled": 4900,
+      "generated": 823,
+      "context_end": 5432,
+      "tool_calls": 9,
+      "tool_errors": 0,
+      "seconds": 49.5,
+      "passed": 3,
+      "runs": 3
+    }
+  }
+}
