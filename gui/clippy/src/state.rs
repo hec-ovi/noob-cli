@@ -672,6 +672,9 @@ impl State {
 
             Event::FileOpen { path, lines, .. } => {
                 let file = self.file_mut(&path);
+                // Read again after a compaction dropped it: it is back in the
+                // model's context, so the tab stops saying it is gone.
+                file.closed = false;
                 file.pane.blank_if_needed();
                 file.pane
                     .say(format!("read {lines} lines"), Tone::Call(Kind::Read));
@@ -690,6 +693,8 @@ impl State {
             } => {
                 let file = self.file_mut(&path);
                 file.changed = true;
+                // Writing it puts it back in context, same as reading it.
+                file.closed = false;
                 file.pane.blank_if_needed();
                 file.pane.say(
                     format!("write lines {}-{}", span.start, span.end),
@@ -729,12 +734,16 @@ impl State {
                 state,
                 detail,
             } => {
+                // Exhaustive on purpose. A wildcard folded `Unknown` into
+                // "queued", so a state a newer agent invented showed a child
+                // that had already run as one that never started.
                 let (word, tone) = match state {
                     noob_proto::AgentState::Done => ("done", Tone::Good),
                     noob_proto::AgentState::Failed => ("failed", Tone::Bad),
                     noob_proto::AgentState::Canceled => ("canceled", Tone::Dim),
                     noob_proto::AgentState::Running => ("running", Tone::Bright),
-                    _ => ("queued", Tone::Dim),
+                    noob_proto::AgentState::Queued => ("queued", Tone::Dim),
+                    noob_proto::AgentState::Unknown => ("unknown", Tone::Dim),
                 };
                 if let Some(agent) = self.agents.iter_mut().find(|a| a.label == agent_id) {
                     agent.state = word;
@@ -1219,6 +1228,30 @@ mod tests {
         }));
     }
 
+    /// A state a newer agent invented must not read as one this build knows.
+    /// Folding it into "queued" showed a child that had already run as one
+    /// that never started.
+    #[test]
+    fn a_state_this_build_does_not_know_says_so() {
+        let mut state = State::new();
+        state.apply(Event::AgentSpawn {
+            agent_id: "agent-1".into(),
+            prompt: "look".into(),
+            tools: "read".into(),
+        });
+        state.apply(Event::AgentStateChanged {
+            agent_id: "agent-1".into(),
+            state: noob_proto::AgentState::Running,
+            detail: None,
+        });
+        state.apply(Event::AgentStateChanged {
+            agent_id: "agent-1".into(),
+            state: noob_proto::AgentState::Unknown,
+            detail: None,
+        });
+        assert_eq!(state.agents[0].state, "unknown");
+    }
+
     /// A failure carries its class, the number the system gave it, and what to
     /// do next. This is the row that used to read `error: exit code 1`.
     #[test]
@@ -1315,21 +1348,32 @@ mod tests {
     }
 
     /// Compaction ends a file's life in the model's context. The page stays
-    /// readable; the tab stops claiming the agent is holding it.
+    /// readable; the tab stops claiming the agent is holding it, and reading
+    /// it again puts it back.
     #[test]
     fn a_compacted_file_is_marked_as_gone_from_the_context() {
         let mut state = State::new();
-        state.apply(Event::FileOpen {
+        let open = |lines| Event::FileOpen {
             path: "src/main.rs".into(),
-            lines: 40,
+            lines,
             call_id: Some("r".into()),
-        });
+        };
+        state.apply(open(40));
         assert!(!state.files[0].closed);
         state.apply(Event::FileClose {
             path: "src/main.rs".into(),
             call_id: None,
         });
         assert!(state.files[0].closed);
+        state.apply(open(40));
+        assert!(
+            !state.files[0].closed,
+            "reading it again put it back in context"
+        );
+        state.apply(Event::FileClose {
+            path: "src/main.rs".into(),
+            call_id: None,
+        });
         assert!(
             state.files[0]
                 .pane

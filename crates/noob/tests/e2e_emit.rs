@@ -512,3 +512,50 @@ fn compaction_closes_every_file_the_model_had_open() {
     let close = first(&frames, "file.close");
     assert!(close.get("call_id").is_none(), "{close}");
 }
+
+/// The file registry is append-only, so a second compaction must not announce
+/// the end of a file that ended at the first one. Only what is still in the
+/// model's context can leave it.
+#[test]
+fn a_second_compaction_only_closes_what_is_still_open() {
+    let server = MockServer::start();
+    let big = |name: &str| -> String {
+        (0..300)
+            .map(|i| format!("{name} line {i:03} {}\n", "x".repeat(80)))
+            .collect()
+    };
+    let config = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    write_env(config.path(), &server.base_url());
+    std::fs::write(work.path().join("one.txt"), big("one")).unwrap();
+    std::fs::write(work.path().join("two.txt"), big("two")).unwrap();
+    let sink = work.path().join("frames.ndjson");
+
+    // Two rounds, each reading one file and each reporting usage past the
+    // threshold, so each is followed by a compaction.
+    server.enqueue_stream_toolcalls(&[("r1", "read", r#"{"path":"one.txt"}"#)], Some((2000, 50)));
+    server.enqueue_stream_toolcalls(&[("r2", "read", r#"{"path":"two.txt"}"#)], Some((2000, 50)));
+    server.enqueue_stream_completion("read both");
+
+    let out = noob(config.path(), work.path())
+        .env("NOOB_EMIT", &sink)
+        .env("NOOB_CTX", "4096")
+        .args(["exec", "-p", "read both files"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    server.assert_clean();
+
+    let frames = frames(&sink);
+    let closed: Vec<&str> = frames
+        .iter()
+        .filter(|f| f["t"] == "file.close")
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    // Each file closes exactly once, at the compaction that dropped it.
+    assert_eq!(closed, ["one.txt", "two.txt"], "{closed:?}");
+}

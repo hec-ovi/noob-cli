@@ -230,6 +230,26 @@ impl SeenFiles {
         paths.sort();
         paths
     }
+
+    /// Only the paths whose content the model is still holding, sorted.
+    ///
+    /// The registry is append-only, so `paths` is every file this session ever
+    /// touched and stays that long after a file left the context. This is the
+    /// subset that would actually lose something if the generation moved, and
+    /// therefore the only honest answer to "what is the model looking at now".
+    pub fn fresh_paths(&self) -> Vec<PathBuf> {
+        let current = self.generation.load(Ordering::Relaxed);
+        let mut paths: Vec<PathBuf> = self
+            .map
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, entry)| entry.generation == current)
+            .map(|(path, _)| path.clone())
+            .collect();
+        paths.sort();
+        paths
+    }
 }
 
 /// Resolve a tool `path` argument: absolute or workspace-relative, lexically

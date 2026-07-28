@@ -501,7 +501,11 @@ impl Agent {
         // Before the invalidation, not after, because the registry is what
         // says which files there were.
         if self.tool_ctx.emitter.is_on() {
-            for path in self.tool_ctx.seen.paths() {
+            // Only what is still in context. The registry is append-only, so
+            // `paths()` is every file the session ever touched and a second
+            // compaction would announce the end of files that ended two
+            // compactions ago.
+            for path in self.tool_ctx.seen.fresh_paths() {
                 self.tool_ctx.emitter.send(Wire::FileClose {
                     path: crate::tools::display_path(&self.tool_ctx, &path),
                     // Compaction is not a tool call; nothing asked for this.

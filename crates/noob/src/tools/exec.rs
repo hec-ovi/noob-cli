@@ -147,11 +147,17 @@ pub(crate) fn run(
                 Err(_) => break,
             }
         }
-        // A command whose last line has no newline still wrote that line.
-        if let Some(progress) = progress.as_mut() {
-            progress.flush();
-        }
+        // Before the tap is drained, not after. Everything the caller decides
+        // from here (whether the pipe reached EOF, and therefore whether the
+        // command left something behind) must be settled while nothing can
+        // block, or a watcher that reads slowly changes what the model is
+        // told about a command that ran perfectly.
         t_eof.store(true, Ordering::SeqCst);
+        // Now it can block. `run` joins this thread, so draining here is also
+        // what keeps a call's live lines ahead of the frame that closes it.
+        if let Some(progress) = progress.take() {
+            progress.finish();
+        }
     });
 
     let pid = child.id() as i32;

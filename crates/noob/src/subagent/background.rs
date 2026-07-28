@@ -55,11 +55,15 @@ impl ProgressLog {
         *self.tap.lock().unwrap() = crate::emit::Progress::for_agent(emitter, agent_id);
     }
 
-    /// Send whatever line the child left unterminated. A child's last words
-    /// are usually the ones that explain the exit.
+    /// Send whatever the child left unterminated and wait for it to land.
+    ///
+    /// Called once the child has exited, so there is nothing more to come, and
+    /// deliberately NOT while the hub's state lock is held: this is the one
+    /// call here that can block on whoever is reading the frames.
     fn close(&self) {
-        if let Some(tap) = self.tap.lock().unwrap().as_mut() {
-            tap.flush();
+        let tap = self.tap.lock().unwrap().take();
+        if let Some(tap) = tap {
+            tap.finish();
         }
     }
 
@@ -226,7 +230,10 @@ impl BackgroundHub {
     }
 
     pub(super) fn submit(&self, mut cfg: RunCfg, request: TaskRequest) -> ToolOutcome {
-        let prompt = request.prompt.clone();
+        // What the model asked for, not the runtime brief wrapped around it:
+        // that wrapper is identical on every child, so a fleet built from it
+        // is a list of the same four hundred characters N times.
+        let prompt = request.asked.clone();
         let tools = request.tools_mode.clone();
         let progress = ProgressLog::default();
         cfg.progress = Some(progress.clone());
@@ -584,12 +591,13 @@ fn worker_loop(inner: Arc<Inner>) {
                     job.id.clone(),
                     job.started,
                     job.cancel.clone(),
+                    job.progress.clone(),
                     job.runner.take().expect("a queued job has a runner"),
                 );
             }
         };
 
-        let (id, started, cancel, runner) = work;
+        let (id, started, cancel, progress, runner) = work;
         let mut outcome = crate::agent::sched::catch_unwind_silent(|| runner(cancel.clone()))
             .unwrap_or_else(|_| {
                 ToolOutcome::err(
@@ -597,6 +605,10 @@ fn worker_loop(inner: Arc<Inner>) {
                 )
                 .classed(crate::tools::fail::INTERNAL)
             });
+        // The child has exited, so its output has. Drained here, outside the
+        // state lock, because this is the one call that can block on whoever
+        // is reading the frames and the hub must never wait on that.
+        progress.close();
         let mut state = inner.state.lock().unwrap();
         state.running = state.running.saturating_sub(1);
         let current_epoch = state.epoch;
@@ -617,7 +629,6 @@ fn worker_loop(inner: Arc<Inner>) {
             // was committed rather than what the runner returned. `done` here
             // means the child finished, NOT that the parent has the result:
             // the parent drains at turn boundaries, which can be much later.
-            job.progress.close();
             agent_state(
                 &inner.emitter,
                 &job.id,
@@ -654,6 +665,8 @@ fn settle_queued_cancellation(emitter: &crate::emit::Emitter, job: &mut Job) {
         "background sub-agent canceled before it started",
     ));
     job.runner.take();
+    // Under the state lock, unlike the terminal commit's drain: this job never
+    // ran, so its tap has nothing queued and nothing to wait on.
     job.progress.close();
     agent_state(
         emitter,
@@ -766,20 +779,30 @@ mod tests {
             .expect("a child announces itself");
         assert_eq!(spawn["agent_id"], "agent-1");
         assert_eq!(spawn["prompt"], "audit the config");
+        // Not the runtime brief wrapped around it, which is the same four
+        // hundred characters on every child and would make a fleet a list of
+        // identical rows. `submit` carries what the model asked for.
+        assert!(
+            !spawn["prompt"].as_str().unwrap().contains("noob child runtime"),
+            "{spawn}"
+        );
         // The tool set, which is what says whether this child can write. It
         // lives on the request and had to be carried down to the one place
         // that mints an id.
         assert_eq!(spawn["tools"], "read");
 
-        // The child's own output, framed into lines as it arrives.
+        // The child's own output, framed into lines as it arrives. Written on
+        // a thread of its own, so it arrives shortly rather than immediately.
         progress.push(b"* read config/.env\n* grep NOOB_\n");
-        let output: Vec<String> = buf
-            .frames()
-            .iter()
-            .filter(|f| f["t"] == "agent.output")
-            .map(|f| f["line"].as_str().unwrap().to_string())
-            .collect();
-        assert_eq!(output, ["* read config/.env", "* grep NOOB_"]);
+        let output = |buf: &crate::emit::Buf| -> Vec<String> {
+            buf.frames()
+                .iter()
+                .filter(|f| f["t"] == "agent.output")
+                .map(|f| f["line"].as_str().unwrap().to_string())
+                .collect()
+        };
+        wait_until(|| output(&buf).len() == 2);
+        assert_eq!(output(&buf), ["* read config/.env", "* grep NOOB_"]);
 
         gate.store(true, Ordering::SeqCst);
         wait_until(|| hub.snapshot().ready == 1);
@@ -787,8 +810,7 @@ mod tests {
         let last = buf
             .frames()
             .into_iter()
-            .filter(|f| f["t"] == "agent.state")
-            .next_back()
+            .rfind(|f| f["t"] == "agent.state")
             .unwrap();
         assert_eq!(last["detail"], "subagent agent-1 (0.1s)");
     }
@@ -807,8 +829,7 @@ mod tests {
         let last = buf
             .frames()
             .into_iter()
-            .filter(|f| f["t"] == "agent.state")
-            .next_back()
+            .rfind(|f| f["t"] == "agent.state")
             .unwrap();
         assert!(
             last["detail"]

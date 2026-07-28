@@ -1325,14 +1325,20 @@ fn cmd_serve(args: &[String]) -> ExitCode {
         // A detached child settles on its own schedule, after the turn that
         // started it. Deliver each report as it lands rather than at whatever
         // the human types next, which may be never.
-        while agent.background_snapshot().ready > 0 {
+        //
+        // One snapshot decides both questions. Two would let a child that
+        // settles between them be counted as neither ready nor running, and
+        // its report would sit undelivered until the human typed again.
+        let mut fleet = agent.background_snapshot();
+        while fleet.ready > 0 {
             match agent.continue_after_background(&mut ui) {
                 RunEnd::Completed(_) | RunEnd::Interrupted | RunEnd::Aborted(_) => {}
             }
+            fleet = agent.background_snapshot();
         }
         // Poll only while children are actually running. Idle is a blocking
         // wait, so a session with nothing in flight costs nothing at all.
-        let text = if agent.background_snapshot().active > 0 {
+        let text = if fleet.active > 0 {
             match rx.recv_timeout(std::time::Duration::from_millis(100)) {
                 Ok(text) => text,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,

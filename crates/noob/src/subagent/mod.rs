@@ -71,6 +71,11 @@ pub struct TaskCfg {
 #[derive(Clone)]
 struct TaskRequest {
     prompt: String,
+    /// What the model actually asked for, before `child_prompt` wrapped it in
+    /// the runtime brief. The wrapper is four hundred characters of harness
+    /// instruction and is the same on every child, so it is the one thing that
+    /// must never be what a watcher is shown as the task.
+    asked: String,
     tools_mode: String,
     max_turns: u32,
     excluded_skills: Vec<String>,
@@ -240,6 +245,7 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
 
     let excluded_skills = skill_exclusions(cfg, ctx, web_available);
     let request = TaskRequest {
+        asked: prompt.clone(),
         prompt: child_prompt(prompt, web_available, tools_mode == "web"),
         tools_mode,
         max_turns,
@@ -1058,6 +1064,7 @@ mod tests {
         // accidentally exec the test binary as `noob child`.
         let request = TaskRequest {
             prompt: "x".repeat((CHILD_STDIN_CAP + 1) as usize),
+            asked: String::from("oversized"),
             tools_mode: "read-only".to_string(),
             max_turns: 1,
             excluded_skills: Vec::new(),
