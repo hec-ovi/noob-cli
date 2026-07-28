@@ -124,20 +124,60 @@ fn tool_error_row_is_descriptive() {
     rig.server
         .enqueue_stream_completion("I will use another path.");
 
+    std::fs::write(rig.work.path().join("present.txt"), "here\n").unwrap();
+
     let out = rig.run(&["exec", "-p", "read the missing file"]);
     ok(&out);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("error: cannot read missing-marker.txt"),
+        stderr.contains("missing-marker.txt does not exist"),
         "stderr: {stderr}"
     );
-    assert!(
-        stderr.contains("check the path with ls or glob"),
-        "stderr: {stderr}"
-    );
+    // The row says what IS there, so the next call is informed instead of
+    // being another guess at the same name.
+    assert!(stderr.contains("present.txt"), "stderr: {stderr}");
     assert!(
         !stderr.lines().any(|line| line.trim() == "* error"),
         "stderr: {stderr}"
+    );
+    rig.server.assert_clean();
+}
+
+/// A mistyped directory resolves instead of failing, and the result names the
+/// real spelling so the model stops repeating the wrong one. This is the
+/// session that cost 67 tool calls, reduced to one.
+#[test]
+fn a_mistyped_path_resolves_and_reports_the_real_name() {
+    let rig = rig();
+    std::fs::create_dir(rig.work.path().join("simulacrium")).unwrap();
+    std::fs::write(
+        rig.work.path().join("simulacrium/README.md"),
+        "# Simulacrumium\n",
+    )
+    .unwrap();
+    rig.server.enqueue_stream_toolcalls(
+        &[("s1", "read", r#"{"path":"simulacrum/README.md"}"#)],
+        None,
+    );
+    rig.server.enqueue_stream_completion("read it");
+
+    let out = rig.run(&["exec", "-p", "read the simulacrum readme"]);
+    ok(&out);
+
+    let reqs = rig.api_requests();
+    let result = reqs.last().unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(result.contains("used simulacrium"), "{result}");
+    assert!(
+        result.contains("Simulacrumium"),
+        "the file body is missing: {result}"
     );
     rig.server.assert_clean();
 }

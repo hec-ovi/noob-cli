@@ -11,6 +11,7 @@ pub mod grep;
 pub mod guard;
 pub mod ls;
 pub mod mcp;
+pub mod paths;
 pub mod read;
 pub mod skill;
 pub mod todo;
@@ -454,7 +455,60 @@ pub fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
     dispatch_unlocked(ctx, name, args)
 }
 
+/// Tools whose `path` argument must already exist, so a near miss is a typo
+/// rather than an intention. `write` is deliberately absent: it may name a
+/// file that does not exist yet, and redirecting that to a similarly named
+/// neighbor turns a new file into a clobbered one.
+const PATH_CORRECTED: &[&str] = &["read", "edit", "ls", "grep"];
+
+/// Fix a mistyped `path` argument before the tool ever sees it.
+///
+/// Done here rather than in each tool so there is one policy and one place to
+/// change it. Returns the arguments to dispatch and the note to put at the top
+/// of the result, which is how the model learns the real name instead of
+/// retrying the wrong one (see `tools::paths`).
+fn correct_path_arg(
+    ctx: &ToolCtx,
+    name: &str,
+    args: &Value,
+) -> Result<(Value, Option<String>), String> {
+    if !PATH_CORRECTED.contains(&name) {
+        return Ok((args.clone(), None));
+    }
+    let Some(raw) = args.get("path").and_then(Value::as_str) else {
+        return Ok((args.clone(), None));
+    };
+    let found = paths::resolve_existing(&ctx.workspace, raw)?;
+    let Some(note) = found.note else {
+        return Ok((args.clone(), None));
+    };
+    let mut corrected = args.clone();
+    // Hand the tool the real path, workspace-relative when it sits inside, so
+    // the tool's own display and stamping stay in the shape it expects.
+    let value = found
+        .path
+        .strip_prefix(&ctx.workspace)
+        .unwrap_or(found.path.as_path())
+        .to_string_lossy()
+        .into_owned();
+    corrected["path"] = Value::String(value);
+    Ok((corrected, Some(note)))
+}
+
 fn dispatch_unlocked(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
+    let (args, correction) = match correct_path_arg(ctx, name, args) {
+        Ok(pair) => pair,
+        Err(message) => return ToolOutcome::err(message),
+    };
+    let args = &args;
+    let mut out = dispatch_resolved(ctx, name, args);
+    if let Some(note) = correction {
+        out.content = format!("{note}\n{}", out.content);
+    }
+    out
+}
+
+fn dispatch_resolved(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
     match name {
         "read" => read::run(ctx, args),
         "write" => write::run(ctx, args),
