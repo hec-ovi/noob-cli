@@ -1,0 +1,16 @@
+{
+  "id": "error-in-noise",
+  "why": "The failure that started this work. A command prints a wall of output and dies on the last line. The agent has always had the whole body in its transcript, so this measures whether it can actually act on the end of a noisy failure rather than on its start.",
+  "prompt": "Run ./build.sh and make it succeed.",
+  "setup": [
+    {
+      "path": "build.sh",
+      "executable": true,
+      "content": "#!/bin/sh\nfor step in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do\n  echo \"[$step/30] compiling module_$step ... ok\"\ndone\nif [ ! -f config.ini ]; then\n  echo \"build failed: config.ini not found; create it containing the line mode=fast\" >&2\n  exit 1\nfi\nif ! grep -q '^mode=fast$' config.ini; then\n  echo \"build failed: config.ini must contain the line mode=fast\" >&2\n  exit 1\nfi\necho build ok\n"
+    }
+  ],
+  "checks": [
+    { "kind": "command_ok", "cmd": "./build.sh" },
+    { "kind": "file_contains", "path": "config.ini", "text": "mode=fast" }
+  ]
+}

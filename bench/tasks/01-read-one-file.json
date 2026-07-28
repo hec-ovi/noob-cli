@@ -1,0 +1,14 @@
+{
+  "id": "read-one-file",
+  "why": "The floor. Reading one named file should cost one tool call and one round trip. Anything above that is navigation waste, which is what the file toolkit work is meant to remove.",
+  "prompt": "What string does the greet() function in src/app.py print? Answer with just that string.",
+  "setup": [
+    {
+      "path": "src/app.py",
+      "content": "import sys\n\n\ndef greet():\n    print(\"ORBITAL-7\")\n\n\ndef main(argv):\n    if len(argv) > 1:\n        return 1\n    greet()\n    return 0\n\n\nif __name__ == \"__main__\":\n    sys.exit(main(sys.argv))\n"
+    }
+  ],
+  "checks": [
+    { "kind": "answer_contains", "text": "ORBITAL-7" }
+  ]
+}

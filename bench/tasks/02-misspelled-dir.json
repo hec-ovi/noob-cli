@@ -1,0 +1,18 @@
+{
+  "id": "misspelled-dir",
+  "why": "The reported failure, reproduced. Taken from a real session (19fa5b9d7b9-1-0-dec6b89f): the prompt said simulacrum, the directory was simulacrium, and the run cost 67 tool calls across 45 rounds with 15 failures. The first call already returned 'simulacrium/README.md', so the correct spelling was in context from round one and the agent still retyped the wrong name through call 62. That is the finding: this is not a discovery problem, it is that a failed path returns an error instead of a correction. The resolver should collapse this to one successful call, so the round and error counts here are its scoreboard.",
+  "prompt": "Read simulacrum/notes.md and tell me the key it contains. Answer with just the key.",
+  "setup": [
+    {
+      "path": "simulacrium/notes.md",
+      "content": "# Field notes\n\nDeployment key: TANGERINE-9\n\nRotate quarterly.\n"
+    },
+    {
+      "path": "README.md",
+      "content": "# Project\n\nNotes live in the simulacrium directory.\n"
+    }
+  ],
+  "checks": [
+    { "kind": "answer_contains", "text": "TANGERINE-9" }
+  ]
+}

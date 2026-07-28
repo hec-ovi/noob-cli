@@ -1,0 +1,20 @@
+{
+  "id": "fix-failing-test",
+  "why": "The core loop: run something, read the failure, edit the right line, confirm. Small enough that a wrong answer is a real miss rather than task difficulty.",
+  "prompt": "Run ./test.sh. It fails. Fix the source so it passes, then run it again to confirm.",
+  "setup": [
+    {
+      "path": "calc.py",
+      "content": "def add(a, b):\n    return a - b\n\n\ndef multiply(a, b):\n    return a * b\n"
+    },
+    {
+      "path": "test.sh",
+      "executable": true,
+      "content": "#!/bin/sh\nset -e\npython3 -c \"import calc; assert calc.add(2, 3) == 5, 'add returned the wrong value'\"\npython3 -c \"import calc; assert calc.multiply(2, 3) == 6, 'multiply returned the wrong value'\"\necho ok\n"
+    }
+  ],
+  "checks": [
+    { "kind": "command_ok", "cmd": "./test.sh" },
+    { "kind": "file_contains", "path": "calc.py", "text": "a * b" }
+  ]
+}

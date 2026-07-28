@@ -1,0 +1,28 @@
+{
+  "id": "rename-across-files",
+  "why": "Multi-file mutation. Measures whether the agent finds every call site before editing, and how much of each file it has to pull into context to change one name. Section-level editing should move the token count here the most.",
+  "prompt": "Rename the function fetch_data to load_records across this project, including every call site. Do not change anything else.",
+  "setup": [
+    {
+      "path": "store.py",
+      "content": "import json\n\n\ndef fetch_data(path):\n    with open(path) as handle:\n        return json.load(handle)\n\n\ndef save_data(path, rows):\n    with open(path, \"w\") as handle:\n        json.dump(rows, handle)\n"
+    },
+    {
+      "path": "report.py",
+      "content": "from store import fetch_data\n\n\ndef build_report(path):\n    rows = fetch_data(path)\n    return f\"{len(rows)} rows\"\n"
+    },
+    {
+      "path": "cli.py",
+      "content": "import sys\n\nfrom store import fetch_data\n\n\ndef main():\n    rows = fetch_data(sys.argv[1])\n    print(len(rows))\n\n\nif __name__ == \"__main__\":\n    main()\n"
+    }
+  ],
+  "checks": [
+    { "kind": "file_lacks", "path": "store.py", "text": "fetch_data" },
+    { "kind": "file_lacks", "path": "report.py", "text": "fetch_data" },
+    { "kind": "file_lacks", "path": "cli.py", "text": "fetch_data" },
+    { "kind": "file_contains", "path": "store.py", "text": "def load_records" },
+    { "kind": "file_contains", "path": "report.py", "text": "load_records(path)" },
+    { "kind": "file_contains", "path": "cli.py", "text": "load_records(sys.argv[1])" },
+    { "kind": "file_contains", "path": "store.py", "text": "def save_data" }
+  ]
+}
