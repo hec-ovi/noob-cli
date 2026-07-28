@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "The wire contract between noob and anything watching it."
 
+# serde_json only, and deliberately no `serde` with `derive`: that pulls
+# serde_derive, proc-macro2, quote, syn and unicode-ident, which takes the
+# binary from 40 runtime crates to 47 and fails the 45-crate gate. The
+# serialization is written out by hand instead; see the crate docs.
 [dependencies]
-serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

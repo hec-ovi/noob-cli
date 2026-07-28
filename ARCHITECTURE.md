@@ -277,8 +277,8 @@ The enforced release budgets are:
 
 | Budget | Limit | Current validation |
 |---|---:|---:|
-| Static release binary | 8 MiB | 4,420,544 bytes |
-| Runtime dependency graph | 45 crates | 40 crates |
+| Static release binary | 8 MiB | 4,428,736 bytes |
+| Runtime dependency graph | 45 crates | 41 crates |
 | Fixed prompt plus schemas | 1,600 tokens | Offline and live tokenizer checks |
 | Offline tests | None | 800 passed; 9 live checks and 1 on-demand diagnostic stay opt-in |
 
