@@ -35,12 +35,17 @@ fi
 # Configuration files are preferred, but forwarding an explicitly exported
 # value makes one-off runs behave like a native CLI. NOOB_CONFIG_DIR and
 # NOOB_SANDBOX stay image-owned.
+#
+# NOOB_EMIT names a path the container has to be able to write, so it belongs
+# under the mounted workspace (/work/...). Without it forwarded, exporting it
+# on the host does nothing at all and says nothing, which is the worst way for
+# a side-channel to be off.
 forward=(
     TERM COLORTERM NO_COLOR
     NOOB_THEME NOOB_DOCK NOOB_RAW NOOB_AUTODETECT
     NOOB_BASE_URL NOOB_MODEL NOOB_API_STYLE NOOB_CTX
     NOOB_TASK_CONCURRENCY NOOB_TASK_MAX_TURNS NOOB_TASK_WALL_CLOCK_S
-    NOOB_TOOL_CAPS NOOB_SKILL_PATHS
+    NOOB_TOOL_CAPS NOOB_SKILL_PATHS NOOB_EMIT
     WEBSEARCH_SEARXNG_URL
     WEBSEARCH_PROXY WEBSEARCH_VPN NORDVPN_USER NORDVPN_PASS NORDVPN_HOST
     HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY

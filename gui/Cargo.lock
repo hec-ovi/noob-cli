@@ -91,7 +91,7 @@ checksum = "175571dd1d178ced59193a6fc02dde1b972eb0bc56c892cde9beeceac5bf0f6b"
 
 [[package]]
 name = "asciify"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "gif",
 ]
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "clippy"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "copypasta",
  "noob-draw",
@@ -1052,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "noob-draw"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "bytemuck",
  "glyphon",
@@ -1062,7 +1062,7 @@ dependencies = [
 
 [[package]]
 name = "noob-gpu"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "wgpu",
  "winit",

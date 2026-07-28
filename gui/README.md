@@ -47,7 +47,7 @@ A space you empty gives its room to its neighbour.
 | ACTIVITY | every call, one colour and one tag per tool: bash, read, ls, glob, grep, write, edit, web, skill, mcp, agent, plan, plus a running command's output as it arrives |
 | PLAN | the checklist, straight from the plan tool's own arguments |
 | AGENTS | sub-agents: their tool set, their brief, the last thing each one said, and how it ended |
-| HARDWARE | GPU, VRAM, GTT, CPU and RAM |
+| HARDWARE | CPU and RAM, plus GPU, VRAM and GTT on an AMD card |
 | LLM | context, where compaction triggers, cache, total and last prefill and output, and the measured prefill and decode rates |
 | FILES | one tab per file touched, with the diff, a line-number gutter and syntax coloring |
 | CLIPPY | the animated ASCII avatar |
@@ -61,6 +61,12 @@ HARDWARE reads `/sys/class/drm/card*/device` and `/proc` directly. No vendor
 library, no dependency: a labelled bar against its maximum the way radeontop
 lays it out, with its own history drawn behind it the way btop does. It only
 samples while it is on screen, so an idle window still costs nothing.
+
+The GPU rows are AMD only, because they come from `gpu_busy_percent` and the
+`mem_info_*` files, which the amdgpu driver exposes and other drivers do not.
+On anything else the pane says so and shows CPU and memory alone. Reading an
+Nvidia card means its own library, which is the dependency this deliberately
+does not have.
 
 LLM is the other question: not whether the machine is keeping up but whether the
 budget is. Context comes from the agent's own estimate rather than from the last
