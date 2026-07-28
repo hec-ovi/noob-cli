@@ -20,3 +20,7 @@
 !/config/skills/
 !/config/skills/web-search/
 !/config/skills/web-search/SKILL.md
+
+# internal working docs, not published
+/docs/REQUIREMENTS-RAW.md
+/docs/GUI-PLAN.md
