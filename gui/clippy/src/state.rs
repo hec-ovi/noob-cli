@@ -190,6 +190,22 @@ impl Pane {
         moved
     }
 
+    /// Whether a fenced code block is open where this window starts.
+    ///
+    /// A transcript is drawn from a scrolling window, so a block that opened
+    /// above it would otherwise render as prose. Scanning the lines above is a
+    /// prefix check each, which is nothing next to shaping them.
+    pub fn fence_before(&self, rows: usize) -> crate::markdown::Fence {
+        let end = self.lines.len().saturating_sub(self.scrollback);
+        let start = end.saturating_sub(rows);
+        crate::markdown::fence_after(
+            self.lines
+                .range(..start)
+                .filter(|line| line.tone == Tone::Body)
+                .map(|line| line.text.as_str()),
+        )
+    }
+
     /// Where the thumb sits and how tall it is, as fractions of the track, or
     /// `None` when everything fits and there is nothing to indicate.
     pub fn thumb(&self, rows: usize) -> Option<(f32, f32)> {
@@ -429,17 +445,10 @@ impl State {
                     }
                     _ => {}
                 }
-                // A shell row is the command itself; the brief clips it.
-                let subject = match kind {
-                    Kind::Shell => args
-                        .get("cmd")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(&brief)
-                        .to_string(),
-                    _ => brief.clone(),
-                };
-                self.activity
-                    .say(format!("{:>5}  {subject}", kind.tag()), Tone::Call(kind));
+                self.activity.say(
+                    format!("{:>5}  {}", kind.tag(), subject(kind, &brief, &args)),
+                    Tone::Call(kind),
+                );
                 self.open.insert(call_id, Open { kind, brief });
             }
             Event::ToolProgress { call_id, line } => {
@@ -633,6 +642,51 @@ impl State {
     }
 }
 
+/// What a call is about, in one line.
+///
+/// The brief the agent builds is empty for some tools, which left a row that
+/// was a colored tag and nothing else. So: the shell command itself for bash,
+/// the brief when there is one, and otherwise the first useful-looking string
+/// in the arguments. A row always says something.
+fn subject(kind: Kind, brief: &str, args: &noob_proto::Value) -> String {
+    let field = |name: &str| {
+        args.get(name)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+    };
+    let found = match kind {
+        Kind::Shell => field("cmd"),
+        Kind::Search => field("query").or_else(|| field("url")).or_else(|| field("action")),
+        _ => None,
+    };
+    let text = found
+        .or_else(|| Some(brief.to_string()).filter(|b| !b.trim().is_empty()))
+        .or_else(|| {
+            args.as_object()?
+                .values()
+                .find_map(|v| v.as_str().filter(|s| !s.trim().is_empty()))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| String::from("(no arguments)"));
+    shorten(&text)
+}
+
+/// An absolute path inside a deep tree wraps over three rows and buries the
+/// rest of the list. Keep the end, which is the part that identifies it.
+fn shorten(text: &str) -> String {
+    let text = text.replace('\n', " ");
+    if text.chars().count() <= SUBJECT_CHARS {
+        return text;
+    }
+    let tail: String = text
+        .chars()
+        .skip(text.chars().count() - SUBJECT_CHARS + 1)
+        .collect();
+    format!("\u{2026}{tail}")
+}
+
+const SUBJECT_CHARS: usize = 96;
 const DIFF_LINES: usize = 60;
 const DETAIL_LINES: usize = 6;
 const MAX_FILES: usize = 40;
@@ -691,6 +745,58 @@ mod tests {
             .iter()
             .map(|l| l.text.clone())
             .collect()
+    }
+
+    /// A row that is a colored tag and nothing else says nothing. Every call
+    /// finds something to be about.
+    #[test]
+    fn a_row_always_says_what_it_is_about() {
+        let mut state = State::new();
+        // A tool whose brief the agent left empty.
+        state.apply(Event::ToolStart {
+            call_id: "w".into(),
+            name: "websearch".into(),
+            brief: String::new(),
+            args: serde_json::json!({"query": "laguna s 2.1"}),
+        });
+        // No brief and no known field: anything in the arguments will do.
+        state.apply(Event::ToolStart {
+            call_id: "x".into(),
+            name: "mcp_call".into(),
+            brief: String::new(),
+            args: serde_json::json!({"server": "fs", "tool": "list"}),
+        });
+        // Nothing at all still names itself rather than rendering blank.
+        state.apply(Event::ToolStart {
+            call_id: "y".into(),
+            name: "context".into(),
+            brief: String::new(),
+            args: serde_json::json!({}),
+        });
+        let lines = texts(&state.activity);
+        assert!(lines[0].contains("laguna s 2.1"), "{lines:?}");
+        assert!(lines[1].contains("fs") || lines[1].contains("list"), "{lines:?}");
+        assert!(lines[2].contains("no arguments"), "{lines:?}");
+        for line in &lines {
+            assert!(line.trim().len() > 6, "a bare tag: {line:?}");
+        }
+    }
+
+    /// A deep absolute path wraps over three rows and buries the list.
+    #[test]
+    fn a_long_subject_is_clipped_to_its_tail() {
+        let deep = format!("/tmp/{}/calc.py", "very-long-directory/".repeat(12));
+        let mut state = State::new();
+        state.apply(Event::ToolStart {
+            call_id: "r".into(),
+            name: "read".into(),
+            brief: deep.clone(),
+            args: serde_json::json!({"path": deep}),
+        });
+        let line = &texts(&state.activity)[0];
+        assert!(line.chars().count() <= SUBJECT_CHARS + 8, "{line}");
+        assert!(line.ends_with("calc.py"), "the end is what identifies it: {line}");
+        assert!(line.contains('\u{2026}'), "{line}");
     }
 
     /// The split that was wrong. `ls` is the `ls` tool and `rm` is `bash`, so
@@ -1089,6 +1195,31 @@ mod tests {
                 assert!(top + size <= 1.001, "{top} + {size}");
             }
         }
+    }
+
+    /// A window scrolled into the middle of a fenced block has to know it is
+    /// looking at code, or the block renders as prose.
+    #[test]
+    fn a_pane_reports_the_fence_open_above_its_window() {
+        let mut pane = Pane::new(100);
+        pane.say("prose", Tone::Body);
+        pane.say("```python", Tone::Body);
+        for n in 0..30 {
+            pane.say(format!("x = {n}"), Tone::Body);
+        }
+        assert!(pane.fence_before(10).open(), "the block is still open");
+        // The window is the lines at the end; `before` is everything above it,
+        // so the closing fence has to be above the window to count as closed.
+        pane.say("```", Tone::Body);
+        pane.say("back to prose", Tone::Body);
+        assert!(!pane.fence_before(1).open(), "and now it is closed");
+        assert!(pane.fence_before(2).open(), "the window still holds the fence");
+        // What the human typed is not the model's Markdown, so it cannot open
+        // a block that the model then has to close.
+        let mut typed = Pane::new(100);
+        typed.say("run ```this```", Tone::Bright);
+        typed.say("prose", Tone::Body);
+        assert!(!typed.fence_before(1).open());
     }
 
     #[test]

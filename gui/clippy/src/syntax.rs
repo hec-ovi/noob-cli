@@ -44,13 +44,37 @@ pub fn for_path(path: &str) -> Syntax {
         .and_then(|name| name.rsplit_once('.'))
         .map(|(_, ext)| ext.to_ascii_lowercase())
         .unwrap_or_default();
-    match ext.as_str() {
+    for_language(&ext)
+}
+
+/// Which syntax a language name is, as a fenced code block writes it. The same
+/// table as [`for_path`], because a fence says `python` where a file says `py`
+/// and both mean the same thing.
+pub fn for_language(name: &str) -> Syntax {
+    let ext = match name.trim().to_ascii_lowercase().as_str() {
+        "python" | "python3" => "py",
+        "rust" => "rs",
+        "javascript" | "node" => "js",
+        "typescript" => "ts",
+        "shell" | "console" | "terminal" => "sh",
+        "golang" => "go",
+        "c++" | "cxx" => "cpp",
+        "csharp" => "cs",
+        "yml" => "yaml",
+        "text" | "plain" | "" => "txt",
+        other => return match_ext(other),
+    };
+    match_ext(ext)
+}
+
+fn match_ext(ext: &str) -> Syntax {
+    match ext {
         "rs" | "c" | "h" | "cc" | "cpp" | "hpp" | "go" | "java" | "kt" | "swift" | "cs"
         | "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" | "json" | "css" | "scss" | "php"
         | "zig" | "wgsl" | "glsl" | "proto" => Syntax::CLike,
         "py" | "rb" | "sh" | "bash" | "zsh" | "toml" | "yaml" | "yml" | "ini" | "cfg" | "nix"
         | "r" | "pl" | "ex" | "exs" | "jl" | "dockerfile" | "makefile" | "mk" => Syntax::Hash,
-        "md" | "markdown" | "mdx" | "rst" | "txt" => Syntax::Markdown,
+        "md" | "markdown" | "mdx" | "rst" => Syntax::Markdown,
         _ => Syntax::None,
     }
 }
@@ -271,6 +295,19 @@ mod tests {
         assert_eq!(numbers, [&String::from("42")], "{scanned:?}");
     }
 
+    /// A fence says `python` where a file says `py`, and both mean the same
+    /// thing, so both reach the same scanner.
+    #[test]
+    fn a_fence_language_picks_the_same_syntax_as_the_extension() {
+        assert_eq!(for_language("python"), for_path("a.py"));
+        assert_eq!(for_language("rust"), for_path("a.rs"));
+        assert_eq!(for_language("Shell"), for_path("a.sh"));
+        assert_eq!(for_language("typescript"), for_path("a.ts"));
+        assert_eq!(for_language("toml"), Syntax::Hash);
+        assert_eq!(for_language(""), Syntax::None);
+        assert_eq!(for_language("brainfuck"), Syntax::None);
+    }
+
     #[test]
     fn the_extension_picks_the_syntax() {
         assert_eq!(for_path("src/main.rs"), Syntax::CLike);
@@ -279,6 +316,7 @@ mod tests {
         assert_eq!(for_path("Cargo.toml"), Syntax::Hash);
         assert_eq!(for_path("app.TSX"), Syntax::CLike, "case does not matter");
         assert_eq!(for_path("LICENSE"), Syntax::None);
+        assert_eq!(for_path("notes.txt"), Syntax::None);
         assert_eq!(for_path("weird.qqq"), Syntax::None);
         // A dot in a directory must not be read as the file's extension.
         assert_eq!(for_path("v1.2/notes"), Syntax::None);

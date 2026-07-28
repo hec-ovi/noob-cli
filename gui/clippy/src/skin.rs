@@ -117,7 +117,7 @@ impl Skin {
             // rest of the window is, because the point of the tag color is to
             // be recognisable at a glance without reading it.
             shell: [0x7f, 0xd4, 0xe8, 255],
-            look: text(config.dim),
+            look: [0x6e, 0xc8, 0xa8, 255],
             change: [0xf2, 0xc0, 0x6a, 255],
             search: [0xc8, 0xa2, 0xf0, 255],
             skill: [0xf0, 0x9c, 0xc8, 255],
@@ -243,6 +243,26 @@ mod tests {
             skin.input,
         ] {
             assert_eq!(fill[3], 1.0, "{fill:?}");
+        }
+    }
+
+    /// `look` used to be the same colour as every structural line, so a
+    /// session of mostly reads looked entirely uncoloured. Every call kind has
+    /// to stand off the ordinary text too, not only off each other.
+    #[test]
+    fn no_call_kind_is_the_colour_of_ordinary_text() {
+        let skin = Skin::default();
+        for kind in [
+            Kind::Shell,
+            Kind::Look,
+            Kind::Change,
+            Kind::Search,
+            Kind::Skill,
+            Kind::Mcp,
+            Kind::Agent,
+        ] {
+            assert_ne!(skin.kind(kind), skin.dim, "{kind:?}");
+            assert_ne!(skin.kind(kind), skin.body, "{kind:?}");
         }
     }
 

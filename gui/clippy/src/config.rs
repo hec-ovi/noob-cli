@@ -41,7 +41,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Config {
         Config {
-            opacity: 0.72,
+            opacity: 0.88,
             font_size: 14.0,
             pane_font_size: 13.0,
             accent: [0x7c, 0xd8, 0x94],
@@ -217,8 +217,9 @@ const DEFAULT_FILE: &str = "\
 
 # How solid the window is. 5% is a ghost, 100% is a normal opaque window.
 # The panels are drawn dark under green text, so lowering this shows more of
-# your desktop through the reading surface rather than washing the text out.
-opacity = 72%
+# your desktop through the reading surface. Below about 60% a busy wallpaper
+# starts competing with the text; that is a taste call, not a bug.
+opacity = 88%
 
 font_size = 14          # the conversation
 pane_font_size = 13     # the activity, plan, agents and file panes

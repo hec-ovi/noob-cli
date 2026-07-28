@@ -19,6 +19,8 @@
 
 mod config;
 mod link;
+mod markdown;
+mod monitor;
 mod skin;
 mod state;
 mod syntax;
@@ -37,6 +39,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 use config::Config;
 use link::{Incoming, Link};
+use monitor::Monitor;
 use skin::Skin;
 use state::{State, Tone};
 use view::{Hit, Layout, Shape, Tab};
@@ -47,6 +50,11 @@ struct Wake;
 
 /// A second click inside this long, on the same thing, is a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// How often the monitor reads the kernel, and only while it is on screen. A
+/// monitor is inherently periodic, which is the opposite of the
+/// redraw-on-change rule; the rule is kept by not sampling when nobody looks.
+const SAMPLE_EVERY: Duration = Duration::from_millis(500);
 
 /// The window will not grow past this. Unbounded is not useful: a conversation
 /// at four thousand pixels wide is one long line per paragraph, and the panes
@@ -62,6 +70,10 @@ struct App {
 
     config: Config,
     state: State,
+    monitor: Monitor,
+    /// Facts about this machine, shown under the readings.
+    reports: Vec<String>,
+    next_sample: Option<Instant>,
     skin: Skin,
     link: Option<Link>,
     trouble: Option<String>,
@@ -93,6 +105,9 @@ impl App {
             proxy,
             config,
             state: State::new(),
+            monitor: Monitor::new(),
+            reports: Vec::new(),
+            next_sample: None,
             skin,
             link: None,
             trouble: None,
@@ -321,13 +336,20 @@ impl App {
                     self.dirty = true;
                 }
             }
+            // Tab walks the whole window: every tab of the upper group, then
+            // every file below it, then back to the top.
             Key::Named(NamedKey::Tab) => {
-                self.tab = match self.tab {
-                    Tab::Activity => Tab::Plan,
-                    Tab::Plan => Tab::Agents,
-                    Tab::Agents => Tab::Activity,
-                };
+                let last = Tab::ALL[Tab::ALL.len() - 1];
+                if self.tab == last && self.state.open_file + 1 < self.state.files.len() {
+                    self.state.open_file += 1;
+                } else if self.tab == last && !self.state.files.is_empty() {
+                    self.state.open_file = 0;
+                    self.tab = Tab::ALL[0];
+                } else {
+                    self.tab = self.tab.next();
+                }
                 self.fold_top = false;
+                self.fold_files = false;
                 self.dirty = true;
             }
             Key::Named(NamedKey::PageUp) => self.scroll_hovered(1.0),
@@ -418,6 +440,7 @@ impl App {
         let layout = Layout::compute(gpu.width(), gpu.height(), &shape);
         let scene = view::build(&view::Frame {
             state: &self.state,
+            monitor: &self.monitor,
             skin: &self.skin,
             layout: &layout,
             tab: self.tab,
@@ -428,6 +451,7 @@ impl App {
             column: self.column,
             body_size: self.config.font_size,
             pane_size: self.config.pane_font_size,
+            reports: &self.reports,
             hot: self.hot,
             trouble: self.trouble.as_deref(),
         });
@@ -470,14 +494,14 @@ impl ApplicationHandler<Wake> for App {
                 if !gpu.caps.transparent {
                     self.skin = self.skin.opaque();
                 }
-                for line in gpu.caps.report() {
-                    self.state.activity.say(line, Tone::Dim);
-                }
-                self.state.activity.say(config::describe(), Tone::Dim);
+                // Facts about the machine belong beside the readings, not in
+                // the log of what the agent did.
+                self.reports = gpu.caps.report();
+                self.reports.push(config::describe());
                 for key in &self.config.unknown {
                     self.state
                         .activity
-                        .say(format!("settings  {key:?} is not a setting"), Tone::Bad);
+                        .say(format!("settings: {key:?} is not a setting"), Tone::Bad);
                 }
                 let mut renderer = noob_draw::Renderer::new(&gpu);
                 self.column = renderer.column_width(self.config.font_size);
@@ -583,8 +607,24 @@ impl ApplicationHandler<Wake> for App {
     /// an interface showing static text should cost nothing, and polling is how
     /// a UI silently eats a GPU.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // The monitor is the one thing that changes without an event, so it is
+        // the one thing that gets a clock, and only while it is on screen.
+        let watching = self.tab == Tab::Monitor && !self.fold_top && !self.shaded;
+        if watching {
+            let now = Instant::now();
+            if self.next_sample.is_none_or(|at| now >= at) {
+                self.monitor.sample(&self.state);
+                self.next_sample = Some(now + SAMPLE_EVERY);
+                self.dirty = true;
+            }
+        } else {
+            self.next_sample = None;
+        }
         self.redraw();
-        event_loop.set_control_flow(ControlFlow::Wait);
+        event_loop.set_control_flow(match self.next_sample {
+            Some(at) => ControlFlow::WaitUntil(at),
+            None => ControlFlow::Wait,
+        });
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {

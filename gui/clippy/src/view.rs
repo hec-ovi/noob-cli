@@ -12,6 +12,7 @@
 
 use noob_draw::{Panel, Run, Scene, Text};
 
+use crate::monitor::Monitor;
 use crate::skin::Skin;
 use crate::state::{State, TodoState, Tone};
 
@@ -32,17 +33,24 @@ pub enum Tab {
     Activity,
     Plan,
     Agents,
+    Monitor,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Activity, Tab::Plan, Tab::Agents];
+    pub const ALL: [Tab; 4] = [Tab::Activity, Tab::Plan, Tab::Agents, Tab::Monitor];
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::Activity => "ACTIVITY",
             Tab::Plan => "PLAN",
             Tab::Agents => "AGENTS",
+            Tab::Monitor => "MONITOR",
         }
+    }
+
+    pub fn next(self) -> Tab {
+        let at = Tab::ALL.iter().position(|t| *t == self).unwrap_or(0);
+        Tab::ALL[(at + 1) % Tab::ALL.len()]
     }
 }
 
@@ -306,6 +314,7 @@ pub fn edge(x: f32, y: f32, width: f32, height: f32) -> Option<winit::window::Re
 
 pub struct Frame<'a> {
     pub state: &'a State,
+    pub monitor: &'a Monitor,
     pub skin: &'a Skin,
     pub layout: &'a Layout,
     pub tab: Tab,
@@ -316,6 +325,9 @@ pub struct Frame<'a> {
     pub column: f32,
     pub body_size: f32,
     pub pane_size: f32,
+    /// The GPU capability report and the settings path: facts about this
+    /// machine, which belong beside the readings and not in the activity log.
+    pub reports: &'a [String],
     /// What the pointer is over, for the button highlight.
     pub hot: Option<Hit>,
     /// Shown in the title bar when the agent could not be reached.
@@ -335,6 +347,7 @@ pub fn build(frame: &Frame) -> Scene {
         return scene;
     }
 
+    let talk_rows = layout.rows(layout.talk, frame.body_size).saturating_sub(1);
     pane(&mut scene, frame, layout.talk, frame.body_size, |runs| {
         let subject = if state.turn > 0 {
             format!("turn {}", state.turn)
@@ -342,22 +355,20 @@ pub fn build(frame: &Frame) -> Scene {
             String::new()
         };
         header(runs, "TALK", &subject, skin);
-        for line in state
-            .talk
-            .visible(layout.rows(layout.talk, frame.body_size).saturating_sub(1))
-        {
-            runs.push(Run::tinted(&line.text, skin.tone(line.tone)));
+        // A window that starts inside a fenced block has to know it is looking
+        // at code, so the state is carried in from the lines above it.
+        let mut fence = state.talk.fence_before(talk_rows);
+        for line in state.talk.visible(talk_rows) {
+            match line.tone {
+                // Only the model's prose is Markdown. What the human typed and
+                // what the harness noted are shown as written.
+                Tone::Body => crate::markdown::line(&line.text, &mut fence, skin, runs),
+                tone => runs.push(Run::tinted(&line.text, skin.tone(tone))),
+            }
             runs.push(Run::plain("\n"));
         }
     });
-    scrollbar(
-        &mut scene,
-        skin,
-        layout.talk,
-        state
-            .talk
-            .thumb(layout.rows(layout.talk, frame.body_size).saturating_sub(1)),
-    );
+    scrollbar(&mut scene, skin, layout.talk, state.talk.thumb(talk_rows));
 
     tab_strip(
         &mut scene,
@@ -410,20 +421,31 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
     let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
     scene.rect(layout.title.fill(skin.bar));
 
-    // The three buttons, drawn as glyphs rather than as bare boxes: a coloured
-    // square with no mark on it says nothing about what it does.
+    // ASCII, at the body size, centred by measured column width. The first
+    // version used \u{2715} and \u{25a1} and drew nothing on a font that has
+    // neither, which reads as three broken buttons.
+    let mark = frame.body_size;
     for (panel, glyph, hit, tint) in [
-        (layout.minimize, "\u{2013}", Hit::Minimize, skin.hot),
-        (layout.maximize, "\u{25a1}", Hit::Maximize, skin.hot),
-        (layout.close, "\u{2715}", Hit::Close, skin.close_hot),
+        (layout.minimize, "_", Hit::Minimize, skin.hot),
+        (layout.maximize, "[]", Hit::Maximize, skin.hot),
+        (layout.close, "X", Hit::Close, skin.close_hot),
     ] {
-        if frame.hot == Some(hit) {
+        let lit = frame.hot == Some(hit);
+        if lit {
             scene.rect(panel.fill(tint));
         }
+        let width = glyph.chars().count() as f32 * frame.column;
+        let centred = Panel::new(
+            panel.x + ((panel.w - width) * 0.5).floor(),
+            panel.y,
+            width.max(1.0),
+            panel.h,
+        )
+        .row(0.0, Text::line_for(mark));
         scene.text(Text::rich(
-            vec![Run::tinted(glyph, skin.bright)],
-            panel.row(0.0, Text::line_for(SMALL)),
-            SMALL,
+            vec![Run::tinted(glyph, if lit { skin.bright } else { skin.title })],
+            centred,
+            mark,
             skin.bright,
         ));
     }
@@ -547,11 +569,89 @@ fn group_pane(scene: &mut Scene, frame: &Frame) {
                 runs.push(Run::plain("\n"));
             }
         }
+        Tab::Monitor => monitor_text(runs, frame),
     });
-    if frame.tab == Tab::Activity {
-        scrollbar(scene, skin, panel, state.activity.thumb(rows));
+    match frame.tab {
+        Tab::Activity => scrollbar(scene, skin, panel, state.activity.thumb(rows)),
+        Tab::Monitor => monitor_bars(scene, frame, panel),
+        _ => {}
     }
 }
+
+/// The labelled rows of the monitor. The bars themselves are rectangles drawn
+/// over this text, so a proportion is a shape rather than a row of `#`.
+fn monitor_text(runs: &mut Vec<Run>, frame: &Frame) {
+    let skin = frame.skin;
+    if frame.monitor.gauges.is_empty() {
+        runs.push(Run::tinted("sampling…", skin.dim));
+        runs.push(Run::plain("\n"));
+    }
+    for gauge in &frame.monitor.gauges {
+        runs.push(Run::tinted(format!("{:<8}", gauge.label), skin.dim));
+        // The bar's room, kept as spaces so the reading lands after it.
+        runs.push(Run::plain(" ".repeat(BAR_COLUMNS)));
+        runs.push(Run::tinted(
+            format!("  {}", gauge.reading()),
+            if gauge.fraction().is_some_and(|f| f > 0.85) {
+                skin.bad
+            } else {
+                skin.body
+            },
+        ));
+        runs.push(Run::plain("\n"));
+    }
+    runs.push(Run::plain("\n"));
+    for note in frame.monitor.notes.iter().chain(frame.reports.iter()) {
+        runs.push(Run::tinted(note.as_str(), skin.dim));
+        runs.push(Run::plain("\n"));
+    }
+}
+
+/// One radeontop-style bar per gauge, and a btop-style history behind it. Both
+/// out of rectangles: a proportion drawn as a shape reads at a glance, and a
+/// row of block characters depends on a font having them.
+fn monitor_bars(scene: &mut Scene, frame: &Frame, panel: Panel) {
+    let skin = frame.skin;
+    let content = panel.inset(PAD);
+    let line = Text::line_for(frame.pane_size);
+    let bar_x = content.x + 8.0 * frame.column;
+    let bar_w = (BAR_COLUMNS as f32 * frame.column).min((content.w - 8.0 * frame.column).max(1.0));
+    for (row, gauge) in frame.monitor.gauges.iter().enumerate() {
+        let y = content.y + row as f32 * line;
+        if y + line > content.y + content.h {
+            break;
+        }
+        let track = Panel::new(bar_x, y + line * 0.28, bar_w, line * 0.44);
+        // The history first, behind the bar: the past is context, not content.
+        let series = frame.monitor.history(gauge.key);
+        if series.len() > 1 {
+            let step = (track.w / series.len() as f32).max(1.0);
+            for (i, point) in series.iter().enumerate() {
+                let height = (track.h * point).max(1.0);
+                scene.rect(
+                    Panel::new(
+                        track.x + i as f32 * step,
+                        track.y + track.h - height,
+                        step.max(1.0),
+                        height,
+                    )
+                    .fill(skin.scroll_track),
+                );
+            }
+        } else {
+            scene.rect(track.fill(skin.gauge_track));
+        }
+        if let Some(fraction) = gauge.fraction() {
+            let full = fraction > 0.85;
+            scene.rect(
+                Panel::new(track.x, track.y, (track.w * fraction).max(1.0), track.h)
+                    .fill(if full { skin.close_hot } else { skin.gauge }),
+            );
+        }
+    }
+}
+
+const BAR_COLUMNS: usize = 24;
 
 fn files_pane(scene: &mut Scene, frame: &Frame) {
     let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
@@ -806,6 +906,7 @@ mod tests {
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state,
+            monitor: &Monitor::new(),
             skin: &skin,
             layout: &layout,
             tab,
@@ -816,6 +917,7 @@ mod tests {
             column: shape.column,
             body_size: 14.0,
             pane_size: 13.0,
+            reports: &[],
             hot: None,
             trouble: None,
         });
@@ -1075,6 +1177,7 @@ mod tests {
         let count = |caret: usize| {
             build(&Frame {
                 state: &state,
+                monitor: &Monitor::new(),
                 skin: &skin,
                 layout: &layout,
                 tab: Tab::Activity,
@@ -1085,6 +1188,7 @@ mod tests {
                 column: 8.0,
                 body_size: 14.0,
                 pane_size: 13.0,
+                reports: &[],
                 hot: None,
                 trouble: None,
             })
@@ -1101,6 +1205,7 @@ mod tests {
         let skin = Skin::default();
         let scene = build(&Frame {
             state: &state,
+            monitor: &Monitor::new(),
             skin: &skin,
             layout: &layout,
             tab: Tab::Activity,
@@ -1111,6 +1216,7 @@ mod tests {
             column: 8.0,
             body_size: 14.0,
             pane_size: 13.0,
+            reports: &[],
             hot: None,
             trouble: Some("cannot start \"noob\": not found"),
         });
