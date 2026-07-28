@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!--
+    CLIppy. The outer bend of a paperclip is an arch, an arch on two legs is an
+    n, and a shape that goes up, turns and comes back down is the agent loop.
+
+    One closed path, one flat fill, drawn on a 128 grid with a module of 8, so
+    every coordinate is a whole pixel at 16, 32, 64 and 128. Constant wire 24,
+    two radii (48 outer, 24 inner), no diagonal anywhere, legs of unequal
+    length, one inward foot.
+
+    #1f9d5b rather than the interface accent #7cd894: the accent is tuned for
+    black panels and measures 1.73:1 on white, which vanishes in a light dock.
+    This clears 3:1 on both grounds, so the mark needs no plate behind it.
+  -->
+  <path fill="#1f9d5b" d="M16 112 L16 64 A48 48 0 0 1 112 64 L112 96 L64 96 L64 72 L88 72 L88 64 A24 24 0 0 0 40 64 L40 112 Z"/>
+</svg>

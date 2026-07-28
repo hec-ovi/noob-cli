@@ -13,6 +13,29 @@ wgpu and winit, composited against your desktop.
 
 `NOOB_BIN` names the agent binary when it is not `noob` on PATH.
 
+## Installing
+
+```
+./dev.sh gui-install         # ~/.local/bin/clippy, the launcher and the icon
+./dev.sh gui-package         # the release tarball, same contents
+```
+
+Everything lands under `~/.local`, so nothing needs root and nothing goes
+outside your home directory. `install.sh --uninstall` takes it all back out.
+Not a Flatpak or an AppImage: the binary is static apart from the system's own
+GPU drivers, and those are exactly the thing a bundle cannot ship.
+
+The icon is one closed path in one flat colour, drawn on a 128 grid with a
+module of 8 so every edge is a whole pixel at 16, 32, 64 and 128, with a second
+drawing at 16 rather than a scaled copy of the first. Its green is darker than
+the interface accent on purpose: the accent measures 1.73:1 against white and
+vanishes in a light dock, while the icon clears 3:1 on both grounds and so needs
+no plate behind it. On Wayland a window cannot set its own icon at all, so the
+launcher file and the icon file are the entire mechanism, and their names have
+to match the name the window announces. A test asserts all three agree, because
+when they stop agreeing the window still works perfectly and just wears a grey
+square forever.
+
 ## What is where
 
 Three spaces: a wide one on the left and two stacked on the right. Every view is
@@ -128,6 +151,9 @@ black.
 | `noob-draw` | instanced rectangles and shaped glyphs, and nothing else |
 | `clippy` | the window shell, the layout, the panes, the agent link |
 | `asciify` | GIF to the avatar's text animation, run at authoring time only |
+
+`gui/data/` holds what the desktop needs: the icon, its small redrawn variant,
+the launcher entry and the installer that places them.
 
 Its own cargo workspace, deliberately. The CLI is capped at 8 MiB and 45 runtime
 crates and those are published claims; a GPU stack is several hundred crates.

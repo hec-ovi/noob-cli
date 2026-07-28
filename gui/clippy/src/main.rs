@@ -23,6 +23,7 @@ mod dock;
 mod link;
 mod markdown;
 mod monitor;
+mod packaging;
 mod skin;
 mod state;
 mod syntax;
@@ -583,13 +584,37 @@ impl App {
     }
 }
 
+/// The name the desktop knows this window by.
+///
+/// It has to be exactly the basename of the installed `.desktop` file or the
+/// desktop cannot match the two, and an unmatched window gets a generic icon in
+/// the dock and in the switcher no matter what the code does. On Wayland the
+/// code cannot set an icon at all, so this string IS the icon.
+pub const APP_ID: &str = "io.github.hec_ovi.CLIppy";
+
+fn window_attributes() -> winit::window::WindowAttributes {
+    let attributes = Window::default_attributes().with_title("CLIppy");
+    // Set on both, because the same binary runs under either and the two
+    // display servers spell the same idea differently.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let attributes = {
+        use winit::platform::wayland::WindowAttributesExtWayland;
+        use winit::platform::x11::WindowAttributesExtX11;
+        WindowAttributesExtX11::with_name(
+            WindowAttributesExtWayland::with_name(attributes, APP_ID, "clippy"),
+            APP_ID,
+            "clippy",
+        )
+    };
+    attributes
+}
+
 impl ApplicationHandler<Wake> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
-        let attributes = Window::default_attributes()
-            .with_title("CLIppy")
+        let attributes = window_attributes()
             .with_decorations(false)
             .with_transparent(true)
             .with_resizable(true)

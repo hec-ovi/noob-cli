@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!--
+    The same mark redrawn on a 16 grid rather than scaled down to it, so every
+    edge lands on a pixel: wire 2, counter 6, arch radii 6 and 3, foot 3 tall.
+    A scaled copy puts edges on halves and renders as grey rows.
+
+    Monochrome and filled with the symbolic placeholder grey, which the desktop
+    replaces with whatever colour the surface needs.
+  -->
+  <path fill="#bebebe" d="M2 14 L2 8 A6 6 0 0 1 14 8 L14 12 L8 12 L8 9 L11 9 L11 8 A3 3 0 0 0 5 8 L5 14 Z"/>
+</svg>

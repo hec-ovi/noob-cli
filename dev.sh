@@ -110,6 +110,38 @@ case "${1:-}" in
     echo "clippy runtime crates: $crates"
     [ "$crates" -le 400 ] || { echo "FAIL: CLIppy crate graph exceeds 400"; exit 1; }
     ;;
+  gui-package)
+    # A release tarball: the binary, the icon, the desktop entry and an
+    # installer that puts them under ~/.local. Not a Flatpak or an AppImage
+    # because neither buys anything here: the binary is static apart from the
+    # system's own GPU drivers, which are exactly the thing a bundle cannot
+    # ship anyway.
+    version=$(awk -F'"' '/^version/ {print $2; exit}' gui/Cargo.toml)
+    arch=$(uname -m)
+    stage="gui/target/package/clippy-$version-$arch-linux"
+    cargo build --release --manifest-path gui/Cargo.toml
+    rm -rf "$stage"
+    install -d "$stage"
+    install -m 0755 gui/target/release/clippy "$stage/clippy"
+    install -m 0755 gui/data/install.sh "$stage/install.sh"
+    install -m 0644 gui/data/io.github.hec_ovi.CLIppy.desktop "$stage/"
+    install -m 0644 gui/data/io.github.hec_ovi.CLIppy.svg "$stage/"
+    install -m 0644 gui/data/io.github.hec_ovi.CLIppy-symbolic.svg "$stage/"
+    tarball="$(dirname "$stage")/$(basename "$stage").tar.gz"
+    tar -czf "$tarball" -C "$(dirname "$stage")" "$(basename "$stage")"
+    echo "$tarball"
+    echo "$(stat -c%s "$tarball") bytes"
+    ;;
+  gui-install)
+    # The same install the tarball performs, straight from this checkout.
+    cargo build --release --manifest-path gui/Cargo.toml
+    shift
+    install -d gui/target/release/data
+    cp gui/data/io.github.hec_ovi.CLIppy.* gui/target/release/data/
+    cp gui/target/release/clippy gui/target/release/data/clippy
+    cp gui/data/install.sh gui/target/release/data/install.sh
+    exec bash gui/target/release/data/install.sh "$@"
+    ;;
   avatar)
     # Regenerate CLIppy's ASCII avatar from a GIF. The window never decodes an
     # image: this runs once, here, and what ships is its output.
@@ -135,6 +167,8 @@ case "${1:-}" in
     echo "  ./dev.sh gui [workspace]     open CLIppy, the GPU front end"
     echo "  ./dev.sh gui-test|gui-check  CLIppy tests and its own size gate"
     echo "  ./dev.sh avatar <in.gif>     regenerate CLIppy's ASCII avatar"
+    echo "  ./dev.sh gui-install         install CLIppy under ~/.local"
+    echo "  ./dev.sh gui-package         build the release tarball"
     ;;
   # Bare `./dev.sh`, or leading-dash noob flags (--session, --plan, ...): open
   # the agent. `repl` is kept as a silent alias for old muscle memory.
