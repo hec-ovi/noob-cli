@@ -21,11 +21,11 @@ A space you empty gives its room to its neighbour.
 
 | view | carries |
 |---|---|
-| ACTIVITY | every call, one colour and one tag per tool: bash, read, ls, glob, grep, write, edit, web, skill, mcp, agent, plan |
+| ACTIVITY | every call, one colour and one tag per tool: bash, read, ls, glob, grep, write, edit, web, skill, mcp, agent, plan, plus a running command's output as it arrives |
 | PLAN | the checklist, straight from the plan tool's own arguments |
-| AGENTS | sub-agents, their brief and how they ended |
+| AGENTS | sub-agents: their tool set, their brief, the last thing each one said, and how it ended |
 | HARDWARE | GPU, VRAM, GTT, CPU and RAM |
-| LLM | context, cache, total and last prefill and output, and the measured prefill and decode rates |
+| LLM | context, where compaction triggers, cache, total and last prefill and output, and the measured prefill and decode rates |
 | FILES | one tab per file touched, with the diff, a line-number gutter and syntax coloring |
 
 The conversation is rendered as Markdown, because the model writes Markdown
@@ -39,10 +39,28 @@ lays it out, with its own history drawn behind it the way btop does. It only
 samples while it is on screen, so an idle window still costs nothing.
 
 LLM is the other question: not whether the machine is keeping up but whether the
-budget is. The rates are measured rather than reported. Prefill is from the
+budget is. Context comes from the agent's own estimate rather than from the last
+request, so it moves while a turn is still running, and COMPACTS AT is the line
+that actually runs out. The rates are measured rather than reported. Prefill is from the
 request leaving to the first token arriving, which is what a long transcript
 costs; decode is from the first token to the last, which is what the answer
 costs. Both averaged over the session, because one request is noise.
+
+A running command scrolls. `cargo build` used to be one row that said nothing
+for two minutes and then said how it went; its output now arrives line by line
+in the calling tool's own colour, so two commands at once stay apart. A command
+that floods stops after five thousand lines and says so rather than going
+quiet; the full output still reaches the model untouched.
+
+A failure says what class it was, the exit status as a number, and what to do
+next on its own line. `exit_status 127` above `available here: python3 node` is
+the whole answer often enough to be worth the room.
+
+Sub-agents are the children themselves, not the calls that asked for them. The
+`subagent` call is an admission that returns in microseconds while the child
+runs for minutes, and it is also how a cancel and a status poll are asked for,
+so drawing rows from it showed every fan-out twice. Each row is one child, with
+what it was given, what it is saying, and how it ended.
 
 Calls are one list, not two. Splitting `bash` off looked right on paper and read
 as arbitrary in use: `ls` is the `ls` tool and `rm -rf` is `bash`, so the split

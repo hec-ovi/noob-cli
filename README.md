@@ -4,7 +4,7 @@ noob-cli is a compact Rust agent for OpenAI-compatible model endpoints. It runs 
 
 **`noob tokens <path>...`** counts what a file costs through the model's own tokenizer, by asking the endpoint's `/tokenize` route. Every other token number here is an estimate; this one is the answer for the model actually loaded.
 
-The static release binary is 4,473,792 bytes (4.27 MiB) with 41 runtime crates. There is no async runtime or TUI framework.
+The static release binary is 4,490,176 bytes (4.28 MiB) with 41 runtime crates. There is no async runtime or TUI framework.
 
 ## Showcase
 
@@ -95,9 +95,17 @@ The checkout path mounts `config/` as the config directory (`NOOB_CONFIG` overri
 noob [--model <name>] [--base-url <url>] [--resume <id>] [--plan] [--verbose] [--yolo]
 noob exec -p "<prompt>" [--json] [--resume <id>] [--plan] [--verbose] [--model <name>] [--base-url <url>] [--yolo]
 noob sessions
+noob tokens <path>... [--model <name>] [--base-url <url>]
+noob serve [--resume <id>] [--plan] [--verbose] [--yolo]
 noob doctor
 noob --version
 ```
+
+`noob serve` is the front-end mode: it reads command frames on stdin and writes
+event frames on stdout, one JSON object per line, versioned by
+`crates/noob-proto`. It is what [CLIppy](gui/README.md) drives. The same frames
+can be tapped from any other surface by pointing `NOOB_EMIT` at a file, which
+writes them beside the session without changing a byte of what you see.
 
 Interactive commands:
 
