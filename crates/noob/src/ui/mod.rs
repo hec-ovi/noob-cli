@@ -318,6 +318,21 @@ impl Ui {
         }
     }
 
+    /// A `Ui` for `noob serve`, where the protocol stream is the only output
+    /// and stdout carries it.
+    ///
+    /// Every terminal sink is inert, so a rendering path that forgets to check
+    /// the mode cannot corrupt the frame stream by writing prose into it.
+    /// `Mode::Child` because its policies are already the right ones for a
+    /// surface with nobody at a terminal: never ask, always deny.
+    pub(crate) fn serve() -> Ui {
+        Ui {
+            out: Box::new(std::io::sink()),
+            err: Box::new(std::io::sink()),
+            ..Ui::new(Mode::Child)
+        }
+    }
+
     /// A `Ui` for one dock-managed turn. Its public rendering operations ship
     /// semantic events over the dock channel; its sinks are deliberately inert
     /// so a future helper that forgets to intercept cannot become a second

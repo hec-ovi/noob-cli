@@ -35,6 +35,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("exec") => cmd_exec(&args[1..]),
+        Some("serve") => cmd_serve(&args[1..]),
         Some("debug") => cmd_debug(&args[1..]),
         Some("child") => cmd_child(),
         Some("sessions") => cmd_sessions(),
@@ -43,7 +44,7 @@ fn main() -> ExitCode {
         None => cmd_repl(&[]),
         Some(other) => {
             eprintln!(
-                "noob: unknown command {other:?}; available: exec, sessions, debug, doctor, --version"
+                "noob: unknown command {other:?}; available: exec, serve, sessions, debug, doctor, --version"
             );
             ExitCode::from(2)
         }
@@ -87,6 +88,10 @@ struct BootArgs {
     excluded_skills: Vec<String>,
     /// None = no persistence; Some(None) = fresh id; Some(Some(id)) = resume.
     session: Option<Option<String>>,
+    /// Where protocol frames go. None means whatever `NOOB_EMIT` says, which
+    /// is off for every ordinary surface. `serve` overrides it with stdout,
+    /// because there the stream is not a side-channel, it is the output.
+    emitter: Option<emit::Emitter>,
 }
 
 impl BootArgs {
@@ -100,6 +105,7 @@ impl BootArgs {
             verbose: false,
             excluded_skills: Vec::new(),
             session,
+            emitter: None,
         }
     }
 }
@@ -247,7 +253,7 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
     // The side-channel opens here, once every surface has been decided and
     // before the first frame anything could emit. Off unless NOOB_EMIT names
     // a file, in which case no byte on any existing surface moves.
-    let emitter = emit::Emitter::from_env();
+    let emitter = boot.emitter.unwrap_or_else(emit::Emitter::from_env);
     emitter.send(noob_proto::Event::SessionStart {
         id: session
             .as_ref()
@@ -1197,6 +1203,140 @@ fn cmd_exec(args: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// serve: the agent as a protocol endpoint
+// ---------------------------------------------------------------------------
+
+/// `noob serve`: `Command` frames in on stdin, `Event` frames out on stdout.
+///
+/// The surface a front end drives. It is a separate subcommand rather than a
+/// mode of the REPL for one reason: the REPL owns the terminal outright, in raw
+/// mode, reading STDIN_FILENO through libc. There is no seam to add a second
+/// input source to that does not also change what a human sees. Here there is
+/// no terminal at all, so the two halves of the protocol are just stdin and
+/// stdout, and nothing about the interactive surface has to move.
+///
+/// Frames the agent has no answer for are ignored rather than refused, which
+/// is the same degradation rule the protocol applies to unknown frames: a
+/// front end built against a newer agent loses a feature, not its session.
+fn cmd_serve(args: &[String]) -> ExitCode {
+    const USAGE: &str = "usage: noob serve [--resume <id> | --session <id>] [--model <name>] \
+                         [--base-url <url>] [--plan] [--verbose] [--yolo]";
+    let mut ov = Overrides::default();
+    let mut yolo = false;
+    let mut plan = false;
+    let mut verbose = false;
+    // A front end is a long-lived conversation, so persistence is the default
+    // here where it is opt-in for exec: a fresh id unless one is named.
+    let mut session_id: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        let taken = match arg.as_str() {
+            "--model" => value_for(arg, it.next(), USAGE).map(|v| ov.model = Some(v)),
+            "--base-url" => value_for(arg, it.next(), USAGE).map(|v| ov.base_url = Some(v)),
+            "--resume" | "--session" | "--restore" => {
+                value_for(arg, it.next(), USAGE).map(|v| session_id = Some(v))
+            }
+            "--yolo" => {
+                yolo = true;
+                Ok(())
+            }
+            "--plan" => {
+                plan = true;
+                Ok(())
+            }
+            "--verbose" => {
+                verbose = true;
+                Ok(())
+            }
+            other => Err(format!("noob serve: unknown flag {other:?}; {USAGE}")),
+        };
+        if let Err(msg) = taken {
+            eprintln!("{msg}");
+            return ExitCode::from(2);
+        }
+    }
+
+    let mut ui = Ui::serve();
+    // Line-buffered stdout would hold a frame until a newline it already has,
+    // and the emitter flushes per frame anyway, so this is the whole transport.
+    let emitter = emit::Emitter::to(Box::new(std::io::stdout()));
+    let mut boot = BootArgs::new(ov, yolo, plan, Some(session_id));
+    boot.verbose = verbose;
+    boot.emitter = Some(emitter.clone());
+    let (mut agent, _) = match bootstrap(boot, &mut ui) {
+        Ok(pair) => pair,
+        Err(e) => {
+            // Before any frame has been written, so a front end that cannot
+            // start gets a readable reason rather than an empty stream.
+            emitter.send(noob_proto::Event::Error {
+                line: format!("noob: {e}"),
+            });
+            eprintln!("noob: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    // Commands are read on their own thread so a cancel lands while a turn is
+    // running rather than after it. The turn itself stays on the main thread,
+    // one at a time, which is what keeps the transcript ordered.
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match std::io::BufRead::read_line(&mut stdin.lock(), &mut line) {
+                Ok(0) | Err(_) => break, // the front end closed
+                Ok(_) => {}
+            }
+            let Some(frame) = noob_proto::decode::<noob_proto::Command>(&line) else {
+                continue;
+            };
+            match frame.body {
+                // Both queue: a prompt typed while the agent is working is
+                // almost always the next thing to do, not a reason to throw
+                // away the work in flight. Cancelling is its own command.
+                noob_proto::Command::PromptSubmit { text }
+                | noob_proto::Command::PromptQueue { text } => {
+                    if tx.send(text).is_err() {
+                        break;
+                    }
+                }
+                noob_proto::Command::TurnCancel => {
+                    INTERRUPTED.store(true, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        }
+    });
+
+    for text in rx {
+        if text.trim().is_empty() {
+            continue;
+        }
+        // A cancel that arrived between turns has nothing to cancel; leaving
+        // it set would kill the turn about to start.
+        INTERRUPTED.store(false, Ordering::SeqCst);
+        match agent.run_input(&text, &mut ui) {
+            RunEnd::Completed(_) | RunEnd::Interrupted => {}
+            // Already emitted as an error frame by the turn itself; the loop
+            // keeps going because the next prompt may well work.
+            RunEnd::Aborted(_) => {}
+        }
+    }
+
+    agent.shutdown_background_agents(&mut ui);
+    emitter.send(noob_proto::Event::SessionEnd {
+        id: agent
+            .session
+            .as_ref()
+            .map(|s| s.id().to_string())
+            .unwrap_or_default(),
+    });
+    ExitCode::SUCCESS
 }
 
 // ---------------------------------------------------------------------------
