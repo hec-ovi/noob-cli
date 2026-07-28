@@ -244,6 +244,7 @@ version = "0.5.1"
 dependencies = [
  "ignore",
  "libc",
+ "noob-proto",
  "noob-provider",
  "noob-testkit",
  "regex",

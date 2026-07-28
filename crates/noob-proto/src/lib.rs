@@ -200,11 +200,27 @@ pub enum Event {
     },
 
     /// The agent is now looking at this file. Drives the code pane.
+    ///
+    /// Every file frame carries the tool call that caused it. Read-only tools
+    /// run up to eight at a time, so without this their frames interleave and
+    /// a consumer cannot tell which read produced which. Optional because a
+    /// file event can also come from outside any call, such as compaction
+    /// dropping what the agent had seen.
     #[serde(rename = "file.open")]
-    FileOpen { path: String, lines: u32 },
+    FileOpen {
+        path: String,
+        lines: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+    },
     /// The part of that file it is about to work on.
     #[serde(rename = "file.span")]
-    FileSpan { path: String, span: Span },
+    FileSpan {
+        path: String,
+        span: Span,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+    },
     /// A range that just changed, with both sides, so a diff needs no guessing
     /// and no second read of the file.
     #[serde(rename = "file.edit")]
@@ -213,9 +229,15 @@ pub enum Event {
         span: Span,
         before: String,
         after: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
     },
     #[serde(rename = "file.close")]
-    FileClose { path: String },
+    FileClose {
+        path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+    },
 
     #[serde(rename = "agent.spawn")]
     AgentSpawn {
@@ -372,6 +394,7 @@ mod tests {
             },
             before: "a - b".into(),
             after: "a + b".into(),
+            call_id: Some("c7".into()),
         });
         round_trip(Event::AgentStateChanged {
             agent_id: "agent-1".into(),
@@ -553,6 +576,27 @@ mod tests {
         // rather than inventing one.
         assert_eq!(value["samples"][1]["max"], 1875.0);
         assert!(value["samples"][2].get("max").is_none());
+    }
+
+    /// Eight reads run concurrently, so a file frame that cannot name its call
+    /// is unattributable. The field is optional because compaction closes files
+    /// outside any call.
+    #[test]
+    fn file_frames_carry_the_call_that_caused_them() {
+        let line = encode(&Event::FileOpen {
+            path: "src/a.rs".into(),
+            lines: 120,
+            call_id: Some("c3".into()),
+        });
+        let value: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["call_id"], "c3");
+
+        let orphan = encode(&Event::FileClose {
+            path: "src/a.rs".into(),
+            call_id: None,
+        });
+        let value: Value = serde_json::from_str(&orphan).unwrap();
+        assert!(value.get("call_id").is_none(), "{orphan}");
     }
 
     /// Absent optional fields stay off the wire. Every frame is paid for on

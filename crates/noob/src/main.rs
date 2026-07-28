@@ -4,6 +4,7 @@
 mod agent;
 mod config;
 mod doctor;
+mod emit;
 mod mcp;
 mod session;
 mod skills;
