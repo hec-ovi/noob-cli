@@ -327,6 +327,74 @@ impl Phase {
     }
 }
 
+/// How fast the endpoint is actually going, measured rather than reported.
+///
+/// Two phases and two rates. Prefill is from the request leaving to the first
+/// token arriving, which is what a long transcript costs. Decode is from the
+/// first token to the last, which is what the answer costs. Averaged over the
+/// session, because a single request is noise and the average is what tells
+/// you whether the machine is doing what it did yesterday.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Rates {
+    prefill_tokens: u64,
+    prefill_seconds: f64,
+    decode_tokens: u64,
+    decode_seconds: f64,
+    /// When the request in flight went out, and when its first token landed.
+    started: Option<f64>,
+    first_token: Option<f64>,
+}
+
+impl Rates {
+    /// Tokens per second the endpoint prefilled at, over the session.
+    pub fn prefill(&self) -> f64 {
+        rate(self.prefill_tokens, self.prefill_seconds)
+    }
+
+    /// Tokens per second it generated at, over the session.
+    pub fn decode(&self) -> f64 {
+        rate(self.decode_tokens, self.decode_seconds)
+    }
+
+    fn request_started(&mut self, at: f64) {
+        self.started = Some(at);
+        self.first_token = None;
+    }
+
+    fn token_arrived(&mut self, at: f64) {
+        self.first_token.get_or_insert(at);
+    }
+
+    /// The request finished and reported what it cost. Windows shorter than a
+    /// millisecond are dropped rather than dividing by nearly zero: a cached
+    /// prefill really does take no measurable time, and counting it as
+    /// infinitely fast makes the average meaningless.
+    fn request_finished(&mut self, usage: Usage, at: f64) {
+        if let (Some(started), Some(first)) = (self.started, self.first_token) {
+            let prefill = first - started;
+            if prefill > 0.001 && usage.prefilled() > 0 {
+                self.prefill_tokens += usage.prefilled();
+                self.prefill_seconds += prefill;
+            }
+            let decode = at - first;
+            if decode > 0.001 && usage.completion > 0 {
+                self.decode_tokens += usage.completion;
+                self.decode_seconds += decode;
+            }
+        }
+        // The next request starts where this one ended, which is what the
+        // agent actually does: it turns straight around and sends again.
+        self.request_started(at);
+    }
+}
+
+fn rate(tokens: u64, seconds: f64) -> f64 {
+    if seconds <= 0.0 {
+        return 0.0;
+    }
+    tokens as f64 / seconds
+}
+
 /// A call in flight, kept so its end can be reported the way its start was.
 struct Open {
     kind: Kind,
@@ -350,6 +418,10 @@ pub struct State {
     pub prefilled: u64,
     pub generated: u64,
     pub requests: u32,
+    /// What the last request alone cost, as against the session totals.
+    pub last_prefill: u64,
+    pub last_generated: u64,
+    pub rates: Rates,
 
     pub turn: u32,
     pub phase: Phase,
@@ -382,6 +454,9 @@ impl State {
             prefilled: 0,
             generated: 0,
             requests: 0,
+            last_prefill: 0,
+            last_generated: 0,
+            rates: Rates::default(),
             turn: 0,
             phase: Phase::Starting,
             status: String::from("starting the agent"),
@@ -421,8 +496,27 @@ impl State {
         self.files.last_mut().expect("just pushed")
     }
 
-    /// Fold one frame in. Returns whether anything visible changed.
+    /// Fold one frame in, untimed. The window always has a clock and uses
+    /// [`State::apply_at`]; this is the shape the tests read better in.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn apply(&mut self, event: Event) -> bool {
+        self.apply_at(event, None)
+    }
+
+    /// Fold one frame in, timed. `at` is monotonic seconds from any fixed
+    /// point; it is passed in rather than read here so this module stays pure
+    /// and the rates are testable without a clock.
+    pub fn apply_at(&mut self, event: Event, at: Option<f64>) -> bool {
+        match (&event, at) {
+            (Event::TurnStart { .. }, Some(at)) => self.rates.request_started(at),
+            (Event::TextDelta { .. } | Event::ReasoningDelta { .. }, Some(at)) => {
+                self.rates.token_arrived(at);
+            }
+            (Event::UsageReport { usage }, Some(at)) => {
+                self.rates.request_finished(*usage, at);
+            }
+            _ => {}
+        }
         match event {
             Event::SessionStart {
                 id,
@@ -621,6 +715,8 @@ impl State {
             Event::UsageReport { usage } => {
                 self.prefilled += usage.prefilled();
                 self.generated += usage.completion;
+                self.last_prefill = usage.prefilled();
+                self.last_generated = usage.completion;
                 self.requests += 1;
                 self.usage = Some(usage);
             }
@@ -1312,6 +1408,86 @@ mod tests {
         let mut state = State::new();
         assert!(!state.apply(Event::Unknown));
         assert!(state.apply(Event::TurnStart { turn: 1 }));
+    }
+
+    /// Two phases, two rates. A long transcript costs prefill time and the
+    /// answer costs decode time, and they are different numbers about
+    /// different problems.
+    #[test]
+    fn the_rates_measure_prefill_and_decode_separately() {
+        let mut state = State::new();
+        let usage = |prompt, cached, completion| Usage {
+            prompt,
+            cached_prompt: cached,
+            completion,
+            context_total: 65536,
+        };
+        // A request that spent 2s prefilling 1000 tokens and 4s writing 200.
+        state.apply_at(Event::TurnStart { turn: 1 }, Some(0.0));
+        state.apply_at(Event::TextDelta { d: "a".into() }, Some(2.0));
+        state.apply_at(Event::TextDelta { d: "b".into() }, Some(3.0));
+        state.apply_at(
+            Event::UsageReport {
+                usage: usage(1000, 0, 200),
+            },
+            Some(6.0),
+        );
+        assert!((state.rates.prefill() - 500.0).abs() < 0.01, "{}", state.rates.prefill());
+        assert!((state.rates.decode() - 50.0).abs() < 0.01, "{}", state.rates.decode());
+        assert_eq!(state.last_prefill, 1000);
+        assert_eq!(state.last_generated, 200);
+
+        // A second request, averaged in rather than replacing.
+        state.apply_at(Event::TextDelta { d: "c".into() }, Some(7.0));
+        state.apply_at(
+            Event::UsageReport {
+                usage: usage(1500, 1000, 100),
+            },
+            Some(9.0),
+        );
+        assert_eq!(state.prefilled, 1500, "totals keep summing");
+        assert_eq!(state.last_prefill, 500, "and the last one is its own number");
+        let prefill = state.rates.prefill();
+        assert!(prefill > 400.0 && prefill < 600.0, "{prefill}");
+    }
+
+    /// A fully cached prefill really does take no measurable time, and
+    /// counting it as infinitely fast makes the average meaningless.
+    #[test]
+    fn an_immeasurable_window_does_not_poison_the_average() {
+        let mut state = State::new();
+        state.apply_at(Event::TurnStart { turn: 1 }, Some(0.0));
+        state.apply_at(Event::TextDelta { d: "x".into() }, Some(0.0));
+        state.apply_at(
+            Event::UsageReport {
+                usage: Usage {
+                    prompt: 1000,
+                    cached_prompt: 1000,
+                    completion: 0,
+                    context_total: 65536,
+                },
+            },
+            Some(0.0),
+        );
+        assert_eq!(state.rates.prefill(), 0.0);
+        assert_eq!(state.rates.decode(), 0.0);
+        assert!(state.rates.prefill().is_finite());
+    }
+
+    /// Without a clock the counters still work; only the rates stay at zero.
+    #[test]
+    fn untimed_frames_still_count_tokens() {
+        let mut state = State::new();
+        state.apply(Event::UsageReport {
+            usage: Usage {
+                prompt: 100,
+                cached_prompt: 0,
+                completion: 10,
+                context_total: 1000,
+            },
+        });
+        assert_eq!(state.prefilled, 100);
+        assert_eq!(state.rates.decode(), 0.0);
     }
 
     #[test]

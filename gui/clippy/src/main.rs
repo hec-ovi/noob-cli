@@ -18,6 +18,7 @@
 //! is not `noob` on PATH. Settings live beside noob's own; see `config`.
 
 mod config;
+mod dock;
 mod link;
 mod markdown;
 mod monitor;
@@ -38,11 +39,12 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use config::Config;
+use dock::{Dock, Space, View};
 use link::{Incoming, Link};
 use monitor::Monitor;
 use skin::Skin;
 use state::{State, Tone};
-use view::{Hit, Layout, Shape, Tab};
+use view::{Drag, Hit, Layout, Shape};
 
 /// The only user event: something arrived, come and look. Deliberately carries
 /// no payload; the channel holds the frames and the loop drains it.
@@ -55,6 +57,10 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// monitor is inherently periodic, which is the opposite of the
 /// redraw-on-change rule; the rule is kept by not sampling when nobody looks.
 const SAMPLE_EVERY: Duration = Duration::from_millis(500);
+
+/// How far the pointer has to move with a tab held before it counts as a drag
+/// rather than a click that wobbled.
+const DRAG_SLOP: f64 = 5.0;
 
 /// The window will not grow past this. Unbounded is not useful: a conversation
 /// at four thousand pixels wide is one long line per paragraph, and the panes
@@ -80,9 +86,11 @@ struct App {
 
     input: String,
     caret: usize,
-    tab: Tab,
-    fold_top: bool,
-    fold_files: bool,
+    dock: Dock,
+    /// A tab that has been pressed, and whether the pointer has moved far
+    /// enough since to call it a drag rather than a click.
+    holding: Option<(View, Space, PhysicalPosition<f64>)>,
+    drag: Option<Drag>,
     shaded: bool,
     /// The size to go back to when the window is unshaded.
     unshaded: Option<PhysicalSize<u32>>,
@@ -93,6 +101,9 @@ struct App {
     hot: Option<Hit>,
     last_click: Option<(Hit, Instant)>,
     modifiers: ModifiersState,
+    /// Where time is measured from. The rates need a monotonic clock and
+    /// `state` is deliberately pure, so it is kept here and passed in.
+    epoch: Instant,
     dirty: bool,
 }
 
@@ -114,9 +125,9 @@ impl App {
             trouble: None,
             input: String::new(),
             caret: 0,
-            tab: Tab::Activity,
-            fold_top: false,
-            fold_files: false,
+            dock: Dock::new(),
+            holding: None,
+            drag: None,
             shaded: false,
             unshaded: None,
             column: 8.0,
@@ -125,16 +136,16 @@ impl App {
             hot: None,
             last_click: None,
             modifiers: ModifiersState::empty(),
+            epoch: Instant::now(),
             dirty: true,
         }
     }
 
-    fn shape(&self) -> Shape {
+    fn shape(&self) -> Shape<'_> {
         let width = self.gpu.as_ref().map_or(1.0, |gpu| gpu.width());
         Shape {
             shaded: self.shaded,
-            fold_top: self.fold_top,
-            fold_files: self.fold_files,
+            dock: &self.dock,
             file_labels: self
                 .state
                 .files
@@ -157,6 +168,15 @@ impl App {
             None => (1.0, 1.0),
         };
         Layout::compute(w, h, &self.shape())
+    }
+
+    /// The view the pointer is over, for routing the wheel and page keys.
+    fn under_pointer(&self, layout: &Layout) -> Option<(View, noob_draw::Panel)> {
+        let space = layout
+            .hit(self.cursor.x as f32, self.cursor.y as f32)?
+            .space()?;
+        let view = self.dock.slot(space).active()?;
+        Some((view, layout.placed(space).body))
     }
 
     /// Start the agent. A failure is shown in the window rather than printed to
@@ -190,7 +210,10 @@ impl App {
         };
         for item in link.drain() {
             match item {
-                Incoming::Frame(event) => self.dirty |= self.state.apply(event),
+                Incoming::Frame(event) => {
+                    let at = self.epoch.elapsed().as_secs_f64();
+                    self.dirty |= self.state.apply_at(event, Some(at));
+                }
                 Incoming::Diagnostic(line) => {
                     self.state.talk.say(format!("noob: {line}"), Tone::Bad);
                     self.dirty = true;
@@ -259,36 +282,73 @@ impl App {
                     let _ = window.drag_window();
                 }
             }
-            Hit::Tab(tab) => {
-                // Clicking the tab already showing folds the group away, which
-                // is how a pane gets out of the way without a second control.
-                if self.tab == tab {
-                    self.fold_top = !self.fold_top;
-                } else {
-                    self.tab = tab;
-                    self.fold_top = false;
-                }
+            Hit::Tab(view, space) => {
+                // Pressed, not yet clicked: a tab is also a drag handle, so
+                // what this was is only decided when the pointer moves or is
+                // released.
+                self.holding = Some((view, space, self.cursor));
+            }
+            Hit::Fold(space) => {
+                let slot = self.dock.slot_mut(space);
+                slot.folded = !slot.folded;
                 self.dirty = true;
             }
-            Hit::FoldTop => {
-                self.fold_top = !self.fold_top;
+            Hit::File(index, _) => {
+                self.state.open_file = index;
                 self.dirty = true;
             }
-            Hit::FoldFiles => {
-                self.fold_files = !self.fold_files;
-                self.dirty = true;
-            }
-            Hit::File(index) => {
-                if self.state.open_file == index {
-                    self.fold_files = !self.fold_files;
-                } else {
-                    self.state.open_file = index;
-                    self.fold_files = false;
-                }
-                self.dirty = true;
-            }
-            Hit::Talk | Hit::Group | Hit::Files | Hit::Input => {}
+            Hit::Body(_) | Hit::Input => {}
         }
+    }
+
+    /// The pointer came up. A tab that never moved is a click; one that did is
+    /// a drop.
+    fn release(&mut self) {
+        let layout = self.layout();
+        if let Some(drag) = self.drag.take() {
+            if let Some(space) = layout
+                .hit(self.cursor.x as f32, self.cursor.y as f32)
+                .and_then(Hit::space)
+            {
+                self.dock.move_view(drag.view, space);
+            }
+            self.holding = None;
+            self.dirty = true;
+            return;
+        }
+        if let Some((view, space, _)) = self.holding.take() {
+            let slot = self.dock.slot_mut(space);
+            // Clicking the tab already showing folds its space away, which is
+            // how a pane gets out of the way without a second control.
+            if slot.active() == Some(view) {
+                slot.folded = !slot.folded;
+            } else {
+                slot.show(view);
+                slot.folded = false;
+            }
+            self.dirty = true;
+        }
+    }
+
+    /// Promote a held tab to a drag once the pointer has moved far enough that
+    /// it cannot have been a click.
+    fn maybe_drag(&mut self) {
+        let Some((view, _, from)) = self.holding else {
+            return;
+        };
+        let moved = (self.cursor.x - from.x).abs() + (self.cursor.y - from.y).abs();
+        if self.drag.is_none() && moved < DRAG_SLOP {
+            return;
+        }
+        let layout = self.layout();
+        self.drag = Some(Drag {
+            view,
+            at: (self.cursor.x as f32, self.cursor.y as f32),
+            onto: layout
+                .hit(self.cursor.x as f32, self.cursor.y as f32)
+                .and_then(Hit::space),
+        });
+        self.dirty = true;
     }
 
     fn key(&mut self, event: winit::event::KeyEvent, event_loop: &ActiveEventLoop) {
@@ -345,20 +405,29 @@ impl App {
                     self.dirty = true;
                 }
             }
-            // Tab walks the whole window: every tab of the upper group, then
-            // every file below it, then back to the top.
+            // Shift-Tab stays in one space and walks its own tabs; plain Tab
+            // walks the whole window.
+            Key::Named(NamedKey::Tab) if self.modifiers.shift_key() => {
+                let layout = self.layout();
+                let space = layout
+                    .hit(self.cursor.x as f32, self.cursor.y as f32)
+                    .and_then(Hit::space)
+                    .unwrap_or(Space::TopRight);
+                self.dirty |= self.dock.slot_mut(space).cycle();
+            }
             Key::Named(NamedKey::Tab) => {
-                let last = Tab::ALL[Tab::ALL.len() - 1];
-                if self.tab == last && self.state.open_file + 1 < self.state.files.len() {
-                    self.state.open_file += 1;
-                } else if self.tab == last && !self.state.files.is_empty() {
-                    self.state.open_file = 0;
-                    self.tab = Tab::ALL[0];
-                } else {
-                    self.tab = self.tab.next();
+                let showing = Space::ALL
+                    .into_iter()
+                    .find_map(|space| self.dock.slot(space).active())
+                    .unwrap_or(View::Talk);
+                let at = self
+                    .dock
+                    .slot(Space::TopRight)
+                    .active()
+                    .unwrap_or(showing);
+                if let Some(next) = self.dock.after(at) {
+                    self.dock.reveal(next);
                 }
-                self.fold_top = false;
-                self.fold_files = false;
                 self.dirty = true;
             }
             Key::Named(NamedKey::PageUp) => self.scroll_hovered(1.0),
@@ -398,26 +467,27 @@ impl App {
     /// history.
     fn scroll_hovered(&mut self, pages: f32) {
         let layout = self.layout();
-        let (panel, size) = match layout.hit(self.cursor.x as f32, self.cursor.y as f32) {
-            Some(Hit::Group) | Some(Hit::Tab(_)) => (layout.group, self.config.pane_font_size),
-            Some(Hit::Files) | Some(Hit::File(_)) => (layout.files, self.config.pane_font_size),
-            _ => (layout.talk, self.config.font_size),
+        let Some((view, panel)) = self.under_pointer(&layout) else {
+            return;
+        };
+        let size = match view {
+            View::Talk => self.config.font_size,
+            _ => self.config.pane_font_size,
         };
         let rows = layout.rows(panel, size).saturating_sub(1).max(1);
         let by = ((rows as f32 * pages.abs()).round() as usize).max(1);
-        let target = match layout.hit(self.cursor.x as f32, self.cursor.y as f32) {
-            Some(Hit::Group) | Some(Hit::Tab(_)) if self.tab == Tab::Activity => {
-                Some(&mut self.state.activity)
-            }
-            Some(Hit::Files) | Some(Hit::File(_)) => self
+        let open_file = self.state.open_file;
+        let pane = match view {
+            View::Talk => Some(&mut self.state.talk),
+            View::Activity => Some(&mut self.state.activity),
+            View::Files => self
                 .state
                 .files
-                .get_mut(self.state.open_file)
+                .get_mut(open_file)
                 .map(|file| &mut file.pane),
-            Some(Hit::Group) | Some(Hit::Tab(_)) => None,
-            _ => Some(&mut self.state.talk),
+            _ => None,
         };
-        let Some(pane) = target else {
+        let Some(pane) = pane else {
             return;
         };
         self.dirty |= if pages > 0.0 {
@@ -436,8 +506,7 @@ impl App {
         };
         let shape = Shape {
             shaded: self.shaded,
-            fold_top: self.fold_top,
-            fold_files: self.fold_files,
+            dock: &self.dock,
             file_labels: self
                 .state
                 .files
@@ -456,11 +525,9 @@ impl App {
         let scene = view::build(&view::Frame {
             state: &self.state,
             monitor: &self.monitor,
+            dock: &self.dock,
             skin: &self.skin,
             layout: &layout,
-            tab: self.tab,
-            fold_top: self.fold_top,
-            fold_files: self.fold_files,
             input: &self.input,
             caret: self.caret,
             column: self.column,
@@ -468,6 +535,7 @@ impl App {
             body_size: self.config.font_size,
             pane_size: self.config.pane_font_size,
             reports: &self.reports,
+            drag: self.drag,
             hot: self.hot,
             trouble: self.trouble.as_deref(),
         });
@@ -557,6 +625,7 @@ impl ApplicationHandler<Wake> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = position;
+                self.maybe_drag();
                 let (x, y) = (position.x as f32, position.y as f32);
                 let layout = self.layout();
                 let hot = match layout.hit(x, y) {
@@ -615,6 +684,14 @@ impl ApplicationHandler<Wake> for App {
                 }
                 self.redraw();
             }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.release();
+                self.redraw();
+            }
             WindowEvent::RedrawRequested => self.render(),
             _ => {}
         }
@@ -626,7 +703,11 @@ impl ApplicationHandler<Wake> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // The monitor is the one thing that changes without an event, so it is
         // the one thing that gets a clock, and only while it is on screen.
-        let watching = self.tab == Tab::Monitor && !self.fold_top && !self.shaded;
+        let watching = !self.shaded
+            && Space::ALL.into_iter().any(|space| {
+                let slot = self.dock.slot(space);
+                !slot.folded && matches!(slot.active(), Some(View::Hardware) | Some(View::Llm))
+            });
         if watching {
             let now = Instant::now();
             if self.next_sample.is_none_or(|at| now >= at) {

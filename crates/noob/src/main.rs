@@ -9,6 +9,7 @@ mod mcp;
 mod session;
 mod skills;
 mod subagent;
+mod tokens;
 mod tools;
 mod ui;
 
@@ -36,6 +37,7 @@ fn main() -> ExitCode {
         }
         Some("exec") => cmd_exec(&args[1..]),
         Some("serve") => cmd_serve(&args[1..]),
+        Some("tokens") => tokens::run(&args[1..]),
         Some("debug") => cmd_debug(&args[1..]),
         Some("child") => cmd_child(),
         Some("sessions") => cmd_sessions(),
@@ -44,7 +46,7 @@ fn main() -> ExitCode {
         None => cmd_repl(&[]),
         Some(other) => {
             eprintln!(
-                "noob: unknown command {other:?}; available: exec, serve, sessions, debug, doctor, --version"
+                "noob: unknown command {other:?}; available: exec, serve, tokens, sessions, debug, doctor, --version"
             );
             ExitCode::from(2)
         }
@@ -53,7 +55,7 @@ fn main() -> ExitCode {
 
 /// A flag's value must exist and must not look like another flag; consuming
 /// blindly turns one forgotten value into a silent misconfig.
-fn value_for(flag: &str, next: Option<&String>, usage: &str) -> Result<String, String> {
+pub(crate) fn value_for(flag: &str, next: Option<&String>, usage: &str) -> Result<String, String> {
     match next {
         Some(v) if !v.starts_with('-') => Ok(v.clone()),
         _ => Err(format!("noob: {flag} needs a value; {usage}")),

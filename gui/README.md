@@ -15,25 +15,34 @@ wgpu and winit, composited against your desktop.
 
 ## What is where
 
-The conversation on the left. On the right, two tabbed groups:
+Three spaces: a wide one on the left and two stacked on the right. Every view is
+a tab in one of them, and **dragging its tab onto another space moves it there**.
+A space you empty gives its room to its neighbour.
 
-| tab | carries |
+| view | carries |
 |---|---|
 | ACTIVITY | every call, one colour and one tag per tool: bash, read, ls, glob, grep, write, edit, web, skill, mcp, agent, plan |
 | PLAN | the checklist, straight from the plan tool's own arguments |
 | AGENTS | sub-agents, their brief and how they ended |
-| MONITOR | GPU, VRAM, GTT, CPU, RAM and the session's token economy |
-| files | one tab per file touched, with the diff and syntax coloring |
+| HARDWARE | GPU, VRAM, GTT, CPU and RAM |
+| LLM | context, cache, total and last prefill and output, and the measured prefill and decode rates |
+| FILES | one tab per file touched, with the diff, a line-number gutter and syntax coloring |
 
 The conversation is rendered as Markdown, because the model writes Markdown
 whether or not anything asked it to: headings, bold, bullets and fenced code
 become formatting instead of showing their marks, and a fenced block is syntax
 colored by the language the fence named.
 
-MONITOR reads `/sys/class/drm/card*/device` and `/proc` directly. No vendor
+HARDWARE reads `/sys/class/drm/card*/device` and `/proc` directly. No vendor
 library, no dependency: a labelled bar against its maximum the way radeontop
 lays it out, with its own history drawn behind it the way btop does. It only
 samples while it is on screen, so an idle window still costs nothing.
+
+LLM is the other question: not whether the machine is keeping up but whether the
+budget is. The rates are measured rather than reported. Prefill is from the
+request leaving to the first token arriving, which is what a long transcript
+costs; decode is from the first token to the last, which is what the answer
+costs. Both averaged over the session, because one request is noise.
 
 Calls are one list, not two. Splitting `bash` off looked right on paper and read
 as arbitrary in use: `ls` is the `ls` tool and `rm -rf` is `bash`, so the split
@@ -50,14 +59,15 @@ Routing is by tool name, and by file extension for syntax coloring. The agent is
 never told any of this exists: everything the window shows is derived from calls
 the model was already making, including the plan.
 
-Keys: Enter sends, Escape clears the line or cancels the turn, Tab walks the
-whole window (every tab, then every file, then back), PageUp and PageDown scroll
-whatever the pointer is over, the wheel does the same, Ctrl-C cancels, Ctrl-Q
-quits.
+Keys: Enter sends, Escape clears the line or cancels the turn, Tab walks every
+view wherever it has been dragged, Shift-Tab stays in one space and walks its
+own tabs, PageUp and PageDown scroll whatever the pointer is over, the wheel
+does the same, Ctrl-C cancels, Ctrl-Q quits.
 
 Mouse: drag the title bar to move, drag an edge to resize, click a tab to switch
-to it, click the tab already showing to fold that group away, and the `▾` at the
-right of a strip does the same. **Double-click the title bar** to shade the
+to it, click the tab already showing to fold that space away, and the `▾` at the
+right of a strip does the same. **Drag a tab into another space** to move it
+there. **Double-click the title bar** to shade the
 window down to that one strip, Winamp style: it keeps showing THINKING, WORKING
 or FINISHED with the plan count and how many files changed, so a collapsed
 window is still a status light. Double-click again to bring it back.

@@ -34,6 +34,8 @@ pub struct Skin {
     pub gauge_track: [f32; 4],
     pub scroll_track: [f32; 4],
     pub scroll_thumb: [f32; 4],
+    /// The marks on the window buttons, drawn rather than typed.
+    pub mark: [f32; 4],
     /// A window button under the pointer.
     pub hot: [f32; 4],
     pub close_hot: [f32; 4],
@@ -94,6 +96,7 @@ impl Skin {
             gauge_track: rgba(config.dim, 0.35),
             scroll_track: rgba(config.dim, 0.22),
             scroll_thumb: rgba(config.accent, 0.75),
+            mark: rgba(config.bright, 0.9),
             hot: rgba(config.accent, 0.30),
             close_hot: rgba(config.bad, 0.55),
 

@@ -45,6 +45,8 @@ impl Gauge {
             ("MiB", None) => format!("{:.0} MiB", self.value),
             ("tok", Some(max)) => format!("{:.0} / {:.0}", self.value, max),
             ("tok", None) => format!("{:.0}", self.value),
+            ("tok/s", _) if self.value <= 0.0 => String::from("—"),
+            ("tok/s", _) => format!("{:.1} tok/s", self.value),
             ("", _) => format!("{:.0}", self.value),
             (unit, _) => format!("{:.1} {unit}", self.value),
         }
@@ -59,7 +61,8 @@ pub struct Monitor {
     /// Total and idle jiffies from the previous `/proc/stat` read, so the
     /// percentage is over the interval rather than since boot.
     cpu_prev: Option<(u64, u64)>,
-    pub gauges: Vec<Gauge>,
+    hardware: Vec<Gauge>,
+    llm: Vec<Gauge>,
     history: HashMap<&'static str, VecDeque<f32>>,
     /// Lines describing what was found, shown once under the gauges.
     pub notes: Vec<String>,
@@ -81,10 +84,23 @@ impl Monitor {
         Monitor {
             gpu,
             cpu_prev: None,
-            gauges: Vec::new(),
+            hardware: Vec::new(),
+            llm: Vec::new(),
             history: HashMap::new(),
             notes,
         }
+    }
+
+    /// What the machine is doing.
+    pub fn hardware(&self) -> Vec<Gauge> {
+        self.hardware.clone()
+    }
+
+    /// What the session is doing. Separate from the hardware because they are
+    /// two different questions: one is whether the machine is keeping up, the
+    /// other is whether the budget is.
+    pub fn llm(&self) -> Vec<Gauge> {
+        self.llm.clone()
     }
 
     /// Everything recorded for one key, oldest first. Empty until sampled.
@@ -99,6 +115,7 @@ impl Monitor {
     /// strings they contain.
     pub fn sample(&mut self, session: &crate::state::State) {
         let mut gauges = Vec::new();
+        let mut llm = Vec::new();
 
         if let Some(gpu) = &self.gpu {
             if let Some(busy) = read_number(&gpu.join("gpu_busy_percent")) {
@@ -167,33 +184,75 @@ impl Monitor {
             });
         }
 
-        // The session's own economy, on the same footing as the hardware,
-        // because it is the budget that actually runs out first.
+        // The session's economy, which is a different question from whether
+        // the machine is keeping up: this is the budget that runs out first.
         if let Some(usage) = session.usage {
-            gauges.push(Gauge {
+            llm.push(Gauge {
                 key: "context",
                 label: "CONTEXT",
                 value: usage.prompt as f64,
                 max: Some(usage.context_total as f64),
                 unit: "tok",
             });
+            llm.push(Gauge {
+                key: "cached",
+                label: "CACHED",
+                value: usage.cached_prompt as f64,
+                max: Some(usage.prompt.max(1) as f64),
+                unit: "tok",
+            });
         }
-        gauges.push(Gauge {
-            key: "prefill",
-            label: "PREFILL",
+        llm.push(Gauge {
+            key: "total_prefill",
+            label: "TOTAL PREFILL",
             value: session.prefilled as f64,
             max: None,
             unit: "tok",
         });
-        gauges.push(Gauge {
-            key: "generated",
-            label: "OUTPUT",
+        llm.push(Gauge {
+            key: "total_output",
+            label: "TOTAL OUTPUT",
             value: session.generated as f64,
             max: None,
             unit: "tok",
         });
+        llm.push(Gauge {
+            key: "last_prefill",
+            label: "LAST PREFILL",
+            value: session.last_prefill as f64,
+            max: None,
+            unit: "tok",
+        });
+        llm.push(Gauge {
+            key: "last_output",
+            label: "LAST OUTPUT",
+            value: session.last_generated as f64,
+            max: None,
+            unit: "tok",
+        });
+        llm.push(Gauge {
+            key: "prefill_rate",
+            label: "PREFILL",
+            value: session.rates.prefill(),
+            max: None,
+            unit: "tok/s",
+        });
+        llm.push(Gauge {
+            key: "decode_rate",
+            label: "DECODE",
+            value: session.rates.decode(),
+            max: None,
+            unit: "tok/s",
+        });
+        llm.push(Gauge {
+            key: "requests",
+            label: "REQUESTS",
+            value: session.requests as f64,
+            max: None,
+            unit: "",
+        });
 
-        for gauge in &gauges {
+        for gauge in gauges.iter().chain(llm.iter()) {
             let series = self.history.entry(gauge.key).or_default();
             // Unbounded readings graph as a rate rather than a total, or the
             // line only ever goes up and says nothing.
@@ -211,7 +270,8 @@ impl Monitor {
             }
             series.make_contiguous();
         }
-        self.gauges = gauges;
+        self.hardware = gauges;
+        self.llm = llm;
     }
 }
 
@@ -382,13 +442,27 @@ Buffers:          100000 kB
         };
         assert_eq!(memory.reading(), "1619 / 1875 MiB");
         let tokens = Gauge {
-            key: "prefill",
-            label: "PREFILL",
+            key: "total_prefill",
+            label: "TOTAL PREFILL",
             value: 4093.0,
             max: None,
             unit: "tok",
         };
         assert_eq!(tokens.reading(), "4093");
+        // A rate nobody has measured yet says so rather than claiming zero.
+        let unmeasured = Gauge {
+            key: "decode_rate",
+            label: "DECODE",
+            value: 0.0,
+            max: None,
+            unit: "tok/s",
+        };
+        assert_eq!(unmeasured.reading(), "—");
+        let measured = Gauge {
+            value: 47.25,
+            ..unmeasured.clone()
+        };
+        assert_eq!(measured.reading(), "47.2 tok/s");
     }
 
     /// A machine with no amdgpu must produce a monitor, not an error.
@@ -397,16 +471,23 @@ Buffers:          100000 kB
         let mut monitor = Monitor {
             gpu: None,
             cpu_prev: None,
-            gauges: Vec::new(),
+            hardware: Vec::new(),
+            llm: Vec::new(),
             history: HashMap::new(),
             notes: Vec::new(),
         };
         let state = crate::state::State::new();
         monitor.sample(&state);
         monitor.sample(&state);
-        let keys: Vec<&str> = monitor.gauges.iter().map(|g| g.key).collect();
-        assert!(keys.contains(&"prefill"), "{keys:?}");
-        assert!(!keys.contains(&"gpu"), "{keys:?}");
+        let hardware: Vec<&str> = monitor.hardware().iter().map(|g| g.key).collect();
+        let llm: Vec<&str> = monitor.llm().iter().map(|g| g.key).collect();
+        assert!(llm.contains(&"total_prefill"), "{llm:?}");
+        assert!(!hardware.contains(&"gpu"), "{hardware:?}");
+        // The two lists are two questions and must not share a row.
+        assert!(
+            hardware.iter().all(|key| !llm.contains(key)),
+            "{hardware:?} and {llm:?} overlap"
+        );
         // The real machine's readings appear when they exist; this only
         // asserts that their absence is survivable.
     }
@@ -418,7 +499,8 @@ Buffers:          100000 kB
         let mut monitor = Monitor {
             gpu: None,
             cpu_prev: None,
-            gauges: Vec::new(),
+            hardware: Vec::new(),
+            llm: Vec::new(),
             history: HashMap::new(),
             notes: Vec::new(),
         };
@@ -449,7 +531,8 @@ Buffers:          100000 kB
         let monitor = Monitor {
             gpu: None,
             cpu_prev: None,
-            gauges: Vec::new(),
+            hardware: Vec::new(),
+            llm: Vec::new(),
             history: HashMap::new(),
             notes: Vec::new(),
         };
