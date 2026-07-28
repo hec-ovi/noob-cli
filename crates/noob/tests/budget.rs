@@ -32,12 +32,13 @@ use serde_json::Value;
 // and only the offline number below is comparable run to run.
 //
 // Raise a ceiling only alongside a capability that pays for itself, and say
-// which one in the commit. TOOLS_CEILING went 1350 -> 1375 for symbol-addressed
-// read and edit, which removes whole-file reads and whole-function `old`
-// strings from every structured edit.
+// which one in the commit. One was raised for symbol-addressed read and edit
+// and then given back: the model never used them, so the cost was permanent
+// and the benefit was zero. Harness capability does not belong in the agent's
+// prompt; it belongs in the harness.
 const HEAD_CEILING: usize = 560; // base.md + environment block
-const TOOLS_CEILING: usize = 1375; // serialized wire tools array
-const TOTAL_CEILING: usize = 1925; // total fixed first-request overhead
+const TOOLS_CEILING: usize = 1350; // serialized wire tools array
+const TOTAL_CEILING: usize = 1900; // total fixed first-request overhead
 const OWNER_HARD_LIMIT: usize = 2000; // never exceed, whatever the above say
 
 /// The switches plant one skill, one configured MCP server, and one executable

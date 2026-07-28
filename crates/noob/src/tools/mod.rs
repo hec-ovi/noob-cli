@@ -547,15 +547,13 @@ pub fn specs() -> Vec<ToolSpec> {
     vec![
         spec(
             "read",
-            "Read a text file as plain lines: page it with offset and limit, or name one \
-             symbol. Re-reading unchanged content returns a note, not the body, so work \
-             from the earlier result.",
+            "Read a text file as plain lines; page big files with offset and limit. \
+             Re-reading unchanged content returns a note, not the body, so work from the \
+             earlier result.",
             json!({"type": "object", "properties": {
                 "path": {"type": "string"},
                 "offset": {"type": "integer", "description": "1-based first line"},
-                "limit": {"type": "integer", "description": "max lines, default 500"},
-                "symbol": {"type": "string", "description": "one function or section \
-                           by name; \"*\" lists them"}
+                "limit": {"type": "integer", "description": "max lines, default 500"}
             }, "required": ["path"]}),
         ),
         spec(
@@ -569,16 +567,13 @@ pub fn specs() -> Vec<ToolSpec> {
         ),
         spec(
             "edit",
-            "Change a file you have read: replace old, which must match exactly one spot, \
-             or replace a whole symbol by name.",
+            "Replace old with new in a file; old must match exactly one spot; read first.",
             json!({"type": "object", "properties": {
                 "path": {"type": "string"},
                 "old": {"type": "string"},
                 "new": {"type": "string"},
-                "all": {"type": "boolean", "description": "replace every match"},
-                "symbol": {"type": "string", "description": "replace this whole \
-                           function or section"}
-            }, "required": ["path", "new"]}),
+                "all": {"type": "boolean", "description": "replace every match"}
+            }, "required": ["path", "old", "new"]}),
         ),
         spec(
             "bash",

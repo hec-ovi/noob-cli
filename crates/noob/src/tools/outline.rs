@@ -13,6 +13,14 @@
 //! span fails loudly instead of corrupting anything. CLIppy can carry real
 //! tree-sitter for highlighting, where binary size is not the constraint.
 
+// Harness-side only, and deliberately not reachable from the agent. It was
+// briefly exposed as a `symbol` parameter on read and edit; the model never
+// used it and the schema cost was permanent, so the surface came out. The
+// capability stays because the harness needs it to answer "which function did
+// that edit change" without asking the agent to declare it, which is what the
+// code view is built on. Wired up when the core starts emitting file spans.
+#![allow(dead_code)]
+
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
