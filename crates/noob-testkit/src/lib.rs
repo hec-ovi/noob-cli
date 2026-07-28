@@ -463,6 +463,7 @@ pub const NOOB_ENV_VARS: &[&str] = &[
     "NOOB_CTX",
     "NOOB_DEPTH",
     "NOOB_DOCK",
+    "NOOB_EMIT",
     "NOOB_MODEL",
     "NOOB_RAW",
     "NOOB_REASONING",

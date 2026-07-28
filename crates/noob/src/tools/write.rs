@@ -66,6 +66,21 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     ctx.seen
         .record_written(&path, FileStamp::of(content.as_bytes()));
     ctx.consume_skills_write_grant(raw);
+    // After the write, so nothing is announced that did not land. A file that
+    // did not exist has no before side; one that is not text is reported as
+    // what it looked like, which is the honest answer for a diff view.
+    if ctx.emitter.is_on() {
+        let before = current
+            .as_deref()
+            .map(String::from_utf8_lossy)
+            .unwrap_or_default();
+        ctx.emitter.send(crate::emit::file_edit(
+            shown.clone(),
+            &before,
+            content,
+            crate::emit::current_call(),
+        ));
+    }
     Ok(ToolOutcome::ok(
         format!(
             "wrote {shown} ({} bytes){}",

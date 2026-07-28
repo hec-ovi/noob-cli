@@ -18,6 +18,10 @@ use noob_provider::http::{Client, INTERRUPTED};
 use noob_provider::types::{
     Event, Finish, Item, Overrides, ProviderError, ToolCall, ToolSpec, TurnRequestRef, Usage,
 };
+// `Event` is already the provider's streaming event here, and the two are
+// unrelated: one is what the endpoint sent, the other is what we tell a
+// watcher. Aliased rather than renamed so neither name has to move.
+use noob_proto::Event as Wire;
 
 use crate::session::Session;
 use crate::tools::guard::{self, fnv1a64};
@@ -142,6 +146,9 @@ pub struct Agent {
     pub max_rounds: u32,
     /// Rounds the last `run_input` actually used (the child reports it).
     pub last_rounds: u32,
+    /// Monotonic turn number for the protocol side-channel. Nothing else
+    /// reads it; the human surfaces have never numbered turns.
+    turn_seq: u32,
     /// chars/4 stand-in for the fixed head when no usage has arrived yet.
     fixed_chars: usize,
     last_usage: Option<Usage>,
@@ -250,6 +257,7 @@ impl Agent {
             ctx_tokens,
             max_rounds: TURN_CAP,
             last_rounds: 0,
+            turn_seq: 0,
             fixed_chars,
             last_usage: None,
             chars_since_usage: replayed_chars,
@@ -625,7 +633,37 @@ impl Agent {
         self.drive(ui)
     }
 
+    /// One turn: everything between the agent picking the work up and putting
+    /// it down. Both entry points come through here, so the protocol sees a
+    /// matched pair even though `drive_rounds` returns from sixteen places and
+    /// four of them consume the interrupt flag on the way out.
+    ///
+    /// A continuation after a background delivery gets its own number rather
+    /// than reopening the human's turn: from a watcher's side it is the agent
+    /// starting work again, and reusing the number would make two spans of
+    /// activity indistinguishable.
     fn drive(&mut self, ui: &mut Ui) -> RunEnd {
+        let emitter = self.tool_ctx.emitter.clone();
+        self.turn_seq += 1;
+        let turn = self.turn_seq;
+        emitter.send(Wire::TurnStart { turn });
+        let end = self.drive_rounds(ui);
+        // The abort text is returned for the caller to render, so this is the
+        // first place it exists as a value anything else can see.
+        if let RunEnd::Aborted(message) = &end {
+            emitter.send(Wire::Error {
+                line: message.clone(),
+            });
+        }
+        emitter.send(Wire::TurnEnd {
+            turn,
+            interrupted: matches!(end, RunEnd::Interrupted).then_some(true),
+        });
+        end
+    }
+
+    fn drive_rounds(&mut self, ui: &mut Ui) -> RunEnd {
+        let emitter = self.tool_ctx.emitter.clone();
         self.consec_errors = 0;
         self.last_rounds = 0;
         self.status_only_rounds = 0;
@@ -668,8 +706,14 @@ impl Agent {
                 &self.ov,
                 req,
                 &mut |ev| match ev {
-                    Event::Text(t) => ui.text_delta(&t),
-                    Event::Reasoning(r) => ui.reasoning_delta(&r),
+                    Event::Text(t) => {
+                        ui.text_delta(&t);
+                        emitter.send(Wire::TextDelta { d: t });
+                    }
+                    Event::Reasoning(r) => {
+                        ui.reasoning_delta(&r);
+                        emitter.send(Wire::ReasoningDelta { d: r });
+                    }
                     _ => {}
                 },
             );
@@ -758,6 +802,14 @@ impl Agent {
                 // Session totals for the frame's readout, and durably, so a
                 // resumed session continues its count instead of restarting.
                 ui.usage(u);
+                emitter.send(Wire::UsageReport {
+                    usage: noob_proto::Usage {
+                        prompt: u.prompt_tokens,
+                        cached_prompt: u.cached_prompt_tokens,
+                        completion: u.completion_tokens,
+                        context_total: self.ctx_tokens,
+                    },
+                });
                 // Best effort by design: a counter that cannot be written is
                 // not worth detaching a working session over. push_item owns
                 // that escalation, for content that would actually be lost.
@@ -798,7 +850,19 @@ impl Agent {
             for call in &turn.tool_calls {
                 let (planned, shown) = self.plan_call(call);
                 ui.tool_requested(&call.name, &shown);
-                shown_briefs.push(crate::ui::brief_args(&call.name, &shown));
+                let brief = crate::ui::brief_args(&call.name, &shown);
+                // Requested, not started: a call intercepted here (doom loop,
+                // plan-mode refusal, unparseable arguments) never reaches the
+                // scheduler, and the scheduler is the only other place with an
+                // id. Opening the row here is what guarantees every call the
+                // model asked for is one a watcher can see and can close.
+                emitter.send(Wire::ToolStart {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    brief: brief.clone(),
+                    args: shown,
+                });
+                shown_briefs.push(brief);
                 let planned = self.gate_skills_write(planned, ui);
                 batch.push(planned);
                 if INTERRUPTED.load(Ordering::SeqCst) {
@@ -872,6 +936,30 @@ impl Agent {
                             timed_summary(&call.name, &visible, elapsed)
                         };
                         ui.tool_done(&call.id, &summary, outcome.is_error && !outcome.canceled);
+                        // The same bytes the row shows, reused rather than
+                        // rebuilt: visible_tool_summary and timed_summary are
+                        // asserted verbatim, and a second derivation would
+                        // drift from them the first time either changes.
+                        emitter.send(Wire::ToolEnd {
+                            call_id: call.id.clone(),
+                            summary: summary.clone(),
+                            // None for a canned outcome and for every
+                            // cancellation, where nothing ran to measure.
+                            elapsed_ms: elapsed.map_or(0, |d| d.as_millis() as u64),
+                            error: outcome.is_error.then(|| noob_proto::ToolError {
+                                kind: if outcome.canceled {
+                                    "canceled".to_string()
+                                } else {
+                                    "error".to_string()
+                                },
+                                code: None,
+                                message: tools::error_digest(&outcome.content)
+                                    .unwrap_or(&outcome.summary)
+                                    .to_string(),
+                                detail: Some(outcome.content.clone()),
+                                remedy: None,
+                            }),
+                        });
                         // A one-line row is right for a one-line failure and
                         // useless for a command that printed a stack trace
                         // before dying, so the tail follows it.
@@ -1223,6 +1311,11 @@ impl Agent {
     /// calls, an `[interrupted]` user note, and a cleared flag so the next
     /// input starts fresh.
     fn finish_interrupt(&mut self, ui: &mut Ui, pending_calls: &[ToolCall]) -> RunEnd {
+        // Every path into this epilogue leaves a different subset of rows
+        // open: none after a stream-level interrupt, some after one landed
+        // mid-planning, all of a wave after one landed mid-batch. The emitter
+        // knows which, so nothing here has to guess.
+        self.tool_ctx.emitter.cancel_open_calls();
         INTERRUPTED.store(false, Ordering::SeqCst);
         ui.end_line();
         for call in pending_calls {
@@ -1268,7 +1361,7 @@ impl Agent {
     /// in every mode, container included (agent-created skills are
     /// persistent injection vectors). Headless surfaces degrade to deny.
     fn gate_skills_write(&self, planned: sched::Planned, ui: &mut Ui) -> sched::Planned {
-        let sched::Planned::Run { name, args } = &planned else {
+        let sched::Planned::Run { name, args, .. } = &planned else {
             return planned;
         };
         if !matches!(name.as_str(), "write" | "edit") {
@@ -1460,6 +1553,7 @@ impl Agent {
         }
         (
             sched::Planned::Run {
+                call_id: call.id.clone(),
                 name: call.name.clone(),
                 args: args.clone(),
             },
@@ -2228,6 +2322,7 @@ mod tests {
         );
         let mut ui = crate::ui::Ui::new(crate::ui::Mode::Exec); // headless: ask degrades to deny
         let run = |name: &str, path: &str| sched::Planned::Run {
+            call_id: format!("{name}-{path}"),
             name: name.into(),
             args: json!({"path": path, "content": "x"}),
         };
@@ -2271,6 +2366,7 @@ mod tests {
         let mut ui = crate::ui::Ui::new(crate::ui::Mode::Repl);
         ui.forced_ask = Some(true);
         let planned = sched::Planned::Run {
+            call_id: "g1".into(),
             name: "write".into(),
             args: json!({"path": ".claude/skills/x/SKILL.md", "content": "ok"}),
         };
@@ -2280,6 +2376,7 @@ mod tests {
         ));
         ui.forced_ask = Some(false);
         let planned = sched::Planned::Run {
+            call_id: "g2".into(),
             name: "write".into(),
             args: json!({"path": ".claude/skills/x/SKILL.md", "content": "no"}),
         };
@@ -2303,6 +2400,7 @@ mod tests {
         );
         let mut ui = crate::ui::Ui::new(crate::ui::Mode::Exec);
         let planned = sched::Planned::Run {
+            call_id: "g3".into(),
             name: "write".into(),
             args: json!({"path": "innocent/SKILL.md", "content": "x"}),
         };

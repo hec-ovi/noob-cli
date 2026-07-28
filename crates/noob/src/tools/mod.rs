@@ -82,6 +82,9 @@ pub struct ToolCtx {
     /// Canonicalized working directory; the root of relative paths.
     pub workspace: PathBuf,
     pub sandbox: Sandbox,
+    /// The protocol side-channel. Off unless bootstrap turned it on, and a
+    /// no-op when off, so no tool's output changes by a byte because of it.
+    pub emitter: crate::emit::Emitter,
     pub seen: SeenFiles,
     /// Failed-edit counter per (path, old) for the escalation ladder.
     pub edit_failures: Mutex<std::collections::HashMap<(PathBuf, u64), u32>>,
@@ -144,6 +147,7 @@ impl ToolCtx {
         ToolCtx {
             workspace,
             sandbox,
+            emitter: crate::emit::Emitter::default(),
             seen: SeenFiles::new(),
             edit_failures: Mutex::new(std::collections::HashMap::new()),
             bash_warned: AtomicBool::new(false),

@@ -134,6 +134,7 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
     // request (flag > env > .env) but is independent of base-url resolution,
     // so `debug prompt` and a live session print the identical head.
     let model = model_label(&config_dir, &ov);
+    let model_name = model.clone();
     let skill_paths = config::skill_paths(&config_dir, &workspace);
     let mut discovered = skills::discover(&workspace, &config_dir, &skill_paths);
     if !boot.excluded_skills.is_empty() {
@@ -198,6 +199,9 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
     } else if boot.read_only {
         tool_specs.retain(|t| tools::READ_ONLY_SET.contains(&t.name.as_str()));
     }
+    // Taken before `workspace` is moved into the context: a watcher needs to
+    // know which tree the paths in every later frame are relative to.
+    let workspace_label = workspace.to_string_lossy().into_owned();
     let mut tool_ctx = ToolCtx::new(workspace, sandbox);
     tool_ctx.caps = config::tool_caps(&config_dir);
     tool_ctx.read_dedup = config::read_dedup(&config_dir);
@@ -240,6 +244,20 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
     if let Some(session) = session.as_ref() {
         ui.seed_tokens(session.tokens());
     }
+    // The side-channel opens here, once every surface has been decided and
+    // before the first frame anything could emit. Off unless NOOB_EMIT names
+    // a file, in which case no byte on any existing surface moves.
+    let emitter = emit::Emitter::from_env();
+    emitter.send(noob_proto::Event::SessionStart {
+        id: session
+            .as_ref()
+            .map(|s| s.id().to_string())
+            .unwrap_or_default(),
+        workspace: workspace_label,
+        model: model_name,
+        resumed: !replayed.is_empty(),
+    });
+    tool_ctx.emitter = emitter;
     let mut agent = Agent::new(
         Client::new(Timeouts::default()),
         config_dir.clone(),
@@ -525,6 +543,17 @@ fn cmd_repl(args: &[String]) -> ExitCode {
         }
     }
     agent.shutdown_background_agents(&mut ui);
+    // After the fleet is down, so the last agent.* frames land inside the
+    // session they belong to. Ungated: the hint below it is behind an
+    // interactive check because it is display policy, and a watcher needs to
+    // know the session ended whatever surface the human was on.
+    agent.tool_ctx.emitter.send(noob_proto::Event::SessionEnd {
+        id: agent
+            .session
+            .as_ref()
+            .map(|s| s.id().to_string())
+            .unwrap_or_default(),
+    });
     // Leave raw mode before the exit hint so it prints on a cooked terminal.
     drop(dock);
     // On the way out, tell the human how to pick this session back up. Only at

@@ -67,6 +67,17 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
             atomic_write(&path, applied.content.as_bytes())?;
             ctx.seen
                 .record_written(&path, FileStamp::of(applied.content.as_bytes()));
+            // Both sides are alive here and nowhere else, so the frame carries
+            // the diff itself. With `all`, scattered replacements collapse
+            // into the one region that covers them.
+            if ctx.emitter.is_on() {
+                ctx.emitter.send(crate::emit::file_edit(
+                    shown.clone(),
+                    &text,
+                    &applied.content,
+                    crate::emit::current_call(),
+                ));
+            }
             ctx.consume_skills_write_grant(raw);
             ctx.edit_failures.lock().unwrap().remove(&fail_key);
             let n = applied.count;

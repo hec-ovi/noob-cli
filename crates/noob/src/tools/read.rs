@@ -143,6 +143,33 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     let unchanged = full && ctx.read_dedup && ctx.seen.stub_unchanged(&path, current);
     // Record the stamp of the full stream, not just the retained page.
     ctx.seen.record(&path, current, full);
+    // Here rather than at each return: this one point covers the three
+    // success paths and the past-the-end refusal, and it is the moment the
+    // file became something the agent is looking at.
+    if ctx.emitter.is_on() {
+        let call_id = crate::emit::current_call();
+        ctx.emitter.send(noob_proto::Event::FileOpen {
+            path: shown_path.clone(),
+            lines: u32::try_from(total).unwrap_or(u32::MAX),
+            call_id: call_id.clone(),
+        });
+        // A read past the end printed nothing, so there is no region to point
+        // at; an inverted span would be worse than none.
+        if total > 0 && last_emitted >= offset {
+            ctx.emitter.send(noob_proto::Event::FileSpan {
+                path: shown_path.clone(),
+                span: noob_proto::Span {
+                    start: u32::try_from(offset).unwrap_or(u32::MAX),
+                    end: u32::try_from(last_emitted).unwrap_or(u32::MAX),
+                    // What a read can honestly say: this is the page the model
+                    // asked for, not a function anybody parsed.
+                    kind: Some(String::from("selection")),
+                    name: None,
+                },
+                call_id,
+            });
+        }
+    }
     if unchanged {
         return Ok(ToolOutcome::ok(
             format!(

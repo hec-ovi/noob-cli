@@ -28,8 +28,16 @@ static TEST_TASK_ADMISSIONS: AtomicU64 = AtomicU64::new(0);
 
 /// One call, pre-processed by the loop: either execute (name, args) or
 /// return a canned outcome (doom-loop intercept, unparseable arguments).
+///
+/// `call_id` is the provider's id for the call. It is carried here rather than
+/// looked up by index because it has to reach the worker thread: a read batch
+/// runs eight wide, and the frames a tool emits are unattributable without it.
 pub enum Planned {
-    Run { name: String, args: Value },
+    Run {
+        call_id: String,
+        name: String,
+        args: Value,
+    },
     Canned(ToolOutcome),
 }
 
@@ -341,7 +349,11 @@ where
 fn execute(ctx: &ToolCtx, planned: Planned) -> ToolOutcome {
     match planned {
         Planned::Canned(out) => out,
-        Planned::Run { name, args } => dispatch(ctx, &name, &args),
+        Planned::Run {
+            call_id,
+            name,
+            args,
+        } => crate::emit::as_call(&call_id, || dispatch(ctx, &name, &args)),
     }
 }
 
@@ -354,7 +366,11 @@ fn execute_ref(ctx: &ToolCtx, planned: &Planned) -> ToolOutcome {
             warning: out.warning.clone(),
             canceled: out.canceled,
         },
-        Planned::Run { name, args } => dispatch(ctx, name, args),
+        Planned::Run {
+            call_id,
+            name,
+            args,
+        } => crate::emit::as_call(call_id, || dispatch(ctx, name, args)),
     }
 }
 
@@ -403,6 +419,7 @@ mod tests {
 
     fn bash(cmd: &str) -> Planned {
         Planned::Run {
+            call_id: format!("bash-{cmd}"),
             name: "bash".into(),
             args: json!({"cmd": cmd}),
         }
@@ -410,6 +427,7 @@ mod tests {
 
     fn read(path: &str) -> Planned {
         Planned::Run {
+            call_id: format!("read-{path}"),
             name: "read".into(),
             args: json!({"path": path}),
         }
@@ -417,6 +435,7 @@ mod tests {
 
     fn test_task(action: &str, millis: u64) -> Planned {
         Planned::Run {
+            call_id: format!("task-{action}-{millis}"),
             name: "__test_task".into(),
             args: json!({"action": action, "millis": millis}),
         }
@@ -440,7 +459,8 @@ mod tests {
         // A test-only read-class operation isolates scheduler timing without
         // teaching the real read tool to open FIFOs or other special files.
         let waits: Vec<Planned> = (0..6)
-            .map(|_| Planned::Run {
+            .map(|n| Planned::Run {
+                call_id: format!("wait-{n}"),
                 name: "__test_wait".into(),
                 args: json!({"millis": 100}),
             })
@@ -461,10 +481,12 @@ mod tests {
         let (_t, ctx) = ctx();
         let batch = vec![
             Planned::Run {
+                call_id: "c1".into(),
                 name: "__test_wait".into(),
                 args: json!({"millis": 80}),
             },
             Planned::Run {
+                call_id: "c2".into(),
                 name: "__test_wait".into(),
                 args: json!({"millis": 5}),
             },
@@ -540,6 +562,7 @@ mod tests {
             let out = run_batch(
                 &ctx,
                 vec![Planned::Run {
+    call_id: "c3".into(),
                     name: "__test_panic".into(),
                     args: json!({}),
                 }],
@@ -576,6 +599,7 @@ mod tests {
         let out = run_batch(
             &ctx,
             vec![Planned::Run {
+    call_id: "c4".into(),
                 name: "__test_mutating_panic".into(),
                 args: json!({}),
             }],
@@ -672,6 +696,7 @@ mod tests {
     #[test]
     fn task_calls_classify_as_task_and_everything_else_keeps_its_class() {
         let task = Planned::Run {
+     call_id: "c5".into(),
             name: "subagent".into(),
             args: json!({"prompt": "x"}),
         };
