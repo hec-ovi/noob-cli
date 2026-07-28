@@ -1,31 +1,42 @@
-//! The palette, and the two rules that make the window read as one thing.
+//! The palette, and the three rules that make the window read as one thing.
 //!
 //! **Everything is square.** No rounded corners anywhere. The primitive can
 //! draw them; the skin does not ask for them.
 //!
-//! **Panels are translucent, at different depths.** The window composites
-//! against the desktop, and each pane sits at its own alpha so the stack reads
-//! as layers rather than as one flat sheet. When the compositor refuses alpha,
-//! [`Skin::opaque`] returns the same palette with every alpha at 1.0, which
-//! looks deliberate instead of looking broken.
+//! **Dark under green, never green under green.** The panels are black at low
+//! alpha and the text is green. A green panel behind green text is what made
+//! the first version hard to read: the two greens fight, and lowering the
+//! opacity to see the desktop through it made the text worse rather than
+//! better. Black backs the text and the desktop shows through the black.
+//!
+//! **Transparency is a setting, not a constant.** [`Config::opacity`] scales
+//! every fill. When the compositor refuses alpha entirely, [`Skin::opaque`]
+//! returns the same palette at full opacity, which looks deliberate.
 
-use crate::state::Tone;
+use crate::config::Config;
+use crate::state::{Kind, Tone};
 
 #[derive(Clone, Copy)]
 pub struct Skin {
     /// The window body, behind every pane.
     pub backdrop: [f32; 4],
+    /// The title and status bars, which stay green so the window reads as noob.
     pub bar: [f32; 4],
-    /// A pane the eye should rest in.
+    /// A pane you read: dark, so green text sits on black.
     pub panel: [f32; 4],
-    /// A pane that is context rather than content, more of the desktop showing.
-    pub panel_thin: [f32; 4],
+    /// A tab strip, a shade darker than the panel under it.
+    pub strip: [f32; 4],
     pub edge: [f32; 4],
     pub edge_focus: [f32; 4],
     pub input: [f32; 4],
     pub caret: [f32; 4],
     pub gauge: [f32; 4],
     pub gauge_track: [f32; 4],
+    pub scroll_track: [f32; 4],
+    pub scroll_thumb: [f32; 4],
+    /// A window button under the pointer.
+    pub hot: [f32; 4],
+    pub close_hot: [f32; 4],
 
     pub title: [u8; 4],
     pub dim: [u8; 4],
@@ -35,7 +46,17 @@ pub struct Skin {
     pub bad: [u8; 4],
     pub minus: [u8; 4],
     pub plus: [u8; 4],
-    /// Syntax colors, in the order of `syntax::Token`.
+
+    /// One per [`Kind`], in the order the enum declares them.
+    pub shell: [u8; 4],
+    pub look: [u8; 4],
+    pub change: [u8; 4],
+    pub search: [u8; 4],
+    pub skill: [u8; 4],
+    pub mcp: [u8; 4],
+    pub agent: [u8; 4],
+    pub plan: [u8; 4],
+
     pub comment: [u8; 4],
     pub string: [u8; 4],
     pub number: [u8; 4],
@@ -43,52 +64,84 @@ pub struct Skin {
     pub markup: [u8; 4],
 }
 
+fn rgba(color: [u8; 3], alpha: f32) -> [f32; 4] {
+    [
+        color[0] as f32 / 255.0,
+        color[1] as f32 / 255.0,
+        color[2] as f32 / 255.0,
+        alpha.clamp(0.0, 1.0),
+    ]
+}
+
+fn text(color: [u8; 3]) -> [u8; 4] {
+    [color[0], color[1], color[2], 255]
+}
+
 impl Default for Skin {
     fn default() -> Skin {
-        Skin::matrix()
+        Skin::from(&Config::default())
     }
 }
 
 impl Skin {
-    /// noob's own theme, so the window reads as the same product as the CLI.
-    pub fn matrix() -> Skin {
+    pub fn from(config: &Config) -> Skin {
+        let o = config.opacity;
         Skin {
-            backdrop: [0.008, 0.031, 0.020, 0.80],
-            bar: [0.055, 0.180, 0.118, 0.97],
-            panel: [0.000, 0.043, 0.024, 0.90],
-            panel_thin: [0.000, 0.039, 0.020, 0.72],
-            edge: [0.153, 0.365, 0.255, 0.90],
-            edge_focus: [0.400, 0.780, 0.545, 1.0],
-            input: [0.000, 0.063, 0.035, 0.95],
-            caret: [0.541, 0.925, 0.639, 1.0],
-            gauge: [0.302, 0.741, 0.451, 1.0],
-            gauge_track: [0.086, 0.216, 0.145, 0.9],
+            // The reading surface is darkest; everything else lets more of the
+            // desktop through, so the eye lands where the text is.
+            backdrop: rgba(config.panel, o * 0.55),
+            bar: rgba(config.bar, (o + 0.25).min(1.0)),
+            panel: rgba(config.panel, o * 0.86),
+            strip: rgba(config.panel, o * 0.97),
+            edge: rgba(config.dim, 0.65),
+            edge_focus: rgba(config.accent, 1.0),
+            input: rgba(config.panel, (o + 0.12).min(1.0)),
+            caret: rgba(config.accent, 1.0),
+            gauge: rgba(config.accent, 1.0),
+            gauge_track: rgba(config.dim, 0.35),
+            scroll_track: rgba(config.dim, 0.22),
+            scroll_thumb: rgba(config.accent, 0.75),
+            hot: rgba(config.accent, 0.30),
+            close_hot: rgba(config.bad, 0.55),
 
-            title: [172, 236, 190, 255],
-            dim: [88, 150, 110, 255],
-            body: [154, 214, 172, 255],
-            bright: [206, 250, 219, 255],
-            good: [116, 209, 148, 255],
-            bad: [232, 122, 108, 255],
-            minus: [206, 116, 106, 255],
-            plus: [124, 216, 148, 255],
-            comment: [86, 132, 102, 255],
-            string: [214, 196, 122, 255],
-            number: [178, 206, 240, 255],
-            keyword: [130, 206, 240, 255],
-            markup: [186, 160, 232, 255],
+            title: text(config.text),
+            dim: text(config.dim),
+            body: text(config.text),
+            bright: text(config.bright),
+            good: text(config.good),
+            bad: text(config.bad),
+            minus: text(config.bad),
+            plus: text(config.good),
+
+            // Six hues that stay apart from each other and from the green the
+            // rest of the window is, because the point of the tag color is to
+            // be recognisable at a glance without reading it.
+            shell: [0x7f, 0xd4, 0xe8, 255],
+            look: text(config.dim),
+            change: [0xf2, 0xc0, 0x6a, 255],
+            search: [0xc8, 0xa2, 0xf0, 255],
+            skill: [0xf0, 0x9c, 0xc8, 255],
+            mcp: [0xf0, 0xa8, 0x76, 255],
+            agent: [0x8a, 0xb8, 0xf0, 255],
+            plan: text(config.bright),
+
+            comment: [0x56, 0x84, 0x66, 255],
+            string: [0xd6, 0xc4, 0x7a, 255],
+            number: [0xb2, 0xce, 0xf0, 255],
+            keyword: [0x82, 0xce, 0xf0, 255],
+            markup: [0xba, 0xa0, 0xe8, 255],
         }
     }
 
-    /// The same palette with nothing translucent, for a surface that refused
-    /// to composite. Every panel keeps its relative depth as a color shift, so
-    /// the layering survives losing alpha.
+    /// The same palette with nothing translucent, for a surface that refused to
+    /// composite. Every fill keeps its relative depth as a color, so the
+    /// layering survives losing alpha.
     pub fn opaque(mut self) -> Skin {
         for fill in [
             &mut self.backdrop,
             &mut self.bar,
             &mut self.panel,
-            &mut self.panel_thin,
+            &mut self.strip,
             &mut self.input,
         ] {
             fill[3] = 1.0;
@@ -105,6 +158,21 @@ impl Skin {
             Tone::Bad => self.bad,
             Tone::Minus => self.minus,
             Tone::Plus => self.plus,
+            Tone::Call(kind) => self.kind(kind),
+        }
+    }
+
+    pub fn kind(&self, kind: Kind) -> [u8; 4] {
+        match kind {
+            Kind::Shell => self.shell,
+            Kind::Look => self.look,
+            Kind::Change => self.change,
+            Kind::Search => self.search,
+            Kind::Skill => self.skill,
+            Kind::Mcp => self.mcp,
+            Kind::Agent => self.agent,
+            Kind::Plan => self.plan,
+            Kind::Other => self.body,
         }
     }
 
@@ -125,35 +193,84 @@ impl Skin {
 mod tests {
     use super::*;
 
-    /// The compositor-refused fallback must leave nothing see-through, or the
-    /// window renders as a stack of muddy grey rectangles over black.
+    /// The rule the second round was about: the surface under the text is dark,
+    /// so green text is not sitting on green.
+    #[test]
+    fn panels_are_dark_and_text_is_not() {
+        let skin = Skin::default();
+        let luminance = |c: [f32; 4]| c[0] * 0.2 + c[1] * 0.7 + c[2] * 0.1;
+        assert!(luminance(skin.panel) < 0.05, "{:?}", skin.panel);
+        assert!(luminance(skin.backdrop) < 0.05, "{:?}", skin.backdrop);
+        let [_, g, ..] = skin.body;
+        assert!(g > 150, "the text is green: {:?}", skin.body);
+    }
+
+    /// The reading surface is the most solid thing in the window, so the eye
+    /// lands on it rather than on the desktop behind it.
+    #[test]
+    fn the_reading_surface_is_more_solid_than_the_backdrop() {
+        let skin = Skin::default();
+        assert!(skin.panel[3] > skin.backdrop[3]);
+        assert!(skin.strip[3] > skin.panel[3]);
+        assert!(skin.panel[3] < 1.0, "and still lets the desktop through");
+    }
+
+    /// Turning the opacity down must move every fill together, or the layering
+    /// inverts halfway down the range.
+    #[test]
+    fn opacity_scales_the_whole_stack_and_keeps_its_order() {
+        let ghost = Skin::from(&Config {
+            opacity: 0.2,
+            ..Config::default()
+        });
+        let solid = Skin::from(&Config {
+            opacity: 1.0,
+            ..Config::default()
+        });
+        assert!(ghost.panel[3] < solid.panel[3]);
+        assert!(ghost.backdrop[3] < ghost.panel[3], "order survives");
+        assert!(solid.backdrop[3] < solid.panel[3]);
+    }
+
     #[test]
     fn the_opaque_fallback_has_no_transparency_left() {
-        let skin = Skin::matrix().opaque();
+        let skin = Skin::default().opaque();
         for fill in [
             skin.backdrop,
             skin.bar,
             skin.panel,
-            skin.panel_thin,
+            skin.strip,
             skin.input,
         ] {
             assert_eq!(fill[3], 1.0, "{fill:?}");
         }
     }
 
-    /// Panels sit at different depths, which is what makes the stack read as
-    /// layers rather than one sheet.
+    /// Every kind is its own color, or the tag is the only thing telling them
+    /// apart and the color is decoration.
     #[test]
-    fn panels_are_translucent_at_different_depths() {
-        let skin = Skin::matrix();
-        assert!(skin.panel[3] < 1.0);
-        assert!(skin.panel_thin[3] < skin.panel[3]);
-        assert!(skin.backdrop[3] < 1.0);
+    fn every_call_kind_has_a_distinct_color() {
+        let skin = Skin::default();
+        let kinds = [
+            Kind::Shell,
+            Kind::Look,
+            Kind::Change,
+            Kind::Search,
+            Kind::Skill,
+            Kind::Mcp,
+            Kind::Agent,
+            Kind::Plan,
+        ];
+        for (i, a) in kinds.iter().enumerate() {
+            for b in &kinds[i + 1..] {
+                assert_ne!(skin.kind(*a), skin.kind(*b), "{a:?} and {b:?} match");
+            }
+        }
     }
 
     #[test]
-    fn every_tone_resolves_to_a_visible_color() {
-        let skin = Skin::matrix();
+    fn every_tone_resolves_to_something_readable() {
+        let skin = Skin::default();
         for tone in [
             Tone::Dim,
             Tone::Body,
@@ -162,19 +279,33 @@ mod tests {
             Tone::Bad,
             Tone::Minus,
             Tone::Plus,
+            Tone::Call(Kind::Shell),
+            Tone::Call(Kind::Other),
         ] {
             let [r, g, b, a] = skin.tone(tone);
             assert_eq!(a, 255, "{tone:?}");
-            assert!(r as u32 + g as u32 + b as u32 > 120, "{tone:?} is unreadable");
+            assert!(
+                r as u32 + g as u32 + b as u32 > 180,
+                "{tone:?} is too dark to read on black"
+            );
         }
     }
 
-    /// Plain text takes the pane's own color rather than being tinted, which
-    /// is what keeps an unrecognised language readable instead of uniformly
-    /// wrong.
+    /// A user's colors reach the window rather than being decoration in a file.
+    #[test]
+    fn the_config_actually_drives_the_palette() {
+        let skin = Skin::from(&Config {
+            accent: [0xff, 0x00, 0x00],
+            text: [0x11, 0x22, 0x33],
+            ..Config::default()
+        });
+        assert_eq!(skin.caret, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(skin.body, [0x11, 0x22, 0x33, 255]);
+    }
+
     #[test]
     fn plain_syntax_has_no_color_of_its_own() {
-        assert!(Skin::matrix().token(crate::syntax::Token::Plain).is_none());
-        assert!(Skin::matrix().token(crate::syntax::Token::Keyword).is_some());
+        assert!(Skin::default().token(crate::syntax::Token::Plain).is_none());
+        assert!(Skin::default().token(crate::syntax::Token::Keyword).is_some());
     }
 }

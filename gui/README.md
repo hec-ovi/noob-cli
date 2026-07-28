@@ -13,27 +13,46 @@ wgpu and winit, composited against your desktop.
 
 `NOOB_BIN` names the agent binary when it is not `noob` on PATH.
 
-## Four panes, because four things are happening
+## What is where
 
-The CLI puts a shell command, a file being rewritten and the model's prose in
-one column, and reading it means sorting them out by eye every time. Here they
-are sorted once, by where each frame came from:
+The conversation on the left. On the right, two tabbed groups:
 
-| pane | carries |
+| tab | carries |
 |---|---|
-| talk | the model's prose and reasoning, streamed |
-| shell | `bash`, its command and its result |
-| tools | search, skills, MCP, sub-agents |
-| code | files opened and changed, with the diff |
+| ACTIVITY | every call, colored by kind: shell, look, edit, web, skill, mcp, agent, plan |
+| PLAN | the checklist, straight from the plan tool's own arguments |
+| AGENTS | sub-agents, their brief and how they ended |
+| files | one tab per file touched, with the diff and syntax coloring |
+
+Calls are one list, not two. Splitting `bash` off looked right on paper and read
+as arbitrary in use: `ls` is the `ls` tool and `rm -rf` is `bash`, so the split
+put two neighbouring thoughts in two places. Color is what separates them now.
 
 Routing is by tool name, and by file extension for syntax coloring. The agent is
 never told any of this exists: everything the window shows is derived from calls
-the model was already making.
+the model was already making, including the plan.
 
 Keys: Enter sends, Escape clears the line or cancels the turn, Tab cycles the
-focused pane, PageUp and PageDown scroll it, the wheel scrolls whatever the
-pointer is over, Ctrl-C cancels, Ctrl-Q quits. Drag the title bar to move, drag
-an edge to resize.
+right-hand tab, PageUp and PageDown scroll whatever the pointer is over, the
+wheel does the same, Ctrl-C cancels, Ctrl-Q quits.
+
+Mouse: drag the title bar to move, drag an edge to resize, click a tab to switch
+to it, click the tab already showing to fold that group away, and the `▾` at the
+right of a strip does the same. **Double-click the title bar** to shade the
+window down to that one strip, Winamp style: it keeps showing THINKING, WORKING
+or FINISHED with the plan count and how many files changed, so a collapsed
+window is still a status light. Double-click again to bring it back.
+
+## Settings
+
+`~/.config/noob/clippy.conf`, written with the defaults on first run and
+commented. Opacity, the seven palette colors, and both font sizes. A key it does
+not recognise is reported in the ACTIVITY pane rather than ignored.
+
+The panels are drawn dark under green text, not green under green: two greens
+fight, and turning the opacity down to see your desktop made the text worse
+rather than better. Black backs the text and the desktop shows through the
+black.
 
 ## Layers
 
@@ -62,8 +81,12 @@ rather than in a log.
 
 ## What is not here yet
 
-Tabs and grid tiling, the ASCII avatar, the GPU and VRAM readouts, voice, and
-real tree-sitter highlighting. The code pane uses a small scanner instead:
-comments, strings, numbers and keywords, chosen by file extension. Real grammars
-are the right answer for a full editor view and are also eight crates and
-several megabytes, which is a trade worth making later and not now.
+Grid tiling, the ASCII avatar, the GPU and VRAM readouts, voice, and real
+tree-sitter highlighting. The file pane uses a small scanner instead: comments,
+strings, numbers and keywords, chosen by file extension. Real grammars are the
+right answer for a full editor view and are also eight crates and several
+megabytes, which is a trade worth making later and not now.
+
+The window will not resize past 2200x1400. Unbounded is not useful: a
+conversation four thousand pixels wide is one long line per paragraph and the
+panes stop being panes.

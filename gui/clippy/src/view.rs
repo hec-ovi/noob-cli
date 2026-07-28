@@ -1,97 +1,286 @@
-//! Layout, and turning state into a scene.
+//! Layout, hit regions, and turning state into a scene.
 //!
 //! One surface carved into panes, never several OS windows. The window has no
-//! system chrome, so the title bar, the close box and the resize edges are all
-//! rectangles here and hit regions in [`Layout`].
+//! system chrome, so the title bar, its three buttons, the tab strips, the
+//! scrollbars and the resize edges are all rectangles here and hit regions in
+//! [`Layout`]. Drawing and hit testing take the same numbers from the same
+//! place, which is the only way they can never disagree.
 //!
-//! Every pane's text is wrapped and clipped to the same content box, so a long
-//! line in one pane can never reach into its neighbour. That is a property of
-//! `Panel::inset`, and this module's only job is to never take those two
-//! numbers from different places.
+//! The window has two shapes. Open, it is a conversation beside three panes.
+//! Shaded, it is one strip carrying [`State::headline`] and nothing else, the
+//! way Winamp collapsed to its title. Double-click the bar to go between them.
 
 use noob_draw::{Panel, Run, Scene, Text};
 
 use crate::skin::Skin;
-use crate::state::{State, Stream};
+use crate::state::{State, TodoState, Tone};
 
 pub const TITLE_H: f32 = 30.0;
-pub const INPUT_H: f32 = 34.0;
+pub const INPUT_H: f32 = 36.0;
 pub const STATUS_H: f32 = 24.0;
+pub const TAB_H: f32 = 22.0;
 pub const RESIZE_EDGE: f32 = 6.0;
 const GAP: f32 = 6.0;
 const PAD: f32 = 9.0;
-const BODY_SIZE: f32 = 14.0;
-const PANE_SIZE: f32 = 13.0;
-const SMALL_SIZE: f32 = 12.0;
+const SMALL: f32 = 12.0;
+const SCROLL_W: f32 = 4.0;
+const BUTTON_W: f32 = 26.0;
 
-/// Where everything is this frame. Built from the window size alone, so hit
-/// testing and drawing can never disagree about it.
+/// Which tab of the upper right group is showing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tab {
+    Activity,
+    Plan,
+    Agents,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 3] = [Tab::Activity, Tab::Plan, Tab::Agents];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Activity => "ACTIVITY",
+            Tab::Plan => "PLAN",
+            Tab::Agents => "AGENTS",
+        }
+    }
+}
+
+/// Something the pointer can land on. Returned by [`Layout::hit`] so every
+/// click is resolved in one place instead of in a chain of `if` in the event
+/// handler.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Hit {
+    TitleBar,
+    Minimize,
+    Maximize,
+    Close,
+    Tab(Tab),
+    /// Collapse or expand the upper right group.
+    FoldTop,
+    FoldFiles,
+    File(usize),
+    Talk,
+    Group,
+    Files,
+    Input,
+}
+
+/// Where everything is this frame. Built from the window size and a little
+/// view state, so nothing else has to recompute it.
 pub struct Layout {
+    pub width: f32,
+    pub height: f32,
+    pub shaded: bool,
+
     pub title: Panel,
+    pub minimize: Panel,
+    pub maximize: Panel,
     pub close: Panel,
+
     pub talk: Panel,
-    pub shell: Panel,
-    pub tools: Panel,
-    pub code: Panel,
+    pub tabs: Vec<(Tab, Panel)>,
+    pub fold_top: Panel,
+    pub group: Panel,
+    pub file_tabs: Vec<(usize, Panel)>,
+    pub fold_files: Panel,
+    pub files: Panel,
     pub input: Panel,
     pub status: Panel,
 }
 
-impl Layout {
-    pub fn compute(width: f32, height: f32) -> Layout {
-        let whole = Panel::new(0.0, 0.0, width, height);
-        let (title, rest) = whole.split_top(TITLE_H);
-        let (rest, status) = rest.split_bottom(STATUS_H);
-        let (body, input) = rest.split_bottom(INPUT_H);
+/// What the layout needs to know beyond the window size.
+pub struct Shape {
+    pub shaded: bool,
+    /// Tab strips stay; their content collapses away.
+    pub fold_top: bool,
+    pub fold_files: bool,
+    /// One label per file tab, in order. Which one is selected is a drawing
+    /// decision, not a layout one, so it is not here.
+    pub file_labels: Vec<String>,
+    pub column: f32,
+}
 
+impl Layout {
+    pub fn compute(width: f32, height: f32, shape: &Shape) -> Layout {
+        let whole = Panel::new(0.0, 0.0, width, height);
+        let (title, rest) = whole.split_top(TITLE_H.min(height));
+        let buttons = [
+            Panel::new(width - BUTTON_W * 3.0, 0.0, BUTTON_W, TITLE_H),
+            Panel::new(width - BUTTON_W * 2.0, 0.0, BUTTON_W, TITLE_H),
+            Panel::new(width - BUTTON_W, 0.0, BUTTON_W, TITLE_H),
+        ];
+
+        if shape.shaded {
+            // One strip and nothing else. Every other region collapses to
+            // nothing so a stale hit region cannot survive the shape change.
+            let nowhere = Panel::new(0.0, 0.0, 0.0, 0.0);
+            return Layout {
+                width,
+                height,
+                shaded: true,
+                title,
+                minimize: buttons[0],
+                maximize: buttons[1],
+                close: buttons[2],
+                talk: nowhere,
+                tabs: Vec::new(),
+                fold_top: nowhere,
+                group: nowhere,
+                file_tabs: Vec::new(),
+                fold_files: nowhere,
+                files: nowhere,
+                input: nowhere,
+                status: nowhere,
+            };
+        }
+
+        let (rest, status) = rest.split_bottom(STATUS_H.min(rest.h));
+        let (body, input) = rest.split_bottom(INPUT_H.min(rest.h));
         let body = body.inset(GAP);
-        // The conversation gets the wider half; the three activity streams
-        // share the other. A code view is worth more room than a tool log, so
-        // it takes half of that column.
         let (talk, right) = body.split_left((body.w * 0.54).floor() - GAP * 0.5);
-        let right = Panel::new(right.x + GAP, right.y, right.w - GAP, right.h);
-        let (shell, rest) = right.split_top((right.h * 0.26).floor());
-        let (tools, code) = rest.split_top((rest.h * 0.32).floor());
+        let right = Panel::new(right.x + GAP, right.y, (right.w - GAP).max(1.0), right.h);
+
+        // Each group is a tab strip plus its content. A folded group is its
+        // strip alone, and the room it gives up goes to the other one.
+        let top_h = match (shape.fold_top, shape.fold_files) {
+            (true, _) => TAB_H,
+            (false, true) => (right.h - TAB_H - GAP).max(TAB_H),
+            (false, false) => ((right.h - GAP) * 0.42).max(TAB_H).floor(),
+        };
+        let (top, lower) = right.split_top(top_h.min(right.h));
+        let lower = Panel::new(lower.x, lower.y + GAP, lower.w, (lower.h - GAP).max(0.0));
+
+        let (top_strip, group) = top.split_top(TAB_H.min(top.h));
+        let (files_strip, files) = lower.split_top(TAB_H.min(lower.h));
+
+        let fold_top = Panel::new(top_strip.x + top_strip.w - TAB_H, top_strip.y, TAB_H, TAB_H);
+        let fold_files = Panel::new(
+            files_strip.x + files_strip.w - TAB_H,
+            files_strip.y,
+            TAB_H,
+            TAB_H,
+        );
+
+        let tabs = strip(
+            Panel::new(top_strip.x, top_strip.y, (top_strip.w - TAB_H).max(1.0), TAB_H),
+            Tab::ALL.iter().map(|t| t.label().len()),
+            shape.column,
+        )
+        .into_iter()
+        .enumerate()
+        .map(|(i, panel)| (Tab::ALL[i], panel))
+        .collect();
+
+        let file_tabs = strip(
+            Panel::new(
+                files_strip.x,
+                files_strip.y,
+                (files_strip.w - TAB_H).max(1.0),
+                TAB_H,
+            ),
+            shape.file_labels.iter().map(|label| label.chars().count()),
+            shape.column,
+        )
+        .into_iter()
+        .enumerate()
+        .collect();
 
         Layout {
+            width,
+            height,
+            shaded: false,
             title,
-            close: Panel::new(width - 26.0, 8.0, 14.0, 14.0),
+            minimize: buttons[0],
+            maximize: buttons[1],
+            close: buttons[2],
             talk,
-            shell: Panel::new(shell.x, shell.y, shell.w, shell.h - GAP),
-            tools: Panel::new(tools.x, tools.y, tools.w, tools.h - GAP),
-            code,
+            tabs,
+            fold_top,
+            group: if shape.fold_top {
+                Panel::new(group.x, group.y, group.w, 0.0)
+            } else {
+                group
+            },
+            file_tabs,
+            fold_files,
+            files: if shape.fold_files {
+                Panel::new(files.x, files.y, files.w, 0.0)
+            } else {
+                files
+            },
             input: input.inset(GAP),
             status,
         }
     }
 
-    pub fn of(&self, stream: Stream) -> Panel {
-        match stream {
-            Stream::Talk => self.talk,
-            Stream::Shell => self.shell,
-            Stream::Tools => self.tools,
-            Stream::Code => self.code,
+    /// What is under a point. One place, so a click and the thing it appears to
+    /// land on can never come apart.
+    pub fn hit(&self, x: f32, y: f32) -> Option<Hit> {
+        for (panel, hit) in [
+            (self.close, Hit::Close),
+            (self.maximize, Hit::Maximize),
+            (self.minimize, Hit::Minimize),
+        ] {
+            if panel.contains(x, y) {
+                return Some(hit);
+            }
         }
+        if self.title.contains(x, y) {
+            return Some(Hit::TitleBar);
+        }
+        if self.shaded {
+            return None;
+        }
+        if self.fold_top.contains(x, y) {
+            return Some(Hit::FoldTop);
+        }
+        if self.fold_files.contains(x, y) {
+            return Some(Hit::FoldFiles);
+        }
+        for (tab, panel) in &self.tabs {
+            if panel.contains(x, y) {
+                return Some(Hit::Tab(*tab));
+            }
+        }
+        for (index, panel) in &self.file_tabs {
+            if panel.contains(x, y) {
+                return Some(Hit::File(*index));
+            }
+        }
+        for (panel, hit) in [
+            (self.talk, Hit::Talk),
+            (self.group, Hit::Group),
+            (self.files, Hit::Files),
+            (self.input, Hit::Input),
+        ] {
+            if panel.contains(x, y) {
+                return Some(hit);
+            }
+        }
+        None
     }
 
-    /// The pane under a point, if any. Used for click-to-focus and for
-    /// routing the scroll wheel to what the pointer is over.
-    pub fn pane_at(&self, x: f32, y: f32) -> Option<Stream> {
-        [Stream::Talk, Stream::Shell, Stream::Tools, Stream::Code]
-            .into_iter()
-            .find(|stream| self.of(*stream).contains(x, y))
+    /// Rows a panel can show. The header line is content, not scrollback.
+    pub fn rows(&self, panel: Panel, size: f32) -> usize {
+        Text::rows_for(size, panel.inset(PAD).h)
     }
+}
 
-    /// Rows a pane can show, which is what scrolling is measured in.
-    pub fn rows(&self, stream: Stream) -> usize {
-        let size = if stream == Stream::Talk {
-            BODY_SIZE
-        } else {
-            PANE_SIZE
-        };
-        // The header line is inside the content box and is not scrollback.
-        Text::rows_for(size, self.of(stream).inset(PAD).h).saturating_sub(1)
+/// Lay tabs left to right at the width their labels need, dropping any that do
+/// not fit rather than squeezing them into unreadable slivers.
+fn strip(bar: Panel, widths: impl Iterator<Item = usize>, column: f32) -> Vec<Panel> {
+    let mut out = Vec::new();
+    let mut x = bar.x;
+    for chars in widths {
+        let w = (chars as f32 + 3.0) * column;
+        if x + w > bar.x + bar.w {
+            break;
+        }
+        out.push(Panel::new(x, bar.y, w, bar.h));
+        x += w;
     }
+    out
 }
 
 /// Which edge, if any, a point is on. An undecorated window loses the window
@@ -119,10 +308,16 @@ pub struct Frame<'a> {
     pub state: &'a State,
     pub skin: &'a Skin,
     pub layout: &'a Layout,
-    pub focus: Stream,
+    pub tab: Tab,
+    pub fold_top: bool,
+    pub fold_files: bool,
     pub input: &'a str,
     pub caret: usize,
     pub column: f32,
+    pub body_size: f32,
+    pub pane_size: f32,
+    /// What the pointer is over, for the button highlight.
+    pub hot: Option<Hit>,
     /// Shown in the title bar when the agent could not be reached.
     pub trouble: Option<&'a str>,
 }
@@ -132,20 +327,117 @@ pub fn build(frame: &Frame) -> Scene {
     let skin = frame.skin;
     let layout = frame.layout;
     let state = frame.state;
-    let width = layout.title.w;
-    let height = layout.status.y + layout.status.h;
 
-    scene.rect(Panel::new(0.0, 0.0, width, height).fill(skin.backdrop));
+    scene.rect(Panel::new(0.0, 0.0, layout.width, layout.height).fill(skin.backdrop));
+    title_bar(&mut scene, frame);
+
+    if layout.shaded {
+        return scene;
+    }
+
+    pane(&mut scene, frame, layout.talk, frame.body_size, |runs| {
+        let subject = if state.turn > 0 {
+            format!("turn {}", state.turn)
+        } else {
+            String::new()
+        };
+        header(runs, "TALK", &subject, skin);
+        for line in state
+            .talk
+            .visible(layout.rows(layout.talk, frame.body_size).saturating_sub(1))
+        {
+            runs.push(Run::tinted(&line.text, skin.tone(line.tone)));
+            runs.push(Run::plain("\n"));
+        }
+    });
+    scrollbar(
+        &mut scene,
+        skin,
+        layout.talk,
+        state
+            .talk
+            .thumb(layout.rows(layout.talk, frame.body_size).saturating_sub(1)),
+    );
+
+    tab_strip(
+        &mut scene,
+        frame,
+        &layout
+            .tabs
+            .iter()
+            .map(|(tab, panel)| (tab.label().to_string(), *tab == frame.tab, false, *panel))
+            .collect::<Vec<_>>(),
+        layout.fold_top,
+        frame.fold_top,
+    );
+    if !frame.fold_top {
+        group_pane(&mut scene, frame);
+    }
+
+    // Indexed through `get`: the layout is built from labels handed in, and a
+    // caller whose labels are one frame ahead of its state must not panic the
+    // window.
+    let file_labels: Vec<(String, bool, bool, Panel)> = layout
+        .file_tabs
+        .iter()
+        .filter_map(|(index, panel)| {
+            let file = state.files.get(*index)?;
+            Some((
+                short_name(&file.path),
+                *index == state.open_file,
+                file.changed,
+                *panel,
+            ))
+        })
+        .collect();
+    tab_strip(
+        &mut scene,
+        frame,
+        &file_labels,
+        layout.fold_files,
+        frame.fold_files,
+    );
+    if !frame.fold_files {
+        files_pane(&mut scene, frame);
+    }
+
+    input_row(&mut scene, frame);
+    status_bar(&mut scene, frame);
+    scene
+}
+
+fn title_bar(scene: &mut Scene, frame: &Frame) {
+    let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
     scene.rect(layout.title.fill(skin.bar));
-    scene.rect(layout.close.fill(skin.caret));
 
-    // Title bar: who we are, what we are talking to, and where.
-    let title_box = Panel::new(0.0, 0.0, width - 28.0, TITLE_H).row(12.0, Text::line_for(SMALL_SIZE));
-    let mut title = vec![Run::tinted("NO0B ▸ CLIppy", skin.bright)];
+    // The three buttons, drawn as glyphs rather than as bare boxes: a coloured
+    // square with no mark on it says nothing about what it does.
+    for (panel, glyph, hit, tint) in [
+        (layout.minimize, "\u{2013}", Hit::Minimize, skin.hot),
+        (layout.maximize, "\u{25a1}", Hit::Maximize, skin.hot),
+        (layout.close, "\u{2715}", Hit::Close, skin.close_hot),
+    ] {
+        if frame.hot == Some(hit) {
+            scene.rect(panel.fill(tint));
+        }
+        scene.text(Text::rich(
+            vec![Run::tinted(glyph, skin.bright)],
+            panel.row(0.0, Text::line_for(SMALL)),
+            SMALL,
+            skin.bright,
+        ));
+    }
+
+    let room = (layout.width - BUTTON_W * 3.0 - 12.0).max(1.0);
+    let mut runs = vec![Run::tinted("NO0B \u{25b8} CLIppy", skin.bright)];
     if let Some(trouble) = frame.trouble {
-        title.push(Run::tinted(format!("   {trouble}"), skin.bad));
+        runs.push(Run::tinted(format!("   {trouble}"), skin.bad));
+    } else if layout.shaded {
+        // Shaded, this strip is the whole window, so it carries the one thing
+        // worth knowing rather than the model name and the path.
+        runs.push(Run::tinted(format!("   {}", state.headline()), skin.good));
     } else {
-        title.push(Run::tinted(
+        runs.push(Run::tinted(
             format!(
                 "   {}   {}{}",
                 if state.model.is_empty() {
@@ -159,122 +451,258 @@ pub fn build(frame: &Frame) -> Scene {
             skin.title,
         ));
     }
-    scene.text(Text::rich(title, title_box, SMALL_SIZE, skin.title));
+    scene.text(Text::rich(
+        runs,
+        Panel::new(0.0, 0.0, room, TITLE_H).row(12.0, Text::line_for(SMALL)),
+        SMALL,
+        skin.title,
+    ));
+}
 
-    pane(&mut scene, frame, Stream::Talk);
-    pane(&mut scene, frame, Stream::Shell);
-    pane(&mut scene, frame, Stream::Tools);
-    pane(&mut scene, frame, Stream::Code);
+fn tab_strip(
+    scene: &mut Scene,
+    frame: &Frame,
+    tabs: &[(String, bool, bool, Panel)],
+    fold: Panel,
+    folded: bool,
+) {
+    let skin = frame.skin;
+    if tabs.is_empty() && fold.w == 0.0 {
+        return;
+    }
+    let bar = Panel::new(
+        tabs.first().map_or(fold.x, |(_, _, _, p)| p.x),
+        fold.y,
+        (fold.x + fold.w) - tabs.first().map_or(fold.x, |(_, _, _, p)| p.x),
+        fold.h,
+    );
+    scene.rect(bar.fill(skin.strip));
+    scene.rect(bar.bottom_edge(skin.edge));
+    for (label, active, changed, panel) in tabs {
+        if *active {
+            scene.rect(panel.fill(skin.panel));
+            scene.rect(panel.top_edge(skin.edge_focus));
+        } else {
+            scene.rect(panel.left_edge(skin.edge));
+        }
+        let color = if *active { skin.bright } else { skin.dim };
+        let mut runs = vec![Run::tinted(label.as_str(), color)];
+        if *changed {
+            runs.push(Run::tinted("\u{2022}", skin.plus));
+        }
+        scene.text(Text::rich(
+            runs,
+            panel.row(SMALL * 0.6, Text::line_for(SMALL)),
+            SMALL,
+            color,
+        ));
+    }
+    scene.text(Text::rich(
+        vec![Run::tinted(
+            if folded { "\u{25b8}" } else { "\u{25be}" },
+            skin.dim,
+        )],
+        fold.row(0.0, Text::line_for(SMALL)),
+        SMALL,
+        skin.dim,
+    ));
+}
 
-    // The input line, with its own caret because there is no system text field.
+fn group_pane(scene: &mut Scene, frame: &Frame) {
+    let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
+    let panel = layout.group;
+    let rows = layout.rows(panel, frame.pane_size);
+    pane(scene, frame, panel, frame.pane_size, |runs| match frame.tab {
+        Tab::Activity => {
+            for line in state.activity.visible(rows) {
+                runs.push(Run::tinted(&line.text, skin.tone(line.tone)));
+                runs.push(Run::plain("\n"));
+            }
+        }
+        Tab::Plan => {
+            if state.plan.is_empty() {
+                runs.push(Run::tinted("no plan yet", skin.dim));
+            }
+            for todo in &state.plan {
+                let (mark, color) = match todo.state {
+                    TodoState::Done => ("[x] ", skin.good),
+                    TodoState::Active => ("[>] ", skin.bright),
+                    TodoState::Pending => ("[ ] ", skin.dim),
+                };
+                runs.push(Run::tinted(mark, color));
+                runs.push(Run::tinted(&todo.text, color));
+                runs.push(Run::plain("\n"));
+            }
+        }
+        Tab::Agents => {
+            if state.agents.is_empty() {
+                runs.push(Run::tinted("no sub-agents this session", skin.dim));
+            }
+            for agent in &state.agents {
+                runs.push(Run::tinted(
+                    format!("{:<9}{:<9}", agent.label, agent.state),
+                    skin.tone(agent.tone),
+                ));
+                runs.push(Run::tinted(clip(&agent.brief, 200), skin.dim));
+                runs.push(Run::plain("\n"));
+            }
+        }
+    });
+    if frame.tab == Tab::Activity {
+        scrollbar(scene, skin, panel, state.activity.thumb(rows));
+    }
+}
+
+fn files_pane(scene: &mut Scene, frame: &Frame) {
+    let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
+    let panel = layout.files;
+    let rows = layout.rows(panel, frame.pane_size);
+    let open = state.files.get(state.open_file);
+    pane(scene, frame, panel, frame.pane_size, |runs| {
+        let Some(file) = open else {
+            runs.push(Run::tinted("no files touched yet", skin.dim));
+            return;
+        };
+        let syntax = crate::syntax::for_path(&file.path);
+        for line in file.pane.visible(rows) {
+            let base = skin.tone(line.tone);
+            // A removed line reads as removed first, so only what is there now
+            // is tokenized.
+            let source = matches!(line.tone, Tone::Plus | Tone::Body);
+            if source {
+                let (marker, rest) = line.text.split_at(line.text.len().min(2));
+                runs.push(Run::tinted(marker, base));
+                for (text, token) in crate::syntax::scan(rest, syntax) {
+                    runs.push(Run::tinted(text, skin.token(token).unwrap_or(base)));
+                }
+            } else {
+                runs.push(Run::tinted(&line.text, base));
+            }
+            runs.push(Run::plain("\n"));
+        }
+    });
+    if let Some(file) = open {
+        scrollbar(scene, skin, panel, file.pane.thumb(rows));
+    }
+}
+
+/// A pane: its fill, its edge, and one text box built by `body`.
+fn pane(
+    scene: &mut Scene,
+    frame: &Frame,
+    panel: Panel,
+    size: f32,
+    body: impl FnOnce(&mut Vec<Run>),
+) {
+    if panel.h < 2.0 {
+        return;
+    }
+    scene.rect(panel.fill(frame.skin.panel));
+    let mut runs = Vec::new();
+    body(&mut runs);
+    scene.text(Text::rich(
+        runs,
+        panel.inset(PAD),
+        size,
+        frame.skin.body,
+    ));
+}
+
+fn header(runs: &mut Vec<Run>, title: &str, subject: &str, skin: &Skin) {
+    runs.push(Run::tinted(format!("{title:<6}"), skin.dim));
+    if !subject.is_empty() {
+        runs.push(Run::tinted(subject, skin.dim));
+    }
+    runs.push(Run::plain("\n"));
+}
+
+/// The bar down the right edge of a pane. Absent when everything fits, because
+/// a scrollbar that is always full length says nothing.
+fn scrollbar(scene: &mut Scene, skin: &Skin, panel: Panel, thumb: Option<(f32, f32)>) {
+    let Some((top, size)) = thumb else {
+        return;
+    };
+    let track = Panel::new(
+        panel.x + panel.w - SCROLL_W - 2.0,
+        panel.y + 3.0,
+        SCROLL_W,
+        (panel.h - 6.0).max(1.0),
+    );
+    scene.rect(track.fill(skin.scroll_track));
+    scene.rect(
+        Panel::new(
+            track.x,
+            track.y + track.h * top,
+            track.w,
+            (track.h * size).max(8.0).min(track.h),
+        )
+        .fill(skin.scroll_thumb),
+    );
+}
+
+fn input_row(scene: &mut Scene, frame: &Frame) {
+    let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
     scene.rect(layout.input.fill(skin.input));
     scene.rect(layout.input.top_edge(skin.edge_focus));
-    // One centred line, not a margin: insetting this bar leaves a box too
-    // short to hold the text, which draws and then clips to nothing.
-    let input_box = layout.input.row(PAD, Text::line_for(BODY_SIZE));
-    let prompt = if state.busy { "…" } else { "›" };
+    // One centred line, not a margin: insetting this bar leaves a box too short
+    // to hold the text, which draws and then clips to nothing.
+    let box_ = layout.input.row(PAD, Text::line_for(frame.body_size));
+    let prompt = if state.phase.busy() { "\u{2026}" } else { "\u{203a}" };
     scene.text(Text::rich(
         vec![
             Run::tinted(format!("{prompt} "), skin.dim),
             Run::tinted(frame.input, skin.bright),
         ],
-        input_box,
-        BODY_SIZE,
+        box_,
+        frame.body_size,
         skin.bright,
     ));
     // Two columns for the prompt, then one per character typed.
-    let caret_x = input_box.x + (frame.caret as f32 + 2.0) * frame.column;
-    if caret_x < input_box.x + input_box.w {
-        scene.rect(Panel::new(caret_x, input_box.y, 2.0, input_box.h).fill(skin.caret));
+    let caret_x = box_.x + (frame.caret as f32 + 2.0) * frame.column;
+    if caret_x < box_.x + box_.w {
+        scene.rect(Panel::new(caret_x, box_.y, 2.0, box_.h).fill(skin.caret));
     }
+}
 
-    // Status: the session budget, as a gauge and as numbers.
+fn status_bar(scene: &mut Scene, frame: &Frame) {
+    let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
     scene.rect(layout.status.fill(skin.bar));
-    let gauge = Panel::new(0.0, layout.status.y, width, 2.0);
+    let gauge = Panel::new(0.0, layout.status.y, layout.width, 2.0);
     scene.rect(gauge.fill(skin.gauge_track));
     let used = state.context_fraction();
     if used > 0.0 {
-        scene.rect(Panel::new(0.0, gauge.y, width * used, 2.0).fill(skin.gauge));
+        scene.rect(Panel::new(0.0, gauge.y, layout.width * used, 2.0).fill(skin.gauge));
     }
     scene.text(Text::rich(
         vec![
-            Run::tinted(format!("{:<12}", state.status), skin.bright),
+            Run::tinted(format!("{:<12}", state.phase.word().to_lowercase()), skin.bright),
             Run::tinted(state.budget_line(), skin.title),
         ],
-        layout.status.row(12.0, Text::line_for(SMALL_SIZE)),
-        SMALL_SIZE,
+        layout.status.row(12.0, Text::line_for(SMALL)),
+        SMALL,
         skin.title,
     ));
-
-    scene
 }
 
-fn pane(scene: &mut Scene, frame: &Frame, stream: Stream) {
-    let skin = frame.skin;
-    let panel = frame.layout.of(stream);
-    let focused = frame.focus == stream;
-    let state = frame.state;
-
-    scene.rect(panel.fill(if stream == Stream::Talk {
-        skin.panel
-    } else {
-        skin.panel_thin
-    }));
-    scene.rect(panel.top_edge(if focused { skin.edge_focus } else { skin.edge }));
-
-    let size = if stream == Stream::Talk {
-        BODY_SIZE
-    } else {
-        PANE_SIZE
-    };
-    let content = panel.inset(PAD);
-    let pane = state.pane(stream);
-    let rows = frame.layout.rows(stream);
-
-    // Header: the pane's name, plus what it is currently about.
-    let subject = match stream {
-        Stream::Code => state.focus.clone().unwrap_or_default(),
-        Stream::Talk if state.turn > 0 => format!("turn {}", state.turn),
-        _ => String::new(),
-    };
-    let mut runs = vec![Run::tinted(
-        format!("{:<6}", pane.title.to_uppercase()),
-        if focused { skin.bright } else { skin.dim },
-    )];
-    if !subject.is_empty() {
-        runs.push(Run::tinted(subject, skin.dim));
+fn clip(text: &str, chars: usize) -> String {
+    let mut out: String = text.chars().take(chars).collect();
+    if text.chars().count() > chars {
+        out.push('\u{2026}');
     }
-    if pane.scrollback > 0 {
-        runs.push(Run::tinted(
-            format!("   ↑{} of {}", pane.scrollback, pane.len()),
-            skin.good,
-        ));
-    }
-    runs.push(Run::plain("\n"));
+    out
+}
 
-    let syntax = state
-        .focus
-        .as_deref()
-        .map(crate::syntax::for_path)
-        .unwrap_or(crate::syntax::Syntax::None);
-    for line in pane.visible(rows) {
-        let base = skin.tone(line.tone);
-        // Only the code pane is source, and only its unchanged and added lines
-        // are worth tokenizing: a removed line reads as removed first.
-        let tokenize = stream == Stream::Code
-            && matches!(line.tone, crate::state::Tone::Plus | crate::state::Tone::Body);
-        if tokenize {
-            let (marker, rest) = line.text.split_at(line.text.len().min(2));
-            runs.push(Run::tinted(marker, base));
-            for (text, token) in crate::syntax::scan(rest, syntax) {
-                runs.push(Run::tinted(text, skin.token(token).unwrap_or(base)));
-            }
-        } else {
-            runs.push(Run::tinted(&line.text, base));
+/// The file name, and enough of its parent to tell two `mod.rs` apart.
+pub fn short_name(path: &str) -> String {
+    let parts: Vec<&str> = path.rsplit('/').take(2).collect();
+    match parts.as_slice() {
+        [] => String::new(),
+        [name] => (*name).to_string(),
+        [name, parent, ..] if *name == "mod.rs" || *name == "index.ts" || *name == "__init__.py" => {
+            format!("{parent}/{name}")
         }
-        runs.push(Run::plain("\n"));
+        [name, ..] => (*name).to_string(),
     }
-    scene.text(Text::rich(runs, content, size, skin.body));
 }
 
 /// A path shortened to its tail, so a deep workspace does not push the model
@@ -291,121 +719,20 @@ fn short_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
 
-    /// Panes tile the body: no gaps a click falls through, no overlap where
-    /// two panes both claim a pixel.
-    #[test]
-    fn the_three_activity_panes_stack_without_overlapping() {
-        let layout = Layout::compute(1200.0, 800.0);
-        assert!(layout.shell.y + layout.shell.h <= layout.tools.y);
-        assert!(layout.tools.y + layout.tools.h <= layout.code.y);
-        assert!(layout.talk.x + layout.talk.w <= layout.shell.x);
-        // The right column is one column.
-        assert_eq!(layout.shell.x, layout.tools.x);
-        assert_eq!(layout.shell.x, layout.code.x);
-        assert_eq!(layout.shell.w, layout.code.w);
-    }
-
-    #[test]
-    fn every_pane_stays_inside_the_window() {
-        for (w, h) in [(1200.0, 800.0), (640.0, 400.0), (2560.0, 1440.0)] {
-            let layout = Layout::compute(w, h);
-            for stream in [Stream::Talk, Stream::Shell, Stream::Tools, Stream::Code] {
-                let panel = layout.of(stream);
-                assert!(panel.x >= 0.0 && panel.y >= TITLE_H, "{stream:?} at {w}x{h}");
-                assert!(panel.x + panel.w <= w + 0.01, "{stream:?} at {w}x{h}");
-                assert!(
-                    panel.y + panel.h <= h - INPUT_H - STATUS_H + 0.01,
-                    "{stream:?} at {w}x{h}"
-                );
-            }
-        }
-    }
-
-    /// A window dragged down to nothing must not produce a negative panel that
-    /// wraps text at a nonsense width.
-    #[test]
-    fn a_tiny_window_still_produces_usable_panels() {
-        let layout = Layout::compute(120.0, 90.0);
-        for stream in [Stream::Talk, Stream::Shell, Stream::Tools, Stream::Code] {
-            let content = layout.of(stream).inset(PAD);
-            assert!(content.w >= 1.0 && content.h >= 1.0, "{stream:?}");
-        }
-        assert!(layout.input.w >= 1.0);
-    }
-
-    #[test]
-    fn hit_testing_finds_the_pane_under_a_point() {
-        let layout = Layout::compute(1200.0, 800.0);
-        for stream in [Stream::Talk, Stream::Shell, Stream::Tools, Stream::Code] {
-            let panel = layout.of(stream);
-            let inside = (panel.x + panel.w * 0.5, panel.y + panel.h * 0.5);
-            assert_eq!(layout.pane_at(inside.0, inside.1), Some(stream), "{stream:?}");
-        }
-        // The title bar belongs to no pane.
-        assert_eq!(layout.pane_at(600.0, 10.0), None);
-    }
-
-    #[test]
-    fn the_resize_edges_are_the_border_and_nothing_else() {
-        use winit::window::ResizeDirection as Dir;
-        assert_eq!(edge(0.0, 0.0, 800.0, 600.0), Some(Dir::NorthWest));
-        assert_eq!(edge(799.0, 599.0, 800.0, 600.0), Some(Dir::SouthEast));
-        assert_eq!(edge(400.0, 2.0, 800.0, 600.0), Some(Dir::North));
-        assert_eq!(edge(400.0, 300.0, 800.0, 600.0), None);
-    }
-
-    /// Rows are what scrolling counts, so they must match the space the text
-    /// actually gets rather than the panel it sits in.
-    #[test]
-    fn rows_fit_inside_the_content_box() {
-        let layout = Layout::compute(1200.0, 800.0);
-        for stream in [Stream::Talk, Stream::Shell, Stream::Tools, Stream::Code] {
-            let content = layout.of(stream).inset(PAD);
-            let size = if stream == Stream::Talk {
-                BODY_SIZE
-            } else {
-                PANE_SIZE
-            };
-            let rows = layout.rows(stream);
-            let used = (rows + 1) as f32 * (size * 1.42).round();
-            assert!(used <= content.h + 0.01, "{stream:?}: {used} in {}", content.h);
-        }
-    }
-
-    #[test]
-    fn a_deep_workspace_shows_its_last_two_segments() {
-        assert_eq!(short_path("/home/hec/workspace/noob-cli"), "workspace/noob-cli");
-        assert_eq!(short_path("noob-cli"), "noob-cli");
-        assert_eq!(short_path(""), "");
-    }
-
-    // ---- the scene itself, without a GPU -------------------------------
-
-    fn scene_of(state: &State, width: f32, height: f32) -> (Scene, Layout) {
-        let layout = Layout::compute(width, height);
-        let skin = Skin::matrix();
-        let scene = build(&Frame {
-            state,
-            skin: &skin,
-            layout: &layout,
-            focus: Stream::Talk,
-            input: "type here",
-            caret: 4,
+    fn shape(files: &[&str]) -> Shape {
+        Shape {
+            shaded: false,
+            fold_top: false,
+            fold_files: false,
+            file_labels: files.iter().map(|f| f.to_string()).collect(),
             column: 8.0,
-            trouble: None,
-        });
-        (scene, layout)
+        }
     }
 
-    /// Everything the panes hold, as one string, for asserting that content
-    /// reached the scene at all.
-    fn rendered(scene: &Scene) -> String {
-        scene
-            .texts
-            .iter()
-            .flat_map(|t| t.runs.iter().map(|r| r.text.as_str()))
-            .collect()
+    fn layout(w: f32, h: f32) -> Layout {
+        Layout::compute(w, h, &shape(&["calc.py", "tools.md"]))
     }
 
     fn busy_state() -> State {
@@ -426,6 +753,21 @@ mod tests {
             brief: "cargo test".into(),
             args: serde_json::json!({"cmd": "cargo test --workspace"}),
         });
+        state.apply(noob_proto::Event::ToolStart {
+            call_id: "c2".into(),
+            name: "plan".into(),
+            brief: "3 items".into(),
+            args: serde_json::json!({"todos": [
+                {"content": "read it", "status": "completed"},
+                {"content": "fix it", "status": "in_progress"},
+            ]}),
+        });
+        state.apply(noob_proto::Event::ToolStart {
+            call_id: "c3".into(),
+            name: "subagent".into(),
+            brief: "research".into(),
+            args: serde_json::json!({"prompt": "search the web"}),
+        });
         state.apply(noob_proto::Event::FileEdit {
             path: "src/calc.py".into(),
             span: noob_proto::Span {
@@ -436,7 +778,7 @@ mod tests {
             },
             before: "    return a - b".into(),
             after: "    return a + b".into(),
-            call_id: Some("c2".into()),
+            call_id: Some("c4".into()),
         });
         state.apply(noob_proto::Event::UsageReport {
             usage: noob_proto::Usage {
@@ -449,59 +791,228 @@ mod tests {
         state
     }
 
-    /// The four streams all reach the screen, each in its own pane. This is the
-    /// end of the path that starts at a frame on the wire.
-    #[test]
-    fn every_stream_reaches_the_scene() {
-        let state = busy_state();
-        let (scene, _) = scene_of(&state, 1200.0, 800.0);
-        let text = rendered(&scene);
-        assert!(text.contains("looking at it now"), "talk missing");
-        assert!(text.contains("cargo test --workspace"), "shell missing");
-        assert!(text.contains("return a + b"), "code missing");
-        assert!(text.contains("laguna-s21"), "the model is named");
-        assert!(text.contains("1,816 / 65,536"), "the budget is shown");
-        assert!(text.contains("type here"), "the input line is shown");
+    fn scene_of(state: &State, w: f32, h: f32, shape: &Shape) -> (Scene, Layout, Skin) {
+        scene_on(state, w, h, shape, Tab::Activity)
     }
 
-    /// The rule the whole layout rests on: a pane's text box is inside its
-    /// panel, so text is wrapped and clipped to the same rectangle and can
-    /// never reach a neighbour.
+    fn scene_on(
+        state: &State,
+        w: f32,
+        h: f32,
+        shape: &Shape,
+        tab: Tab,
+    ) -> (Scene, Layout, Skin) {
+        let layout = Layout::compute(w, h, shape);
+        let skin = Skin::from(&Config::default());
+        let scene = build(&Frame {
+            state,
+            skin: &skin,
+            layout: &layout,
+            tab,
+            fold_top: shape.fold_top,
+            fold_files: shape.fold_files,
+            input: "type here",
+            caret: 4,
+            column: shape.column,
+            body_size: 14.0,
+            pane_size: 13.0,
+            hot: None,
+            trouble: None,
+        });
+        (scene, layout, skin)
+    }
+
+    fn rendered(scene: &Scene) -> String {
+        scene
+            .texts
+            .iter()
+            .flat_map(|t| t.runs.iter().map(|r| r.text.as_str()))
+            .collect()
+    }
+
     #[test]
-    fn no_text_box_escapes_the_window() {
-        let state = busy_state();
-        for (w, h) in [(1200.0, 800.0), (700.0, 420.0), (2560.0, 1440.0)] {
-            let (scene, _) = scene_of(&state, w, h);
-            for text in &scene.texts {
-                assert!(text.at.x >= 0.0 && text.at.y >= 0.0, "{:?} at {w}x{h}", text.at);
-                assert!(
-                    text.at.x + text.at.w <= w + 0.01,
-                    "{:?} runs past {w}",
-                    text.at
-                );
-                assert!(
-                    text.at.y + text.at.h <= h + 0.01,
-                    "{:?} runs past {h}",
-                    text.at
-                );
-                assert!(text.at.w >= 1.0, "{:?}", text.at);
-                // The bug this catches: a box shorter than its own line draws
-                // the text and then clips every pixel of it away, which reads
-                // as the keyboard not working.
-                assert!(
-                    text.at.h >= Text::line_for(text.size),
-                    "{:?} cannot hold one {}pt line at {w}x{h}",
-                    text.at,
-                    text.size
-                );
+    fn the_groups_stack_without_overlapping_and_stay_in_the_window() {
+        for (w, h) in [(1200.0, 800.0), (700.0, 460.0), (2560.0, 1440.0)] {
+            let layout = layout(w, h);
+            assert!(layout.talk.x + layout.talk.w <= layout.group.x);
+            assert!(layout.group.y + layout.group.h <= layout.files.y);
+            for panel in [layout.talk, layout.group, layout.files, layout.input] {
+                assert!(panel.x >= 0.0 && panel.y >= 0.0, "{panel:?} at {w}x{h}");
+                assert!(panel.x + panel.w <= w + 0.01, "{panel:?} at {w}x{h}");
+                assert!(panel.y + panel.h <= h + 0.01, "{panel:?} at {w}x{h}");
             }
         }
     }
 
-    /// A code line is colored by its syntax; a shell line is not. The extension
-    /// is the only signal, and it is the harness's, never the model's.
+    /// Every click resolves in one place, so what a region looks like and what
+    /// it does can never come apart.
     #[test]
-    fn the_code_pane_is_syntax_colored_and_the_others_are_not() {
+    fn every_region_is_hit_where_it_is_drawn() {
+        let layout = layout(1200.0, 800.0);
+        let middle = |p: Panel| (p.x + p.w * 0.5, p.y + p.h * 0.5);
+        let cases: Vec<(Panel, Hit)> = vec![
+            (layout.close, Hit::Close),
+            (layout.maximize, Hit::Maximize),
+            (layout.minimize, Hit::Minimize),
+            (layout.fold_top, Hit::FoldTop),
+            (layout.fold_files, Hit::FoldFiles),
+            (layout.talk, Hit::Talk),
+            (layout.group, Hit::Group),
+            (layout.files, Hit::Files),
+            (layout.input, Hit::Input),
+        ];
+        for (panel, expected) in cases {
+            let (x, y) = middle(panel);
+            assert_eq!(layout.hit(x, y), Some(expected), "{expected:?} {panel:?}");
+        }
+        for (tab, panel) in &layout.tabs {
+            let (x, y) = middle(*panel);
+            assert_eq!(layout.hit(x, y), Some(Hit::Tab(*tab)));
+        }
+        for (index, panel) in &layout.file_tabs {
+            let (x, y) = middle(*panel);
+            assert_eq!(layout.hit(x, y), Some(Hit::File(*index)));
+        }
+    }
+
+    /// The buttons sit on the title bar and must win against it, or the window
+    /// drags instead of closing.
+    #[test]
+    fn the_buttons_win_against_the_title_bar_they_sit_on() {
+        let layout = layout(1200.0, 800.0);
+        assert!(layout.title.contains(layout.close.x + 1.0, 10.0));
+        assert_eq!(layout.hit(layout.close.x + 1.0, 10.0), Some(Hit::Close));
+        assert_eq!(layout.hit(200.0, 10.0), Some(Hit::TitleBar));
+    }
+
+    /// Shaded, the window is one strip. Every other region has to be gone, or
+    /// a click lands on a pane that is not on screen.
+    #[test]
+    fn shading_leaves_the_bar_and_nothing_else() {
+        let mut shape = shape(&["a.rs"]);
+        shape.shaded = true;
+        let layout = Layout::compute(1200.0, 800.0, &shape);
+        assert!(layout.shaded);
+        assert!(layout.tabs.is_empty() && layout.file_tabs.is_empty());
+        for panel in [layout.talk, layout.group, layout.files, layout.input] {
+            assert_eq!(panel.w, 0.0);
+            assert_eq!(panel.h, 0.0);
+        }
+        // Below the strip there is nothing to hit.
+        assert_eq!(layout.hit(600.0, 400.0), None);
+        assert_eq!(layout.hit(600.0, 10.0), Some(Hit::TitleBar));
+        // And the strip carries the headline rather than the model and path.
+        let (scene, _, _) = scene_of(&busy_state(), 1200.0, 800.0, &shape);
+        let text = rendered(&scene);
+        assert!(text.contains("WORKING") || text.contains("THINKING"), "{text}");
+        assert!(!text.contains("looking at it now"), "no pane content");
+    }
+
+    /// Folding a group gives its room to the other one rather than leaving a
+    /// hole where it was.
+    #[test]
+    fn folding_a_group_gives_its_room_away() {
+        let open = Layout::compute(1200.0, 800.0, &shape(&["a.rs"]));
+        let mut folded = shape(&["a.rs"]);
+        folded.fold_top = true;
+        let folded = Layout::compute(1200.0, 800.0, &folded);
+        assert_eq!(folded.group.h, 0.0, "the folded group has no content");
+        assert!(folded.files.h > open.files.h, "the other group grew");
+        assert!(folded.fold_top.w > 0.0, "its strip is still there to unfold");
+    }
+
+    /// Every text box must be able to hold at least one line of its own size.
+    /// A box shorter than that draws the text and clips every pixel of it,
+    /// which reads as the interface being broken.
+    #[test]
+    fn no_text_box_is_too_small_to_show_its_text() {
+        let state = busy_state();
+        for (w, h) in [(1200.0, 800.0), (700.0, 420.0), (420.0, 300.0)] {
+            for (tab, fold_top, fold_files) in [
+                (Tab::Activity, false, false),
+                (Tab::Plan, false, false),
+                (Tab::Agents, true, false),
+                (Tab::Activity, false, true),
+            ] {
+                let mut shape = shape(&["calc.py"]);
+                shape.fold_top = fold_top;
+                shape.fold_files = fold_files;
+                let (scene, _, _) = scene_on(&state, w, h, &shape, tab);
+                for text in &scene.texts {
+                    assert!(text.at.w >= 1.0, "{:?} at {w}x{h}", text.at);
+                    assert!(
+                        text.at.h >= Text::line_for(text.size),
+                        "{:?} cannot hold one {}pt line at {w}x{h}",
+                        text.at,
+                        text.size
+                    );
+                    assert!(text.at.x >= 0.0 && text.at.y >= 0.0, "{:?}", text.at);
+                    assert!(text.at.x + text.at.w <= w + 0.01, "{:?}", text.at);
+                    assert!(text.at.y + text.at.h <= h + 0.01, "{:?}", text.at);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_rectangle_is_inside_the_surface() {
+        let state = busy_state();
+        for (w, h) in [(1200.0, 800.0), (320.0, 240.0)] {
+            let (scene, _, _) = scene_of(&state, w, h, &shape(&["a.rs"]));
+            assert!(!scene.rects.is_empty());
+            for rect in &scene.rects {
+                let [x, y, rw, rh] = rect.xywh();
+                assert!(x >= 0.0 && y >= 0.0, "{rect:?} at {w}x{h}");
+                assert!(x + rw <= w + 0.01 && y + rh <= h + 0.01, "{rect:?} at {w}x{h}");
+            }
+        }
+    }
+
+    /// Each tab shows its own thing and not the others'.
+    #[test]
+    fn each_tab_shows_its_own_content() {
+        let state = busy_state();
+        let shape = shape(&["calc.py"]);
+
+        let text = rendered(&scene_on(&state, 1400.0, 900.0, &shape, Tab::Activity).0);
+        assert!(text.contains("cargo test --workspace"), "{text}");
+
+        let text = rendered(&scene_on(&state, 1400.0, 900.0, &shape, Tab::Plan).0);
+        assert!(text.contains("[x] read it"), "{text}");
+        assert!(text.contains("[>] fix it"), "{text}");
+        assert!(!text.contains("cargo test --workspace"), "activity leaked");
+
+        let text = rendered(&scene_on(&state, 1400.0, 900.0, &shape, Tab::Agents).0);
+        assert!(text.contains("search the web"), "{text}");
+        assert!(text.contains("running"), "{text}");
+    }
+
+    /// The conversation, the file diff and the budget are always on screen,
+    /// whichever tab is up.
+    #[test]
+    fn the_conversation_and_the_file_are_always_visible() {
+        let state = busy_state();
+        for tab in Tab::ALL {
+            let shape = shape(&["calc.py"]);
+            let text = rendered(&scene_on(&state, 1400.0, 900.0, &shape, tab).0);
+            assert!(text.contains("looking at it now"), "{tab:?}");
+            assert!(text.contains("return a + b"), "{tab:?}");
+            assert!(text.contains("1,816 / 65,536"), "{tab:?}");
+            assert!(text.contains("type here"), "{tab:?}");
+        }
+    }
+
+    /// A file the agent wrote is marked in its tab, so a glance says which of
+    /// them it changed rather than only read.
+    #[test]
+    fn a_changed_file_is_marked_in_its_tab() {
+        let state = busy_state();
+        let text = rendered(&scene_of(&state, 1400.0, 900.0, &shape(&["calc.py"])).0);
+        assert!(text.contains("calc.py\u{2022}"), "{text}");
+    }
+
+    #[test]
+    fn the_code_pane_is_syntax_colored() {
         let mut state = State::new();
         state.apply(noob_proto::Event::FileEdit {
             path: "calc.py".into(),
@@ -515,50 +1026,66 @@ mod tests {
             after: "x = \"hello\"  # a note".into(),
             call_id: None,
         });
-        let (scene, layout) = scene_of(&state, 1200.0, 800.0);
-        let skin = Skin::matrix();
+        let (scene, layout, skin) = scene_of(&state, 1400.0, 900.0, &shape(&["calc.py"]));
+        let content = layout.files.inset(PAD);
         let code = scene
             .texts
             .iter()
-            .find(|t| t.at.x == layout.code.inset(PAD).x && t.at.y == layout.code.inset(PAD).y)
-            .expect("the code pane has a text box");
+            .find(|t| t.at.x == content.x && t.at.y == content.y)
+            .expect("the file pane has a text box");
         let colors: Vec<Option<[u8; 4]>> = code.runs.iter().map(|r| r.color).collect();
         assert!(colors.contains(&Some(skin.string)), "the string is tinted");
         assert!(colors.contains(&Some(skin.comment)), "the comment is tinted");
     }
 
-    /// Nothing outside the window: every rectangle is inside the surface, so a
-    /// resize can never leave one drawing over the desktop.
+    /// A tab strip too narrow for its tabs drops the ones that do not fit
+    /// rather than drawing slivers nobody can read or click.
     #[test]
-    fn every_rectangle_is_inside_the_surface() {
-        let state = busy_state();
-        for (w, h) in [(1200.0, 800.0), (320.0, 240.0)] {
-            let (scene, _) = scene_of(&state, w, h);
-            assert!(!scene.rects.is_empty());
-            for rect in &scene.rects {
-                let [x, y, rw, rh] = rect.xywh();
-                assert!(x >= 0.0 && y >= 0.0, "{rect:?} at {w}x{h}");
-                assert!(x + rw <= w + 0.01 && y + rh <= h + 0.01, "{rect:?} at {w}x{h}");
-            }
+    fn tabs_that_do_not_fit_are_dropped_not_squeezed() {
+        let many: Vec<&str> = vec!["averyverylongfilename.rs"; 30];
+        let layout = Layout::compute(900.0, 700.0, &shape(&many));
+        assert!(layout.file_tabs.len() < many.len(), "some were dropped");
+        for (_, panel) in &layout.file_tabs {
+            assert!(panel.w > 20.0, "no slivers: {panel:?}");
+            assert!(
+                panel.x + panel.w <= layout.fold_files.x + 0.01,
+                "a tab ran into the fold control"
+            );
         }
     }
 
-    /// A caret past the right edge is not drawn rather than drawn on top of the
-    /// pane beside it.
+    #[test]
+    fn a_scrollbar_appears_only_when_there_is_something_to_scroll() {
+        let mut state = State::new();
+        let short = scene_of(&state, 1200.0, 800.0, &shape(&[])).0.rects.len();
+        for n in 0..500 {
+            state.apply(noob_proto::Event::TextDelta {
+                d: format!("line {n}\n"),
+            });
+        }
+        let long = scene_of(&state, 1200.0, 800.0, &shape(&[])).0.rects.len();
+        assert_eq!(long, short + 2, "a track and a thumb appeared");
+    }
+
     #[test]
     fn a_caret_past_the_edge_is_dropped() {
         let state = State::new();
-        let layout = Layout::compute(600.0, 500.0);
-        let skin = Skin::matrix();
+        let layout = layout(600.0, 500.0);
+        let skin = Skin::default();
         let count = |caret: usize| {
             build(&Frame {
                 state: &state,
                 skin: &skin,
                 layout: &layout,
-                focus: Stream::Talk,
+                tab: Tab::Activity,
+                fold_top: false,
+                fold_files: false,
                 input: "",
                 caret,
                 column: 8.0,
+                body_size: 14.0,
+                pane_size: 13.0,
+                hot: None,
                 trouble: None,
             })
             .rects
@@ -567,24 +1094,51 @@ mod tests {
         assert_eq!(count(0) - 1, count(10_000), "the caret rect is gone");
     }
 
-    /// A failure to start the agent has to be visible in the window, because
-    /// there is no terminal for it to be printed to.
     #[test]
     fn trouble_replaces_the_title_detail() {
         let state = State::new();
-        let layout = Layout::compute(900.0, 600.0);
-        let skin = Skin::matrix();
+        let layout = layout(900.0, 600.0);
+        let skin = Skin::default();
         let scene = build(&Frame {
             state: &state,
             skin: &skin,
             layout: &layout,
-            focus: Stream::Talk,
+            tab: Tab::Activity,
+            fold_top: false,
+            fold_files: false,
             input: "",
             caret: 0,
             column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            hot: None,
             trouble: Some("cannot start \"noob\": not found"),
         });
-        let text = rendered(&scene);
-        assert!(text.contains("cannot start"), "{text}");
+        assert!(rendered(&scene).contains("cannot start"));
+    }
+
+    #[test]
+    fn the_resize_edges_are_the_border_and_nothing_else() {
+        use winit::window::ResizeDirection as Dir;
+        assert_eq!(edge(0.0, 0.0, 800.0, 600.0), Some(Dir::NorthWest));
+        assert_eq!(edge(799.0, 599.0, 800.0, 600.0), Some(Dir::SouthEast));
+        assert_eq!(edge(400.0, 300.0, 800.0, 600.0), None);
+    }
+
+    #[test]
+    fn a_file_tab_says_enough_to_tell_two_of_them_apart() {
+        assert_eq!(short_name("src/calc.py"), "calc.py");
+        assert_eq!(short_name("crates/noob/src/mod.rs"), "src/mod.rs");
+        assert_eq!(short_name("a/b/index.ts"), "b/index.ts");
+        assert_eq!(short_name("README"), "README");
+    }
+
+    #[test]
+    fn a_deep_workspace_shows_its_last_two_segments() {
+        assert_eq!(
+            short_path("/home/hec/workspace/noob-cli"),
+            "workspace/noob-cli"
+        );
+        assert_eq!(short_path("noob-cli"), "noob-cli");
     }
 }

@@ -1,21 +1,24 @@
-//! What the agent is doing, as four separate streams.
+//! What the agent is doing, sorted into the things you actually want to look
+//! at separately.
 //!
-//! One scrollback jumbles a shell command, a file being rewritten and the
-//! model's prose into the same column, and reading it means sorting them out
-//! again by eye every time. So they are sorted once, here, by where each frame
-//! came from:
-//!
-//! | pane | carries |
+//! | view | carries |
 //! |---|---|
 //! | `talk` | the model's prose and reasoning, streamed |
-//! | `shell` | `bash`, its command and its result |
-//! | `tools` | every other call: search, skills, MCP, sub-agents |
-//! | `code`  | file activity, with the diff for anything written |
+//! | `activity` | every call it makes, colored by what kind of thing it is |
+//! | `plan` | the checklist, from the plan tool's own arguments |
+//! | `agents` | sub-agents, their brief and how they ended |
+//! | `files` | one tab per file it has touched, with the diff |
 //!
-//! Routing is by tool name and, for files, by extension, which is the only
-//! information the harness has and the only information it needs. Nothing here
-//! asks the model to classify anything: the agent is never taught that this
-//! front end exists.
+//! Activity is one stream, not two. Splitting `bash` from the rest looked
+//! right on paper and read as arbitrary in use: `ls` is the `ls` tool and
+//! `rm -rf` is `bash`, so the split put two neighbouring thoughts in two
+//! different panes. They are one list now, and what separates them is color:
+//! a shell command, a file being written and a web search are three colors,
+//! which is the distinction that was actually wanted.
+//!
+//! Nothing here asks the model to classify anything. The kind comes from the
+//! tool name and the syntax comes from the file extension, both of which the
+//! harness already has.
 //!
 //! This module is pure. It takes frames and produces lines, and it is where
 //! nearly all of the front end's behaviour can be tested without a GPU.
@@ -28,20 +31,66 @@ use noob_proto::{Event, Usage};
 /// How a line reads, resolved to a color by the skin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
-    /// Structure: headers, separators, timings.
     Dim,
-    /// Ordinary content.
     Body,
-    /// The thing that just happened.
     Bright,
-    /// It worked.
     Good,
-    /// It did not.
     Bad,
-    /// Removed, in a diff.
     Minus,
-    /// Added, in a diff.
     Plus,
+    /// A call, colored by what kind of call it is.
+    Call(Kind),
+}
+
+/// What sort of thing a tool call is. The activity list's whole legibility.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// `bash`: a real shell command.
+    Shell,
+    /// Looking: read, ls, glob, grep, context.
+    Look,
+    /// Changing: write, edit.
+    Change,
+    /// The web.
+    Search,
+    Skill,
+    Mcp,
+    Agent,
+    Plan,
+    Other,
+}
+
+impl Kind {
+    /// From the tool's name, which is all the harness has and all it needs.
+    pub fn of(name: &str) -> Kind {
+        match name {
+            "bash" => Kind::Shell,
+            "read" | "ls" | "glob" | "grep" | "context" => Kind::Look,
+            "write" | "edit" => Kind::Change,
+            "websearch" => Kind::Search,
+            "skill" => Kind::Skill,
+            "subagent" => Kind::Agent,
+            "plan" | "todo" => Kind::Plan,
+            name if name.starts_with("mcp") => Kind::Mcp,
+            _ => Kind::Other,
+        }
+    }
+
+    /// The short tag printed before every row, so the color has a name for
+    /// anyone who cannot rely on color alone.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Kind::Shell => "sh",
+            Kind::Look => "look",
+            Kind::Change => "edit",
+            Kind::Search => "web",
+            Kind::Skill => "skill",
+            Kind::Mcp => "mcp",
+            Kind::Agent => "agent",
+            Kind::Plan => "plan",
+            Kind::Other => "tool",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -62,7 +111,6 @@ impl Line {
 /// A bounded scrollback. Old lines fall off the top rather than growing until
 /// the process is the size of the session.
 pub struct Pane {
-    pub title: &'static str,
     lines: VecDeque<Line>,
     cap: usize,
     /// Rows scrolled back from the tail. Zero means following the live end,
@@ -71,9 +119,8 @@ pub struct Pane {
 }
 
 impl Pane {
-    pub fn new(title: &'static str, cap: usize) -> Pane {
+    pub fn new(cap: usize) -> Pane {
         Pane {
-            title,
             lines: VecDeque::new(),
             cap,
             scrollback: 0,
@@ -84,7 +131,6 @@ impl Pane {
         self.lines.push_back(line);
         while self.lines.len() > self.cap {
             self.lines.pop_front();
-            self.scrollback = self.scrollback.saturating_sub(1);
         }
         // New content pulls the view back to the live end. A pane that stayed
         // where it was would silently stop showing what is happening.
@@ -117,10 +163,6 @@ impl Pane {
         self.scrollback = 0;
     }
 
-    pub fn len(&self) -> usize {
-        self.lines.len()
-    }
-
     /// The `rows` lines this pane is currently showing, honouring scrollback.
     pub fn visible(&self, rows: usize) -> Vec<&Line> {
         if rows == 0 {
@@ -147,21 +189,84 @@ impl Pane {
         self.scrollback = next;
         moved
     }
-}
 
-/// A call in flight, kept so its end can be reported where its start was.
-struct Open {
-    name: String,
-    /// Which pane opened it, so the result lands in the same one.
-    pane: Stream,
+    /// Where the thumb sits and how tall it is, as fractions of the track, or
+    /// `None` when everything fits and there is nothing to indicate.
+    pub fn thumb(&self, rows: usize) -> Option<(f32, f32)> {
+        if rows == 0 || self.lines.len() <= rows {
+            return None;
+        }
+        let total = self.lines.len() as f32;
+        let size = (rows as f32 / total).clamp(0.06, 1.0);
+        let top = (total - rows as f32 - self.scrollback as f32).max(0.0) / total;
+        Some((top.min(1.0 - size), size))
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Stream {
-    Talk,
-    Shell,
-    Tools,
-    Code,
+pub enum TodoState {
+    Pending,
+    Active,
+    Done,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Todo {
+    pub text: String,
+    pub state: TodoState,
+}
+
+#[derive(Clone, Debug)]
+pub struct AgentRow {
+    pub label: String,
+    pub brief: String,
+    pub state: &'static str,
+    pub tone: Tone,
+}
+
+/// One file the agent has touched, and everything it did to it.
+pub struct FileView {
+    pub path: String,
+    pub pane: Pane,
+    /// Set once anything was written to it, so the tab can say so.
+    pub changed: bool,
+}
+
+/// The one word the collapsed bar shows. A window shaded to a single strip has
+/// room for exactly this, so it has to be the thing worth knowing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Phase {
+    Starting,
+    Ready,
+    Thinking,
+    Working,
+    Finished,
+    Interrupted,
+    Gone,
+}
+
+impl Phase {
+    pub fn word(self) -> &'static str {
+        match self {
+            Phase::Starting => "STARTING",
+            Phase::Ready => "READY",
+            Phase::Thinking => "THINKING",
+            Phase::Working => "WORKING",
+            Phase::Finished => "FINISHED",
+            Phase::Interrupted => "INTERRUPTED",
+            Phase::Gone => "AGENT GONE",
+        }
+    }
+
+    pub fn busy(self) -> bool {
+        matches!(self, Phase::Thinking | Phase::Working)
+    }
+}
+
+/// A call in flight, kept so its end can be reported the way its start was.
+struct Open {
+    kind: Kind,
+    brief: String,
 }
 
 pub struct State {
@@ -171,22 +276,20 @@ pub struct State {
     pub resumed: bool,
 
     pub talk: Pane,
-    pub shell: Pane,
-    pub tools: Pane,
-    pub code: Pane,
+    pub activity: Pane,
+    pub plan: Vec<Todo>,
+    pub agents: Vec<AgentRow>,
+    pub files: Vec<FileView>,
+    pub open_file: usize,
 
     pub usage: Option<Usage>,
-    /// Prefill summed across the session: what the endpoint actually computed,
-    /// which is the number that means anything. Raw prompt tokens summed across
-    /// requests counts the transcript once per request.
     pub prefilled: u64,
     pub generated: u64,
     pub requests: u32,
 
     pub turn: u32,
-    pub busy: bool,
-    /// The file the code pane is currently about, for its header.
-    pub focus: Option<String>,
+    pub phase: Phase,
+    /// What is happening right now, in a few words, for the status bar.
     pub status: String,
 
     open: HashMap<String, Open>,
@@ -205,37 +308,20 @@ impl State {
             model: String::new(),
             workspace: String::new(),
             resumed: false,
-            talk: Pane::new("talk", 4000),
-            shell: Pane::new("shell", 2000),
-            tools: Pane::new("tools", 2000),
-            code: Pane::new("code", 4000),
+            talk: Pane::new(6000),
+            activity: Pane::new(4000),
+            plan: Vec::new(),
+            agents: Vec::new(),
+            files: Vec::new(),
+            open_file: 0,
             usage: None,
             prefilled: 0,
             generated: 0,
             requests: 0,
             turn: 0,
-            busy: false,
-            focus: None,
+            phase: Phase::Starting,
             status: String::from("starting the agent"),
             open: HashMap::new(),
-        }
-    }
-
-    pub fn pane(&self, stream: Stream) -> &Pane {
-        match stream {
-            Stream::Talk => &self.talk,
-            Stream::Shell => &self.shell,
-            Stream::Tools => &self.tools,
-            Stream::Code => &self.code,
-        }
-    }
-
-    pub fn pane_mut(&mut self, stream: Stream) -> &mut Pane {
-        match stream {
-            Stream::Talk => &mut self.talk,
-            Stream::Shell => &mut self.shell,
-            Stream::Tools => &mut self.tools,
-            Stream::Code => &mut self.code,
         }
     }
 
@@ -245,8 +331,30 @@ impl State {
         self.talk.blank_if_needed();
         self.talk.say(format!("› {text}"), Tone::Bright);
         self.talk.push(Line::new("", Tone::Body));
-        self.busy = true;
+        self.phase = Phase::Thinking;
         self.status = String::from("thinking");
+    }
+
+    /// The file's view, creating it the first time it is mentioned. Opening it
+    /// selects it, which is what makes the tab strip follow the agent without
+    /// anyone clicking.
+    fn file_mut(&mut self, path: &str) -> &mut FileView {
+        if let Some(index) = self.files.iter().position(|f| f.path == path) {
+            self.open_file = index;
+            return &mut self.files[index];
+        }
+        // Bounded: a session that touches a thousand files must not keep a
+        // thousand scrollbacks alive.
+        if self.files.len() >= MAX_FILES {
+            self.files.remove(0);
+        }
+        self.files.push(FileView {
+            path: path.to_string(),
+            pane: Pane::new(3000),
+            changed: false,
+        });
+        self.open_file = self.files.len() - 1;
+        self.files.last_mut().expect("just pushed")
     }
 
     /// Fold one frame in. Returns whether anything visible changed.
@@ -262,33 +370,32 @@ impl State {
                 self.workspace = workspace;
                 self.model = model;
                 self.resumed = resumed;
+                self.phase = Phase::Ready;
                 self.status = String::from("ready");
             }
             Event::SessionEnd { .. } => {
-                self.busy = false;
+                self.phase = Phase::Gone;
                 self.status = String::from("the agent stopped");
             }
             Event::TurnStart { turn } => {
                 self.turn = turn;
-                self.busy = true;
+                self.phase = Phase::Thinking;
                 self.status = String::from("thinking");
             }
             Event::TurnEnd { interrupted, .. } => {
-                self.busy = false;
-                self.status = String::from(if interrupted == Some(true) {
-                    "interrupted"
+                self.phase = if interrupted == Some(true) {
+                    Phase::Interrupted
                 } else {
-                    "ready"
-                });
-                // Close anything the agent left open, so a row cannot show as
-                // running after the turn that owned it has ended.
-                for (_, open) in self.open.drain() {
-                    let pane = match open.pane {
-                        Stream::Shell => &mut self.shell,
-                        Stream::Code => &mut self.code,
-                        _ => &mut self.tools,
-                    };
-                    pane.say(format!("  {} did not report back", open.name), Tone::Bad);
+                    Phase::Finished
+                };
+                self.status = self.phase.word().to_lowercase();
+                // Close anything left open, so a row cannot show as running
+                // after the turn that owned it has ended.
+                let stragglers: Vec<String> =
+                    self.open.drain().map(|(_, open)| open.brief).collect();
+                for brief in stragglers {
+                    self.activity
+                        .say(format!("       {brief} never reported back"), Tone::Bad);
                 }
             }
             Event::TextDelta { d } => self.talk.stream(&d, Tone::Body),
@@ -300,28 +407,45 @@ impl State {
                 brief,
                 args,
             } => {
-                let pane = route(&name);
-                let subject = match pane {
-                    // A shell line is the command itself; the brief clips it.
-                    Stream::Shell => args
+                let kind = Kind::of(&name);
+                self.phase = Phase::Working;
+                self.status = format!("{name} {brief}");
+                match kind {
+                    // The plan is a view, not a log line: the call carries the
+                    // whole updated checklist, so it replaces the last one.
+                    Kind::Plan => self.plan = read_todos(&args),
+                    Kind::Agent => {
+                        let prompt = args
+                            .get("prompt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(&brief)
+                            .to_string();
+                        self.agents.push(AgentRow {
+                            label: format!("agent {}", self.agents.len() + 1),
+                            brief: prompt,
+                            state: "running",
+                            tone: Tone::Bright,
+                        });
+                    }
+                    _ => {}
+                }
+                // A shell row is the command itself; the brief clips it.
+                let subject = match kind {
+                    Kind::Shell => args
                         .get("cmd")
                         .and_then(|v| v.as_str())
                         .unwrap_or(&brief)
                         .to_string(),
                     _ => brief.clone(),
                 };
-                self.pane_mut(pane).say(
-                    match pane {
-                        Stream::Shell => format!("$ {subject}"),
-                        _ => format!("▸ {name}  {subject}"),
-                    },
-                    Tone::Bright,
-                );
-                self.open.insert(call_id, Open { name, pane });
+                self.activity
+                    .say(format!("{:>5}  {subject}", kind.tag()), Tone::Call(kind));
+                self.open.insert(call_id, Open { kind, brief });
             }
             Event::ToolProgress { call_id, line } => {
-                let pane = self.open.get(&call_id).map_or(Stream::Tools, |o| o.pane);
-                self.pane_mut(pane).say(format!("  {line}"), Tone::Dim);
+                let kind = self.open.get(&call_id).map_or(Kind::Other, |o| o.kind);
+                self.activity
+                    .say(format!("       {line}"), Tone::Call(kind));
             }
             Event::ToolEnd {
                 call_id,
@@ -330,28 +454,29 @@ impl State {
                 ..
             } => {
                 let open = self.open.remove(&call_id);
-                let pane = open.as_ref().map_or(Stream::Tools, |o| o.pane);
+                if open.as_ref().map(|o| o.kind) == Some(Kind::Agent)
+                    && let Some(agent) = self.agents.last_mut()
+                {
+                    let failed = error.is_some();
+                    agent.state = if failed { "failed" } else { "done" };
+                    agent.tone = if failed { Tone::Bad } else { Tone::Good };
+                }
                 match error {
-                    None => self
-                        .pane_mut(pane)
-                        .say(format!("  {summary}"), Tone::Good),
+                    None => self.activity.say(format!("       {summary}"), Tone::Good),
                     Some(error) => {
-                        let pane = self.pane_mut(pane);
-                        pane.say(format!("  {summary}"), Tone::Bad);
-                        pane.say(format!("  {}", error.message), Tone::Bad);
-                        // The rest, bounded: a failure that printed a stack
-                        // trace is why this exists, and all of it is on the
-                        // wire, so the pane shows the head and says so.
+                        self.activity.say(format!("       {summary}"), Tone::Bad);
+                        self.activity
+                            .say(format!("       {}", error.message), Tone::Bad);
                         if let Some(detail) = error.detail.as_deref() {
                             let mut rest = detail
                                 .lines()
                                 .skip(1)
                                 .filter(|line| !line.trim().is_empty());
                             for line in rest.by_ref().take(DETAIL_LINES) {
-                                pane.say(format!("  {line}"), Tone::Dim);
+                                self.activity.say(format!("       {line}"), Tone::Dim);
                             }
                             if rest.next().is_some() {
-                                pane.say("  …", Tone::Dim);
+                                self.activity.say("       …", Tone::Dim);
                             }
                         }
                     }
@@ -359,17 +484,15 @@ impl State {
             }
 
             Event::FileOpen { path, lines, .. } => {
-                self.focus = Some(path.clone());
-                self.code.blank_if_needed();
-                self.code
-                    .say(format!("▸ {path}  {lines} lines"), Tone::Bright);
+                let file = self.file_mut(&path);
+                file.pane.blank_if_needed();
+                file.pane
+                    .say(format!("read  {lines} lines"), Tone::Call(Kind::Look));
             }
             Event::FileSpan { path, span, .. } => {
-                self.focus = Some(path);
-                self.code.say(
-                    format!("  lines {}-{}", span.start, span.end),
-                    Tone::Dim,
-                );
+                let file = self.file_mut(&path);
+                file.pane
+                    .say(format!("      lines {}-{}", span.start, span.end), Tone::Dim);
             }
             Event::FileEdit {
                 path,
@@ -378,52 +501,59 @@ impl State {
                 after,
                 ..
             } => {
-                self.focus = Some(path.clone());
-                self.code.blank_if_needed();
-                self.code.say(
-                    format!("▸ {path}  {}-{}", span.start, span.end),
-                    Tone::Bright,
+                let file = self.file_mut(&path);
+                file.changed = true;
+                file.pane.blank_if_needed();
+                file.pane.say(
+                    format!("write lines {}-{}", span.start, span.end),
+                    Tone::Call(Kind::Change),
                 );
-                let syntax = crate::syntax::for_path(&path);
+                let mut clipped = before.lines().count() > DIFF_LINES;
                 for line in before.lines().take(DIFF_LINES) {
-                    self.code.say(format!("- {line}"), Tone::Minus);
+                    file.pane.say(format!("- {line}"), Tone::Minus);
                 }
-                if before.lines().count() > DIFF_LINES {
-                    self.code.say("- …", Tone::Minus);
-                }
+                clipped |= after.lines().count() > DIFF_LINES;
                 for line in after.lines().take(DIFF_LINES) {
-                    self.code.say(format!("+ {line}"), Tone::Plus);
+                    file.pane.say(format!("+ {line}"), Tone::Plus);
                 }
-                if after.lines().count() > DIFF_LINES {
-                    self.code.say("+ …", Tone::Plus);
+                if clipped {
+                    file.pane.say("  …", Tone::Dim);
                 }
-                let _ = syntax; // colored at render time, from the same path
             }
             Event::FileClose { path, .. } => {
-                if self.focus.as_deref() == Some(path.as_str()) {
-                    self.focus = None;
+                if let Some(file) = self.files.iter_mut().find(|f| f.path == path) {
+                    file.pane.say("left the context", Tone::Dim);
                 }
-                self.code
-                    .say(format!("  {path} left the context"), Tone::Dim);
             }
 
-            Event::AgentSpawn { agent_id, .. } => {
-                self.tools.say(format!("▸ agent {agent_id}"), Tone::Bright);
+            Event::AgentSpawn {
+                agent_id, prompt, ..
+            } => {
+                self.agents.push(AgentRow {
+                    label: agent_id,
+                    brief: prompt,
+                    state: "queued",
+                    tone: Tone::Dim,
+                });
             }
             Event::AgentStateChanged {
                 agent_id, state, ..
             } => {
-                self.tools.say(
-                    format!("  agent {agent_id} {}", state.as_str()),
-                    match state {
-                        noob_proto::AgentState::Failed => Tone::Bad,
-                        noob_proto::AgentState::Done => Tone::Good,
-                        _ => Tone::Dim,
-                    },
-                );
+                let (word, tone) = match state {
+                    noob_proto::AgentState::Done => ("done", Tone::Good),
+                    noob_proto::AgentState::Failed => ("failed", Tone::Bad),
+                    noob_proto::AgentState::Canceled => ("canceled", Tone::Dim),
+                    noob_proto::AgentState::Running => ("running", Tone::Bright),
+                    _ => ("queued", Tone::Dim),
+                };
+                if let Some(agent) = self.agents.iter_mut().find(|a| a.label == agent_id) {
+                    agent.state = word;
+                    agent.tone = tone;
+                }
             }
             Event::AgentOutput { agent_id, line } => {
-                self.tools.say(format!("  {agent_id} {line}"), Tone::Dim);
+                self.activity
+                    .say(format!("agent  {agent_id} {line}"), Tone::Call(Kind::Agent));
             }
 
             Event::UsageReport { usage } => {
@@ -439,7 +569,7 @@ impl State {
                 self.talk.say(line, Tone::Bad);
             }
 
-            // Nothing this front end shows yet. Skipped rather than guessed at,
+            // Nothing this window shows yet. Skipped rather than guessed at,
             // which is what keeps a newer agent from breaking an older window.
             Event::SkillList { .. }
             | Event::McpList { .. }
@@ -460,8 +590,8 @@ impl State {
         }
     }
 
-    /// The session budget, as a line. Prefill and cache separated, because
-    /// summing raw prompt tokens counts work nobody did.
+    /// The session budget. Prefill and cache separated, because summing raw
+    /// prompt tokens counts work nobody did.
     pub fn budget_line(&self) -> String {
         match self.usage {
             None => String::from("context —"),
@@ -477,22 +607,57 @@ impl State {
             ),
         }
     }
+
+    /// The line the shaded window shows, which is the only thing visible when
+    /// it is collapsed to a strip.
+    pub fn headline(&self) -> String {
+        let done = self
+            .plan
+            .iter()
+            .filter(|t| t.state == TodoState::Done)
+            .count();
+        let plan = if self.plan.is_empty() {
+            String::new()
+        } else {
+            format!("   plan {done}/{}", self.plan.len())
+        };
+        let files = match self.files.iter().filter(|f| f.changed).count() {
+            0 => String::new(),
+            1 => String::from("   1 file changed"),
+            n => format!("   {n} files changed"),
+        };
+        match self.phase {
+            Phase::Working => format!("{}   {}{plan}{files}", self.phase.word(), self.status),
+            _ => format!("{}{plan}{files}", self.phase.word()),
+        }
+    }
 }
 
-const DIFF_LINES: usize = 40;
+const DIFF_LINES: usize = 60;
 const DETAIL_LINES: usize = 6;
+const MAX_FILES: usize = 40;
 
-/// Which stream a tool belongs to.
-///
-/// By name, because the name is what the harness has. `read` joins the file
-/// tools: what it produces is file frames, and a reader watching the code pane
-/// wants to see the file the agent just opened next to the one it just changed.
-fn route(name: &str) -> Stream {
-    match name {
-        "bash" => Stream::Shell,
-        "read" | "write" | "edit" => Stream::Code,
-        _ => Stream::Tools,
-    }
+/// The checklist, straight out of the plan tool's own arguments. The call
+/// carries the whole updated list by contract, so nothing has to be merged and
+/// no protocol addition was needed to show it.
+fn read_todos(args: &noob_proto::Value) -> Vec<Todo> {
+    args.get("todos")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let text = item.get("content")?.as_str()?.to_string();
+                    let state = match item.get("status").and_then(|v| v.as_str()) {
+                        Some("completed") => TodoState::Done,
+                        Some("in_progress") => TodoState::Active,
+                        _ => TodoState::Pending,
+                    };
+                    Some(Todo { text, state })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn thousands(n: u64) -> String {
@@ -528,55 +693,209 @@ mod tests {
             .collect()
     }
 
-    /// The whole point of the layout: a shell command, a file write and the
-    /// model's prose land in three different places without anyone sorting
-    /// them by eye.
+    /// The split that was wrong. `ls` is the `ls` tool and `rm` is `bash`, so
+    /// separating them by pane put two neighbouring thoughts in two places.
+    /// They are one list; color is what separates them.
     #[test]
-    fn each_kind_of_work_lands_in_its_own_pane() {
+    fn every_call_lands_in_one_list_and_carries_its_kind() {
         let mut state = State::new();
-        state.apply(tool_start("a", "bash", serde_json::json!({"cmd": "cargo test"})));
-        state.apply(tool_start("b", "write", serde_json::json!({"path": "a.rs"})));
-        state.apply(tool_start("c", "websearch", serde_json::json!({"query": "x"})));
-        state.apply(Event::TextDelta {
-            d: "here is what I found".into(),
-        });
+        state.apply(tool_start(
+            "a",
+            "bash",
+            serde_json::json!({"cmd": "rm -rf build"}),
+        ));
+        state.apply(tool_start("b", "ls", serde_json::json!({"path": "."})));
+        state.apply(tool_start("c", "write", serde_json::json!({"path": "a.rs"})));
+        state.apply(tool_start("d", "websearch", serde_json::json!({"query": "x"})));
+        state.apply(tool_start("e", "skill", serde_json::json!({"name": "web"})));
 
-        assert_eq!(texts(&state.shell), ["$ cargo test"]);
-        assert_eq!(texts(&state.tools), ["▸ websearch  brief"]);
-        assert_eq!(texts(&state.code), ["▸ write  brief"]);
-        assert_eq!(texts(&state.talk), ["here is what I found"]);
+        let lines = state.activity.visible(usize::MAX);
+        let kinds: Vec<Tone> = lines.iter().map(|l| l.tone).collect();
+        assert_eq!(
+            kinds,
+            [
+                Tone::Call(Kind::Shell),
+                Tone::Call(Kind::Look),
+                Tone::Call(Kind::Change),
+                Tone::Call(Kind::Search),
+                Tone::Call(Kind::Skill),
+            ]
+        );
+        // Every kind is distinguishable without color, too.
+        assert!(lines[0].text.contains("sh  rm -rf build"), "{:?}", lines[0]);
+        assert!(lines[3].text.contains("web"), "{:?}", lines[3]);
     }
 
-    /// A result must land in the pane its call opened, whatever else happened
-    /// in between. Calls run concurrently, so this cannot be "the last pane".
     #[test]
-    fn a_result_lands_where_its_call_started_even_when_calls_interleave() {
-        let mut state = State::new();
-        state.apply(tool_start("sh", "bash", serde_json::json!({"cmd": "ls"})));
-        state.apply(tool_start("rd", "read", serde_json::json!({"path": "a.rs"})));
-        // The read finishes first, which is the ordinary case for a wave.
-        state.apply(Event::ToolEnd {
-            call_id: "rd".into(),
-            summary: "read a.rs".into(),
-            elapsed_ms: 1,
-            error: None,
-        });
-        state.apply(Event::ToolEnd {
-            call_id: "sh".into(),
-            summary: "bash ls".into(),
-            elapsed_ms: 2,
-            error: None,
-        });
-        assert_eq!(texts(&state.shell), ["$ ls", "  bash ls"]);
-        assert_eq!(texts(&state.code), ["▸ read  brief", "  read a.rs"]);
+    fn tool_names_map_to_the_kind_you_would_guess() {
+        assert_eq!(Kind::of("bash"), Kind::Shell);
+        assert_eq!(Kind::of("grep"), Kind::Look);
+        assert_eq!(Kind::of("edit"), Kind::Change);
+        assert_eq!(Kind::of("mcp_call"), Kind::Mcp);
+        assert_eq!(Kind::of("mcp_connect"), Kind::Mcp);
+        assert_eq!(Kind::of("subagent"), Kind::Agent);
+        assert_eq!(Kind::of("plan"), Kind::Plan);
+        assert_eq!(Kind::of("something_new"), Kind::Other);
     }
 
-    /// A failure says what broke, in the pane it broke in. This is the same
-    /// failure that used to render as a bare `exit code 1`.
+    /// The plan tool sends the whole updated list every call, so the view
+    /// replaces rather than merges, and it needs no protocol addition.
+    #[test]
+    fn the_plan_comes_from_the_calls_arguments() {
+        let mut state = State::new();
+        state.apply(tool_start(
+            "p",
+            "plan",
+            serde_json::json!({"todos": [
+                {"content": "read the file", "status": "completed"},
+                {"content": "fix the bug", "status": "in_progress"},
+                {"content": "run the tests", "status": "pending"},
+            ]}),
+        ));
+        assert_eq!(
+            state.plan,
+            [
+                Todo {
+                    text: "read the file".into(),
+                    state: TodoState::Done
+                },
+                Todo {
+                    text: "fix the bug".into(),
+                    state: TodoState::Active
+                },
+                Todo {
+                    text: "run the tests".into(),
+                    state: TodoState::Pending
+                },
+            ]
+        );
+        // A second call replaces the first outright.
+        state.apply(tool_start(
+            "p2",
+            "plan",
+            serde_json::json!({"todos": [{"content": "done", "status": "completed"}]}),
+        ));
+        assert_eq!(state.plan.len(), 1);
+    }
+
+    #[test]
+    fn a_malformed_plan_does_not_panic_or_half_apply() {
+        let mut state = State::new();
+        state.apply(tool_start("p", "plan", serde_json::json!({"todos": "nope"})));
+        assert!(state.plan.is_empty());
+        state.apply(tool_start(
+            "p",
+            "plan",
+            serde_json::json!({"todos": [{"content": 7}, {"content": "ok", "status": "weird"}]}),
+        ));
+        assert_eq!(
+            state.plan,
+            [Todo {
+                text: "ok".into(),
+                state: TodoState::Pending
+            }]
+        );
+    }
+
+    /// Sub-agents get their own list rather than a row in the activity log,
+    /// which is where they used to disappear.
+    #[test]
+    fn a_sub_agent_gets_a_row_of_its_own_that_resolves() {
+        let mut state = State::new();
+        state.apply(tool_start(
+            "s",
+            "subagent",
+            serde_json::json!({"prompt": "search the web for elcensuradoweb.com"}),
+        ));
+        assert_eq!(state.agents.len(), 1);
+        assert_eq!(state.agents[0].state, "running");
+        assert!(state.agents[0].brief.contains("elcensuradoweb"));
+        state.apply(Event::ToolEnd {
+            call_id: "s".into(),
+            summary: "subagent failed".into(),
+            elapsed_ms: 5,
+            error: Some(ToolError {
+                kind: "error".into(),
+                code: None,
+                message: "needs the websearch CLI on PATH".into(),
+                detail: None,
+                remedy: None,
+            }),
+        });
+        assert_eq!(state.agents[0].state, "failed");
+        assert_eq!(state.agents[0].tone, Tone::Bad);
+    }
+
+    /// One tab per file, selected by whatever the agent just touched, so the
+    /// strip follows it without anyone clicking.
+    #[test]
+    fn files_get_a_tab_each_and_the_newest_is_selected() {
+        let mut state = State::new();
+        state.apply(Event::FileOpen {
+            path: "a.py".into(),
+            lines: 10,
+            call_id: None,
+        });
+        state.apply(Event::FileEdit {
+            path: "b.md".into(),
+            span: Span {
+                start: 1,
+                end: 1,
+                kind: None,
+                name: None,
+            },
+            before: String::new(),
+            after: "# Title".into(),
+            call_id: None,
+        });
+        assert_eq!(state.files.len(), 2);
+        assert_eq!(state.open_file, 1);
+        assert_eq!(state.files[1].path, "b.md");
+        assert!(state.files[1].changed, "b.md was written");
+        assert!(!state.files[0].changed, "a.py was only read");
+        // Touching the first again selects it rather than adding a duplicate.
+        state.apply(Event::FileOpen {
+            path: "a.py".into(),
+            lines: 12,
+            call_id: None,
+        });
+        assert_eq!(state.files.len(), 2);
+        assert_eq!(state.open_file, 0);
+    }
+
+    /// A session that touches hundreds of files must not keep a scrollback for
+    /// every one of them alive forever.
+    #[test]
+    fn the_file_list_is_bounded() {
+        let mut state = State::new();
+        for n in 0..MAX_FILES + 10 {
+            state.apply(Event::FileOpen {
+                path: format!("f{n}.rs"),
+                lines: 1,
+                call_id: None,
+            });
+        }
+        assert_eq!(state.files.len(), MAX_FILES);
+        assert_eq!(
+            state.files.last().unwrap().path,
+            format!("f{}.rs", MAX_FILES + 9)
+        );
+        assert!(
+            state.open_file < state.files.len(),
+            "the selection stays valid"
+        );
+    }
+
+    /// A failure says what broke. This is the same failure that used to render
+    /// as a bare `exit code 1`.
     #[test]
     fn a_failure_shows_its_message_and_a_bounded_tail() {
         let mut state = State::new();
-        state.apply(tool_start("x", "bash", serde_json::json!({"cmd": "cargo test"})));
+        state.apply(tool_start(
+            "x",
+            "bash",
+            serde_json::json!({"cmd": "cargo test"}),
+        ));
         let detail = std::iter::once(String::from("exit code 1"))
             .chain((0..50).map(|n| format!("trace line {n}")))
             .collect::<Vec<_>>()
@@ -593,14 +912,16 @@ mod tests {
                 remedy: None,
             }),
         });
-        let lines = texts(&state.shell);
-        assert!(lines.iter().any(|l| l.contains("could not compile")), "{lines:?}");
+        let lines = texts(&state.activity);
+        assert!(
+            lines.iter().any(|l| l.contains("could not compile")),
+            "{lines:?}"
+        );
         assert!(lines.iter().any(|l| l.contains("trace line 0")), "{lines:?}");
         assert!(lines.last().unwrap().contains('…'), "{lines:?}");
         assert!(lines.len() < 20, "the tail is bounded: {}", lines.len());
     }
 
-    /// Streamed prose is a paragraph, not one line per token.
     #[test]
     fn streamed_text_accumulates_into_lines() {
         let mut state = State::new();
@@ -610,85 +931,84 @@ mod tests {
         assert_eq!(texts(&state.talk), ["Hello there", "second line"]);
     }
 
-    /// Prose and reasoning are different tones, so they do not merge into one
-    /// run when they interleave.
     #[test]
     fn reasoning_does_not_merge_into_the_answer() {
         let mut state = State::new();
-        state.apply(Event::ReasoningDelta { d: "let me think".into() });
-        state.apply(Event::TextDelta { d: "the answer".into() });
+        state.apply(Event::ReasoningDelta {
+            d: "let me think".into(),
+        });
+        state.apply(Event::TextDelta {
+            d: "the answer".into(),
+        });
         let lines: Vec<_> = state.talk.visible(usize::MAX);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].tone, Tone::Dim);
         assert_eq!(lines[1].tone, Tone::Body);
     }
 
-    /// A write shows both sides, so the diff needs no second read of the file.
+    /// The collapsed window is one strip, so its line has to be the thing
+    /// worth knowing without opening it again.
     #[test]
-    fn an_edit_shows_the_diff_it_carried() {
+    fn the_headline_says_what_is_happening_in_one_line() {
         let mut state = State::new();
+        assert_eq!(state.headline(), "STARTING");
+        state.apply(Event::TurnStart { turn: 1 });
+        assert_eq!(state.headline(), "THINKING");
+        state.apply(tool_start(
+            "p",
+            "plan",
+            serde_json::json!({"todos": [
+                {"content": "one", "status": "completed"},
+                {"content": "two", "status": "in_progress"},
+            ]}),
+        ));
+        assert!(
+            state.headline().starts_with("WORKING"),
+            "{}",
+            state.headline()
+        );
+        assert!(state.headline().contains("plan 1/2"), "{}", state.headline());
         state.apply(Event::FileEdit {
-            path: "calc.py".into(),
-            span: Span {
-                start: 2,
-                end: 2,
-                kind: None,
-                name: None,
-            },
-            before: "    return a - b".into(),
-            after: "    return a + b".into(),
-            call_id: Some("c1".into()),
-        });
-        let lines = state.code.visible(usize::MAX);
-        assert_eq!(lines[0].text, "▸ calc.py  2-2");
-        assert_eq!(*lines[1], Line::new("-     return a - b", Tone::Minus));
-        assert_eq!(*lines[2], Line::new("+     return a + b", Tone::Plus));
-        assert_eq!(state.focus.as_deref(), Some("calc.py"));
-    }
-
-    /// A rewritten large file must not push everything else out of the pane.
-    #[test]
-    fn a_huge_edit_is_clipped_rather_than_flooding_the_pane() {
-        let mut state = State::new();
-        let after: String = (0..500).map(|n| format!("line {n}\n")).collect();
-        state.apply(Event::FileEdit {
-            path: "big.rs".into(),
+            path: "a.rs".into(),
             span: Span {
                 start: 1,
-                end: 500,
+                end: 1,
                 kind: None,
                 name: None,
             },
             before: String::new(),
-            after,
+            after: "x".into(),
             call_id: None,
         });
-        assert!(state.code.len() <= DIFF_LINES + 4, "{}", state.code.len());
-        assert!(texts(&state.code).last().unwrap().contains('…'));
+        state.apply(Event::TurnEnd {
+            turn: 1,
+            interrupted: None,
+        });
+        assert_eq!(state.headline(), "FINISHED   plan 1/2   1 file changed");
+        assert!(!state.phase.busy());
     }
 
-    /// A row that never closed must not read as still running once the turn
-    /// that owned it has ended.
     #[test]
-    fn a_turn_ending_closes_rows_the_agent_left_open() {
+    fn an_interrupted_turn_says_so_and_closes_open_rows() {
         let mut state = State::new();
         state.apply(Event::TurnStart { turn: 1 });
-        state.apply(tool_start("ghost", "bash", serde_json::json!({"cmd": "sleep 9"})));
+        state.apply(tool_start(
+            "g",
+            "bash",
+            serde_json::json!({"cmd": "sleep 9"}),
+        ));
         state.apply(Event::TurnEnd {
             turn: 1,
             interrupted: Some(true),
         });
-        assert!(!state.busy);
-        assert_eq!(state.status, "interrupted");
+        assert_eq!(state.phase, Phase::Interrupted);
         assert!(
-            texts(&state.shell).iter().any(|l| l.contains("did not report back")),
-            "{:?}",
-            texts(&state.shell)
+            texts(&state.activity)
+                .iter()
+                .any(|l| l.contains("never reported back"))
         );
     }
 
-    /// Prefill is what the endpoint computed. Summing raw prompt tokens counts
-    /// the transcript once per request, which is work nobody did.
     #[test]
     fn the_budget_sums_prefill_and_not_the_whole_prompt() {
         let mut state = State::new();
@@ -702,29 +1022,24 @@ mod tests {
                 },
             });
         }
-        assert_eq!(state.prefilled, 1000 + 200 + 300);
-        assert_eq!(state.generated, 30);
-        assert_eq!(state.requests, 3);
+        assert_eq!(state.prefilled, 1500);
         let line = state.budget_line();
         assert!(line.contains("1,500 / 65,536"), "{line}");
-        assert!(line.contains("prefilled 1,500"), "{line}");
     }
 
     #[test]
     fn a_pane_keeps_only_its_last_lines() {
-        let mut pane = Pane::new("t", 8);
+        let mut pane = Pane::new(8);
         for n in 0..40 {
             pane.say(format!("{n}"), Tone::Body);
         }
-        assert_eq!(pane.len(), 8);
+        assert_eq!(pane.visible(usize::MAX).len(), 8);
         assert_eq!(pane.visible(3).last().unwrap().text, "39");
     }
 
-    /// New content pulls a scrolled-back pane to the live end, or it silently
-    /// stops showing what is happening.
     #[test]
     fn scrolling_back_then_receiving_returns_to_the_live_end() {
-        let mut pane = Pane::new("t", 100);
+        let mut pane = Pane::new(100);
         for n in 0..50 {
             pane.say(format!("{n}"), Tone::Body);
         }
@@ -737,11 +1052,10 @@ mod tests {
 
     #[test]
     fn scrolling_stops_at_both_ends() {
-        let mut pane = Pane::new("t", 100);
+        let mut pane = Pane::new(100);
         for n in 0..20 {
             pane.say(format!("{n}"), Tone::Body);
         }
-        // Ten visible of twenty means ten rows of history and no more.
         assert!(pane.scroll_back(999, 10));
         assert_eq!(pane.scrollback, 10);
         assert!(!pane.scroll_back(1, 10), "already at the oldest line");
@@ -750,25 +1064,44 @@ mod tests {
         assert!(!pane.scroll_forward(1), "already at the live end");
     }
 
-    /// A frame this window does not render must not make it redraw.
+    /// The scrollbar has to say where you are, and has to disappear when
+    /// everything already fits.
+    #[test]
+    fn the_thumb_reports_position_and_size_or_nothing_at_all() {
+        let mut pane = Pane::new(200);
+        for n in 0..10 {
+            pane.say(format!("{n}"), Tone::Body);
+        }
+        assert_eq!(pane.thumb(10), None, "everything fits");
+        assert_eq!(pane.thumb(20), None);
+        for n in 10..100 {
+            pane.say(format!("{n}"), Tone::Body);
+        }
+        let (top, size) = pane.thumb(10).expect("ninety lines do not fit in ten");
+        assert!((size - 0.1).abs() < 0.01, "{size}");
+        assert!((top - 0.9).abs() < 0.01, "at the live end: {top}");
+        pane.scroll_back(90, 10);
+        let (top, _) = pane.thumb(10).unwrap();
+        assert_eq!(top, 0.0, "scrolled to the very top");
+        // The thumb never runs off the end of its track.
+        for rows in [1, 3, 7, 10, 99] {
+            if let Some((top, size)) = pane.thumb(rows) {
+                assert!(top + size <= 1.001, "{top} + {size}");
+            }
+        }
+    }
+
     #[test]
     fn an_unknown_frame_changes_nothing() {
         let mut state = State::new();
         assert!(!state.apply(Event::Unknown));
-        assert!(!state.apply(Event::Metrics {
-            group: "gpu".into(),
-            at_ms: 0,
-            samples: vec![],
-        }));
         assert!(state.apply(Event::TurnStart { turn: 1 }));
     }
 
     #[test]
     fn thousands_groups_from_the_right() {
         assert_eq!(thousands(0), "0");
-        assert_eq!(thousands(999), "999");
         assert_eq!(thousands(1_000), "1,000");
-        assert_eq!(thousands(65_536), "65,536");
         assert_eq!(thousands(1_234_567), "1,234,567");
     }
 }

@@ -43,7 +43,10 @@
 
 use std::fmt::Write as _;
 
-use serde_json::Value;
+/// Re-exported because [`Event::ToolStart`] carries one. A consumer that has to
+/// add `serde_json` to read a field of a frame does not have a self-contained
+/// contract.
+pub use serde_json::Value;
 
 /// Protocol version. Additive changes bump this; readers accept `<=` their own.
 pub const VERSION: u16 = 1;

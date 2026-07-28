@@ -3,8 +3,8 @@
 //! It starts `noob serve` in a workspace, sends what you type as a
 //! `prompt.submit` and renders the frames that come back. There is no terminal
 //! involved and no web anything: one GPU surface, no system window chrome, and
-//! four panes that separate the model's prose from its shell, its tools and the
-//! files it is changing.
+//! panes that separate the model's prose from its calls, its plan, its
+//! sub-agents and the files it is changing.
 //!
 //! ## Redraw only on change
 //!
@@ -15,8 +15,9 @@
 //! eats a machine.
 //!
 //! Usage: `clippy [workspace]`, with `NOOB_BIN` naming the agent binary when it
-//! is not `noob` on PATH.
+//! is not `noob` on PATH. Settings live beside noob's own; see `config`.
 
+mod config;
 mod link;
 mod skin;
 mod state;
@@ -24,23 +25,34 @@ mod syntax;
 mod view;
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use noob_proto::Command as Cmd;
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
+use config::Config;
 use link::{Incoming, Link};
 use skin::Skin;
-use state::{State, Stream};
-use view::Layout;
+use state::{State, Tone};
+use view::{Hit, Layout, Shape, Tab};
 
 /// The only user event: something arrived, come and look. Deliberately carries
 /// no payload; the channel holds the frames and the loop drains it.
 struct Wake;
+
+/// A second click inside this long, on the same thing, is a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// The window will not grow past this. Unbounded is not useful: a conversation
+/// at four thousand pixels wide is one long line per paragraph, and the panes
+/// stop being panes.
+const MAX_SIZE: LogicalSize<f64> = LogicalSize::new(2200.0, 1400.0);
+const MIN_SIZE: LogicalSize<f64> = LogicalSize::new(680.0, 380.0);
 
 struct App {
     window: Option<Arc<Window>>,
@@ -48,6 +60,7 @@ struct App {
     renderer: Option<noob_draw::Renderer>,
     proxy: EventLoopProxy<Wake>,
 
+    config: Config,
     state: State,
     skin: Skin,
     link: Option<Link>,
@@ -55,40 +68,71 @@ struct App {
 
     input: String,
     caret: usize,
-    focus: Stream,
+    tab: Tab,
+    fold_top: bool,
+    fold_files: bool,
+    shaded: bool,
+    /// The size to go back to when the window is unshaded.
+    unshaded: Option<PhysicalSize<u32>>,
     column: f32,
 
     cursor: PhysicalPosition<f64>,
+    hot: Option<Hit>,
+    last_click: Option<(Hit, Instant)>,
     modifiers: ModifiersState,
     dirty: bool,
 }
 
 impl App {
-    fn new(proxy: EventLoopProxy<Wake>) -> App {
+    fn new(proxy: EventLoopProxy<Wake>, config: Config) -> App {
+        let skin = Skin::from(&config);
         App {
             window: None,
             gpu: None,
             renderer: None,
             proxy,
+            config,
             state: State::new(),
-            skin: Skin::matrix(),
+            skin,
             link: None,
             trouble: None,
             input: String::new(),
             caret: 0,
-            focus: Stream::Talk,
+            tab: Tab::Activity,
+            fold_top: false,
+            fold_files: false,
+            shaded: false,
+            unshaded: None,
             column: 8.0,
             cursor: PhysicalPosition::new(0.0, 0.0),
+            hot: None,
+            last_click: None,
             modifiers: ModifiersState::empty(),
             dirty: true,
         }
     }
 
-    fn layout(&self) -> Layout {
-        match &self.gpu {
-            Some(gpu) => Layout::compute(gpu.width(), gpu.height()),
-            None => Layout::compute(1.0, 1.0),
+    fn shape(&self) -> Shape {
+        Shape {
+            shaded: self.shaded,
+            fold_top: self.fold_top,
+            fold_files: self.fold_files,
+            file_labels: self
+                .state
+                .files
+                .iter()
+                .map(|file| view::short_name(&file.path))
+                .collect(),
+            column: self.column,
         }
+    }
+
+    fn layout(&self) -> Layout {
+        let (w, h) = match &self.gpu {
+            Some(gpu) => (gpu.width(), gpu.height()),
+            None => (1.0, 1.0),
+        };
+        Layout::compute(w, h, &self.shape())
     }
 
     /// Start the agent. A failure is shown in the window rather than printed to
@@ -109,9 +153,8 @@ impl App {
                 self.state.workspace = workspace.display().to_string();
             }
             Err(message) => {
-                self.state.status = String::from("no agent");
                 self.trouble = Some(message.clone());
-                self.state.talk.say(message, state::Tone::Bad);
+                self.state.talk.say(message, Tone::Bad);
             }
         }
         self.dirty = true;
@@ -125,12 +168,11 @@ impl App {
             match item {
                 Incoming::Frame(event) => self.dirty |= self.state.apply(event),
                 Incoming::Diagnostic(line) => {
-                    self.state.talk.say(format!("noob: {line}"), state::Tone::Bad);
+                    self.state.talk.say(format!("noob: {line}"), Tone::Bad);
                     self.dirty = true;
                 }
                 Incoming::Ended(reason) => {
-                    self.state.busy = false;
-                    self.state.status = reason.clone();
+                    self.state.phase = state::Phase::Gone;
                     self.trouble = Some(reason);
                     self.dirty = true;
                 }
@@ -146,13 +188,9 @@ impl App {
         self.input.clear();
         self.caret = 0;
         self.state.submitted(&text);
-        self.focus = Stream::Talk;
         match self.link.as_mut() {
             Some(link) if link.is_alive() => link.send(Cmd::PromptSubmit { text }),
-            _ => self
-                .state
-                .talk
-                .say("no agent is running", state::Tone::Bad),
+            _ => self.state.talk.say("no agent is running", Tone::Bad),
         }
         self.dirty = true;
     }
@@ -163,6 +201,70 @@ impl App {
         }
         self.state.status = String::from("cancelling");
         self.dirty = true;
+    }
+
+    /// Collapse the window to its title bar, or restore it. The bar keeps
+    /// showing what the agent is doing, so a shaded window is still a status
+    /// light rather than a hidden one.
+    fn shade(&mut self, window: &Window) {
+        self.shaded = !self.shaded;
+        if self.shaded {
+            self.unshaded = Some(window.inner_size());
+            let width = window.inner_size().width;
+            let _ = window.request_inner_size(PhysicalSize::new(width, view::TITLE_H as u32));
+        } else if let Some(size) = self.unshaded.take() {
+            let _ = window.request_inner_size(size);
+        }
+        self.dirty = true;
+    }
+
+    fn click(&mut self, hit: Hit, window: &Window, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        let double = matches!(self.last_click, Some((last, at))
+            if last == hit && now.duration_since(at) < DOUBLE_CLICK);
+        self.last_click = Some((hit, now));
+
+        match hit {
+            Hit::Close => event_loop.exit(),
+            Hit::Minimize => window.set_minimized(true),
+            Hit::Maximize => window.set_maximized(!window.is_maximized()),
+            Hit::TitleBar => {
+                if double {
+                    self.shade(window);
+                } else {
+                    let _ = window.drag_window();
+                }
+            }
+            Hit::Tab(tab) => {
+                // Clicking the tab already showing folds the group away, which
+                // is how a pane gets out of the way without a second control.
+                if self.tab == tab {
+                    self.fold_top = !self.fold_top;
+                } else {
+                    self.tab = tab;
+                    self.fold_top = false;
+                }
+                self.dirty = true;
+            }
+            Hit::FoldTop => {
+                self.fold_top = !self.fold_top;
+                self.dirty = true;
+            }
+            Hit::FoldFiles => {
+                self.fold_files = !self.fold_files;
+                self.dirty = true;
+            }
+            Hit::File(index) => {
+                if self.state.open_file == index {
+                    self.fold_files = !self.fold_files;
+                } else {
+                    self.state.open_file = index;
+                    self.fold_files = false;
+                }
+                self.dirty = true;
+            }
+            Hit::Talk | Hit::Group | Hit::Files | Hit::Input => {}
+        }
     }
 
     fn key(&mut self, event: winit::event::KeyEvent, event_loop: &ActiveEventLoop) {
@@ -220,16 +322,16 @@ impl App {
                 }
             }
             Key::Named(NamedKey::Tab) => {
-                self.focus = match self.focus {
-                    Stream::Talk => Stream::Shell,
-                    Stream::Shell => Stream::Tools,
-                    Stream::Tools => Stream::Code,
-                    Stream::Code => Stream::Talk,
+                self.tab = match self.tab {
+                    Tab::Activity => Tab::Plan,
+                    Tab::Plan => Tab::Agents,
+                    Tab::Agents => Tab::Activity,
                 };
+                self.fold_top = false;
                 self.dirty = true;
             }
-            Key::Named(NamedKey::PageUp) => self.scroll(self.focus, 1.0),
-            Key::Named(NamedKey::PageDown) => self.scroll(self.focus, -1.0),
+            Key::Named(NamedKey::PageUp) => self.scroll_hovered(1.0),
+            Key::Named(NamedKey::PageDown) => self.scroll_hovered(-1.0),
             Key::Character("q") if ctrl => event_loop.exit(),
             Key::Character("c") if ctrl => self.cancel(),
             Key::Character("u") if ctrl => {
@@ -261,17 +363,37 @@ impl App {
         }
     }
 
-    /// Scroll a pane by whole pages. Positive is back into history.
-    fn scroll(&mut self, stream: Stream, pages: f32) {
+    /// Scroll whatever the pointer is over, in pages. Positive is back into
+    /// history.
+    fn scroll_hovered(&mut self, pages: f32) {
         let layout = self.layout();
-        let rows = layout.rows(stream);
-        let by = ((rows as f32 * pages.abs()).round() as usize).max(1);
-        let moved = if pages > 0.0 {
-            self.state.pane_mut(stream).scroll_back(by, rows)
-        } else {
-            self.state.pane_mut(stream).scroll_forward(by)
+        let (panel, size) = match layout.hit(self.cursor.x as f32, self.cursor.y as f32) {
+            Some(Hit::Group) | Some(Hit::Tab(_)) => (layout.group, self.config.pane_font_size),
+            Some(Hit::Files) | Some(Hit::File(_)) => (layout.files, self.config.pane_font_size),
+            _ => (layout.talk, self.config.font_size),
         };
-        self.dirty |= moved;
+        let rows = layout.rows(panel, size).saturating_sub(1).max(1);
+        let by = ((rows as f32 * pages.abs()).round() as usize).max(1);
+        let target = match layout.hit(self.cursor.x as f32, self.cursor.y as f32) {
+            Some(Hit::Group) | Some(Hit::Tab(_)) if self.tab == Tab::Activity => {
+                Some(&mut self.state.activity)
+            }
+            Some(Hit::Files) | Some(Hit::File(_)) => self
+                .state
+                .files
+                .get_mut(self.state.open_file)
+                .map(|file| &mut file.pane),
+            Some(Hit::Group) | Some(Hit::Tab(_)) => None,
+            _ => Some(&mut self.state.talk),
+        };
+        let Some(pane) = target else {
+            return;
+        };
+        self.dirty |= if pages > 0.0 {
+            pane.scroll_back(by, rows)
+        } else {
+            pane.scroll_forward(by)
+        };
     }
 
     fn render(&mut self) {
@@ -281,19 +403,42 @@ impl App {
         let Some(frame) = gpu.acquire() else {
             return;
         };
-        let layout = Layout::compute(gpu.width(), gpu.height());
+        let shape = Shape {
+            shaded: self.shaded,
+            fold_top: self.fold_top,
+            fold_files: self.fold_files,
+            file_labels: self
+                .state
+                .files
+                .iter()
+                .map(|file| view::short_name(&file.path))
+                .collect(),
+            column: self.column,
+        };
+        let layout = Layout::compute(gpu.width(), gpu.height(), &shape);
         let scene = view::build(&view::Frame {
             state: &self.state,
             skin: &self.skin,
             layout: &layout,
-            focus: self.focus,
+            tab: self.tab,
+            fold_top: self.fold_top,
+            fold_files: self.fold_files,
             input: &self.input,
             caret: self.caret,
             column: self.column,
+            body_size: self.config.font_size,
+            pane_size: self.config.pane_font_size,
+            hot: self.hot,
             trouble: self.trouble.as_deref(),
         });
         renderer.draw(gpu, &scene, frame);
         self.dirty = false;
+    }
+
+    fn redraw(&self) {
+        if self.dirty && let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 }
 
@@ -307,6 +452,8 @@ impl ApplicationHandler<Wake> for App {
             .with_decorations(false)
             .with_transparent(true)
             .with_resizable(true)
+            .with_min_inner_size(MIN_SIZE)
+            .with_max_inner_size(MAX_SIZE)
             .with_inner_size(LogicalSize::new(1180.0, 760.0));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -324,10 +471,16 @@ impl ApplicationHandler<Wake> for App {
                     self.skin = self.skin.opaque();
                 }
                 for line in gpu.caps.report() {
-                    self.state.tools.say(line, state::Tone::Dim);
+                    self.state.activity.say(line, Tone::Dim);
+                }
+                self.state.activity.say(config::describe(), Tone::Dim);
+                for key in &self.config.unknown {
+                    self.state
+                        .activity
+                        .say(format!("settings  {key:?} is not a setting"), Tone::Bad);
                 }
                 let mut renderer = noob_draw::Renderer::new(&gpu);
-                self.column = renderer.column_width(14.0);
+                self.column = renderer.column_width(self.config.font_size);
                 self.renderer = Some(renderer);
                 self.gpu = Some(gpu);
             }
@@ -343,17 +496,10 @@ impl ApplicationHandler<Wake> for App {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _wake: Wake) {
         self.drain();
-        if self.dirty && let Some(window) = &self.window {
-            window.request_redraw();
-        }
+        self.redraw();
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -361,31 +507,40 @@ impl ApplicationHandler<Wake> for App {
                     gpu.resize(size.width, size.height);
                 }
                 self.dirty = true;
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
+                self.redraw();
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } => {
                 self.key(event, event_loop);
-                if self.dirty && let Some(window) = &self.window {
-                    window.request_redraw();
-                }
+                self.redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = position;
+                let (x, y) = (position.x as f32, position.y as f32);
+                let layout = self.layout();
+                let hot = match layout.hit(x, y) {
+                    Some(hit @ (Hit::Close | Hit::Maximize | Hit::Minimize)) => Some(hit),
+                    _ => None,
+                };
+                if hot != self.hot {
+                    self.hot = hot;
+                    self.dirty = true;
+                }
                 // The pointer shape is the only thing telling a user that an
                 // undecorated window can be resized at all.
                 if let Some(window) = &self.window {
-                    let (w, h) = (
-                        window.inner_size().width as f32,
-                        window.inner_size().height as f32,
-                    );
-                    let icon = match view::edge(position.x as f32, position.y as f32, w, h) {
+                    let icon = match view::edge(x, y, layout.width, layout.height) {
                         Some(dir) => resize_cursor(dir),
                         None => CursorIcon::Default,
                     };
                     window.set_cursor(icon);
+                }
+                self.redraw();
+            }
+            WindowEvent::CursorLeft { .. } => {
+                if self.hot.take().is_some() {
+                    self.dirty = true;
+                    self.redraw();
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -393,14 +548,8 @@ impl ApplicationHandler<Wake> for App {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => (p.y / 40.0) as f32,
                 };
-                let layout = self.layout();
-                let over = layout
-                    .pane_at(self.cursor.x as f32, self.cursor.y as f32)
-                    .unwrap_or(self.focus);
-                self.scroll(over, lines * 0.34);
-                if self.dirty && let Some(window) = &self.window {
-                    window.request_redraw();
-                }
+                self.scroll_hovered(lines * 0.34);
+                self.redraw();
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -411,21 +560,19 @@ impl ApplicationHandler<Wake> for App {
                     return;
                 };
                 let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
-                let size = window.inner_size();
                 let layout = self.layout();
-                if layout.close.contains(x, y) {
-                    event_loop.exit();
-                } else if let Some(dir) =
-                    view::edge(x, y, size.width as f32, size.height as f32)
+                // A resize edge wins against whatever pane is under it, or the
+                // border becomes six pixels of unusable pane.
+                if !self.shaded
+                    && let Some(dir) = view::edge(x, y, layout.width, layout.height)
                 {
                     let _ = window.drag_resize_window(dir);
-                } else if layout.title.contains(x, y) {
-                    let _ = window.drag_window();
-                } else if let Some(stream) = layout.pane_at(x, y) {
-                    self.focus = stream;
-                    self.dirty = true;
-                    window.request_redraw();
+                    return;
                 }
+                if let Some(hit) = layout.hit(x, y) {
+                    self.click(hit, &window, event_loop);
+                }
+                self.redraw();
             }
             WindowEvent::RedrawRequested => self.render(),
             _ => {}
@@ -436,9 +583,7 @@ impl ApplicationHandler<Wake> for App {
     /// an interface showing static text should cost nothing, and polling is how
     /// a UI silently eats a GPU.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.dirty && let Some(window) = &self.window {
-            window.request_redraw();
-        }
+        self.redraw();
         event_loop.set_control_flow(ControlFlow::Wait);
     }
 
@@ -464,6 +609,7 @@ fn resize_cursor(dir: winit::window::ResizeDirection) -> CursorIcon {
 }
 
 fn main() {
+    let config = Config::load();
     let event_loop = match EventLoop::<Wake>::with_user_event().build() {
         Ok(loop_) => loop_,
         Err(e) => {
@@ -472,7 +618,7 @@ fn main() {
         }
     };
     event_loop.set_control_flow(ControlFlow::Wait);
-    let mut app = App::new(event_loop.create_proxy());
+    let mut app = App::new(event_loop.create_proxy(), config);
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("clippy: {e}");
         std::process::exit(1);
