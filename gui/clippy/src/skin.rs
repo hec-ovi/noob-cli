@@ -47,15 +47,8 @@ pub struct Skin {
     pub minus: [u8; 4],
     pub plus: [u8; 4],
 
-    /// One per [`Kind`], in the order the enum declares them.
-    pub shell: [u8; 4],
-    pub look: [u8; 4],
-    pub change: [u8; 4],
-    pub search: [u8; 4],
-    pub skill: [u8; 4],
-    pub mcp: [u8; 4],
-    pub agent: [u8; 4],
-    pub plan: [u8; 4],
+    /// One colour per tool, in the order [`Kind`] declares them.
+    pub tools: [[u8; 4]; 14],
 
     pub comment: [u8; 4],
     pub string: [u8; 4],
@@ -113,17 +106,27 @@ impl Skin {
             minus: text(config.bad),
             plus: text(config.good),
 
-            // Six hues that stay apart from each other and from the green the
-            // rest of the window is, because the point of the tag color is to
-            // be recognisable at a glance without reading it.
-            shell: [0x7f, 0xd4, 0xe8, 255],
-            look: [0x6e, 0xc8, 0xa8, 255],
-            change: [0xf2, 0xc0, 0x6a, 255],
-            search: [0xc8, 0xa2, 0xf0, 255],
-            skill: [0xf0, 0x9c, 0xc8, 255],
-            mcp: [0xf0, 0xa8, 0x76, 255],
-            agent: [0x8a, 0xb8, 0xf0, 255],
-            plan: text(config.bright),
+            // One hue per tool, spread far enough apart to tell at a glance
+            // and far enough from the window's own green not to read as
+            // ordinary text. Grouping them by category was the first attempt
+            // and read as no colour at all, because most of a session is
+            // read, ls and grep.
+            tools: [
+                [0x4f, 0xd6, 0xc8, 255], // bash
+                [0x7f, 0xb5, 0xf0, 255], // read
+                [0x5f, 0x8f, 0xd0, 255], // ls
+                [0xa8, 0xc8, 0xf0, 255], // glob
+                [0xc8, 0xd8, 0x4f, 255], // grep
+                [0x9a, 0xa4, 0xae, 255], // context
+                [0xf5, 0xc2, 0x5a, 255], // write
+                [0xf5, 0x9a, 0x4f, 255], // edit
+                [0xc0, 0x90, 0xf5, 255], // websearch
+                [0xf5, 0x7f, 0xc8, 255], // skill
+                [0xf5, 0xd8, 0x4f, 255], // mcp
+                [0x7f, 0x7f, 0xf5, 255], // subagent
+                text(config.bright),     // plan
+                text(config.text),       // anything else
+            ],
 
             comment: [0x56, 0x84, 0x66, 255],
             string: [0xd6, 0xc4, 0x7a, 255],
@@ -163,17 +166,8 @@ impl Skin {
     }
 
     pub fn kind(&self, kind: Kind) -> [u8; 4] {
-        match kind {
-            Kind::Shell => self.shell,
-            Kind::Look => self.look,
-            Kind::Change => self.change,
-            Kind::Search => self.search,
-            Kind::Skill => self.skill,
-            Kind::Mcp => self.mcp,
-            Kind::Agent => self.agent,
-            Kind::Plan => self.plan,
-            Kind::Other => self.body,
-        }
+        let at = Kind::ALL.iter().position(|k| *k == kind).unwrap_or(13);
+        self.tools[at]
     }
 
     pub fn token(&self, token: crate::syntax::Token) -> Option<[u8; 4]> {
@@ -246,52 +240,45 @@ mod tests {
         }
     }
 
-    /// `look` used to be the same colour as every structural line, so a
-    /// session of mostly reads looked entirely uncoloured. Every call kind has
-    /// to stand off the ordinary text too, not only off each other.
+    /// Grouping tools by category read as no colour at all: most of a session
+    /// is read, ls and grep, and one colour for all three left the list
+    /// looking uncoloured. Every tool but the catch-all stands off ordinary
+    /// text, and every one of them stands off the others.
     #[test]
-    fn no_call_kind_is_the_colour_of_ordinary_text() {
+    fn every_tool_has_its_own_colour_and_none_is_the_colour_of_prose() {
         let skin = Skin::default();
-        for kind in [
-            Kind::Shell,
-            Kind::Look,
-            Kind::Change,
-            Kind::Search,
-            Kind::Skill,
-            Kind::Mcp,
-            Kind::Agent,
-        ] {
-            assert_ne!(skin.kind(kind), skin.dim, "{kind:?}");
-            assert_ne!(skin.kind(kind), skin.body, "{kind:?}");
+        let named: Vec<Kind> = Kind::ALL
+            .into_iter()
+            .filter(|kind| *kind != Kind::Other)
+            .collect();
+        for kind in &named {
+            assert_ne!(skin.kind(*kind), skin.dim, "{kind:?}");
+            if *kind != Kind::Plan {
+                assert_ne!(skin.kind(*kind), skin.body, "{kind:?}");
+            }
         }
-    }
-
-    /// Every kind is its own color, or the tag is the only thing telling them
-    /// apart and the color is decoration.
-    #[test]
-    fn every_call_kind_has_a_distinct_color() {
-        let skin = Skin::default();
-        let kinds = [
-            Kind::Shell,
-            Kind::Look,
-            Kind::Change,
-            Kind::Search,
-            Kind::Skill,
-            Kind::Mcp,
-            Kind::Agent,
-            Kind::Plan,
-        ];
-        for (i, a) in kinds.iter().enumerate() {
-            for b in &kinds[i + 1..] {
+        for (i, a) in named.iter().enumerate() {
+            for b in &named[i + 1..] {
                 assert_ne!(skin.kind(*a), skin.kind(*b), "{a:?} and {b:?} match");
             }
         }
     }
 
+    /// The table is indexed by position, so it has to have one entry for every
+    /// variant or a new tool silently takes another one's colour.
+    #[test]
+    fn the_palette_has_one_entry_per_tool() {
+        let skin = Skin::default();
+        assert_eq!(skin.tools.len(), Kind::ALL.len());
+        assert_eq!(skin.kind(Kind::Other), skin.body, "the catch-all is prose");
+        assert_eq!(skin.kind(Kind::Bash), skin.tools[0]);
+        assert_eq!(skin.kind(Kind::Plan), skin.tools[12]);
+    }
+
     #[test]
     fn every_tone_resolves_to_something_readable() {
         let skin = Skin::default();
-        for tone in [
+        let tones: Vec<Tone> = [
             Tone::Dim,
             Tone::Body,
             Tone::Bright,
@@ -299,9 +286,11 @@ mod tests {
             Tone::Bad,
             Tone::Minus,
             Tone::Plus,
-            Tone::Call(Kind::Shell),
-            Tone::Call(Kind::Other),
-        ] {
+        ]
+        .into_iter()
+        .chain(Kind::ALL.into_iter().map(Tone::Call))
+        .collect();
+        for tone in tones {
             let [r, g, b, a] = skin.tone(tone);
             assert_eq!(a, 255, "{tone:?}");
             assert!(

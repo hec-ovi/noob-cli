@@ -21,7 +21,7 @@
 
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
-    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
 };
 
 /// A rectangle in physical pixels. The only way geometry is expressed.
@@ -139,6 +139,22 @@ impl Panel {
         Rect::new(self.x, self.y, 1.0, self.h, rgba)
     }
 
+    pub fn right_edge(self, rgba: [f32; 4]) -> Rect {
+        Rect::new(self.x + self.w - 1.0, self.y, 1.0, self.h, rgba)
+    }
+
+    /// A hairline all the way round, inside the panel. Four rectangles rather
+    /// than a stroked path: this renderer draws rectangles and glyphs, and a
+    /// border is four rectangles.
+    pub fn border(self, rgba: [f32; 4]) -> [Rect; 4] {
+        [
+            self.top_edge(rgba),
+            self.bottom_edge(rgba),
+            self.left_edge(rgba),
+            self.right_edge(rgba),
+        ]
+    }
+
     fn bounds(self) -> TextBounds {
         TextBounds {
             left: self.x as i32,
@@ -226,6 +242,10 @@ pub struct Text {
     /// Lines scrolled off the top. A pane showing the tail of a long stream
     /// sets this to `lines - visible` and pays for the visible rows only.
     pub scroll_lines: f32,
+    /// Wrap at whatever character reaches the edge rather than at a word
+    /// boundary. What a text field needs: a caret placed by counting columns
+    /// only lands where the glyph is if the wrap counts columns too.
+    pub wrap_anywhere: bool,
 }
 
 impl Text {
@@ -241,7 +261,13 @@ impl Text {
             line_height: Text::line_for(size),
             color,
             scroll_lines: 0.0,
+            wrap_anywhere: false,
         }
+    }
+
+    pub fn wrap_anywhere(mut self) -> Text {
+        self.wrap_anywhere = true;
+        self
     }
 
     pub fn line_height(mut self, height: f32) -> Text {
@@ -485,6 +511,9 @@ impl Renderer {
                 );
                 // Wrap width and clip rectangle from the same content box.
                 buffer.set_size(Some(item.at.w), Some(item.at.h));
+                if item.wrap_anywhere {
+                    buffer.set_wrap(Wrap::Glyph);
+                }
                 match item.runs.as_slice() {
                     [only] if only.color.is_none() => {
                         buffer.set_text(&only.text, &mono, Shaping::Basic, None);
@@ -727,11 +756,7 @@ mod tests {
     #[test]
     fn edges_stay_inside_the_panel() {
         let panel = Panel::new(5.0, 5.0, 20.0, 20.0);
-        for rect in [
-            panel.top_edge([0.0; 4]),
-            panel.bottom_edge([0.0; 4]),
-            panel.left_edge([0.0; 4]),
-        ] {
+        for rect in panel.border([0.0; 4]) {
             let [x, y, w, h] = rect.xywh;
             assert!(x >= panel.x && y >= panel.y, "{rect:?}");
             assert!(x + w <= panel.x + panel.w, "{rect:?}");

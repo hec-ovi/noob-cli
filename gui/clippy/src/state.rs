@@ -42,17 +42,24 @@ pub enum Tone {
     Call(Kind),
 }
 
-/// What sort of thing a tool call is. The activity list's whole legibility.
+/// Which tool a call is. One variant per tool, not one per category.
+///
+/// Categories were the first attempt and read as no distinction at all: most
+/// of a session is `read`, `ls` and `grep`, so grouping them under one colour
+/// left the list looking uncoloured. Every tool gets its own colour and its
+/// own name in the tag column, which is what makes a list of forty rows
+/// scannable without reading any of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// `bash`: a real shell command.
-    Shell,
-    /// Looking: read, ls, glob, grep, context.
-    Look,
-    /// Changing: write, edit.
-    Change,
-    /// The web.
-    Search,
+    Bash,
+    Read,
+    Ls,
+    Glob,
+    Grep,
+    Context,
+    Write,
+    Edit,
+    Web,
     Skill,
     Mcp,
     Agent,
@@ -61,13 +68,36 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// Every tool this build knows, for tests and for the palette.
+    pub const ALL: [Kind; 14] = [
+        Kind::Bash,
+        Kind::Read,
+        Kind::Ls,
+        Kind::Glob,
+        Kind::Grep,
+        Kind::Context,
+        Kind::Write,
+        Kind::Edit,
+        Kind::Web,
+        Kind::Skill,
+        Kind::Mcp,
+        Kind::Agent,
+        Kind::Plan,
+        Kind::Other,
+    ];
+
     /// From the tool's name, which is all the harness has and all it needs.
     pub fn of(name: &str) -> Kind {
         match name {
-            "bash" => Kind::Shell,
-            "read" | "ls" | "glob" | "grep" | "context" => Kind::Look,
-            "write" | "edit" => Kind::Change,
-            "websearch" => Kind::Search,
+            "bash" => Kind::Bash,
+            "read" => Kind::Read,
+            "ls" => Kind::Ls,
+            "glob" => Kind::Glob,
+            "grep" => Kind::Grep,
+            "context" => Kind::Context,
+            "write" => Kind::Write,
+            "edit" => Kind::Edit,
+            "websearch" => Kind::Web,
             "skill" => Kind::Skill,
             "subagent" => Kind::Agent,
             "plan" | "todo" => Kind::Plan,
@@ -76,14 +106,19 @@ impl Kind {
         }
     }
 
-    /// The short tag printed before every row, so the color has a name for
-    /// anyone who cannot rely on color alone.
+    /// The tag printed before every row: the tool's own name, so the colour
+    /// has a name for anyone who cannot rely on colour alone.
     pub fn tag(self) -> &'static str {
         match self {
-            Kind::Shell => "sh",
-            Kind::Look => "look",
-            Kind::Change => "edit",
-            Kind::Search => "web",
+            Kind::Bash => "bash",
+            Kind::Read => "read",
+            Kind::Ls => "ls",
+            Kind::Glob => "glob",
+            Kind::Grep => "grep",
+            Kind::Context => "ctx",
+            Kind::Write => "write",
+            Kind::Edit => "edit",
+            Kind::Web => "web",
             Kind::Skill => "skill",
             Kind::Mcp => "mcp",
             Kind::Agent => "agent",
@@ -97,6 +132,8 @@ impl Kind {
 pub struct Line {
     pub text: String,
     pub tone: Tone,
+    /// The line this is in its file, for the gutter. Only file views set it.
+    pub number: Option<u32>,
 }
 
 impl Line {
@@ -104,7 +141,13 @@ impl Line {
         Line {
             text: text.into(),
             tone,
+            number: None,
         }
+    }
+
+    pub fn at(mut self, number: u32) -> Line {
+        self.number = Some(number);
+        self
     }
 }
 
@@ -139,6 +182,11 @@ impl Pane {
 
     pub fn say(&mut self, text: impl Into<String>, tone: Tone) {
         self.push(Line::new(text, tone));
+    }
+
+    /// A line that knows where it is in its file.
+    pub fn say_at(&mut self, text: impl Into<String>, tone: Tone, number: u32) {
+        self.push(Line::new(text, tone).at(number));
     }
 
     pub fn blank_if_needed(&mut self) {
@@ -496,7 +544,7 @@ impl State {
                 let file = self.file_mut(&path);
                 file.pane.blank_if_needed();
                 file.pane
-                    .say(format!("read  {lines} lines"), Tone::Call(Kind::Look));
+                    .say(format!("read {lines} lines"), Tone::Call(Kind::Read));
             }
             Event::FileSpan { path, span, .. } => {
                 let file = self.file_mut(&path);
@@ -515,19 +563,24 @@ impl State {
                 file.pane.blank_if_needed();
                 file.pane.say(
                     format!("write lines {}-{}", span.start, span.end),
-                    Tone::Call(Kind::Change),
+                    Tone::Call(Kind::Write),
                 );
                 let mut clipped = before.lines().count() > DIFF_LINES;
-                for line in before.lines().take(DIFF_LINES) {
-                    file.pane.say(format!("- {line}"), Tone::Minus);
+                for (n, line) in before.lines().take(DIFF_LINES).enumerate() {
+                    file.pane
+                        .say_at(format!("- {line}"), Tone::Minus, span.start + n as u32);
                 }
                 clipped |= after.lines().count() > DIFF_LINES;
-                for line in after.lines().take(DIFF_LINES) {
-                    file.pane.say(format!("+ {line}"), Tone::Plus);
+                for (n, line) in after.lines().take(DIFF_LINES).enumerate() {
+                    file.pane
+                        .say_at(format!("+ {line}"), Tone::Plus, span.start + n as u32);
                 }
                 if clipped {
                     file.pane.say("  …", Tone::Dim);
                 }
+                // A blank line after the block, so two edits in a row read as
+                // two edits rather than as one long stretch of file.
+                file.pane.say("", Tone::Dim);
             }
             Event::FileClose { path, .. } => {
                 if let Some(file) = self.files.iter_mut().find(|f| f.path == path) {
@@ -656,8 +709,8 @@ fn subject(kind: Kind, brief: &str, args: &noob_proto::Value) -> String {
             .map(str::to_string)
     };
     let found = match kind {
-        Kind::Shell => field("cmd"),
-        Kind::Search => field("query").or_else(|| field("url")).or_else(|| field("action")),
+        Kind::Bash => field("cmd"),
+        Kind::Web => field("query").or_else(|| field("url")).or_else(|| field("action")),
         _ => None,
     };
     let text = found
@@ -820,23 +873,25 @@ mod tests {
         assert_eq!(
             kinds,
             [
-                Tone::Call(Kind::Shell),
-                Tone::Call(Kind::Look),
-                Tone::Call(Kind::Change),
-                Tone::Call(Kind::Search),
+                Tone::Call(Kind::Bash),
+                Tone::Call(Kind::Ls),
+                Tone::Call(Kind::Write),
+                Tone::Call(Kind::Web),
                 Tone::Call(Kind::Skill),
             ]
         );
         // Every kind is distinguishable without color, too.
-        assert!(lines[0].text.contains("sh  rm -rf build"), "{:?}", lines[0]);
+        assert!(lines[0].text.contains("bash  rm -rf build"), "{:?}", lines[0]);
         assert!(lines[3].text.contains("web"), "{:?}", lines[3]);
     }
 
     #[test]
     fn tool_names_map_to_the_kind_you_would_guess() {
-        assert_eq!(Kind::of("bash"), Kind::Shell);
-        assert_eq!(Kind::of("grep"), Kind::Look);
-        assert_eq!(Kind::of("edit"), Kind::Change);
+        assert_eq!(Kind::of("bash"), Kind::Bash);
+        assert_eq!(Kind::of("grep"), Kind::Grep);
+        assert_eq!(Kind::of("edit"), Kind::Edit);
+        assert_eq!(Kind::of("ls"), Kind::Ls);
+        assert_eq!(Kind::of("read"), Kind::Read);
         assert_eq!(Kind::of("mcp_call"), Kind::Mcp);
         assert_eq!(Kind::of("mcp_connect"), Kind::Mcp);
         assert_eq!(Kind::of("subagent"), Kind::Agent);
@@ -1195,6 +1250,36 @@ mod tests {
                 assert!(top + size <= 1.001, "{top} + {size}");
             }
         }
+    }
+
+    /// A diff line knows where it is in the file, so the gutter can say so.
+    #[test]
+    fn diff_lines_carry_their_line_numbers() {
+        let mut state = State::new();
+        state.apply(Event::FileEdit {
+            path: "a.rs".into(),
+            span: Span {
+                start: 17,
+                end: 19,
+                kind: None,
+                name: None,
+            },
+            before: "one\ntwo".into(),
+            after: "ONE\nTWO\nTHREE".into(),
+            call_id: None,
+        });
+        let lines = state.files[0].pane.visible(usize::MAX);
+        let numbered: Vec<(Option<u32>, &str)> = lines
+            .iter()
+            .map(|l| (l.number, l.text.as_str()))
+            .collect();
+        assert!(numbered.contains(&(None, "write lines 17-19")), "{numbered:?}");
+        assert!(numbered.contains(&(Some(17), "- one")), "{numbered:?}");
+        assert!(numbered.contains(&(Some(18), "- two")), "{numbered:?}");
+        assert!(numbered.contains(&(Some(17), "+ ONE")), "{numbered:?}");
+        assert!(numbered.contains(&(Some(19), "+ THREE")), "{numbered:?}");
+        // And the block is closed off, so a second edit reads as a second one.
+        assert_eq!(lines.last().unwrap().text, "");
     }
 
     /// A window scrolled into the middle of a fenced block has to know it is

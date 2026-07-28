@@ -107,6 +107,9 @@ pub struct Shape {
     /// decision, not a layout one, so it is not here.
     pub file_labels: Vec<String>,
     pub column: f32,
+    /// How tall the prompt is. It grows with what has been typed, so it is an
+    /// input to the layout rather than a constant.
+    pub input_h: f32,
 }
 
 impl Layout {
@@ -144,7 +147,7 @@ impl Layout {
         }
 
         let (rest, status) = rest.split_bottom(STATUS_H.min(rest.h));
-        let (body, input) = rest.split_bottom(INPUT_H.min(rest.h));
+        let (body, input) = rest.split_bottom(shape.input_h.max(INPUT_H).min(rest.h));
         let body = body.inset(GAP);
         let (talk, right) = body.split_left((body.w * 0.54).floor() - GAP * 0.5);
         let right = Panel::new(right.x + GAP, right.y, (right.w - GAP).max(1.0), right.h);
@@ -187,7 +190,7 @@ impl Layout {
                 (files_strip.w - TAB_H).max(1.0),
                 TAB_H,
             ),
-            shape.file_labels.iter().map(|label| label.chars().count()),
+            shape.file_labels.iter().map(|label| label.chars().count() + 1),
             shape.column,
         )
         .into_iter()
@@ -323,6 +326,10 @@ pub struct Frame<'a> {
     pub input: &'a str,
     pub caret: usize,
     pub column: f32,
+    /// The column width at `pane_size`. The panes are a different size from
+    /// the transcript, so anything that lines text up with a rectangle has to
+    /// use this one.
+    pub pane_column: f32,
     pub body_size: f32,
     pub pane_size: f32,
     /// The GPU capability report and the settings path: facts about this
@@ -401,6 +408,18 @@ pub fn build(frame: &Frame) -> Scene {
             ))
         })
         .collect();
+    let file_labels = if file_labels.is_empty() {
+        // An empty strip beside the title bar reads as a gap in the window
+        // rather than as a place files will appear.
+        vec![(String::from("FILES"), false, false, layout.fold_files)]
+            .into_iter()
+            .map(|(label, a, b, fold)| {
+                (label, a, b, Panel::new(fold.x - 7.0 * frame.column, fold.y, 7.0 * frame.column, fold.h))
+            })
+            .collect()
+    } else {
+        file_labels
+    };
     tab_strip(
         &mut scene,
         frame,
@@ -510,7 +529,7 @@ fn tab_strip(
         let color = if *active { skin.bright } else { skin.dim };
         let mut runs = vec![Run::tinted(label.as_str(), color)];
         if *changed {
-            runs.push(Run::tinted("\u{2022}", skin.plus));
+            runs.push(Run::tinted(" \u{2022}", skin.plus));
         }
         scene.text(Text::rich(
             runs,
@@ -561,71 +580,82 @@ fn group_pane(scene: &mut Scene, frame: &Frame) {
                 runs.push(Run::tinted("no sub-agents this session", skin.dim));
             }
             for agent in &state.agents {
+                runs.push(Run::tinted(format!("{:<9}", agent.label), skin.dim));
                 runs.push(Run::tinted(
-                    format!("{:<9}{:<9}", agent.label, agent.state),
+                    format!("{:<10}", agent.state),
                     skin.tone(agent.tone),
                 ));
-                runs.push(Run::tinted(clip(&agent.brief, 200), skin.dim));
+                runs.push(Run::tinted(clip(&agent.brief, 300), skin.body));
                 runs.push(Run::plain("\n"));
             }
         }
-        Tab::Monitor => monitor_text(runs, frame),
+        // The monitor is three columns and a stack of bars, so it draws itself
+        // below rather than through this one text box.
+        Tab::Monitor => {}
     });
     match frame.tab {
         Tab::Activity => scrollbar(scene, skin, panel, state.activity.thumb(rows)),
-        Tab::Monitor => monitor_bars(scene, frame, panel),
+        Tab::Monitor => monitor_pane(scene, frame, panel),
         _ => {}
     }
 }
 
-/// The labelled rows of the monitor. The bars themselves are rectangles drawn
-/// over this text, so a proportion is a shape rather than a row of `#`.
-fn monitor_text(runs: &mut Vec<Run>, frame: &Frame) {
+/// The monitor: a label column, a bar, and a reading, laid out as three boxes
+/// rather than as one padded string.
+///
+/// One string with the bar's room spelled as spaces was the first attempt, and
+/// the readings landed on top of the bars: the spaces are the pane's column
+/// width and the bar was drawn in the transcript's, which is a different
+/// number. Three boxes at computed positions cannot drift apart.
+fn monitor_pane(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let skin = frame.skin;
-    if frame.monitor.gauges.is_empty() {
-        runs.push(Run::tinted("sampling…", skin.dim));
-        runs.push(Run::plain("\n"));
+    let content = panel.inset(PAD);
+    let column = frame.pane_column;
+    let line = Text::line_for(frame.pane_size);
+    let rows = frame.monitor.gauges.len();
+
+    let label_w = LABEL_COLUMNS as f32 * column;
+    let bar_w = (BAR_COLUMNS as f32 * column).min((content.w - label_w - 2.0 * column).max(1.0));
+    let read_x = content.x + label_w + bar_w + column;
+
+    if rows == 0 {
+        scene.text(Text::rich(
+            vec![Run::tinted("sampling…", skin.dim)],
+            content,
+            frame.pane_size,
+            skin.dim,
+        ));
+        return;
     }
-    for gauge in &frame.monitor.gauges {
-        runs.push(Run::tinted(format!("{:<8}", gauge.label), skin.dim));
-        // The bar's room, kept as spaces so the reading lands after it.
-        runs.push(Run::plain(" ".repeat(BAR_COLUMNS)));
-        runs.push(Run::tinted(
-            format!("  {}", gauge.reading()),
+
+    let mut labels = Vec::new();
+    let mut readings = Vec::new();
+    for (row, gauge) in frame.monitor.gauges.iter().enumerate() {
+        let y = content.y + row as f32 * line;
+        if y + line > content.y + content.h {
+            break;
+        }
+        labels.push(Run::tinted(format!("{}\n", gauge.label), skin.dim));
+        readings.push(Run::tinted(
+            format!("{}\n", gauge.reading()),
             if gauge.fraction().is_some_and(|f| f > 0.85) {
                 skin.bad
             } else {
                 skin.body
             },
         ));
-        runs.push(Run::plain("\n"));
-    }
-    runs.push(Run::plain("\n"));
-    for note in frame.monitor.notes.iter().chain(frame.reports.iter()) {
-        runs.push(Run::tinted(note.as_str(), skin.dim));
-        runs.push(Run::plain("\n"));
-    }
-}
 
-/// One radeontop-style bar per gauge, and a btop-style history behind it. Both
-/// out of rectangles: a proportion drawn as a shape reads at a glance, and a
-/// row of block characters depends on a font having them.
-fn monitor_bars(scene: &mut Scene, frame: &Frame, panel: Panel) {
-    let skin = frame.skin;
-    let content = panel.inset(PAD);
-    let line = Text::line_for(frame.pane_size);
-    let bar_x = content.x + 8.0 * frame.column;
-    let bar_w = (BAR_COLUMNS as f32 * frame.column).min((content.w - 8.0 * frame.column).max(1.0));
-    for (row, gauge) in frame.monitor.gauges.iter().enumerate() {
-        let y = content.y + row as f32 * line;
-        if y + line > content.y + content.h {
-            break;
-        }
-        let track = Panel::new(bar_x, y + line * 0.28, bar_w, line * 0.44);
+        let track = Panel::new(
+            content.x + label_w,
+            y + (line * 0.24).floor(),
+            bar_w,
+            (line * 0.5).floor().max(3.0),
+        );
         // The history first, behind the bar: the past is context, not content.
         let series = frame.monitor.history(gauge.key);
+        scene.rect(track.fill(skin.gauge_track));
         if series.len() > 1 {
-            let step = (track.w / series.len() as f32).max(1.0);
+            let step = track.w / series.len() as f32;
             for (i, point) in series.iter().enumerate() {
                 let height = (track.h * point).max(1.0);
                 scene.rect(
@@ -635,48 +665,112 @@ fn monitor_bars(scene: &mut Scene, frame: &Frame, panel: Panel) {
                         step.max(1.0),
                         height,
                     )
-                    .fill(skin.scroll_track),
+                    .fill(skin.scroll_thumb),
                 );
             }
-        } else {
-            scene.rect(track.fill(skin.gauge_track));
         }
         if let Some(fraction) = gauge.fraction() {
-            let full = fraction > 0.85;
+            let full = fraction > 0.9;
             scene.rect(
                 Panel::new(track.x, track.y, (track.w * fraction).max(1.0), track.h)
                     .fill(if full { skin.close_hot } else { skin.gauge }),
             );
         }
     }
+
+    let text_h = rows as f32 * line;
+    scene.text(Text::rich(
+        labels,
+        Panel::new(content.x, content.y, label_w.max(1.0), text_h.min(content.h)),
+        frame.pane_size,
+        skin.dim,
+    ));
+    scene.text(Text::rich(
+        readings,
+        Panel::new(
+            read_x,
+            content.y,
+            (content.x + content.w - read_x).max(1.0),
+            text_h.min(content.h),
+        ),
+        frame.pane_size,
+        skin.body,
+    ));
+
+    // What this machine is, under the readings it explains.
+    let notes_y = content.y + text_h + line;
+    if notes_y < content.y + content.h {
+        let mut notes = Vec::new();
+        for note in frame.monitor.notes.iter().chain(frame.reports.iter()) {
+            notes.push(Run::tinted(format!("{note}\n"), skin.dim));
+        }
+        scene.text(Text::rich(
+            notes,
+            Panel::new(
+                content.x,
+                notes_y,
+                content.w,
+                (content.y + content.h - notes_y).max(1.0),
+            ),
+            frame.pane_size,
+            skin.dim,
+        ));
+    }
 }
 
-const BAR_COLUMNS: usize = 24;
+const LABEL_COLUMNS: usize = 9;
+const BAR_COLUMNS: usize = 22;
 
 fn files_pane(scene: &mut Scene, frame: &Frame) {
     let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
     let panel = layout.files;
     let rows = layout.rows(panel, frame.pane_size);
     let open = state.files.get(state.open_file);
+
+    // A band behind every block header, drawn before the text. Without it a
+    // `write lines 17-17` reads as a line of the file rather than as the mark
+    // between two of them.
+    if let Some(file) = open {
+        let content = panel.inset(PAD);
+        let line = Text::line_for(frame.pane_size);
+        for (row, shown) in file.pane.visible(rows).iter().enumerate() {
+            if !matches!(shown.tone, Tone::Call(_)) {
+                continue;
+            }
+            let y = content.y + row as f32 * line;
+            if y + line > content.y + content.h {
+                break;
+            }
+            scene.rect(
+                Panel::new(panel.x + 1.0, y, (panel.w - 2.0).max(1.0), line).fill(skin.strip),
+            );
+        }
+    }
+
     pane(scene, frame, panel, frame.pane_size, |runs| {
         let Some(file) = open else {
             runs.push(Run::tinted("no files touched yet", skin.dim));
             return;
         };
         let syntax = crate::syntax::for_path(&file.path);
-        for line in file.pane.visible(rows) {
-            let base = skin.tone(line.tone);
+        for shown in file.pane.visible(rows) {
+            let base = skin.tone(shown.tone);
+            // The gutter, so a diff line says where in the file it landed.
+            match shown.number {
+                Some(number) => runs.push(Run::tinted(format!("{number:03} "), skin.comment)),
+                None if !shown.text.is_empty() => runs.push(Run::plain("    ")),
+                None => {}
+            }
             // A removed line reads as removed first, so only what is there now
             // is tokenized.
-            let source = matches!(line.tone, Tone::Plus | Tone::Body);
-            if source {
-                let (marker, rest) = line.text.split_at(line.text.len().min(2));
+            if matches!(shown.tone, Tone::Plus | Tone::Body) {
+                let (marker, rest) = shown.text.split_at(shown.text.len().min(2));
                 runs.push(Run::tinted(marker, base));
                 for (text, token) in crate::syntax::scan(rest, syntax) {
                     runs.push(Run::tinted(text, skin.token(token).unwrap_or(base)));
                 }
             } else {
-                runs.push(Run::tinted(&line.text, base));
+                runs.push(Run::tinted(&shown.text, base));
             }
             runs.push(Run::plain("\n"));
         }
@@ -686,7 +780,10 @@ fn files_pane(scene: &mut Scene, frame: &Frame) {
     }
 }
 
-/// A pane: its fill, its edge, and one text box built by `body`.
+/// A pane: its fill, its border, and one text box built by `body`.
+///
+/// The border is what tells two panes apart. Without one, a dark panel beside
+/// a dark panel over a busy desktop reads as one region with a gap in it.
 fn pane(
     scene: &mut Scene,
     frame: &Frame,
@@ -698,14 +795,12 @@ fn pane(
         return;
     }
     scene.rect(panel.fill(frame.skin.panel));
+    for edge in panel.border(frame.skin.edge) {
+        scene.rect(edge);
+    }
     let mut runs = Vec::new();
     body(&mut runs);
-    scene.text(Text::rich(
-        runs,
-        panel.inset(PAD),
-        size,
-        frame.skin.body,
-    ));
+    scene.text(Text::rich(runs, panel.inset(PAD), size, frame.skin.body));
 }
 
 fn header(runs: &mut Vec<Run>, title: &str, subject: &str, skin: &Skin) {
@@ -743,26 +838,74 @@ fn scrollbar(scene: &mut Scene, skin: &Skin, panel: Panel, thumb: Option<(f32, f
 fn input_row(scene: &mut Scene, frame: &Frame) {
     let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
     scene.rect(layout.input.fill(skin.input));
-    scene.rect(layout.input.top_edge(skin.edge_focus));
-    // One centred line, not a margin: insetting this bar leaves a box too short
-    // to hold the text, which draws and then clips to nothing.
-    let box_ = layout.input.row(PAD, Text::line_for(frame.body_size));
+    for edge in layout.input.border(skin.edge_focus) {
+        scene.rect(edge);
+    }
+    let line = Text::line_for(frame.body_size);
+    // The box is as tall as the prompt needs. One centred line was right when
+    // it could only ever be one line; a prompt that grows needs the whole bar
+    // minus its padding, top-aligned so the first line does not move.
+    let box_ = Panel::new(
+        layout.input.x + PAD,
+        layout.input.y + INPUT_PAD,
+        (layout.input.w - 2.0 * PAD).max(1.0),
+        (layout.input.h - 2.0 * INPUT_PAD).max(line),
+    );
     let prompt = if state.phase.busy() { "\u{2026}" } else { "\u{203a}" };
-    scene.text(Text::rich(
-        vec![
-            Run::tinted(format!("{prompt} "), skin.dim),
-            Run::tinted(frame.input, skin.bright),
-        ],
-        box_,
-        frame.body_size,
-        skin.bright,
-    ));
-    // Two columns for the prompt, then one per character typed.
-    let caret_x = box_.x + (frame.caret as f32 + 2.0) * frame.column;
-    if caret_x < box_.x + box_.w {
-        scene.rect(Panel::new(caret_x, box_.y, 2.0, box_.h).fill(skin.caret));
+    scene.text(
+        Text::rich(
+            vec![
+                Run::tinted(format!("{prompt} "), skin.dim),
+                Run::tinted(frame.input, skin.bright),
+            ],
+            box_,
+            frame.body_size,
+            skin.bright,
+        )
+        // Wrap by glyph, so counting columns lands the caret where the glyph
+        // actually is. Word wrap would put it a word away on every long line.
+        .wrap_anywhere(),
+    );
+    // Two columns for the prompt, then one per character typed, wrapped the
+    // same way the text is.
+    let columns = columns_in(box_.w, frame.column);
+    let at = frame.caret + PROMPT_COLUMNS;
+    let (row, column) = (at / columns, at % columns);
+    let caret = Panel::new(
+        box_.x + column as f32 * frame.column,
+        box_.y + row as f32 * line,
+        2.0,
+        line,
+    );
+    if caret.y + caret.h <= box_.y + box_.h + 0.5 {
+        scene.rect(caret.fill(skin.caret));
     }
 }
+
+/// How many characters fit across a box of this width.
+fn columns_in(width: f32, column: f32) -> usize {
+    ((width / column.max(1.0)).floor() as usize).max(1)
+}
+
+/// How tall the prompt has to be to hold `chars` characters.
+///
+/// Grows a line at a time up to a ceiling, then scrolls inside itself. A
+/// prompt that grows without limit eventually eats the conversation it is
+/// about, which is the wrong trade.
+pub fn input_height(width: f32, column: f32, chars: usize, line: f32) -> f32 {
+    let inner = (width - 2.0 * GAP - 2.0 * PAD).max(column);
+    let columns = columns_in(inner, column);
+    let rows = (chars + PROMPT_COLUMNS + 1)
+        .div_ceil(columns)
+        .clamp(1, MAX_INPUT_ROWS);
+    // The strip, not the box inside it: the layout insets this by `GAP` before
+    // the prompt gets it, and forgetting that cost the last row of a full one.
+    (rows as f32 * line + 2.0 * INPUT_PAD + 2.0 * GAP).max(INPUT_H)
+}
+
+const PROMPT_COLUMNS: usize = 2;
+const MAX_INPUT_ROWS: usize = 8;
+const INPUT_PAD: f32 = 6.0;
 
 fn status_bar(scene: &mut Scene, frame: &Frame) {
     let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
@@ -828,6 +971,7 @@ mod tests {
             fold_files: false,
             file_labels: files.iter().map(|f| f.to_string()).collect(),
             column: 8.0,
+            input_h: INPUT_H,
         }
     }
 
@@ -915,6 +1059,7 @@ mod tests {
             input: "type here",
             caret: 4,
             column: shape.column,
+            pane_column: 8.0,
             body_size: 14.0,
             pane_size: 13.0,
             reports: &[],
@@ -1110,7 +1255,7 @@ mod tests {
     fn a_changed_file_is_marked_in_its_tab() {
         let state = busy_state();
         let text = rendered(&scene_of(&state, 1400.0, 900.0, &shape(&["calc.py"])).0);
-        assert!(text.contains("calc.py\u{2022}"), "{text}");
+        assert!(text.contains("calc.py \u{2022}"), "{text}");
     }
 
     #[test]
@@ -1186,6 +1331,7 @@ mod tests {
                 input: "",
                 caret,
                 column: 8.0,
+                pane_column: 8.0,
                 body_size: 14.0,
                 pane_size: 13.0,
                 reports: &[],
@@ -1214,6 +1360,7 @@ mod tests {
             input: "",
             caret: 0,
             column: 8.0,
+            pane_column: 8.0,
             body_size: 14.0,
             pane_size: 13.0,
             reports: &[],
@@ -1221,6 +1368,163 @@ mod tests {
             trouble: Some("cannot start \"noob\": not found"),
         });
         assert!(rendered(&scene).contains("cannot start"));
+    }
+
+    /// The bug this replaced: the bar's room was spelled as spaces in the
+    /// pane's font while the bar itself was drawn in the transcript's column
+    /// width, so the readings landed on top of the bars. Three boxes at
+    /// computed positions cannot drift apart, whatever the two sizes are.
+    #[test]
+    fn a_monitor_reading_never_lands_on_its_bar() {
+        let mut monitor = Monitor::new();
+        let mut state = State::new();
+        state.apply(noob_proto::Event::UsageReport {
+            usage: noob_proto::Usage {
+                prompt: 5869,
+                cached_prompt: 5348,
+                completion: 40,
+                context_total: 65536,
+            },
+        });
+        monitor.sample(&state);
+        monitor.sample(&state);
+
+        // Deliberately mismatched: the transcript's columns are wider than the
+        // pane's, which is the situation that produced the overlap.
+        for (column, pane_column) in [(8.4, 7.8), (7.8, 8.4), (8.0, 8.0)] {
+            let layout = Layout::compute(1400.0, 900.0, &shape(&["a.rs"]));
+            let skin = Skin::from(&Config::default());
+            let scene = build(&Frame {
+                state: &state,
+                monitor: &monitor,
+                skin: &skin,
+                layout: &layout,
+                tab: Tab::Monitor,
+                fold_top: false,
+                fold_files: false,
+                input: "",
+                caret: 0,
+                column,
+                pane_column,
+                body_size: 14.0,
+                pane_size: 13.0,
+                reports: &[],
+                hot: None,
+                trouble: None,
+            });
+            // The rightmost bar rectangle inside the group pane, and the
+            // leftmost text box that holds a reading.
+            let group = layout.group;
+            // The bars: inside the pane, thicker than a border, and narrower
+            // than the pane's own fill.
+            let bar_right = scene
+                .rects
+                .iter()
+                .map(|r| r.xywh())
+                .filter(|[x, y, w, h]| {
+                    group.contains(*x, *y) && *h > 2.0 && *w > 2.0 && *w < group.w - 4.0
+                })
+                .map(|[x, _, w, _]| x + w)
+                .fold(0.0f32, f32::max);
+            assert!(bar_right > group.x, "no bars were drawn");
+            let reading = scene
+                .texts
+                .iter()
+                .find(|t| {
+                    group.contains(t.at.x, t.at.y)
+                        && t.runs.iter().any(|r| r.text.contains('/') || r.text.contains('%'))
+                })
+                .expect("a reading is on screen");
+            assert!(
+                reading.at.x >= bar_right,
+                "reading at {} overlaps a bar ending at {bar_right} ({column}/{pane_column})",
+                reading.at.x
+            );
+        }
+    }
+
+    /// The prompt grows with what has been typed, and the caret follows the
+    /// wrap rather than running off the end of the first line.
+    #[test]
+    fn the_prompt_grows_and_the_caret_stays_inside_it() {
+        let state = State::new();
+        let skin = Skin::from(&Config::default());
+        let line = Text::line_for(14.0);
+        let render = |typed: &str| {
+            let mut shape = shape(&[]);
+            shape.input_h = input_height(1200.0, 8.0, typed.chars().count(), line);
+            let layout = Layout::compute(1200.0, 800.0, &shape);
+            let scene = build(&Frame {
+                state: &state,
+                monitor: &Monitor::new(),
+                skin: &skin,
+                layout: &layout,
+                tab: Tab::Activity,
+                fold_top: false,
+                fold_files: false,
+                input: typed,
+                caret: typed.chars().count(),
+                column: 8.0,
+                pane_column: 8.0,
+                body_size: 14.0,
+                pane_size: 13.0,
+                reports: &[],
+                hot: None,
+                trouble: None,
+            });
+            (layout.input, scene)
+        };
+
+        let (one, _) = render("short");
+        let (many, scene) = render(&"x".repeat(600));
+        assert!(many.h > one.h, "the prompt grew: {} then {}", one.h, many.h);
+        assert!(many.h <= 8.0 * line + 24.0, "and stopped growing: {}", many.h);
+        // The caret is the last rectangle drawn inside the prompt.
+        let caret = scene
+            .rects
+            .iter()
+            .map(|r| r.xywh())
+            .rfind(|[x, y, w, _]| *w <= 3.0 && many.contains(*x, *y))
+            .expect("the caret is drawn");
+        assert!(
+            caret[1] + caret[3] <= many.y + many.h + 0.5,
+            "the caret left the prompt: {caret:?} in {many:?}"
+        );
+        assert!(caret[1] > many.y, "and it is not still on the first row");
+    }
+
+    /// Two dark panels side by side over a busy desktop read as one region
+    /// with a gap in it. The border is what tells them apart.
+    #[test]
+    fn every_pane_is_drawn_with_a_border() {
+        let state = busy_state();
+        let (scene, layout, skin) = scene_of(&state, 1200.0, 800.0, &shape(&["a.rs"]));
+        for panel in [layout.talk, layout.group, layout.files] {
+            let edges = scene
+                .rects
+                .iter()
+                .filter(|r| {
+                    let [x, y, w, h] = r.xywh();
+                    (w <= 1.5 || h <= 1.5)
+                        && x >= panel.x - 0.5
+                        && y >= panel.y - 0.5
+                        && x + w <= panel.x + panel.w + 0.5
+                        && y + h <= panel.y + panel.h + 0.5
+                })
+                .count();
+            assert!(edges >= 4, "{panel:?} has {edges} edges");
+        }
+        let _ = skin;
+    }
+
+    /// An empty file strip beside the title bar reads as a gap in the window
+    /// rather than as the place files will appear.
+    #[test]
+    fn the_file_strip_names_itself_when_there_are_no_files() {
+        let state = State::new();
+        let (scene, _, _) = scene_of(&state, 1200.0, 800.0, &shape(&[]));
+        let text = rendered(&scene);
+        assert!(text.contains("FILES"), "{text}");
     }
 
     #[test]

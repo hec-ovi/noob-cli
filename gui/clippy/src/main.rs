@@ -87,6 +87,7 @@ struct App {
     /// The size to go back to when the window is unshaded.
     unshaded: Option<PhysicalSize<u32>>,
     column: f32,
+    pane_column: f32,
 
     cursor: PhysicalPosition<f64>,
     hot: Option<Hit>,
@@ -119,6 +120,7 @@ impl App {
             shaded: false,
             unshaded: None,
             column: 8.0,
+            pane_column: 8.0,
             cursor: PhysicalPosition::new(0.0, 0.0),
             hot: None,
             last_click: None,
@@ -128,6 +130,7 @@ impl App {
     }
 
     fn shape(&self) -> Shape {
+        let width = self.gpu.as_ref().map_or(1.0, |gpu| gpu.width());
         Shape {
             shaded: self.shaded,
             fold_top: self.fold_top,
@@ -139,6 +142,12 @@ impl App {
                 .map(|file| view::short_name(&file.path))
                 .collect(),
             column: self.column,
+            input_h: view::input_height(
+                width,
+                self.column,
+                self.input.chars().count(),
+                noob_draw::Text::line_for(self.config.font_size),
+            ),
         }
     }
 
@@ -436,6 +445,12 @@ impl App {
                 .map(|file| view::short_name(&file.path))
                 .collect(),
             column: self.column,
+            input_h: view::input_height(
+                gpu.width(),
+                self.column,
+                self.input.chars().count(),
+                noob_draw::Text::line_for(self.config.font_size),
+            ),
         };
         let layout = Layout::compute(gpu.width(), gpu.height(), &shape);
         let scene = view::build(&view::Frame {
@@ -449,6 +464,7 @@ impl App {
             input: &self.input,
             caret: self.caret,
             column: self.column,
+            pane_column: self.pane_column,
             body_size: self.config.font_size,
             pane_size: self.config.pane_font_size,
             reports: &self.reports,
@@ -505,6 +521,7 @@ impl ApplicationHandler<Wake> for App {
                 }
                 let mut renderer = noob_draw::Renderer::new(&gpu);
                 self.column = renderer.column_width(self.config.font_size);
+                self.pane_column = renderer.column_width(self.config.pane_font_size);
                 self.renderer = Some(renderer);
                 self.gpu = Some(gpu);
             }

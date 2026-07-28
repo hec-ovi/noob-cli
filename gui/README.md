@@ -19,7 +19,7 @@ The conversation on the left. On the right, two tabbed groups:
 
 | tab | carries |
 |---|---|
-| ACTIVITY | every call, colored by kind: shell, look, edit, web, skill, mcp, agent, plan |
+| ACTIVITY | every call, one colour and one tag per tool: bash, read, ls, glob, grep, write, edit, web, skill, mcp, agent, plan |
 | PLAN | the checklist, straight from the plan tool's own arguments |
 | AGENTS | sub-agents, their brief and how they ended |
 | MONITOR | GPU, VRAM, GTT, CPU, RAM and the session's token economy |
@@ -37,7 +37,14 @@ samples while it is on screen, so an idle window still costs nothing.
 
 Calls are one list, not two. Splitting `bash` off looked right on paper and read
 as arbitrary in use: `ls` is the `ls` tool and `rm -rf` is `bash`, so the split
-put two neighbouring thoughts in two places. Color is what separates them now.
+put two neighbouring thoughts in two places. Colour separates them now, one per
+tool. Grouping them by category was tried first and read as no colour at all,
+because most of a session is `read`, `ls` and `grep`.
+
+Files show a line-number gutter and a band behind each block header, so a write
+reads as a mark between two stretches of file rather than as part of one.
+
+The prompt grows as you type, up to eight lines.
 
 Routing is by tool name, and by file extension for syntax coloring. The agent is
 never told any of this exists: everything the window shows is derived from calls
