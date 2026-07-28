@@ -186,14 +186,39 @@ impl Monitor {
 
         // The session's economy, which is a different question from whether
         // the machine is keeping up: this is the budget that runs out first.
-        if let Some(usage) = session.usage {
-            llm.push(Gauge {
+        // The agent's own reading where it sent one: it moves at every
+        // transcript boundary, while usage only reports the request that
+        // already went out. Falling back keeps a stream without measurements
+        // showing something true rather than nothing.
+        match (session.context, session.usage) {
+            (Some(fill), _) if fill.total > 0 => llm.push(Gauge {
+                key: "context",
+                label: "CONTEXT",
+                value: fill.used as f64,
+                max: Some(fill.total as f64),
+                unit: "tok",
+            }),
+            (_, Some(usage)) => llm.push(Gauge {
                 key: "context",
                 label: "CONTEXT",
                 value: usage.prompt as f64,
                 max: Some(usage.context_total as f64),
                 unit: "tok",
+            }),
+            _ => {}
+        }
+        // Where compaction triggers, which is the line that actually runs out:
+        // the window is not the budget.
+        if let Some(fill) = session.context.filter(|f| f.compact_at > 0) {
+            llm.push(Gauge {
+                key: "compact_at",
+                label: "COMPACTS AT",
+                value: fill.compact_at as f64,
+                max: Some(fill.total.max(1) as f64),
+                unit: "tok",
             });
+        }
+        if let Some(usage) = session.usage {
             llm.push(Gauge {
                 key: "cached",
                 label: "CACHED",

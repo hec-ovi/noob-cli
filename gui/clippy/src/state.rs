@@ -286,6 +286,39 @@ pub struct AgentRow {
     pub brief: String,
     pub state: &'static str,
     pub tone: Tone,
+    /// The tools this child was given, which is what says whether it can
+    /// write. Empty when the frame did not carry one.
+    pub tools: String,
+    /// The last thing it said, live while it runs and its reason once it ends.
+    /// A fleet of eight children is unreadable as eight names and no news.
+    pub last: String,
+}
+
+impl AgentRow {
+    fn new(label: String, brief: String, tools: String) -> AgentRow {
+        AgentRow {
+            label,
+            brief,
+            state: "queued",
+            tone: Tone::Dim,
+            tools,
+            last: String::new(),
+        }
+    }
+}
+
+/// How full the agent says its context is, right now.
+///
+/// Measured by the agent at every transcript boundary, so it moves while a
+/// turn is still running. `usage` only reports once per request and describes
+/// the request that already went out, which is a different and staler number.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ContextFill {
+    pub used: u64,
+    pub total: u64,
+    /// Where compaction triggers, which is the line that actually matters:
+    /// the window is not the budget, this is.
+    pub compact_at: u64,
 }
 
 /// One file the agent has touched, and everything it did to it.
@@ -294,6 +327,9 @@ pub struct FileView {
     pub pane: Pane,
     /// Set once anything was written to it, so the tab can say so.
     pub changed: bool,
+    /// Compaction dropped what the model had read of this file. The page is
+    /// still worth showing; it is just no longer what the agent is holding.
+    pub closed: bool,
 }
 
 /// The one word the collapsed bar shows. A window shaded to a single strip has
@@ -423,6 +459,9 @@ pub struct State {
     pub last_generated: u64,
     pub rates: Rates,
 
+    /// The agent's own reading of how full it is. None until it says.
+    pub context: Option<ContextFill>,
+
     pub turn: u32,
     pub phase: Phase,
     /// What is happening right now, in a few words, for the status bar.
@@ -457,6 +496,7 @@ impl State {
             last_prefill: 0,
             last_generated: 0,
             rates: Rates::default(),
+            context: None,
             turn: 0,
             phase: Phase::Starting,
             status: String::from("starting the agent"),
@@ -491,6 +531,7 @@ impl State {
             path: path.to_string(),
             pane: Pane::new(3000),
             changed: false,
+            closed: false,
         });
         self.open_file = self.files.len() - 1;
         self.files.last_mut().expect("just pushed")
@@ -568,24 +609,17 @@ impl State {
                 let kind = Kind::of(&name);
                 self.phase = Phase::Working;
                 self.status = format!("{name} {brief}");
-                match kind {
-                    // The plan is a view, not a log line: the call carries the
-                    // whole updated checklist, so it replaces the last one.
-                    Kind::Plan => self.plan = read_todos(&args),
-                    Kind::Agent => {
-                        let prompt = args
-                            .get("prompt")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(&brief)
-                            .to_string();
-                        self.agents.push(AgentRow {
-                            label: format!("agent {}", self.agents.len() + 1),
-                            brief: prompt,
-                            state: "running",
-                            tone: Tone::Bright,
-                        });
-                    }
-                    _ => {}
+                // The plan is a view, not a log line: the call carries the
+                // whole updated checklist, so it replaces the last one.
+                //
+                // A `subagent` call deliberately does NOT open an agent row.
+                // The call is the admission, not the child: it returns in
+                // microseconds while the child runs for minutes, and it is
+                // also how a cancel and a status poll are asked for. The
+                // agent.* frames are the child's own lifecycle, and letting
+                // both write rows showed every fan-out twice.
+                if kind == Kind::Plan {
+                    self.plan = read_todos(&args);
                 }
                 self.activity.say(
                     format!("{:>5}  {}", kind.tag(), subject(kind, &brief, &args)),
@@ -604,18 +638,16 @@ impl State {
                 error,
                 ..
             } => {
-                let open = self.open.remove(&call_id);
-                if open.as_ref().map(|o| o.kind) == Some(Kind::Agent)
-                    && let Some(agent) = self.agents.last_mut()
-                {
-                    let failed = error.is_some();
-                    agent.state = if failed { "failed" } else { "done" };
-                    agent.tone = if failed { Tone::Bad } else { Tone::Good };
-                }
+                self.open.remove(&call_id);
                 match error {
                     None => self.activity.say(format!("       {summary}"), Tone::Good),
                     Some(error) => {
                         self.activity.say(format!("       {summary}"), Tone::Bad);
+                        // The class and the number the system gave, when the
+                        // failure was minted with them. `exit_status 3` is the
+                        // whole answer often enough to be worth its own line.
+                        self.activity
+                            .say(format!("       {}", fault(&error)), Tone::Bad);
                         self.activity
                             .say(format!("       {}", error.message), Tone::Bad);
                         if let Some(detail) = error.detail.as_deref() {
@@ -629,6 +661,10 @@ impl State {
                             if rest.next().is_some() {
                                 self.activity.say("       …", Tone::Dim);
                             }
+                        }
+                        // What to do next, last, where the eye ends up.
+                        if let Some(remedy) = error.remedy.as_deref() {
+                            self.activity.say(format!("    -> {remedy}"), Tone::Bright);
                         }
                     }
                 }
@@ -678,22 +714,20 @@ impl State {
             }
             Event::FileClose { path, .. } => {
                 if let Some(file) = self.files.iter_mut().find(|f| f.path == path) {
+                    file.closed = true;
                     file.pane.say("left the context", Tone::Dim);
                 }
             }
 
             Event::AgentSpawn {
-                agent_id, prompt, ..
-            } => {
-                self.agents.push(AgentRow {
-                    label: agent_id,
-                    brief: prompt,
-                    state: "queued",
-                    tone: Tone::Dim,
-                });
-            }
+                agent_id,
+                prompt,
+                tools,
+            } => self.agents.push(AgentRow::new(agent_id, prompt, tools)),
             Event::AgentStateChanged {
-                agent_id, state, ..
+                agent_id,
+                state,
+                detail,
             } => {
                 let (word, tone) = match state {
                     noob_proto::AgentState::Done => ("done", Tone::Good),
@@ -705,11 +739,21 @@ impl State {
                 if let Some(agent) = self.agents.iter_mut().find(|a| a.label == agent_id) {
                     agent.state = word;
                     agent.tone = tone;
+                    // How it ended replaces what it was last doing: at the end
+                    // the reason is the only line worth the room.
+                    if let Some(detail) = detail {
+                        agent.last = detail;
+                    }
                 }
             }
+            // A child's own output belongs to the child, not to the parent's
+            // activity list: eight of them at once made that list unreadable
+            // and buried the parent's own work under it.
             Event::AgentOutput { agent_id, line } => {
-                self.activity
-                    .say(format!("agent  {agent_id} {line}"), Tone::Call(Kind::Agent));
+                match self.agents.iter_mut().find(|a| a.label == agent_id) {
+                    Some(agent) => agent.last = line,
+                    None => return false,
+                }
             }
 
             Event::UsageReport { usage } => {
@@ -727,6 +771,29 @@ impl State {
                 self.talk.say(line, Tone::Bad);
             }
 
+            // The agent's own reading of how full it is, which is a better
+            // number than the last request's prompt: it moves at every
+            // transcript boundary, including after a tool result mid-turn,
+            // where usage only lands once per request.
+            Event::Metrics { group, samples, .. } if group == "context" => {
+                let value = |key: &str| {
+                    samples
+                        .iter()
+                        .find(|s| s.key == key)
+                        .map(|s| (s.value.max(0.0) as u64, s.max.unwrap_or(0.0).max(0.0) as u64))
+                };
+                match value("used") {
+                    Some((used, total)) => {
+                        self.context = Some(ContextFill {
+                            used,
+                            total,
+                            compact_at: value("compact_at").map(|(at, _)| at).unwrap_or(0),
+                        });
+                    }
+                    None => return false,
+                }
+            }
+
             // Nothing this window shows yet. Skipped rather than guessed at,
             // which is what keeps a newer agent from breaking an older window.
             Event::SkillList { .. }
@@ -739,7 +806,13 @@ impl State {
     }
 
     /// How much of the context window this session is holding, 0.0 to 1.0.
+    ///
+    /// The agent's own reading first, because it moves during a turn; the last
+    /// request's prompt only as a fallback for a stream that never sent one.
     pub fn context_fraction(&self) -> f32 {
+        if let Some(fill) = self.context.filter(|f| f.total > 0) {
+            return (fill.used as f32 / fill.total as f32).clamp(0.0, 1.0);
+        }
         match self.usage {
             Some(usage) if usage.context_total > 0 => {
                 (usage.prompt as f32 / usage.context_total as f32).clamp(0.0, 1.0)
@@ -788,6 +861,18 @@ impl State {
             Phase::Working => format!("{}   {}{plan}{files}", self.phase.word(), self.status),
             _ => format!("{}{plan}{files}", self.phase.word()),
         }
+    }
+}
+
+/// What went wrong, as a class and a number rather than a sentence.
+///
+/// `exit_status 3` answers the question on its own often enough to earn its
+/// own line above the message. A failure nobody classified says so, because
+/// pretending to a class would be worse than admitting there is none.
+fn fault(error: &noob_proto::ToolError) -> String {
+    match error.code {
+        Some(code) => format!("{} {code}", error.kind),
+        None => error.kind.clone(),
     }
 }
 
@@ -1055,7 +1140,9 @@ mod tests {
     }
 
     /// Sub-agents get their own list rather than a row in the activity log,
-    /// which is where they used to disappear.
+    /// which is where they used to disappear. The list is built from the
+    /// children's own frames: the `subagent` call is the admission, which
+    /// returns in microseconds while the child runs for minutes.
     #[test]
     fn a_sub_agent_gets_a_row_of_its_own_that_resolves() {
         let mut state = State::new();
@@ -1064,23 +1151,192 @@ mod tests {
             "subagent",
             serde_json::json!({"prompt": "search the web for elcensuradoweb.com"}),
         ));
+        assert!(
+            state.agents.is_empty(),
+            "the admission is not the child: {:?}",
+            state.agents
+        );
+        state.apply(Event::AgentSpawn {
+            agent_id: "agent-1".into(),
+            prompt: "search the web for elcensuradoweb.com".into(),
+            tools: "web".into(),
+        });
         assert_eq!(state.agents.len(), 1);
-        assert_eq!(state.agents[0].state, "running");
+        assert_eq!(state.agents[0].state, "queued");
+        assert_eq!(state.agents[0].tools, "web");
         assert!(state.agents[0].brief.contains("elcensuradoweb"));
-        state.apply(Event::ToolEnd {
-            call_id: "s".into(),
-            summary: "subagent failed".into(),
-            elapsed_ms: 5,
-            error: Some(ToolError {
-                kind: "error".into(),
-                code: None,
-                message: "needs the websearch CLI on PATH".into(),
-                detail: None,
-                remedy: None,
-            }),
+
+        state.apply(Event::AgentStateChanged {
+            agent_id: "agent-1".into(),
+            state: noob_proto::AgentState::Running,
+            detail: None,
+        });
+        assert_eq!(state.agents[0].state, "running");
+        // Its own output is its news, and never the parent's activity list.
+        let before = state.activity.visible(200).len();
+        state.apply(Event::AgentOutput {
+            agent_id: "agent-1".into(),
+            line: "* websearch search".into(),
+        });
+        assert_eq!(state.agents[0].last, "* websearch search");
+        assert_eq!(state.activity.visible(200).len(), before);
+
+        state.apply(Event::AgentStateChanged {
+            agent_id: "agent-1".into(),
+            state: noob_proto::AgentState::Failed,
+            detail: Some("needs the websearch CLI on PATH".into()),
         });
         assert_eq!(state.agents[0].state, "failed");
         assert_eq!(state.agents[0].tone, Tone::Bad);
+        // How it ended replaces what it was last doing.
+        assert_eq!(state.agents[0].last, "needs the websearch CLI on PATH");
+    }
+
+    /// The tail of a fan-out: a child cancelled before it ever ran still
+    /// resolves, and output for a child this window never heard of is dropped
+    /// rather than invented.
+    #[test]
+    fn a_fleet_resolves_every_child_it_was_told_about() {
+        let mut state = State::new();
+        for n in 1..=3 {
+            state.apply(Event::AgentSpawn {
+                agent_id: format!("agent-{n}"),
+                prompt: format!("task {n}"),
+                tools: "read".into(),
+            });
+        }
+        assert_eq!(state.agents.len(), 3);
+        state.apply(Event::AgentStateChanged {
+            agent_id: "agent-3".into(),
+            state: noob_proto::AgentState::Canceled,
+            detail: Some("canceled before it started".into()),
+        });
+        assert_eq!(state.agents[2].state, "canceled");
+        assert_eq!(state.agents[0].state, "queued", "one child, not all of them");
+        assert!(!state.apply(Event::AgentOutput {
+            agent_id: "agent-99".into(),
+            line: "from nowhere".into(),
+        }));
+    }
+
+    /// A failure carries its class, the number the system gave it, and what to
+    /// do next. This is the row that used to read `error: exit code 1`.
+    #[test]
+    fn a_failed_call_shows_its_class_and_what_to_do_about_it() {
+        let mut state = State::new();
+        state.apply(tool_start("b", "bash", serde_json::json!({"cmd": "cargo build"})));
+        state.apply(Event::ToolEnd {
+            call_id: "b".into(),
+            summary: "bash cargo build (2.0s, exit 127)".into(),
+            elapsed_ms: 2000,
+            error: Some(ToolError {
+                kind: "exit_status".into(),
+                code: Some(127),
+                message: "cargo: command not found".into(),
+                detail: None,
+                remedy: Some("available here: python3 node".into()),
+            }),
+        });
+        let shown: Vec<&str> = state
+            .activity
+            .visible(200)
+            .iter()
+            .map(|line| line.text.trim())
+            .collect();
+        assert!(shown.contains(&"exit_status 127"), "{shown:?}");
+        assert!(shown.contains(&"-> available here: python3 node"), "{shown:?}");
+    }
+
+    /// The agent's own reading of how full it is beats the last request's
+    /// prompt: it moves during a turn, and it is the number compaction acts on.
+    #[test]
+    fn the_live_context_reading_outranks_the_last_request() {
+        let mut state = State::new();
+        state.apply(Event::UsageReport {
+            usage: noob_proto::Usage {
+                prompt: 1_000,
+                cached_prompt: 0,
+                completion: 10,
+                context_total: 10_000,
+            },
+        });
+        assert!((state.context_fraction() - 0.1).abs() < 0.001);
+        assert!(state.apply(Event::Metrics {
+            group: "context".into(),
+            at_ms: 42,
+            samples: vec![
+                noob_proto::Sample {
+                    key: "used".into(),
+                    label: "context used".into(),
+                    value: 8_000.0,
+                    max: Some(10_000.0),
+                    unit: Some("tokens".into()),
+                },
+                noob_proto::Sample {
+                    key: "compact_at".into(),
+                    label: "compacts at".into(),
+                    value: 7_500.0,
+                    max: Some(10_000.0),
+                    unit: Some("tokens".into()),
+                },
+            ],
+        }));
+        assert!((state.context_fraction() - 0.8).abs() < 0.001);
+        assert_eq!(state.context.unwrap().compact_at, 7_500);
+        // A group this window does not draw is skipped, not guessed at.
+        assert!(!state.apply(Event::Metrics {
+            group: "weather".into(),
+            at_ms: 43,
+            samples: Vec::new(),
+        }));
+    }
+
+    /// Live output from a running command scrolls under the call that made it,
+    /// in the call's own colour, so two concurrent tools cannot be confused.
+    #[test]
+    fn a_running_command_scrolls_its_output_under_its_own_row() {
+        let mut state = State::new();
+        state.apply(tool_start("b", "bash", serde_json::json!({"cmd": "cargo build"})));
+        for line in ["compiling noob", "compiling clippy"] {
+            state.apply(Event::ToolProgress {
+                call_id: "b".into(),
+                line: line.into(),
+            });
+        }
+        let shown: Vec<(String, Tone)> = state
+            .activity
+            .visible(200)
+            .iter()
+            .map(|line| (line.text.trim().to_string(), line.tone))
+            .collect();
+        assert_eq!(shown[1].0, "compiling noob");
+        assert_eq!(shown[1].1, Tone::Call(Kind::Bash), "{shown:?}");
+        assert_eq!(shown[2].0, "compiling clippy");
+    }
+
+    /// Compaction ends a file's life in the model's context. The page stays
+    /// readable; the tab stops claiming the agent is holding it.
+    #[test]
+    fn a_compacted_file_is_marked_as_gone_from_the_context() {
+        let mut state = State::new();
+        state.apply(Event::FileOpen {
+            path: "src/main.rs".into(),
+            lines: 40,
+            call_id: Some("r".into()),
+        });
+        assert!(!state.files[0].closed);
+        state.apply(Event::FileClose {
+            path: "src/main.rs".into(),
+            call_id: None,
+        });
+        assert!(state.files[0].closed);
+        assert!(
+            state.files[0]
+                .pane
+                .visible(20)
+                .iter()
+                .any(|line| line.text.contains("left the context"))
+        );
     }
 
     /// One tab per file, selected by whatever the agent just touched, so the

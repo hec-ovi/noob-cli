@@ -620,6 +620,12 @@ fn plan(scene: &mut Scene, frame: &Frame, panel: Panel) {
     text_box(scene, frame, panel, frame.pane_size, runs);
 }
 
+/// The fleet: one child per row, and under each the last thing it said.
+///
+/// A row alone is a name and a word, which for eight children at once tells
+/// you nothing about any of them. The second line is where the news is: while
+/// a child runs it is that child's own output, and once it ends it is the
+/// reason it ended.
 fn agents(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let (skin, state) = (frame.skin, frame.state);
     let mut runs = Vec::new();
@@ -632,8 +638,17 @@ fn agents(scene: &mut Scene, frame: &Frame, panel: Panel) {
             format!("{:<10}", agent.state),
             skin.tone(agent.tone),
         ));
+        // The tool set says whether this child can change anything, which is
+        // the one thing about a detached child worth knowing at a glance.
+        if !agent.tools.is_empty() {
+            runs.push(Run::tinted(format!("{:<10}", agent.tools), skin.dim));
+        }
         runs.push(Run::tinted(clip(&agent.brief, 300), skin.body));
         runs.push(Run::plain("\n"));
+        if !agent.last.is_empty() {
+            runs.push(Run::tinted(format!("           {}", clip(&agent.last, 300)), skin.dim));
+            runs.push(Run::plain("\n"));
+        }
     }
     text_box(scene, frame, panel, frame.pane_size, runs);
 }
@@ -788,7 +803,13 @@ fn files(scene: &mut Scene, frame: &Frame, panel: Panel) {
             scene.rect(tab.fill(skin.panel));
             scene.rect(tab.top_edge(skin.edge_focus));
         }
-        let color = if active { skin.bright } else { skin.title };
+        // A file compaction dropped is still worth reading; it is just no
+        // longer what the agent is holding, and the tab says which.
+        let color = match (active, file.closed) {
+            (_, true) => skin.dim,
+            (true, false) => skin.bright,
+            (false, false) => skin.title,
+        };
         let mut runs = vec![Run::tinted(short_name(&file.path), color)];
         if file.changed {
             runs.push(Run::tinted(" \u{2022}", skin.plus));
@@ -1071,6 +1092,22 @@ mod tests {
             name: "subagent".into(),
             brief: "research".into(),
             args: serde_json::json!({"prompt": "search the web"}),
+        });
+        // The admission above is the parent asking; the child's own frames are
+        // what the fleet is drawn from.
+        state.apply(noob_proto::Event::AgentSpawn {
+            agent_id: "agent-1".into(),
+            prompt: "search the web".into(),
+            tools: "web".into(),
+        });
+        state.apply(noob_proto::Event::AgentStateChanged {
+            agent_id: "agent-1".into(),
+            state: noob_proto::AgentState::Running,
+            detail: None,
+        });
+        state.apply(noob_proto::Event::AgentOutput {
+            agent_id: "agent-1".into(),
+            line: "* websearch search".into(),
         });
         state.apply(noob_proto::Event::FileEdit {
             path: "src/calc.py".into(),
