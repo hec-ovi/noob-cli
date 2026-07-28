@@ -110,12 +110,17 @@ case "${1:-}" in
     echo "clippy runtime crates: $crates"
     [ "$crates" -le 400 ] || { echo "FAIL: CLIppy crate graph exceeds 400"; exit 1; }
     ;;
-  gui-package)
-    # A release tarball: the binary, the icon, the desktop entry and an
-    # installer that puts them under ~/.local. Not a Flatpak or an AppImage
-    # because neither buys anything here: the binary is static apart from the
-    # system's own GPU drivers, which are exactly the thing a bundle cannot
-    # ship anyway.
+  gui-package|gui-install)
+    # Both routes stage the same directory, because they were two copies of the
+    # same list once and the copies disagreed: a glob matched the icon and the
+    # launcher but not the icon's small variant, and the install died on a file
+    # nobody had noticed was missing. `gui/data` is copied whole now, so the
+    # staged set cannot drift from what is in the repository.
+    #
+    # Not a Flatpak or an AppImage: the binary is static apart from the
+    # system's own GPU drivers, which are exactly what a bundle cannot ship.
+    command=$1
+    shift
     version=$(awk -F'"' '/^version/ {print $2; exit}' gui/Cargo.toml)
     arch=$(uname -m)
     stage="gui/target/package/clippy-$version-$arch-linux"
@@ -124,23 +129,16 @@ case "${1:-}" in
     install -d "$stage"
     install -m 0755 gui/target/release/clippy "$stage/clippy"
     install -m 0755 gui/data/install.sh "$stage/install.sh"
-    install -m 0644 gui/data/io.github.hec_ovi.CLIppy.desktop "$stage/"
-    install -m 0644 gui/data/io.github.hec_ovi.CLIppy.svg "$stage/"
-    install -m 0644 gui/data/io.github.hec_ovi.CLIppy-symbolic.svg "$stage/"
+    for asset in gui/data/io.github.hec_ovi.CLIppy*; do
+        install -m 0644 "$asset" "$stage/"
+    done
+    if [ "$command" = gui-install ]; then
+        exec bash "$stage/install.sh" "$@"
+    fi
     tarball="$(dirname "$stage")/$(basename "$stage").tar.gz"
     tar -czf "$tarball" -C "$(dirname "$stage")" "$(basename "$stage")"
     echo "$tarball"
     echo "$(stat -c%s "$tarball") bytes"
-    ;;
-  gui-install)
-    # The same install the tarball performs, straight from this checkout.
-    cargo build --release --manifest-path gui/Cargo.toml
-    shift
-    install -d gui/target/release/data
-    cp gui/data/io.github.hec_ovi.CLIppy.* gui/target/release/data/
-    cp gui/target/release/clippy gui/target/release/data/clippy
-    cp gui/data/install.sh gui/target/release/data/install.sh
-    exec bash gui/target/release/data/install.sh "$@"
     ;;
   avatar)
     # Regenerate CLIppy's ASCII avatar from a GIF. The window never decodes an

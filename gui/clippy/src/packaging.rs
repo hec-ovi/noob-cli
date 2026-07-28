@@ -21,6 +21,8 @@ const DESKTOP: &str = include_str!("../../data/io.github.hec_ovi.CLIppy.desktop"
 const ICON: &str = include_str!("../../data/io.github.hec_ovi.CLIppy.svg");
 #[cfg(test)]
 const SYMBOLIC: &str = include_str!("../../data/io.github.hec_ovi.CLIppy-symbolic.svg");
+#[cfg(test)]
+const INSTALLER: &str = include_str!("../../data/install.sh");
 
 #[cfg(test)]
 mod tests {
@@ -46,6 +48,40 @@ mod tests {
         assert_eq!(key(DESKTOP, "Icon"), APP_ID);
         // And the entry runs the binary the installer put on PATH.
         assert!(key(DESKTOP, "Exec").starts_with("clippy"), "{DESKTOP}");
+    }
+
+    /// Every file the installer places has to exist to be placed.
+    ///
+    /// This is not hypothetical. The staging step used a glob that matched the
+    /// icon and the launcher but not the icon's small variant, whose name has
+    /// a suffix before the extension. The install died on a missing file with
+    /// no clue which one, because `install` reports the error and not the
+    /// path. The glob is gone; this keeps the list honest.
+    #[test]
+    fn the_installer_only_places_files_that_exist() {
+        let placed: Vec<&str> = INSTALLER
+            .lines()
+            .filter(|line| line.contains("install -m") && line.contains("$HERE/"))
+            .map(|line| {
+                line.split("$HERE/")
+                    .nth(1)
+                    .and_then(|rest| rest.split('"').next())
+                    .expect("an installed file is quoted")
+            })
+            .collect();
+        assert!(placed.len() >= 3, "the installer places {placed:?}");
+        for name in placed {
+            let name = name.replace("$APP_ID", crate::APP_ID);
+            // The binary is the one thing staged from the build rather than
+            // from the repository.
+            if name == "clippy" {
+                continue;
+            }
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../data")
+                .join(&name);
+            assert!(path.exists(), "the installer places {name}, which is not in gui/data");
+        }
     }
 
     /// A malformed entry is ignored in full, so the parts that make it valid
