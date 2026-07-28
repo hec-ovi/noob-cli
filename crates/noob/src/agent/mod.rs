@@ -34,6 +34,10 @@ const DOOM_REPEATS: usize = 3;
 const REPEAT_EXEMPT: &[&str] = &["bash", "mcp_call", "subagent"];
 const NUDGE_AT: u32 = 4;
 const PAUSE_AT: u32 = 8;
+/// Lines of a failure's tail shown under its summary row. Enough for a short
+/// stack trace or a compiler's last few diagnostics, few enough that a failing
+/// test suite does not repaint the screen.
+const TOOL_ERROR_DETAIL_LINES: usize = 8;
 
 /// The plan-mode tool set (ARCHITECTURE.md, plan mode): the shared
 /// read-only set. Everything else is structurally absent from the request,
@@ -868,6 +872,16 @@ impl Agent {
                             timed_summary(&call.name, &visible, elapsed)
                         };
                         ui.tool_done(&call.id, &summary, outcome.is_error && !outcome.canceled);
+                        // A one-line row is right for a one-line failure and
+                        // useless for a command that printed a stack trace
+                        // before dying, so the tail follows it.
+                        if outcome.is_error && !outcome.canceled {
+                            let detail =
+                                tools::error_detail(&outcome.content, TOOL_ERROR_DETAIL_LINES);
+                            if !detail.is_empty() {
+                                ui.tool_error_detail(&call.id, &detail.join("\n"));
+                            }
+                        }
                         // The plan tool's result is a checklist; show it as a
                         // visible block on the themed REPL (a no-op elsewhere).
                         if matches!(call.name.as_str(), "plan" | "todo") && !outcome.is_error {
@@ -1626,8 +1640,9 @@ fn is_status_poll(call: &ToolCall) -> bool {
 
 fn timed_summary(name: &str, summary: &str, elapsed: Option<std::time::Duration>) -> String {
     match elapsed {
-        // Bash already measures and prints its own lifecycle duration.
-        Some(_) if name == "bash" => summary.to_string(),
+        // These two measure and print their own lifecycle duration, so the
+        // scheduler's would be the second one on the same row.
+        Some(_) if matches!(name, "bash" | "websearch") => summary.to_string(),
         Some(elapsed) => format!("{summary} · {}", crate::ui::elapsed_label(elapsed)),
         None => summary.to_string(),
     }
@@ -1635,7 +1650,7 @@ fn timed_summary(name: &str, summary: &str, elapsed: Option<std::time::Duration>
 
 /// Keep the full tool result in the transcript while making a failed activity
 /// line useful on its own. ToolOutcome's stable machine summary remains
-/// `error`; only the human-facing row receives the first diagnostic line.
+/// `error`; only the human-facing row receives the diagnosis.
 /// A canceled call names its subject: a lone "* canceled" row read as "my
 /// background work was killed" in a live session when only one bash wait was.
 fn visible_tool_summary(name: &str, outcome: &ToolOutcome) -> String {
@@ -1645,13 +1660,19 @@ fn visible_tool_summary(name: &str, outcome: &ToolOutcome) -> String {
     if !outcome.is_error {
         return outcome.summary.clone();
     }
-    let detail = outcome
-        .content
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or(&outcome.summary);
-    let detail = clip(detail, 160);
+    let digest = tools::error_digest(&outcome.content);
+    // A tool that built its own summary keeps it as the row's subject: `bash`
+    // and `websearch` name the command and carry the exit code and duration,
+    // all of which the failure row was throwing away. `error` is the default
+    // placeholder every other tool leaves in place and says nothing, so there
+    // the diagnosis stands alone.
+    if outcome.summary != "error" {
+        return match digest {
+            Some(line) => format!("{} · {}", outcome.summary, clip(line, 120)),
+            None => outcome.summary.clone(),
+        };
+    }
+    let detail = clip(digest.unwrap_or(outcome.summary.as_str()), 160);
     if detail.to_ascii_lowercase().starts_with("error")
         || detail.to_ascii_lowercase().starts_with("sub-agent error")
     {
@@ -1683,6 +1704,71 @@ mod tests {
             visible_tool_summary("bash", &ToolOutcome::canceled()),
             "bash canceled",
             "a canceled call must name its subject"
+        );
+    }
+
+    /// The reported bug: a failing command rendered as a red `error: exit code
+    /// 1` with no hint of what broke, and the summary bash had already built
+    /// (the command, its duration, its exit code) was discarded on the error
+    /// path. Both halves are asserted here because either alone still leaves
+    /// the human guessing.
+    #[test]
+    fn a_failed_command_names_itself_and_what_went_wrong() {
+        let mut out = ToolOutcome::err(
+            "exit code 1\n\
+             running 2 tests\n\
+             error: could not compile `noob` (lib test)",
+        );
+        out.summary = "bash cargo test (2.1s, exit 1)".to_string();
+        assert_eq!(
+            visible_tool_summary("bash", &out),
+            "bash cargo test (2.1s, exit 1) · error: could not compile `noob` (lib test)"
+        );
+    }
+
+    /// A failed web call rendered as the untrusted-content banner, which is
+    /// the single least informative line in the whole result.
+    #[test]
+    fn a_failed_web_call_reports_the_failure_not_the_banner() {
+        let mut out = ToolOutcome::err(crate::tools::untrusted::wrap(
+            "the web (websearch)",
+            "websearch: no SearXNG instance configured",
+        ));
+        out.summary = "websearch web-search (0.4s, exit 1)".to_string();
+        let line = visible_tool_summary("websearch", &out);
+        assert_eq!(
+            line,
+            "websearch web-search (0.4s, exit 1) · websearch: no SearXNG instance configured"
+        );
+        assert!(!line.contains("untrusted"), "{line}");
+    }
+
+    /// An MCP failure leaves the default `error` summary in place, so the
+    /// diagnosis stands alone rather than being prefixed by a placeholder.
+    #[test]
+    fn a_failed_mcp_call_stands_on_its_diagnosis_alone() {
+        let out = ToolOutcome::err(crate::tools::untrusted::wrap(
+            "MCP server \"fs\"",
+            "connection refused",
+        ));
+        assert_eq!(
+            visible_tool_summary("mcp_call", &out),
+            "error: connection refused"
+        );
+    }
+
+    /// bash and websearch both measure themselves, so the scheduler must not
+    /// append a second duration to the same row.
+    #[test]
+    fn self_timing_tools_are_not_timed_twice() {
+        let elapsed = Some(std::time::Duration::from_millis(1_200));
+        for name in ["bash", "websearch"] {
+            let summary = format!("{name} thing (1.2s, exit 0)");
+            assert_eq!(timed_summary(name, &summary, elapsed), summary, "{name}");
+        }
+        assert_eq!(
+            timed_summary("read", "read src/a.rs", elapsed),
+            "read src/a.rs · 1.2s"
         );
     }
 

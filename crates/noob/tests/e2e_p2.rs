@@ -142,6 +142,45 @@ fn tool_error_row_is_descriptive() {
     rig.server.assert_clean();
 }
 
+/// The reported bug, through the real binary: a failing command rendered as
+/// `error: exit code 1` and nothing else. The row must name the command, its
+/// exit code and its duration, and carry the line the command actually died
+/// on, which lives at the END of the captured output and not at its start.
+#[test]
+fn failed_command_row_carries_the_command_and_its_diagnosis() {
+    let rig = rig();
+    rig.server.enqueue_stream_toolcalls(
+        &[(
+            "b1",
+            "bash",
+            r#"{"cmd":"echo compiling; echo 'error: could not compile marker' >&2; exit 1"}"#,
+        )],
+        None,
+    );
+    rig.server.enqueue_stream_completion("the build is broken.");
+
+    let out = rig.run(&["exec", "-p", "build it"]);
+    ok(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let row = stderr
+        .lines()
+        .find(|line| line.contains("exit 1"))
+        .unwrap_or_else(|| panic!("no failure row in stderr: {stderr}"));
+    assert!(row.contains("bash"), "the row lost the tool: {row}");
+    assert!(
+        row.contains("error: could not compile marker"),
+        "the row lost the diagnosis: {row}"
+    );
+    // The regression itself: the status header must never be the whole story.
+    assert!(
+        !stderr
+            .lines()
+            .any(|line| line.trim() == "* error: exit code 1"),
+        "stderr: {stderr}"
+    );
+    rig.server.assert_clean();
+}
+
 /// One assistant turn with three read calls: all three results come back
 /// in emission order, one tool message per call id.
 #[test]

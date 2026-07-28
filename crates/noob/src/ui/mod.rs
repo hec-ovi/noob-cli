@@ -85,6 +85,12 @@ pub(crate) enum TurnEvent {
         summary: String,
         is_error: bool,
     },
+    /// The failing tail of a tool error, shown under its summary row. Themed
+    /// REPL only, like the checklist and the fan-out panel; off the token path.
+    ToolDetail {
+        id: String,
+        block: String,
+    },
     /// The `plan` tool's rendered checklist text (header + one glyph line per
     /// item), for the themed REPL's visible block. Off the token path.
     Todos(String),
@@ -158,6 +164,7 @@ impl BufferedTurnRenderer {
             } => {
                 self.ui.tool_done(&id, &summary, is_error);
             }
+            TurnEvent::ToolDetail { id, block } => self.ui.render_error_detail(&id, &block),
             TurnEvent::Todos(text) => self.ui.render_checklist(&text),
             TurnEvent::Agents { block, ids } => self.ui.render_agents(&block, &ids),
             TurnEvent::Note(line) => self.ui.note(&line),
@@ -728,6 +735,50 @@ impl Ui {
                 }
                 self.activity_line(summary, is_error);
             }
+        }
+    }
+
+    /// Show the failing tail of a tool error under its summary row. `block` is
+    /// already selected and ordered by the caller; this only paints it.
+    ///
+    /// The summary row carries one line, which is the right amount when a
+    /// failure IS one line and far too little when a command printed a stack
+    /// trace before dying. The transcript has always had the whole thing and
+    /// the human never did.
+    pub fn tool_error_detail(&mut self, id: &str, block: &str) {
+        if self.send_turn(TurnEvent::ToolDetail {
+            id: id.to_string(),
+            block: block.to_string(),
+        }) {
+            return;
+        }
+        self.render_error_detail(id, block);
+    }
+
+    /// Paint the failure tail: dim, indented under the row, one terminal row
+    /// per line. Themed REPL only, so every byte-identity surface (piped REPL,
+    /// exec, exec --json, child) is unchanged, exactly like the checklist and
+    /// the fan-out panel. Those surfaces still gain the richer summary row,
+    /// which is the part that belongs on one line.
+    fn render_error_detail(&mut self, id: &str, block: &str) {
+        if !self.styled() || self.panel_task_ids.contains(id) {
+            return;
+        }
+        self.end_line();
+        let width = prompt::term_width();
+        let mut rendered = String::new();
+        for line in block.lines() {
+            let safe = safe_terminal_text(line);
+            if safe.trim().is_empty() {
+                continue;
+            }
+            rendered.push_str(DIM);
+            rendered.push_str(&clamp_to_row(&format!("  {safe}"), width));
+            rendered.push_str(RESET);
+            rendered.push('\n');
+        }
+        if !rendered.is_empty() {
+            self.out(&rendered);
         }
     }
 
@@ -1609,6 +1660,53 @@ mod tests {
                 ui.checklist_region_rows("plan (0/1 done):\n[ ] x", 40)
                     .is_empty()
             );
+        }
+    }
+
+    /// The failure tail is what the human never had: the summary row carries
+    /// one line, and everything the command actually said lived only in the
+    /// transcript the model reads.
+    #[test]
+    fn styled_error_detail_shows_the_failing_tail_indented_and_dim() {
+        let (mut ui, out, _) = harness(Mode::Repl, true, true);
+        ui.tool_error_detail("c1", "running 2 tests\nerror[E0308]: mismatched types");
+        let s = out.text();
+        let plain = strip_ansi(&s);
+        for line in ["  running 2 tests", "  error[E0308]: mismatched types"] {
+            assert!(plain.contains(line), "missing {line:?} in {plain:?}");
+        }
+        assert!(s.contains(DIM), "the detail block must be dim: {s:?}");
+        assert!(s.ends_with("\x1b[0m\n"), "every row must reset: {s:?}");
+    }
+
+    /// A fan-out agent's rows belong to the panel, and the panel already shows
+    /// its failures. Without this the themed surface prints a detail block for
+    /// a call whose summary row it deliberately suppressed.
+    #[test]
+    fn error_detail_is_suppressed_for_calls_an_agents_panel_covers() {
+        let (mut ui, out, _) = harness(Mode::Repl, true, true);
+        ui.panel_task_ids.insert("f1".to_string());
+        ui.tool_error_detail("f1", "first\nsecond");
+        assert!(out.text().is_empty(), "{:?}", out.text());
+    }
+
+    /// Same discipline as the checklist and the fan-out panel: the block is a
+    /// themed-REPL affordance and no byte-identity surface may gain a byte.
+    /// Those surfaces still get the richer summary row, which is the part that
+    /// belongs on a single line.
+    #[test]
+    fn error_detail_is_silent_on_byte_identity_surfaces() {
+        for (label, mode, color, ansi) in [
+            ("no_color_repl", Mode::Repl, false, true),
+            ("piped_repl", Mode::Repl, false, false),
+            ("exec", Mode::Exec, true, true),
+            ("exec_json", Mode::ExecJson, true, true),
+            ("child", Mode::Child, true, true),
+        ] {
+            let (mut ui, out, err) = harness(mode, color, ansi);
+            ui.tool_error_detail("c1", "first\nsecond");
+            assert!(out.text().is_empty(), "{label} stdout gained detail bytes");
+            assert!(err.text().is_empty(), "{label} stderr gained detail bytes");
         }
     }
 
