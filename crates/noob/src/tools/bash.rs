@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use serde_json::Value;
 
 use super::exec;
-use super::{ToolCtx, ToolOutcome, need_str, opt_u64};
+use super::{ToolCtx, ToolOutcome, fail, need_str, opt_u64};
 
 const DEFAULT_TIMEOUT_S: u64 = 120;
 const MAX_TIMEOUT_S: u64 = 600;
@@ -60,19 +60,33 @@ fn not_found_hint(code: i32, body: &str) -> Option<String> {
 }
 
 pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
+    // Both sides are the outcome: a failure is classified where it is minted,
+    // which is the only place that knows whether it was the model's argument,
+    // the deadline, or the command's own exit status.
     match run_inner(ctx, args) {
-        Ok(out) => out,
-        Err(msg) if msg.starts_with("command canceled by user") => ToolOutcome::canceled_with(msg),
-        Err(msg) => ToolOutcome::err(msg),
+        Ok(out) | Err(out) => out,
     }
 }
 
-fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
-    let cmd = need_str(args, "cmd")?;
+/// A parameter the model got wrong, which is a different failure from anything
+/// the command itself can do.
+fn arg_error(message: String) -> ToolOutcome {
+    ToolOutcome::err(message).classed(fail::INVALID_ARGUMENT)
+}
+
+// Both variants are the same type, so there is no smaller shape to move to:
+// the usual advice (box the error) would only add an allocation to every
+// failure and leave the success just as large.
+#[allow(clippy::result_large_err)]
+fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, ToolOutcome> {
+    let cmd = need_str(args, "cmd").map_err(arg_error)?;
     if cmd.trim().is_empty() {
-        return Err("cmd is empty; send the shell command to run".to_string());
+        return Err(arg_error(
+            "cmd is empty; send the shell command to run".to_string(),
+        ));
     }
-    let timeout_s = opt_u64(args, "timeout_s")?
+    let timeout_s = opt_u64(args, "timeout_s")
+        .map_err(arg_error)?
         .unwrap_or(DEFAULT_TIMEOUT_S)
         .clamp(1, MAX_TIMEOUT_S);
 
@@ -84,20 +98,27 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         timeout_s,
         ctx.caps.bash_head,
         ctx.caps.bash_tail,
+        crate::emit::Progress::for_current_call(&ctx.emitter),
     ) {
         Ok(run) => run,
-        Err(exec::RunError::Spawn(message)) => return Err(message),
+        Err(exec::RunError::Spawn(message)) => {
+            return Err(ToolOutcome::err(message).classed(fail::INTERNAL));
+        }
         Err(exec::RunError::Canceled { body, elapsed }) => {
-            return Err(format!(
+            return Err(ToolOutcome::canceled_with(format!(
                 "command canceled by user after {:.1}s; partial output:\n{body}",
                 elapsed.as_secs_f32()
-            ));
+            )));
         }
         Err(exec::RunError::TimedOut { body, timeout_s }) => {
-            return Err(format!(
+            return Err(ToolOutcome::err(format!(
                 "command timed out after {timeout_s}s and was killed; raise timeout_s \
                  (max {MAX_TIMEOUT_S}) or run something faster; partial output:\n{body}"
-            ));
+            ))
+            .classed(fail::TIMEOUT)
+            .remedy(format!(
+                "raise timeout_s (max {MAX_TIMEOUT_S}) or run something faster"
+            )));
         }
     };
     let (mut body, code, elapsed) = (run.body, run.code, run.elapsed);
@@ -120,7 +141,17 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         ToolOutcome::ok(body, summary)
     } else {
         let hint = not_found_hint(code, &body).unwrap_or_default();
-        let mut out = ToolOutcome::err(format!("exit code {code}\n{body}{hint}"));
+        let mut out = ToolOutcome::err(format!("exit code {code}\n{body}{hint}"))
+            .classed(fail::EXIT_STATUS)
+            .coded(code);
+        // The one exit status whose next action is knowable from the number
+        // alone. Anything else, the command already said why.
+        if code == 127 {
+            out.remedy = Some(match available() {
+                "" => "none of the usual interpreters are on PATH here".to_string(),
+                found => format!("available here: {found}"),
+            });
+        }
         out.summary = summary;
         out
     };

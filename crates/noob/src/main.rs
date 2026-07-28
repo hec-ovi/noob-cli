@@ -1281,6 +1281,12 @@ fn cmd_serve(args: &[String]) -> ExitCode {
         }
     };
 
+    // A front end drives a long-lived conversation, same as the dock, so
+    // sub-agents detach here too. Without this they run inline, the session
+    // blocks for the length of the longest child, and the agent.* frames a
+    // front end draws its fleet from never exist.
+    agent.enable_background_agents(&mut ui);
+
     // Commands are read on their own thread so a cancel lands while a turn is
     // running rather than after it. The turn itself stays on the main thread,
     // one at a time, which is what keeps the transcript ordered.
@@ -1315,7 +1321,29 @@ fn cmd_serve(args: &[String]) -> ExitCode {
         }
     });
 
-    for text in rx {
+    loop {
+        // A detached child settles on its own schedule, after the turn that
+        // started it. Deliver each report as it lands rather than at whatever
+        // the human types next, which may be never.
+        while agent.background_snapshot().ready > 0 {
+            match agent.continue_after_background(&mut ui) {
+                RunEnd::Completed(_) | RunEnd::Interrupted | RunEnd::Aborted(_) => {}
+            }
+        }
+        // Poll only while children are actually running. Idle is a blocking
+        // wait, so a session with nothing in flight costs nothing at all.
+        let text = if agent.background_snapshot().active > 0 {
+            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(text) => text,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(text) => text,
+                Err(_) => break,
+            }
+        };
         if text.trim().is_empty() {
             continue;
         }

@@ -169,9 +169,43 @@ impl ToolCtx {
     }
 
     pub(crate) fn set_context(&self, used: u64, total: u64, threshold: u64) {
-        self.context_used.store(used, Ordering::Relaxed);
-        self.context_total.store(total, Ordering::Relaxed);
-        self.context_threshold.store(threshold, Ordering::Relaxed);
+        let before = (
+            self.context_used.swap(used, Ordering::Relaxed),
+            self.context_total.swap(total, Ordering::Relaxed),
+            self.context_threshold.swap(threshold, Ordering::Relaxed),
+        );
+        // The agent refreshes at several boundaries that can land back to
+        // back on the same numbers. A series wants the points where something
+        // moved, not one sample per time the question was asked.
+        if before == (used, total, threshold) {
+            return;
+        }
+        // The only place these numbers change, so the only place that makes a
+        // series rather than a reading. The `context` tool reads the same
+        // atomics, but only when the model asks, which is rare and uneven; a
+        // graph drawn from that would be a graph of the model's curiosity.
+        if self.emitter.is_on() {
+            let scale = (total > 0).then_some(total as f64);
+            self.emitter.metrics(
+                "context",
+                vec![
+                    noob_proto::Sample {
+                        key: "used".to_string(),
+                        label: "context used".to_string(),
+                        value: used as f64,
+                        max: scale,
+                        unit: Some("tokens".to_string()),
+                    },
+                    noob_proto::Sample {
+                        key: "compact_at".to_string(),
+                        label: "compacts at".to_string(),
+                        value: threshold as f64,
+                        max: scale,
+                        unit: Some("tokens".to_string()),
+                    },
+                ],
+            );
+        }
     }
 
     pub(crate) fn record_evidence_call(&self) {
@@ -255,12 +289,41 @@ impl ToolCtx {
 /// recognizes cancellation structurally instead of by matching the content
 /// string (which a tool could otherwise echo to forge one). Tools that were
 /// already running also set it when they observe the shared interrupt.
+///
+/// `kind`, `code` and `remedy` are the same question asked structurally rather
+/// than by reading `content`: what class of failure this was, what number the
+/// system gave it, and what to do next. Every tool already writes the answer
+/// into its error prose, but that prose is asserted verbatim by tests and
+/// parsing it back out is a guess. Set at the point the failure is minted,
+/// where it is known for free. None means unclassified, which is honest.
+#[derive(Clone)]
 pub struct ToolOutcome {
     pub content: String,
     pub is_error: bool,
     pub summary: String,
     pub warning: Option<String>,
     pub canceled: bool,
+    /// One of the closed set the protocol names: `not_found`, `denied`,
+    /// `timeout`, `canceled`, `exit_status`, `invalid_argument`, `internal`.
+    pub kind: Option<&'static str>,
+    /// The number the system gave, where there is one: a process exit status.
+    pub code: Option<i32>,
+    /// What to do next, in the words the tool would have used anyway.
+    pub remedy: Option<String>,
+}
+
+/// The classes a failure can be. Static strings rather than an enum: the
+/// protocol carries the word, a consumer may see one this build has never
+/// heard of, and neither side gains anything from a type that closes the set
+/// twice.
+pub mod fail {
+    pub const NOT_FOUND: &str = "not_found";
+    pub const DENIED: &str = "denied";
+    pub const TIMEOUT: &str = "timeout";
+    pub const CANCELED: &str = "canceled";
+    pub const EXIT_STATUS: &str = "exit_status";
+    pub const INVALID_ARGUMENT: &str = "invalid_argument";
+    pub const INTERNAL: &str = "internal";
 }
 
 impl ToolOutcome {
@@ -271,6 +334,9 @@ impl ToolOutcome {
             summary: summary.into(),
             warning: None,
             canceled: false,
+            kind: None,
+            code: None,
+            remedy: None,
         }
     }
 
@@ -281,6 +347,9 @@ impl ToolOutcome {
             summary: "error".to_string(),
             warning: None,
             canceled: false,
+            kind: None,
+            code: None,
+            remedy: None,
         }
     }
 
@@ -298,7 +367,29 @@ impl ToolOutcome {
             summary: "canceled".to_string(),
             warning: None,
             canceled: true,
+            kind: Some(fail::CANCELED),
+            code: None,
+            remedy: None,
         }
+    }
+
+    /// Say what class of failure this is. Chainable at the mint site, which is
+    /// the only place that knows.
+    pub fn classed(mut self, kind: &'static str) -> ToolOutcome {
+        self.kind = Some(kind);
+        self
+    }
+
+    /// Attach the number the system gave.
+    pub fn coded(mut self, code: i32) -> ToolOutcome {
+        self.code = Some(code);
+        self
+    }
+
+    /// Attach what to do next.
+    pub fn remedy(mut self, remedy: impl Into<String>) -> ToolOutcome {
+        self.remedy = Some(remedy.into());
+        self
     }
 }
 
@@ -446,12 +537,18 @@ pub fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
                     "workspace write blocked: another parent or sub-agent mutation is active; \
                      continue read-only, wait for it to finish, or cancel the relevant agent \
                      with /agents cancel <agent-N>",
+                )
+                .classed(fail::DENIED)
+                .remedy(
+                    "continue read-only, wait for it to finish, or cancel the relevant agent \
+                     with /agents cancel <agent-N>",
                 );
             }
             Err(guard::WorkspaceLeaseError::Io(error)) => {
                 return ToolOutcome::err(format!(
                     "cannot lock the workspace before {name}: {error}; no files were changed"
-                ));
+                ))
+                .classed(fail::INTERNAL);
             }
         }
     } else {
@@ -503,7 +600,9 @@ fn correct_path_arg(
 fn dispatch_unlocked(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
     let (args, correction) = match correct_path_arg(ctx, name, args) {
         Ok(pair) => pair,
-        Err(message) => return ToolOutcome::err(message),
+        // The resolver only fails when nothing near the given path exists,
+        // which is the definition of this class.
+        Err(message) => return ToolOutcome::err(message).classed(fail::NOT_FOUND),
     };
     let args = &args;
     let mut out = dispatch_resolved(ctx, name, args);
@@ -532,7 +631,9 @@ fn dispatch_resolved(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
         "subagent" => crate::subagent::run(ctx, args),
         other => ToolOutcome::err(format!(
             "unknown tool {other:?}; the available tools are listed in your tool schemas"
-        )),
+        ))
+        .classed(fail::NOT_FOUND)
+        .remedy("call one of the tools in your schemas"),
     }
 }
 

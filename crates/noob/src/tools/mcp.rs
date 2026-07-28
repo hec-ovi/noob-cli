@@ -162,6 +162,11 @@ pub fn run_call(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
                 summary: format!("mcp {server}.{tool}{flag}"),
                 warning: None,
                 canceled: false,
+                // The server said it failed and nothing here knows why; a
+                // class invented at this distance would be a guess.
+                kind: None,
+                code: None,
+                remedy: None,
             }
         }
         Err(e) if INTERRUPTED.load(Ordering::SeqCst) => ToolOutcome::canceled_with(e),

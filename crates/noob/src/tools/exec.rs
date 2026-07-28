@@ -39,13 +39,18 @@ pub(crate) enum RunError {
 /// Run `command` with a deadline, returning its merged output.
 ///
 /// `program` names the binary for the spawn-failure message; `head`/`tail` are
-/// the truncation budget for the collected output.
+/// the truncation budget for the collected output. `progress` taps the same
+/// stream for anything watching: the collector already has every byte as it
+/// arrives, and nothing else in the process does, so a build scrolls live
+/// instead of appearing all at once when it ends. None when nothing is
+/// watching, which is the default and costs a branch per chunk.
 pub(crate) fn run(
     mut command: Command,
     program: &str,
     timeout_s: u64,
     head: usize,
     tail: usize,
+    progress: Option<crate::emit::Progress>,
 ) -> Result<Run, RunError> {
     // One pipe; the child gets its write end as BOTH stdout and stderr, so
     // interleaving matches what a terminal would show. O_CLOEXEC is load-
@@ -116,6 +121,7 @@ pub(crate) fn run(
     let abandoned = Arc::new(AtomicBool::new(false));
     let (t_buf, t_eof, t_gone) = (collected.clone(), eof_seen.clone(), abandoned.clone());
     let collector = std::thread::spawn(move || {
+        let mut progress = progress;
         let mut chunk = [0u8; 8192];
         loop {
             if t_gone.load(Ordering::SeqCst) {
@@ -126,6 +132,12 @@ pub(crate) fn run(
                 Ok(n) => {
                     if !t_gone.load(Ordering::SeqCst) {
                         t_buf.lock().unwrap().extend(&chunk[..n]);
+                        // After the buffer, never instead of it: the model's
+                        // copy of the output is the one that must not depend
+                        // on whether anybody is watching.
+                        if let Some(progress) = progress.as_mut() {
+                            progress.feed(&chunk[..n]);
+                        }
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -134,6 +146,10 @@ pub(crate) fn run(
                 }
                 Err(_) => break,
             }
+        }
+        // A command whose last line has no newline still wrote that line.
+        if let Some(progress) = progress.as_mut() {
+            progress.flush();
         }
         t_eof.store(true, Ordering::SeqCst);
     });

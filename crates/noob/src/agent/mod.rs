@@ -947,17 +947,22 @@ impl Agent {
                             // cancellation, where nothing ran to measure.
                             elapsed_ms: elapsed.map_or(0, |d| d.as_millis() as u64),
                             error: outcome.is_error.then(|| noob_proto::ToolError {
+                                // Cancellation stays structural and outranks
+                                // whatever the tool set: a tool cannot know it
+                                // was skipped. Everything else is the class the
+                                // failure was minted with, and "error" is the
+                                // honest word for one nobody classified.
                                 kind: if outcome.canceled {
-                                    "canceled".to_string()
+                                    tools::fail::CANCELED.to_string()
                                 } else {
-                                    "error".to_string()
+                                    outcome.kind.unwrap_or("error").to_string()
                                 },
-                                code: None,
+                                code: outcome.code,
                                 message: tools::error_digest(&outcome.content)
                                     .unwrap_or(&outcome.summary)
                                     .to_string(),
                                 detail: Some(outcome.content.clone()),
-                                remedy: None,
+                                remedy: outcome.remedy.clone(),
                             }),
                         });
                         // A one-line row is right for a one-line failure and
@@ -1088,14 +1093,17 @@ impl Agent {
         ))
     }
 
-    /// Detachment is enabled only after the default interactive dock opened.
-    /// Inline/headless and nested surfaces never receive a hub.
+    /// Detachment is enabled for the two long-lived conversational surfaces:
+    /// the default interactive dock, and `serve` driving a front end. Inline,
+    /// headless and nested surfaces never receive a hub, because there is
+    /// nothing there to deliver a detached result into.
     pub fn enable_background_agents(
         &mut self,
         ui: &mut Ui,
     ) -> Option<crate::subagent::BackgroundHub> {
+        let emitter = self.tool_ctx.emitter.clone();
         let cfg = self.tool_ctx.task.as_mut()?;
-        let hub = crate::subagent::BackgroundHub::new(cfg.concurrency);
+        let hub = crate::subagent::BackgroundHub::with_emitter(cfg.concurrency, emitter);
         cfg.background = Some(hub.clone());
         let orphaned = self.repair_orphaned_background_results();
         if orphaned > 0 {
@@ -1391,12 +1399,16 @@ impl Agent {
                 .or_insert(1);
             return planned;
         }
-        sched::Planned::Canned(ToolOutcome::err(
-            "refused: writing into a skills directory needs the user's confirmation \
-             and it was not granted; leave skill files unchanged and continue \
-             without them"
-                .to_string(),
-        ))
+        sched::Planned::Canned(
+            ToolOutcome::err(
+                "refused: writing into a skills directory needs the user's confirmation \
+                 and it was not granted; leave skill files unchanged and continue \
+                 without them"
+                    .to_string(),
+            )
+            .classed(tools::fail::DENIED)
+            .remedy("leave skill files unchanged and continue without them"),
+        )
     }
 
     /// Remove the most recent doom-window record for `call`, mirroring
@@ -1422,18 +1434,26 @@ impl Agent {
             Ok(Value::Null) => json!({}),
             Ok(other) => {
                 return (
-                    sched::Planned::Canned(ToolOutcome::err(format!(
-                        "arguments must be a JSON object, got {other}; resend the call"
-                    ))),
+                    sched::Planned::Canned(
+                        ToolOutcome::err(format!(
+                            "arguments must be a JSON object, got {other}; resend the call"
+                        ))
+                        .classed(tools::fail::INVALID_ARGUMENT)
+                        .remedy("resend the call with a JSON object"),
+                    ),
                     json!({}),
                 );
             }
             Err(e) => {
                 return (
-                    sched::Planned::Canned(ToolOutcome::err(format!(
-                        "arguments were not valid JSON ({e}); resend the call \
-                         with a JSON object"
-                    ))),
+                    sched::Planned::Canned(
+                        ToolOutcome::err(format!(
+                            "arguments were not valid JSON ({e}); resend the call \
+                             with a JSON object"
+                        ))
+                        .classed(tools::fail::INVALID_ARGUMENT)
+                        .remedy("resend the call with a JSON object"),
+                    ),
                     json!({}),
                 );
             }
@@ -1443,11 +1463,15 @@ impl Agent {
         // agent is a read-only child.
         if self.plan && !PLAN_TOOLS.contains(&call.name.as_str()) {
             return (
-                sched::Planned::Canned(ToolOutcome::err(format!(
-                    "plan mode is read-only: {} is unavailable; present your plan \
-                     as text and wait for the user to approve it",
-                    call.name
-                ))),
+                sched::Planned::Canned(
+                    ToolOutcome::err(format!(
+                        "plan mode is read-only: {} is unavailable; present your plan \
+                         as text and wait for the user to approve it",
+                        call.name
+                    ))
+                    .classed(tools::fail::DENIED)
+                    .remedy("present your plan as text and wait for the user to approve it"),
+                ),
                 args,
             );
         }
@@ -1461,11 +1485,15 @@ impl Agent {
         };
         if self.read_only && !child_allowed.contains(&call.name.as_str()) {
             return (
-                sched::Planned::Canned(ToolOutcome::err(format!(
-                    "this sub-agent is read-only: {} is unavailable; finish the \
-                     task with the read-only tools and report what you found",
-                    call.name
-                ))),
+                sched::Planned::Canned(
+                    ToolOutcome::err(format!(
+                        "this sub-agent is read-only: {} is unavailable; finish the \
+                         task with the read-only tools and report what you found",
+                        call.name
+                    ))
+                    .classed(tools::fail::DENIED)
+                    .remedy("finish the task with the read-only tools and report what you found"),
+                ),
                 args,
             );
         }
@@ -1543,10 +1571,11 @@ impl Agent {
             }
             if repeats + 1 >= DOOM_REPEATS {
                 return (
-                    sched::Planned::Canned(ToolOutcome::err(repeat_intercept_msg(
-                        self.plan,
-                        self.read_only,
-                    ))),
+                    sched::Planned::Canned(
+                        ToolOutcome::err(repeat_intercept_msg(self.plan, self.read_only))
+                            .classed(tools::fail::DENIED)
+                            .remedy("change the approach rather than repeating the call"),
+                    ),
                     args,
                 );
             }

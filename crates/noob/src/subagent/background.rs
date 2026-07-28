@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
+use noob_proto::{AgentState, Event as Wire};
+
 use super::{RunCfg, TaskRequest, run_task};
 use crate::tools::ToolOutcome;
 
@@ -18,23 +20,51 @@ const PROGRESS_KEEP_LINES: usize = 12;
 type Runner = Box<dyn FnOnce(Arc<AtomicBool>) -> ToolOutcome + Send + 'static>;
 
 #[derive(Clone, Default)]
-pub(super) struct ProgressLog(Arc<Mutex<String>>);
+pub(super) struct ProgressLog {
+    text: Arc<Mutex<String>>,
+    /// Frames for anything watching, once the job has an id to attach them to.
+    ///
+    /// The log exists before the id does (the caller builds it, `enqueue`
+    /// mints the id), so this is filled in afterwards. Shared through the same
+    /// clone, so attaching once reaches every copy.
+    tap: Arc<Mutex<Option<crate::emit::Progress>>>,
+}
 
 impl ProgressLog {
     pub(super) fn push(&self, bytes: &[u8]) {
-        let mut text = self.0.lock().unwrap();
-        text.push_str(&String::from_utf8_lossy(bytes));
-        if text.len() > PROGRESS_KEEP_BYTES {
-            let mut cut = text.len() - PROGRESS_KEEP_BYTES;
-            while !text.is_char_boundary(cut) {
-                cut += 1;
+        {
+            let mut text = self.text.lock().unwrap();
+            text.push_str(&String::from_utf8_lossy(bytes));
+            if text.len() > PROGRESS_KEEP_BYTES {
+                let mut cut = text.len() - PROGRESS_KEEP_BYTES;
+                while !text.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                text.drain(..cut);
             }
-            text.drain(..cut);
+        }
+        // The retained window above is bounded and rewritten; a watcher wants
+        // every line as it happens, so the tap sees the raw bytes instead.
+        if let Some(tap) = self.tap.lock().unwrap().as_mut() {
+            tap.feed(bytes);
+        }
+    }
+
+    /// Point this log's frames at a job id. Called once, from `enqueue`.
+    fn attach(&self, emitter: &crate::emit::Emitter, agent_id: &str) {
+        *self.tap.lock().unwrap() = crate::emit::Progress::for_agent(emitter, agent_id);
+    }
+
+    /// Send whatever line the child left unterminated. A child's last words
+    /// are usually the ones that explain the exit.
+    fn close(&self) {
+        if let Some(tap) = self.tap.lock().unwrap().as_mut() {
+            tap.flush();
         }
     }
 
     fn summary(&self) -> String {
-        let text = self.0.lock().unwrap();
+        let text = self.text.lock().unwrap();
         let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
         prompt_slice(&flat)
     }
@@ -44,7 +74,7 @@ impl ProgressLog {
     /// tool activity to be useful, while the completed report still moves to
     /// the parent unchanged through `ReadyResult`.
     fn recent_lines(&self) -> Vec<String> {
-        let text = self.0.lock().unwrap();
+        let text = self.text.lock().unwrap();
         let mut lines = text
             .lines()
             .map(str::trim)
@@ -79,6 +109,10 @@ struct Inner {
     /// path and builds an allocated snapshot only after lifecycle state moves.
     revision: AtomicU64,
     concurrency: usize,
+    /// The protocol side-channel, so a front end can watch a fleet of children
+    /// the same way it watches the parent. Off by default and a no-op when
+    /// off, which is what every test constructs.
+    emitter: crate::emit::Emitter,
 }
 
 #[derive(Default)]
@@ -155,7 +189,17 @@ pub struct JobsSnapshot {
 }
 
 impl BackgroundHub {
+    #[cfg(test)]
     pub fn new(concurrency: usize) -> BackgroundHub {
+        BackgroundHub::with_emitter(concurrency, crate::emit::Emitter::default())
+    }
+
+    /// A hub whose lifecycle is visible to a front end.
+    ///
+    /// The emitter goes in at construction rather than being set later because
+    /// the workers hold the shared inner state from the moment they start, and
+    /// a job could reach `Running` before a setter ever ran.
+    pub fn with_emitter(concurrency: usize, emitter: crate::emit::Emitter) -> BackgroundHub {
         let concurrency = concurrency.max(1);
         let hub = BackgroundHub {
             inner: Arc::new(Inner {
@@ -164,6 +208,7 @@ impl BackgroundHub {
                 next_id: AtomicU64::new(1),
                 revision: AtomicU64::new(0),
                 concurrency,
+                emitter,
             }),
         };
         let mut workers = Vec::with_capacity(concurrency);
@@ -182,9 +227,10 @@ impl BackgroundHub {
 
     pub(super) fn submit(&self, mut cfg: RunCfg, request: TaskRequest) -> ToolOutcome {
         let prompt = request.prompt.clone();
+        let tools = request.tools_mode.clone();
         let progress = ProgressLog::default();
         cfg.progress = Some(progress.clone());
-        self.enqueue(prompt, progress, move |cancel| {
+        self.enqueue(prompt, tools, progress, move |cancel| {
             run_task(&cfg, &request, || cancel.load(Ordering::SeqCst))
         })
     }
@@ -195,12 +241,22 @@ impl BackgroundHub {
         prompt: String,
         runner: impl FnOnce(Arc<AtomicBool>) -> ToolOutcome + Send + 'static,
     ) -> ToolOutcome {
-        self.enqueue(prompt, ProgressLog::default(), runner)
+        self.enqueue(
+            prompt,
+            "all".to_string(),
+            ProgressLog::default(),
+            runner,
+        )
     }
 
+    /// `tools` is the child's tool set, carried down to here rather than left
+    /// in the caller because this is the only place a job gets an id, and the
+    /// two are useless apart: a watcher showing a fleet needs to know which of
+    /// them can write.
     fn enqueue(
         &self,
         prompt: String,
+        tools: String,
         progress: ProgressLog,
         runner: impl FnOnce(Arc<AtomicBool>) -> ToolOutcome + Send + 'static,
     ) -> ToolOutcome {
@@ -224,6 +280,16 @@ impl BackgroundHub {
         let ordinal = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let id = format!("agent-{ordinal}");
         let epoch = state.epoch;
+        // Under the state lock, before the job is visible: a worker cannot
+        // take it and announce `running` until this releases, so `spawn` can
+        // never arrive after the first state change it describes.
+        progress.attach(&self.inner.emitter, &id);
+        self.inner.emitter.send(Wire::AgentSpawn {
+            agent_id: id.clone(),
+            prompt: prompt.clone(),
+            tools,
+        });
+        agent_state(&self.inner.emitter, &id, AgentState::Queued, None);
         state.jobs.push(Job {
             id: id.clone(),
             prompt,
@@ -405,7 +471,7 @@ impl BackgroundHub {
             return false;
         };
         job.cancel.store(true, Ordering::SeqCst);
-        settle_queued_cancellation(job);
+        settle_queued_cancellation(&self.inner.emitter, job);
         state.spawn_paused = true;
         self.inner.revision.fetch_add(1, Ordering::Release);
         drop(state);
@@ -423,7 +489,7 @@ impl BackgroundHub {
         {
             count += 1;
             job.cancel.store(true, Ordering::SeqCst);
-            settle_queued_cancellation(job);
+            settle_queued_cancellation(&self.inner.emitter, job);
         }
         if count > 0 {
             state.spawn_paused = true;
@@ -485,12 +551,10 @@ fn worker_loop(inner: Arc<Inner>) {
                 if state.jobs[index].cancel.load(Ordering::SeqCst) {
                     let current_epoch = state.epoch;
                     let job = &mut state.jobs[index];
-                    job.state = JobState::Ready;
-                    job.elapsed = Some(Duration::default());
-                    job.outcome = Some(ToolOutcome::canceled_with(
-                        "background sub-agent canceled before it started",
-                    ));
-                    job.runner.take();
+                    // The same settling as the cancel path, called rather than
+                    // repeated, so a job cancelled before it started is
+                    // announced exactly once no matter who noticed first.
+                    settle_queued_cancellation(&inner.emitter, job);
                     // Epoch-gated like the terminal commit below: a stale
                     // job settled after the human moved on must not close
                     // the current turn's replacement gate.
@@ -509,6 +573,12 @@ fn worker_loop(inner: Arc<Inner>) {
                 let job = &mut state.jobs[index];
                 job.state = JobState::Running;
                 job.started = Instant::now();
+                // Admitted to a worker, which is not the same as a process
+                // existing: the child is spawned inside the runner, so this
+                // can be followed immediately by `failed` with nothing ever
+                // having run. That is the truth, and the frame says the
+                // truth rather than a nicer version of it.
+                agent_state(&inner.emitter, &job.id, AgentState::Running, None);
                 inner.revision.fetch_add(1, Ordering::Release);
                 break (
                     job.id.clone(),
@@ -525,6 +595,7 @@ fn worker_loop(inner: Arc<Inner>) {
                 ToolOutcome::err(
                     "the background sub-agent crashed; this is a noob bug, retry the task",
                 )
+                .classed(crate::tools::fail::INTERNAL)
             });
         let mut state = inner.state.lock().unwrap();
         state.running = state.running.saturating_sub(1);
@@ -541,6 +612,18 @@ fn worker_loop(inner: Arc<Inner>) {
             // job belongs to; a stale child failing mid-current-turn cannot
             // block spawns the new turn already authorized.
             pause_spawning = (outcome.is_error || outcome.canceled) && job.epoch == current_epoch;
+            // The single point every job that actually ran passes through, and
+            // it is below the cancel-wins rewrite, so the frame reports what
+            // was committed rather than what the runner returned. `done` here
+            // means the child finished, NOT that the parent has the result:
+            // the parent drains at turn boundaries, which can be much later.
+            job.progress.close();
+            agent_state(
+                &inner.emitter,
+                &job.id,
+                terminal_state(&outcome),
+                terminal_detail(&outcome),
+            );
             job.state = JobState::Ready;
             job.elapsed = Some(started.elapsed());
             job.outcome = Some(outcome);
@@ -557,7 +640,11 @@ fn worker_loop(inner: Arc<Inner>) {
 /// Settle a job that has not been admitted to a worker. The caller holds the
 /// hub state lock, so a worker can observe either Queued or Ready, never an
 /// intermediate state and never the discarded runner.
-fn settle_queued_cancellation(job: &mut Job) {
+///
+/// The early return is what makes the frame fire once: the two callers race
+/// for the same job under this lock, and whichever loses finds it no longer
+/// Queued and says nothing.
+fn settle_queued_cancellation(emitter: &crate::emit::Emitter, job: &mut Job) {
     if job.state != JobState::Queued {
         return;
     }
@@ -567,6 +654,55 @@ fn settle_queued_cancellation(job: &mut Job) {
         "background sub-agent canceled before it started",
     ));
     job.runner.take();
+    job.progress.close();
+    agent_state(
+        emitter,
+        &job.id,
+        AgentState::Canceled,
+        Some(String::from("canceled before it started")),
+    );
+}
+
+/// Which terminal state a committed outcome is. Cancellation outranks failure:
+/// a child killed mid-task usually fails on its way out, and reporting that as
+/// a failure would blame the child for being stopped.
+fn terminal_state(outcome: &ToolOutcome) -> AgentState {
+    if outcome.canceled {
+        AgentState::Canceled
+    } else if outcome.is_error {
+        AgentState::Failed
+    } else {
+        AgentState::Done
+    }
+}
+
+/// One line about how it ended: why it failed, or what it did.
+fn terminal_detail(outcome: &ToolOutcome) -> Option<String> {
+    if outcome.is_error && !outcome.canceled {
+        return Some(
+            crate::tools::error_digest(&outcome.content)
+                .unwrap_or(&outcome.summary)
+                .to_string(),
+        );
+    }
+    (!outcome.summary.is_empty()).then(|| outcome.summary.clone())
+}
+
+/// One state change, or nothing at all when nobody is watching.
+fn agent_state(
+    emitter: &crate::emit::Emitter,
+    agent_id: &str,
+    state: AgentState,
+    detail: Option<String>,
+) {
+    if !emitter.is_on() {
+        return;
+    }
+    emitter.send(Wire::AgentStateChanged {
+        agent_id: agent_id.to_string(),
+        state,
+        detail,
+    });
 }
 
 fn prompt_slice(prompt: &str) -> String {
@@ -591,6 +727,154 @@ mod tests {
             assert!(Instant::now() < deadline, "condition did not become true");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// Every state a job was reported to be in, in order.
+    fn states(buf: &crate::emit::Buf, agent_id: &str) -> Vec<String> {
+        buf.frames()
+            .iter()
+            .filter(|f| f["t"] == "agent.state" && f["agent_id"] == agent_id)
+            .map(|f| f["state"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// One child from admission to its report, as a watcher sees it.
+    #[test]
+    fn a_childs_whole_life_is_announced_once_in_order() {
+        let (emitter, buf) = crate::emit::watched();
+        let hub = BackgroundHub::with_emitter(1, emitter);
+        let progress = ProgressLog::default();
+        let gate = Arc::new(AtomicBool::new(false));
+        let release = gate.clone();
+        hub.enqueue(
+            "audit the config".to_string(),
+            "read".to_string(),
+            progress.clone(),
+            move |_| {
+                while !release.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                ToolOutcome::ok("found three", "subagent agent-1 (0.1s)")
+            },
+        );
+        wait_until(|| hub.snapshot().running == 1);
+
+        let spawn = buf
+            .frames()
+            .into_iter()
+            .find(|f| f["t"] == "agent.spawn")
+            .expect("a child announces itself");
+        assert_eq!(spawn["agent_id"], "agent-1");
+        assert_eq!(spawn["prompt"], "audit the config");
+        // The tool set, which is what says whether this child can write. It
+        // lives on the request and had to be carried down to the one place
+        // that mints an id.
+        assert_eq!(spawn["tools"], "read");
+
+        // The child's own output, framed into lines as it arrives.
+        progress.push(b"* read config/.env\n* grep NOOB_\n");
+        let output: Vec<String> = buf
+            .frames()
+            .iter()
+            .filter(|f| f["t"] == "agent.output")
+            .map(|f| f["line"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(output, ["* read config/.env", "* grep NOOB_"]);
+
+        gate.store(true, Ordering::SeqCst);
+        wait_until(|| hub.snapshot().ready == 1);
+        assert_eq!(states(&buf, "agent-1"), ["queued", "running", "done"]);
+        let last = buf
+            .frames()
+            .into_iter()
+            .filter(|f| f["t"] == "agent.state")
+            .next_back()
+            .unwrap();
+        assert_eq!(last["detail"], "subagent agent-1 (0.1s)");
+    }
+
+    /// A child that fails says so, and says why, without a consumer having to
+    /// read the report to find out.
+    #[test]
+    fn a_failed_child_reports_the_class_and_the_reason() {
+        let (emitter, buf) = crate::emit::watched();
+        let hub = BackgroundHub::with_emitter(1, emitter);
+        hub.submit_with("break".to_string(), |_| {
+            ToolOutcome::err("sub-agent error: the child exited before reporting")
+        });
+        wait_until(|| hub.snapshot().ready == 1);
+        assert_eq!(states(&buf, "agent-1"), ["queued", "running", "failed"]);
+        let last = buf
+            .frames()
+            .into_iter()
+            .filter(|f| f["t"] == "agent.state")
+            .next_back()
+            .unwrap();
+        assert!(
+            last["detail"]
+                .as_str()
+                .unwrap()
+                .contains("exited before reporting"),
+            "{last}"
+        );
+    }
+
+    /// Cancelling a child that never started still closes it, exactly once.
+    /// Two callers race to settle the same job under one lock, and a watcher
+    /// that saw `canceled` twice would count one child as two.
+    #[test]
+    fn a_child_canceled_before_it_ran_is_closed_exactly_once() {
+        let (emitter, buf) = crate::emit::watched();
+        let hub = BackgroundHub::with_emitter(1, emitter);
+        let gate = Arc::new(AtomicBool::new(false));
+        let release = gate.clone();
+        // Fill the single worker so the second child stays queued.
+        hub.submit_with("first".to_string(), move |_| {
+            while !release.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            ToolOutcome::ok("first done", "done")
+        });
+        hub.submit_with("second".to_string(), |_| ToolOutcome::ok("never", "never"));
+        wait_until(|| hub.snapshot().running == 1);
+
+        assert!(hub.cancel("agent-2"));
+        assert_eq!(states(&buf, "agent-2"), ["queued", "canceled"]);
+        // cancel_all sweeps the same job again; it is already settled.
+        hub.cancel_all();
+        assert_eq!(states(&buf, "agent-2"), ["queued", "canceled"]);
+        gate.store(true, Ordering::SeqCst);
+        wait_until(|| hub.snapshot().active == 0);
+    }
+
+    /// A cancelled child usually fails on its way out. Reporting that as a
+    /// failure would blame it for being stopped.
+    #[test]
+    fn cancellation_outranks_the_failure_it_causes() {
+        let (emitter, buf) = crate::emit::watched();
+        let hub = BackgroundHub::with_emitter(1, emitter);
+        hub.submit_with("stubborn".to_string(), |cancel| {
+            while !cancel.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // The runner reports an error, not a cancellation.
+            ToolOutcome::err("sub-agent error: killed mid-task")
+        });
+        wait_until(|| hub.snapshot().running == 1);
+        assert!(hub.cancel("agent-1"));
+        wait_until(|| hub.snapshot().ready == 1);
+        assert_eq!(states(&buf, "agent-1"), ["queued", "running", "canceled"]);
+    }
+
+    /// Off is the default, and off writes nothing at all.
+    #[test]
+    fn a_hub_nobody_is_watching_emits_nothing() {
+        let hub = BackgroundHub::new(1);
+        hub.submit_with("quiet".to_string(), |_| ToolOutcome::ok("done", "done"));
+        wait_until(|| hub.snapshot().ready == 1);
+        // Nothing to assert on a sink that does not exist; the assertion is
+        // that the whole lifecycle ran without one.
+        assert_eq!(hub.take_ready().len(), 1);
     }
 
     #[test]
@@ -1054,12 +1338,17 @@ mod tests {
         let progress = ProgressLog::default();
         let gate = Arc::new(AtomicBool::new(false));
         let release = gate.clone();
-        hub.enqueue("inspect files".to_string(), progress.clone(), move |_| {
-            while !release.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            ToolOutcome::ok("done", "done")
-        });
+        hub.enqueue(
+            "inspect files".to_string(),
+            "all".to_string(),
+            progress.clone(),
+            move |_| {
+                while !release.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                ToolOutcome::ok("done", "done")
+            },
+        );
         wait_until(|| hub.snapshot().running == 1);
         progress.push(b"read src/main.rs\noutput: found entry point\n");
         let snapshot = hub.snapshot();
@@ -1091,12 +1380,17 @@ mod tests {
         let release = gate.clone();
         let final_output = "result ".repeat(PROGRESS_KEEP_BYTES);
         let runner_output = final_output.clone();
-        hub.enqueue("many steps".to_string(), progress.clone(), move |_| {
-            while !release.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            ToolOutcome::ok(runner_output, "done")
-        });
+        hub.enqueue(
+            "many steps".to_string(),
+            "all".to_string(),
+            progress.clone(),
+            move |_| {
+                while !release.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                ToolOutcome::ok(runner_output, "done")
+            },
+        );
         wait_until(|| hub.snapshot().running == 1);
         for ordinal in 0..(PROGRESS_KEEP_LINES + 3) {
             progress.push(format!("* tool event {ordinal}\n").as_bytes());

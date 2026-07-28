@@ -127,6 +127,9 @@ fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> Tool
         summary: format!("skill {name} ({lines} lines)"),
         warning,
         canceled: false,
+        kind: None,
+        code: None,
+        remedy: None,
     }
 }
 

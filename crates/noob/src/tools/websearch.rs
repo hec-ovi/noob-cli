@@ -323,6 +323,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         timeout_s,
         ctx.caps.mcp_head,
         ctx.caps.mcp_tail,
+        crate::emit::Progress::for_current_call(&ctx.emitter),
     ) {
         Ok(run) => run,
         Err(super::exec::RunError::Spawn(message)) => {
@@ -357,7 +358,9 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         let mut out = ToolOutcome::err(untrusted::wrap(
             "the web (websearch)",
             &mcp_cap(&run.body, &ctx.caps),
-        ));
+        ))
+        .classed(super::fail::EXIT_STATUS)
+        .coded(run.code);
         out.summary = summary;
         return Ok(out);
     }

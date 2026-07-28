@@ -22,6 +22,7 @@
 //! summarizer. A provider failure sets a backoff so a failing summarizer
 //! is not retried on every subsequent round (the compression-loop trap).
 
+use noob_proto::Event as Wire;
 use noob_provider::types::{Item, ProviderError, TurnRequestRef};
 
 use super::{Agent, looks_like_context_overflow, prompt};
@@ -493,6 +494,21 @@ impl Agent {
     /// again. `clear_plan_history` deliberately calls plain `adopt`: it
     /// rewrites plan payloads in place and never removes a file body.
     pub(crate) fn adopt_compacted(&mut self, items: Vec<Item>, ui: &mut Ui) {
+        // The one honest end of a file's life. `invalidate_freshness` already
+        // means exactly this: content the model saw earlier is no longer in
+        // context. Nothing else in the process ends a file, so a code view
+        // that never hears this keeps showing pages the agent has forgotten.
+        // Before the invalidation, not after, because the registry is what
+        // says which files there were.
+        if self.tool_ctx.emitter.is_on() {
+            for path in self.tool_ctx.seen.paths() {
+                self.tool_ctx.emitter.send(Wire::FileClose {
+                    path: crate::tools::display_path(&self.tool_ctx, &path),
+                    // Compaction is not a tool call; nothing asked for this.
+                    call_id: None,
+                });
+            }
+        }
         self.tool_ctx.seen.invalidate_freshness();
         self.adopt(items, ui);
     }

@@ -146,12 +146,18 @@ fn a_turn_with_a_tool_call_produces_a_complete_stream() {
     server.assert_clean();
 
     let frames = frames(&sink);
-    let kinds = kinds(&frames);
+    // Measurements are a series that runs alongside the conversation and can
+    // land between any two frames, so the shape of the conversation is
+    // asserted without them.
+    let shape: Vec<&str> = kinds(&frames)
+        .into_iter()
+        .filter(|kind| *kind != "metrics")
+        .collect();
     assert!(
-        kinds.starts_with(&["session.start", "turn.start"]),
-        "{kinds:?}"
+        shape.starts_with(&["session.start", "turn.start"]),
+        "{shape:?}"
     );
-    assert_eq!(kinds.last(), Some(&"turn.end"), "{kinds:?}");
+    assert_eq!(shape.last(), Some(&"turn.end"), "{shape:?}");
 
     let start = first(&frames, "session.start");
     assert_eq!(start["model"], "mockmodel");
@@ -217,6 +223,32 @@ fn a_turn_with_a_tool_call_produces_a_complete_stream() {
         .collect();
     assert_eq!(turn_starts, vec![1]);
     assert_eq!(turn_ends, vec![1]);
+
+    // Context fill is a series: a value, the window it is measured against,
+    // and a stamp on the stream's own clock, so a consumer can graph it
+    // without a clock of its own.
+    let context: Vec<&serde_json::Value> = frames
+        .iter()
+        .filter(|f| f["t"] == "metrics" && f["group"] == "context")
+        .collect();
+    assert!(!context.is_empty(), "{:?}", kinds(&frames));
+    let sample = &context[0]["samples"][0];
+    assert_eq!(sample["key"], "used");
+    assert_eq!(sample["unit"], "tokens");
+    assert!(sample["max"].as_f64().unwrap() > 0.0, "{sample}");
+    for frame in &context {
+        assert!(frame["at_ms"].is_u64(), "{frame}");
+    }
+    // Only where something moved: the agent refreshes at several boundaries
+    // that can land back to back on identical numbers.
+    let used: Vec<f64> = context
+        .iter()
+        .map(|f| f["samples"][0]["value"].as_f64().unwrap())
+        .collect();
+    assert!(
+        used.windows(2).all(|pair| pair[0] != pair[1]),
+        "a series repeated a point: {used:?}"
+    );
 }
 
 /// Reads run eight wide, so a file frame that cannot name its call is
@@ -302,7 +334,8 @@ fn concurrent_reads_attribute_their_file_frames_to_the_right_call() {
 }
 
 /// A failed call is fields, not prose. This is the same failure that used to
-/// render as a bare `exit code 1`, now carrying its parts separately.
+/// render as a bare `exit code 1`, now carrying its parts separately: the
+/// class, the message, the rest, and what to do next.
 #[test]
 fn a_failed_call_carries_its_error_as_fields() {
     let server = MockServer::start();
@@ -324,7 +357,8 @@ fn a_failed_call_carries_its_error_as_fields() {
     let end = first(&frames, "tool.end");
     assert_eq!(end["call_id"], "call-x");
     let error = &end["error"];
-    assert_eq!(error["kind"], "error");
+    // Classed where it was minted, not guessed from the message here.
+    assert_eq!(error["kind"], "not_found");
     assert!(
         error["message"].as_str().unwrap().contains("missing.txt"),
         "{error}"
@@ -356,4 +390,125 @@ fn an_unusable_sink_is_not_a_session_failure() {
     assert!(out.status.success());
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "still fine");
     server.assert_clean();
+}
+
+/// A build scrolls. The whole reason this frame exists is that a command's
+/// summary arrives when it is already over, and what somebody watching wants
+/// is the line it is on right now.
+#[test]
+fn a_shell_command_sends_its_output_line_by_line_as_it_runs() {
+    let server = MockServer::start();
+    server.enqueue_stream_toolcalls(
+        &[(
+            "call-sh",
+            "bash",
+            r#"{"cmd":"printf 'compiling one\\ncompiling two\\n'; echo 'error: it broke' >&2; exit 3"}"#,
+        )],
+        None,
+    );
+    server.enqueue_completion("it failed");
+    let config = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    write_env(config.path(), &server.base_url());
+    let sink = work.path().join("frames.ndjson");
+
+    let out = noob(config.path(), work.path())
+        .env("NOOB_EMIT", &sink)
+        .args(["exec", "-p", "build it"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    server.assert_clean();
+
+    let frames = frames(&sink);
+    let progress: Vec<(&str, &str)> = frames
+        .iter()
+        .filter(|f| f["t"] == "tool.progress")
+        .map(|f| (f["call_id"].as_str().unwrap(), f["line"].as_str().unwrap()))
+        .collect();
+    // Every line, attributed to the call that produced it, so eight concurrent
+    // calls cannot mix their output.
+    assert_eq!(
+        progress,
+        [
+            ("call-sh", "compiling one"),
+            ("call-sh", "compiling two"),
+            ("call-sh", "error: it broke"),
+        ],
+        "{progress:?}"
+    );
+
+    // Live output arrives before the call closes, or it is not live.
+    let kinds = kinds(&frames);
+    let last_progress = kinds.iter().rposition(|k| *k == "tool.progress").unwrap();
+    let end = kinds.iter().position(|k| *k == "tool.end").unwrap();
+    assert!(last_progress < end, "{kinds:?}");
+
+    // The same call also carries its failure as fields: the class, the exit
+    // status as a number, and what to do about it where that is knowable.
+    let error = &first(&frames, "tool.end")["error"];
+    assert_eq!(error["kind"], "exit_status");
+    assert_eq!(error["code"], 3);
+    assert!(error["message"].as_str().unwrap().contains("it broke"), "{error}");
+}
+
+/// Compaction is the one honest end of a file's life: content the model saw
+/// is no longer in its context. A code view that never hears this keeps
+/// showing pages the agent has forgotten.
+#[test]
+fn compaction_closes_every_file_the_model_had_open() {
+    let server = MockServer::start();
+    let big: String = (0..300)
+        .map(|i| format!("line {i:03} {}\n", "x".repeat(90)))
+        .collect();
+    let config = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    write_env(config.path(), &server.base_url());
+    std::fs::write(work.path().join("big.txt"), &big).unwrap();
+    let sink = work.path().join("frames.ndjson");
+
+    // Usage on the first round pushes the estimate past the threshold, so the
+    // second round compacts before it asks anything.
+    server.enqueue_stream_toolcalls(&[("p1", "read", r#"{"path":"big.txt"}"#)], Some((2000, 50)));
+    server.enqueue_stream_completion("noted the file");
+
+    let out = noob(config.path(), work.path())
+        .env("NOOB_EMIT", &sink)
+        .env("NOOB_CTX", "4096")
+        .args(["exec", "-p", "look at big.txt"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    server.assert_clean();
+
+    let frames = frames(&sink);
+    let opened: Vec<&str> = frames
+        .iter()
+        .filter(|f| f["t"] == "file.open")
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(opened, ["big.txt"]);
+    let closed: Vec<&str> = frames
+        .iter()
+        .filter(|f| f["t"] == "file.close")
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(closed, ["big.txt"], "{:?}", kinds(&frames));
+
+    // The same names on both sides, or a consumer cannot pair them.
+    let kinds = kinds(&frames);
+    let open_at = kinds.iter().position(|k| *k == "file.open").unwrap();
+    let close_at = kinds.iter().position(|k| *k == "file.close").unwrap();
+    assert!(open_at < close_at, "{kinds:?}");
+    // Nothing asked for it: compaction is not a tool call.
+    let close = first(&frames, "file.close");
+    assert!(close.get("call_id").is_none(), "{close}");
 }

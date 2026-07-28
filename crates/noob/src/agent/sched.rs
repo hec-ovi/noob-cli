@@ -183,6 +183,7 @@ pub fn run_batch_with(
                 ToolOutcome::err(
                     "the tool crashed while running; this is a noob bug, try a different approach",
                 )
+                .classed(crate::tools::fail::INTERNAL)
             });
             on_progress(Progress::Finished {
                 index,
@@ -220,6 +221,7 @@ pub fn run_batch_with(
                         "the tool crashed while running; this is a noob bug, try a different \
                          approach",
                     )
+                    .classed(crate::tools::fail::INTERNAL)
                 });
                 on_progress(Progress::Finished {
                     index,
@@ -278,6 +280,7 @@ pub fn run_batch_with(
                                             "the tool crashed while running; this is a noob bug, \
                                          try a different approach",
                                         )
+                                        .classed(crate::tools::fail::INTERNAL)
                                     });
                                 let _ = tx.send((*index, outcome, started.elapsed()));
                             });
@@ -359,13 +362,10 @@ fn execute(ctx: &ToolCtx, planned: Planned) -> ToolOutcome {
 
 fn execute_ref(ctx: &ToolCtx, planned: &Planned) -> ToolOutcome {
     match planned {
-        Planned::Canned(out) => ToolOutcome {
-            content: out.content.clone(),
-            is_error: out.is_error,
-            summary: out.summary.clone(),
-            warning: out.warning.clone(),
-            canceled: out.canceled,
-        },
+        // Cloned rather than copied field by field: a hand-copy silently drops
+        // every field added after it was written, and a canned outcome losing
+        // its failure class is exactly the bug that would never be noticed.
+        Planned::Canned(out) => out.clone(),
         Planned::Run {
             call_id,
             name,
