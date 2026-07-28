@@ -24,6 +24,7 @@ mod link;
 mod markdown;
 mod monitor;
 mod packaging;
+mod select;
 mod skin;
 mod state;
 mod syntax;
@@ -96,6 +97,13 @@ struct App {
     /// A tab that has been pressed, and whether the pointer has moved far
     /// enough since to call it a drag rather than a click.
     holding: Option<(View, Space, PhysicalPosition<f64>)>,
+    /// True while the button is down inside a pane, so pointer motion extends
+    /// the selection instead of merely moving the cursor.
+    selecting: bool,
+    /// Opened once, and only when something is first copied: the clipboard
+    /// connects to the display server, which is work an idle window has no
+    /// reason to do.
+    clipboard: Option<copypasta::ClipboardContext>,
     drag: Option<Drag>,
     shaded: bool,
     /// The size to go back to when the window is unshaded.
@@ -157,6 +165,8 @@ impl App {
             input: String::new(),
             caret: 0,
             holding: None,
+            selecting: false,
+            clipboard: None,
             drag: None,
             shaded: false,
             unshaded: None,
@@ -327,13 +337,111 @@ impl App {
                 self.state.open_file = index;
                 self.dirty = true;
             }
-            Hit::Body(_) | Hit::Input => {}
+            Hit::Body(space) => self.begin_selection(space),
+            Hit::Input => {}
         }
+    }
+
+    /// Press inside a pane: put the anchor where the pointer is, or clear the
+    /// selection when the press is somewhere with no text to select.
+    fn begin_selection(&mut self, space: Space) {
+        let previous = self.state.selection.take();
+        let Some(view) = self.dock.slot(space).active() else {
+            self.dirty = previous.is_some();
+            return;
+        };
+        let layout = self.layout();
+        let spot = self.spot_at(&layout, space, view);
+        self.state.selection = spot.map(|spot| select::Selection::new(view, spot));
+        self.selecting = self.state.selection.is_some();
+        self.dirty = true;
+    }
+
+    /// The character under the pointer, as a line and a column the pane can
+    /// still resolve after it has scrolled.
+    fn spot_at(&self, layout: &view::Layout, space: Space, view: View) -> Option<select::Spot> {
+        let pane = self.state.pane_of(view)?;
+        let (over, row, column) = layout.cell(
+            self.cursor.x as f32,
+            self.cursor.y as f32,
+            self.config.pane_font_size,
+            self.pane_column,
+        )?;
+        if over != space {
+            return None;
+        }
+        let rows = layout.rows(layout.placed(space).body, self.config.pane_font_size);
+        let line = pane.showing_from(rows) + row;
+        // Below the last line, the selection runs to the end of the text
+        // rather than to a line that does not exist.
+        let line = line.min(pane.last().saturating_sub(1));
+        Some(select::Spot::new(line, column))
+    }
+
+    /// Extend the selection to wherever the pointer is now.
+    fn extend_selection(&mut self) {
+        let Some(mut selection) = self.state.selection else {
+            return;
+        };
+        let layout = self.layout();
+        let Some(space) = self.dock_space_of(selection.view) else {
+            return;
+        };
+        if let Some(spot) = self.spot_at(&layout, space, selection.view) {
+            selection.extend(spot);
+            self.state.selection = Some(selection);
+            self.dirty = true;
+        }
+    }
+
+    fn dock_space_of(&self, view: View) -> Option<Space> {
+        Space::ALL
+            .into_iter()
+            .find(|space| self.dock.slot(*space).active() == Some(view))
+    }
+
+    /// Put the selected text on the system clipboard. Returns whether there
+    /// was anything to copy, so the caller can fall back to what the key
+    /// otherwise does.
+    fn copy_selection(&mut self) -> bool {
+        let Some(selection) = self.state.selection else {
+            return false;
+        };
+        let Some(pane) = self.state.pane_of(selection.view) else {
+            return false;
+        };
+        let text = selection.text(pane);
+        if text.is_empty() {
+            return false;
+        }
+        use copypasta::ClipboardProvider;
+        if self.clipboard.is_none() {
+            self.clipboard = copypasta::ClipboardContext::new().ok();
+        }
+        match self.clipboard.as_mut() {
+            Some(clipboard) => {
+                // A clipboard that will not take it is worth saying out loud:
+                // the alternative is a copy that silently did nothing.
+                if let Err(e) = clipboard.set_contents(text) {
+                    self.state.activity.say(
+                        format!("could not reach the clipboard: {e}"),
+                        state::Tone::Bad,
+                    );
+                }
+            }
+            None => self.state.activity.say(
+                "could not reach the clipboard on this display",
+                state::Tone::Bad,
+            ),
+        }
+        self.dirty = true;
+        true
     }
 
     /// The pointer came up. A tab that never moved is a click; one that did is
     /// a drop.
     fn release(&mut self) {
+        self.selecting = false;
         let layout = self.layout();
         if let Some(drag) = self.drag.take() {
             if let Some(space) = layout
@@ -423,11 +531,14 @@ impl App {
                 self.caret = self.input.chars().count();
                 self.dirty = true;
             }
-            // Escape clears a half-typed line first, and only cancels the turn
-            // when there is nothing to clear. Losing a typed prompt to a key
-            // meant for the agent is the worse mistake of the two.
+            // Escape drops a selection first, then a half-typed line, and only
+            // cancels the turn when there is neither. Losing a typed prompt to
+            // a key meant for the agent is the worse mistake of the two, and
+            // losing a turn to one meant for a selection is worse still.
             Key::Named(NamedKey::Escape) => {
-                if self.input.is_empty() {
+                if self.state.selection.take().is_some() {
+                    self.dirty = true;
+                } else if self.input.is_empty() {
                     self.cancel();
                 } else {
                     self.input.clear();
@@ -463,7 +574,19 @@ impl App {
             Key::Named(NamedKey::PageUp) => self.scroll_hovered(1.0),
             Key::Named(NamedKey::PageDown) => self.scroll_hovered(-1.0),
             Key::Character("q") if ctrl => event_loop.exit(),
-            Key::Character("c") if ctrl => self.cancel(),
+            // Copy when there is a selection, cancel when there is not. The
+            // same key does both because cancelling a turn is the thing this
+            // window must never make hard to reach, and a selection you just
+            // made is the thing you obviously meant.
+            Key::Character("c") if ctrl => {
+                if !self.copy_selection() {
+                    self.cancel();
+                }
+            }
+            // And an unambiguous copy, for the muscle memory a terminal built.
+            Key::Character("C") if ctrl && self.modifiers.shift_key() => {
+                self.copy_selection();
+            }
             Key::Character("u") if ctrl => {
                 self.input.clear();
                 self.caret = 0;
@@ -568,6 +691,7 @@ impl App {
             drag: self.drag,
             hot: self.hot,
             trouble: self.trouble.as_deref(),
+            selection: self.state.selection,
             avatar: self
                 .avatar
                 .as_ref()
@@ -684,6 +808,9 @@ impl ApplicationHandler<Wake> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = position;
                 self.maybe_drag();
+                if self.selecting {
+                    self.extend_selection();
+                }
                 let (x, y) = (position.x as f32, position.y as f32);
                 let layout = self.layout();
                 let hot = match layout.hit(x, y) {

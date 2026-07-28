@@ -18,6 +18,7 @@ noob-draw.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 pollster.workspace = true
+copypasta = "0.10.2"
 
 [dev-dependencies]
 # Test-only: tool arguments arrive as an opaque JSON value, so building one

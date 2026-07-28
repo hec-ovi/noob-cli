@@ -159,6 +159,14 @@ pub struct Pane {
     /// Rows scrolled back from the tail. Zero means following the live end,
     /// which is what a pane returns to whenever new content arrives.
     pub scrollback: usize,
+    /// How many lines have fallen off the front over the pane's whole life.
+    ///
+    /// The absolute number of `lines[i]` is `dropped + i`, and that number is
+    /// what a selection holds onto. Anchoring to a screen row instead would
+    /// slide the selection onto different text the moment anything arrived,
+    /// and anchoring to a position in the deque would slide it every time a
+    /// line was evicted.
+    dropped: usize,
 }
 
 impl Pane {
@@ -167,6 +175,7 @@ impl Pane {
             lines: VecDeque::new(),
             cap,
             scrollback: 0,
+            dropped: 0,
         }
     }
 
@@ -174,6 +183,7 @@ impl Pane {
         self.lines.push_back(line);
         while self.lines.len() > self.cap {
             self.lines.pop_front();
+            self.dropped += 1;
         }
         // New content pulls the view back to the live end. A pane that stayed
         // where it was would silently stop showing what is happening.
@@ -219,6 +229,23 @@ impl Pane {
         let end = self.lines.len().saturating_sub(self.scrollback);
         let start = end.saturating_sub(rows);
         self.lines.range(start..end).collect()
+    }
+
+    /// The absolute number of the first line currently on screen, so a screen
+    /// row can be turned into the line it is actually showing.
+    pub fn showing_from(&self, rows: usize) -> usize {
+        let end = self.lines.len().saturating_sub(self.scrollback);
+        self.dropped + end.saturating_sub(rows)
+    }
+
+    /// One line by its absolute number, or nothing when it has been evicted.
+    pub fn line(&self, absolute: usize) -> Option<&Line> {
+        self.lines.get(absolute.checked_sub(self.dropped)?)
+    }
+
+    /// One past the last line this pane has ever held.
+    pub fn last(&self) -> usize {
+        self.dropped + self.lines.len()
     }
 
     /// Scroll back by `rows`, stopping at the oldest line still held. Returns
@@ -462,6 +489,9 @@ pub struct State {
     /// The agent's own reading of how full it is. None until it says.
     pub context: Option<ContextFill>,
 
+    /// A drag over one of the text panes, if there is one.
+    pub selection: Option<crate::select::Selection>,
+
     pub turn: u32,
     pub phase: Phase,
     /// What is happening right now, in a few words, for the status bar.
@@ -497,6 +527,7 @@ impl State {
             last_generated: 0,
             rates: Rates::default(),
             context: None,
+            selection: None,
             turn: 0,
             phase: Phase::Starting,
             status: String::from("starting the agent"),
@@ -812,6 +843,21 @@ impl State {
             | Event::Unknown => return false,
         }
         true
+    }
+
+    /// The scrollback a view is drawn from, for the views that have one.
+    ///
+    /// PLAN, AGENTS and the two monitors are built from lists and readings
+    /// rather than from lines, so there is nothing there to select. Returning
+    /// nothing for them is the honest answer and keeps selection off the views
+    /// where it would mean guessing at a layout.
+    pub fn pane_of(&self, view: crate::dock::View) -> Option<&Pane> {
+        match view {
+            crate::dock::View::Talk => Some(&self.talk),
+            crate::dock::View::Activity => Some(&self.activity),
+            crate::dock::View::Files => self.files.get(self.open_file).map(|file| &file.pane),
+            _ => None,
+        }
     }
 
     /// How much of the context window this session is holding, 0.0 to 1.0.

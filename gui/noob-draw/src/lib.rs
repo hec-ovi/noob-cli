@@ -200,6 +200,12 @@ impl Rect {
     pub fn xywh(&self) -> [f32; 4] {
         self.xywh
     }
+
+    /// The fill, for the same reason: telling one rectangle from another in a
+    /// scene means knowing what colour it is.
+    pub fn rgba(&self) -> [f32; 4] {
+        self.rgba
+    }
 }
 
 /// A stretch of characters that share a color. `None` means the run takes the

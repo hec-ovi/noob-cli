@@ -330,6 +330,30 @@ impl Layout {
     pub fn rows(&self, panel: Panel, size: f32) -> usize {
         Text::rows_for(size, panel.inset(PAD).h)
     }
+
+    /// Which pane the pointer is over, and which character cell of it.
+    ///
+    /// Arithmetic rather than a layout query, which is what a monospace grid
+    /// buys: the renderer never has to be asked where a glyph landed. The
+    /// column is rounded to the nearest boundary rather than floored, so
+    /// pressing on the right half of a character puts the caret after it, the
+    /// way a text cursor behaves everywhere else.
+    pub fn cell(&self, x: f32, y: f32, size: f32, column: f32) -> Option<(Space, usize, usize)> {
+        if self.shaded || column <= 0.0 {
+            return None;
+        }
+        let line = Text::line_for(size);
+        for space in Space::ALL {
+            let body = self.placed(space).body.inset(PAD);
+            if !body.contains(x, y) {
+                continue;
+            }
+            let row = ((y - body.y) / line).floor().max(0.0) as usize;
+            let at = (((x - body.x) / column).round().max(0.0)) as usize;
+            return Some((space, row, at));
+        }
+        None
+    }
 }
 
 /// Lay tabs left to right at the width their labels need, dropping any that do
@@ -400,6 +424,8 @@ pub struct Frame<'a> {
     pub hot: Option<Hit>,
     /// Shown in the title bar when the agent could not be reached.
     pub trouble: Option<&'a str>,
+    /// A drag over one of the text panes, drawn as a band under the glyphs.
+    pub selection: Option<crate::select::Selection>,
     /// The avatar clip and how far into it we are. None when the settings
     /// turned it off or the named clip could not be read.
     pub avatar: Option<(&'a crate::avatar::Avatar, u64)>,
@@ -556,6 +582,8 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
         scene.rect(edge);
     }
 
+    selection_band(scene, frame, panel, slot.active());
+
     match slot.active() {
         None => {}
         Some(View::Talk) => talk(scene, frame, panel),
@@ -607,6 +635,44 @@ fn avatar(scene: &mut Scene, frame: &Frame, panel: Panel) {
         runs.push(Run::plain("\n"));
     }
     scene.text(Text::rich(runs, box_, frame.pane_size, skin.body));
+}
+
+/// The band behind selected text, drawn before the glyphs go over it.
+///
+/// One rectangle per visible line of the selection rather than one for the
+/// whole block, because the first and last lines start and stop mid-line and a
+/// single rectangle would cover text that is not selected.
+fn selection_band(scene: &mut Scene, frame: &Frame, panel: Panel, showing: Option<View>) {
+    let (Some(selection), Some(view)) = (frame.selection, showing) else {
+        return;
+    };
+    if selection.view != view || selection.is_empty() {
+        return;
+    }
+    let Some(pane) = frame.state.pane_of(view) else {
+        return;
+    };
+    let content = panel.inset(PAD);
+    let rows = frame.layout.rows(panel, frame.pane_size);
+    let line_h = Text::line_for(frame.pane_size);
+    let column = frame.pane_column;
+    let first = pane.showing_from(rows);
+    for row in 0..rows {
+        let number = first + row;
+        let Some(line) = pane.line(number) else {
+            continue;
+        };
+        let Some((from, to)) = selection.columns_on(number, line.text.chars().count()) else {
+            continue;
+        };
+        let x = content.x + from as f32 * column;
+        let width = ((to - from) as f32 * column).min(content.x + content.w - x);
+        let y = content.y + row as f32 * line_h;
+        if width <= 0.0 || y + line_h > content.y + content.h {
+            continue;
+        }
+        scene.rect(Panel::new(x, y, width, line_h).fill(frame.skin.select));
+    }
 }
 
 fn text_box(scene: &mut Scene, frame: &Frame, panel: Panel, size: f32, runs: Vec<Run>) {
@@ -1217,6 +1283,7 @@ mod tests {
             drag,
             hot: None,
             trouble: None,
+            selection: None,
             avatar: clip.as_ref().map(|clip| (clip, 700)),
         });
         Rendered {
@@ -1416,6 +1483,120 @@ mod tests {
         });
         assert!(lit, "the target is not outlined");
         let _ = dragging.skin;
+    }
+
+    /// The band has to land on the text it selects. This is the geometry that
+    /// can be silently wrong: the selection model is right, the copy is right,
+    /// and the highlight sits a line off.
+    #[test]
+    fn the_selection_band_covers_the_rows_it_selects() {
+        let mut state = busy_state();
+        // Three known lines at the end of the conversation.
+        for text in ["alpha alpha", "beta beta", "gamma gamma"] {
+            state.talk.say(text, Tone::Body);
+        }
+        let last = state.talk.last() - 1;
+        let mut selection =
+            crate::select::Selection::new(View::Talk, crate::select::Spot::new(last - 2, 6));
+        selection.extend(crate::select::Spot::new(last, 5));
+        state.selection = Some(selection);
+
+        let dock = Dock::new();
+        let shape = shape(&dock, &["a.rs"]);
+        let layout = Layout::compute(1400.0, 900.0, &shape);
+        let skin = Skin::from(&Config::default());
+        let scene = build(&Frame {
+            state: &state,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            input: "",
+            caret: 0,
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            reports: &[],
+            drag: None,
+            hot: None,
+            trouble: None,
+            selection: Some(selection),
+            avatar: None,
+        });
+
+        let body = layout.placed(Space::Left).body.inset(PAD);
+        let bands: Vec<[f32; 4]> = scene
+            .rects
+            .iter()
+            .filter(|r| r.rgba() == skin.select)
+            .map(|r| r.xywh())
+            .collect();
+        // One per selected line, no more: a single rectangle over the block
+        // would cover text on the first and last lines that is not selected.
+        assert_eq!(bands.len(), 3, "{bands:?}");
+        // Consecutive rows, top to bottom, each one line tall.
+        let line = Text::line_for(13.0);
+        let mut ys: Vec<f32> = bands.iter().map(|b| b[1]).collect();
+        ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for pair in ys.windows(2) {
+            assert!((pair[1] - pair[0] - line).abs() < 0.01, "{ys:?}");
+        }
+        for band in &bands {
+            assert!((band[3] - line).abs() < 0.01, "band is {} tall", band[3]);
+            assert!(band[0] >= body.x - 0.01, "{band:?} starts left of the pane");
+            assert!(
+                band[0] + band[2] <= body.x + body.w + 0.01,
+                "{band:?} runs past the pane"
+            );
+        }
+        // The first line starts six columns in, the last starts at the edge.
+        let first = bands
+            .iter()
+            .min_by(|a, b| a[1].partial_cmp(&b[1]).unwrap())
+            .unwrap();
+        assert!((first[0] - (body.x + 6.0 * 8.0)).abs() < 0.01, "{first:?}");
+    }
+
+    /// A selection in a pane that is not on screen must not paint anything.
+    #[test]
+    fn a_selection_in_a_hidden_pane_draws_nothing() {
+        let mut state = busy_state();
+        state.activity.say("something to select", Tone::Body);
+        let last = state.activity.last() - 1;
+        let mut selection =
+            crate::select::Selection::new(View::Activity, crate::select::Spot::new(last, 0));
+        selection.extend(crate::select::Spot::new(last, 9));
+        state.selection = Some(selection);
+
+        // Fold every space away, so nothing is showing at all.
+        let mut dock = Dock::new();
+        for space in Space::ALL {
+            dock.slot_mut(space).folded = true;
+        }
+        let shape = shape(&dock, &["a.rs"]);
+        let layout = Layout::compute(1400.0, 900.0, &shape);
+        let skin = Skin::from(&Config::default());
+        let scene = build(&Frame {
+            state: &state,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            input: "",
+            caret: 0,
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            reports: &[],
+            drag: None,
+            hot: None,
+            trouble: None,
+            selection: Some(selection),
+            avatar: None,
+        });
+        assert!(!scene.rects.iter().any(|r| r.rgba() == skin.select));
     }
 
     /// The avatar draws, moves, and stays inside its panel. It is the one
@@ -1628,6 +1809,7 @@ mod tests {
                 drag: None,
                 hot: None,
                 trouble: None,
+            selection: None,
             avatar: None,
             });
             let body = layout.placed(Space::TopRight).body;
@@ -1687,6 +1869,7 @@ mod tests {
                 drag: None,
                 hot: None,
                 trouble: None,
+            selection: None,
             avatar: None,
             });
             (layout.input, scene)
@@ -1767,6 +1950,7 @@ mod tests {
             drag: None,
             hot: None,
             trouble: None,
+            selection: None,
             avatar: None,
         });
         let text = text_of(&scene);

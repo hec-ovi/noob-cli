@@ -97,11 +97,23 @@ reads as a mark between two stretches of file rather than as part of one.
 
 The prompt grows as you type, up to eight lines.
 
+Drag across the conversation, the activity list or a file to select text, and
+Ctrl-C copies it. Ctrl-C with nothing selected still cancels the turn, which is
+the thing that must never get hard to reach; Ctrl-Shift-C always copies, and
+Escape drops the selection before it touches anything else. Selection is only
+on the panes that are made of lines, because the plan, the agent list and the
+two monitors are lists and readings rather than text, and pretending otherwise
+would mean guessing at a layout that does not exist.
+
+A selection holds line numbers rather than screen positions, so output arriving
+underneath it does not slide it onto different text mid-drag.
+
 Routing is by tool name, and by file extension for syntax coloring. The agent is
 never told any of this exists: everything the window shows is derived from calls
 the model was already making, including the plan.
 
-Keys: Enter sends, Escape clears the line or cancels the turn, Tab walks every
+Keys: Enter sends, Escape drops a selection then clears the line then cancels
+the turn, Ctrl-C copies a selection or cancels, Ctrl-Shift-C always copies, Tab walks every
 view wherever it has been dragged, Shift-Tab stays in one space and walks its
 own tabs, PageUp and PageDown scroll whatever the pointer is over, the wheel
 does the same, Ctrl-C cancels, Ctrl-Q quits.
@@ -161,8 +173,9 @@ One lockfile for both would put a `workspace = true` between the two budgets.
 They share exactly one thing, `crates/noob-proto`, by path.
 
 CLIppy has its own ceiling, 40 MiB and 400 crates, enforced by
-`./dev.sh gui-check` the same way the CLI's is. It currently uses 10.3 MiB and
-141 crates. `asciify` is a fourth crate in that workspace and is never a
+`./dev.sh gui-check` the same way the CLI's is. It currently uses 10.6 MiB and
+146 crates, five of which are the clipboard: a copy has to reach the display
+server, and Wayland and X11 do not agree on how. `asciify` is a fourth crate in that workspace and is never a
 dependency of the window, so its GIF decoder is not in the binary.
 
 ## Transparency is probed, never assumed
