@@ -205,7 +205,7 @@ The mounted config directory contains `.env`, optional `AGENTS.md`, `mcp.json`, 
 | `NOOB_SANDBOX` | container detection | `container` or `workspace` | process start |
 | `NOOB_TASK_CONCURRENCY` | `4` | Concurrent child limit | process start |
 | `NOOB_TASK_MAX_TURNS` | `25` | Child inference-round limit | process start |
-| `NOOB_TASK_WALL_CLOCK_S` | `300` | Child wall-clock limit | process start |
+| `NOOB_TASK_WALL_CLOCK_S` | `0` (no limit) | Child wall-clock limit in seconds; `0` disables it | process start |
 | `NOOB_TOOL_CAPS` | enabled | Set `0` (or `off`) to lift every tool-output truncation cap: read, bash, grep, glob/ls, skill, websearch, and MCP results flow through whole | process start |
 | `NOOB_READ_DEDUP` | enabled | Set `0` (or `off`) to print every `read` in full. On, a whole-file read of content already in context returns a one-line note instead of the body, and reading again prints it | process start |
 | `NOOB_SKILL_PATHS` | none | Colon-separated skill directories, each resolved against the workspace and registered as one resolver skill (so a `cli/SKILL.md` dispatcher is discovered without copying it into a skills root) | `.env`: `/skills reload`; environment: process start |

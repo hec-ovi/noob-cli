@@ -286,11 +286,12 @@ pub fn task_max_turns(config_dir: &Path) -> u32 {
 }
 
 /// NOOB_TASK_WALL_CLOCK_S: per-child wall clock before the parent kills the
-/// process group. Settable mostly so tests do not wait five minutes.
+/// process group. 0 (the default) disables the limit entirely; any positive
+/// value caps the child at that many seconds (tests use this to avoid long
+/// waits).
 pub fn task_wall_clock(config_dir: &Path) -> std::time::Duration {
     let secs = setting(config_dir, "NOOB_TASK_WALL_CLOCK_S")
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|&n| n >= 1)
         .unwrap_or(crate::subagent::DEFAULT_WALL_CLOCK_S)
         .min(3_600);
     std::time::Duration::from_secs(secs)
@@ -612,6 +613,33 @@ mod tests {
                 .unwrap_err()
                 .contains("read-dedup")
         );
+    }
+
+    /// The wall clock ships off: a sub-agent that researches for twenty
+    /// minutes is working, not wedged, and killing it throws away work the
+    /// parent has to pay to redo. A configured value still caps it, and the
+    /// one-hour ceiling still holds.
+    #[test]
+    fn the_wall_clock_ships_disabled_and_still_honors_a_configured_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "").unwrap();
+        assert_eq!(task_wall_clock(tmp.path()), std::time::Duration::ZERO);
+        for (set, want) in [("0", 0), ("45", 45), ("99999", 3_600)] {
+            std::fs::write(
+                tmp.path().join(".env"),
+                format!("NOOB_TASK_WALL_CLOCK_S={set}\n"),
+            )
+            .unwrap();
+            assert_eq!(
+                task_wall_clock(tmp.path()),
+                std::time::Duration::from_secs(want),
+                "{set}"
+            );
+        }
+        // An unparseable value falls back to the default, not to some
+        // arbitrary cap the user never asked for.
+        std::fs::write(tmp.path().join(".env"), "NOOB_TASK_WALL_CLOCK_S=soon\n").unwrap();
+        assert_eq!(task_wall_clock(tmp.path()), std::time::Duration::ZERO);
     }
 
     #[test]

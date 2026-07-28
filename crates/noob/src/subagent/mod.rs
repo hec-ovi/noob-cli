@@ -30,7 +30,8 @@ pub const MAX_DEPTH: u32 = 2;
 pub const DEFAULT_CONCURRENCY: usize = 4;
 pub const DEFAULT_MAX_TURNS: u32 = 25;
 /// Per-child wall clock; the parent kills the whole process group on expiry.
-pub const DEFAULT_WALL_CLOCK_S: u64 = 300;
+/// 0 means no limit: the child runs until it finishes or is interrupted.
+pub const DEFAULT_WALL_CLOCK_S: u64 = 0;
 /// The child's stdin bound: `noob child` reads its task via
 /// `take(CHILD_STDIN_CAP)`, so a bigger payload arrives truncated, fails to
 /// parse, and surfaces as a misleading "no task" error. The parent
@@ -319,12 +320,23 @@ fn skill_exclusions(cfg: &TaskCfg, ctx: &ToolCtx, mcp_replaces_web_skill: bool) 
     excluded
 }
 
+/// When the parent should kill this child, or `None` when it should not.
+///
+/// Zero means no limit, and it is the default. A child researching for twenty
+/// minutes is doing its job, not hanging, and killing it at an arbitrary mark
+/// destroys work the parent then has to pay to redo. What actually bounds a
+/// child is its own turn budget, a Ctrl-C, and the parent exiting. A positive
+/// value still caps it, which is how the tests avoid long waits.
+fn deadline_for(wall_clock: Duration) -> Option<Instant> {
+    (wall_clock > Duration::ZERO).then(|| Instant::now() + wall_clock)
+}
+
 fn run_task(
     cfg: &RunCfg,
     request: &TaskRequest,
     interrupted: impl Fn() -> bool + Copy,
 ) -> ToolOutcome {
-    let deadline = Instant::now() + cfg.wall_clock;
+    let deadline = deadline_for(cfg.wall_clock);
     // One JSON object in, then EOF: the child reads stdin to end. Built and
     // bounds-checked BEFORE the spawn, so an oversized task fails with the
     // real reason instead of the child's truncated-JSON "no task" error.
@@ -459,7 +471,7 @@ fn run_task(
             let progress = stderr_reader.join().unwrap_or_default();
             return with_progress(ToolOutcome::canceled(), verbose, progress);
         }
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
             child.terminate();
             let _ = stdout_reader.join();
             let progress = stderr_reader.join().unwrap_or_default();
@@ -533,7 +545,7 @@ enum ChildInputError {
 fn write_child_input_with(
     stdin: &mut std::process::ChildStdin,
     mut bytes: &[u8],
-    deadline: Instant,
+    deadline: Option<Instant>,
     interrupted: impl Fn() -> bool,
 ) -> Result<(), ChildInputError> {
     use std::os::fd::AsRawFd;
@@ -548,7 +560,7 @@ fn write_child_input_with(
         if interrupted() {
             return Err(ChildInputError::Canceled);
         }
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
             return Err(ChildInputError::Timeout);
         }
         match stdin.write(bytes) {
@@ -1138,7 +1150,7 @@ mod tests {
         let result = write_child_input_with(
             &mut stdin,
             &input,
-            Instant::now() + Duration::from_secs(2),
+            Some(Instant::now() + Duration::from_secs(2)),
             || canceled.load(Ordering::SeqCst),
         );
         setter.join().unwrap();
@@ -1147,6 +1159,77 @@ mod tests {
 
         assert!(matches!(result, Err(ChildInputError::Canceled)));
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    /// The wall clock now ships disabled, so `None` is the ordinary state of
+    /// this path rather than an impossible one. A blocked write must still be
+    /// interruptible with no deadline to fall back on.
+    #[test]
+    fn blocked_child_input_without_a_deadline_is_still_cancelable() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("exec sleep 5")
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let trigger = canceled.clone();
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            trigger.store(true, Ordering::SeqCst);
+        });
+        let input = vec![b'x'; 4 * 1024 * 1024];
+        let started = Instant::now();
+        let result =
+            write_child_input_with(&mut stdin, &input, None, || canceled.load(Ordering::SeqCst));
+        setter.join().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(matches!(result, Err(ChildInputError::Canceled)));
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    /// A configured wall clock still stops a child that never reads its task.
+    /// Paired with the test above so the two states are pinned together: no
+    /// deadline never times out, a deadline always does.
+    #[test]
+    fn blocked_child_input_times_out_when_a_wall_clock_is_set() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("exec sleep 5")
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let input = vec![b'x'; 4 * 1024 * 1024];
+        let result = write_child_input_with(
+            &mut stdin,
+            &input,
+            Some(Instant::now() + Duration::from_millis(200)),
+            || false,
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(matches!(result, Err(ChildInputError::Timeout)));
+    }
+
+    /// The default ships disabled; a configured value still produces a kill
+    /// time. This is the whole behavior change, at the point it is decided.
+    #[test]
+    fn a_zero_wall_clock_produces_no_deadline() {
+        assert_eq!(deadline_for(Duration::ZERO), None);
+        assert_eq!(
+            deadline_for(Duration::from_secs(DEFAULT_WALL_CLOCK_S)),
+            None,
+            "the shipped default must not cap a child"
+        );
+        assert!(deadline_for(Duration::from_secs(5)).is_some());
     }
 
     // Spawning real children is exercised end to end in tests/e2e_p6.rs;
