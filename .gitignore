@@ -9,6 +9,7 @@
 
 # build caches (docker bind mounts, user-owned)
 /target
+/gui/target
 /.cargo-home
 /.rustup-home
 /workspace/

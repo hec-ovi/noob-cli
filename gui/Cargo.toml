@@ -1,0 +1,41 @@
+# CLIppy: the GPU front end. Its own workspace, deliberately.
+#
+# The CLI is capped at 8 MiB and 45 runtime crates, and those are published
+# claims rather than preferences. A GPU stack is several hundred crates. One
+# lockfile for both would put a `workspace = true` between the two budgets, so
+# they are kept apart and share exactly one thing: `crates/noob-proto`, by path.
+[workspace]
+resolver = "2"
+members = ["noob-gpu", "noob-draw", "clippy"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT"
+repository = "https://github.com/hec-ovi/noob-cli"
+
+[workspace.dependencies]
+noob-proto = { path = "../crates/noob-proto" }
+noob-gpu = { path = "noob-gpu" }
+noob-draw = { path = "noob-draw" }
+wgpu = "30"
+winit = "0.30"
+glyphon = "0.12"
+pollster = "0.4"
+serde_json = "1.0.150"
+bytemuck = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+codegen-units = 1
+
+# A debug build of a renderer is unusable at any resolution, and the
+# dependencies never change, so they are optimized even in dev.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

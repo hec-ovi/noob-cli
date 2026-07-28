@@ -1,0 +1,25 @@
+[package]
+name = "clippy"
+description = "CLIppy: the GPU front end for noob."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "clippy"
+path = "src/main.rs"
+
+[dependencies]
+noob-proto.workspace = true
+noob-gpu.workspace = true
+noob-draw.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+pollster.workspace = true
+
+[dev-dependencies]
+# Test-only: tool arguments arrive as an opaque JSON value, so building one
+# is how a test names what the model asked for.
+serde_json.workspace = true

@@ -87,8 +87,31 @@ case "${1:-}" in
     echo "runtime crates: $crates"
     [ "$crates" -le 45 ] || { echo "FAIL: crate graph exceeds 45"; exit 1; }
     ;;
+  gui)
+    # CLIppy, from its own workspace. Built on the host rather than in the
+    # container: it needs a GPU, a compositor and a window, none of which the
+    # CLI's build image has or should have.
+    shift
+    cargo build --release --manifest-path gui/Cargo.toml
+    NOOB_BIN="${NOOB_BIN:-$PWD/target/release/noob}" \
+      exec gui/target/release/clippy "$@"
+    ;;
+  gui-test)
+    cargo test --manifest-path gui/Cargo.toml
+    cargo clippy --manifest-path gui/Cargo.toml --all-targets -- -D warnings
+    ;;
+  gui-check)
+    cargo build --release --manifest-path gui/Cargo.toml
+    size=$(stat -c%s gui/target/release/clippy)
+    echo "clippy binary: $size bytes"
+    [ "$size" -le 41943040 ] || { echo "FAIL: CLIppy exceeds 40 MiB"; exit 1; }
+    crates=$(cargo tree --manifest-path gui/Cargo.toml -p clippy -e normal \
+      --prefix none | sed 's/ (\*)$//' | awk '{print $1}' | sort -u | grep -c .)
+    echo "clippy runtime crates: $crates"
+    [ "$crates" -le 400 ] || { echo "FAIL: CLIppy crate graph exceeds 400"; exit 1; }
+    ;;
   clean)
-    rm -rf target .cargo-home
+    rm -rf target .cargo-home gui/target
     ;;
   -h|--help|help)
     echo "usage:"
@@ -96,6 +119,8 @@ case "${1:-}" in
     echo "  ./dev.sh --resume <id>      resume a saved session"
     echo "  ./dev.sh --plan | --yolo    any noob flag is forwarded to the agent"
     echo "  ./dev.sh install|test|build|docker|exec \"prompt\"|smoke|size-check|clean"
+    echo "  ./dev.sh gui [workspace]     open CLIppy, the GPU front end"
+    echo "  ./dev.sh gui-test|gui-check  CLIppy tests and its own size gate"
     ;;
   # Bare `./dev.sh`, or leading-dash noob flags (--session, --plan, ...): open
   # the agent. `repl` is kept as a silent alias for old muscle memory.

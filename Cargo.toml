@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/noob", "crates/noob-proto", "crates/noob-provider", "crates/noob-testkit"]
+# CLIppy is its own workspace with its own lockfile. The CLI's budget is 8 MiB
+# and 45 runtime crates, and a GPU stack is several hundred crates on its own:
+# sharing a lockfile would put them one careless `workspace = true` apart. They
+# share exactly one thing, `crates/noob-proto`, by path.
+exclude = ["gui"]
 
 [workspace.package]
 version = "0.5.1"
