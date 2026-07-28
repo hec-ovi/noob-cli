@@ -2,7 +2,7 @@
 
 noob-cli is a compact Rust agent for OpenAI-compatible model endpoints. It runs in an isolated Docker container against the current project directory, with persistent configuration and sessions stored outside the image.
 
-The static release binary is 4,354,944 bytes (4.15 MiB) with 40 runtime crates. There is no async runtime or TUI framework.
+The static release binary is 4,420,544 bytes (4.22 MiB) with 40 runtime crates. There is no async runtime or TUI framework.
 
 ## Showcase
 
