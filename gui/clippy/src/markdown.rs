@@ -50,6 +50,129 @@ pub fn fence_after<'a>(lines: impl Iterator<Item = &'a str>) -> Fence {
     fence
 }
 
+/// Whether a line is a row of a pipe table.
+///
+/// A leading pipe is required rather than merely allowed. Prose containing a
+/// pipe is far more common than a table written without one, and guessing wrong
+/// turns a sentence into a one-column table.
+pub fn is_table_row(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('|') && t.len() > 1
+}
+
+/// The cells of a row, trimmed, with the outer pipes discarded.
+fn cells(line: &str) -> Vec<&str> {
+    let t = line.trim();
+    let inner = t.strip_prefix('|').unwrap_or(t);
+    let inner = inner.strip_suffix('|').unwrap_or(inner);
+    inner.split('|').map(str::trim).collect()
+}
+
+/// Whether a row is the `|---|:--:|` rule under a header rather than content.
+fn is_rule(line: &str) -> bool {
+    let cells = cells(line);
+    !cells.is_empty()
+        && cells.iter().all(|c| {
+            !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')
+        })
+}
+
+/// A table's shape: how wide each column has to be to hold its widest cell.
+///
+/// Computed over the whole block, including rows above the visible window, so
+/// the columns do not jump about while a table is scrolled through.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Table {
+    widths: Vec<usize>,
+}
+
+impl Table {
+    /// Measure a block. Rule rows are skipped: their dashes say nothing about
+    /// how wide the content is.
+    pub fn of<'a>(rows: impl Iterator<Item = &'a str>) -> Table {
+        let mut widths: Vec<usize> = Vec::new();
+        for row in rows.filter(|r| !is_rule(r)) {
+            for (i, cell) in cells(row).into_iter().enumerate() {
+                let width = cell.chars().count();
+                match widths.get_mut(i) {
+                    Some(at) => *at = (*at).max(width),
+                    None => widths.push(width),
+                }
+            }
+        }
+        Table { widths }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.widths.is_empty()
+    }
+
+    /// Draw one row of the table, box-drawn and column aligned.
+    ///
+    /// A rule row becomes the box's own divider, so the rendering uses exactly
+    /// the lines the source had: adding a top or bottom border would put a row
+    /// on screen that no source line corresponds to, and every selection and
+    /// scroll position is anchored to source lines.
+    ///
+    /// `room` is how many columns the pane has. A table wider than that is cut
+    /// with an ellipsis rather than wrapped, because a wrapped table is not a
+    /// table any more.
+    pub fn row(&self, line: &str, room: usize, skin: &Skin, out: &mut Vec<Run>) {
+        let rule = is_rule(line);
+        let cells = cells(line);
+        let mut drawn = 0;
+
+        let mut push = |text: String, tint: [u8; 4], drawn: &mut usize| -> bool {
+            let width = text.chars().count();
+            if *drawn + width > room {
+                let left = room.saturating_sub(*drawn);
+                if left > 0 {
+                    out.push(Run::tinted(
+                        text.chars().take(left.saturating_sub(1)).collect::<String>() + "\u{2026}",
+                        tint,
+                    ));
+                    *drawn = room;
+                }
+                return false;
+            }
+            out.push(Run::tinted(text, tint));
+            *drawn += width;
+            true
+        };
+
+        for (i, width) in self.widths.iter().enumerate() {
+            let edge = if i == 0 {
+                if rule { "\u{251c}\u{2500}" } else { "\u{2502} " }
+            } else if rule {
+                "\u{2500}\u{253c}\u{2500}"
+            } else {
+                " \u{2502} "
+            };
+            if !push(edge.to_string(), skin.markup, &mut drawn) {
+                return;
+            }
+            let body = match (rule, cells.get(i)) {
+                (true, _) => "\u{2500}".repeat(*width),
+                (false, Some(cell)) => {
+                    let mut s = cell.to_string();
+                    let pad = width.saturating_sub(cell.chars().count());
+                    s.push_str(&" ".repeat(pad));
+                    s
+                }
+                // A row with fewer cells than the widest one still has to fill
+                // its columns, or the closing edge lands mid table.
+                (false, None) => " ".repeat(*width),
+            };
+            let tint = if rule { skin.markup } else { skin.body };
+            if !push(body, tint, &mut drawn) {
+                return;
+            }
+        }
+        let close = if rule { "\u{2500}\u{2524}" } else { " \u{2502}" };
+        push(close.to_string(), skin.markup, &mut drawn);
+    }
+}
+
 /// Append one line as runs, updating the fence state.
 pub fn line(text: &str, fence: &mut Fence, skin: &Skin, out: &mut Vec<Run>) {
     if fence.toggle(text) {
@@ -221,6 +344,114 @@ mod tests {
         }
         let flat: String = runs.iter().map(|r| r.text.as_str()).collect();
         (flat, runs)
+    }
+
+    /// Render a whole table block the way the transcript does: measure it once,
+    /// then draw each source line.
+    fn table(src: &str, room: usize) -> String {
+        let skin = skin();
+        let table = Table::of(src.lines());
+        let mut out = String::new();
+        for line in src.lines() {
+            let mut runs = Vec::new();
+            table.row(line, room, &skin, &mut runs);
+            out.push_str(&runs.iter().map(|r| r.text.as_str()).collect::<String>());
+            out.push('\n');
+        }
+        out
+    }
+
+    const SRC: &str = "\
+| Name | Type |
+| --- | --- |
+| talk | pane |
+| llm | monitor |";
+
+    /// A table used to reach the screen as raw pipes and a row of dashes. It is
+    /// box drawn and column aligned now, and every column is the same width on
+    /// every row.
+    #[test]
+    fn a_table_is_box_drawn_and_its_columns_line_up() {
+        let out = table(SRC, 60);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 4, "one drawn row per source row: {out}");
+        assert!(lines[0].starts_with('\u{2502}'), "{out}");
+        assert!(lines[0].contains("Name"), "{out}");
+        assert!(!out.contains('|'), "no raw pipe survives: {out}");
+        assert!(!out.contains("---"), "no dashed rule survives: {out}");
+        // Every row is exactly as wide as every other, which is what "lines up"
+        // means and what the old rendering could not do.
+        let widths: Vec<usize> = lines.iter().map(|l| l.chars().count()).collect();
+        assert!(
+            widths.windows(2).all(|p| p[0] == p[1]),
+            "rows are {widths:?} wide: {out}"
+        );
+    }
+
+    /// The `|---|` row becomes the box's divider rather than a line of dashes,
+    /// and no row is added or removed: a selection is anchored to source lines,
+    /// so a border of its own would put the highlight on the wrong text.
+    #[test]
+    fn the_rule_row_becomes_the_divider_and_no_row_is_invented() {
+        let out = table(SRC, 60);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), SRC.lines().count());
+        assert!(
+            lines[1].starts_with('\u{251c}') && lines[1].contains('\u{253c}'),
+            "the second row is the divider: {out}"
+        );
+        assert!(lines[1].ends_with('\u{2524}'), "{out}");
+    }
+
+    /// Column widths come from the widest cell anywhere in the block, not from
+    /// the header, or a long value would push its column out of alignment.
+    #[test]
+    fn a_column_is_as_wide_as_its_widest_cell_anywhere() {
+        let t = Table::of(SRC.lines());
+        // "monitor" is seven characters and is the widest in column two.
+        assert_eq!(t.widths, vec![4, 7]);
+    }
+
+    /// A table wider than the pane is cut, not wrapped. A wrapped table stops
+    /// being a table.
+    #[test]
+    fn a_table_wider_than_the_pane_is_cut_with_an_ellipsis() {
+        let out = table(SRC, 12);
+        for line in out.lines() {
+            assert!(
+                line.chars().count() <= 12,
+                "{:?} is {} columns wide in a 12 column pane",
+                line,
+                line.chars().count()
+            );
+        }
+        assert!(out.contains('\u{2026}'), "the cut is marked: {out}");
+    }
+
+    /// A row with fewer cells than the widest still has to close its box, or
+    /// the table looks torn.
+    #[test]
+    fn a_ragged_row_still_fills_and_closes_its_columns() {
+        let src = "| a | b |\n| --- | --- |\n| only |";
+        let out = table(src, 60);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[2].ends_with('\u{2502}'), "{out}");
+        let widths: Vec<usize> = lines.iter().map(|l| l.chars().count()).collect();
+        assert!(widths.windows(2).all(|p| p[0] == p[1]), "{widths:?}: {out}");
+    }
+
+    /// Prose is not a table. A sentence with a pipe in it is far more common
+    /// than a table written without a leading one, so the leading pipe is
+    /// required and this must pass through untouched.
+    #[test]
+    fn a_sentence_containing_a_pipe_is_not_a_table() {
+        assert!(!is_table_row("run a | b to pipe it"));
+        assert!(!is_table_row(""));
+        assert!(!is_table_row("|"));
+        assert!(is_table_row("| a | b |"));
+        assert!(is_table_row("  | indented | row |"));
+        let (text, _) = render("use `ls | wc` to count\n");
+        assert!(text.contains("ls | wc"), "{text}");
     }
 
     /// The marks are the formatting, so they must not survive into the text.

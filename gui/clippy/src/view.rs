@@ -718,6 +718,53 @@ fn text_box(scene: &mut Scene, frame: &Frame, panel: Panel, size: f32, runs: Vec
     scene.text(Text::rich(runs, panel.inset(PAD), size, frame.skin.body));
 }
 
+/// The table each visible line belongs to, or `None` for ordinary prose.
+///
+/// Measured over the whole block, including the rows above and below the
+/// window, so the columns stay still while a table is scrolled through. Widths
+/// taken from the visible rows alone would shift on every wheel notch.
+fn table_blocks(
+    pane: &crate::state::Pane,
+    first: usize,
+    count: usize,
+) -> Vec<Option<crate::markdown::Table>> {
+    let mut out = vec![None; count];
+    // Only the model's prose is Markdown, so only a Body line can be a row.
+    let text = |n: usize| {
+        pane.line(n)
+            .filter(|l| l.tone == Tone::Body)
+            .map(|l| l.text.as_str())
+    };
+    let is_row = |n: usize| text(n).is_some_and(crate::markdown::is_table_row);
+
+    let mut i = 0;
+    while i < count {
+        let at = first + i;
+        if !is_row(at) {
+            i += 1;
+            continue;
+        }
+        // An evicted line reads as absent rather than as a row, so walking up
+        // stops at the oldest line the pane still holds.
+        let mut start = at;
+        while start > 0 && is_row(start - 1) {
+            start -= 1;
+        }
+        let mut end = at;
+        while end + 1 < pane.last() && is_row(end + 1) {
+            end += 1;
+        }
+        let table = crate::markdown::Table::of((start..=end).filter_map(text));
+        while i < count && first + i <= end {
+            if is_row(first + i) {
+                out[i] = Some(table.clone());
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
 fn talk(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let (skin, state) = (frame.skin, frame.state);
     let rows = frame.layout.rows(panel, frame.body_size);
@@ -726,11 +773,19 @@ fn talk(scene: &mut Scene, frame: &Frame, panel: Panel) {
     // A window that starts inside a fenced block has to know it is looking at
     // code, so the state is carried in from the lines above it.
     let mut fence = state.talk.fence_before(rows, cols);
-    for line in state.talk.visible(rows, cols) {
+    let shown = state.talk.visible(rows, cols);
+    let tables = table_blocks(&state.talk, state.talk.showing_from(rows, cols), shown.len());
+    for (i, line) in shown.iter().enumerate() {
         match line.tone {
             // Only the model's prose is Markdown. What the human typed and
             // what the harness noted are shown as written.
-            Tone::Body => crate::markdown::line(&line.text, &mut fence, skin, &mut runs),
+            Tone::Body => match tables[i].as_ref() {
+                // A pipe inside a code block is code, so the fence wins.
+                Some(table) if !fence.open() && !table.is_empty() => {
+                    table.row(&line.text, cols, skin, &mut runs);
+                }
+                _ => crate::markdown::line(&line.text, &mut fence, skin, &mut runs),
+            },
             tone => runs.push(Run::tinted(&line.text, skin.tone(tone))),
         }
         runs.push(Run::plain("\n"));
@@ -1296,6 +1351,48 @@ mod tests {
 
     fn render(state: &State, w: f32, h: f32, dock: &Dock, files: &[&str]) -> Rendered {
         render_with(state, w, h, dock, files, &Monitor::new(), None)
+    }
+
+    /// A table's columns are measured over the whole block, so scrolling
+    /// through one must not make them jump. Measuring only the visible rows
+    /// would reshape the table on every wheel notch.
+    #[test]
+    fn a_table_keeps_its_columns_still_while_it_is_scrolled() {
+        let mut state = busy_state();
+        state.talk.say("here is a table:", Tone::Body);
+        state.talk.say("| Name | Type |", Tone::Body);
+        state.talk.say("| --- | --- |", Tone::Body);
+        for n in 0..30 {
+            // One row carries a much longer value than the rest, so a window
+            // that misses it would measure the column narrower.
+            let value = if n == 29 { "a-very-long-monitor-name" } else { "pane" };
+            state.talk.say(format!("| row{n} | {value} |"), Tone::Body);
+        }
+
+        let dock = Dock::new();
+        let widths_at = |state: &State| -> Vec<usize> {
+            let out = render(state, 1400.0, 900.0, &dock, &[]);
+            text_of(&out.scene)
+                .lines()
+                .filter(|l| l.contains('\u{2502}'))
+                .map(|l| l.chars().count())
+                .collect()
+        };
+
+        let at_end = widths_at(&state);
+        assert!(!at_end.is_empty(), "the table has to be drawn at all");
+        // Scroll up so the window holds different rows of the same block.
+        state.talk.scroll_back(6, 10, 120);
+        let scrolled = widths_at(&state);
+        assert!(!scrolled.is_empty(), "still drawing rows after scrolling");
+
+        let one = at_end[0];
+        for width in at_end.iter().chain(scrolled.iter()) {
+            assert_eq!(
+                *width, one,
+                "a row is {width} wide against {one}: the columns moved when scrolled"
+            );
+        }
     }
 
     /// The window has to say which build it is, or a tester cannot tell two of
