@@ -765,6 +765,24 @@ fn table_blocks(
     out
 }
 
+/// How far the widest table in a window can be scrolled sideways before its
+/// right edge is on screen. Zero when nothing there is too wide to fit.
+pub fn widest_table_overhang(
+    pane: &crate::state::Pane,
+    rows: usize,
+    cols: usize,
+) -> usize {
+    let first = pane.showing_from(rows, cols);
+    let count = pane.visible(rows, cols).len();
+    table_blocks(pane, first, count)
+        .iter()
+        .flatten()
+        .map(|t| t.width())
+        .max()
+        .unwrap_or(0)
+        .saturating_sub(cols)
+}
+
 fn talk(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let (skin, state) = (frame.skin, frame.state);
     let rows = frame.layout.rows(panel, frame.body_size);
@@ -782,7 +800,7 @@ fn talk(scene: &mut Scene, frame: &Frame, panel: Panel) {
             Tone::Body => match tables[i].as_ref() {
                 // A pipe inside a code block is code, so the fence wins.
                 Some(table) if !fence.open() && !table.is_empty() => {
-                    table.row(&line.text, cols, skin, &mut runs);
+                    table.row(&line.text, state.talk.side, cols, skin, &mut runs);
                 }
                 _ => crate::markdown::line(&line.text, &mut fence, skin, &mut runs),
             },
@@ -1393,6 +1411,48 @@ mod tests {
                 "a row is {width} wide against {one}: the columns moved when scrolled"
             );
         }
+    }
+
+    /// Scrolling sideways has to stop exactly where the table's right edge
+    /// reaches the pane. Stopping short leaves the last column unreachable,
+    /// which was the whole complaint; stopping late scrolls into blank space.
+    #[test]
+    fn the_sideways_stop_is_the_widest_table_on_screen() {
+        let mut state = busy_state();
+        state.talk.say("| a | b |", Tone::Body);
+        state.talk.say("| --- | --- |", Tone::Body);
+        state.talk.say(
+            format!("| {} | {} |", "x".repeat(60), "y".repeat(60)),
+            Tone::Body,
+        );
+        let (rows, cols) = (20, 40);
+        let most = widest_table_overhang(&state.talk, rows, cols);
+        let width = crate::markdown::Table::of(
+            state.talk.visible(rows, cols).iter().map(|l| l.text.as_str()),
+        )
+        .width();
+        assert_eq!(most, width - cols, "the stop is exactly the overhang");
+
+        assert!(state.talk.scroll_sideways(9_999, most));
+        assert_eq!(state.talk.side, most, "and the wheel cannot go past it");
+        assert!(!state.talk.scroll_sideways(1, most), "already at the edge");
+        assert!(state.talk.scroll_sideways(-9_999, most));
+        assert_eq!(state.talk.side, 0, "and it comes back to the left edge");
+    }
+
+    /// Prose has no right edge to reach, so a transcript without a wide table
+    /// must not scroll sideways at all.
+    #[test]
+    fn a_transcript_without_a_wide_table_has_nowhere_to_go_sideways() {
+        let mut state = busy_state();
+        state.talk.say("just some prose, which wraps instead", Tone::Body);
+        assert_eq!(widest_table_overhang(&state.talk, 20, 40), 0);
+        state.talk.say("| a | b |", Tone::Body);
+        assert_eq!(
+            widest_table_overhang(&state.talk, 20, 40),
+            0,
+            "a table narrower than the pane does not scroll either"
+        );
     }
 
     /// The window has to say which build it is, or a tester cannot tell two of

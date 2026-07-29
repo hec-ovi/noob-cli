@@ -107,6 +107,20 @@ impl Table {
         self.widths.is_empty()
     }
 
+    /// How many columns the whole table needs, edges included.
+    ///
+    /// `"| a | b |"` is two columns of content plus `"| "`, `" | "` and `" |"`,
+    /// so three separators of two, three and two columns.
+    pub fn width(&self) -> usize {
+        if self.widths.is_empty() {
+            return 0;
+        }
+        let content: usize = self.widths.iter().sum();
+        // Two for the opening edge, two for the closing one, three between
+        // every adjacent pair of columns.
+        content + 4 + 3 * (self.widths.len() - 1)
+    }
+
     /// Draw one row of the table, box-drawn and column aligned.
     ///
     /// A rule row becomes the box's own divider, so the rendering uses exactly
@@ -114,62 +128,74 @@ impl Table {
     /// on screen that no source line corresponds to, and every selection and
     /// scroll position is anchored to source lines.
     ///
-    /// `room` is how many columns the pane has. A table wider than that is cut
-    /// with an ellipsis rather than wrapped, because a wrapped table is not a
-    /// table any more.
-    pub fn row(&self, line: &str, room: usize, skin: &Skin, out: &mut Vec<Run>) {
+    /// The row is a viewport onto the full table rather than a truncation of
+    /// it: `skip` columns are scrolled off to the left and `room` columns are
+    /// visible. A table is never wrapped, because a wrapped table is not a
+    /// table, so scrolling sideways is the only way to read a wide one. An edge
+    /// with more table beyond it is marked, or there would be nothing to say
+    /// that scrolling is possible.
+    pub fn row(&self, line: &str, skip: usize, room: usize, skin: &Skin, out: &mut Vec<Run>) {
+        if room == 0 || self.widths.is_empty() {
+            return;
+        }
+        let total = self.width();
+        let skip = skip.min(total.saturating_sub(room));
+        let more_left = skip > 0;
+        let more_right = total > skip + room;
+        let lead = usize::from(more_left);
+        let span = room.saturating_sub(lead + usize::from(more_right));
+
+        if more_left {
+            out.push(Run::tinted("\u{2039}", skin.markup));
+        }
+        // The window into the row, in absolute table columns.
+        let (from, to) = (skip + lead, skip + lead + span);
         let rule = is_rule(line);
         let cells = cells(line);
-        let mut drawn = 0;
+        let mut at = 0;
 
-        let mut push = |text: String, tint: [u8; 4], drawn: &mut usize| -> bool {
+        let mut clipped = |text: &str, tint: [u8; 4], at: &mut usize| {
+            let start = *at;
             let width = text.chars().count();
-            if *drawn + width > room {
-                let left = room.saturating_sub(*drawn);
-                if left > 0 {
-                    out.push(Run::tinted(
-                        text.chars().take(left.saturating_sub(1)).collect::<String>() + "\u{2026}",
-                        tint,
-                    ));
-                    *drawn = room;
-                }
-                return false;
+            *at += width;
+            let a = from.max(start);
+            let b = to.min(*at);
+            if a < b {
+                out.push(Run::tinted(
+                    text.chars().skip(a - start).take(b - a).collect::<String>(),
+                    tint,
+                ));
             }
-            out.push(Run::tinted(text, tint));
-            *drawn += width;
-            true
         };
 
         for (i, width) in self.widths.iter().enumerate() {
-            let edge = if i == 0 {
-                if rule { "\u{251c}\u{2500}" } else { "\u{2502} " }
-            } else if rule {
-                "\u{2500}\u{253c}\u{2500}"
-            } else {
-                " \u{2502} "
+            let edge = match (i, rule) {
+                (0, true) => "\u{251c}\u{2500}",
+                (0, false) => "\u{2502} ",
+                (_, true) => "\u{2500}\u{253c}\u{2500}",
+                (_, false) => " \u{2502} ",
             };
-            if !push(edge.to_string(), skin.markup, &mut drawn) {
-                return;
-            }
+            clipped(edge, skin.markup, &mut at);
             let body = match (rule, cells.get(i)) {
                 (true, _) => "\u{2500}".repeat(*width),
                 (false, Some(cell)) => {
-                    let mut s = cell.to_string();
                     let pad = width.saturating_sub(cell.chars().count());
-                    s.push_str(&" ".repeat(pad));
-                    s
+                    format!("{cell}{}", " ".repeat(pad))
                 }
                 // A row with fewer cells than the widest one still has to fill
                 // its columns, or the closing edge lands mid table.
                 (false, None) => " ".repeat(*width),
             };
-            let tint = if rule { skin.markup } else { skin.body };
-            if !push(body, tint, &mut drawn) {
-                return;
-            }
+            clipped(&body, if rule { skin.markup } else { skin.body }, &mut at);
         }
-        let close = if rule { "\u{2500}\u{2524}" } else { " \u{2502}" };
-        push(close.to_string(), skin.markup, &mut drawn);
+        clipped(
+            if rule { "\u{2500}\u{2524}" } else { " \u{2502}" },
+            skin.markup,
+            &mut at,
+        );
+        if more_right {
+            out.push(Run::tinted("\u{203a}", skin.markup));
+        }
     }
 }
 
@@ -349,12 +375,17 @@ mod tests {
     /// Render a whole table block the way the transcript does: measure it once,
     /// then draw each source line.
     fn table(src: &str, room: usize) -> String {
+        table_from(src, 0, room)
+    }
+
+    /// The same, scrolled `skip` columns to the right.
+    fn table_from(src: &str, skip: usize, room: usize) -> String {
         let skin = skin();
         let table = Table::of(src.lines());
         let mut out = String::new();
         for line in src.lines() {
             let mut runs = Vec::new();
-            table.row(line, room, &skin, &mut runs);
+            table.row(line, skip, room, &skin, &mut runs);
             out.push_str(&runs.iter().map(|r| r.text.as_str()).collect::<String>());
             out.push('\n');
         }
@@ -412,20 +443,61 @@ mod tests {
         assert_eq!(t.widths, vec![4, 7]);
     }
 
-    /// A table wider than the pane is cut, not wrapped. A wrapped table stops
-    /// being a table.
+    /// A table wider than the pane is a viewport onto the whole thing, not a
+    /// truncation of it, and both edges say when there is more beyond them.
+    /// Cutting the data off was the first version and it lost columns.
     #[test]
-    fn a_table_wider_than_the_pane_is_cut_with_an_ellipsis() {
-        let out = table(SRC, 12);
-        for line in out.lines() {
+    fn a_wide_table_scrolls_sideways_instead_of_losing_its_columns() {
+        let room = 14;
+        let at_left = table_from(SRC, 0, room);
+        for line in at_left.lines() {
             assert!(
-                line.chars().count() <= 12,
-                "{:?} is {} columns wide in a 12 column pane",
-                line,
+                line.chars().count() <= room,
+                "{line:?} is {} wide in a {room} column pane",
                 line.chars().count()
             );
         }
-        assert!(out.contains('\u{2026}'), "the cut is marked: {out}");
+        assert!(at_left.contains('\u{203a}'), "more to the right is marked: {at_left}");
+        assert!(!at_left.contains('\u{2039}'), "nothing off to the left yet: {at_left}");
+        assert!(at_left.contains("Name"), "{at_left}");
+
+        // Scrolled right, the far column is reachable and the left edge now
+        // says there is something behind it.
+        let table = Table::of(SRC.lines());
+        let scrolled = table_from(SRC, table.width() - room, room);
+        assert!(scrolled.contains('\u{2039}'), "{scrolled}");
+        assert!(!scrolled.contains('\u{203a}'), "the right edge is reached: {scrolled}");
+        assert!(
+            scrolled.contains("monitor"),
+            "the column that was cut off is now readable: {scrolled}"
+        );
+    }
+
+    /// Scrolling past the right edge is not possible: the viewport clamps, so
+    /// the wheel cannot push the table off into blank space.
+    #[test]
+    fn scrolling_a_table_stops_at_its_right_edge() {
+        let room = 14;
+        let table = Table::of(SRC.lines());
+        let at_edge = table_from(SRC, table.width() - room, room);
+        let far_past = table_from(SRC, 9_999, room);
+        assert_eq!(far_past, at_edge, "asking for more stops at the edge");
+    }
+
+    /// The declared width has to match what is actually drawn, or the clamp
+    /// stops in the wrong place and the last column stays unreachable.
+    #[test]
+    fn the_declared_width_is_what_a_row_actually_draws() {
+        let table = Table::of(SRC.lines());
+        let full = table_from(SRC, 0, 500);
+        for line in full.lines() {
+            assert_eq!(
+                line.chars().count(),
+                table.width(),
+                "{line:?} against a declared width of {}",
+                table.width()
+            );
+        }
     }
 
     /// A row with fewer cells than the widest still has to close its box, or
