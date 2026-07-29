@@ -25,12 +25,17 @@ pub struct Skin {
     pub bar: [f32; 4],
     /// A pane you read: dark, so green text sits on black.
     pub panel: [f32; 4],
-    /// A tab strip, a shade darker than the panel under it.
+    /// The one surface more solid than a pane: the band behind a block header
+    /// in the file view. A tab strip used to be drawn in it too, until a strip
+    /// with a surface of its own read as a toolbar.
     pub strip: [f32; 4],
-    /// The tab that is showing. Lighter than the strip and less solid than it,
-    /// so the block stands off the strip whatever is behind the window: over a
-    /// dark desktop the colour is what shows it, over a bright one the alpha is.
+    /// The tab that is showing. The pane's own surface, so the tab reads as the
+    /// top of the pane rather than as a raised block sitting on a bar.
     pub tab: [f32; 4],
+    /// A tab that is not showing: the same colour with less of it. Weight is
+    /// the whole difference, because a second fill colour up here turns the
+    /// strip back into a row of buttons.
+    pub tab_idle: [f32; 4],
     pub edge: [f32; 4],
     pub edge_focus: [f32; 4],
     pub input: [f32; 4],
@@ -83,19 +88,6 @@ fn text(color: [u8; 3]) -> [u8; 4] {
     [color[0], color[1], color[2], 255]
 }
 
-/// A colour part of the way to another one. A surface that sits between two of
-/// the palette's own colours has to be derived from them, or a theme moves the
-/// window and leaves that one surface behind.
-fn mix(from: [u8; 3], to: [u8; 3], amount: f32) -> [u8; 3] {
-    let amount = amount.clamp(0.0, 1.0);
-    let blend = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * amount).round() as u8;
-    [
-        blend(from[0], to[0]),
-        blend(from[1], to[1]),
-        blend(from[2], to[2]),
-    ]
-}
-
 impl Default for Skin {
     fn default() -> Skin {
         Skin::from(&Config::default())
@@ -112,9 +104,11 @@ impl Skin {
             bar: rgba(config.bar, (o + 0.25).min(1.0)),
             panel: rgba(config.panel, o * 0.86),
             strip: rgba(config.panel, o * 0.97),
-            // Part of the way to the bar, which is the one chrome colour the
-            // window already has, so the block belongs to whatever theme set it.
-            tab: rgba(mix(config.panel, config.bar, 0.6), o * 0.86),
+            // Exactly the pane, not a colour of its own. It was part of the way
+            // to the bar, which made the showing tab a green block standing off
+            // the strip: a button, which is not what a tab is.
+            tab: rgba(config.panel, o * 0.86),
+            tab_idle: rgba(config.panel, o * 0.34),
             edge: rgba(config.dim, 0.65),
             edge_focus: rgba(config.accent, 1.0),
             input: rgba(config.panel, (o + 0.12).min(1.0)),
@@ -168,6 +162,10 @@ impl Skin {
         ] {
             fill[3] = 1.0;
         }
+        // Not `tab_idle`. It is the showing tab's colour at a lower alpha, so
+        // making it solid here would make every tab the showing one. Its own
+        // blend still happens inside the window, which an opaque surface does
+        // not take away.
         self
     }
 
@@ -302,21 +300,29 @@ mod tests {
         assert_eq!(skin.kind(Kind::Plan), skin.tools[12]);
     }
 
-    /// The tab that is showing has to read as a block over any desktop. Lighter
-    /// than the strip covers a dark one; less solid than it covers a bright one,
-    /// where more of the desktop coming through is what makes it lighter.
+    /// The showing tab is the pane's own surface and the others are the same
+    /// colour with less of it, so the strip behind them can stay the window.
+    ///
+    /// This asserted the opposite until the tabs stopped being buttons: the tab
+    /// was mixed towards the bar and had to be lighter than the strip it sat
+    /// in, which is exactly the raised block that was wrong.
     #[test]
-    fn the_showing_tab_is_lighter_than_the_strip_it_sits_in() {
-        let over_black = |c: [f32; 4]| (c[0] * 0.2 + c[1] * 0.7 + c[2] * 0.1) * c[3];
+    fn a_tab_is_the_pane_s_surface_and_an_idle_one_is_less_of_it() {
         for name in crate::config::THEMES {
             let skin = Skin::from(&crate::config::theme(name).expect(name));
-            assert!(
-                over_black(skin.tab) > over_black(skin.strip),
-                "{name}: {:?} is not lighter than {:?}",
-                skin.tab,
-                skin.strip
+            assert_eq!(skin.tab, skin.panel, "{name}: the tab is not the pane");
+            assert_eq!(
+                skin.tab_idle[..3],
+                skin.tab[..3],
+                "{name}: an idle tab has a colour of its own"
             );
-            assert!(skin.tab[3] < skin.strip[3], "{name}: and less solid");
+            assert!(
+                skin.tab_idle[3] < skin.tab[3],
+                "{name}: {:?} is not lighter than {:?}",
+                skin.tab_idle,
+                skin.tab
+            );
+            assert!(skin.tab_idle[3] > 0.0, "{name}: and is still drawn");
         }
     }
 

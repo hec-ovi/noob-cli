@@ -47,8 +47,8 @@ const CUT: f32 = 10.0;
 /// reads as the hairline every other edge in the window is, and the tab has to
 /// say which view it is holding from further away than that.
 const ACCENT_H: f32 = 2.0;
-/// How far the rule between two tabs stops short of the strip, top and bottom.
-const RULE_INSET: f32 = 5.0;
+/// How far a scrollbar sits in from the right edge of the pane it belongs to.
+const SCROLL_GAP: f32 = 2.0;
 
 /// Something the pointer can land on. Returned by [`Layout::hit`] so every
 /// click is resolved in one place instead of in a chain of `if` in the event
@@ -544,38 +544,23 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
     let mut runs = vec![
         Run::tinted("NO0B \u{25b8} CLIppy", skin.bright),
         // Which build this is. Stamped by build.rs from the commit, because a
-        // crate version cannot tell two test builds apart.
-        Run::tinted(format!(" {}", env!("CLIPPY_BUILD")), skin.dim),
+        // crate version cannot tell two test builds apart. At the text tint,
+        // not the dim one: dim is the faintest thing the palette has and two
+        // builds side by side could not be told apart, which is the one job
+        // this reading has.
+        Run::tinted(format!(" {}", env!("CLIPPY_BUILD")), skin.title),
     ];
+    // Open, the strip says which build this is and nothing more. The phase, the
+    // model, the workspace and the token budget were readings squeezed into a
+    // title with no room to label them; they belong in the monitors, which have
+    // both. Trouble stays because it is the one thing that makes the rest of
+    // the window meaningless.
     if let Some(trouble) = frame.trouble {
         runs.push(Run::tinted(format!("   {trouble}"), skin.bad));
     } else if layout.shaded {
         // Shaded, this strip is the whole window, so it carries the one thing
-        // worth knowing rather than the model name and the path.
+        // worth knowing while there is nowhere else to read it.
         runs.push(Run::tinted(format!("   {}", state.headline()), skin.good));
-    } else {
-        // The phase and the token budget used to live in a bar along the
-        // bottom. They are the same two facts wherever they are drawn, and
-        // here they cost no rows. Ordered so that a narrow window loses the
-        // path before it loses what the agent is doing.
-        runs.push(Run::tinted(
-            format!("   {}", state.phase.word().to_lowercase()),
-            skin.bright,
-        ));
-        runs.push(Run::tinted(
-            format!(
-                "   {}   {}{}   {}",
-                if state.model.is_empty() {
-                    "…"
-                } else {
-                    &state.model
-                },
-                short_path(&state.workspace),
-                if state.resumed { "   resumed" } else { "" },
-                state.budget_line(),
-            ),
-            skin.title,
-        ));
     }
     scene.text(Text::rich(
         runs,
@@ -594,6 +579,15 @@ fn panel_fill(panel: Panel, rgba: [f32; 4]) -> Rect {
     panel.fill(rgba).chamfer(CUT, Rect::TOP_RIGHT)
 }
 
+/// How far the cut actually reaches on a box this size.
+///
+/// The shader caps the reach at half the shorter side, so a short box loses a
+/// smaller corner than [`CUT`]. Anything that has to stop where the cut starts
+/// has to cap it the same way, or it stops short of a corner nothing took.
+fn cut_of(panel: Panel) -> f32 {
+    CUT.min(panel.w * 0.5).min(panel.h * 0.5).max(0.0)
+}
+
 /// Its hairline border, as one rectangle. Four of them could not follow the
 /// cut.
 fn panel_edge(panel: Panel, rgba: [f32; 4]) -> Rect {
@@ -602,29 +596,37 @@ fn panel_edge(panel: Panel, rgba: [f32; 4]) -> Rect {
 
 /// One tab of a strip, before its label goes on.
 ///
-/// The tab that is showing is a block: its own fill, the whole height of the
-/// strip so the fill covers the strip's bottom hairline and the block joins the
-/// pane under it, and an accent line along the top in the colour of what it is
-/// holding. The others get a short rule and no fill, so they sit back in the
-/// strip instead of reading as a row of boxes competing with the block.
+/// A tab is not a button. Both states carry the pane's own surface and the same
+/// cut corner the pane has, so the tab reads as the top of the pane; what says
+/// which one is showing is weight. The showing tab is that surface at full
+/// strength with an accent line in the colour of what it holds, the rest are
+/// the same colour at a lower alpha. A filled block over a filled strip is what
+/// made these look like a row of buttons.
 fn tab_block(scene: &mut Scene, skin: &Skin, tab: Panel, active: bool, accent: [f32; 4]) {
+    let cut = cut_of(tab);
+    scene.rect(
+        tab.fill(if active { skin.tab } else { skin.tab_idle })
+            .chamfer(cut, Rect::TOP_RIGHT),
+    );
     if !active {
-        let inset = RULE_INSET.min(tab.h * 0.25);
-        let tall = (tab.h - 2.0 * inset).max(1.0);
-        scene.rect(Panel::new(tab.x, tab.y + inset, 1.0, tall).fill(skin.edge));
         return;
     }
-    scene.rect(tab.fill(skin.tab));
-    scene.rect(Panel::new(tab.x, tab.y, tab.w, ACCENT_H.min(tab.h)).fill(accent));
+    // Stopped where the cut starts. Run to the full width and the last pixels
+    // of the line hang in a corner that is not there any more.
+    scene.rect(Panel::new(tab.x, tab.y, (tab.w - cut).max(1.0), ACCENT_H.min(tab.h)).fill(accent));
 }
 
-/// The hairline along the bottom of a tab strip, broken where the showing tab
+/// The hairline under the file view's inner tabs, broken where the open one
 /// stands on it.
 ///
-/// The block cannot simply be drawn over the line: every fill in this window is
+/// The outer strips have no floor of their own; the pane's outline is their
+/// line and it follows the cut corner. This strip is inside a pane, with the
+/// file below it and no outline between the two, so it draws its own.
+///
+/// The tab cannot simply be drawn over the line: every fill in this window is
 /// translucent, so a line under one still shows through it, and a line running
-/// across the block makes the tab read as a cell in the strip rather than as
-/// the front of the pane below it.
+/// across the tab makes it read as a cell in the strip rather than as the front
+/// of what is below it.
 fn strip_floor(scene: &mut Scene, skin: &Skin, strip: Panel, joined: Option<Panel>) {
     let right = strip.x + strip.w;
     let (from, to) = match joined {
@@ -646,27 +648,25 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
         return;
     }
 
-    // The strip. A space being dragged onto is lit along its whole edge, so a
-    // drop target is a place rather than a guess.
+    // A space being dragged onto is lit along its whole edge, so a drop target
+    // is a place rather than a guess.
     let target = frame.drag.is_some_and(|drag| drag.onto == Some(space));
-    scene.rect(placed.strip.fill(skin.strip));
-    // A folded space has no pane for its tab to join, so the strip keeps its
-    // floor: the block would otherwise open onto whatever is behind the window.
-    let joined = placed
-        .tabs
-        .iter()
-        .find(|(view, _)| slot.active() == Some(*view))
-        .map(|(_, panel)| *panel)
-        .filter(|_| !slot.folded && placed.body.h >= 2.0);
-    strip_floor(scene, skin, placed.strip, joined);
+    // The strip itself is not drawn. It is the window, not a toolbar, and the
+    // tabs standing in it are the only thing up here. Its fill and the hairline
+    // along its foot were both square, so they ran past the cut corner of the
+    // pane below and left a stray stroke there; the pane's own outline is the
+    // line now, and it follows the cut.
     for (view, panel) in &placed.tabs {
         let active = slot.active() == Some(*view);
         let lifted = frame.drag.is_some_and(|drag| drag.view == *view);
         tab_block(scene, skin, *panel, active, skin.view(*view));
-        let color = match (lifted, active) {
-            (true, _) => skin.dim,
-            (_, true) => skin.bright,
-            _ => skin.title,
+        // Not showing reads as not showing. This was the title tint, as strong
+        // as the showing tab's, which left the fill to carry the whole
+        // difference and is why the fill had to be so heavy.
+        let color = if active && !lifted {
+            skin.bright
+        } else {
+            skin.dim
         };
         scene.text(Text::rich(
             vec![Run::tinted(view.label(), color)],
@@ -992,8 +992,10 @@ fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>) {
 fn files(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
     // The inner tab strip, one per file, along the top of this space's body.
+    // No fill, for the same reason the outer strips have none, and here it also
+    // covered the cut the pane had just been given: a square rectangle across
+    // the top of a chamfered pane puts the corner straight back.
     let strip = Panel::new(panel.x, panel.y, panel.w, TAB_H);
-    scene.rect(strip.fill(skin.strip));
     let joined = layout
         .file_tabs
         .iter()
@@ -1018,10 +1020,10 @@ fn files(scene: &mut Scene, frame: &Frame, panel: Panel) {
         tab_block(scene, skin, *tab, active, skin.view(View::Files));
         // A file compaction dropped is still worth reading; it is just no
         // longer what the agent is holding, and the tab says which.
-        let color = match (active, file.closed) {
-            (_, true) => skin.dim,
-            (true, false) => skin.bright,
-            (false, false) => skin.title,
+        let color = if active && !file.closed {
+            skin.bright
+        } else {
+            skin.dim
         };
         let mut runs = vec![
             // The type mark, so a tab is recognisable before it is read.
@@ -1133,11 +1135,17 @@ fn scrollbar(scene: &mut Scene, skin: &Skin, panel: Panel, thumb: Option<(f32, f
     let Some((top, size)) = thumb else {
         return;
     };
+    // The track runs down the right edge, which is the edge the cut takes a
+    // triangle out of. Starting it three pixels down put its head inside that
+    // triangle, hanging in the air outside the pane, so it starts below the cut
+    // instead: the cut reaches `cut` in from the corner along both edges, and
+    // the track is already `SCROLL_GAP` in from the right.
+    let head = (cut_of(panel) - SCROLL_GAP).max(3.0);
     let track = Panel::new(
-        panel.x + panel.w - SCROLL_W - 2.0,
-        panel.y + 3.0,
+        panel.x + panel.w - SCROLL_W - SCROLL_GAP,
+        panel.y + head,
         SCROLL_W,
-        (panel.h - 6.0).max(1.0),
+        (panel.h - head - 3.0).max(1.0),
     );
     scene.rect(track.fill(skin.scroll_track));
     scene.rect(
@@ -1275,8 +1283,12 @@ pub fn short_name(path: &str) -> String {
     }
 }
 
-/// A path shortened to its tail, so a deep workspace does not push the model
-/// name off the title bar.
+/// A path shortened to its tail, so a deep workspace reads as one line.
+///
+/// Nothing draws it now that the workspace has come off the title strip. Kept
+/// because the reading is moving into the monitors and it is the rule for how
+/// that path is written, tested here rather than re-guessed there.
+#[allow(dead_code)]
 fn short_path(path: &str) -> String {
     let parts: Vec<&str> = path.rsplit('/').take(2).collect();
     match parts.len() {
@@ -1411,17 +1423,51 @@ mod tests {
         );
     }
 
-    /// The bar along the bottom is gone, and the two readings it carried are
-    /// still on screen. Removing it silently would have lost the token budget.
+    /// The strip carries the name and the build stamp, and nothing else.
+    ///
+    /// It used to carry the phase, the model, the workspace, a resumed marker
+    /// and the whole token budget on one unlabelled line. Those are readings
+    /// and they are moving to the monitors, so this asserts they are gone from
+    /// here rather than that they are here, which is what it asserted before.
     #[test]
-    fn nothing_is_drawn_along_the_bottom_and_its_readings_moved_up() {
+    fn the_title_strip_carries_only_the_name_and_the_build() {
+        let state = busy_state();
+        let out = render(&state, 1400.0, 900.0, &Dock::new(), &[]);
+        let title = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| text.runs.iter().any(|run| run.text.contains("CLIppy")))
+            .expect("the title strip names the window");
+        let line: String = title.runs.iter().map(|run| run.text.as_str()).collect();
+        assert!(line.contains(env!("CLIPPY_BUILD")), "{line}");
+        for evicted in [
+            state.phase.word().to_lowercase(),
+            state.model.clone(),
+            short_path(&state.workspace),
+            state.budget_line(),
+        ] {
+            assert!(
+                !line.contains(&evicted),
+                "{evicted:?} is still in the title strip: {line}"
+            );
+        }
+        // And the stamp is readable. It was in the dim tint, the faintest the
+        // palette has, and two builds could not be told apart by it.
+        let stamp = title
+            .runs
+            .iter()
+            .find(|run| run.text.contains(env!("CLIPPY_BUILD")))
+            .expect("the build stamp is a run of its own");
+        assert_eq!(stamp.color, Some(out.skin.title));
+        assert_ne!(stamp.color, Some(out.skin.dim));
+    }
+
+    /// The bar along the bottom is gone and nothing was put back down there.
+    #[test]
+    fn nothing_is_drawn_along_the_bottom() {
         let (w, h) = (1400.0, 900.0);
         let out = render(&busy_state(), w, h, &Dock::new(), &[]);
-        let text = text_of(&out.scene);
-        assert!(
-            text.contains("context"),
-            "the token budget has to survive the bar it used to live in: {text}"
-        );
 
         // The input row now runs to the bottom of the window. It used to stop
         // 24 pixels short, and those pixels were the bar.
@@ -1562,26 +1608,28 @@ mod tests {
         })
     }
 
-    /// Nothing but hairlines is drawn inside this tab, which is what a tab
-    /// sitting back in its strip rather than reading as a box looks like. The
-    /// rule beside it and the strip's own floor under it are both one pixel.
-    fn sits_back(out: &Rendered, tab: Panel) -> bool {
-        out.scene.rects.iter().all(|rect| {
-            let [x, y, w, h] = rect.xywh();
-            let inside = x >= tab.x - 0.01
-                && x + w <= tab.x + tab.w + 0.01
-                && y >= tab.y - 0.01
-                && y + h <= tab.y + tab.h + 0.01;
-            !inside || w <= 1.01 || h <= 1.01
-        })
+    /// The rectangle of this colour drawn at the top-left of `box_`, whatever
+    /// its width. What an accent line stopping short of the cut needs, since
+    /// [`covered`] insists on the full width.
+    fn topped(out: &Rendered, box_: Panel, height: f32, want: [f32; 4]) -> Option<Rect> {
+        out.scene
+            .rects
+            .iter()
+            .find(|rect| {
+                let [x, y, _, h] = rect.xywh();
+                (x - box_.x).abs() < 0.01
+                    && (y - box_.y).abs() < 0.01
+                    && (h - height).abs() < 0.01
+                    && rect.rgba() == want
+            })
+            .copied()
     }
 
-    /// The showing tab is a block: a fill of its own over the whole strip
-    /// height, and an accent line on top in the colour of the view it holds.
-    /// The line used to be the focus colour, which is one colour for the whole
-    /// window, so a strip said which tab was active and never which view.
+    /// The showing tab is the pane's own surface with the view's accent on top,
+    /// and it takes the pane's cut corner. It used to be a block in a colour of
+    /// its own, standing on a filled strip, which read as a button.
     #[test]
-    fn the_showing_tab_is_a_block_with_its_view_s_accent_on_top() {
+    fn the_showing_tab_wears_the_pane_s_surface_and_its_view_s_accent() {
         let dock = Dock::new();
         let out = render(&busy_state(), 1400.0, 900.0, &dock, &["a.rs"]);
         for space in Space::ALL {
@@ -1597,18 +1645,126 @@ mod tests {
                 .expect("the showing view has a tab");
             assert!(
                 covered(&out, *tab, tab.h, out.skin.tab),
-                "{space:?}: {active:?} is not a block"
+                "{space:?}: {active:?} does not carry the pane's surface"
             );
+            let accent = topped(&out, *tab, ACCENT_H, out.skin.view(active))
+                .unwrap_or_else(|| panic!("{space:?}: {active:?} has no accent line"));
+            // The accent stops where the cut starts, so no line ends in a
+            // corner that is not there.
             assert!(
-                covered(&out, *tab, ACCENT_H, out.skin.view(active)),
-                "{space:?}: {active:?} has no accent line"
+                (accent.xywh()[2] - (tab.w - cut_of(*tab))).abs() < 0.01,
+                "{space:?}: the accent runs {:?} across a {}px tab cut by {}",
+                accent.xywh(),
+                tab.w,
+                cut_of(*tab)
             );
             // And the accent is the view's own, not one colour for every strip.
             assert_ne!(out.skin.view(active), out.skin.edge_focus);
-            assert!(
-                floor_is_broken_under(&out, *tab),
-                "{space:?}: the strip's floor runs across {active:?}"
-            );
+        }
+    }
+
+    /// A tab strip is the window, not a surface. Nothing spans it: no fill, and
+    /// no hairline along its foot either. Both were square rectangles, and the
+    /// right end of both ran past the cut corner of the pane below.
+    #[test]
+    fn a_tab_strip_has_no_surface_of_its_own() {
+        let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &["a.rs"]);
+        for space in Space::ALL {
+            let strip = out.layout.placed(space).strip;
+            if strip.w < 1.0 {
+                continue;
+            }
+            for rect in &out.scene.rects {
+                let [x, y, w, h] = rect.xywh();
+                let spans = x <= strip.x + 0.01 && x + w >= strip.x + strip.w - 0.01;
+                let inside = y >= strip.y - 0.01 && y + h <= strip.y + strip.h + 0.01;
+                assert!(
+                    !(spans && inside),
+                    "{space:?}: {:?} runs the width of the strip",
+                    rect.xywh()
+                );
+            }
+        }
+    }
+
+    /// Nothing is drawn in the triangle the cut takes out of a pane's top-right
+    /// corner. The strip's floor sat one pixel above the pane and ran the full
+    /// width, and the scrollbar started three pixels down the right edge; both
+    /// drew into a corner that is not there.
+    #[test]
+    fn nothing_is_drawn_in_the_corner_the_cut_takes_away() {
+        let mut state = busy_state();
+        // Enough transcript that the panes want scrollbars, which is the other
+        // half of what this is checking.
+        for i in 0..200 {
+            state.apply(noob_proto::Event::TextDelta {
+                d: format!("line {i}\n"),
+            });
+        }
+        let out = render(&state, 1400.0, 900.0, &Dock::new(), &["calc.py"]);
+        assert!(
+            out.scene
+                .rects
+                .iter()
+                .any(|rect| rect.rgba() == out.skin.scroll_thumb),
+            "no scrollbar was drawn, so this proves nothing about the one that was in the corner"
+        );
+        for space in Space::ALL {
+            let body = out.layout.placed(space).body;
+            if body.w < 1.0 || body.h < 1.0 {
+                continue;
+            }
+            let right = body.x + body.w;
+            let cut = cut_of(body);
+            for rect in &out.scene.rects {
+                let [x, y, w, _] = rect.xywh();
+                // Only what is drawn inside this pane's own corner: the
+                // backdrop and the title strip are wider than the pane.
+                if x < body.x - 0.01 || x + w > right + 0.01 || y < body.y - CUT || y > body.y + CUT
+                {
+                    continue;
+                }
+                // The pane's fill and outline are the shape, cut and all.
+                if rect.extra()[1] > 0.0 {
+                    continue;
+                }
+                let clear = (right - (x + w)) + (y - body.y);
+                assert!(
+                    clear >= cut - 0.01,
+                    "{space:?}: {:?} is {clear}px into a {cut}px cut",
+                    rect.xywh()
+                );
+            }
+        }
+    }
+
+    /// Every tab takes the same cut the panes take, whichever strip it is in.
+    #[test]
+    fn every_tab_is_cut_the_way_a_pane_is() {
+        // One label, because the state this renders has one file open and a
+        // tab with no file behind it is not drawn.
+        let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &["calc.py"]);
+        let boxes: Vec<Panel> = Space::ALL
+            .iter()
+            .flat_map(|space| out.layout.placed(*space).tabs.iter().map(|(_, tab)| *tab))
+            .chain(out.layout.file_tabs.iter().map(|(_, tab)| *tab))
+            .collect();
+        assert!(boxes.len() >= 8, "only {} tabs on screen", boxes.len());
+        for tab in boxes {
+            let cut = out
+                .scene
+                .rects
+                .iter()
+                .find(|rect| {
+                    let [x, y, w, h] = rect.xywh();
+                    (x - tab.x).abs() < 0.01
+                        && (y - tab.y).abs() < 0.01
+                        && (w - tab.w).abs() < 0.01
+                        && (h - tab.h).abs() < 0.01
+                })
+                .unwrap_or_else(|| panic!("no surface under the tab at {:?}", (tab.x, tab.y)));
+            assert_eq!(cut.extra()[1], cut_of(tab), "{:?}", cut.xywh());
+            assert_eq!(cut.extra()[2], Rect::TOP_RIGHT as f32, "{:?}", cut.xywh());
         }
     }
 
@@ -1624,13 +1780,15 @@ mod tests {
         })
     }
 
-    /// A tab that is not showing has no fill at all, so the strip reads as one
-    /// recessed surface with the block sitting in it rather than as a row of
-    /// boxes competing with it.
+    /// A tab that is not showing is the same tab with less weight: the same
+    /// surface at a lower alpha, a dimmer label, and no accent line. It used to
+    /// have no fill at all and a rule beside it, which only worked while the
+    /// strip behind it was a surface of its own.
     #[test]
-    fn a_tab_that_is_not_showing_sits_back_in_the_strip() {
+    fn a_tab_that_is_not_showing_is_the_same_tab_with_less_weight() {
         let dock = Dock::new();
         let out = render(&busy_state(), 1400.0, 900.0, &dock, &["a.rs"]);
+        assert!(out.skin.tab_idle[3] < out.skin.tab[3]);
         let mut checked = 0;
         for space in Space::ALL {
             let active = dock.slot(space).active();
@@ -1639,22 +1797,21 @@ mod tests {
                     continue;
                 }
                 checked += 1;
-                assert!(sits_back(&out, *tab), "{view:?} is drawn as a box");
-                let rule = out
-                    .scene
-                    .rects
-                    .iter()
-                    .find(|rect| {
-                        let [x, _, w, _] = rect.xywh();
-                        (x - tab.x).abs() < 0.01 && (w - 1.0).abs() < 0.01
-                    })
-                    .unwrap_or_else(|| panic!("{view:?} has no rule beside it"));
-                let [_, y, _, h] = rule.xywh();
                 assert!(
-                    y > tab.y && y + h < tab.y + tab.h,
-                    "{view:?}: the rule runs the full height of the strip: {:?}",
-                    rule.xywh()
+                    covered(&out, *tab, tab.h, out.skin.tab_idle),
+                    "{view:?} is not drawn at the idle weight"
                 );
+                assert!(
+                    topped(&out, *tab, ACCENT_H, out.skin.view(*view)).is_none(),
+                    "{view:?} has an accent line and is not showing"
+                );
+                let label = out
+                    .scene
+                    .texts
+                    .iter()
+                    .find(|text| tab.contains(text.at.x, text.at.y))
+                    .unwrap_or_else(|| panic!("{view:?} has no label"));
+                assert_eq!(label.color, out.skin.dim, "{view:?} is not dimmed");
             }
         }
         assert!(checked >= 4, "only {checked} tabs were not showing");
@@ -1684,14 +1841,18 @@ mod tests {
             assert_eq!(
                 covered(&out, *tab, tab.h, out.skin.tab),
                 active,
-                "file tab {index} is filled when it should not be, or the other way round"
+                "file tab {index} is at full weight when it should not be, or the other way round"
             );
             assert_eq!(
-                covered(&out, *tab, ACCENT_H, out.skin.view(View::Files)),
+                covered(&out, *tab, tab.h, out.skin.tab_idle),
+                !active,
+                "file tab {index} is at idle weight when it should not be"
+            );
+            assert_eq!(
+                topped(&out, *tab, ACCENT_H, out.skin.view(View::Files)).is_some(),
                 active,
                 "file tab {index} and its accent line disagree about being open"
             );
-            assert_eq!(sits_back(&out, *tab), !active, "file tab {index}");
             assert_eq!(
                 floor_is_broken_under(&out, *tab),
                 active,
@@ -2051,8 +2212,11 @@ mod tests {
         assert!(!hardware.contains("DECODE"), "the reverse: {hardware}");
     }
 
-    /// The conversation and the budget are on screen whichever tab is up,
-    /// because they are in a different space.
+    /// The conversation and what has been typed are on screen whichever tab is
+    /// up, because they are in a different space.
+    ///
+    /// This also asserted the token budget, which the title strip used to
+    /// carry. It does not any more, and the budget is a monitor reading now.
     #[test]
     fn the_conversation_stays_visible_whatever_the_other_space_shows() {
         let state = busy_state();
@@ -2061,7 +2225,6 @@ mod tests {
             dock.reveal(view);
             let text = text_of(&render(&state, 1400.0, 900.0, &dock, &["calc.py"]).scene);
             assert!(text.contains("looking at it now"), "{view:?}");
-            assert!(text.contains("1,816 / 65,536"), "{view:?}");
             assert!(text.contains("type here"), "{view:?}");
         }
     }

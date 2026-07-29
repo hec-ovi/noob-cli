@@ -937,6 +937,11 @@ impl State {
 
     /// The session budget. Prefill and cache separated, because summing raw
     /// prompt tokens counts work nobody did.
+    ///
+    /// Nothing draws it since the title strip was cut back to the build stamp.
+    /// Kept because the reading is moving into the monitors and this is where
+    /// the arithmetic behind it is tested.
+    #[allow(dead_code)]
     pub fn budget_line(&self) -> String {
         match self.usage {
             None => String::from("context —"),
@@ -1062,6 +1067,9 @@ fn read_todos(args: &noob_proto::Value) -> Vec<Todo> {
         .unwrap_or_default()
 }
 
+/// Grouped digits, so a six figure token count can be read at a glance.
+/// Reached only from [`State::budget_line`], which is waiting on the monitors.
+#[allow(dead_code)]
 fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);

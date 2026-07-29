@@ -41,8 +41,10 @@ square forever.
 Three spaces: a wide one on the left and two stacked on the right. Every view is
 a tab in one of them, and **dragging its tab onto another space moves it there**.
 A space you empty gives its room to its neighbour. Each view has a colour of its
-own: the tab showing it is a filled block with that colour as a line along its
-top, so which view a space is holding is answerable without reading the labels.
+own, drawn as a line along the top of the tab showing it, so which view a space
+is holding is answerable without reading the labels. A tab strip has no surface
+of its own; the tabs carry the pane's, the showing one at full strength and the
+rest at a lower alpha.
 
 | view | carries |
 |---|---|

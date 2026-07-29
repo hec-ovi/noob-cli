@@ -22,6 +22,10 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
 - The dock icon appears as soon as the window opens. The desktop entry asks for
   a startup notification and nothing answered it, so the cursor spun until
   GNOME's own timeout, around fifteen seconds.
+- Nothing is drawn in the corner a panel's cut takes away. The tab strip's fill
+  and the hairline along its foot were square rectangles that ran past the cut
+  and left a stray stroke there, and a pane's scrollbar started inside the same
+  triangle, hanging outside the pane.
 - The window buttons are no longer clipped. Their text box was sized to one
   estimated glyph advance, so maximize lost all but the left edge of its frame
   and close all but one arm of its cross.
@@ -57,8 +61,17 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
   report underneath are gone, which also means a machine without an amdgpu no
   longer says why those rows are missing.
 - The status bar along the bottom is gone and every pane gained its height. The
-  phase word and the token budget moved into the title strip and the context
-  gauge became a hairline beneath it.
+  context gauge became a hairline under the title strip.
+- The title strip carries the window name and the build stamp and nothing else.
+  The phase word, the model, the workspace and the token budget were readings
+  crammed onto one unlabelled line up there; they are monitor readings and the
+  monitors have room to label them. The stamp reads at the text tint now, not
+  the faintest one the palette has, which is what a build stamp is for.
+- A tab is not a button. A tab strip has no surface of its own and is the same
+  ground as the window behind it. A tab carries the pane's surface, at full
+  strength with its view's accent line when it is showing and at a lower alpha
+  with a dimmer label when it is not, so the difference is weight rather than a
+  filled block. Every tab takes the same ten pixel corner cut the panes take.
 - The fold arrow at the end of each tab strip is gone. Clicking the tab already
   showing still collapses its space.
 
