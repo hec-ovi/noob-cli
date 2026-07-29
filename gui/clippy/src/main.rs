@@ -81,8 +81,6 @@ struct App {
     config: Config,
     state: State,
     monitor: Monitor,
-    /// Facts about this machine, shown under the readings.
-    reports: Vec<String>,
     next_sample: Option<Instant>,
     skin: Skin,
     link: Option<Link>,
@@ -158,7 +156,6 @@ impl App {
             config,
             state: State::new(),
             monitor: Monitor::new(),
-            reports: Vec::new(),
             next_sample: None,
             skin,
             link: None,
@@ -703,7 +700,6 @@ impl App {
             pane_column: self.pane_column,
             body_size: self.config.font_size,
             pane_size: self.config.pane_font_size,
-            reports: &self.reports,
             drag: self.drag,
             hot: self.hot,
             trouble: self.trouble.as_deref(),
@@ -788,10 +784,6 @@ impl ApplicationHandler<Wake> for App {
                 if !gpu.caps.transparent {
                     self.skin = self.skin.opaque();
                 }
-                // Facts about the machine belong beside the readings, not in
-                // the log of what the agent did.
-                self.reports = gpu.caps.report();
-                self.reports.push(config::describe());
                 for key in &self.config.unknown {
                     self.state
                         .activity

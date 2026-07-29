@@ -218,15 +218,6 @@ fn color(value: &str) -> Option<[u8; 3]> {
     }
 }
 
-/// Reported by the window on first run, so the file is findable without
-/// reading this source.
-pub fn describe() -> String {
-    match path() {
-        Some(path) => format!("settings  {}", path.display()),
-        None => String::from("settings  no HOME, using defaults"),
-    }
-}
-
 /// Written on first run. Every key present, every key commented.
 const DEFAULT_FILE: &str = "\
 # CLIppy settings. `key = value`, one per line, `#` starts a comment.

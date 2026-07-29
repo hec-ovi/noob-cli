@@ -64,8 +64,6 @@ pub struct Monitor {
     hardware: Vec<Gauge>,
     llm: Vec<Gauge>,
     history: HashMap<&'static str, VecDeque<f32>>,
-    /// Lines describing what was found, shown once under the gauges.
-    pub notes: Vec<String>,
 }
 
 impl Default for Monitor {
@@ -76,18 +74,12 @@ impl Default for Monitor {
 
 impl Monitor {
     pub fn new() -> Monitor {
-        let gpu = find_gpu();
-        let notes = match &gpu {
-            Some(path) => vec![format!("gpu      {}", path.display())],
-            None => vec![String::from("gpu      no amdgpu device; GPU rows hidden")],
-        };
         Monitor {
-            gpu,
+            gpu: find_gpu(),
             cpu_prev: None,
             hardware: Vec::new(),
             llm: Vec::new(),
             history: HashMap::new(),
-            notes,
         }
     }
 
@@ -499,7 +491,6 @@ Buffers:          100000 kB
             hardware: Vec::new(),
             llm: Vec::new(),
             history: HashMap::new(),
-            notes: Vec::new(),
         };
         let state = crate::state::State::new();
         monitor.sample(&state);
@@ -527,7 +518,6 @@ Buffers:          100000 kB
             hardware: Vec::new(),
             llm: Vec::new(),
             history: HashMap::new(),
-            notes: Vec::new(),
         };
         let mut state = crate::state::State::new();
         for n in 0..HISTORY + 50 {
@@ -559,7 +549,6 @@ Buffers:          100000 kB
             hardware: Vec::new(),
             llm: Vec::new(),
             history: HashMap::new(),
-            notes: Vec::new(),
         };
         assert!(monitor.history("nothing").is_empty());
     }

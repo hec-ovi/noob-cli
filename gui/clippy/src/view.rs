@@ -33,7 +33,10 @@ const SMALL: f32 = 12.0;
 const SCROLL_W: f32 = 4.0;
 const BUTTON_W: f32 = 26.0;
 const LABEL_COLUMNS: usize = 9;
-const BAR_COLUMNS: usize = 22;
+/// A gauge bar is a grid of dots: ten columns is 0 to 100 percent, so one
+/// column is 10 percent and one of its four dots is 2.5 percent.
+const DOT_COLUMNS: usize = 10;
+const DOT_ROWS: usize = 4;
 const PROMPT_COLUMNS: usize = 2;
 const MAX_INPUT_ROWS: usize = 8;
 const INPUT_PAD: f32 = 6.0;
@@ -403,9 +406,6 @@ pub struct Frame<'a> {
     pub pane_column: f32,
     pub body_size: f32,
     pub pane_size: f32,
-    /// The GPU capability report and the settings path: facts about this
-    /// machine, which belong beside the readings and not in the activity log.
-    pub reports: &'a [String],
     pub drag: Option<Drag>,
     /// What the pointer is over, for the button highlight.
     pub hot: Option<Hit>,
@@ -601,8 +601,8 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
         Some(View::Activity) => activity(scene, frame, panel),
         Some(View::Plan) => plan(scene, frame, panel),
         Some(View::Agents) => agents(scene, frame, panel),
-        Some(View::Hardware) => gauges(scene, frame, panel, frame.monitor.hardware(), true),
-        Some(View::Llm) => gauges(scene, frame, panel, frame.monitor.llm(), false),
+        Some(View::Hardware) => gauges(scene, frame, panel, frame.monitor.hardware()),
+        Some(View::Llm) => gauges(scene, frame, panel, frame.monitor.llm()),
         Some(View::Files) => files(scene, frame, panel),
         Some(View::Avatar) => avatar(scene, frame, panel),
     }
@@ -814,7 +814,14 @@ fn agents(scene: &mut Scene, frame: &Frame, panel: Panel) {
 /// the readings landed on top of the bars: the spaces are the pane's column
 /// width and the bar was drawn in the transcript's, which is a different
 /// number. Three boxes at computed positions cannot drift apart.
-fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>, notes: bool) {
+///
+/// The bar reads as [`DOT_COLUMNS`] columns of [`DOT_ROWS`] dots, so a column
+/// is 10% and a dot is 2.5%. Four stacked dots do not fit the half-line track
+/// a solid bar used, so a bounded row is taller than a line of text and its
+/// label and reading are centred against the grid. Unbounded readings keep the
+/// line pitch: they draw no dots, and a tall empty row for them would push the
+/// rows that do have dots off the bottom of the pane.
+fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>) {
     let skin = frame.skin;
     let content = panel.inset(PAD);
     let column = frame.pane_column;
@@ -832,36 +839,62 @@ fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>, no
     }
 
     let label_w = LABEL_COLUMNS as f32 * column;
-    let bar_w = (BAR_COLUMNS as f32 * column).min((content.w - label_w - 2.0 * column).max(1.0));
+    let room = (content.w - label_w - 2.0 * column).max(1.0);
+    let gap = (line * 0.16).round().max(1.0);
+    // The dot is as big as the line height asks for, unless ten of them with
+    // their gaps would not fit the room left beside the label.
+    let dot = (line * 0.28)
+        .round()
+        .min((room / DOT_COLUMNS as f32 - gap).floor())
+        .max(2.0);
+    let cell = dot + gap;
+    let bar_w = cell * DOT_COLUMNS as f32;
+    let grid_h = dot * DOT_ROWS as f32 + gap * (DOT_ROWS - 1) as f32;
+    // A bounded row is the grid plus a gap above and below it.
+    let pitch = grid_h + 2.0 * gap;
     let read_x = content.x + label_w + bar_w + column;
 
-    let mut labels = Vec::new();
-    let mut readings = Vec::new();
-    let mut drawn = 0;
-    for (row, gauge) in gauges.iter().enumerate() {
-        let y = content.y + row as f32 * line;
-        if y + line > content.y + content.h {
+    let mut y = content.y;
+    for gauge in &gauges {
+        let fraction = gauge.fraction();
+        let row_h = if fraction.is_some() { pitch } else { line };
+        if y + row_h > content.y + content.h {
             break;
         }
-        drawn += 1;
-        labels.push(Run::tinted(format!("{}\n", gauge.label), skin.dim));
-        readings.push(Run::tinted(
-            format!("{}\n", gauge.reading()),
-            if gauge.fraction().is_some_and(|f| f > 0.85) {
-                skin.bad
-            } else {
-                skin.body
-            },
+        let text_y = y + ((row_h - line) * 0.5).floor();
+        scene.text(Text::rich(
+            vec![Run::tinted(gauge.label, skin.dim)],
+            Panel::new(content.x, text_y, label_w.max(1.0), line),
+            frame.pane_size,
+            skin.dim,
+        ));
+        scene.text(Text::rich(
+            vec![Run::tinted(
+                gauge.reading(),
+                if fraction.is_some_and(|f| f > 0.85) {
+                    skin.bad
+                } else {
+                    skin.body
+                },
+            )],
+            Panel::new(
+                read_x,
+                text_y,
+                (content.x + content.w - read_x).max(1.0),
+                line,
+            ),
+            frame.pane_size,
+            skin.body,
         ));
 
         let track = Panel::new(
             content.x + label_w,
-            y + (line * 0.24).floor(),
+            y + gap,
             bar_w,
-            (line * 0.5).floor().max(3.0),
+            (row_h - 2.0 * gap).max(3.0),
         );
         scene.rect(track.fill(skin.gauge_track));
-        // The history first, behind the bar: the past is context, not content.
+        // The history first, behind the dots: the past is context, not content.
         let series = frame.monitor.history(gauge.key);
         if series.len() > 1 {
             let step = track.w / series.len() as f32;
@@ -878,59 +911,30 @@ fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>, no
                 );
             }
         }
-        if let Some(fraction) = gauge.fraction() {
-            scene.rect(
-                Panel::new(track.x, track.y, (track.w * fraction).max(1.0), track.h).fill(
-                    if fraction > 0.9 {
-                        skin.close_hot
-                    } else {
-                        skin.gauge
-                    },
-                ),
-            );
+        if let Some(fraction) = fraction {
+            let tint = if fraction > 0.9 {
+                skin.close_hot
+            } else {
+                skin.gauge
+            };
+            let lit = (fraction * (DOT_COLUMNS * DOT_ROWS) as f32).round() as usize;
+            for index in 0..lit {
+                let (col, level) = (index / DOT_ROWS, index % DOT_ROWS);
+                // Columns fill bottom up, so a part-filled column reads as a
+                // level and not as a hole in the row above it.
+                scene.rect(
+                    Panel::new(
+                        track.x + col as f32 * cell + 0.5 * gap,
+                        track.y + grid_h - (level + 1) as f32 * dot - level as f32 * gap,
+                        dot,
+                        dot,
+                    )
+                    .fill(tint)
+                    .radius(0.5 * dot),
+                );
+            }
         }
-    }
-
-    let text_h = (drawn as f32 * line).min(content.h);
-    scene.text(Text::rich(
-        labels,
-        Panel::new(content.x, content.y, label_w.max(1.0), text_h.max(line)),
-        frame.pane_size,
-        skin.dim,
-    ));
-    scene.text(Text::rich(
-        readings,
-        Panel::new(
-            read_x,
-            content.y,
-            (content.x + content.w - read_x).max(1.0),
-            text_h.max(line),
-        ),
-        frame.pane_size,
-        skin.body,
-    ));
-
-    // What this machine is, under the readings it explains.
-    let notes_y = content.y + text_h + line;
-    if notes && notes_y + line < content.y + content.h {
-        let runs = frame
-            .monitor
-            .notes
-            .iter()
-            .chain(frame.reports.iter())
-            .map(|note| Run::tinted(format!("{note}\n"), skin.dim))
-            .collect();
-        scene.text(Text::rich(
-            runs,
-            Panel::new(
-                content.x,
-                notes_y,
-                content.w,
-                (content.y + content.h - notes_y).max(line),
-            ),
-            frame.pane_size,
-            skin.dim,
-        ));
+        y += row_h;
     }
 }
 
@@ -1420,7 +1424,6 @@ mod tests {
             pane_column: 8.0,
             body_size: 14.0,
             pane_size: 13.0,
-            reports: &[],
             drag,
             hot: None,
             trouble: None,
@@ -1656,7 +1659,6 @@ mod tests {
             pane_column: 8.0,
             body_size: 14.0,
             pane_size: 13.0,
-            reports: &[],
             drag: None,
             hot: None,
             trouble: None,
@@ -1733,7 +1735,6 @@ mod tests {
             pane_column: 8.0,
             body_size: 14.0,
             pane_size: 13.0,
-            reports: &[],
             drag: None,
             hot: None,
             trouble: None,
@@ -1908,6 +1909,10 @@ mod tests {
     /// The bug this replaced: the bar's room was spelled as spaces in the
     /// pane's font while the bar itself was drawn in the transcript's column
     /// width, so the readings landed on top of the bars.
+    ///
+    /// The bar is a grid of dots now, so the thing the reading has to clear is
+    /// the track and every dot on it. Found by fill rather than by size: a dot
+    /// is a few pixels square, which no size filter can tell from a hairline.
     #[test]
     fn a_monitor_reading_never_lands_on_its_bar() {
         let mut state = State::new();
@@ -1949,7 +1954,6 @@ mod tests {
                 pane_column,
                 body_size: 14.0,
                 pane_size: 13.0,
-                reports: &[],
                 drag: None,
                 hot: None,
                 trouble: None,
@@ -1957,13 +1961,19 @@ mod tests {
             avatar: None,
             });
             let body = layout.placed(Space::TopRight).body;
-            let bar_right = scene
+            let bars: Vec<[f32; 4]> = scene
                 .rects
                 .iter()
-                .map(|r| r.xywh())
-                .filter(|[x, y, w, h]| {
-                    body.contains(*x, *y) && *h > 2.0 && *w > 2.0 && *w < body.w - 4.0
+                .filter(|r| {
+                    [skin.gauge_track, skin.gauge, skin.close_hot].contains(&r.rgba())
+                        && body.contains(r.xywh()[0], r.xywh()[1])
                 })
+                .map(|r| r.xywh())
+                .collect();
+            let dots = bars.iter().filter(|[_, _, w, h]| w == h).count();
+            assert!(dots > 0, "no dots were drawn");
+            let bar_right = bars
+                .iter()
                 .map(|[x, _, w, _]| x + w)
                 .fold(0.0f32, f32::max);
             assert!(bar_right > body.x, "no bars were drawn");
@@ -1983,6 +1993,99 @@ mod tests {
                 reading.at.x
             );
         }
+    }
+
+    /// Ten columns of four dots, so a column is 10% and a dot is 2.5%. 525 of
+    /// 1000 tokens is 52.5%, which is five whole columns and one dot of a
+    /// sixth, and the part-filled column fills from the bottom the way a level
+    /// meter does.
+    #[test]
+    fn a_gauge_is_ten_columns_of_four_dots() {
+        let mut state = State::new();
+        state.apply(noob_proto::Event::UsageReport {
+            usage: noob_proto::Usage {
+                prompt: 525,
+                cached_prompt: 0,
+                completion: 0,
+                context_total: 1000,
+            },
+        });
+        let mut monitor = Monitor::new();
+        monitor.sample(&state);
+
+        let mut dock = Dock::new();
+        dock.reveal(View::Llm);
+        let shape = Shape {
+            shaded: false,
+            dock: &dock,
+            file_labels: vec![],
+            column: 8.0,
+            input_h: INPUT_H,
+        };
+        let layout = Layout::compute(1400.0, 900.0, &shape);
+        let skin = Skin::from(&Config::default());
+        let scene = build(&Frame {
+            state: &state,
+            monitor: &monitor,
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            input: "",
+            caret: 0,
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            drag: None,
+            hot: None,
+            trouble: None,
+            selection: None,
+            avatar: None,
+        });
+
+        // CONTEXT is the only bounded reading with anything in it: CACHED is
+        // zero of 525 and every other row is unbounded, so every lit dot in
+        // this pane belongs to the one gauge under test.
+        let body = layout.placed(Space::TopRight).body;
+        let dots: Vec<[f32; 4]> = scene
+            .rects
+            .iter()
+            .filter(|r| r.rgba() == skin.gauge && body.contains(r.xywh()[0], r.xywh()[1]))
+            .map(|r| r.xywh())
+            .collect();
+        assert_eq!(dots.len(), 21, "52.5% is five full columns plus one dot");
+        for [_, _, w, h] in &dots {
+            assert_eq!(w, h, "a dot is drawn square so its radius rounds it off");
+        }
+
+        let mut columns: Vec<f32> = dots.iter().map(|[x, _, _, _]| *x).collect();
+        columns.sort_by(f32::total_cmp);
+        columns.dedup();
+        assert_eq!(columns.len(), 6, "five whole columns and a part-filled one");
+        let height = |x: f32| dots.iter().filter(|[dx, _, _, _]| *dx == x).count();
+        assert_eq!(
+            columns.iter().map(|x| height(*x)).collect::<Vec<_>>(),
+            vec![4, 4, 4, 4, 4, 1]
+        );
+        // Evenly pitched, or the grid reads as a random scatter.
+        let pitch = columns[1] - columns[0];
+        for pair in columns.windows(2) {
+            assert!((pair[1] - pair[0] - pitch).abs() < 0.01, "{columns:?}");
+        }
+
+        let floor = dots.iter().map(|[_, y, _, _]| *y).fold(f32::MIN, f32::max);
+        let lone = dots
+            .iter()
+            .find(|[x, _, _, _]| *x == columns[5])
+            .expect("the part-filled column");
+        assert_eq!(lone[1], floor, "a part-filled column fills from the bottom");
+
+        // The row had to grow: four stacked dots do not fit a line of text.
+        let top = dots.iter().map(|[_, y, _, _]| *y).fold(f32::MAX, f32::min);
+        assert!(
+            floor + dots[0][3] - top > Text::line_for(13.0),
+            "the dot grid is taller than the line pitch it replaced"
+        );
     }
 
     /// The prompt grows with what has been typed, and the caret follows the
@@ -2009,7 +2112,6 @@ mod tests {
                 pane_column: 8.0,
                 body_size: 14.0,
                 pane_size: 13.0,
-                reports: &[],
                 drag: None,
                 hot: None,
                 trouble: None,
@@ -2090,7 +2192,6 @@ mod tests {
             pane_column: 8.0,
             body_size: 14.0,
             pane_size: 13.0,
-            reports: &[],
             drag: None,
             hot: None,
             trouble: None,
