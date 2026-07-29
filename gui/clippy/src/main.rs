@@ -761,6 +761,18 @@ impl ApplicationHandler<Wake> for App {
             .with_min_inner_size(MIN_SIZE)
             .with_max_inner_size(MAX_SIZE)
             .with_inner_size(LogicalSize::new(1180.0, 760.0));
+        // The window carries the answer to the launch, so the token has to be
+        // on it before it exists; there is no saying it afterwards. Taken here
+        // rather than in `main` so it is out of the environment before
+        // `connect()` at the bottom of this function spawns the agent.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let attributes = match packaging::take_activation_token(event_loop) {
+            Some(token) => {
+                use winit::platform::startup_notify::WindowAttributesExtStartupNotify;
+                attributes.with_activation_token(token)
+            }
+            None => attributes,
+        };
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(e) => {

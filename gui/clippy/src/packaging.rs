@@ -1,9 +1,9 @@
 //! What the desktop needs in order to show this window as an application.
 //!
-//! There is no code here, only the checks that keep three files agreeing with
-//! each other. They agree by convention rather than by construction, and the
-//! failure is silent: the window opens, works perfectly, and wears a generic
-//! grey icon in the dock forever, with nothing anywhere saying why.
+//! Almost all of it is checks that keep three files agreeing with each other.
+//! They agree by convention rather than by construction, and the failure is
+//! silent: the window opens, works perfectly, and wears a generic grey icon in
+//! the dock forever, with nothing anywhere saying why.
 //!
 //! The chain is: the window announces a name, the desktop looks for a
 //! `.desktop` file whose basename is that name, reads the `Icon=` key out of
@@ -13,6 +13,51 @@
 //! On Wayland this is the ONLY path. `winit` documents window icons as
 //! unsupported there, so nothing the running program does can put a picture on
 //! its own window; the installed files are the whole mechanism.
+//!
+//! The one piece of code is the other half of a launch: the desktop hands a
+//! started application a token naming the click that started it, and expects
+//! the token back on the window it opens.
+
+#[cfg(all(unix, not(target_os = "macos")))]
+use winit::event_loop::ActiveEventLoop;
+#[cfg(all(unix, not(target_os = "macos")))]
+use winit::window::ActivationToken;
+
+/// Take the startup notification this process was launched with.
+///
+/// The desktop puts a token in the environment, starts a spinning cursor and a
+/// placeholder in the dock, and waits for a window to arrive carrying that
+/// token. Nothing here read it, so every launch from the dock spun for the ten
+/// to fifteen seconds of the desktop's own timeout and showed no icon until it
+/// expired, even though the window itself had painted immediately.
+///
+/// Taking it, rather than reading it, matters just as much: `noob serve` is
+/// spawned from this process and inherits its environment, and a child holding
+/// a token that has already been spent asks the compositor to act twice on one
+/// click.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn take_activation_token(event_loop: &ActiveEventLoop) -> Option<ActivationToken> {
+    use winit::platform::startup_notify::{EventLoopExtStartupNotify, reset_activation_token_env};
+
+    let raw = event_loop.read_token_from_env().map(ActivationToken::into_raw);
+    // Unconditionally, and even when this display server had nothing to read:
+    // a session running both an X server and a Wayland compositor sets one
+    // variable each, and only the child would ever see the other one.
+    reset_activation_token_env();
+    usable_token(raw)
+}
+
+/// The token worth passing on, which is a token with something in it.
+///
+/// A launcher that exports the variable without filling it in is not offering
+/// a notification. Handing the empty string on is not free: it is a name no
+/// click answers to, and the compositor is entitled to focus whatever it
+/// decides that names.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn usable_token(raw: Option<String>) -> Option<ActivationToken> {
+    let raw = raw?;
+    (!raw.trim().is_empty()).then(|| ActivationToken::from_raw(raw))
+}
 
 /// The desktop entry, checked against the code rather than trusted.
 #[cfg(test)]
@@ -23,6 +68,8 @@ const ICON: &str = include_str!("../../data/io.github.hec_ovi.CLIppy.svg");
 const SYMBOLIC: &str = include_str!("../../data/io.github.hec_ovi.CLIppy-symbolic.svg");
 #[cfg(test)]
 const INSTALLER: &str = include_str!("../../data/install.sh");
+#[cfg(test)]
+const MAIN: &str = include_str!("main.rs");
 
 #[cfg(test)]
 mod tests {
@@ -46,8 +93,35 @@ mod tests {
         // The entry names its icon, and the installer writes a file called
         // exactly that into the theme.
         assert_eq!(key(DESKTOP, "Icon"), APP_ID);
-        // And the entry runs the binary the installer put on PATH.
-        assert!(key(DESKTOP, "Exec").starts_with("clippy"), "{DESKTOP}");
+        // And the entry runs the binary the installer put on PATH. Bare, with
+        // no field code: the argument CLIppy takes is a workspace directory,
+        // and every field code the specification has stands for a file or a
+        // URL. `%f` said "hand me a file", which nothing does anyway because
+        // the entry declares no `MimeType`, and which would be the wrong thing
+        // if something did.
+        assert_eq!(key(DESKTOP, "Exec"), "clippy", "{DESKTOP}");
+        assert!(!DESKTOP.contains("MimeType"), "a field code would be needed");
+    }
+
+    /// The launch handshake, which the entry opts into and the code has to
+    /// finish. Without the code half the desktop starts a spinner on click and
+    /// runs it for the full ten to fifteen seconds of its own timeout, showing
+    /// no icon in the dock the whole time, while the window sits there painted.
+    #[test]
+    fn the_entry_asks_for_a_notification_the_code_answers() {
+        assert_eq!(key(DESKTOP, "StartupNotify"), "true");
+        assert!(MAIN.contains("take_activation_token"), "nothing reads the token");
+    }
+
+    #[test]
+    fn an_empty_token_is_not_a_notification() {
+        assert_eq!(usable_token(None), None);
+        assert_eq!(usable_token(Some(String::new())), None);
+        assert_eq!(usable_token(Some(String::from("  "))), None);
+        assert_eq!(
+            usable_token(Some(String::from("clippy-0_TIME42"))),
+            Some(ActivationToken::from_raw(String::from("clippy-0_TIME42")))
+        );
     }
 
     /// Every file the installer places has to exist to be placed.
