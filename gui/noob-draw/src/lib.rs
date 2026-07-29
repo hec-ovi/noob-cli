@@ -143,16 +143,13 @@ impl Panel {
         Rect::new(self.x + self.w - 1.0, self.y, 1.0, self.h, rgba)
     }
 
-    /// A hairline all the way round, inside the panel. Four rectangles rather
-    /// than a stroked path: this renderer draws rectangles and glyphs, and a
-    /// border is four rectangles.
-    pub fn border(self, rgba: [f32; 4]) -> [Rect; 4] {
-        [
-            self.top_edge(rgba),
-            self.bottom_edge(rgba),
-            self.left_edge(rgba),
-            self.right_edge(rgba),
-        ]
+    /// A hairline all the way round, inside the panel, as one rectangle.
+    ///
+    /// This was four 1px rectangles until the fragment stage learned to stroke.
+    /// Four of them cannot follow a cut or a rounded corner, so a bordered panel
+    /// had a square outline around a shaped fill.
+    pub fn outline(self, rgba: [f32; 4], width: f32) -> Rect {
+        self.fill(rgba).stroke(width)
     }
 
     fn bounds(self) -> TextBounds {
@@ -167,20 +164,44 @@ impl Panel {
 
 /// One instanced rectangle.
 ///
-/// Square by construction. Corners stay in `extra` so a rounded variant can be
-/// added later without the struct changing size, which would mean the shader
-/// changing with it.
+/// Square by construction, and shaped by `extra` rather than by more members:
+/// the struct size is what the shader agrees with, so the shape parameters had
+/// to fit in the space that was already there.
+///
+/// `extra` is now full. The scheme, which the WGSL fragment stage reads back in
+/// this order:
+///
+/// | slot | meaning |
+/// |---|---|
+/// | `x` | corner radius in pixels, 0 for square corners |
+/// | `y` | chamfer size in pixels: how far a 45 degree cut reaches along each edge, 0 for no cut |
+/// | `z` | which corners that cut applies to, as the 4 bit mask below |
+/// | `w` | stroke width in pixels, 0 to fill the shape instead of outlining it |
+///
+/// A fifth parameter has nowhere to go. Either share a slot (two small
+/// integers packed into one float, decoded in the shader) or accept that
+/// growing the struct means editing the WGSL `Rect` in the same commit, which
+/// is the mismatch the module docs describe.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Rect {
     xywh: [f32; 4],
     rgba: [f32; 4],
-    /// x is the corner radius in pixels; the rest is reserved. A `vec4` on both
-    /// sides, never a bare trailing scalar. See the module docs.
+    /// Radius, chamfer size, corner mask, stroke width. A `vec4` on both sides,
+    /// never a bare trailing scalar. See the type and module docs.
     extra: [f32; 4],
 }
 
 impl Rect {
+    /// Corner bits for [`Rect::chamfer`], clockwise from the top left. Held as
+    /// a mask rather than four booleans because it travels to the shader as one
+    /// float.
+    pub const TOP_LEFT: u32 = 1;
+    pub const TOP_RIGHT: u32 = 2;
+    pub const BOTTOM_RIGHT: u32 = 4;
+    pub const BOTTOM_LEFT: u32 = 8;
+    pub const EVERY_CORNER: u32 = 15;
+
     pub fn new(x: f32, y: f32, w: f32, h: f32, rgba: [f32; 4]) -> Rect {
         Rect {
             xywh: [x, y, w, h],
@@ -196,6 +217,24 @@ impl Rect {
         self
     }
 
+    /// A 45 degree cut across the named corners, reaching `px` along each edge.
+    ///
+    /// The shader caps the reach at half the shorter side, so a 10 pixel cut on
+    /// a pane squeezed down to 12 pixels loses its corner instead of losing the
+    /// whole rectangle.
+    pub fn chamfer(mut self, px: f32, corners: u32) -> Rect {
+        self.extra[1] = px.max(0.0);
+        self.extra[2] = (corners & Rect::EVERY_CORNER) as f32;
+        self
+    }
+
+    /// Draw the outline instead of the fill: a ring `px` wide lying inside the
+    /// edge, which is where the four separate 1px rectangles used to sit.
+    pub fn stroke(mut self, px: f32) -> Rect {
+        self.extra[3] = px.max(0.0);
+        self
+    }
+
     /// Position and size, so a caller can assert a scene without a GPU.
     pub fn xywh(&self) -> [f32; 4] {
         self.xywh
@@ -205,6 +244,12 @@ impl Rect {
     /// scene means knowing what colour it is.
     pub fn rgba(&self) -> [f32; 4] {
         self.rgba
+    }
+
+    /// The shape parameters, in the packing the type docs describe. Same
+    /// reason again: a test asserts the shape of a rectangle without a GPU.
+    pub fn extra(&self) -> [f32; 4] {
+        self.extra
     }
 }
 
@@ -392,7 +437,10 @@ struct VsOut {
     @location(0) rgba: vec4<f32>,
     @location(1) local: vec2<f32>,
     @location(2) half_size: vec2<f32>,
-    @location(3) radius: f32,
+    // radius, chamfer, corner mask, stroke width. Flat: the mask is a bitfield
+    // read back with integer arithmetic, and an interpolated 2.0 that arrives
+    // as 1.9999997 cuts the wrong corner.
+    @location(3) @interpolate(flat) extra: vec4<f32>,
 };
 
 @vertex
@@ -410,15 +458,46 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VsOut
     out.rgba = r.rgba;
     out.half_size = r.xywh.zw * 0.5;
     out.local = (corner - vec2<f32>(0.5, 0.5)) * r.xywh.zw;
-    out.radius = r.extra.x;
+    out.extra = r.extra;
     return out;
 }
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
+    let radius = in.extra.x;
+    let cuts = u32(in.extra.z + 0.5);
+    let stroke = in.extra.w;
+
     // Signed distance to the rectangle; radius 0 is an ordinary square corner.
-    let q = abs(in.local) - (in.half_size - vec2<f32>(in.radius, in.radius));
-    let d = length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - in.radius;
+    let q = abs(in.local) - (in.half_size - vec2<f32>(radius, radius));
+    var d = length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - radius;
+
+    // A 45 degree cut is a half-plane: in the corner's own quadrant, where both
+    // coordinates are positive, everything past x + y = hx + hy - c is outside.
+    // Intersecting (max) with the rectangle takes that wedge away. Capped at the
+    // shorter half side so an oversized cut eats a corner, not the rectangle.
+    let chamfer = min(in.extra.y, min(in.half_size.x, in.half_size.y));
+    if chamfer > 0.0 {
+        let reach = in.half_size.x + in.half_size.y - chamfer;
+        let signs = array<vec2<f32>, 4>(
+            vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0),
+            vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
+        );
+        for (var i = 0u; i < 4u; i = i + 1u) {
+            if (cuts & (1u << i)) != 0u {
+                let p = in.local * signs[i];
+                d = max(d, (p.x + p.y - reach) * 0.70710678);
+            }
+        }
+    }
+
+    // The outline: the ring between the shape and the shape shrunk by the
+    // stroke width. Inside the edge, where the four 1px rectangles it replaces
+    // were, so a stroked panel still ends exactly where the panel ends.
+    if stroke > 0.0 {
+        d = max(d, -(d + stroke));
+    }
+
     let a = in.rgba.a * (1.0 - smoothstep(-1.0, 1.0, d));
     // Premultiplied: the surface composites against the desktop behind it.
     return vec4<f32>(in.rgba.rgb * a, a);
@@ -785,6 +864,19 @@ mod tests {
         );
     }
 
+    /// The shader is a `&str` handed to a driver, so nothing else in the build
+    /// notices a WGSL mistake. Parse and validate it the way wgpu does.
+    #[test]
+    fn the_shader_compiles() {
+        let module = naga::front::wgsl::parse_str(SHADER).expect("the shader parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("the shader validates");
+    }
+
     /// The alignment bug, caught by the type system rather than by eye. Rust
     /// must agree with WGSL that this is three `vec4`s, or every instance after
     /// the first reads the previous one's tail as its own head.
@@ -884,11 +976,81 @@ mod tests {
     #[test]
     fn edges_stay_inside_the_panel() {
         let panel = Panel::new(5.0, 5.0, 20.0, 20.0);
-        for rect in panel.border([0.0; 4]) {
+        let edges = [
+            panel.top_edge([0.0; 4]),
+            panel.bottom_edge([0.0; 4]),
+            panel.left_edge([0.0; 4]),
+            panel.right_edge([0.0; 4]),
+        ];
+        for rect in edges {
             let [x, y, w, h] = rect.xywh;
             assert!(x >= panel.x && y >= panel.y, "{rect:?}");
             assert!(x + w <= panel.x + panel.w, "{rect:?}");
             assert!(y + h <= panel.y + panel.h, "{rect:?}");
         }
+    }
+
+    /// An outline is the panel itself, not a ring drawn around it: the stroke
+    /// lies inside the edge, the way the four hairlines it replaces did, so a
+    /// bordered panel still ends where the panel ends.
+    #[test]
+    fn an_outline_covers_the_panel_and_asks_for_a_stroke() {
+        let panel = Panel::new(5.0, 5.0, 20.0, 20.0);
+        let rect = panel.outline([1.0; 4], 1.0);
+        assert_eq!(rect.xywh(), [5.0, 5.0, 20.0, 20.0]);
+        assert_eq!(rect.extra()[3], 1.0);
+        // And a fill is not a stroke, or every panel would be hollow.
+        assert_eq!(panel.fill([1.0; 4]).extra()[3], 0.0);
+    }
+
+    /// The packing the shader reads back. Each builder owns one slot and
+    /// leaves the others alone, so a chamfered stroke is both and not either.
+    #[test]
+    fn the_shape_builders_write_the_slots_the_shader_reads() {
+        let plain = Rect::new(0.0, 0.0, 10.0, 10.0, [1.0; 4]);
+        assert_eq!(plain.extra(), [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(plain.radius(3.0).extra(), [3.0, 0.0, 0.0, 0.0]);
+        assert_eq!(
+            plain.chamfer(10.0, Rect::TOP_RIGHT).extra(),
+            [0.0, 10.0, 2.0, 0.0]
+        );
+        assert_eq!(plain.stroke(1.0).extra(), [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(
+            plain
+                .radius(2.0)
+                .chamfer(10.0, Rect::TOP_LEFT | Rect::BOTTOM_RIGHT)
+                .stroke(1.5)
+                .extra(),
+            [2.0, 10.0, 5.0, 1.5]
+        );
+        assert_eq!(
+            plain.chamfer(4.0, Rect::EVERY_CORNER).extra()[2],
+            15.0,
+            "all four corner bits"
+        );
+    }
+
+    /// The corner bits are read in the shader as `1u << i` against a fixed
+    /// table of quadrant signs, so their values are part of the contract and
+    /// cannot be renumbered on this side alone.
+    #[test]
+    fn the_corner_bits_are_the_ones_the_shader_indexes() {
+        assert_eq!(Rect::TOP_LEFT, 1);
+        assert_eq!(Rect::TOP_RIGHT, 2);
+        assert_eq!(Rect::BOTTOM_RIGHT, 4);
+        assert_eq!(Rect::BOTTOM_LEFT, 8);
+        assert_eq!(
+            Rect::TOP_LEFT | Rect::TOP_RIGHT | Rect::BOTTOM_RIGHT | Rect::BOTTOM_LEFT,
+            Rect::EVERY_CORNER
+        );
+    }
+
+    /// A negative size would flip the sign of the distance field and paint the
+    /// whole quad, which looks like a solid block over the window.
+    #[test]
+    fn a_negative_shape_parameter_is_refused() {
+        let plain = Rect::new(0.0, 0.0, 10.0, 10.0, [1.0; 4]);
+        assert_eq!(plain.chamfer(-4.0, Rect::TOP_RIGHT).extra()[1], 0.0);
+        assert_eq!(plain.stroke(-1.0).extra()[3], 0.0);
     }
 }

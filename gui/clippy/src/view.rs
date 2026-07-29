@@ -14,7 +14,7 @@
 //! carrying [`State::headline`] and nothing else, the way Winamp collapsed to
 //! its title. Double-click the bar to go between them.
 
-use noob_draw::{Panel, Run, Scene, Text};
+use noob_draw::{Panel, Rect, Run, Scene, Text};
 
 use crate::dock::{Dock, Space, View};
 use crate::monitor::{Gauge, Monitor};
@@ -39,6 +39,10 @@ const DOT_COLUMNS: usize = 10;
 const DOT_ROWS: usize = 4;
 const PROMPT_COLUMNS: usize = 2;
 const INPUT_PAD: f32 = 6.0;
+/// How far the 45 degree cut reaches along each edge of a panel's top-right
+/// corner. One corner, so the shape reads as a mark rather than as a rounded
+/// box, and always the same corner so two panels side by side still line up.
+const CUT: f32 = 10.0;
 
 /// Something the pointer can land on. Returned by [`Layout::hit`] so every
 /// click is resolved in one place instead of in a chain of `if` in the event
@@ -572,6 +576,21 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
     ));
 }
 
+/// The body of a panel: the fill, cut corner and all.
+///
+/// The cut lives on the fill as well as on the outline because they are the
+/// same shape twice. A square fill under a cut outline shows a triangle of the
+/// wrong colour poking out of the corner.
+fn panel_fill(panel: Panel, rgba: [f32; 4]) -> Rect {
+    panel.fill(rgba).chamfer(CUT, Rect::TOP_RIGHT)
+}
+
+/// Its hairline border, as one rectangle. Four of them could not follow the
+/// cut.
+fn panel_edge(panel: Panel, rgba: [f32; 4]) -> Rect {
+    panel_fill(panel, rgba).stroke(1.0)
+}
+
 fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
     let skin = frame.skin;
     let placed = frame.layout.placed(space);
@@ -610,10 +629,11 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
         return;
     }
     let panel = placed.body;
-    scene.rect(panel.fill(skin.panel));
-    for edge in panel.border(if target { skin.edge_focus } else { skin.edge }) {
-        scene.rect(edge);
-    }
+    scene.rect(panel_fill(panel, skin.panel));
+    scene.rect(panel_edge(
+        panel,
+        if target { skin.edge_focus } else { skin.edge },
+    ));
 
     selection_band(scene, frame, panel, slot.active());
 
@@ -1085,9 +1105,7 @@ fn dragging(scene: &mut Scene, frame: &Frame) {
     let w = (label.chars().count() as f32 + 3.0) * frame.column;
     let ghost = Panel::new(drag.at.0 - w * 0.5, drag.at.1 - TAB_H * 0.5, w, TAB_H);
     scene.rect(ghost.fill(skin.bar));
-    for edge in ghost.border(skin.edge_focus) {
-        scene.rect(edge);
-    }
+    scene.rect(ghost.outline(skin.edge_focus, 1.0));
     scene.text(Text::rich(
         vec![Run::tinted(label, skin.bright)],
         ghost.row(SMALL * 0.6, Text::line_for(SMALL)),
@@ -1122,10 +1140,8 @@ fn scrollbar(scene: &mut Scene, skin: &Skin, panel: Panel, thumb: Option<(f32, f
 
 fn input_row(scene: &mut Scene, frame: &Frame) {
     let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
-    scene.rect(layout.input.fill(skin.input));
-    for edge in layout.input.border(skin.edge_focus) {
-        scene.rect(edge);
-    }
+    scene.rect(panel_fill(layout.input, skin.input));
+    scene.rect(panel_edge(layout.input, skin.edge_focus));
     let line = Text::line_for(frame.body_size);
     let box_ = input_box(layout.input, line);
     let columns = columns_in(box_.w, frame.column);
@@ -2314,25 +2330,55 @@ mod tests {
 
     /// Two dark panels side by side over a busy desktop read as one region
     /// with a gap in it. The border is what tells them apart.
+    ///
+    /// One stroked rectangle covering the whole panel, not four 1px edges
+    /// around it: a square outline cannot follow the cut corner, and it used to
+    /// cost five rectangles per pane instead of two.
     #[test]
     fn every_space_is_drawn_with_a_border() {
         let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &["a.rs"]);
         for space in Space::ALL {
             let panel = out.layout.placed(space).body;
-            let edges = out
+            let over_panel: Vec<_> = out
                 .scene
                 .rects
                 .iter()
-                .filter(|r| {
-                    let [x, y, w, h] = r.xywh();
-                    (w <= 1.5 || h <= 1.5)
-                        && x >= panel.x - 0.5
-                        && y >= panel.y - 0.5
-                        && x + w <= panel.x + panel.w + 0.5
-                        && y + h <= panel.y + panel.h + 0.5
-                })
-                .count();
-            assert!(edges >= 4, "{space:?} has {edges} edges");
+                .filter(|r| r.xywh() == [panel.x, panel.y, panel.w, panel.h])
+                .collect();
+            let strokes: Vec<_> = over_panel
+                .iter()
+                .filter(|r| r.extra()[3] > 0.0)
+                .collect();
+            assert_eq!(strokes.len(), 1, "{space:?} is not bordered by one rect");
+            assert_eq!(strokes[0].extra()[3], 1.0, "a hairline, not a slab");
+            // The fill under it is a second rectangle, and no more than that.
+            assert_eq!(over_panel.len(), 2, "{space:?} costs more than fill plus edge");
+        }
+    }
+
+    /// The cut corner, on the fill and on the border alike. A square fill under
+    /// a cut border leaves a triangle of panel colour outside its own edge.
+    #[test]
+    fn a_panel_is_cut_on_its_top_right_corner_only() {
+        let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &["a.rs"]);
+        let boxes: Vec<Panel> = Space::ALL
+            .iter()
+            .map(|space| out.layout.placed(*space).body)
+            .chain(std::iter::once(out.layout.input))
+            .collect();
+        for panel in boxes {
+            let shaped: Vec<_> = out
+                .scene
+                .rects
+                .iter()
+                .filter(|r| r.xywh() == [panel.x, panel.y, panel.w, panel.h])
+                .collect();
+            assert_eq!(shaped.len(), 2, "{panel:?} is not a fill plus an edge");
+            for rect in shaped {
+                let [_, chamfer, corners, _] = rect.extra();
+                assert_eq!(chamfer, CUT, "{rect:?} is not cut");
+                assert_eq!(corners, Rect::TOP_RIGHT as f32, "{rect:?} cuts elsewhere");
+            }
         }
     }
 

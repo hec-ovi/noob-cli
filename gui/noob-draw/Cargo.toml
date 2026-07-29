@@ -12,3 +12,10 @@ noob-gpu.workspace = true
 wgpu.workspace = true
 glyphon.workspace = true
 bytemuck.workspace = true
+
+# The shader is a string until a GPU compiles it, so a typo in it is a black
+# window rather than a build error. This is wgpu's own front end, already in the
+# tree at the same version, so the test compiles the shader the way the driver
+# will.
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }
