@@ -279,6 +279,14 @@ code gets written.
 
 ### Settled
 
+- **Settings is a full-screen takeover**, not a popup and not a second OS
+  window. It replaces the whole surface, is entered from the right-click menu
+  and the config icon, and is dismissed with Escape or its close mark. A second
+  OS window would mean a second wgpu surface, its own renderer and its own event
+  routing, for the same result.
+- **The orb lives in the corner block, not in a pane.** That is why the CLIPPY
+  view is being deleted rather than repaired: the ASCII clip becomes the idle
+  animation beside the orb, and `avatar.rs` stays as the player for it.
 - **D1 (item 22): capped 2x2 grid.** Max depth 2, at most 4 leaves, dividers
   drag freely. No arbitrary nesting, so no leaf can collapse below a drawable
   size. Roughly half the code of a general tree.
