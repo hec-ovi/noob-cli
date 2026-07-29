@@ -470,23 +470,35 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
     // first version asked for were not on this machine and a missing glyph
     // draws as nothing. The symbol font ships in the binary now, so they are
     // the same marks every other window on the desktop uses.
-    for (panel, hit, tint, glyph) in [
-        (layout.minimize, Hit::Minimize, skin.hot, crate::icons::MINIMIZE),
-        (layout.maximize, Hit::Maximize, skin.hot, crate::icons::MAXIMIZE),
-        (layout.close, Hit::Close, skin.close_hot, crate::icons::CLOSE),
+    let line = Text::line_for(SMALL);
+    for (panel, hit, tint, glyph, quiet) in [
+        (layout.minimize, Hit::Minimize, skin.hot, crate::icons::MINIMIZE, true),
+        (layout.maximize, Hit::Maximize, skin.hot, crate::icons::MAXIMIZE, true),
+        (layout.close, Hit::Close, skin.close_hot, crate::icons::CLOSE, false),
     ] {
         let lit = frame.hot == Some(hit);
         if lit {
             scene.rect(panel.fill(tint));
         }
-        let ink = if lit { skin.bright } else { skin.dim };
+        // Close reads at full strength because it is the one that cannot be
+        // undone; the other two sit back until the pointer is on them.
+        let ink = match (lit, quiet) {
+            (true, _) => skin.bright,
+            (false, true) => skin.dim,
+            (false, false) => skin.title,
+        };
+        // The box runs to the button's right edge rather than being sized to
+        // one estimated glyph. A box exactly one guessed advance wide clipped
+        // these: the maximize mark lost all but its left edge and close all but
+        // one arm of its cross.
+        let left = ((panel.w - SMALL * 0.6) * 0.5).max(0.0).floor();
         scene.text(Text::rich(
             vec![Run::icon(glyph.to_string(), ink)],
-            // One glyph centred in the button: the icon font is monospace, so
-            // half the leftover width is the left margin.
-            panel.row(
-                ((panel.w - SMALL * 0.6) * 0.5).max(0.0),
-                Text::line_for(SMALL),
+            Panel::new(
+                panel.x + left,
+                panel.y + ((panel.h - line) * 0.5).max(0.0).floor(),
+                panel.w - left,
+                line,
             ),
             SMALL,
             ink,
