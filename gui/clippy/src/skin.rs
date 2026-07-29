@@ -37,8 +37,6 @@ pub struct Skin {
     /// The band behind selected text. Drawn under the glyphs, so it has to be
     /// dark enough that green text still reads on top of it.
     pub select: [f32; 4],
-    /// The marks on the window buttons, drawn rather than typed.
-    pub mark: [f32; 4],
     /// A window button under the pointer.
     pub hot: [f32; 4],
     pub close_hot: [f32; 4],
@@ -102,7 +100,6 @@ impl Skin {
             // Dim rather than accent: the band sits under the text, and a
             // bright one takes the reading surface away from what it selects.
             select: rgba(config.dim, 0.45),
-            mark: rgba(config.bright, 0.9),
             hot: rgba(config.accent, 0.30),
             close_hot: rgba(config.bad, 0.55),
 

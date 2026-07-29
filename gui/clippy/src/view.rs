@@ -466,48 +466,31 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
         scene.rect(Panel::new(0.0, gauge.y, layout.width * used, 2.0).fill(skin.gauge));
     }
 
-    // The marks are rectangles, not glyphs. The first version used \u{2715}
-    // and \u{25a1}, which this machine's font does not have, so it drew three
-    // empty buttons; the second used ASCII, which renders but puts a `[]` at
-    // whatever width and baseline the font feels like. A 9-pixel square is a
-    // 9-pixel square.
-    let mark = 9.0_f32;
-    for (panel, hit, tint) in [
-        (layout.minimize, Hit::Minimize, skin.hot),
-        (layout.maximize, Hit::Maximize, skin.hot),
-        (layout.close, Hit::Close, skin.close_hot),
+    // These were three hand-drawn rectangles, because the Unicode glyphs the
+    // first version asked for were not on this machine and a missing glyph
+    // draws as nothing. The symbol font ships in the binary now, so they are
+    // the same marks every other window on the desktop uses.
+    for (panel, hit, tint, glyph) in [
+        (layout.minimize, Hit::Minimize, skin.hot, crate::icons::MINIMIZE),
+        (layout.maximize, Hit::Maximize, skin.hot, crate::icons::MAXIMIZE),
+        (layout.close, Hit::Close, skin.close_hot, crate::icons::CLOSE),
     ] {
         let lit = frame.hot == Some(hit);
         if lit {
             scene.rect(panel.fill(tint));
         }
-        let ink = if lit { skin.edge_focus } else { skin.mark };
-        let box_ = Panel::new(
-            (panel.x + (panel.w - mark) * 0.5).floor(),
-            (panel.y + (panel.h - mark) * 0.5).floor(),
-            mark,
-            mark,
-        );
-        match hit {
-            Hit::Minimize => {
-                scene.rect(Panel::new(box_.x, box_.y + mark - 1.0, mark, 1.0).fill(ink));
-            }
-            Hit::Maximize => {
-                for edge in box_.border(ink) {
-                    scene.rect(edge);
-                }
-            }
-            // A cross out of axis-aligned rectangles would be a staircase, so
-            // the close mark is a filled square with its middle knocked out:
-            // unmistakable at this size and drawn exactly.
-            _ => {
-                scene.rect(box_.fill(ink));
-                scene.rect(
-                    Panel::new(box_.x + 2.0, box_.y + 2.0, mark - 4.0, mark - 4.0)
-                        .fill(skin.bar),
-                );
-            }
-        }
+        let ink = if lit { skin.bright } else { skin.dim };
+        scene.text(Text::rich(
+            vec![Run::icon(glyph.to_string(), ink)],
+            // One glyph centred in the button: the icon font is monospace, so
+            // half the leftover width is the left margin.
+            panel.row(
+                ((panel.w - SMALL * 0.6) * 0.5).max(0.0),
+                Text::line_for(SMALL),
+            ),
+            SMALL,
+            ink,
+        ));
     }
 
     let room = (layout.width - BUTTON_W * 3.0 - 12.0).max(1.0);
@@ -969,7 +952,11 @@ fn files(scene: &mut Scene, frame: &Frame, panel: Panel) {
             (true, false) => skin.bright,
             (false, false) => skin.title,
         };
-        let mut runs = vec![Run::tinted(short_name(&file.path), color)];
+        let mut runs = vec![
+            // The type mark, so a tab is recognisable before it is read.
+            Run::icon(crate::icons::for_path(&file.path).to_string(), color),
+            Run::tinted(format!(" {}", short_name(&file.path)), color),
+        ];
         if file.changed {
             runs.push(Run::tinted(" \u{2022}", skin.plus));
         }

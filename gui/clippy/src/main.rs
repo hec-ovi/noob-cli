@@ -20,6 +20,7 @@
 mod avatar;
 mod config;
 mod dock;
+mod icons;
 mod link;
 mod markdown;
 mod monitor;

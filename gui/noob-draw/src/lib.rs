@@ -208,12 +208,62 @@ impl Rect {
     }
 }
 
+/// The family name of the embedded symbol font.
+///
+/// Symbols Nerd Font Mono, shipped in the binary rather than looked for on the
+/// system. It carries the Codicon, Seti and Devicon sets, which is what a
+/// window button and a file-type mark need.
+pub const ICON_FAMILY: &str = "Symbols Nerd Font Mono";
+
+/// The bytes of that font, embedded at build time.
+const ICON_FONT: &[u8] = include_bytes!("../fonts/SymbolsNerdFontMono-Regular.ttf");
+
+/// A font system holding the system fonts plus the embedded symbol font.
+fn icon_fonts() -> FontSystem {
+    let mut system = FontSystem::new();
+    system.db_mut().load_font_data(ICON_FONT.to_vec());
+    system
+}
+
+/// Whether the embedded symbol font has a real glyph for this character.
+///
+/// A font returns `.notdef` for a character it lacks, and `.notdef` draws as
+/// nothing, so an icon that is simply absent looks exactly like an icon that
+/// was never asked for. Callers naming codepoints should assert this in a test
+/// rather than discover it on someone's screen.
+///
+/// Builds a whole `FontSystem` per call, which is why this is for tests and not
+/// for a draw path.
+pub fn has_glyph(ch: char) -> bool {
+    let mut fonts = icon_fonts();
+    let mut buffer = Buffer::new(&mut fonts, Metrics::new(14.0, 20.0));
+    buffer.set_size(Some(64.0), Some(32.0));
+    buffer.set_text(
+        &ch.to_string(),
+        &Attrs::new().family(Family::Name(ICON_FAMILY)),
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(&mut fonts, false);
+    buffer
+        .layout_runs()
+        .flat_map(|run| run.glyphs.iter())
+        .all(|g| g.glyph_id != 0)
+}
+
 /// A stretch of characters that share a color. `None` means the run takes the
 /// text's default, which is the common case and costs no per-run state.
 #[derive(Clone, Debug)]
 pub struct Run {
     pub text: String,
     pub color: Option<[u8; 4]>,
+    /// Draw this run in the icon font rather than the monospace one.
+    ///
+    /// Named on the run rather than left to font fallback. Nerd Font glyphs
+    /// live in the private use area, where fallback has no script to match on,
+    /// and a glyph that silently resolves to nothing is the exact failure that
+    /// made the window buttons rectangles in the first place.
+    pub icon: bool,
 }
 
 impl Run {
@@ -221,6 +271,7 @@ impl Run {
         Run {
             text: text.into(),
             color: None,
+            icon: false,
         }
     }
 
@@ -228,6 +279,16 @@ impl Run {
         Run {
             text: text.into(),
             color: Some(color),
+            icon: false,
+        }
+    }
+
+    /// A run of glyphs from the embedded symbol font.
+    pub fn icon(text: impl Into<String>, color: [u8; 4]) -> Run {
+        Run {
+            text: text.into(),
+            color: Some(color),
+            icon: true,
         }
     }
 }
@@ -464,7 +525,7 @@ impl Renderer {
             bind_layout,
             bind_group,
             capacity,
-            font_system: FontSystem::new(),
+            font_system: icon_fonts(),
             swash: SwashCache::new(),
             atlas,
             viewport,
@@ -526,7 +587,11 @@ impl Renderer {
                     }
                     runs => {
                         let spans = runs.iter().map(|run| {
-                            let attrs = Attrs::new().family(Family::Monospace);
+                            let attrs = Attrs::new().family(if run.icon {
+                                Family::Name(ICON_FAMILY)
+                            } else {
+                                Family::Monospace
+                            });
                             let attrs = match run.color {
                                 Some([r, g, b, a]) => attrs.color(Color::rgba(r, g, b, a)),
                                 None => attrs,
@@ -662,6 +727,63 @@ fn bind(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shape one string in a family and report the glyph ids it resolved to.
+    /// Glyph 0 is `.notdef`, the empty box a font returns for a character it
+    /// does not have.
+    fn glyph_ids(text: &str, family: Family) -> Vec<u16> {
+        let mut fonts = icon_fonts();
+        let mut buffer = Buffer::new(&mut fonts, Metrics::new(14.0, 20.0));
+        buffer.set_size(Some(400.0), Some(40.0));
+        buffer.set_text(text, &Attrs::new().family(family), Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut fonts, false);
+        buffer
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter().map(|g| g.glyph_id))
+            .collect()
+    }
+
+    /// The window buttons were drawn as bare rectangles because the glyphs they
+    /// wanted were not on this machine, and a missing glyph renders as nothing
+    /// rather than as an error. The font ships in the binary now, so the test
+    /// that matters is that these codepoints resolve to real glyphs.
+    #[test]
+    fn every_icon_the_window_uses_is_in_the_embedded_font() {
+        // Codicon window controls, Seti file types, a folder and a gear.
+        let icons = [
+            ("close", '\u{eab8}'),
+            ("maximize", '\u{eab9}'),
+            ("minimize", '\u{eaba}'),
+            ("markdown", '\u{e609}'),
+            ("python", '\u{e606}'),
+            ("javascript", '\u{e60c}'),
+            ("rust", '\u{e7a8}'),
+            ("folder", '\u{e5ff}'),
+            ("terminal", '\u{ea85}'),
+            ("gear", '\u{f013}'),
+        ];
+        for (name, ch) in icons {
+            let ids = glyph_ids(&ch.to_string(), Family::Name(ICON_FAMILY));
+            assert_eq!(ids.len(), 1, "{name} shaped to {} glyphs", ids.len());
+            assert_ne!(
+                ids[0], 0,
+                "{name} (U+{:04X}) resolved to .notdef, so it would draw as nothing",
+                ch as u32
+            );
+        }
+    }
+
+    /// And the embedded font must not displace the monospace one: ordinary
+    /// prose still has to shape in the text face.
+    #[test]
+    fn loading_the_symbol_font_leaves_monospace_text_alone() {
+        let ids = glyph_ids("hello", Family::Monospace);
+        assert_eq!(ids.len(), 5, "five characters, five glyphs");
+        assert!(
+            ids.iter().all(|id| *id != 0),
+            "monospace text resolved to .notdef: {ids:?}"
+        );
+    }
 
     /// The alignment bug, caught by the type system rather than by eye. Rust
     /// must agree with WGSL that this is three `vec4`s, or every instance after
