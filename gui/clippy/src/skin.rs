@@ -112,33 +112,15 @@ impl Skin {
             minus: text(config.bad),
             plus: text(config.good),
 
-            // One hue per tool, spread far enough apart to tell at a glance
-            // and far enough from the window's own green not to read as
-            // ordinary text. Grouping them by category was the first attempt
-            // and read as no colour at all, because most of a session is
-            // read, ls and grep.
-            tools: [
-                [0x4f, 0xd6, 0xc8, 255], // bash
-                [0x7f, 0xb5, 0xf0, 255], // read
-                [0x5f, 0x8f, 0xd0, 255], // ls
-                [0xa8, 0xc8, 0xf0, 255], // glob
-                [0xc8, 0xd8, 0x4f, 255], // grep
-                [0x9a, 0xa4, 0xae, 255], // context
-                [0xf5, 0xc2, 0x5a, 255], // write
-                [0xf5, 0x9a, 0x4f, 255], // edit
-                [0xc0, 0x90, 0xf5, 255], // websearch
-                [0xf5, 0x7f, 0xc8, 255], // skill
-                [0xf5, 0xd8, 0x4f, 255], // mcp
-                [0x7f, 0x7f, 0xf5, 255], // subagent
-                text(config.bright),     // plan
-                text(config.text),       // anything else
-            ],
+            // Ordered by `Kind::ALL`, which is the order the config reads them
+            // in, so the two cannot drift.
+            tools: config.tools.map(text),
 
-            comment: [0x56, 0x84, 0x66, 255],
-            string: [0xd6, 0xc4, 0x7a, 255],
-            number: [0xb2, 0xce, 0xf0, 255],
-            keyword: [0x82, 0xce, 0xf0, 255],
-            markup: [0xba, 0xa0, 0xe8, 255],
+            comment: text(config.syntax_comment),
+            string: text(config.syntax_string),
+            number: text(config.syntax_number),
+            keyword: text(config.syntax_keyword),
+            markup: text(config.syntax_markup),
         }
     }
 
@@ -316,6 +298,67 @@ mod tests {
         });
         assert_eq!(skin.caret, [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(skin.body, [0x11, 0x22, 0x33, 255]);
+    }
+
+    /// The invariants above, run over every preset rather than only the one
+    /// they were written against. A preset that breaks one of them is an
+    /// unreadable window, and nobody can see that from a name in a file.
+    #[test]
+    fn every_preset_is_a_window_you_can_read() {
+        use crate::syntax::Token;
+        let luminance = |c: [f32; 4]| c[0] * 0.2 + c[1] * 0.7 + c[2] * 0.1;
+        let named: Vec<Kind> = Kind::ALL
+            .into_iter()
+            .filter(|kind| *kind != Kind::Other)
+            .collect();
+        for name in crate::config::THEMES {
+            let config = crate::config::theme(name).expect(name);
+            let skin = Skin::from(&config);
+
+            assert!(luminance(skin.panel) < 0.05, "{name}: {:?}", skin.panel);
+            assert!(luminance(skin.backdrop) < 0.05, "{name}: {:?}", skin.backdrop);
+            assert!(skin.backdrop[3] < skin.panel[3], "{name}: backdrop over panel");
+            assert!(skin.panel[3] < skin.strip[3], "{name}: panel over strip");
+
+            let readable = |what: &str, [r, g, b, a]: [u8; 4]| {
+                assert_eq!(a, 255, "{name}: {what}");
+                assert!(
+                    r as u32 + g as u32 + b as u32 > 180,
+                    "{name}: {what} is too dark to read on black"
+                );
+            };
+            for tone in [
+                Tone::Dim,
+                Tone::Body,
+                Tone::Bright,
+                Tone::Good,
+                Tone::Bad,
+                Tone::Minus,
+                Tone::Plus,
+            ]
+            .into_iter()
+            .chain(Kind::ALL.into_iter().map(Tone::Call))
+            {
+                readable(&format!("{tone:?}"), skin.tone(tone));
+            }
+            for token in [
+                Token::Comment,
+                Token::Str,
+                Token::Number,
+                Token::Keyword,
+                Token::Markup,
+            ] {
+                readable(&format!("{token:?}"), skin.token(token).expect(name));
+            }
+
+            for (i, a) in named.iter().enumerate() {
+                assert_ne!(skin.kind(*a), skin.dim, "{name}: {a:?}");
+                for b in &named[i + 1..] {
+                    assert_ne!(skin.kind(*a), skin.kind(*b), "{name}: {a:?} and {b:?} match");
+                }
+            }
+            assert_eq!(skin.kind(Kind::Other), skin.body, "{name}: the catch-all is prose");
+        }
     }
 
     #[test]

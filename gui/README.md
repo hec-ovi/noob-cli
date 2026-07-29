@@ -148,9 +148,15 @@ holding a frame for a second costs one redraw rather than sixty. Point
 ## Settings
 
 `~/.config/noob/clippy.conf`, written with the defaults on first run and
-commented. Opacity, the seven palette colors, both font sizes, which panes
-exist, and the avatar. A key it does not recognise is reported in the ACTIVITY
-pane rather than ignored.
+commented. Opacity, both font sizes, which panes exist, the avatar, and the
+whole palette: the eight base colors, one per tool, and the five the
+highlighter uses for code. A key it does not recognise is reported in the
+ACTIVITY pane rather than ignored.
+
+`theme = noob | amber | ice | plum` sets every color at once. The colors ship
+as commented defaults so the theme has something to set, so uncomment one line
+to keep the theme and override that single color. `clippy --set theme=amber`
+makes the same edit from a terminal without touching the comments.
 
 Opacity defaults to 88%. Lower it to see more of your desktop through the
 reading surface; below about 60% a busy wallpaper starts competing with the

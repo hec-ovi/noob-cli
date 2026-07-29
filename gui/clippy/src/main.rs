@@ -16,6 +16,7 @@
 //!
 //! Usage: `clippy [workspace]`, with `NOOB_BIN` naming the agent binary when it
 //! is not `noob` on PATH. Settings live beside noob's own; see `config`.
+//! `clippy --set <key>=<value>` changes one of them and exits.
 
 mod avatar;
 mod config;
@@ -971,6 +972,30 @@ fn resize_cursor(dir: winit::window::ResizeDirection) -> CursorIcon {
 }
 
 fn main() {
+    // `clippy --set theme=amber` edits the settings file and exits. Not an
+    // editor: it is a terminal one-liner for the same file, and the only
+    // caller of the writer.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(request) = config::set_request(&args) {
+        let written = request.and_then(|(key, value)| {
+            let path = config::path().ok_or_else(|| "no settings file to write".to_string())?;
+            // Write the commented default first when there is no file yet, or
+            // the first `--set` on a fresh install leaves a two-line file and
+            // the documentation never gets written at all.
+            let _ = Config::load();
+            config::write_setting(&path, key, Some(value))
+                .map(|()| format!("{key} = {value} in {}", path.display()))
+        });
+        match written {
+            Ok(line) => println!("clippy: {line}"),
+            Err(error) => {
+                eprintln!("clippy: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     let config = Config::load();
     let event_loop = match EventLoop::<Wake>::with_user_event().build() {
         Ok(loop_) => loop_,
