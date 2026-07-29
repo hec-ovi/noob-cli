@@ -628,30 +628,6 @@ impl App {
         }
     }
 
-    /// Scroll a wide table sideways, in columns. Positive is to the right.
-    ///
-    /// Only the transcript has tables, and the stop is the widest one actually
-    /// on screen, so the wheel stops at the table's right edge rather than
-    /// scrolling on into blank space.
-    fn scroll_hovered_sideways(&mut self, notches: f32) {
-        let layout = self.layout();
-        let Some((view, panel)) = self.under_pointer(&layout) else {
-            return;
-        };
-        if view != View::Talk {
-            return;
-        }
-        let (size, column) = self.metrics_of(view);
-        let rows = layout.rows(panel, size);
-        let cols = view::cols_of(panel, column);
-        let most = view::widest_table_overhang(&self.state.talk, rows, cols);
-        if most == 0 {
-            return;
-        }
-        let by = (notches * 6.0).round() as isize;
-        self.dirty |= self.state.talk.scroll_sideways(by, most);
-    }
-
     /// Scroll whatever the pointer is over, in pages. Positive is back into
     /// history.
     fn scroll_hovered(&mut self, pages: f32) {
@@ -882,14 +858,7 @@ impl ApplicationHandler<Wake> for App {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => (p.y / 40.0) as f32,
                 };
-                // Shift turns the wheel sideways, which is how every other
-                // program spells it. Tables are the only thing wide enough to
-                // need it: prose wraps, so it has no right edge to reach.
-                if self.modifiers.shift_key() {
-                    self.scroll_hovered_sideways(-lines);
-                } else {
-                    self.scroll_hovered(lines * 0.34);
-                }
+                self.scroll_hovered(lines * 0.34);
                 self.redraw();
             }
             WindowEvent::MouseInput {

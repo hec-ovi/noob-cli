@@ -159,11 +159,6 @@ pub struct Pane {
     /// Rows scrolled back from the tail. Zero means following the live end,
     /// which is what a pane returns to whenever new content arrives.
     pub scrollback: usize,
-    /// Columns scrolled off to the left. Only tables use it: prose wraps, so
-    /// it has nothing to the side to reach. Clamped where it is drawn rather
-    /// than where it is set, because how far a table can go depends on which
-    /// table is on screen.
-    pub side: usize,
     /// How many lines have fallen off the front over the pane's whole life.
     ///
     /// The absolute number of `lines[i]` is `dropped + i`, and that number is
@@ -190,7 +185,6 @@ impl Pane {
             lines: VecDeque::new(),
             cap,
             scrollback: 0,
-            side: 0,
             dropped: 0,
             heights: std::cell::RefCell::new(Heights {
                 // Nothing has been measured yet, and a zero width would look
@@ -323,15 +317,6 @@ impl Pane {
         let next = (self.scrollback + rows).min(most);
         let moved = next != self.scrollback;
         self.scrollback = next;
-        moved
-    }
-
-    /// Scroll sideways by `by` columns, positive to the right, stopping at the
-    /// left edge and at `most`. Returns whether anything moved.
-    pub fn scroll_sideways(&mut self, by: isize, most: usize) -> bool {
-        let next = (self.side as isize + by).clamp(0, most as isize) as usize;
-        let moved = next != self.side;
-        self.side = next;
         moved
     }
 

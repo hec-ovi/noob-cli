@@ -718,71 +718,6 @@ fn text_box(scene: &mut Scene, frame: &Frame, panel: Panel, size: f32, runs: Vec
     scene.text(Text::rich(runs, panel.inset(PAD), size, frame.skin.body));
 }
 
-/// The table each visible line belongs to, or `None` for ordinary prose.
-///
-/// Measured over the whole block, including the rows above and below the
-/// window, so the columns stay still while a table is scrolled through. Widths
-/// taken from the visible rows alone would shift on every wheel notch.
-fn table_blocks(
-    pane: &crate::state::Pane,
-    first: usize,
-    count: usize,
-) -> Vec<Option<crate::markdown::Table>> {
-    let mut out = vec![None; count];
-    // Only the model's prose is Markdown, so only a Body line can be a row.
-    let text = |n: usize| {
-        pane.line(n)
-            .filter(|l| l.tone == Tone::Body)
-            .map(|l| l.text.as_str())
-    };
-    let is_row = |n: usize| text(n).is_some_and(crate::markdown::is_table_row);
-
-    let mut i = 0;
-    while i < count {
-        let at = first + i;
-        if !is_row(at) {
-            i += 1;
-            continue;
-        }
-        // An evicted line reads as absent rather than as a row, so walking up
-        // stops at the oldest line the pane still holds.
-        let mut start = at;
-        while start > 0 && is_row(start - 1) {
-            start -= 1;
-        }
-        let mut end = at;
-        while end + 1 < pane.last() && is_row(end + 1) {
-            end += 1;
-        }
-        let table = crate::markdown::Table::of((start..=end).filter_map(text));
-        while i < count && first + i <= end {
-            if is_row(first + i) {
-                out[i] = Some(table.clone());
-            }
-            i += 1;
-        }
-    }
-    out
-}
-
-/// How far the widest table in a window can be scrolled sideways before its
-/// right edge is on screen. Zero when nothing there is too wide to fit.
-pub fn widest_table_overhang(
-    pane: &crate::state::Pane,
-    rows: usize,
-    cols: usize,
-) -> usize {
-    let first = pane.showing_from(rows, cols);
-    let count = pane.visible(rows, cols).len();
-    table_blocks(pane, first, count)
-        .iter()
-        .flatten()
-        .map(|t| t.width())
-        .max()
-        .unwrap_or(0)
-        .saturating_sub(cols)
-}
-
 fn talk(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let (skin, state) = (frame.skin, frame.state);
     let rows = frame.layout.rows(panel, frame.body_size);
@@ -791,19 +726,11 @@ fn talk(scene: &mut Scene, frame: &Frame, panel: Panel) {
     // A window that starts inside a fenced block has to know it is looking at
     // code, so the state is carried in from the lines above it.
     let mut fence = state.talk.fence_before(rows, cols);
-    let shown = state.talk.visible(rows, cols);
-    let tables = table_blocks(&state.talk, state.talk.showing_from(rows, cols), shown.len());
-    for (i, line) in shown.iter().enumerate() {
+    for line in state.talk.visible(rows, cols) {
         match line.tone {
             // Only the model's prose is Markdown. What the human typed and
             // what the harness noted are shown as written.
-            Tone::Body => match tables[i].as_ref() {
-                // A pipe inside a code block is code, so the fence wins.
-                Some(table) if !fence.open() && !table.is_empty() => {
-                    table.row(&line.text, state.talk.side, cols, skin, &mut runs);
-                }
-                _ => crate::markdown::line(&line.text, &mut fence, skin, &mut runs),
-            },
+            Tone::Body => crate::markdown::line(&line.text, &mut fence, skin, &mut runs),
             tone => runs.push(Run::tinted(&line.text, skin.tone(tone))),
         }
         runs.push(Run::plain("\n"));
@@ -1369,90 +1296,6 @@ mod tests {
 
     fn render(state: &State, w: f32, h: f32, dock: &Dock, files: &[&str]) -> Rendered {
         render_with(state, w, h, dock, files, &Monitor::new(), None)
-    }
-
-    /// A table's columns are measured over the whole block, so scrolling
-    /// through one must not make them jump. Measuring only the visible rows
-    /// would reshape the table on every wheel notch.
-    #[test]
-    fn a_table_keeps_its_columns_still_while_it_is_scrolled() {
-        let mut state = busy_state();
-        state.talk.say("here is a table:", Tone::Body);
-        state.talk.say("| Name | Type |", Tone::Body);
-        state.talk.say("| --- | --- |", Tone::Body);
-        for n in 0..30 {
-            // One row carries a much longer value than the rest, so a window
-            // that misses it would measure the column narrower.
-            let value = if n == 29 { "a-very-long-monitor-name" } else { "pane" };
-            state.talk.say(format!("| row{n} | {value} |"), Tone::Body);
-        }
-
-        let dock = Dock::new();
-        let widths_at = |state: &State| -> Vec<usize> {
-            let out = render(state, 1400.0, 900.0, &dock, &[]);
-            text_of(&out.scene)
-                .lines()
-                .filter(|l| l.contains('\u{2502}'))
-                .map(|l| l.chars().count())
-                .collect()
-        };
-
-        let at_end = widths_at(&state);
-        assert!(!at_end.is_empty(), "the table has to be drawn at all");
-        // Scroll up so the window holds different rows of the same block.
-        state.talk.scroll_back(6, 10, 120);
-        let scrolled = widths_at(&state);
-        assert!(!scrolled.is_empty(), "still drawing rows after scrolling");
-
-        let one = at_end[0];
-        for width in at_end.iter().chain(scrolled.iter()) {
-            assert_eq!(
-                *width, one,
-                "a row is {width} wide against {one}: the columns moved when scrolled"
-            );
-        }
-    }
-
-    /// Scrolling sideways has to stop exactly where the table's right edge
-    /// reaches the pane. Stopping short leaves the last column unreachable,
-    /// which was the whole complaint; stopping late scrolls into blank space.
-    #[test]
-    fn the_sideways_stop_is_the_widest_table_on_screen() {
-        let mut state = busy_state();
-        state.talk.say("| a | b |", Tone::Body);
-        state.talk.say("| --- | --- |", Tone::Body);
-        state.talk.say(
-            format!("| {} | {} |", "x".repeat(60), "y".repeat(60)),
-            Tone::Body,
-        );
-        let (rows, cols) = (20, 40);
-        let most = widest_table_overhang(&state.talk, rows, cols);
-        let width = crate::markdown::Table::of(
-            state.talk.visible(rows, cols).iter().map(|l| l.text.as_str()),
-        )
-        .width();
-        assert_eq!(most, width - cols, "the stop is exactly the overhang");
-
-        assert!(state.talk.scroll_sideways(9_999, most));
-        assert_eq!(state.talk.side, most, "and the wheel cannot go past it");
-        assert!(!state.talk.scroll_sideways(1, most), "already at the edge");
-        assert!(state.talk.scroll_sideways(-9_999, most));
-        assert_eq!(state.talk.side, 0, "and it comes back to the left edge");
-    }
-
-    /// Prose has no right edge to reach, so a transcript without a wide table
-    /// must not scroll sideways at all.
-    #[test]
-    fn a_transcript_without_a_wide_table_has_nowhere_to_go_sideways() {
-        let mut state = busy_state();
-        state.talk.say("just some prose, which wraps instead", Tone::Body);
-        assert_eq!(widest_table_overhang(&state.talk, 20, 40), 0);
-        state.talk.say("| a | b |", Tone::Body);
-        assert_eq!(
-            widest_table_overhang(&state.talk, 20, 40),
-            0,
-            "a table narrower than the pane does not scroll either"
-        );
     }
 
     /// The window has to say which build it is, or a tester cannot tell two of
