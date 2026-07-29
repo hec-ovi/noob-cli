@@ -26,9 +26,6 @@ pub enum View {
     Llm,
     /// The files the agent has touched, with its own inner tab per file.
     Files,
-    /// The animated ASCII avatar. Decorative on purpose, and the one view
-    /// that shows nothing about the session.
-    Avatar,
 }
 
 impl View {
@@ -36,7 +33,7 @@ impl View {
     /// builds its arrangement from [`Dock::new`] rather than from this, but the
     /// skin reads a view's accent by position here, so the order is part of
     /// what a colour means.
-    pub const ALL: [View; 8] = [
+    pub const ALL: [View; 7] = [
         View::Talk,
         View::Activity,
         View::Plan,
@@ -44,7 +41,6 @@ impl View {
         View::Hardware,
         View::Llm,
         View::Files,
-        View::Avatar,
     ];
 
     pub fn label(self) -> &'static str {
@@ -56,7 +52,6 @@ impl View {
             View::Hardware => "HARDWARE",
             View::Llm => "LLM",
             View::Files => "FILES",
-            View::Avatar => "CLIPPY",
         }
     }
 }
@@ -188,10 +183,7 @@ impl Dock {
                     folded: false,
                 },
                 Slot {
-                    // The avatar sits behind the files rather than beside the
-                    // conversation: it is the one view with nothing to say,
-                    // so it must never be what a space opens on.
-                    views: vec![View::Files, View::Avatar],
+                    views: vec![View::Files],
                     active: 0,
                     folded: false,
                 },
@@ -289,11 +281,21 @@ mod tests {
         assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Activity));
         assert_eq!(dock.slot(Space::BottomRight).active(), Some(View::Files));
         assert_eq!(dock.walk().len(), View::ALL.len());
-        // The avatar is present and is not what anything opens on.
-        assert_eq!(dock.space_of(View::Avatar), Some(Space::BottomRight));
-        for space in Space::ALL {
-            assert_ne!(dock.slot(space).active(), Some(View::Avatar));
+    }
+
+    /// The decorative avatar was a view of its own and is not one any more.
+    /// Its tab is the thing this asserts is gone: the palette and the walk are
+    /// both indexed by `View::ALL`, so a leftover variant would keep a tab and
+    /// an accent alive with nothing behind them.
+    #[test]
+    fn there_are_seven_views_and_none_of_them_is_the_avatar() {
+        assert_eq!(View::ALL.len(), 7);
+        for view in View::ALL {
+            assert_ne!(view.label(), "CLIPPY", "{view:?}");
         }
+        let dock = Dock::new();
+        assert!(dock.is_sound());
+        assert_eq!(dock.slot(Space::BottomRight).views, vec![View::Files]);
     }
 
     /// The invariant the rest of the window relies on: whatever gets dragged
@@ -398,19 +400,19 @@ mod tests {
     /// cannot be dragged back in.
     #[test]
     fn a_hidden_view_is_gone_rather_than_folded() {
-        let dock = Dock::hiding(&[View::Avatar, View::Files]);
+        let dock = Dock::hiding(&[View::Files, View::Activity]);
         assert!(dock.is_sound());
-        assert_eq!(dock.space_of(View::Avatar), None);
         assert_eq!(dock.space_of(View::Files), None);
+        assert_eq!(dock.space_of(View::Activity), None);
         assert_eq!(dock.walk().len(), View::ALL.len() - 2);
-        assert!(!dock.walk().contains(&View::Avatar));
-        // The space they were the only occupants of is empty, not broken.
+        assert!(!dock.walk().contains(&View::Files));
+        // The space the files were the only occupant of is empty, not broken.
         assert!(dock.slot(Space::BottomRight).is_empty());
         assert_eq!(dock.slot(Space::BottomRight).active(), None);
 
         let mut dock = dock;
-        assert!(!dock.move_view(View::Avatar, Space::Left));
-        assert_eq!(dock.space_of(View::Avatar), None);
+        assert!(!dock.move_view(View::Files, Space::Left));
+        assert_eq!(dock.space_of(View::Files), None);
         assert!(dock.is_sound());
         // The views that are on still walk, and still wrap.
         let mut at = View::Talk;

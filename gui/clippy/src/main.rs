@@ -18,6 +18,11 @@
 //! is not `noob` on PATH. Settings live beside noob's own; see `config`.
 //! `clippy --set <key>=<value>` changes one of them and exits.
 
+/// The clip player, with nothing drawing it at the moment. Kept compiled and
+/// tested because the format it reads is about to carry an idle animation in
+/// the corner of the window; deleting the parser with the view would mean
+/// writing it again.
+#[allow(dead_code)]
 mod avatar;
 mod config;
 mod dock;
@@ -75,6 +80,26 @@ const DRAG_SLOP: f64 = 5.0;
 const MAX_SIZE: LogicalSize<f64> = LogicalSize::new(2200.0, 1400.0);
 const MIN_SIZE: LogicalSize<f64> = LogicalSize::new(680.0, 380.0);
 
+/// What shading asks the window for: the minimum inner size to hold it to, and
+/// the size to become. Split out from [`App::shade`] so the rule can be tested
+/// without a compositor.
+///
+/// Shaded there is no minimum at all. `MIN_SIZE` is taller than the strip, and
+/// a window that keeps its minimum while shaded simply does not shrink.
+fn shade_request(
+    shaded: bool,
+    remembered: Option<PhysicalSize<u32>>,
+) -> (Option<LogicalSize<f64>>, Option<PhysicalSize<u32>>) {
+    match (shaded, remembered) {
+        (true, Some(was)) => (
+            None,
+            Some(PhysicalSize::new(was.width, view::TITLE_H as u32)),
+        ),
+        (true, None) => (None, None),
+        (false, was) => (Some(MIN_SIZE), was),
+    }
+}
+
 struct App {
     window: Option<Arc<Window>>,
     gpu: Option<noob_gpu::Gpu>,
@@ -88,10 +113,6 @@ struct App {
     skin: Skin,
     link: Option<Link>,
     trouble: Option<String>,
-    /// The avatar clip. None when the settings turned it off, or named one
-    /// that could not be read. It plays off `epoch`, the same clock the rest
-    /// of the window measures against.
-    avatar: Option<avatar::Avatar>,
 
     prompt: Prompt,
     dock: Dock,
@@ -125,16 +146,6 @@ struct App {
 impl App {
     fn new(proxy: EventLoopProxy<Wake>, config: Config) -> App {
         let skin = Skin::from(&config);
-        // Read once, at startup. A clip the settings named that cannot be read
-        // falls back to the built-in one rather than to nothing: a typo in a
-        // path should not silently remove a view.
-        let avatar = config.show_avatar.then(|| {
-            config
-                .avatar
-                .as_deref()
-                .and_then(avatar::Avatar::load)
-                .or_else(avatar::Avatar::built_in)
-        });
         // A view the settings turned off has no tab at all. Folding it away
         // would leave a strip saying the name of something you asked not to
         // see, which is not the same thing.
@@ -145,12 +156,8 @@ impl App {
         if !config.show_files {
             hidden.push(View::Files);
         }
-        if !config.show_avatar {
-            hidden.push(View::Avatar);
-        }
         App {
             dock: Dock::hiding(&hidden),
-            avatar: avatar.flatten(),
             window: None,
             gpu: None,
             renderer: None,
@@ -301,10 +308,18 @@ impl App {
         self.shaded = !self.shaded;
         if self.shaded {
             self.unshaded = Some(window.inner_size());
-            let width = window.inner_size().width;
-            let _ = window.request_inner_size(PhysicalSize::new(width, view::TITLE_H as u32));
-        } else if let Some(size) = self.unshaded.take() {
+        }
+        let (min, size) = shade_request(self.shaded, self.unshaded);
+        // The minimum goes first. A resize request is clamped to it, and
+        // asking a 680x380 minimum for a 30 pixel strip left the surface at
+        // full height with the strip painted across the top of it, which is
+        // the black bar the window showed when it was shaded.
+        window.set_min_inner_size(min);
+        if let Some(size) = size {
             let _ = window.request_inner_size(size);
+        }
+        if !self.shaded {
+            self.unshaded = None;
         }
         self.dirty = true;
     }
@@ -724,10 +739,6 @@ impl App {
             hot: self.hot,
             trouble: self.trouble.as_deref(),
             selection: self.state.selection,
-            avatar: self
-                .avatar
-                .as_ref()
-                .map(|clip| (clip, self.epoch.elapsed().as_millis() as u64)),
         });
         renderer.draw(gpu, &scene, frame);
         self.dirty = false;
@@ -926,10 +937,10 @@ impl ApplicationHandler<Wake> for App {
     /// an interface showing static text should cost nothing, and polling is how
     /// a UI silently eats a GPU.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // The monitor and the avatar are the two things that change without an
-        // event, so they are the two things that get a clock, and only while
-        // they are on screen. Everything else redraws because something
-        // happened, which is what keeps an idle window free.
+        // The monitor is the one thing that changes without an event, so it is
+        // the one thing that gets a clock, and only while it is on screen.
+        // Everything else redraws because something happened, which is what
+        // keeps an idle window free.
         let showing = |wanted: &[View]| {
             !self.shaded
                 && Space::ALL.into_iter().any(|space| {
@@ -947,23 +958,8 @@ impl ApplicationHandler<Wake> for App {
         } else {
             self.next_sample = None;
         }
-        // The avatar wakes for exactly one frame's delay, not on a fixed rate:
-        // a clip holding a frame for a second must not cost sixty redraws.
-        let next_frame = self
-            .avatar
-            .as_ref()
-            .filter(|_| showing(&[View::Avatar]))
-            .map(|clip| {
-                let hold = clip.hold_ms(self.epoch.elapsed().as_millis() as u64);
-                self.dirty = true;
-                Instant::now() + Duration::from_millis(hold)
-            });
         self.redraw();
-        let next = match (self.next_sample, next_frame) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (only, None) | (None, only) => only,
-        };
-        event_loop.set_control_flow(match next {
+        event_loop.set_control_flow(match self.next_sample {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
         });
@@ -1028,5 +1024,26 @@ fn main() {
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("clippy: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Shading has to drop the minimum inner size. It did not, so the
+    /// compositor clamped the 30 pixel request back up to 380 and the window
+    /// stayed tall behind a title strip.
+    #[test]
+    fn shading_drops_the_minimum_and_unshading_puts_it_back() {
+        let open = PhysicalSize::new(1180, 760);
+
+        let (min, size) = shade_request(true, Some(open));
+        assert_eq!(min, None, "a minimum taller than the strip refuses it");
+        assert_eq!(size, Some(PhysicalSize::new(1180, view::TITLE_H as u32)));
+
+        let (min, size) = shade_request(false, Some(open));
+        assert_eq!(min, Some(MIN_SIZE));
+        assert_eq!(size, Some(open), "and it goes back to the size it was");
     }
 }

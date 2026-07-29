@@ -48,7 +48,7 @@ pub struct Config {
 
     /// One color per view, in the order [`View`](crate::dock::View) declares
     /// them. Read by position, so the order is the same as [`VIEW_KEYS`].
-    pub views: [[u8; 3]; 8],
+    pub views: [[u8; 3]; 7],
 
     pub syntax_comment: [u8; 3],
     pub syntax_string: [u8; 3],
@@ -58,12 +58,6 @@ pub struct Config {
 
     pub show_activity: bool,
     pub show_files: bool,
-    /// Whether the avatar view exists at all. On by default, and the one
-    /// setting somebody is definitely going to want off.
-    pub show_avatar: bool,
-    /// A clip to play instead of the one built in. Anything `gui/asciify`
-    /// produced. Unset plays the built-in one.
-    pub avatar: Option<PathBuf>,
 
     /// Keys in the file this build does not know. Reported, never dropped.
     pub unknown: Vec<String>,
@@ -93,8 +87,6 @@ impl Default for Config {
             syntax_markup: [0xba, 0xa0, 0xe8],
             show_activity: true,
             show_files: true,
-            show_avatar: true,
-            avatar: None,
             unknown: Vec::new(),
         }
     }
@@ -146,7 +138,7 @@ const TOOLS: [[u8; 3]; 14] = [
 
 /// The key for each view color, in the order `View::ALL` declares the views.
 /// The position here is the position in [`Config::views`].
-pub const VIEW_KEYS: [&str; 8] = [
+pub const VIEW_KEYS: [&str; 7] = [
     "view_talk",
     "view_activity",
     "view_plan",
@@ -154,17 +146,13 @@ pub const VIEW_KEYS: [&str; 8] = [
     "view_hardware",
     "view_llm",
     "view_files",
-    "view_avatar",
 ];
 
 /// One hue per view. It marks the tab that is showing, so what a space is
 /// holding is answerable from the corner of the eye rather than by reading
-/// eight labels. Spread the way the tool hues are, and a theme leaves them
+/// seven labels. Spread the way the tool hues are, and a theme leaves them
 /// alone for the same reason: they name the views, not the window.
-///
-/// The avatar is the grey one. It is the view with nothing to report, so a hue
-/// of its own would compete with the seven that do.
-const VIEWS: [[u8; 3]; 8] = [
+const VIEWS: [[u8; 3]; 7] = [
     [0x73, 0xde, 0x9f], // talk
     [0xf5, 0xc7, 0x5c], // activity
     [0xc6, 0x82, 0xed], // plan
@@ -172,7 +160,6 @@ const VIEWS: [[u8; 3]; 8] = [
     [0x52, 0xe0, 0xe0], // hardware
     [0xf0, 0x75, 0xc3], // llm
     [0xf0, 0x7d, 0x4c], // files
-    [0xa9, 0xb1, 0xbc], // avatar
 ];
 
 fn prose_tools(bright: [u8; 3], text: [u8; 3]) -> [[u8; 3]; 14] {
@@ -283,8 +270,6 @@ pub fn keys() -> Vec<&'static str> {
         "syntax_markup",
         "show_activity",
         "show_files",
-        "show_avatar",
-        "avatar",
     ];
     keys.extend(TOOL_KEYS);
     keys.extend(VIEW_KEYS);
@@ -376,15 +361,6 @@ impl Config {
                 }
                 "show_activity" => set(&mut config.show_activity, boolean(&value)),
                 "show_files" => set(&mut config.show_files, boolean(&value)),
-                "show_avatar" => set(&mut config.show_avatar, boolean(&value)),
-                // Empty means the built-in clip, which is what the shipped
-                // file says, so a key left as written is not a broken path.
-                "avatar" => {
-                    config.avatar = Some(value.trim())
-                        .filter(|path| !path.is_empty())
-                        .map(PathBuf::from);
-                    true
-                }
                 _ => false,
             };
             if !known {
@@ -709,7 +685,6 @@ theme = noob
 # view_hardware = #52e0e0
 # view_llm      = #f075c3
 # view_files    = #f07d4c
-# view_avatar   = #a9b1bc
 
 # Code in a message: the five things the highlighter can name.
 # syntax_comment = #568466
@@ -721,14 +696,6 @@ theme = noob
 # Panes. A hidden pane gives its room to the conversation.
 show_activity = true
 show_files    = true
-
-# The animated ASCII avatar, as its own view. Off removes the tab entirely.
-show_avatar = true
-
-# A clip to play instead of the one built in. Any file `gui/asciify` produced:
-#   cargo run -p asciify -- your.gif your.txt --cols 40
-# Empty plays the built-in one.
-avatar =
 ";
 
 #[cfg(test)]
@@ -764,7 +731,7 @@ mod tests {
         for key in keys() {
             assert!(named.contains(&key.to_string()), "{key} is undocumented");
         }
-        assert_eq!(keys().len(), 44, "a new key needs a line in the file");
+        assert_eq!(keys().len(), 41, "a new key needs a line in the file");
     }
 
     /// The commented colors are the noob theme spelled out. A stale hex there
@@ -1063,7 +1030,7 @@ mod tests {
         assert!(write_setting(&conf, "colour", Some("#fff")).is_err());
         assert!(write_setting(&conf, "accent", Some("chartreuse")).is_err());
         assert!(write_setting(&conf, "opacity", Some("very")).is_err());
-        assert!(write_setting(&conf, "avatar", Some("two words")).is_err());
+        assert!(write_setting(&conf, "theme", Some("two words")).is_err());
         assert!(write_setting(&conf, "accent", Some("#ff0000\nbad = #fff")).is_err());
         let theme_error = write_setting(&conf, "theme", Some("tangerine")).unwrap_err();
         assert!(theme_error.contains("noob, amber, ice, plum"), "{theme_error}");

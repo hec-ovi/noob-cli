@@ -20,7 +20,7 @@ open only what the right column names.
 | The GPU device, surface, transparency probing | `gui/noob-gpu/src/lib.rs` |
 | Markdown rendering in the transcript | `gui/clippy/src/markdown.rs` |
 | Syntax colors in the file view | `gui/clippy/src/syntax.rs` |
-| The ASCII animation and its file format | `gui/clippy/src/avatar.rs`, authored by `gui/asciify/` |
+| The ASCII animation and its file format, which nothing draws yet | `gui/clippy/src/avatar.rs`, authored by `gui/asciify/` |
 | Desktop entry, icons, packaging | `gui/clippy/src/packaging.rs`, `gui/data/`, `dev.sh gui-package` |
 
 ## The agent (`crates/`)

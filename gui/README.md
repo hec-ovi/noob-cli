@@ -52,7 +52,6 @@ top, so which view a space is holding is answerable without reading the labels.
 | HARDWARE | CPU and RAM, plus GPU, VRAM and GTT on an AMD card |
 | LLM | context, where compaction triggers, cache, total and last prefill and output, and the measured prefill and decode rates |
 | FILES | one tab per file touched, with the diff, a line-number gutter and syntax coloring |
-| CLIPPY | the animated ASCII avatar |
 
 The conversation is rendered as Markdown, because the model writes Markdown
 whether or not anything asked it to: headings, bold, bullets and fenced code
@@ -137,25 +136,12 @@ window down to that one strip, Winamp style: it keeps showing THINKING, WORKING
 or FINISHED with the plan count and how many files changed, so a collapsed
 window is still a status light. Double-click again to bring it back.
 
-The avatar is an animation, not an image. `gui/asciify` turns a GIF into a text
-file once:
-
-```
-./dev.sh avatar docs/asciis/clippy-black-1.gif      # writes gui/clippy/avatar/clippy.txt
-```
-
-The window never decodes an image. It plays each frame for that frame's own
-delay, through one timer, and only while the view is on screen, so an avatar
-holding a frame for a second costs one redraw rather than sixty. Point
-`avatar` in the settings at any file the converter produced, or set
-`show_avatar = false` and the tab is gone.
-
 ## Settings
 
 `~/.config/noob/clippy.conf`, written with the defaults on first run and
 commented. Opacity, both font sizes, how tall the prompt may grow, which panes
-exist, the avatar, and the whole palette: the eight base colors, one per tool,
-one per view, and the five the highlighter uses for code. A key it does not
+exist, and the whole palette: the eight base colors, one per tool, one per view,
+and the five the highlighter uses for code. A key it does not
 recognise is reported in the ACTIVITY pane rather than ignored.
 
 `theme = noob | amber | ice | plum` sets every color at once. The tool and view
@@ -181,7 +167,7 @@ black.
 | `noob-gpu` | adapter, device, surface, what this machine will actually do |
 | `noob-draw` | instanced rectangles and shaped glyphs, and nothing else |
 | `clippy` | the window shell, the layout, the panes, the agent link |
-| `asciify` | GIF to the avatar's text animation, run at authoring time only |
+| `asciify` | GIF to a text animation, run at authoring time only |
 
 `gui/data/` holds what the desktop needs: the icon, its small redrawn variant,
 the launcher entry and the installer that places them.

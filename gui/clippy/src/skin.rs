@@ -61,7 +61,7 @@ pub struct Skin {
     /// One colour per view, in the order [`View`] declares them. A fill rather
     /// than a text tint: it is drawn as the accent line along the top of the
     /// tab that is showing.
-    pub views: [[f32; 4]; 8],
+    pub views: [[f32; 4]; 7],
 
     pub comment: [u8; 4],
     pub string: [u8; 4],
@@ -327,7 +327,7 @@ mod tests {
         let skin = Skin::default();
         assert_eq!(skin.views.len(), View::ALL.len());
         assert_eq!(skin.view(View::Talk), skin.views[0]);
-        assert_eq!(skin.view(View::Avatar), skin.views[7]);
+        assert_eq!(skin.view(View::Files), skin.views[6]);
     }
 
     /// An accent nobody can tell from its neighbour's says nothing about which
