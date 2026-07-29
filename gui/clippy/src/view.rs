@@ -23,7 +23,6 @@ use crate::state::{State, TodoState, Tone};
 
 pub const TITLE_H: f32 = 30.0;
 pub const INPUT_H: f32 = 36.0;
-pub const STATUS_H: f32 = 24.0;
 pub const TAB_H: f32 = 22.0;
 pub const RESIZE_EDGE: f32 = 6.0;
 const GAP: f32 = 6.0;
@@ -50,8 +49,6 @@ pub enum Hit {
     Close,
     /// A view's tab, in the space it currently lives in.
     Tab(View, Space),
-    /// The fold control at the right of a space's tab strip.
-    Fold(Space),
     /// The body of a space: where a dragged tab lands.
     Body(Space),
     /// One of the file view's inner tabs, and the space it is showing in. The
@@ -66,7 +63,6 @@ impl Hit {
     pub fn space(self) -> Option<Space> {
         match self {
             Hit::Tab(_, space)
-            | Hit::Fold(space)
             | Hit::Body(space)
             | Hit::File(_, space) => Some(space),
             _ => None,
@@ -79,7 +75,6 @@ pub struct Placed {
     pub strip: Panel,
     pub body: Panel,
     pub tabs: Vec<(View, Panel)>,
-    pub fold: Panel,
 }
 
 /// Where everything is this frame. Built from the window size and the dock, so
@@ -100,7 +95,6 @@ pub struct Layout {
     pub file_tabs: Vec<(usize, Panel)>,
     pub files_in: Option<Space>,
     pub input: Panel,
-    pub status: Panel,
 }
 
 /// What the layout needs beyond the window size.
@@ -124,7 +118,6 @@ fn empty_placed() -> Placed {
         strip: nowhere(),
         body: nowhere(),
         tabs: Vec::new(),
-        fold: nowhere(),
     }
 }
 
@@ -153,11 +146,9 @@ impl Layout {
                 file_tabs: Vec::new(),
                 files_in: None,
                 input: nowhere(),
-                status: nowhere(),
             };
         }
 
-        let (rest, status) = rest.split_bottom(STATUS_H.min(rest.h));
         let (body, input) = rest.split_bottom(shape.input_h.max(INPUT_H).min(rest.h));
         let body = body.inset(GAP);
 
@@ -201,8 +192,7 @@ impl Layout {
                 return empty_placed();
             }
             let (strip, rest) = area.split_top(TAB_H.min(area.h));
-            let fold = Panel::new(strip.x + strip.w - TAB_H, strip.y, TAB_H, TAB_H);
-            let room = Panel::new(strip.x, strip.y, (strip.w - TAB_H).max(1.0), TAB_H);
+            let room = strip;
             let slot = shape.dock.slot(space);
             let tabs = strip_tabs(
                 room,
@@ -221,7 +211,6 @@ impl Layout {
                     rest
                 },
                 tabs,
-                fold,
             }
         };
 
@@ -272,7 +261,6 @@ impl Layout {
             file_tabs,
             files_in,
             input: input.inset(GAP),
-            status,
         }
     }
 
@@ -304,9 +292,6 @@ impl Layout {
                 if panel.contains(x, y) {
                     return Some(Hit::Tab(*view, space));
                 }
-            }
-            if placed.fold.contains(x, y) {
-                return Some(Hit::Fold(space));
             }
         }
         if let Some(space) = self.files_in {
@@ -463,7 +448,6 @@ pub fn build(frame: &Frame) -> Scene {
         space_pane(&mut scene, frame, space);
     }
     input_row(&mut scene, frame);
-    status_bar(&mut scene, frame);
     dragging(&mut scene, frame);
     scene
 }
@@ -471,6 +455,16 @@ pub fn build(frame: &Frame) -> Scene {
 fn title_bar(scene: &mut Scene, frame: &Frame) {
     let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
     scene.rect(layout.title.fill(skin.bar));
+
+    // How full the context is, as a hairline along the bottom of the strip.
+    // It was a bar of its own at the foot of the window; two pixels at the top
+    // of the window says the same thing and costs no rows.
+    let gauge = Panel::new(0.0, layout.title.y + layout.title.h - 2.0, layout.width, 2.0);
+    scene.rect(gauge.fill(skin.gauge_track));
+    let used = state.context_fraction();
+    if used > 0.0 {
+        scene.rect(Panel::new(0.0, gauge.y, layout.width * used, 2.0).fill(skin.gauge));
+    }
 
     // The marks are rectangles, not glyphs. The first version used \u{2715}
     // and \u{25a1}, which this machine's font does not have, so it drew three
@@ -517,7 +511,12 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
     }
 
     let room = (layout.width - BUTTON_W * 3.0 - 12.0).max(1.0);
-    let mut runs = vec![Run::tinted("NO0B \u{25b8} CLIppy", skin.bright)];
+    let mut runs = vec![
+        Run::tinted("NO0B \u{25b8} CLIppy", skin.bright),
+        // Which build this is. Stamped by build.rs from the commit, because a
+        // crate version cannot tell two test builds apart.
+        Run::tinted(format!(" {}", env!("CLIPPY_BUILD")), skin.dim),
+    ];
     if let Some(trouble) = frame.trouble {
         runs.push(Run::tinted(format!("   {trouble}"), skin.bad));
     } else if layout.shaded {
@@ -525,9 +524,17 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
         // worth knowing rather than the model name and the path.
         runs.push(Run::tinted(format!("   {}", state.headline()), skin.good));
     } else {
+        // The phase and the token budget used to live in a bar along the
+        // bottom. They are the same two facts wherever they are drawn, and
+        // here they cost no rows. Ordered so that a narrow window loses the
+        // path before it loses what the agent is doing.
+        runs.push(Run::tinted(
+            format!("   {}", state.phase.word().to_lowercase()),
+            skin.bright,
+        ));
         runs.push(Run::tinted(
             format!(
-                "   {}   {}{}",
+                "   {}   {}{}   {}",
                 if state.model.is_empty() {
                     "…"
                 } else {
@@ -535,6 +542,7 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
                 },
                 short_path(&state.workspace),
                 if state.resumed { "   resumed" } else { "" },
+                state.budget_line(),
             ),
             skin.title,
         ));
@@ -581,16 +589,6 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
             color,
         ));
     }
-    scene.text(Text::rich(
-        vec![Run::tinted(
-            if slot.folded { "\u{25b8}" } else { "\u{25be}" },
-            skin.dim,
-        )],
-        placed.fold.row(0.0, Text::line_for(SMALL)),
-        SMALL,
-        skin.dim,
-    ));
-
     if slot.folded || placed.body.h < 2.0 {
         return;
     }
@@ -1141,28 +1139,6 @@ fn input_row(scene: &mut Scene, frame: &Frame) {
     }
 }
 
-fn status_bar(scene: &mut Scene, frame: &Frame) {
-    let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
-    scene.rect(layout.status.fill(skin.bar));
-    let gauge = Panel::new(0.0, layout.status.y, layout.width, 2.0);
-    scene.rect(gauge.fill(skin.gauge_track));
-    let used = state.context_fraction();
-    if used > 0.0 {
-        scene.rect(Panel::new(0.0, gauge.y, layout.width * used, 2.0).fill(skin.gauge));
-    }
-    scene.text(Text::rich(
-        vec![
-            Run::tinted(
-                format!("{:<12}", state.phase.word().to_lowercase()),
-                skin.bright,
-            ),
-            Run::tinted(state.budget_line(), skin.title),
-        ],
-        layout.status.row(12.0, Text::line_for(SMALL)),
-        SMALL,
-        skin.title,
-    ));
-}
 
 /// How many characters fit across a box of this width.
 fn columns_in(width: f32, column: f32) -> usize {
@@ -1322,6 +1298,102 @@ mod tests {
         render_with(state, w, h, dock, files, &Monitor::new(), None)
     }
 
+    /// The window has to say which build it is, or a tester cannot tell two of
+    /// them apart. The crate version alone cannot: it does not move between
+    /// commits, so `build.rs` stamps the commit into it.
+    #[test]
+    fn the_title_bar_names_the_build() {
+        let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &[]);
+        let text = text_of(&out.scene);
+        assert!(text.contains("CLIppy"), "{text}");
+        assert!(
+            text.contains(env!("CLIPPY_BUILD")),
+            "the build stamp {:?} is not on screen: {text}",
+            env!("CLIPPY_BUILD")
+        );
+        assert!(
+            env!("CLIPPY_BUILD").starts_with(env!("CARGO_PKG_VERSION")),
+            "the stamp has to start with the version, got {:?}",
+            env!("CLIPPY_BUILD")
+        );
+    }
+
+    /// The bar along the bottom is gone, and the two readings it carried are
+    /// still on screen. Removing it silently would have lost the token budget.
+    #[test]
+    fn nothing_is_drawn_along_the_bottom_and_its_readings_moved_up() {
+        let (w, h) = (1400.0, 900.0);
+        let out = render(&busy_state(), w, h, &Dock::new(), &[]);
+        let text = text_of(&out.scene);
+        assert!(
+            text.contains("context"),
+            "the token budget has to survive the bar it used to live in: {text}"
+        );
+
+        // The input row now runs to the bottom of the window. It used to stop
+        // 24 pixels short, and those pixels were the bar.
+        let floor = out.layout.input.y + out.layout.input.h;
+        // Only the window's own bottom margin is left, not a reserved strip.
+        assert!(
+            h - floor <= GAP + 0.01,
+            "the input row stops {} short of the bottom, more than the {GAP}px margin, \
+             so something is still reserved down there",
+            h - floor
+        );
+    }
+
+    /// The context gauge moved to the bottom edge of the title strip. It is two
+    /// pixels either way; what matters is that it is still drawn and still
+    /// scales with how full the context is.
+    #[test]
+    fn the_context_gauge_is_a_hairline_under_the_title_strip() {
+        let mut state = busy_state();
+        state.context = Some(crate::state::ContextFill {
+            used: 4_000,
+            total: 16_000,
+            compact_at: 12_000,
+        });
+        let out = render(&state, 1400.0, 900.0, &Dock::new(), &[]);
+        let edge = out.layout.title.y + out.layout.title.h - 2.0;
+        let hairlines: Vec<[f32; 4]> = out
+            .scene
+            .rects
+            .iter()
+            .map(|r| r.xywh())
+            .filter(|[_, y, _, h]| (*y - edge).abs() < 0.01 && (*h - 2.0).abs() < 0.01)
+            .collect();
+        assert!(
+            hairlines.len() >= 2,
+            "expected a track and a fill on the strip's bottom edge, got {hairlines:?}"
+        );
+        let fill = hairlines.iter().map(|[_, _, w, _]| *w).fold(f32::INFINITY, f32::min);
+        let track = hairlines.iter().map(|[_, _, w, _]| *w).fold(0.0f32, f32::max);
+        assert!(fill > 0.0 && fill < track, "the fill has to be part of the track: {hairlines:?}");
+    }
+
+    /// The arrow at the end of each tab strip is gone. Clicking the tab already
+    /// showing still collapses its space, so nothing was lost with it, and the
+    /// square it occupied is now available to tabs.
+    #[test]
+    fn no_control_sits_at_the_end_of_a_tab_strip() {
+        let dock = Dock::new();
+        let out = render(&busy_state(), 1400.0, 900.0, &dock, &[]);
+        for space in Space::ALL {
+            let strip = out.layout.placed(space).strip;
+            if strip.w < 1.0 {
+                continue;
+            }
+            let (x, y) = (strip.x + strip.w - TAB_H * 0.5, strip.y + strip.h * 0.5);
+            // Whatever is under the square the arrow used to occupy, it is
+            // not a control of its own: a strip resolves only to its tabs now.
+            let hit = out.layout.hit(x, y);
+            assert!(
+                matches!(hit, None | Some(Hit::Tab(..)) | Some(Hit::Body(_)) | Some(Hit::TitleBar)),
+                "{space:?} still has a control at the end of its strip: {hit:?}"
+            );
+        }
+    }
+
     fn render_with(
         state: &State,
         w: f32,
@@ -1407,8 +1479,6 @@ mod tests {
                     "{view:?} in {space:?}"
                 );
             }
-            let (x, y) = middle(placed.fold);
-            assert_eq!(out.layout.hit(x, y), Some(Hit::Fold(space)));
         }
         for (index, panel) in &out.layout.file_tabs {
             let (x, y) = middle(*panel);

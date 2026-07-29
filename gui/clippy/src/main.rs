@@ -328,11 +328,6 @@ impl App {
                 // released.
                 self.holding = Some((view, space, self.cursor));
             }
-            Hit::Fold(space) => {
-                let slot = self.dock.slot_mut(space);
-                slot.folded = !slot.folded;
-                self.dirty = true;
-            }
             Hit::File(index, _) => {
                 self.state.open_file = index;
                 self.dirty = true;
