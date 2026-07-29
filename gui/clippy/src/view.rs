@@ -17,6 +17,7 @@
 use noob_draw::{Panel, Rect, Run, Scene, Text};
 
 use crate::dock::{Dock, Space, View};
+use crate::menu::Menu;
 use crate::monitor::{Gauge, Monitor};
 use crate::skin::Skin;
 use crate::state::{State, TodoState, Tone};
@@ -49,6 +50,16 @@ const CUT: f32 = 10.0;
 const ACCENT_H: f32 = 2.0;
 /// How far a scrollbar sits in from the right edge of the pane it belongs to.
 const SCROLL_GAP: f32 = 2.0;
+/// One row of a menu. Taller than a tab: a tab is read, a menu row is aimed at,
+/// and 22 pixels is already tight for a pointer.
+const MENU_ROW_H: f32 = 20.0;
+/// The margin around a menu's rows, top and bottom and on either side of a
+/// label. Also what keeps the first row off the pointer that opened it.
+const MENU_PAD: f32 = 5.0;
+/// Columns every menu row leaves in front of its label for an icon, whether it
+/// has one or not, so labels line up in a column instead of stepping in and out
+/// with whichever rows happen to be marked.
+const MENU_GUTTER: usize = 2;
 
 /// Something the pointer can land on. Returned by [`Layout::hit`] so every
 /// click is resolved in one place instead of in a chain of `if` in the event
@@ -68,6 +79,13 @@ pub enum Hit {
     /// somewhere: a drop target is a place on screen, not a widget.
     File(usize, Space),
     Input,
+    /// A row of the open menu, by position in it. The overlay is hit tested
+    /// before anything else, so a menu takes the click that lands on it rather
+    /// than letting it through to the pane it opened over.
+    MenuRow(usize),
+    /// The open menu's box, away from any row. Swallowed for the same reason:
+    /// a press on its margin must not reach what is behind it.
+    Menu,
 }
 
 impl Hit {
@@ -80,6 +98,18 @@ impl Hit {
             _ => None,
         }
     }
+}
+
+/// Where a dragged tab ends up when the button comes up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Landing {
+    /// Into a space, which moves the view there.
+    In(Space),
+    /// Off the window entirely, which takes the view out of it.
+    Out,
+    /// Somewhere in the window that is not a space: the title strip, the
+    /// prompt, the margin between two panes. Nothing happens.
+    Nowhere,
 }
 
 /// Where one space is, and where its tabs are.
@@ -107,12 +137,22 @@ pub struct Layout {
     pub file_tabs: Vec<(usize, Panel)>,
     pub files_in: Option<Space>,
     pub input: Panel,
+
+    /// The floating layer. The open menu's box, and one panel per row, both
+    /// empty when no menu is open. Drawn last and hit tested first.
+    pub menu: Panel,
+    pub menu_rows: Vec<Panel>,
 }
 
 /// What the layout needs beyond the window size.
 pub struct Shape<'a> {
     pub shaded: bool,
     pub dock: &'a Dock,
+    /// The open menu, if there is one. Part of the shape because the overlay is
+    /// hit tested off the same layout the rest of the window is, which is the
+    /// only way a click on a menu row and the row it looks like it landed on
+    /// can never come apart.
+    pub menu: Option<&'a Menu>,
     /// One label per file tab, in order.
     pub file_labels: Vec<String>,
     pub column: f32,
@@ -142,6 +182,13 @@ impl Layout {
             Panel::new(width - BUTTON_W * 2.0, 0.0, BUTTON_W, TITLE_H),
             Panel::new(width - BUTTON_W, 0.0, BUTTON_W, TITLE_H),
         ];
+        // Placed before the shape is decided, because the overlay is above the
+        // window in both shapes: a menu that survived a double click on the
+        // title bar would still be hit tested and would have nothing drawn.
+        let (menu, menu_rows) = match shape.menu {
+            Some(menu) => place_menu(menu, shape.column, width, height),
+            None => (nowhere(), Vec::new()),
+        };
 
         if shape.shaded {
             // One strip and nothing else. Every other region collapses to
@@ -158,6 +205,8 @@ impl Layout {
                 file_tabs: Vec::new(),
                 files_in: None,
                 input: nowhere(),
+                menu,
+                menu_rows,
             };
         }
 
@@ -273,6 +322,8 @@ impl Layout {
             file_tabs,
             files_in,
             input: input.inset(GAP),
+            menu,
+            menu_rows,
         }
     }
 
@@ -283,6 +334,18 @@ impl Layout {
     /// What is under a point. One place, so a click and the thing it appears to
     /// land on can never come apart.
     pub fn hit(&self, x: f32, y: f32) -> Option<Hit> {
+        // The floating layer first. A menu is above the window, so it takes the
+        // click even when a window button, a tab or a pane is under it; without
+        // this the menu would be drawn over things it could be clicked through
+        // onto, which is worse than having no menu.
+        for (index, row) in self.menu_rows.iter().enumerate() {
+            if row.contains(x, y) {
+                return Some(Hit::MenuRow(index));
+            }
+        }
+        if self.menu.w >= 1.0 && self.menu.contains(x, y) {
+            return Some(Hit::Menu);
+        }
         for (panel, hit) in [
             (self.close, Hit::Close),
             (self.maximize, Hit::Maximize),
@@ -323,6 +386,22 @@ impl Layout {
             return Some(Hit::Input);
         }
         None
+    }
+
+    /// Where a tab released here lands.
+    ///
+    /// Off the window is its own answer rather than a miss. There is nowhere
+    /// outside to put a pane, so the only two readings of a tab thrown out of
+    /// the window are "close it" and "put it back where it was", and a tab that
+    /// snaps back after being thrown away is the more surprising of the two.
+    pub fn landing(&self, x: f32, y: f32) -> Landing {
+        if x < 0.0 || y < 0.0 || x > self.width || y > self.height {
+            return Landing::Out;
+        }
+        match self.hit(x, y).and_then(Hit::space) {
+            Some(space) => Landing::In(space),
+            None => Landing::Nowhere,
+        }
     }
 
     /// Rows a panel can show. The header line is content, not scrollback.
@@ -376,6 +455,24 @@ impl Layout {
         // row, so a click on it means the start of the text.
         (row * columns + at).saturating_sub(PROMPT_COLUMNS).min(chars)
     }
+}
+
+/// Where an open menu's box is, and where each of its rows is inside it.
+///
+/// Clamped into the window. A menu opened near the right edge or a row from the
+/// bottom would otherwise hang off the surface, and the part that hangs off is
+/// not merely invisible: no pointer can reach it, so the rows down there cannot
+/// be picked at all.
+fn place_menu(menu: &Menu, column: f32, width: f32, height: f32) -> (Panel, Vec<Panel>) {
+    let column = column.max(1.0);
+    let w = (menu.width_chars() + MENU_GUTTER) as f32 * column + MENU_PAD * 2.0;
+    let h = menu.rows.len() as f32 * MENU_ROW_H + MENU_PAD * 2.0;
+    let x = menu.at.0.min(width - w).max(0.0);
+    let y = menu.at.1.min(height - h).max(0.0);
+    let rows = (0..menu.rows.len())
+        .map(|i| Panel::new(x, y + MENU_PAD + i as f32 * MENU_ROW_H, w, MENU_ROW_H))
+        .collect();
+    (Panel::new(x, y, w, h), rows)
 }
 
 /// Lay tabs left to right at the width their labels need, dropping any that do
@@ -445,6 +542,9 @@ pub struct Frame<'a> {
     pub trouble: Option<&'a str>,
     /// A drag over one of the text panes, drawn as a band under the glyphs.
     pub selection: Option<crate::select::Selection>,
+    /// The open menu. The same one the layout was computed from, or the rows
+    /// would be drawn somewhere other than where they are hit tested.
+    pub menu: Option<&'a Menu>,
 }
 
 impl Frame<'_> {
@@ -473,6 +573,7 @@ pub fn build(frame: &Frame) -> Scene {
     // pixel strip is what drew the black bar below it.
     if layout.shaded {
         title_bar(&mut scene, frame);
+        overlay(&mut scene, frame);
         return scene;
     }
 
@@ -484,7 +585,51 @@ pub fn build(frame: &Frame) -> Scene {
     }
     input_row(&mut scene, frame);
     dragging(&mut scene, frame);
+    overlay(&mut scene, frame);
     scene
+}
+
+/// The floating layer, and the last thing painted.
+///
+/// Drawn after everything else and hit tested before everything else, which
+/// together are the whole of what floating means here. With only one of the two
+/// a menu is either painted under the pane it opened over, or clicked straight
+/// through onto it.
+fn overlay(scene: &mut Scene, frame: &Frame) {
+    let Some(menu) = frame.menu else {
+        return;
+    };
+    let (skin, layout) = (frame.skin, frame.layout);
+    if layout.menu.w < 1.0 {
+        return;
+    }
+    scene.rect(panel_fill(layout.menu, skin.menu));
+    scene.rect(panel_edge(layout.menu, skin.edge_focus));
+    let line = Text::line_for(SMALL);
+    for (index, (row, panel)) in menu.rows.iter().zip(&layout.menu_rows).enumerate() {
+        // Only a row that can act lights up. Highlighting a greyed one promises
+        // something will happen when the button comes down and it will not.
+        if row.enabled && frame.hot == Some(Hit::MenuRow(index)) {
+            scene.rect(panel.fill(skin.hot));
+        }
+        // A row that cannot act says so by weight, the way a tab that is not
+        // showing does, rather than by being missing.
+        let tint = if row.enabled { skin.bright } else { skin.dim };
+        let mut runs = Vec::new();
+        match row.item.icon() {
+            Some(icon) => runs.push(Run::icon(icon.to_string(), tint)),
+            // The gutter is spent either way, so the labels line up.
+            None => runs.push(Run::tinted(" ", tint)),
+        }
+        runs.push(Run::tinted(format!(" {}", row.item.label()), tint));
+        let text = Panel::new(
+            panel.x + MENU_PAD,
+            panel.y,
+            (panel.w - MENU_PAD * 2.0).max(1.0),
+            panel.h,
+        );
+        scene.text(Text::rich(runs, text.row(0.0, line), SMALL, tint));
+    }
 }
 
 fn title_bar(scene: &mut Scene, frame: &Frame) {
@@ -1307,6 +1452,7 @@ mod tests {
         Shape {
             shaded: false,
             dock,
+            menu: None,
             file_labels: files.iter().map(|f| f.to_string()).collect(),
             column: 8.0,
             input_h: INPUT_H,
@@ -1560,6 +1706,7 @@ mod tests {
             hot: None,
             trouble: None,
             selection: None,
+            menu: None,
         });
         Rendered {
             scene,
@@ -2059,6 +2206,7 @@ mod tests {
             hot: None,
             trouble: None,
             selection: Some(selection),
+            menu: None,
         });
 
         let body = layout.placed(Space::Left).body.inset(PAD);
@@ -2133,6 +2281,7 @@ mod tests {
             hot: None,
             trouble: None,
             selection: Some(selection),
+            menu: None,
         });
         assert!(!scene.rects.iter().any(|r| r.rgba() == skin.select));
     }
@@ -2297,6 +2446,7 @@ mod tests {
             let shape = Shape {
                 shaded: false,
                 dock: &dock,
+                menu: None,
                 file_labels: vec![],
                 column,
                 input_h: INPUT_H,
@@ -2318,6 +2468,7 @@ mod tests {
                 hot: None,
                 trouble: None,
             selection: None,
+            menu: None,
             });
             let body = layout.placed(Space::TopRight).body;
             let bars: Vec<[f32; 4]> = scene
@@ -2377,6 +2528,7 @@ mod tests {
         let shape = Shape {
             shaded: false,
             dock: &dock,
+            menu: None,
             file_labels: vec![],
             column: 8.0,
             input_h: INPUT_H,
@@ -2398,6 +2550,7 @@ mod tests {
             hot: None,
             trouble: None,
             selection: None,
+            menu: None,
         });
 
         // CONTEXT is the only bounded reading with anything in it: CACHED is
@@ -2472,6 +2625,7 @@ mod tests {
             hot: None,
             trouble: None,
             selection: None,
+            menu: None,
         });
         (layout.input, layout, scene)
     }
@@ -2699,6 +2853,7 @@ mod tests {
             hot: None,
             trouble: None,
             selection: None,
+            menu: None,
         });
         let text = text_of(&scene);
         assert!(text.contains("WORKING") || text.contains("THINKING"), "{text}");
@@ -2762,5 +2917,264 @@ mod tests {
             "workspace/noob-cli"
         );
         assert_eq!(short_path("noob-cli"), "noob-cli");
+    }
+
+    /// The window with a menu open, laid out off the same shape the window is,
+    /// which is what makes a row land where it is drawn.
+    fn with_menu<'a>(dock: &'a Dock, menu: &'a Menu, w: f32, h: f32) -> Layout {
+        let mut shape = shape(dock, &[]);
+        shape.menu = Some(menu);
+        Layout::compute(w, h, &shape)
+    }
+
+    fn render_menu(
+        state: &State,
+        w: f32,
+        h: f32,
+        dock: &Dock,
+        menu: &Menu,
+        hot: Option<Hit>,
+    ) -> Rendered {
+        let layout = with_menu(dock, menu, w, h);
+        let skin = Skin::from(&Config::default());
+        let scene = build(&Frame {
+            state,
+            monitor: &Monitor::new(),
+            dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &typed_prompt("type here", 4),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            drag: None,
+            hot,
+            trouble: None,
+            selection: None,
+            menu: Some(menu),
+        });
+        Rendered {
+            scene,
+            layout,
+            skin,
+        }
+    }
+
+    fn middle(panel: Panel) -> (f32, f32) {
+        (panel.x + panel.w * 0.5, panel.y + panel.h * 0.5)
+    }
+
+    /// The whole of what floating means, half one: an open menu takes the click
+    /// that lands on it, even over a tab or a window button, and its margin
+    /// swallows one rather than letting it through to what it covers.
+    #[test]
+    fn an_open_menu_takes_the_click_before_what_is_under_it() {
+        let dock = Dock::new();
+        let plain = Layout::compute(1400.0, 900.0, &shape(&dock, &[]));
+        let (view, tab) = plain.placed(Space::TopRight).tabs[0];
+        let at = middle(tab);
+        assert_eq!(
+            plain.hit(at.0, at.1),
+            Some(Hit::Tab(view, Space::TopRight)),
+            "the tab is what is under the pointer to begin with"
+        );
+
+        let menu = Menu::for_widget(at, view, Space::TopRight, false);
+        let layout = with_menu(&dock, &menu, 1400.0, 900.0);
+        assert_eq!(
+            layout.hit(at.0, at.1),
+            Some(Hit::Menu),
+            "the pointer that opened it is on the menu's own margin"
+        );
+        for (index, row) in layout.menu_rows.iter().enumerate() {
+            let (x, y) = middle(*row);
+            assert_eq!(layout.hit(x, y), Some(Hit::MenuRow(index)));
+        }
+        // And over a window button, which is hit tested before everything else
+        // in the window.
+        let over_close = middle(plain.close);
+        let menu = Menu::for_widget(over_close, view, Space::TopRight, false);
+        let layout = with_menu(&dock, &menu, 1400.0, 900.0);
+        assert!(matches!(
+            layout.hit(over_close.0, over_close.1),
+            Some(Hit::Menu | Hit::MenuRow(_))
+        ));
+    }
+
+    /// The row the pointer is over is the row that acts, and a greyed one acts
+    /// on nothing while still keeping its place.
+    #[test]
+    fn the_row_under_the_pointer_is_the_row_that_acts() {
+        use crate::menu::Item;
+        let dock = Dock::new();
+        let menu = Menu::for_widget((600.0, 400.0), View::Plan, Space::TopRight, true);
+        let layout = with_menu(&dock, &menu, 1400.0, 900.0);
+        let picked: Vec<Option<Item>> = layout
+            .menu_rows
+            .iter()
+            .map(|row| {
+                let (x, y) = middle(*row);
+                match layout.hit(x, y) {
+                    Some(Hit::MenuRow(index)) => menu.pick(index),
+                    other => panic!("{other:?} is not a row"),
+                }
+            })
+            .collect();
+        assert_eq!(
+            picked,
+            vec![None, Some(Item::CopySelection), Some(Item::Close)],
+            "settings is drawn and refuses to act"
+        );
+    }
+
+    /// A menu opened in the corner has to stay on the surface. The part that
+    /// hangs off is not merely invisible: no pointer can reach it, so the rows
+    /// down there could not be picked at all.
+    #[test]
+    fn a_menu_opened_at_an_edge_stays_reachable() {
+        let dock = Dock::new();
+        let (w, h) = (1400.0, 900.0);
+        for at in [(w - 2.0, h - 2.0), (w + 40.0, h + 40.0), (-10.0, -10.0)] {
+            let menu = Menu::for_widget(at, View::Files, Space::BottomRight, false);
+            let layout = with_menu(&dock, &menu, w, h);
+            let box_ = layout.menu;
+            assert!(box_.x >= 0.0 && box_.y >= 0.0, "{at:?}: {box_:?}");
+            assert!(box_.x + box_.w <= w + 0.01, "{at:?}: {box_:?}");
+            assert!(box_.y + box_.h <= h + 0.01, "{at:?}: {box_:?}");
+            assert_eq!(layout.menu_rows.len(), menu.rows.len());
+            for (index, row) in layout.menu_rows.iter().enumerate() {
+                let (x, y) = middle(*row);
+                assert_eq!(layout.hit(x, y), Some(Hit::MenuRow(index)), "{at:?}");
+            }
+        }
+    }
+
+    /// The other half of floating: the menu is painted after everything else,
+    /// so nothing in the window can be drawn over it.
+    #[test]
+    fn the_menu_is_the_last_thing_painted() {
+        let dock = Dock::new();
+        let menu = Menu::for_widget((500.0, 400.0), View::Plan, Space::TopRight, false);
+        let out = render_menu(&busy_state(), 1400.0, 900.0, &dock, &menu, None);
+        let box_ = out.layout.menu;
+        // Found by where it is, not by what colour it is: at the shipped
+        // opacity every solid surface in the palette is already fully opaque,
+        // so the menu's fill is the same colour as the prompt's.
+        let first = out
+            .scene
+            .rects
+            .iter()
+            .position(|r| r.xywh() == [box_.x, box_.y, box_.w, box_.h] && r.extra()[3] == 0.0)
+            .expect("the menu has a surface");
+        assert!(first > 0, "the window was painted first");
+        for rect in &out.scene.rects[first..] {
+            let [x, y, w, h] = rect.xywh();
+            assert!(
+                x >= box_.x - 0.01
+                    && y >= box_.y - 0.01
+                    && x + w <= box_.x + box_.w + 0.01
+                    && y + h <= box_.y + box_.h + 0.01,
+                "{:?} was painted over the menu",
+                rect.xywh()
+            );
+        }
+        // The rows are legible, and a row that cannot act says so by weight.
+        let runs: Vec<(&str, Option<[u8; 4]>)> = out
+            .scene
+            .texts
+            .iter()
+            .flat_map(|t| t.runs.iter().map(|r| (r.text.as_str(), r.color)))
+            .collect();
+        for (label, tint) in [
+            ("Settings", out.skin.dim),
+            ("Copy selection", out.skin.dim),
+            ("Close this widget", out.skin.bright),
+        ] {
+            let run = runs
+                .iter()
+                .find(|(text, _)| text.contains(label))
+                .unwrap_or_else(|| panic!("{label} is not on screen: {runs:?}"));
+            assert_eq!(run.1, Some(tint), "{label}");
+        }
+    }
+
+    /// Only a row that can act lights up. Highlighting a greyed one promises
+    /// something will happen when the button comes down and it will not.
+    #[test]
+    fn a_greyed_row_does_not_light_up_under_the_pointer() {
+        let dock = Dock::new();
+        let menu = Menu::for_widget((500.0, 400.0), View::Plan, Space::TopRight, false);
+        let lit = |hot: Option<Hit>| {
+            let out = render_menu(&busy_state(), 1400.0, 900.0, &dock, &menu, hot);
+            let box_ = out.layout.menu;
+            out.scene
+                .rects
+                .iter()
+                .filter(|r| r.rgba() == out.skin.hot && box_.contains(r.xywh()[0], r.xywh()[1]))
+                .count()
+        };
+        assert_eq!(lit(Some(Hit::MenuRow(0))), 0, "settings is disabled");
+        assert_eq!(lit(Some(Hit::MenuRow(2))), 1, "close is not");
+        assert_eq!(lit(None), 0);
+    }
+
+    /// A tab thrown out of the window is its own answer, not a miss: there is
+    /// nowhere outside to put a pane, and a tab that snaps back after being
+    /// thrown away is the more surprising of the two readings.
+    #[test]
+    fn a_tab_released_off_the_window_lands_out() {
+        let dock = Dock::new();
+        let (w, h) = (1400.0, 900.0);
+        let layout = Layout::compute(w, h, &shape(&dock, &[]));
+        for (x, y) in [
+            (-1.0, 400.0),
+            (w + 1.0, 400.0),
+            (700.0, -1.0),
+            (700.0, h + 1.0),
+        ] {
+            assert_eq!(layout.landing(x, y), Landing::Out, "at {x},{y}");
+        }
+        let (x, y) = middle(layout.placed(Space::Left).body);
+        assert_eq!(layout.landing(x, y), Landing::In(Space::Left));
+        let (x, y) = middle(layout.placed(Space::TopRight).tabs[0].1);
+        assert_eq!(layout.landing(x, y), Landing::In(Space::TopRight));
+        // Inside the window but on nothing that holds panes.
+        assert_eq!(layout.landing(400.0, 10.0), Landing::Nowhere);
+    }
+
+    /// Closing the only widget in a space leaves that space with no tabs, which
+    /// the layout has to read as room to give away rather than as a hole.
+    #[test]
+    fn an_emptied_space_gives_its_room_away() {
+        let full = Layout::compute(1400.0, 900.0, &shape(&Dock::new(), &[]));
+        let mut dock = Dock::new();
+        assert!(dock.hide(View::Files));
+        let out = render(&busy_state(), 1400.0, 900.0, &dock, &[]);
+
+        assert_eq!(out.layout.placed(Space::BottomRight).body.h, 0.0);
+        assert!(out.layout.placed(Space::BottomRight).tabs.is_empty());
+        assert!(
+            out.layout.placed(Space::TopRight).body.h
+                > full.placed(Space::TopRight).body.h + TAB_H,
+            "the space above it took the room"
+        );
+        // The left column is untouched and the prompt is still there.
+        assert_eq!(
+            out.layout.placed(Space::Left).body,
+            full.placed(Space::Left).body
+        );
+        assert_eq!(out.layout.input, full.input);
+
+        // And with everything closed the window is empty rather than broken.
+        let empty = Dock::hiding(&View::ALL);
+        let out = render(&busy_state(), 1400.0, 900.0, &empty, &[]);
+        for space in Space::ALL {
+            assert!(out.layout.placed(space).tabs.is_empty(), "{space:?}");
+        }
+        assert!(out.layout.input.h > 0.0, "the prompt survives");
+        // The room the panes had is unclaimed rather than claimed by a space
+        // with nothing in it.
+        assert_eq!(out.layout.hit(700.0, 450.0), None);
     }
 }

@@ -13,6 +13,7 @@ open only what the right column names.
 | Colors, transparency, the palette | `gui/clippy/src/skin.rs`, keys in `gui/clippy/src/config.rs` |
 | Settings file format and its defaults | `gui/clippy/src/config.rs` |
 | Mouse, keyboard, selection gestures, the window lifecycle | `gui/clippy/src/main.rs` |
+| What a right click offers and what a row does | `gui/clippy/src/menu.rs`, routed in `gui/clippy/src/main.rs` |
 | The conversation and metrics model: what an event does to state | `gui/clippy/src/state.rs` |
 | Which readings the monitors show | `gui/clippy/src/monitor.rs` |
 | Talking to the agent process | `gui/clippy/src/link.rs` |

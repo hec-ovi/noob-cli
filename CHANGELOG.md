@@ -32,6 +32,18 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
 
 ### Added
 
+- Right click menus. The prompt offers Copy and Paste; a pane or the tab that
+  names it offers Settings, Copy selection and Close this widget. A row with
+  nothing to act on is greyed rather than dropped, so the menu is the same shape
+  every time it opens and the row you were aiming for has not moved. Settings is
+  greyed everywhere until there is a panel behind it. A menu is a floating layer,
+  drawn after everything else and hit tested before it, so a click that lands on
+  one cannot reach what it covers.
+- Closing a widget, from that menu or by dragging its tab off the window. A space
+  left with no tabs gives its room to its neighbour. There is no way back inside
+  the window yet; reopening comes with the launcher.
+- Selecting in the prompt with the pointer, and Ctrl+V. A pasted newline arrives
+  as a space, since the prompt is one wrapped line and Enter is what sends it.
 - `gui/layers/text-geometry`, the first contract-isolated layer: it owns the
   rule for turning logical lines into rows on screen, which was previously
   written out at eight call sites and disagreed with itself at three. Ships with

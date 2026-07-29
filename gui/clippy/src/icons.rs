@@ -14,6 +14,9 @@ pub const CLOSE: char = '\u{eab8}';
 pub const MAXIMIZE: char = '\u{eab9}';
 pub const MINIMIZE: char = '\u{eaba}';
 
+/// The gear on a menu's settings row.
+pub const SETTINGS: char = '\u{eb51}';
+
 /// A file whose type has no mark of its own.
 pub const FILE: char = '\u{ea7b}';
 /// For the explorer tree. Named here already so the font coverage test in
@@ -83,7 +86,7 @@ mod tests {
             "cfg", "conf", "yml", "yaml", "sh", "bash", "zsh", "html", "htm", "css", "c", "h",
             "cpp", "cc", "hpp", "go", "lock", "txt", "log", "nothing-in-particular",
         ];
-        let named = [CLOSE, MAXIMIZE, MINIMIZE, FILE, FOLDER]
+        let named = [CLOSE, MAXIMIZE, MINIMIZE, SETTINGS, FILE, FOLDER]
             .into_iter()
             .chain(extensions.iter().map(|e| for_path(&format!("a.{e}"))));
         for ch in named {

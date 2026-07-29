@@ -105,8 +105,10 @@ Files show a line-number gutter and a band behind each block header, so a write
 reads as a mark between two stretches of file rather than as part of one.
 
 The prompt grows as you type, up to eight lines or whatever `max_input_rows` in
-the settings says. Click anywhere in it to put the caret there, Ctrl-A selects
-the whole line, and typing or backspace over a selection replaces it.
+the settings says. Click anywhere in it to put the caret there, drag across it to
+select a span, Ctrl-A selects the whole line, and typing or backspace over a
+selection replaces it. Ctrl-V pastes; a pasted newline becomes a space, because
+the prompt is one wrapped line and Enter is what sends it.
 
 Drag across the conversation, the activity list or a file to select text, and
 Ctrl-C copies it. Ctrl-C with nothing selected still cancels the turn, which is
@@ -133,10 +135,19 @@ does the same, Ctrl-C cancels, Ctrl-Q quits.
 
 Mouse: drag the title bar to move, drag an edge to resize, click a tab to switch
 to it, and click the tab already showing to fold that space away. **Drag a tab
-into another space** to move it there. **Double-click the title bar** to shade the
+into another space** to move it there, or **drag it off the window** to close that
+widget. **Double-click the title bar** to shade the
 window down to that one strip, Winamp style: it keeps showing THINKING, WORKING
 or FINISHED with the plan count and how many files changed, so a collapsed
 window is still a status light. Double-click again to bring it back.
+
+Right click the prompt for Copy and Paste, or a pane or its tab for Settings,
+Copy selection and Close this widget. A row with nothing to act on is greyed
+rather than absent, so the menu is the same shape every time and the row you were
+aiming for has not moved. Settings is greyed everywhere: there is no settings
+panel behind it yet. Closing a widget is one way for now, and the way back is the
+launcher that is still to come; a space left with no tabs gives its room to its
+neighbour rather than leaving a hole.
 
 ## Settings
 

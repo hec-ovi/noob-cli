@@ -36,6 +36,14 @@ pub struct Skin {
     /// the whole difference, because a second fill colour up here turns the
     /// strip back into a row of buttons.
     pub tab_idle: [f32; 4],
+    /// The surface a menu floats on. The most solid thing in the window,
+    /// because a menu is above the window rather than part of it: read a pane
+    /// through a menu and the menu stops reading as the thing in front.
+    ///
+    /// Derived from the panel colour rather than given a settings key of its
+    /// own, the way `tab_idle` is. A menu is on screen for a second at a time
+    /// and nobody is going to tune it.
+    pub menu: [f32; 4],
     pub edge: [f32; 4],
     pub edge_focus: [f32; 4],
     pub input: [f32; 4],
@@ -109,6 +117,7 @@ impl Skin {
             // the strip: a button, which is not what a tab is.
             tab: rgba(config.panel, o * 0.86),
             tab_idle: rgba(config.panel, o * 0.34),
+            menu: rgba(config.panel, (o + 0.42).min(1.0)),
             edge: rgba(config.dim, 0.65),
             edge_focus: rgba(config.accent, 1.0),
             input: rgba(config.panel, (o + 0.12).min(1.0)),
@@ -158,6 +167,7 @@ impl Skin {
             &mut self.panel,
             &mut self.strip,
             &mut self.tab,
+            &mut self.menu,
             &mut self.input,
         ] {
             fill[3] = 1.0;
@@ -259,10 +269,34 @@ mod tests {
             skin.panel,
             skin.strip,
             skin.tab,
+            skin.menu,
             skin.input,
         ] {
             assert_eq!(fill[3], 1.0, "{fill:?}");
         }
+    }
+
+    /// A menu floats above the window, so nothing in the window may be more
+    /// solid than it. Read the pane through the menu and the two swap places.
+    #[test]
+    fn a_menu_is_the_most_solid_surface_in_the_window() {
+        for name in crate::config::THEMES {
+            let skin = Skin::from(&crate::config::theme(name).expect(name));
+            for under in [skin.panel, skin.strip, skin.tab, skin.bar, skin.input] {
+                assert!(
+                    skin.menu[3] >= under[3],
+                    "{name}: {:?} is not above {under:?}",
+                    skin.menu
+                );
+            }
+            assert_eq!(skin.menu[..3], skin.panel[..3], "{name}: not the pane's hue");
+        }
+        // And it stays that way with the transparency wound right down.
+        let ghost = Skin::from(&Config {
+            opacity: 0.1,
+            ..Config::default()
+        });
+        assert!(ghost.menu[3] > ghost.panel[3]);
     }
 
     /// Grouping tools by category read as no colour at all: most of a session

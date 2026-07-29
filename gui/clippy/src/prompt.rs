@@ -63,6 +63,30 @@ impl Prompt {
         self.anchor = None;
     }
 
+    /// The pointer went down here: the caret goes here and so does the anchor.
+    ///
+    /// Not [`Prompt::place`]. A press that never moves has to select nothing,
+    /// which it does because an anchor sitting on the caret is not a selection,
+    /// and a press that does move has to have left an anchor behind for the
+    /// drag to select from.
+    pub fn press(&mut self, at: usize) {
+        self.caret = at.min(self.len());
+        self.anchor = Some(self.caret);
+    }
+
+    /// The pointer moved with the button down: the caret follows it and the
+    /// anchor stays where the press was. Dragging back past the press selects
+    /// backwards rather than collapsing, which the anchor model gives for free.
+    pub fn drag_to(&mut self, at: usize) {
+        self.caret = at.min(self.len());
+        // A drag with no press before it can only come from a press the window
+        // lost, on a resize or a focus change. Anchoring here is the reading
+        // that selects nothing rather than the whole line.
+        if self.anchor.is_none() {
+            self.anchor = Some(self.caret);
+        }
+    }
+
     /// Type over whatever is selected, the way every other text field does.
     pub fn insert(&mut self, typed: &str) {
         self.cut();
@@ -250,6 +274,62 @@ mod tests {
             prompt.insert("!");
             assert_eq!(prompt.len(), 6, "{}", prompt.text());
         }
+    }
+
+    /// Click and drag in the prompt: the span is between where the button went
+    /// down and where the pointer is now.
+    #[test]
+    fn pressing_and_dragging_selects_the_span_between_the_two() {
+        let mut prompt = typed("hello world");
+        prompt.press(2);
+        assert_eq!(prompt.selection(), None, "a press alone selects nothing");
+        prompt.drag_to(7);
+        assert_eq!(prompt.selection(), Some((2, 7)));
+        assert_eq!(prompt.selected().as_deref(), Some("llo w"));
+        assert_eq!(prompt.caret(), 7);
+        // Still dragging: the anchor holds and only the loose end moves.
+        prompt.drag_to(9);
+        assert_eq!(prompt.selection(), Some((2, 9)));
+    }
+
+    /// Dragging back past the press is the same span the other way round, not
+    /// a collapsed one.
+    #[test]
+    fn dragging_back_past_the_press_selects_backwards() {
+        let mut prompt = typed("hello world");
+        prompt.press(7);
+        prompt.drag_to(2);
+        assert_eq!(prompt.selection(), Some((2, 7)));
+        assert_eq!(prompt.selected().as_deref(), Some("llo w"));
+        assert_eq!(prompt.caret(), 2, "the caret is the end you dragged to");
+        // Back onto the press: nothing is selected again.
+        prompt.drag_to(7);
+        assert_eq!(prompt.selection(), None);
+    }
+
+    /// A drag past the end of the line stops at the end of the line, the way a
+    /// click past it does.
+    #[test]
+    fn a_drag_clamps_to_the_text_and_survives_a_lost_press() {
+        let mut prompt = typed("abc");
+        prompt.press(1);
+        prompt.drag_to(99);
+        assert_eq!(prompt.selection(), Some((1, 3)));
+
+        let mut orphan = typed("abc");
+        orphan.drag_to(2);
+        assert_eq!(orphan.selection(), None, "a drag with no press selects none");
+        assert_eq!(orphan.caret(), 2);
+    }
+
+    /// What is dragged out is typed over, like any other selection.
+    #[test]
+    fn typing_replaces_what_the_pointer_selected() {
+        let mut prompt = typed("hello world");
+        prompt.press(0);
+        prompt.drag_to(6);
+        prompt.insert("bye ");
+        assert_eq!(prompt.text(), "bye world");
     }
 
     #[test]

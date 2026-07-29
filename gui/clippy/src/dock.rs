@@ -224,6 +224,64 @@ impl Dock {
         true
     }
 
+    /// Take a view out of the window: no tab, no space, nothing walks to it.
+    ///
+    /// The same state the settings produce at startup, reached at runtime by
+    /// closing a widget or by dragging its tab off the window. It goes on the
+    /// hidden list in the same move it leaves its space, so the invariant every
+    /// view is in exactly one place or hidden holds between the two.
+    pub fn hide(&mut self, view: View) -> bool {
+        if self.hidden.contains(&view) {
+            return false;
+        }
+        for space in Space::ALL {
+            self.slot_mut(space).remove(view);
+        }
+        self.hidden.push(view);
+        true
+    }
+
+    /// Put a hidden view back, in the space it opens in by default.
+    ///
+    /// Its old space is not remembered. A view that was hidden months of window
+    /// time ago would come back into an arrangement that has since been dragged
+    /// around it, and the default is the one place that is always still there.
+    ///
+    /// Nothing in the window calls this yet: closing a widget is one way for
+    /// now, and the way back is the orb launcher. Kept and tested rather than
+    /// left for later, because hiding without a matching unhide is what makes
+    /// the invariant untestable in both directions.
+    #[allow(dead_code)]
+    pub fn unhide(&mut self, view: View) -> bool {
+        let Some(at) = self.hidden.iter().position(|v| *v == view) else {
+            return false;
+        };
+        self.hidden.remove(at);
+        let slot = self.slot_mut(Dock::home_of(view));
+        slot.views.push(view);
+        slot.active = slot.views.len() - 1;
+        slot.folded = false;
+        true
+    }
+
+    /// Where a view lives before anything has been dragged. Read off the full
+    /// arrangement rather than written out again, so the two cannot drift.
+    ///
+    /// Reached only through [`Dock::unhide`], so it waits on the same caller.
+    #[allow(dead_code)]
+    fn home_of(view: View) -> Space {
+        let full = Dock::full();
+        Space::ALL
+            .into_iter()
+            .find(|space| full.slot(*space).views.contains(&view))
+            .unwrap_or(Space::TopRight)
+    }
+
+    /// Whether a view is out of the window rather than merely not showing.
+    pub fn is_hidden(&self, view: View) -> bool {
+        self.hidden.contains(&view)
+    }
+
     /// Show a view wherever it is, unfolding its space.
     pub fn reveal(&mut self, view: View) -> bool {
         let Some(space) = self.space_of(view) else {
@@ -420,6 +478,81 @@ mod tests {
             at = dock.after(at).unwrap();
         }
         assert_eq!(at, View::Talk);
+    }
+
+    /// Closing a widget and reopening it, which is the same pair of states the
+    /// settings produce at startup, reached one view at a time.
+    #[test]
+    fn hiding_a_view_takes_it_out_and_unhiding_puts_it_back() {
+        let mut dock = Dock::new();
+        assert!(dock.hide(View::Plan));
+        assert!(dock.is_sound());
+        assert!(dock.is_hidden(View::Plan));
+        assert_eq!(dock.space_of(View::Plan), None);
+        assert!(!dock.walk().contains(&View::Plan));
+        assert_eq!(dock.walk().len(), View::ALL.len() - 1);
+        // Hidden means out, so a drag cannot put it back either.
+        assert!(!dock.move_view(View::Plan, Space::Left));
+        assert_eq!(dock.space_of(View::Plan), None);
+        // Hiding it twice is not two hidden entries.
+        assert!(!dock.hide(View::Plan));
+        assert!(dock.is_sound());
+
+        assert!(dock.unhide(View::Plan));
+        assert!(dock.is_sound());
+        assert!(!dock.is_hidden(View::Plan));
+        assert_eq!(dock.space_of(View::Plan), Some(Space::TopRight));
+        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Plan));
+        assert_eq!(dock.walk().len(), View::ALL.len());
+        assert!(!dock.unhide(View::Plan), "it was not hidden any more");
+    }
+
+    /// It comes back where it opens by default, not where it happened to be
+    /// dragged before it was closed.
+    #[test]
+    fn a_view_comes_back_in_the_space_it_opens_in() {
+        let mut dock = Dock::new();
+        dock.move_view(View::Files, Space::Left);
+        assert!(dock.hide(View::Files));
+        assert!(dock.unhide(View::Files));
+        assert_eq!(dock.space_of(View::Files), Some(Space::BottomRight));
+        assert!(dock.is_sound());
+    }
+
+    /// Closing the only tab in a space empties it. That is a space with no
+    /// tabs, not a broken one: nothing shows, nothing is active, and the next
+    /// thing dropped there lands.
+    #[test]
+    fn hiding_the_last_tab_in_a_space_leaves_it_empty_and_usable() {
+        let mut dock = Dock::new();
+        assert!(dock.hide(View::Files));
+        let slot = dock.slot(Space::BottomRight);
+        assert!(slot.is_empty());
+        assert_eq!(slot.active(), None);
+        assert!(dock.is_sound());
+        dock.move_view(View::Plan, Space::BottomRight);
+        assert_eq!(dock.slot(Space::BottomRight).active(), Some(View::Plan));
+        assert!(dock.is_sound());
+    }
+
+    /// Every view closed is an empty window, which has to hold together: the
+    /// walk is empty rather than wrong, and one unhide is enough to get back.
+    #[test]
+    fn hiding_everything_leaves_a_dock_that_still_holds() {
+        let mut dock = Dock::new();
+        for view in View::ALL {
+            assert!(dock.hide(view), "{view:?}");
+            assert!(dock.is_sound(), "{view:?}");
+        }
+        assert!(dock.walk().is_empty());
+        assert_eq!(dock.after(View::Talk), None);
+        for space in Space::ALL {
+            assert!(dock.slot(space).is_empty(), "{space:?}");
+            assert_eq!(dock.slot(space).active(), None);
+        }
+        assert!(dock.unhide(View::Talk));
+        assert_eq!(dock.slot(Space::Left).active(), Some(View::Talk));
+        assert!(dock.is_sound());
     }
 
     #[test]

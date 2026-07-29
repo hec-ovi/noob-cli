@@ -29,6 +29,7 @@ mod dock;
 mod icons;
 mod link;
 mod markdown;
+mod menu;
 mod monitor;
 mod packaging;
 mod prompt;
@@ -52,11 +53,12 @@ use winit::window::{CursorIcon, Window, WindowId};
 use config::Config;
 use dock::{Dock, Space, View};
 use link::{Incoming, Link};
+use menu::{Item, Menu, Target};
 use monitor::Monitor;
 use prompt::Prompt;
 use skin::Skin;
 use state::{State, Tone};
-use view::{Drag, Hit, Layout, Shape};
+use view::{Drag, Hit, Landing, Layout, Shape};
 
 /// The only user event: something arrived, come and look. Deliberately carries
 /// no payload; the channel holds the frames and the loop drains it.
@@ -100,6 +102,68 @@ fn shade_request(
     }
 }
 
+/// What a right click opens, for what it landed on, or nothing when it landed
+/// on something no menu belongs to: the title strip, a window button, the
+/// margin between panes.
+///
+/// A free function taking everything it reads, so the routing from a hit to a
+/// menu can be tested without a window or a GPU. The greying of the copy rows
+/// is decided here too, because whether there is anything to copy is something
+/// only the window knows.
+fn menu_for(
+    hit: Option<Hit>,
+    at: (f32, f32),
+    dock: &Dock,
+    prompt_selection: bool,
+    pane_selection: Option<View>,
+) -> Option<Menu> {
+    let widget = |view: View, space: Space| {
+        Some(Menu::for_widget(
+            at,
+            view,
+            space,
+            pane_selection == Some(view),
+        ))
+    };
+    match hit? {
+        Hit::Input => Some(Menu::for_input(at, prompt_selection)),
+        Hit::Tab(view, space) => widget(view, space),
+        // A pane and its own inner file tabs are the same widget: the menu acts
+        // on whatever that space is showing.
+        Hit::Body(space) | Hit::File(_, space) => widget(dock.slot(space).active()?, space),
+        Hit::TitleBar | Hit::Close | Hit::Maximize | Hit::Minimize => None,
+        // The menu already open. Its own right click is handled before this is
+        // reached, and a row is picked with the left button.
+        Hit::Menu | Hit::MenuRow(_) => None,
+    }
+}
+
+/// What a released tab does to the arrangement.
+///
+/// Off the window closes the widget. Pure so the rule can be tested without a
+/// compositor, and so the one place a drop changes the dock is the one place a
+/// test drives.
+fn land(dock: &mut Dock, view: View, landing: Landing) -> bool {
+    match landing {
+        Landing::In(space) => dock.move_view(view, space),
+        Landing::Out => dock.hide(view),
+        Landing::Nowhere => false,
+    }
+}
+
+/// What a paste actually puts in the prompt.
+///
+/// The prompt is one line that wraps, not a text area, and Enter submits. A
+/// newline pasted straight in has no glyph in any font, so it would draw as
+/// nothing while still counting as a character; tabs and the rest of the
+/// control characters are the same. They become spaces so a copied block of
+/// code arrives as one readable line.
+fn pasted(raw: &str) -> String {
+    raw.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 struct App {
     window: Option<Arc<Window>>,
     gpu: Option<noob_gpu::Gpu>,
@@ -116,12 +180,21 @@ struct App {
 
     prompt: Prompt,
     dock: Dock,
+    /// The open right click menu, or nothing. Held here rather than in the
+    /// layout because it outlives a frame: it stays up until a row is picked or
+    /// something puts it away.
+    menu: Option<Menu>,
     /// A tab that has been pressed, and whether the pointer has moved far
     /// enough since to call it a drag rather than a click.
     holding: Option<(View, Space, PhysicalPosition<f64>)>,
     /// True while the button is down inside a pane, so pointer motion extends
     /// the selection instead of merely moving the cursor.
     selecting: bool,
+    /// The same for the prompt. Separate from `selecting` because the two
+    /// selections are different models over different text, and a drag that
+    /// began in the prompt must not start extending a pane's band when the
+    /// pointer wanders over one.
+    prompt_selecting: bool,
     /// Opened once, and only when something is first copied: the clipboard
     /// connects to the display server, which is work an idle window has no
     /// reason to do.
@@ -170,8 +243,10 @@ impl App {
             link: None,
             trouble: None,
             prompt: Prompt::default(),
+            menu: None,
             holding: None,
             selecting: false,
+            prompt_selecting: false,
             clipboard: None,
             drag: None,
             shaded: false,
@@ -192,6 +267,7 @@ impl App {
         Shape {
             shaded: self.shaded,
             dock: &self.dock,
+            menu: self.menu.as_ref(),
             file_labels: self
                 .state
                 .files
@@ -325,6 +401,24 @@ impl App {
     }
 
     fn click(&mut self, hit: Hit, window: &Window, event_loop: &ActiveEventLoop) {
+        // While a menu is open it decides what a press means, because it is
+        // above the window: a row acts, its margin is swallowed, and anywhere
+        // else only puts the menu away. Dismissing and acting on the same press
+        // would fold a pane that was only being clicked past to close a menu.
+        // Before the double click bookkeeping, so a dismiss is not remembered
+        // as the first of a pair.
+        if self.menu.is_some() {
+            match hit {
+                Hit::MenuRow(index) => self.pick(index),
+                Hit::Menu => {}
+                _ => {
+                    self.menu = None;
+                    self.dirty = true;
+                }
+            }
+            return;
+        }
+
         let now = Instant::now();
         let double = matches!(self.last_click, Some((last, at))
             if last == hit && now.duration_since(at) < DOUBLE_CLICK);
@@ -353,15 +447,160 @@ impl App {
             }
             Hit::Body(space) => self.begin_selection(space),
             Hit::Input => {
-                let layout = self.layout();
-                let at = layout.input_caret(
-                    self.cursor.x as f32,
-                    self.cursor.y as f32,
-                    self.config.font_size,
-                    self.column,
-                    self.prompt.len(),
+                // A press, not a placement: the anchor stays here so motion
+                // with the button still down selects the span between the two.
+                // An anchor sitting on the caret is not a selection, so a click
+                // that never moves still reads as one that selected nothing.
+                self.prompt.press(self.caret_under_pointer());
+                self.prompt_selecting = true;
+                self.dirty = true;
+            }
+            // Both handled above, while a menu is open, which is the only time
+            // either can be hit at all.
+            Hit::MenuRow(_) | Hit::Menu => {}
+        }
+    }
+
+    /// Where in the typed text the pointer is, for a press or a drag in the
+    /// prompt. The layout owns the arithmetic; this only feeds it the metrics
+    /// the prompt is drawn with.
+    fn caret_under_pointer(&self) -> usize {
+        self.layout().input_caret(
+            self.cursor.x as f32,
+            self.cursor.y as f32,
+            self.config.font_size,
+            self.column,
+            self.prompt.len(),
+        )
+    }
+
+    /// The right button came down: open the menu for whatever is under it.
+    fn right_click(&mut self) {
+        let at = (self.cursor.x as f32, self.cursor.y as f32);
+        // Over a menu that is already open, a second right click only puts it
+        // away. Opening a menu for what is behind the one on screen would be a
+        // menu for something the pointer cannot see.
+        let over_menu = matches!(
+            self.layout().hit(at.0, at.1),
+            Some(Hit::MenuRow(_) | Hit::Menu)
+        );
+        let had = self.menu.take().is_some();
+        if over_menu {
+            self.dirty = true;
+            return;
+        }
+        // Recomputed now the menu is down, so the target is resolved against
+        // the window rather than against the menu that was floating over it.
+        let layout = self.layout();
+        self.menu = menu_for(
+            layout.hit(at.0, at.1),
+            at,
+            &self.dock,
+            self.prompt.selection().is_some(),
+            self.pane_selection(),
+        );
+        self.dirty |= had || self.menu.is_some();
+    }
+
+    /// Which pane holds a selection worth copying, if any. A click that never
+    /// moved leaves an empty selection behind, and a Copy row that lights up
+    /// for one would copy nothing.
+    fn pane_selection(&self) -> Option<View> {
+        self.state
+            .selection
+            .filter(|selection| !selection.is_empty())
+            .map(|selection| selection.view)
+    }
+
+    /// Do what the row at `index` says, and put the menu away either way.
+    ///
+    /// A greyed row still closes it: leaving a menu open under a pointer that
+    /// has already committed to a row reads as a click that missed the window.
+    fn pick(&mut self, index: usize) {
+        let Some(menu) = self.menu.take() else {
+            return;
+        };
+        self.dirty = true;
+        let Some(item) = menu.pick(index) else {
+            return;
+        };
+        match (item, menu.target) {
+            (Item::Copy, _) => {
+                self.copy_prompt();
+            }
+            (Item::Paste, _) => self.paste(),
+            // There is no settings panel to open yet, so the row ships disabled
+            // and `pick` never returns it. The arm is here so the day the panel
+            // exists is one line rather than a hunt.
+            (Item::Settings, _) => {}
+            (Item::CopySelection, _) => {
+                self.copy_selection();
+            }
+            (Item::Close, Target::Widget(view, _)) => self.close_view(view),
+            // The prompt's menu has no Close row, so this cannot happen; it is
+            // matched rather than caught by a wildcard so adding one is a
+            // compile error here instead of a click that silently does nothing.
+            (Item::Close, Target::Input) => {}
+        }
+    }
+
+    /// Take a widget out of the window.
+    ///
+    /// One way for now: nothing inside the window puts it back, and the way
+    /// back is the orb launcher, which does not exist yet. The arrangement
+    /// survives it because a space with no tabs gives its room to its
+    /// neighbour rather than leaving a hole; see `Layout::compute`.
+    fn close_view(&mut self, view: View) {
+        if self.dock.hide(view) {
+            self.forget_selection_in(view);
+            self.dirty = true;
+        }
+    }
+
+    /// Drop a selection that belonged to a pane which is no longer on screen.
+    /// Left behind it would still be what Ctrl-C copied, with nothing drawn
+    /// anywhere saying so.
+    fn forget_selection_in(&mut self, view: View) {
+        if self
+            .state
+            .selection
+            .is_some_and(|selection| selection.view == view)
+        {
+            self.state.selection = None;
+        }
+    }
+
+    /// Put the clipboard into the prompt at the caret.
+    fn paste(&mut self) {
+        use copypasta::ClipboardProvider;
+        if self.clipboard.is_none() {
+            self.clipboard = copypasta::ClipboardContext::new().ok();
+        }
+        let got = match self.clipboard.as_mut() {
+            Some(clipboard) => clipboard.get_contents(),
+            None => {
+                self.state.activity.say(
+                    "could not reach the clipboard on this display",
+                    state::Tone::Bad,
                 );
-                self.prompt.place(at);
+                self.dirty = true;
+                return;
+            }
+        };
+        match got {
+            Ok(text) => {
+                let text = pasted(&text);
+                if !text.is_empty() {
+                    self.prompt.insert(&text);
+                    self.dirty = true;
+                }
+            }
+            // Worth saying out loud: the alternative is a paste that appeared
+            // to do nothing.
+            Err(e) => {
+                self.state
+                    .activity
+                    .say(format!("nothing to paste: {e}"), state::Tone::Bad);
                 self.dirty = true;
             }
         }
@@ -504,13 +743,13 @@ impl App {
     /// a drop.
     fn release(&mut self) {
         self.selecting = false;
+        self.prompt_selecting = false;
         let layout = self.layout();
         if let Some(drag) = self.drag.take() {
-            if let Some(space) = layout
-                .hit(self.cursor.x as f32, self.cursor.y as f32)
-                .and_then(Hit::space)
-            {
-                self.dock.move_view(drag.view, space);
+            let landing = layout.landing(self.cursor.x as f32, self.cursor.y as f32);
+            land(&mut self.dock, drag.view, landing);
+            if self.dock.is_hidden(drag.view) {
+                self.forget_selection_in(drag.view);
             }
             self.holding = None;
             self.dirty = true;
@@ -554,6 +793,17 @@ impl App {
     fn key(&mut self, event: winit::event::KeyEvent, event_loop: &ActiveEventLoop) {
         if event.state != ElementState::Pressed {
             return;
+        }
+        // A menu was opened for a pointer, and a keystroke means the pointer
+        // has been left behind. Leaving it floating over text being typed under
+        // it is worse than losing it. Escape stops here rather than falling
+        // through, so putting a menu away does not also drop a selection or a
+        // half typed line.
+        if self.menu.take().is_some() {
+            self.dirty = true;
+            if matches!(event.logical_key.as_ref(), Key::Named(NamedKey::Escape)) {
+                return;
+            }
         }
         let ctrl = self.modifiers.control_key();
         match event.logical_key.as_ref() {
@@ -639,6 +889,9 @@ impl App {
                 self.prompt.select_all();
                 self.dirty = true;
             }
+            // The other half of the prompt's menu, for the muscle memory every
+            // other text field built.
+            Key::Character("v") if ctrl => self.paste(),
             Key::Character("u") if ctrl => {
                 self.prompt.clear();
                 self.dirty = true;
@@ -714,6 +967,7 @@ impl App {
         let shape = Shape {
             shaded: self.shaded,
             dock: &self.dock,
+            menu: self.menu.as_ref(),
             file_labels: self
                 .state
                 .files
@@ -739,6 +993,9 @@ impl App {
             hot: self.hot,
             trouble: self.trouble.as_deref(),
             selection: self.state.selection,
+            // The same menu the layout above was computed from, or the rows
+            // would be drawn somewhere other than where they are hit tested.
+            menu: self.menu.as_ref(),
         });
         renderer.draw(gpu, &scene, frame);
         self.dirty = false;
@@ -862,10 +1119,16 @@ impl ApplicationHandler<Wake> for App {
                 if self.selecting {
                     self.extend_selection();
                 }
+                if self.prompt_selecting {
+                    self.prompt.drag_to(self.caret_under_pointer());
+                    self.dirty = true;
+                }
                 let (x, y) = (position.x as f32, position.y as f32);
                 let layout = self.layout();
                 let hot = match layout.hit(x, y) {
-                    Some(hit @ (Hit::Close | Hit::Maximize | Hit::Minimize)) => Some(hit),
+                    Some(hit @ (Hit::Close | Hit::Maximize | Hit::Minimize | Hit::MenuRow(_))) => {
+                        Some(hit)
+                    }
                     _ => None,
                 };
                 if hot != self.hot {
@@ -907,15 +1170,20 @@ impl ApplicationHandler<Wake> for App {
                 };
                 let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
                 let layout = self.layout();
+                let hit = layout.hit(x, y);
                 // A resize edge wins against whatever pane is under it, or the
-                // border becomes six pixels of unusable pane.
+                // border becomes six pixels of unusable pane. An open menu wins
+                // against the edge in turn: it is drawn over the border, and a
+                // menu clamped against the left of the window would otherwise
+                // have its rows resize the window instead of acting.
                 if !self.shaded
+                    && !matches!(hit, Some(Hit::MenuRow(_) | Hit::Menu))
                     && let Some(dir) = view::edge(x, y, layout.width, layout.height)
                 {
                     let _ = window.drag_resize_window(dir);
                     return;
                 }
-                if let Some(hit) = layout.hit(x, y) {
+                if let Some(hit) = hit {
                     self.click(hit, &window, event_loop);
                 }
                 self.redraw();
@@ -926,6 +1194,17 @@ impl ApplicationHandler<Wake> for App {
                 ..
             } => {
                 self.release();
+                self.redraw();
+            }
+            // The right button only ever opens or closes a menu, so it has one
+            // arm rather than a path through `click`, and nothing to do on the
+            // way back up.
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                self.right_click();
                 self.redraw();
             }
             WindowEvent::RedrawRequested => self.render(),
@@ -1045,5 +1324,173 @@ mod tests {
         let (min, size) = shade_request(false, Some(open));
         assert_eq!(min, Some(MIN_SIZE));
         assert_eq!(size, Some(open), "and it goes back to the size it was");
+    }
+
+    const W: f32 = 1400.0;
+    const H: f32 = 900.0;
+    const COLUMN: f32 = 8.0;
+    const SIZE: f32 = 14.0;
+
+    fn laid_out<'a>(dock: &'a Dock, menu: Option<&'a Menu>, chars: usize) -> Layout {
+        let shape = Shape {
+            shaded: false,
+            dock,
+            menu,
+            file_labels: Vec::new(),
+            column: COLUMN,
+            input_h: view::input_height(
+                W,
+                COLUMN,
+                chars,
+                noob_draw::Text::line_for(SIZE),
+                Config::default().max_input_rows,
+            ),
+        };
+        Layout::compute(W, H, &shape)
+    }
+
+    fn middle(panel: noob_draw::Panel) -> (f32, f32) {
+        (panel.x + panel.w * 0.5, panel.y + panel.h * 0.5)
+    }
+
+    fn opened(layout: &Layout, dock: &Dock, at: (f32, f32)) -> Option<Menu> {
+        menu_for(layout.hit(at.0, at.1), at, dock, false, None)
+    }
+
+    /// A right click has to land on the menu for the thing under it, and on no
+    /// menu at all where there is nothing a menu could act on.
+    #[test]
+    fn a_right_click_opens_the_menu_for_what_is_under_it() {
+        let dock = Dock::new();
+        let layout = laid_out(&dock, None, 0);
+
+        let menu = opened(&layout, &dock, middle(layout.input)).expect("the prompt has a menu");
+        assert_eq!(menu.target, Target::Input);
+        assert_eq!(menu.rows.len(), 2);
+        assert_eq!(menu.pick(1), Some(Item::Paste));
+
+        // A tab, and the pane it names, are the same widget.
+        let (view, tab) = layout.placed(Space::TopRight).tabs[1];
+        let menu = opened(&layout, &dock, middle(tab)).expect("a tab has a menu");
+        assert_eq!(menu.target, Target::Widget(view, Space::TopRight));
+        assert_eq!(menu.pick(2), Some(Item::Close));
+
+        let showing = dock.slot(Space::Left).active().unwrap();
+        let menu = opened(&layout, &dock, middle(layout.placed(Space::Left).body))
+            .expect("a pane has a menu");
+        assert_eq!(menu.target, Target::Widget(showing, Space::Left));
+
+        // Nothing a menu could act on.
+        for at in [middle(layout.close), (400.0, 8.0)] {
+            assert!(opened(&layout, &dock, at).is_none(), "at {at:?}");
+        }
+        // And the open menu itself: the second right click puts it away rather
+        // than opening a menu for what it covers.
+        let menu = Menu::for_widget((500.0, 400.0), View::Plan, Space::TopRight, false);
+        let over = laid_out(&dock, Some(&menu), 0);
+        let at = middle(over.menu_rows[0]);
+        assert!(opened(&over, &dock, at).is_none());
+    }
+
+    /// The copy row belongs to the pane the menu opened over. A selection in
+    /// some other pane must not light it up, because copying would then hand
+    /// over text from a pane nobody pointed at.
+    #[test]
+    fn the_copy_row_reads_the_selection_of_its_own_pane() {
+        let dock = Dock::new();
+        let layout = laid_out(&dock, None, 0);
+        let (view, tab) = layout.placed(Space::TopRight).tabs[0];
+        let at = middle(tab);
+        let hit = layout.hit(at.0, at.1);
+
+        let mine = menu_for(hit, at, &dock, false, Some(view)).unwrap();
+        assert_eq!(mine.pick(1), Some(Item::CopySelection));
+        let elsewhere = menu_for(hit, at, &dock, false, Some(View::Talk)).unwrap();
+        assert_eq!(elsewhere.pick(1), None);
+        assert_eq!(
+            mine.rows.len(),
+            elsewhere.rows.len(),
+            "the menu is the same shape either way"
+        );
+
+        // The prompt's own copy row reads the prompt's selection.
+        let at = middle(layout.input);
+        let hit = layout.hit(at.0, at.1);
+        assert_eq!(
+            menu_for(hit, at, &dock, true, None).unwrap().pick(0),
+            Some(Item::Copy)
+        );
+        assert_eq!(menu_for(hit, at, &dock, false, None).unwrap().pick(0), None);
+    }
+
+    /// Dropped on a space a tab moves; dropped off the window it is closed, the
+    /// same as picking Close; dropped on neither it stays where it was.
+    #[test]
+    fn a_tab_dropped_off_the_window_is_closed_rather_than_moved() {
+        let mut dock = Dock::new();
+        assert!(land(&mut dock, View::Files, Landing::In(Space::Left)));
+        assert_eq!(dock.space_of(View::Files), Some(Space::Left));
+
+        let before = dock.clone();
+        assert!(!land(&mut dock, View::Files, Landing::Nowhere));
+        assert_eq!(dock, before, "a release on nothing changes nothing");
+
+        assert!(land(&mut dock, View::Files, Landing::Out));
+        assert!(dock.is_hidden(View::Files));
+        assert_eq!(dock.space_of(View::Files), None);
+        assert!(!dock.walk().contains(&View::Files));
+        assert!(
+            !land(&mut dock, View::Files, Landing::Out),
+            "and throwing it out twice is not two hidden entries"
+        );
+        // A view that is out stays out until something unhides it.
+        assert!(!land(&mut dock, View::Files, Landing::In(Space::Left)));
+    }
+
+    /// The whole pointer path for a selection in the prompt: two pixel
+    /// positions become two caret offsets, and what is between them is what a
+    /// copy would take.
+    #[test]
+    fn dragging_in_the_prompt_selects_the_span_the_pointer_crossed() {
+        let dock = Dock::new();
+        let mut prompt = Prompt::default();
+        prompt.insert("select me please");
+        let layout = laid_out(&dock, None, prompt.len());
+        let y = layout.input.y + layout.input.h * 0.5;
+        let chars = prompt.len();
+        let caret = |x: f32| layout.input_caret(x, y, SIZE, COLUMN, chars);
+        // The pixel that resolves to a given offset, found by asking the layout
+        // rather than by working out where the prompt marker ends.
+        let x_of = |want: usize| {
+            (0..W as usize)
+                .map(|x| x as f32)
+                .find(|x| caret(*x) == want)
+                .unwrap_or_else(|| panic!("no pixel resolves to {want}"))
+        };
+
+        prompt.press(caret(x_of(3)));
+        assert_eq!(prompt.selection(), None, "a press alone selects nothing");
+        prompt.drag_to(caret(x_of(9)));
+        assert_eq!(prompt.selected().as_deref(), Some("ect me"));
+
+        // Back the other way, from the same press.
+        prompt.drag_to(caret(x_of(0)));
+        assert_eq!(prompt.selected().as_deref(), Some("sel"));
+        assert_eq!(prompt.caret(), 0);
+
+        // Off the right hand end stops at the end of the text.
+        prompt.drag_to(caret(W - 1.0));
+        assert_eq!(prompt.selected().as_deref(), Some("ect me please"));
+    }
+
+    /// The prompt is one line and Enter submits it, so a pasted newline cannot
+    /// stay a newline. It has no glyph in any font, which would draw as nothing
+    /// while still counting as a character.
+    #[test]
+    fn a_paste_arrives_as_one_line() {
+        assert_eq!(pasted("cargo test\n"), "cargo test ");
+        assert_eq!(pasted("one\r\n\ttwo"), "one   two");
+        assert_eq!(pasted(""), "");
+        assert_eq!(pasted("nothing to do"), "nothing to do");
     }
 }
