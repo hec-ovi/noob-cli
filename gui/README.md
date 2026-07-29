@@ -136,7 +136,7 @@ The avatar is an animation, not an image. `gui/asciify` turns a GIF into a text
 file once:
 
 ```
-./dev.sh avatar docs/clippy-black-1.gif      # writes gui/clippy/avatar/clippy.txt
+./dev.sh avatar docs/asciis/clippy-black-1.gif      # writes gui/clippy/avatar/clippy.txt
 ```
 
 The window never decodes an image. It plays each frame for that frame's own

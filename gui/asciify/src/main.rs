@@ -6,7 +6,7 @@
 //! applies here too even though the number is bigger.
 //!
 //! ```text
-//! ./dev.sh avatar docs/clippy-black-1.gif gui/clippy/avatar/clippy.txt
+//! ./dev.sh avatar docs/asciis/clippy-black-1.gif gui/clippy/avatar/clippy.txt
 //! ```
 //!
 //! ## Why the shape it produces looks the way it does
