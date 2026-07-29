@@ -66,9 +66,9 @@ samples while it is on screen, so an idle window still costs nothing.
 
 The GPU rows are AMD only, because they come from `gpu_busy_percent` and the
 `mem_info_*` files, which the amdgpu driver exposes and other drivers do not.
-On anything else the pane says so and shows CPU and memory alone. Reading an
-Nvidia card means its own library, which is the dependency this deliberately
-does not have.
+On anything else those rows are simply absent and the pane shows CPU and memory
+alone. Reading an Nvidia card means its own library, which is the dependency
+this deliberately does not have.
 
 LLM is the other question: not whether the machine is keeping up but whether the
 budget is. Context comes from the agent's own estimate rather than from the last
@@ -131,9 +131,8 @@ own tabs, PageUp and PageDown scroll whatever the pointer is over, the wheel
 does the same, Ctrl-C cancels, Ctrl-Q quits.
 
 Mouse: drag the title bar to move, drag an edge to resize, click a tab to switch
-to it, click the tab already showing to fold that space away, and the `▾` at the
-right of a strip does the same. **Drag a tab into another space** to move it
-there. **Double-click the title bar** to shade the
+to it, and click the tab already showing to fold that space away. **Drag a tab
+into another space** to move it there. **Double-click the title bar** to shade the
 window down to that one strip, Winamp style: it keeps showing THINKING, WORKING
 or FINISHED with the plan count and how many files changed, so a collapsed
 window is still a status light. Double-click again to bring it back.
@@ -193,8 +192,10 @@ One lockfile for both would put a `workspace = true` between the two budgets.
 They share exactly one thing, `crates/noob-proto`, by path.
 
 CLIppy has its own ceiling, 40 MiB and 400 crates, enforced by
-`./dev.sh gui-check` the same way the CLI's is. It currently uses 10.6 MiB and
-146 crates, five of which are the clipboard: a copy has to reach the display
+`./dev.sh gui-check` the same way the CLI's is. It currently uses 13.0 MiB and
+147 crates. Most of the size is one asset: the symbol font is embedded rather
+than looked for on the system, because a glyph a machine does not have draws as
+nothing at all. Five of the crates are the clipboard: a copy has to reach the display
 server, and Wayland and X11 do not agree on how. `asciify` is a fourth crate in that workspace and is never a
 dependency of the window, so its GIF decoder is not in the binary.
 
@@ -202,9 +203,7 @@ dependency of the window, so its GIF decoder is not in the binary.
 
 `CompositeAlphaMode` support varies by compositor and driver. The mode is chosen
 from what the surface reports, and when none of the modes composite, the palette
-falls back to fully opaque, which looks deliberate rather than broken. The tools
-pane prints the capability report at startup, so what happened is on screen
-rather than in a log.
+falls back to fully opaque, which looks deliberate rather than broken.
 
 ## What is not here yet
 
