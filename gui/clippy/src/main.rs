@@ -26,6 +26,7 @@ mod link;
 mod markdown;
 mod monitor;
 mod packaging;
+mod prompt;
 mod select;
 mod skin;
 mod state;
@@ -47,6 +48,7 @@ use config::Config;
 use dock::{Dock, Space, View};
 use link::{Incoming, Link};
 use monitor::Monitor;
+use prompt::Prompt;
 use skin::Skin;
 use state::{State, Tone};
 use view::{Drag, Hit, Layout, Shape};
@@ -91,8 +93,7 @@ struct App {
     /// of the window measures against.
     avatar: Option<avatar::Avatar>,
 
-    input: String,
-    caret: usize,
+    prompt: Prompt,
     dock: Dock,
     /// A tab that has been pressed, and whether the pointer has moved far
     /// enough since to call it a drag rather than a click.
@@ -161,8 +162,7 @@ impl App {
             skin,
             link: None,
             trouble: None,
-            input: String::new(),
-            caret: 0,
+            prompt: Prompt::default(),
             holding: None,
             selecting: false,
             clipboard: None,
@@ -192,13 +192,19 @@ impl App {
                 .map(|file| view::short_name(&file.path))
                 .collect(),
             column: self.column,
-            input_h: view::input_height(
-                width,
-                self.column,
-                self.input.chars().count(),
-                noob_draw::Text::line_for(self.config.font_size),
-            ),
+            input_h: self.input_height(width),
         }
+    }
+
+    /// How tall the prompt strip is for what has been typed so far.
+    fn input_height(&self, width: f32) -> f32 {
+        view::input_height(
+            width,
+            self.column,
+            self.prompt.len(),
+            noob_draw::Text::line_for(self.config.font_size),
+            self.config.max_input_rows,
+        )
     }
 
     fn layout(&self) -> Layout {
@@ -267,12 +273,11 @@ impl App {
     }
 
     fn submit(&mut self) {
-        let text = self.input.trim().to_string();
+        let text = self.prompt.text().trim().to_string();
         if text.is_empty() {
             return;
         }
-        self.input.clear();
-        self.caret = 0;
+        self.prompt.clear();
         self.state.submitted(&text);
         match self.link.as_mut() {
             Some(link) if link.is_alive() => link.send(Cmd::PromptSubmit { text }),
@@ -332,7 +337,18 @@ impl App {
                 self.dirty = true;
             }
             Hit::Body(space) => self.begin_selection(space),
-            Hit::Input => {}
+            Hit::Input => {
+                let layout = self.layout();
+                let at = layout.input_caret(
+                    self.cursor.x as f32,
+                    self.cursor.y as f32,
+                    self.config.font_size,
+                    self.column,
+                    self.prompt.len(),
+                );
+                self.prompt.place(at);
+                self.dirty = true;
+            }
         }
     }
 
@@ -411,7 +427,7 @@ impl App {
             .find(|space| self.dock.slot(*space).active() == Some(view))
     }
 
-    /// Put the selected text on the system clipboard. Returns whether there
+    /// Put the pane selection on the system clipboard. Returns whether there
     /// was anything to copy, so the caller can fall back to what the key
     /// otherwise does.
     fn copy_selection(&mut self) -> bool {
@@ -425,6 +441,27 @@ impl App {
         if text.is_empty() {
             return false;
         }
+        self.put_on_clipboard(text);
+        true
+    }
+
+    /// The same, for what is selected in the prompt.
+    fn copy_prompt(&mut self) -> bool {
+        let Some(text) = self.prompt.selected() else {
+            return false;
+        };
+        self.put_on_clipboard(text);
+        true
+    }
+
+    /// A copy the user asked for, from wherever it came from. Prefers the
+    /// prompt over a pane, because the prompt is what they were last typing
+    /// into and a band left behind in the transcript must not swallow it.
+    fn copy(&mut self) -> bool {
+        self.copy_prompt() || self.copy_selection()
+    }
+
+    fn put_on_clipboard(&mut self, text: String) {
         use copypasta::ClipboardProvider;
         if self.clipboard.is_none() {
             self.clipboard = copypasta::ClipboardContext::new().ok();
@@ -446,7 +483,6 @@ impl App {
             ),
         }
         self.dirty = true;
-        true
     }
 
     /// The pointer came up. A tab that never moved is a click; one that did is
@@ -507,39 +543,22 @@ impl App {
         let ctrl = self.modifiers.control_key();
         match event.logical_key.as_ref() {
             Key::Named(NamedKey::Enter) => self.submit(),
-            Key::Named(NamedKey::Backspace) => {
-                if self.caret > 0 {
-                    // By character, not by byte: a backspace after an emoji
-                    // must remove the emoji, not half of it.
-                    let mut chars: Vec<char> = self.input.chars().collect();
-                    chars.remove(self.caret - 1);
-                    self.input = chars.into_iter().collect();
-                    self.caret -= 1;
-                    self.dirty = true;
-                }
-            }
-            Key::Named(NamedKey::Delete) => {
-                let mut chars: Vec<char> = self.input.chars().collect();
-                if self.caret < chars.len() {
-                    chars.remove(self.caret);
-                    self.input = chars.into_iter().collect();
-                    self.dirty = true;
-                }
-            }
+            Key::Named(NamedKey::Backspace) => self.dirty |= self.prompt.backspace(),
+            Key::Named(NamedKey::Delete) => self.dirty |= self.prompt.delete(),
             Key::Named(NamedKey::ArrowLeft) => {
-                self.caret = self.caret.saturating_sub(1);
+                self.prompt.left();
                 self.dirty = true;
             }
             Key::Named(NamedKey::ArrowRight) => {
-                self.caret = (self.caret + 1).min(self.input.chars().count());
+                self.prompt.right();
                 self.dirty = true;
             }
             Key::Named(NamedKey::Home) => {
-                self.caret = 0;
+                self.prompt.home();
                 self.dirty = true;
             }
             Key::Named(NamedKey::End) => {
-                self.caret = self.input.chars().count();
+                self.prompt.end();
                 self.dirty = true;
             }
             // Escape drops a selection first, then a half-typed line, and only
@@ -549,11 +568,10 @@ impl App {
             Key::Named(NamedKey::Escape) => {
                 if self.state.selection.take().is_some() {
                     self.dirty = true;
-                } else if self.input.is_empty() {
+                } else if self.prompt.is_empty() {
                     self.cancel();
                 } else {
-                    self.input.clear();
-                    self.caret = 0;
+                    self.prompt.clear();
                     self.dirty = true;
                 }
             }
@@ -590,17 +608,24 @@ impl App {
             // window must never make hard to reach, and a selection you just
             // made is the thing you obviously meant.
             Key::Character("c") if ctrl => {
-                if !self.copy_selection() {
+                if !self.copy() {
                     self.cancel();
                 }
             }
             // And an unambiguous copy, for the muscle memory a terminal built.
             Key::Character("C") if ctrl && self.modifiers.shift_key() => {
-                self.copy_selection();
+                self.copy();
+            }
+            // Nothing in this window can take the keyboard focus, and the
+            // prompt is its only text field, so select-all means the prompt
+            // wherever the pointer happens to be. This is the line that has to
+            // learn which pane has the focus on the day one can have it.
+            Key::Character("a") if ctrl => {
+                self.prompt.select_all();
+                self.dirty = true;
             }
             Key::Character("u") if ctrl => {
-                self.input.clear();
-                self.caret = 0;
+                self.prompt.clear();
                 self.dirty = true;
             }
             _ => {
@@ -616,12 +641,7 @@ impl App {
                 if typed.is_empty() {
                     return;
                 }
-                let mut chars: Vec<char> = self.input.chars().collect();
-                for (i, c) in typed.chars().enumerate() {
-                    chars.insert(self.caret + i, c);
-                }
-                self.caret += typed.chars().count();
-                self.input = chars.into_iter().collect();
+                self.prompt.insert(&typed);
                 self.dirty = true;
             }
         }
@@ -665,6 +685,11 @@ impl App {
     }
 
     fn render(&mut self) {
+        // Measured before the surface is borrowed, because the prompt's height
+        // is read off the whole app and the renderer holds it mutably.
+        let Some(input_h) = self.gpu.as_ref().map(|gpu| self.input_height(gpu.width())) else {
+            return;
+        };
         let (Some(gpu), Some(renderer)) = (self.gpu.as_mut(), self.renderer.as_mut()) else {
             return;
         };
@@ -681,12 +706,7 @@ impl App {
                 .map(|file| view::short_name(&file.path))
                 .collect(),
             column: self.column,
-            input_h: view::input_height(
-                gpu.width(),
-                self.column,
-                self.input.chars().count(),
-                noob_draw::Text::line_for(self.config.font_size),
-            ),
+            input_h,
         };
         let layout = Layout::compute(gpu.width(), gpu.height(), &shape);
         let scene = view::build(&view::Frame {
@@ -695,8 +715,7 @@ impl App {
             dock: &self.dock,
             skin: &self.skin,
             layout: &layout,
-            input: &self.input,
-            caret: self.caret,
+            prompt: &self.prompt,
             column: self.column,
             pane_column: self.pane_column,
             body_size: self.config.font_size,

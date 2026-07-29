@@ -38,7 +38,6 @@ const LABEL_COLUMNS: usize = 9;
 const DOT_COLUMNS: usize = 10;
 const DOT_ROWS: usize = 4;
 const PROMPT_COLUMNS: usize = 2;
-const MAX_INPUT_ROWS: usize = 8;
 const INPUT_PAD: f32 = 6.0;
 
 /// Something the pointer can land on. Returned by [`Layout::hit`] so every
@@ -344,6 +343,29 @@ impl Layout {
         }
         None
     }
+
+    /// Where a click in the prompt puts the caret, as a character offset into
+    /// the typed text.
+    ///
+    /// The inverse of the arithmetic [`input_row`] draws the caret with, off
+    /// the same box, so the caret lands under the pointer instead of near it.
+    /// A click past the end of the text lands at the end, which is why `chars`
+    /// is passed in.
+    pub fn input_caret(&self, x: f32, y: f32, size: f32, column: f32, chars: usize) -> usize {
+        if column <= 0.0 {
+            return chars;
+        }
+        let line = Text::line_for(size);
+        let box_ = input_box(self.input, line);
+        let columns = columns_in(box_.w, column);
+        let row = ((y - box_.y) / line).floor().max(0.0) as usize;
+        // Rounded, not floored, so pressing on the right half of a character
+        // puts the caret after it, the way a text cursor behaves everywhere.
+        let at = ((((x - box_.x) / column).round().max(0.0)) as usize).min(columns);
+        // The marker in front of the text owns the first columns of the first
+        // row, so a click on it means the start of the text.
+        (row * columns + at).saturating_sub(PROMPT_COLUMNS).min(chars)
+    }
 }
 
 /// Lay tabs left to right at the width their labels need, dropping any that do
@@ -397,8 +419,8 @@ pub struct Frame<'a> {
     pub dock: &'a Dock,
     pub skin: &'a Skin,
     pub layout: &'a Layout,
-    pub input: &'a str,
-    pub caret: usize,
+    /// What has been typed, where the caret is, and what is selected in it.
+    pub prompt: &'a crate::prompt::Prompt,
     pub column: f32,
     /// The column width at `pane_size`. The panes are a different size from
     /// the transcript, so anything that lines text up with a rectangle has to
@@ -1105,20 +1127,36 @@ fn input_row(scene: &mut Scene, frame: &Frame) {
         scene.rect(edge);
     }
     let line = Text::line_for(frame.body_size);
-    // The box is as tall as the prompt needs, top-aligned so the first line
-    // does not move as it grows.
-    let box_ = Panel::new(
-        layout.input.x + PAD,
-        layout.input.y + INPUT_PAD,
-        (layout.input.w - 2.0 * PAD).max(1.0),
-        (layout.input.h - 2.0 * INPUT_PAD).max(line),
-    );
-    let prompt = if state.phase.busy() { "\u{2026}" } else { "\u{203a}" };
+    let box_ = input_box(layout.input, line);
+    let columns = columns_in(box_.w, frame.column);
+    // Under the glyphs, like the band in a pane, so selected text stays
+    // readable rather than being painted over.
+    if let Some((from, to)) = frame.prompt.selection() {
+        let mut at = from + PROMPT_COLUMNS;
+        let end = to + PROMPT_COLUMNS;
+        while at < end {
+            let row = at / columns;
+            // One rectangle per visual row: a selection that wrapped is not
+            // one rectangle, it is a run on each row it crosses.
+            let stop = end.min((row + 1) * columns);
+            let band = Panel::new(
+                box_.x + (at % columns) as f32 * frame.column,
+                box_.y + row as f32 * line,
+                (stop - at) as f32 * frame.column,
+                line,
+            );
+            if band.y + band.h <= box_.y + box_.h + 0.5 {
+                scene.rect(band.fill(skin.select));
+            }
+            at = stop;
+        }
+    }
+    let marker = if state.phase.busy() { "\u{2026}" } else { "\u{203a}" };
     scene.text(
         Text::rich(
             vec![
-                Run::tinted(format!("{prompt} "), skin.dim),
-                Run::tinted(frame.input, skin.bright),
+                Run::tinted(format!("{marker} "), skin.dim),
+                Run::tinted(frame.prompt.text(), skin.bright),
             ],
             box_,
             frame.body_size,
@@ -1128,8 +1166,7 @@ fn input_row(scene: &mut Scene, frame: &Frame) {
         // actually is. Word wrap would put it a word away on every long line.
         .wrap_anywhere(),
     );
-    let columns = columns_in(box_.w, frame.column);
-    let at = frame.caret + PROMPT_COLUMNS;
+    let at = frame.prompt.caret() + PROMPT_COLUMNS;
     let (row, column) = (at / columns, at % columns);
     let caret = Panel::new(
         box_.x + column as f32 * frame.column,
@@ -1142,6 +1179,20 @@ fn input_row(scene: &mut Scene, frame: &Frame) {
     }
 }
 
+
+/// The box the prompt's text is drawn in, inside the strip the layout gave it.
+///
+/// Top-aligned so the first line does not move as the prompt grows. Drawing
+/// and hit testing both take it from here, which is the only way a click can
+/// land on the column the glyph is actually in.
+fn input_box(input: Panel, line: f32) -> Panel {
+    Panel::new(
+        input.x + PAD,
+        input.y + INPUT_PAD,
+        (input.w - 2.0 * PAD).max(1.0),
+        (input.h - 2.0 * INPUT_PAD).max(line),
+    )
+}
 
 /// How many characters fit across a box of this width.
 fn columns_in(width: f32, column: f32) -> usize {
@@ -1159,14 +1210,16 @@ pub fn cols_of(panel: Panel, column: f32) -> usize {
 
 /// How tall the prompt has to be to hold `chars` characters.
 ///
-/// Grows a line at a time up to a ceiling, then scrolls inside itself. A prompt
-/// that grows without limit eventually eats the conversation it is about.
-pub fn input_height(width: f32, column: f32, chars: usize, line: f32) -> f32 {
+/// Grows a line at a time up to `max_rows`, then scrolls inside itself. A
+/// prompt that grows without limit eventually eats the conversation it is
+/// about, and how much of the window that is worth is a matter of taste, which
+/// is why the ceiling is a setting.
+pub fn input_height(width: f32, column: f32, chars: usize, line: f32, max_rows: usize) -> f32 {
     let inner = (width - 2.0 * GAP - 2.0 * PAD).max(column);
     let columns = columns_in(inner, column);
     let rows = (chars + PROMPT_COLUMNS + 1)
         .div_ceil(columns)
-        .clamp(1, MAX_INPUT_ROWS);
+        .clamp(1, max_rows.max(1));
     // The strip, not the box inside it: the layout insets this by `GAP` before
     // the prompt gets it, and forgetting that cost the last row of a full one.
     (rows as f32 * line + 2.0 * INPUT_PAD + 2.0 * GAP).max(INPUT_H)
@@ -1217,6 +1270,14 @@ mod tests {
             column: 8.0,
             input_h: INPUT_H,
         }
+    }
+
+    /// A prompt holding `text` with the caret at `at`.
+    fn typed_prompt(text: &str, at: usize) -> crate::prompt::Prompt {
+        let mut prompt = crate::prompt::Prompt::default();
+        prompt.insert(text);
+        prompt.place(at);
+        prompt
     }
 
     fn busy_state() -> State {
@@ -1418,8 +1479,7 @@ mod tests {
             dock,
             skin: &skin,
             layout: &layout,
-            input: "type here",
-            caret: 4,
+            prompt: &typed_prompt("type here", 4),
             column: 8.0,
             pane_column: 8.0,
             body_size: 14.0,
@@ -1653,8 +1713,7 @@ mod tests {
             dock: &dock,
             skin: &skin,
             layout: &layout,
-            input: "",
-            caret: 0,
+            prompt: &crate::prompt::Prompt::default(),
             column: 8.0,
             pane_column: 8.0,
             body_size: 14.0,
@@ -1729,8 +1788,7 @@ mod tests {
             dock: &dock,
             skin: &skin,
             layout: &layout,
-            input: "",
-            caret: 0,
+            prompt: &crate::prompt::Prompt::default(),
             column: 8.0,
             pane_column: 8.0,
             body_size: 14.0,
@@ -1948,8 +2006,7 @@ mod tests {
                 dock: &dock,
                 skin: &skin,
                 layout: &layout,
-                input: "",
-                caret: 0,
+                prompt: &crate::prompt::Prompt::default(),
                 column,
                 pane_column,
                 body_size: 14.0,
@@ -2030,8 +2087,7 @@ mod tests {
             dock: &dock,
             skin: &skin,
             layout: &layout,
-            input: "",
-            caret: 0,
+            prompt: &crate::prompt::Prompt::default(),
             column: 8.0,
             pane_column: 8.0,
             body_size: 14.0,
@@ -2088,41 +2144,47 @@ mod tests {
         );
     }
 
+    /// A frame that is nothing but a prompt: the strip it landed in, its
+    /// layout, and the scene, at the default 14pt body size.
+    fn render_prompt(
+        prompt: &crate::prompt::Prompt,
+        max_rows: usize,
+    ) -> (Panel, Layout, Scene) {
+        let state = State::new();
+        let dock = Dock::new();
+        let skin = Skin::from(&Config::default());
+        let mut shape = shape(&dock, &[]);
+        shape.input_h = input_height(1200.0, 8.0, prompt.len(), Text::line_for(14.0), max_rows);
+        let layout = Layout::compute(1200.0, 800.0, &shape);
+        let scene = build(&Frame {
+            state: &state,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            prompt,
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            drag: None,
+            hot: None,
+            trouble: None,
+            selection: None,
+            avatar: None,
+        });
+        (layout.input, layout, scene)
+    }
+
     /// The prompt grows with what has been typed, and the caret follows the
     /// wrap rather than running off the end of the first line.
     #[test]
     fn the_prompt_grows_and_the_caret_stays_inside_it() {
-        let state = State::new();
-        let dock = Dock::new();
-        let skin = Skin::from(&Config::default());
         let line = Text::line_for(14.0);
-        let render = |typed: &str| {
-            let mut shape = shape(&dock, &[]);
-            shape.input_h = input_height(1200.0, 8.0, typed.chars().count(), line);
-            let layout = Layout::compute(1200.0, 800.0, &shape);
-            let scene = build(&Frame {
-                state: &state,
-                monitor: &Monitor::new(),
-                dock: &dock,
-                skin: &skin,
-                layout: &layout,
-                input: typed,
-                caret: typed.chars().count(),
-                column: 8.0,
-                pane_column: 8.0,
-                body_size: 14.0,
-                pane_size: 13.0,
-                drag: None,
-                hot: None,
-                trouble: None,
-            selection: None,
-            avatar: None,
-            });
-            (layout.input, scene)
-        };
-
-        let (one, _) = render("short");
-        let (many, scene) = render(&"x".repeat(600));
+        let short = typed_prompt("short", 5);
+        let long = typed_prompt(&"x".repeat(600), 600);
+        let (one, ..) = render_prompt(&short, 8);
+        let (many, _, scene) = render_prompt(&long, 8);
         assert!(many.h > one.h, "the prompt grew: {} then {}", one.h, many.h);
         assert!(many.h <= 8.0 * line + 30.0, "and stopped growing: {}", many.h);
         let caret = scene
@@ -2136,6 +2198,118 @@ mod tests {
             "the caret left the prompt: {caret:?} in {many:?}"
         );
         assert!(caret[1] > many.y, "and it is not still on the first row");
+    }
+
+    /// How tall it is allowed to get is a setting, not a constant. Two rows
+    /// and twenty rows are both a window somebody wants.
+    #[test]
+    fn the_prompt_stops_growing_at_the_configured_row_count() {
+        let line = Text::line_for(14.0);
+        // More than twenty rows of it, so the ceiling is what stops it.
+        let long = typed_prompt(&"x".repeat(3000), 3000);
+        let (two, ..) = render_prompt(&long, 2);
+        let (twenty, ..) = render_prompt(&long, 20);
+        assert!(twenty.h > two.h, "{} is not taller than {}", twenty.h, two.h);
+        // The strip holds that many rows and the padding around them.
+        assert!((two.h - (2.0 * line + 2.0 * INPUT_PAD)).abs() < 0.01, "{}", two.h);
+        assert!(
+            (twenty.h - (20.0 * line + 2.0 * INPUT_PAD)).abs() < 0.01,
+            "{}",
+            twenty.h
+        );
+        // A ceiling nobody typed up to still leaves the prompt one row.
+        let (empty, ..) = render_prompt(&crate::prompt::Prompt::default(), 20);
+        assert!((empty.h - (line + 2.0 * INPUT_PAD)).abs() < 0.01, "{}", empty.h);
+    }
+
+    /// A click lands on the character it is over, on any row of a wrapped
+    /// prompt. This is the arithmetic that can be silently wrong: the caret is
+    /// drawn from it, so an inverse that disagrees puts the caret elsewhere.
+    #[test]
+    fn a_click_in_the_prompt_lands_on_the_character_under_it() {
+        let typed = "0123456789".repeat(50);
+        let prompt = typed_prompt(&typed, 0);
+        let (strip, layout, scene) = render_prompt(&prompt, 8);
+        let line = Text::line_for(14.0);
+        let box_ = input_box(strip, line);
+        let columns = columns_in(box_.w, 8.0);
+        for at in [0usize, 1, 7, columns, columns + 3, columns * 2 + 9] {
+            let column = (at + PROMPT_COLUMNS) % columns;
+            let row = (at + PROMPT_COLUMNS) / columns;
+            // The middle of that cell, which is where a pointer would be.
+            let x = box_.x + column as f32 * 8.0 + 3.0;
+            let y = box_.y + row as f32 * line + line * 0.5;
+            assert_eq!(
+                layout.input_caret(x, y, 14.0, 8.0, prompt.len()),
+                at,
+                "row {row} column {column}"
+            );
+        }
+        // Past the end of the text, and past the end of a row.
+        let below = box_.y + box_.h - 1.0;
+        assert_eq!(
+            layout.input_caret(box_.x + box_.w - 1.0, below, 14.0, 8.0, prompt.len()),
+            prompt.len()
+        );
+        // And the caret the click asks for is where the frame draws it.
+        let mut moved = typed_prompt(&typed, 0);
+        moved.place(columns + 3);
+        let (_, _, after) = render_prompt(&moved, 8);
+        let caret = |scene: &Scene| {
+            scene
+                .rects
+                .iter()
+                .map(|r| r.xywh())
+                .rfind(|[x, y, w, _]| *w <= 3.0 && strip.contains(*x, *y))
+                .expect("the caret is drawn")
+        };
+        assert_ne!(caret(&scene), caret(&after));
+        let placed = caret(&after);
+        assert_eq!(
+            layout.input_caret(placed[0] + 1.0, placed[1] + 1.0, 14.0, 8.0, moved.len()),
+            columns + 3
+        );
+    }
+
+    /// Select-all bands every row the text covers, and nothing outside the
+    /// prompt. A selection you cannot see is a selection you delete by
+    /// accident.
+    #[test]
+    fn the_prompt_bands_what_it_has_selected() {
+        let mut prompt = typed_prompt(&"y".repeat(400), 0);
+        prompt.select_all();
+        let (strip, _, scene) = render_prompt(&prompt, 8);
+        let skin = Skin::from(&Config::default());
+        let bands: Vec<[f32; 4]> = scene
+            .rects
+            .iter()
+            .filter(|r| r.rgba() == skin.select)
+            .map(|r| r.xywh())
+            .collect();
+        let line = Text::line_for(14.0);
+        let box_ = input_box(strip, line);
+        let columns = columns_in(box_.w, 8.0);
+        assert_eq!(bands.len(), (400 + PROMPT_COLUMNS).div_ceil(columns));
+        for band in &bands {
+            assert!(band[1] >= box_.y - 0.01, "{band:?} is above the prompt");
+            assert!(
+                band[1] + band[3] <= box_.y + box_.h + 0.5,
+                "{band:?} runs below the prompt"
+            );
+            assert!(
+                band[0] + band[2] <= box_.x + box_.w + 0.01,
+                "{band:?} runs past the right edge"
+            );
+        }
+        // The first row starts after the marker, not at the left edge.
+        let first = bands
+            .iter()
+            .min_by(|a, b| a[1].total_cmp(&b[1]))
+            .expect("a first row");
+        assert!((first[0] - (box_.x + PROMPT_COLUMNS as f32 * 8.0)).abs() < 0.01);
+        // Nothing selected is nothing banded.
+        let (_, _, plain) = render_prompt(&typed_prompt("hello", 5), 8);
+        assert!(!plain.rects.iter().any(|r| r.rgba() == skin.select));
     }
 
     /// Two dark panels side by side over a busy desktop read as one region
@@ -2186,8 +2360,7 @@ mod tests {
             dock: &dock,
             skin: &skin,
             layout: &layout,
-            input: "",
-            caret: 0,
+            prompt: &crate::prompt::Prompt::default(),
             column: 8.0,
             pane_column: 8.0,
             body_size: 14.0,

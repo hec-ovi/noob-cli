@@ -101,7 +101,9 @@ because most of a session is `read`, `ls` and `grep`.
 Files show a line-number gutter and a band behind each block header, so a write
 reads as a mark between two stretches of file rather than as part of one.
 
-The prompt grows as you type, up to eight lines.
+The prompt grows as you type, up to eight lines or whatever `max_input_rows` in
+the settings says. Click anywhere in it to put the caret there, Ctrl-A selects
+the whole line, and typing or backspace over a selection replaces it.
 
 Drag across the conversation, the activity list or a file to select text, and
 Ctrl-C copies it. Ctrl-C with nothing selected still cancels the turn, which is
@@ -119,7 +121,9 @@ never told any of this exists: everything the window shows is derived from calls
 the model was already making, including the plan.
 
 Keys: Enter sends, Escape drops a selection then clears the line then cancels
-the turn, Ctrl-C copies a selection or cancels, Ctrl-Shift-C always copies, Tab walks every
+the turn, Ctrl-A selects the prompt, Ctrl-C copies a selection or cancels and
+takes the prompt's selection over a pane's since that is the one you were last
+touching, Ctrl-Shift-C always copies, Tab walks every
 view wherever it has been dragged, Shift-Tab stays in one space and walks its
 own tabs, PageUp and PageDown scroll whatever the pointer is over, the wheel
 does the same, Ctrl-C cancels, Ctrl-Q quits.
@@ -148,10 +152,10 @@ holding a frame for a second costs one redraw rather than sixty. Point
 ## Settings
 
 `~/.config/noob/clippy.conf`, written with the defaults on first run and
-commented. Opacity, both font sizes, which panes exist, the avatar, and the
-whole palette: the eight base colors, one per tool, and the five the
-highlighter uses for code. A key it does not recognise is reported in the
-ACTIVITY pane rather than ignored.
+commented. Opacity, both font sizes, how tall the prompt may grow, which panes
+exist, the avatar, and the whole palette: the eight base colors, one per tool,
+and the five the highlighter uses for code. A key it does not recognise is
+reported in the ACTIVITY pane rather than ignored.
 
 `theme = noob | amber | ice | plum` sets every color at once. The colors ship
 as commented defaults so the theme has something to set, so uncomment one line

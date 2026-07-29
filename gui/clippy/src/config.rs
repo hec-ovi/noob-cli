@@ -27,6 +27,8 @@ pub struct Config {
     pub opacity: f32,
     pub font_size: f32,
     pub pane_font_size: f32,
+    /// The tallest the prompt grows before it scrolls inside itself, in rows.
+    pub max_input_rows: usize,
 
     pub accent: [u8; 3],
     pub text: [u8; 3],
@@ -69,6 +71,7 @@ impl Default for Config {
             opacity: 0.88,
             font_size: 14.0,
             pane_font_size: 13.0,
+            max_input_rows: 8,
             accent: [0x7c, 0xd8, 0x94],
             text: [0x9a, 0xd6, 0xac],
             dim: [0x58, 0x96, 0x6e],
@@ -227,6 +230,7 @@ pub fn keys() -> Vec<&'static str> {
         "opacity",
         "font_size",
         "pane_font_size",
+        "max_input_rows",
         "theme",
         "accent",
         "text",
@@ -301,6 +305,12 @@ impl Config {
                 "pane_font_size" => set(
                     &mut config.pane_font_size,
                     number(&value).map(|n| n.clamp(8.0, 40.0)),
+                ),
+                // A prompt taller than the window is not a prompt, and one of
+                // zero rows has nowhere to put the caret.
+                "max_input_rows" => set(
+                    &mut config.max_input_rows,
+                    value.parse::<usize>().ok().map(|rows| rows.clamp(1, 24)),
                 ),
                 "accent" => set(&mut config.accent, color(&value)),
                 "text" => set(&mut config.text, color(&value)),
@@ -612,6 +622,10 @@ opacity = 88%
 font_size = 14          # the conversation
 pane_font_size = 13     # the activity, plan, agents and file panes
 
+# How tall the prompt is allowed to grow, in rows. Past this it scrolls inside
+# itself rather than taking more of the conversation.
+max_input_rows = 8
+
 # The whole palette, by name: noob, amber, ice, plum.
 theme = noob
 
@@ -696,7 +710,7 @@ mod tests {
         for key in keys() {
             assert!(named.contains(&key.to_string()), "{key} is undocumented");
         }
-        assert_eq!(keys().len(), 35, "a new key needs a line in the file");
+        assert_eq!(keys().len(), 36, "a new key needs a line in the file");
     }
 
     /// The commented colors are the noob theme spelled out. A stale hex there
