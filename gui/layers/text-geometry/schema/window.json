@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Window",
+  "description": "Which logical lines to draw and how much of the first one sits above the viewport.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "first",
+    "count",
+    "skip"
+  ],
+  "properties": {
+    "first": {
+      "description": "Index of the first line to draw.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "count": {
+      "description": "How many lines to draw, starting at first.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "skip": {
+      "description": "Rows of the first line hidden above the viewport. The renderer applies this as a scroll offset rather than dropping the line, so a long paragraph scrolls a row at a time instead of jumping.",
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

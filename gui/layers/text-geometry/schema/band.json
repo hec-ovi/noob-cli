@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Band",
+  "description": "The rows a line occupies inside the viewport, clipped to it, or null when the line is not on screen. A line partly scrolled off reports only its visible part.",
+  "oneOf": [
+    {
+      "type": "null"
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "top",
+        "height"
+      ],
+      "properties": {
+        "top": {
+          "description": "First visible row, counted from the top of the viewport.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "height": {
+          "description": "How many rows of the line are visible.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  ]
+}

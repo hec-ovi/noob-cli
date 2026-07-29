@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Line hit",
+  "description": "Which logical line a visual row belongs to, or null when the row is past the last line. Null is the correct answer for a click below a short transcript: it must select nothing rather than snapping to the final character.",
+  "oneOf": [
+    {
+      "type": "null"
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "line",
+        "offset"
+      ],
+      "properties": {
+        "line": {
+          "description": "Index of the line, absolute rather than relative to the window.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "offset": {
+          "description": "Character offset at which this visual row starts within the line. A caller adds its own column to reach the character.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  ]
+}

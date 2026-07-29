@@ -248,14 +248,20 @@ code gets written.
 
 ## Decisions
 
-These four gate work and should be answered before their items start:
+### Settled
 
-- **D1 (item 22).** Arbitrary-depth binary split tree, or a capped 2x2 grid
-  (max depth 2, at most 4 leaves) with draggable dividers? Every example you
-  gave fits the capped version at roughly half the work.
-- **D9 (item 2).** Where does the 66px orb square live: grows the title strip
-  (currently 30px), a reserved block above the panes, or floating? And does it
-  keep spinning when idle, at roughly 3 to 7 percent of a core?
+- **D1 (item 22): capped 2x2 grid.** Max depth 2, at most 4 leaves, dividers
+  drag freely. No arbitrary nesting, so no leaf can collapse below a drawable
+  size. Roughly half the code of a general tree.
+- **D9 (item 2): own 66px block at top-left, above the panes.** Idle plays the
+  ASCII face loop, the orb animates only while the agent is working, and the
+  wakeup stops at the end of a turn. Keeps the no-free-running-render rule in
+  `noob-gpu/src/lib.rs:19-24` intact.
+- **D22 (item 20): top-right corner only, 10px, on every panel** including tabs
+  and the input box.
+
+### Still gating
+
 - **D8 (item 28).** Does a browser page reach the agent directly, which means
   CLIppy grows an HTTP listener with origin and token checks, or does your site
   talk to a broker you run that holds the socket? And does the caller need the

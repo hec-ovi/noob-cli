@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Band request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "heights",
+    "window",
+    "rows",
+    "line"
+  ],
+  "properties": {
+    "heights": {
+      "$ref": "heights.json"
+    },
+    "window": {
+      "$ref": "window.json"
+    },
+    "rows": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "line": {
+      "description": "Index of the line to locate.",
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Wrap request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "lengths",
+    "cols"
+  ],
+  "properties": {
+    "lengths": {
+      "description": "Character count of each logical line, in order.",
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "cols": {
+      "description": "Width of the box in monospace columns. Zero is legal and means a window mid-resize; every line then reports one row.",
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

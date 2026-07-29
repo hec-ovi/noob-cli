@@ -15,6 +15,7 @@ path = "src/main.rs"
 noob-proto.workspace = true
 noob-gpu.workspace = true
 noob-draw.workspace = true
+text-geometry.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 pollster.workspace = true

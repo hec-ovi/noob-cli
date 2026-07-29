@@ -224,6 +224,6 @@ mod tests {
         assert_eq!(pane.last(), 5);
         assert_eq!(pane.line(4).map(|l| l.text.as_str()), Some("line 4"));
         // The row on screen resolves to the line it is really showing.
-        assert_eq!(pane.showing_from(2), 3);
+        assert_eq!(pane.showing_from(2, 200), 3);
     }
 }

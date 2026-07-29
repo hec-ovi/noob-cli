@@ -167,6 +167,16 @@ pub struct Pane {
     /// and anchoring to a position in the deque would slide it every time a
     /// line was evicted.
     dropped: usize,
+    /// Wrapped heights for the width they were last asked for.
+    heights: std::cell::RefCell<Heights>,
+}
+
+/// The wrapped height of every line, and what it was computed for.
+#[derive(Default)]
+struct Heights {
+    rows: Vec<usize>,
+    cols: usize,
+    stale: bool,
 }
 
 impl Pane {
@@ -176,6 +186,12 @@ impl Pane {
             cap,
             scrollback: 0,
             dropped: 0,
+            heights: std::cell::RefCell::new(Heights {
+                // Nothing has been measured yet, and a zero width would look
+                // like a valid cache for a window mid-resize.
+                stale: true,
+                ..Heights::default()
+            }),
         }
     }
 
@@ -185,6 +201,7 @@ impl Pane {
             self.lines.pop_front();
             self.dropped += 1;
         }
+        self.heights.borrow_mut().stale = true;
         // New content pulls the view back to the live end. A pane that stayed
         // where it was would silently stop showing what is happening.
         self.scrollback = 0;
@@ -218,24 +235,65 @@ impl Pane {
                 _ => self.push(Line::new(part, tone)),
             }
         }
+        // The tail line grew in place, which changes its wrapped height
+        // without changing the line count.
+        self.heights.borrow_mut().stale = true;
         self.scrollback = 0;
     }
 
-    /// The `rows` lines this pane is currently showing, honouring scrollback.
-    pub fn visible(&self, rows: usize) -> Vec<&Line> {
-        if rows == 0 {
-            return Vec::new();
+    /// The wrapped height of every line held, for a box `cols` wide.
+    ///
+    /// Cached because a full pane holds thousands of lines and this is asked
+    /// for several times per frame. The cache is rebuilt when the width
+    /// changes or when a line is added, which is the only way a height can
+    /// move: lines are immutable once past the tail, and `stream` marks the
+    /// tail dirty itself.
+    fn heights(&self, cols: usize) -> std::cell::Ref<'_, Vec<usize>> {
+        {
+            let mut cache = self.heights.borrow_mut();
+            if cache.cols != cols || cache.stale {
+                cache.rows.clear();
+                cache
+                    .rows
+                    .extend(self.lines.iter().map(|l| text_geometry::rows_of(l.text.chars().count(), cols)));
+                cache.cols = cols;
+                cache.stale = false;
+            }
         }
-        let end = self.lines.len().saturating_sub(self.scrollback);
-        let start = end.saturating_sub(rows);
-        self.lines.range(start..end).collect()
+        std::cell::Ref::map(self.heights.borrow(), |c| &c.rows)
+    }
+
+    /// Which lines to draw and how far the first one is scrolled off the top.
+    pub fn window(&self, rows: usize, cols: usize) -> text_geometry::Window {
+        text_geometry::window(&self.heights(cols), rows, self.scrollback)
+    }
+
+    /// The lines this pane is currently showing, honouring scrollback, counted
+    /// in **visual** rows so a wrapped line cannot fall out of the box.
+    pub fn visible(&self, rows: usize, cols: usize) -> Vec<&Line> {
+        let w = self.window(rows, cols);
+        self.lines.range(w.first..w.first + w.count).collect()
     }
 
     /// The absolute number of the first line currently on screen, so a screen
     /// row can be turned into the line it is actually showing.
-    pub fn showing_from(&self, rows: usize) -> usize {
-        let end = self.lines.len().saturating_sub(self.scrollback);
-        self.dropped + end.saturating_sub(rows)
+    pub fn showing_from(&self, rows: usize, cols: usize) -> usize {
+        self.dropped + self.window(rows, cols).first
+    }
+
+    /// Which line a visual row is showing, and the character offset that row
+    /// starts at within it. `None` for a row below the last line.
+    pub fn spot_in(&self, rows: usize, cols: usize, row: usize) -> Option<(usize, usize)> {
+        let w = self.window(rows, cols);
+        let (line, offset) = text_geometry::line_at(&self.heights(cols), w, cols, row)?;
+        Some((self.dropped + line, offset))
+    }
+
+    /// The rows one line occupies on screen, clipped to the viewport.
+    pub fn band_of(&self, rows: usize, cols: usize, absolute: usize) -> Option<(usize, usize)> {
+        let line = absolute.checked_sub(self.dropped)?;
+        let w = self.window(rows, cols);
+        text_geometry::band(&self.heights(cols), w, rows, line)
     }
 
     /// One line by its absolute number, or nothing when it has been evicted.
@@ -248,10 +306,14 @@ impl Pane {
         self.dropped + self.lines.len()
     }
 
-    /// Scroll back by `rows`, stopping at the oldest line still held. Returns
+    /// Scroll back by `rows`, stopping at the oldest row still held. Returns
     /// whether anything moved, so a caller only redraws when it did.
-    pub fn scroll_back(&mut self, rows: usize, visible: usize) -> bool {
-        let most = self.lines.len().saturating_sub(visible);
+    ///
+    /// Counted in visual rows, so a pane of wrapped lines can scroll further
+    /// than it has lines. Under the old line-count clamp the tail of a wrapped
+    /// transcript was unreachable.
+    pub fn scroll_back(&mut self, rows: usize, visible: usize, cols: usize) -> bool {
+        let most = text_geometry::max_scrollback(&self.heights(cols), visible);
         let next = (self.scrollback + rows).min(most);
         let moved = next != self.scrollback;
         self.scrollback = next;
@@ -270,9 +332,8 @@ impl Pane {
     /// A transcript is drawn from a scrolling window, so a block that opened
     /// above it would otherwise render as prose. Scanning the lines above is a
     /// prefix check each, which is nothing next to shaping them.
-    pub fn fence_before(&self, rows: usize) -> crate::markdown::Fence {
-        let end = self.lines.len().saturating_sub(self.scrollback);
-        let start = end.saturating_sub(rows);
+    pub fn fence_before(&self, rows: usize, cols: usize) -> crate::markdown::Fence {
+        let start = self.window(rows, cols).first;
         crate::markdown::fence_after(
             self.lines
                 .range(..start)
@@ -283,14 +344,12 @@ impl Pane {
 
     /// Where the thumb sits and how tall it is, as fractions of the track, or
     /// `None` when everything fits and there is nothing to indicate.
-    pub fn thumb(&self, rows: usize) -> Option<(f32, f32)> {
-        if rows == 0 || self.lines.len() <= rows {
-            return None;
-        }
-        let total = self.lines.len() as f32;
-        let size = (rows as f32 / total).clamp(0.06, 1.0);
-        let top = (total - rows as f32 - self.scrollback as f32).max(0.0) / total;
-        Some((top.min(1.0 - size), size))
+    ///
+    /// Measured in visual rows. Counting lines reported a pane of wrapped text
+    /// as shorter than it is, so the thumb filled the track while content was
+    /// still overflowing.
+    pub fn thumb(&self, rows: usize, cols: usize) -> Option<(f32, f32)> {
+        text_geometry::thumb(&self.heights(cols), rows, self.scrollback)
     }
 }
 
@@ -1030,7 +1089,7 @@ mod tests {
     }
 
     fn texts(pane: &Pane) -> Vec<String> {
-        pane.visible(usize::MAX)
+        pane.visible(usize::MAX, 200)
             .iter()
             .map(|l| l.text.clone())
             .collect()
@@ -1104,7 +1163,7 @@ mod tests {
         state.apply(tool_start("d", "websearch", serde_json::json!({"query": "x"})));
         state.apply(tool_start("e", "skill", serde_json::json!({"name": "web"})));
 
-        let lines = state.activity.visible(usize::MAX);
+        let lines = state.activity.visible(usize::MAX, 200);
         let kinds: Vec<Tone> = lines.iter().map(|l| l.tone).collect();
         assert_eq!(
             kinds,
@@ -1228,13 +1287,13 @@ mod tests {
         });
         assert_eq!(state.agents[0].state, "running");
         // Its own output is its news, and never the parent's activity list.
-        let before = state.activity.visible(200).len();
+        let before = state.activity.visible(200, 200).len();
         state.apply(Event::AgentOutput {
             agent_id: "agent-1".into(),
             line: "* websearch search".into(),
         });
         assert_eq!(state.agents[0].last, "* websearch search");
-        assert_eq!(state.activity.visible(200).len(), before);
+        assert_eq!(state.activity.visible(200, 200).len(), before);
 
         state.apply(Event::AgentStateChanged {
             agent_id: "agent-1".into(),
@@ -1318,7 +1377,7 @@ mod tests {
         });
         let shown: Vec<&str> = state
             .activity
-            .visible(200)
+            .visible(200, 200)
             .iter()
             .map(|line| line.text.trim())
             .collect();
@@ -1384,7 +1443,7 @@ mod tests {
         }
         let shown: Vec<(String, Tone)> = state
             .activity
-            .visible(200)
+            .visible(200, 200)
             .iter()
             .map(|line| (line.text.trim().to_string(), line.tone))
             .collect();
@@ -1423,7 +1482,7 @@ mod tests {
         assert!(
             state.files[0]
                 .pane
-                .visible(20)
+                .visible(20, 200)
                 .iter()
                 .any(|line| line.text.contains("left the context"))
         );
@@ -1543,7 +1602,7 @@ mod tests {
         state.apply(Event::TextDelta {
             d: "the answer".into(),
         });
-        let lines: Vec<_> = state.talk.visible(usize::MAX);
+        let lines: Vec<_> = state.talk.visible(usize::MAX, 200);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].tone, Tone::Dim);
         assert_eq!(lines[1].tone, Tone::Body);
@@ -1636,8 +1695,109 @@ mod tests {
         for n in 0..40 {
             pane.say(format!("{n}"), Tone::Body);
         }
-        assert_eq!(pane.visible(usize::MAX).len(), 8);
-        assert_eq!(pane.visible(3).last().unwrap().text, "39");
+        assert_eq!(pane.visible(usize::MAX, 200).len(), 8);
+        assert_eq!(pane.visible(3, 200).last().unwrap().text, "39");
+    }
+
+    /// The defect this whole change exists for. A pane following the live end
+    /// used to hand the shaper as many logical lines as rows fit, so a line
+    /// that wrapped overflowed the clip box, the newest rows were discarded,
+    /// and no scroll position could reach them because forward stops at zero.
+    #[test]
+    fn the_end_of_a_wrapped_message_is_on_screen_at_the_live_end() {
+        let mut pane = Pane::new(100);
+        pane.say("short", Tone::Body);
+        // Five rows in a fifty column box, so six rows of content in total.
+        pane.say("x".repeat(250), Tone::Body);
+        let (rows, cols) = (4, 50);
+
+        let window = pane.window(rows, cols);
+        assert_eq!(
+            window.first + window.count,
+            2,
+            "the newest line has to be in the window"
+        );
+        let (top, height) = pane
+            .band_of(rows, cols, 1)
+            .expect("the long line is on screen");
+        assert_eq!(
+            top + height, rows,
+            "its last row must be the last row of the pane, not clipped away"
+        );
+    }
+
+    /// And the rows above it are reachable, a row at a time rather than a line
+    /// at a time: a five row paragraph used to be one indivisible scroll step.
+    #[test]
+    fn scrolling_back_through_a_wrapped_line_moves_one_row_at_a_time() {
+        let mut pane = Pane::new(100);
+        pane.say("x".repeat(250), Tone::Body);
+        let (rows, cols) = (2, 50);
+        // Five rows of content in a two row pane leaves three to scroll through.
+        assert_eq!(pane.window(rows, cols).skip, 3, "showing the last two rows");
+        assert!(pane.scroll_back(1, rows, cols));
+        assert_eq!(pane.window(rows, cols).skip, 2, "one row back, not one line");
+        assert!(pane.scroll_back(99, rows, cols));
+        assert_eq!(pane.scrollback, 3, "and it stops at the top of the line");
+        assert_eq!(pane.window(rows, cols).skip, 0);
+        assert!(!pane.scroll_back(1, rows, cols), "already at the oldest row");
+    }
+
+    /// A click on the second visual row of a wrapped line has to select text
+    /// from past the wrap, not from the start of the line.
+    #[test]
+    fn a_row_of_a_wrapped_line_maps_past_the_wrap() {
+        let mut pane = Pane::new(100);
+        pane.say("x".repeat(120), Tone::Body);
+        let (rows, cols) = (3, 50);
+        assert_eq!(pane.spot_in(rows, cols, 0), Some((0, 0)));
+        assert_eq!(
+            pane.spot_in(rows, cols, 1),
+            Some((0, 50)),
+            "the second row starts fifty characters in"
+        );
+        assert_eq!(pane.spot_in(rows, cols, 2), Some((0, 100)));
+        assert_eq!(
+            pane.spot_in(rows, cols, 3),
+            None,
+            "and below the text is nothing, not the last character"
+        );
+    }
+
+    /// The thumb has to know the pane is overflowing. Counting lines, four
+    /// lines in a five row pane looked like it fitted while it was in fact
+    /// twelve rows tall.
+    #[test]
+    fn the_thumb_appears_when_wrapped_content_overflows() {
+        let mut pane = Pane::new(100);
+        for _ in 0..4 {
+            pane.say("x".repeat(150), Tone::Body);
+        }
+        assert!(
+            pane.thumb(5, 50).is_some(),
+            "twelve rows of content in a five row pane is an overflow"
+        );
+        assert!(
+            pane.thumb(5, 600).is_none(),
+            "and the same four lines in a wide pane fit, so no thumb"
+        );
+    }
+
+    /// Streamed text grows the tail line in place, so its wrapped height moves
+    /// without the line count changing. A cache keyed only on the count would
+    /// keep reporting the old height forever.
+    #[test]
+    fn streaming_into_the_tail_line_remeasures_it() {
+        let mut pane = Pane::new(100);
+        pane.stream("short", Tone::Body);
+        assert_eq!(pane.window(4, 20).skip, 0);
+        pane.stream(&"y".repeat(80), Tone::Body);
+        // The one line is now five rows tall in a twenty column box, so a two
+        // row pane has to report three rows above it.
+        assert_eq!(
+            pane.window(2, 20).skip, 3,
+            "the tail line was remeasured after it grew"
+        );
     }
 
     #[test]
@@ -1646,11 +1806,11 @@ mod tests {
         for n in 0..50 {
             pane.say(format!("{n}"), Tone::Body);
         }
-        assert!(pane.scroll_back(10, 10));
-        assert_eq!(pane.visible(10).last().unwrap().text, "39");
+        assert!(pane.scroll_back(10, 10, 200));
+        assert_eq!(pane.visible(10, 200).last().unwrap().text, "39");
         pane.say("new", Tone::Body);
         assert_eq!(pane.scrollback, 0);
-        assert_eq!(pane.visible(10).last().unwrap().text, "new");
+        assert_eq!(pane.visible(10, 200).last().unwrap().text, "new");
     }
 
     #[test]
@@ -1659,9 +1819,9 @@ mod tests {
         for n in 0..20 {
             pane.say(format!("{n}"), Tone::Body);
         }
-        assert!(pane.scroll_back(999, 10));
+        assert!(pane.scroll_back(999, 10, 200));
         assert_eq!(pane.scrollback, 10);
-        assert!(!pane.scroll_back(1, 10), "already at the oldest line");
+        assert!(!pane.scroll_back(1, 10, 200), "already at the oldest line");
         assert!(pane.scroll_forward(999));
         assert_eq!(pane.scrollback, 0);
         assert!(!pane.scroll_forward(1), "already at the live end");
@@ -1675,20 +1835,20 @@ mod tests {
         for n in 0..10 {
             pane.say(format!("{n}"), Tone::Body);
         }
-        assert_eq!(pane.thumb(10), None, "everything fits");
-        assert_eq!(pane.thumb(20), None);
+        assert_eq!(pane.thumb(10, 200), None, "everything fits");
+        assert_eq!(pane.thumb(20, 200), None);
         for n in 10..100 {
             pane.say(format!("{n}"), Tone::Body);
         }
-        let (top, size) = pane.thumb(10).expect("ninety lines do not fit in ten");
+        let (top, size) = pane.thumb(10, 200).expect("ninety lines do not fit in ten");
         assert!((size - 0.1).abs() < 0.01, "{size}");
         assert!((top - 0.9).abs() < 0.01, "at the live end: {top}");
-        pane.scroll_back(90, 10);
-        let (top, _) = pane.thumb(10).unwrap();
+        pane.scroll_back(90, 10, 200);
+        let (top, _) = pane.thumb(10, 200).unwrap();
         assert_eq!(top, 0.0, "scrolled to the very top");
         // The thumb never runs off the end of its track.
         for rows in [1, 3, 7, 10, 99] {
-            if let Some((top, size)) = pane.thumb(rows) {
+            if let Some((top, size)) = pane.thumb(rows, 200) {
                 assert!(top + size <= 1.001, "{top} + {size}");
             }
         }
@@ -1710,7 +1870,7 @@ mod tests {
             after: "ONE\nTWO\nTHREE".into(),
             call_id: None,
         });
-        let lines = state.files[0].pane.visible(usize::MAX);
+        let lines = state.files[0].pane.visible(usize::MAX, 200);
         let numbered: Vec<(Option<u32>, &str)> = lines
             .iter()
             .map(|l| (l.number, l.text.as_str()))
@@ -1734,19 +1894,19 @@ mod tests {
         for n in 0..30 {
             pane.say(format!("x = {n}"), Tone::Body);
         }
-        assert!(pane.fence_before(10).open(), "the block is still open");
+        assert!(pane.fence_before(10, 200).open(), "the block is still open");
         // The window is the lines at the end; `before` is everything above it,
         // so the closing fence has to be above the window to count as closed.
         pane.say("```", Tone::Body);
         pane.say("back to prose", Tone::Body);
-        assert!(!pane.fence_before(1).open(), "and now it is closed");
-        assert!(pane.fence_before(2).open(), "the window still holds the fence");
+        assert!(!pane.fence_before(1, 200).open(), "and now it is closed");
+        assert!(pane.fence_before(2, 200).open(), "the window still holds the fence");
         // What the human typed is not the model's Markdown, so it cannot open
         // a block that the model then has to close.
         let mut typed = Pane::new(100);
         typed.say("run ```this```", Tone::Bright);
         typed.say("prose", Tone::Body);
-        assert!(!typed.fence_before(1).open());
+        assert!(!typed.fence_before(1, 200).open());
     }
 
     #[test]

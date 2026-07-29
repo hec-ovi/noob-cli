@@ -28,6 +28,8 @@ pub const TAB_H: f32 = 22.0;
 pub const RESIZE_EDGE: f32 = 6.0;
 const GAP: f32 = 6.0;
 const PAD: f32 = 9.0;
+/// Columns the file view spends on its line-number gutter, on every row.
+const GUTTER: usize = 4;
 const SMALL: f32 = 12.0;
 const SCROLL_W: f32 = 4.0;
 const BUTTON_W: f32 = 26.0;
@@ -431,6 +433,22 @@ pub struct Frame<'a> {
     pub avatar: Option<(&'a crate::avatar::Avatar, u64)>,
 }
 
+impl Frame<'_> {
+    /// The font size and column width a view is actually drawn with.
+    ///
+    /// Talk uses the transcript size and every other pane the smaller one.
+    /// Measuring a pane with the wrong one of the two is what put the
+    /// selection band and the hit test off the glyphs they were describing,
+    /// so nothing may reach for `body_size` or `pane_size` directly when the
+    /// view is a variable.
+    pub fn metrics_of(&self, view: View) -> (f32, f32) {
+        match view {
+            View::Talk => (self.body_size, self.column),
+            _ => (self.pane_size, self.pane_column),
+        }
+    }
+}
+
 pub fn build(frame: &Frame) -> Scene {
     let mut scene = Scene::default();
     let layout = frame.layout;
@@ -652,26 +670,49 @@ fn selection_band(scene: &mut Scene, frame: &Frame, panel: Panel, showing: Optio
     let Some(pane) = frame.state.pane_of(view) else {
         return;
     };
+    // The pane's own size, not the pane size for everything: Talk is drawn at
+    // the transcript size, and banding it at the smaller one is what put the
+    // highlight off the glyphs it was supposed to cover.
+    let (size, column) = frame.metrics_of(view);
     let content = panel.inset(PAD);
-    let rows = frame.layout.rows(panel, frame.pane_size);
-    let line_h = Text::line_for(frame.pane_size);
-    let column = frame.pane_column;
-    let first = pane.showing_from(rows);
-    for row in 0..rows {
-        let number = first + row;
+    let rows = frame.layout.rows(panel, size);
+    let cols = cols_of(panel, column);
+    let line_h = Text::line_for(size);
+    let window = pane.window(rows, cols);
+    let first = pane.showing_from(rows, cols);
+    for step in 0..window.count {
+        let number = first + step;
         let Some(line) = pane.line(number) else {
             continue;
         };
-        let Some((from, to)) = selection.columns_on(number, line.text.chars().count()) else {
+        let chars = line.text.chars().count();
+        let Some((from, to)) = selection.columns_on(number, chars) else {
             continue;
         };
-        let x = content.x + from as f32 * column;
-        let width = ((to - from) as f32 * column).min(content.x + content.w - x);
-        let y = content.y + row as f32 * line_h;
-        if width <= 0.0 || y + line_h > content.y + content.h {
+        let Some((top, height)) = pane.band_of(rows, cols, number) else {
             continue;
+        };
+        // A wrapped line needs one rectangle per visual row, each covering only
+        // the part of the selection that lands on that row. The first line in
+        // the window may start partway down, which is what `skip` records.
+        let from_row = if step == 0 { window.skip } else { 0 };
+        for i in 0..height {
+            let wrapped = from_row + i;
+            let row_start = wrapped * cols;
+            let row_end = (row_start + cols).min(chars.max(row_start));
+            let a = from.max(row_start);
+            let b = to.min(row_end);
+            if a >= b {
+                continue;
+            }
+            let x = content.x + (a - row_start) as f32 * column;
+            let width = ((b - a) as f32 * column).min(content.x + content.w - x);
+            let y = content.y + (top + i) as f32 * line_h;
+            if width <= 0.0 || y + line_h > content.y + content.h {
+                continue;
+            }
+            scene.rect(Panel::new(x, y, width, line_h).fill(frame.skin.select));
         }
-        scene.rect(Panel::new(x, y, width, line_h).fill(frame.skin.select));
     }
 }
 
@@ -682,11 +723,12 @@ fn text_box(scene: &mut Scene, frame: &Frame, panel: Panel, size: f32, runs: Vec
 fn talk(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let (skin, state) = (frame.skin, frame.state);
     let rows = frame.layout.rows(panel, frame.body_size);
+    let cols = cols_of(panel, frame.column);
     let mut runs = Vec::new();
     // A window that starts inside a fenced block has to know it is looking at
     // code, so the state is carried in from the lines above it.
-    let mut fence = state.talk.fence_before(rows);
-    for line in state.talk.visible(rows) {
+    let mut fence = state.talk.fence_before(rows, cols);
+    for line in state.talk.visible(rows, cols) {
         match line.tone {
             // Only the model's prose is Markdown. What the human typed and
             // what the harness noted are shown as written.
@@ -695,20 +737,29 @@ fn talk(scene: &mut Scene, frame: &Frame, panel: Panel) {
         }
         runs.push(Run::plain("\n"));
     }
-    text_box(scene, frame, panel, frame.body_size, runs);
-    scrollbar(scene, skin, panel, state.talk.thumb(rows));
+    // The window may start partway down a wrapped line rather than dropping
+    // it, so the shaped buffer is scrolled by the rows that sit above.
+    scene.text(
+        Text::rich(runs, panel.inset(PAD), frame.body_size, frame.skin.body)
+            .scrolled(state.talk.window(rows, cols).skip as f32),
+    );
+    scrollbar(scene, skin, panel, state.talk.thumb(rows, cols));
 }
 
 fn activity(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let (skin, state) = (frame.skin, frame.state);
     let rows = frame.layout.rows(panel, frame.pane_size);
+    let cols = cols_of(panel, frame.pane_column);
     let mut runs = Vec::new();
-    for line in state.activity.visible(rows) {
+    for line in state.activity.visible(rows, cols) {
         runs.push(Run::tinted(&line.text, skin.tone(line.tone)));
         runs.push(Run::plain("\n"));
     }
-    text_box(scene, frame, panel, frame.pane_size, runs);
-    scrollbar(scene, skin, panel, state.activity.thumb(rows));
+    scene.text(
+        Text::rich(runs, panel.inset(PAD), frame.pane_size, frame.skin.body)
+            .scrolled(state.activity.window(rows, cols).skip as f32),
+    );
+    scrollbar(scene, skin, panel, state.activity.thumb(rows, cols));
 }
 
 fn plan(scene: &mut Scene, frame: &Frame, panel: Panel) {
@@ -951,16 +1002,26 @@ fn files(scene: &mut Scene, frame: &Frame, panel: Panel) {
     // between two of them.
     let content = body.inset(PAD);
     let line = Text::line_for(frame.pane_size);
-    let shown = file.pane.visible(rows);
-    for (row, entry) in shown.iter().enumerate() {
+    // Every row carries a four column gutter, so the text wraps in what is
+    // left rather than in the full width of the box.
+    let cols = cols_of(body, frame.pane_column).saturating_sub(GUTTER).max(1);
+    let first = file.pane.showing_from(rows, cols);
+    let shown = file.pane.visible(rows, cols);
+    for (step, entry) in shown.iter().enumerate() {
         if !matches!(entry.tone, Tone::Call(_)) {
             continue;
         }
-        let y = content.y + row as f32 * line;
-        if y + line > content.y + content.h {
+        // A header that wraps gets a band as tall as it actually is, taken
+        // from the same arithmetic the text is laid out with.
+        let Some((top, height)) = file.pane.band_of(rows, cols, first + step) else {
+            continue;
+        };
+        let y = content.y + top as f32 * line;
+        let tall = height as f32 * line;
+        if y + tall > content.y + content.h {
             break;
         }
-        scene.rect(Panel::new(body.x + 1.0, y, (body.w - 2.0).max(1.0), line).fill(skin.strip));
+        scene.rect(Panel::new(body.x + 1.0, y, (body.w - 2.0).max(1.0), tall).fill(skin.strip));
     }
 
     let syntax = crate::syntax::for_path(&file.path);
@@ -987,7 +1048,7 @@ fn files(scene: &mut Scene, frame: &Frame, panel: Panel) {
         runs.push(Run::plain("\n"));
     }
     scene.text(Text::rich(runs, content, frame.pane_size, skin.body));
-    scrollbar(scene, skin, body, file.pane.thumb(rows));
+    scrollbar(scene, skin, body, file.pane.thumb(rows, cols));
 }
 
 /// The tab under the pointer while it is being dragged, so the drag has
@@ -1106,6 +1167,15 @@ fn status_bar(scene: &mut Scene, frame: &Frame) {
 /// How many characters fit across a box of this width.
 fn columns_in(width: f32, column: f32) -> usize {
     ((width / column.max(1.0)).floor() as usize).max(1)
+}
+
+/// How many characters fit across a panel's content box.
+///
+/// The one place a pane's width becomes a column count. Wrapping, hit testing
+/// and the selection band all have to agree on this number, so they all ask
+/// here rather than each dividing by the column width themselves.
+pub fn cols_of(panel: Panel, column: f32) -> usize {
+    columns_in(panel.inset(PAD).w, column)
 }
 
 /// How tall the prompt has to be to hold `chars` characters.
@@ -1536,7 +1606,12 @@ mod tests {
         // would cover text on the first and last lines that is not selected.
         assert_eq!(bands.len(), 3, "{bands:?}");
         // Consecutive rows, top to bottom, each one line tall.
-        let line = Text::line_for(13.0);
+        //
+        // At the size Talk is *drawn* with, not the pane size. This assertion
+        // used to read `line_for(13.0)` while the transcript rendered at 14.0,
+        // so it passed while the highlight sat a growing fraction of a row
+        // above the glyphs it was supposed to cover.
+        let line = Text::line_for(14.0);
         let mut ys: Vec<f32> = bands.iter().map(|b| b[1]).collect();
         ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
         for pair in ys.windows(2) {

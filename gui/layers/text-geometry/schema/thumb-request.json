@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Thumb request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "heights",
+    "rows",
+    "scrollback"
+  ],
+  "properties": {
+    "heights": {
+      "$ref": "heights.json"
+    },
+    "rows": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "scrollback": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

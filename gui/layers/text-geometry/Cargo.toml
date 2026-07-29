@@ -1,0 +1,11 @@
+[package]
+name = "text-geometry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No dependencies, on purpose. This layer is arithmetic over character counts,
+# so it builds and tests without a GPU, a font, or a window.
+[dependencies]

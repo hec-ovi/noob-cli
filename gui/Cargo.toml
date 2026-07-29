@@ -6,7 +6,7 @@
 # they are kept apart and share exactly one thing: `crates/noob-proto`, by path.
 [workspace]
 resolver = "2"
-members = ["noob-gpu", "noob-draw", "clippy", "asciify"]
+members = ["noob-gpu", "noob-draw", "clippy", "asciify", "layers/text-geometry"]
 
 [workspace.package]
 version = "0.6.0"
@@ -19,6 +19,7 @@ repository = "https://github.com/hec-ovi/noob-cli"
 noob-proto = { path = "../crates/noob-proto" }
 noob-gpu = { path = "noob-gpu" }
 noob-draw = { path = "noob-draw" }
+text-geometry = { path = "layers/text-geometry" }
 wgpu = "30"
 winit = "0.30"
 glyphon = "0.12"

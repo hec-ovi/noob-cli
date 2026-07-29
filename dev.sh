@@ -99,6 +99,18 @@ case "${1:-}" in
   gui-test)
     cargo test --manifest-path gui/Cargo.toml
     cargo clippy --manifest-path gui/Cargo.toml --all-targets -- -D warnings
+    # Layer contract tests: the Rust tests above prove behavior, these prove
+    # that what crosses a layer boundary matches its declared schema. Skipped
+    # rather than failed where jsonschema is absent, so a missing dev-only
+    # Python package cannot block a build.
+    for contract in gui/layers/*/tests/contract.py; do
+      [ -f "$contract" ] || continue
+      if python3 -c 'import jsonschema' 2>/dev/null; then
+        python3 "$contract" || exit 1
+      else
+        echo "skipped $contract (pip install jsonschema to run it)"
+      fi
+    done
     ;;
   gui-check)
     cargo build --release --manifest-path gui/Cargo.toml

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Row request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "heights",
+    "window",
+    "cols",
+    "row"
+  ],
+  "properties": {
+    "heights": {
+      "$ref": "heights.json"
+    },
+    "window": {
+      "$ref": "window.json"
+    },
+    "cols": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "row": {
+      "description": "Visual row counted from the top of the viewport.",
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

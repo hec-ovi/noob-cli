@@ -361,21 +361,38 @@ impl App {
     /// still resolve after it has scrolled.
     fn spot_at(&self, layout: &view::Layout, space: Space, view: View) -> Option<select::Spot> {
         let pane = self.state.pane_of(view)?;
-        let (over, row, column) = layout.cell(
-            self.cursor.x as f32,
-            self.cursor.y as f32,
-            self.config.pane_font_size,
-            self.pane_column,
-        )?;
+        // Talk is drawn at the transcript size, not the pane size. Hit testing
+        // it with the smaller one put every click a growing number of rows
+        // away from the character under the pointer.
+        let (size, column) = self.metrics_of(view);
+        let (over, row, at) =
+            layout.cell(self.cursor.x as f32, self.cursor.y as f32, size, column)?;
         if over != space {
             return None;
         }
-        let rows = layout.rows(layout.placed(space).body, self.config.pane_font_size);
-        let line = pane.showing_from(rows) + row;
-        // Below the last line, the selection runs to the end of the text
-        // rather than to a line that does not exist.
-        let line = line.min(pane.last().saturating_sub(1));
-        Some(select::Spot::new(line, column))
+        let body = layout.placed(space).body;
+        let rows = layout.rows(body, size);
+        let cols = view::cols_of(body, column);
+        let Some((line, offset)) = pane.spot_in(rows, cols, row) else {
+            // Below the last line, the selection runs to the end of the text
+            // rather than to a line that does not exist.
+            let last = pane.last().saturating_sub(1);
+            let end = pane.line(last).map_or(0, |l| l.text.chars().count());
+            return Some(select::Spot::new(last, end));
+        };
+        // `offset` is where this visual row starts inside its logical line, so
+        // a click on the second row of a wrapped line lands past the wrap.
+        Some(select::Spot::new(line, offset + at))
+    }
+
+    /// The font size and column width a view is drawn with. The window-side
+    /// twin of `view::Frame::metrics_of`, for the paths that run before a
+    /// frame exists.
+    fn metrics_of(&self, view: View) -> (f32, f32) {
+        match view {
+            View::Talk => (self.config.font_size, self.column),
+            _ => (self.config.pane_font_size, self.pane_column),
+        }
     }
 
     /// Extend the selection to wherever the pointer is now.
@@ -623,11 +640,14 @@ impl App {
         let Some((view, panel)) = self.under_pointer(&layout) else {
             return;
         };
-        let size = match view {
-            View::Talk => self.config.font_size,
-            _ => self.config.pane_font_size,
-        };
+        let (size, column) = self.metrics_of(view);
         let rows = layout.rows(panel, size).saturating_sub(1).max(1);
+        // The file view spends four columns per row on its gutter, so its text
+        // wraps in a narrower box than the panel is wide.
+        let cols = match view {
+            View::Files => view::cols_of(panel, column).saturating_sub(4).max(1),
+            _ => view::cols_of(panel, column),
+        };
         let by = ((rows as f32 * pages.abs()).round() as usize).max(1);
         let open_file = self.state.open_file;
         let pane = match view {
@@ -644,7 +664,7 @@ impl App {
             return;
         };
         self.dirty |= if pages > 0.0 {
-            pane.scroll_back(by, rows)
+            pane.scroll_back(by, rows, cols)
         } else {
             pane.scroll_forward(by)
         };

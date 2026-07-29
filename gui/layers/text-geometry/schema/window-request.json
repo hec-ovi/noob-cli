@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Window request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "heights",
+    "rows",
+    "scrollback"
+  ],
+  "properties": {
+    "heights": {
+      "$ref": "heights.json"
+    },
+    "rows": {
+      "description": "Height of the viewport in visual rows. Zero is legal and yields an empty window.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "scrollback": {
+      "description": "Visual rows back from the last row. Zero follows the live end. A value past the top is clamped rather than refused, because narrowing the window legitimately makes an older value too large.",
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

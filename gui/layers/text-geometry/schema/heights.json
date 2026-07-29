@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Wrapped heights",
+  "description": "How many visual rows each logical line occupies, in the same order as the lines that produced them. Never zero: an empty line still occupies one row, because a blank line is a paragraph break.",
+  "type": "array",
+  "items": {
+    "type": "integer",
+    "minimum": 1
+  }
+}

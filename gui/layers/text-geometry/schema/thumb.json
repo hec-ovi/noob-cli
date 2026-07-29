@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Thumb",
+  "description": "Where the scrollbar thumb sits and how tall it is, as fractions of the track, or null when everything fits. Measured in visual rows, so a pane of wrapped lines gets a thumb matching how far it can actually scroll.",
+  "oneOf": [
+    {
+      "type": "null"
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "top",
+        "size"
+      ],
+      "properties": {
+        "top": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "size": {
+          "description": "Clamped to a readable minimum of 0.06 of the track.",
+          "type": "number",
+          "minimum": 0.06,
+          "maximum": 1
+        }
+      }
+    }
+  ]
+}
