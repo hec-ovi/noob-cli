@@ -43,6 +43,12 @@ const INPUT_PAD: f32 = 6.0;
 /// corner. One corner, so the shape reads as a mark rather than as a rounded
 /// box, and always the same corner so two panels side by side still line up.
 const CUT: f32 = 10.0;
+/// The accent line along the top of the tab that is showing. Two pixels: one
+/// reads as the hairline every other edge in the window is, and the tab has to
+/// say which view it is holding from further away than that.
+const ACCENT_H: f32 = 2.0;
+/// How far the rule between two tabs stops short of the strip, top and bottom.
+const RULE_INSET: f32 = 5.0;
 
 /// Something the pointer can land on. Returned by [`Layout::hit`] so every
 /// click is resolved in one place instead of in a chain of `if` in the event
@@ -591,6 +597,44 @@ fn panel_edge(panel: Panel, rgba: [f32; 4]) -> Rect {
     panel_fill(panel, rgba).stroke(1.0)
 }
 
+/// One tab of a strip, before its label goes on.
+///
+/// The tab that is showing is a block: its own fill, the whole height of the
+/// strip so the fill covers the strip's bottom hairline and the block joins the
+/// pane under it, and an accent line along the top in the colour of what it is
+/// holding. The others get a short rule and no fill, so they sit back in the
+/// strip instead of reading as a row of boxes competing with the block.
+fn tab_block(scene: &mut Scene, skin: &Skin, tab: Panel, active: bool, accent: [f32; 4]) {
+    if !active {
+        let inset = RULE_INSET.min(tab.h * 0.25);
+        let tall = (tab.h - 2.0 * inset).max(1.0);
+        scene.rect(Panel::new(tab.x, tab.y + inset, 1.0, tall).fill(skin.edge));
+        return;
+    }
+    scene.rect(tab.fill(skin.tab));
+    scene.rect(Panel::new(tab.x, tab.y, tab.w, ACCENT_H.min(tab.h)).fill(accent));
+}
+
+/// The hairline along the bottom of a tab strip, broken where the showing tab
+/// stands on it.
+///
+/// The block cannot simply be drawn over the line: every fill in this window is
+/// translucent, so a line under one still shows through it, and a line running
+/// across the block makes the tab read as a cell in the strip rather than as
+/// the front of the pane below it.
+fn strip_floor(scene: &mut Scene, skin: &Skin, strip: Panel, joined: Option<Panel>) {
+    let right = strip.x + strip.w;
+    let (from, to) = match joined {
+        Some(tab) => (tab.x.max(strip.x), (tab.x + tab.w).min(right)),
+        None => (right, right),
+    };
+    for (start, end) in [(strip.x, from), (to, right)] {
+        if end - start > 0.5 {
+            scene.rect(Panel::new(start, strip.y, end - start, strip.h).bottom_edge(skin.edge));
+        }
+    }
+}
+
 fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
     let skin = frame.skin;
     let placed = frame.layout.placed(space);
@@ -603,16 +647,19 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
     // drop target is a place rather than a guess.
     let target = frame.drag.is_some_and(|drag| drag.onto == Some(space));
     scene.rect(placed.strip.fill(skin.strip));
-    scene.rect(placed.strip.bottom_edge(skin.edge));
+    // A folded space has no pane for its tab to join, so the strip keeps its
+    // floor: the block would otherwise open onto whatever is behind the window.
+    let joined = placed
+        .tabs
+        .iter()
+        .find(|(view, _)| slot.active() == Some(*view))
+        .map(|(_, panel)| *panel)
+        .filter(|_| !slot.folded && placed.body.h >= 2.0);
+    strip_floor(scene, skin, placed.strip, joined);
     for (view, panel) in &placed.tabs {
         let active = slot.active() == Some(*view);
         let lifted = frame.drag.is_some_and(|drag| drag.view == *view);
-        if active {
-            scene.rect(panel.fill(skin.panel));
-            scene.rect(panel.top_edge(skin.edge_focus));
-        } else {
-            scene.rect(panel.left_edge(skin.edge));
-        }
+        tab_block(scene, skin, *panel, active, skin.view(*view));
         let color = match (lifted, active) {
             (true, _) => skin.dim,
             (_, true) => skin.bright,
@@ -985,7 +1032,12 @@ fn files(scene: &mut Scene, frame: &Frame, panel: Panel) {
     // The inner tab strip, one per file, along the top of this space's body.
     let strip = Panel::new(panel.x, panel.y, panel.w, TAB_H);
     scene.rect(strip.fill(skin.strip));
-    scene.rect(strip.bottom_edge(skin.edge));
+    let joined = layout
+        .file_tabs
+        .iter()
+        .find(|(index, _)| *index == state.open_file)
+        .map(|(_, tab)| *tab);
+    strip_floor(scene, skin, strip, joined);
     if layout.file_tabs.is_empty() {
         scene.text(Text::rich(
             vec![Run::tinted("no files touched yet", skin.dim)],
@@ -999,10 +1051,9 @@ fn files(scene: &mut Scene, frame: &Frame, panel: Panel) {
             continue;
         };
         let active = *index == state.open_file;
-        if active {
-            scene.rect(tab.fill(skin.panel));
-            scene.rect(tab.top_edge(skin.edge_focus));
-        }
+        // The same block as an outer tab, in the file view's own accent: these
+        // are files rather than views, and the strip they are in belongs to it.
+        tab_block(scene, skin, *tab, active, skin.view(View::Files));
         // A file compaction dropped is still worth reading; it is just no
         // longer what the agent is holding, and the tab says which.
         let color = match (active, file.closed) {
@@ -1537,6 +1588,157 @@ mod tests {
                 );
                 assert!(placed.body.y + placed.body.h <= h + 0.01, "{space:?}");
             }
+        }
+    }
+
+    /// Whether a rectangle of this colour is drawn exactly over `box_`, at
+    /// `height` from its top.
+    fn covered(out: &Rendered, box_: Panel, height: f32, want: [f32; 4]) -> bool {
+        out.scene.rects.iter().any(|rect| {
+            let [x, y, w, h] = rect.xywh();
+            (x - box_.x).abs() < 0.01
+                && (y - box_.y).abs() < 0.01
+                && (w - box_.w).abs() < 0.01
+                && (h - height).abs() < 0.01
+                && rect.rgba() == want
+        })
+    }
+
+    /// Nothing but hairlines is drawn inside this tab, which is what a tab
+    /// sitting back in its strip rather than reading as a box looks like. The
+    /// rule beside it and the strip's own floor under it are both one pixel.
+    fn sits_back(out: &Rendered, tab: Panel) -> bool {
+        out.scene.rects.iter().all(|rect| {
+            let [x, y, w, h] = rect.xywh();
+            let inside = x >= tab.x - 0.01
+                && x + w <= tab.x + tab.w + 0.01
+                && y >= tab.y - 0.01
+                && y + h <= tab.y + tab.h + 0.01;
+            !inside || w <= 1.01 || h <= 1.01
+        })
+    }
+
+    /// The showing tab is a block: a fill of its own over the whole strip
+    /// height, and an accent line on top in the colour of the view it holds.
+    /// The line used to be the focus colour, which is one colour for the whole
+    /// window, so a strip said which tab was active and never which view.
+    #[test]
+    fn the_showing_tab_is_a_block_with_its_view_s_accent_on_top() {
+        let dock = Dock::new();
+        let out = render(&busy_state(), 1400.0, 900.0, &dock, &["a.rs"]);
+        for space in Space::ALL {
+            let Some(active) = dock.slot(space).active() else {
+                continue;
+            };
+            let (_, tab) = out
+                .layout
+                .placed(space)
+                .tabs
+                .iter()
+                .find(|(view, _)| *view == active)
+                .expect("the showing view has a tab");
+            assert!(
+                covered(&out, *tab, tab.h, out.skin.tab),
+                "{space:?}: {active:?} is not a block"
+            );
+            assert!(
+                covered(&out, *tab, ACCENT_H, out.skin.view(active)),
+                "{space:?}: {active:?} has no accent line"
+            );
+            // And the accent is the view's own, not one colour for every strip.
+            assert_ne!(out.skin.view(active), out.skin.edge_focus);
+            assert!(
+                floor_is_broken_under(&out, *tab),
+                "{space:?}: the strip's floor runs across {active:?}"
+            );
+        }
+    }
+
+    /// Whether the strip's bottom hairline stops where this tab starts, so the
+    /// block opens onto the pane below it.
+    fn floor_is_broken_under(out: &Rendered, tab: Panel) -> bool {
+        !out.scene.rects.iter().any(|rect| {
+            let [x, y, w, h] = rect.xywh();
+            (h - 1.0).abs() < 0.01
+                && (y - (tab.y + tab.h - 1.0)).abs() < 0.01
+                && x < tab.x + tab.w - 0.5
+                && x + w > tab.x + 0.5
+        })
+    }
+
+    /// A tab that is not showing has no fill at all, so the strip reads as one
+    /// recessed surface with the block sitting in it rather than as a row of
+    /// boxes competing with it.
+    #[test]
+    fn a_tab_that_is_not_showing_sits_back_in_the_strip() {
+        let dock = Dock::new();
+        let out = render(&busy_state(), 1400.0, 900.0, &dock, &["a.rs"]);
+        let mut checked = 0;
+        for space in Space::ALL {
+            let active = dock.slot(space).active();
+            for (view, tab) in &out.layout.placed(space).tabs {
+                if Some(*view) == active {
+                    continue;
+                }
+                checked += 1;
+                assert!(sits_back(&out, *tab), "{view:?} is drawn as a box");
+                let rule = out
+                    .scene
+                    .rects
+                    .iter()
+                    .find(|rect| {
+                        let [x, _, w, _] = rect.xywh();
+                        (x - tab.x).abs() < 0.01 && (w - 1.0).abs() < 0.01
+                    })
+                    .unwrap_or_else(|| panic!("{view:?} has no rule beside it"));
+                let [_, y, _, h] = rule.xywh();
+                assert!(
+                    y > tab.y && y + h < tab.y + tab.h,
+                    "{view:?}: the rule runs the full height of the strip: {:?}",
+                    rule.xywh()
+                );
+            }
+        }
+        assert!(checked >= 4, "only {checked} tabs were not showing");
+    }
+
+    /// The file view's inner tabs get the same block, in the file view's own
+    /// accent. Two strips styled differently in one window read as two windows.
+    #[test]
+    fn the_open_file_tab_is_a_block_in_the_file_view_s_accent() {
+        let mut state = busy_state();
+        state.apply(noob_proto::Event::FileEdit {
+            path: "src/main.rs".into(),
+            span: noob_proto::Span {
+                start: 1,
+                end: 1,
+                kind: None,
+                name: None,
+            },
+            before: "fn main() {}".into(),
+            after: "fn main() { go() }".into(),
+            call_id: Some("c5".into()),
+        });
+        let out = render(&state, 1400.0, 900.0, &Dock::new(), &["calc.py", "main.rs"]);
+        assert_eq!(out.layout.file_tabs.len(), 2);
+        for (index, tab) in &out.layout.file_tabs {
+            let active = *index == state.open_file;
+            assert_eq!(
+                covered(&out, *tab, tab.h, out.skin.tab),
+                active,
+                "file tab {index} is filled when it should not be, or the other way round"
+            );
+            assert_eq!(
+                covered(&out, *tab, ACCENT_H, out.skin.view(View::Files)),
+                active,
+                "file tab {index} and its accent line disagree about being open"
+            );
+            assert_eq!(sits_back(&out, *tab), !active, "file tab {index}");
+            assert_eq!(
+                floor_is_broken_under(&out, *tab),
+                active,
+                "file tab {index} and the strip's floor disagree about being open"
+            );
         }
     }
 

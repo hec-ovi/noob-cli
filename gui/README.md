@@ -40,7 +40,9 @@ square forever.
 
 Three spaces: a wide one on the left and two stacked on the right. Every view is
 a tab in one of them, and **dragging its tab onto another space moves it there**.
-A space you empty gives its room to its neighbour.
+A space you empty gives its room to its neighbour. Each view has a colour of its
+own: the tab showing it is a filled block with that colour as a line along its
+top, so which view a space is holding is answerable without reading the labels.
 
 | view | carries |
 |---|---|
@@ -154,13 +156,15 @@ holding a frame for a second costs one redraw rather than sixty. Point
 `~/.config/noob/clippy.conf`, written with the defaults on first run and
 commented. Opacity, both font sizes, how tall the prompt may grow, which panes
 exist, the avatar, and the whole palette: the eight base colors, one per tool,
-and the five the highlighter uses for code. A key it does not recognise is
-reported in the ACTIVITY pane rather than ignored.
+one per view, and the five the highlighter uses for code. A key it does not
+recognise is reported in the ACTIVITY pane rather than ignored.
 
-`theme = noob | amber | ice | plum` sets every color at once. The colors ship
-as commented defaults so the theme has something to set, so uncomment one line
-to keep the theme and override that single color. `clippy --set theme=amber`
-makes the same edit from a terminal without touching the comments.
+`theme = noob | amber | ice | plum` sets every color at once. The tool and view
+colors name the thing rather than the window, so a theme leaves them alone. The
+colors ship as commented defaults so the theme has something to set, so
+uncomment one line to keep the theme and override that single color.
+`clippy --set theme=amber` makes the same edit from a terminal without touching
+the comments.
 
 Opacity defaults to 88%. Lower it to see more of your desktop through the
 reading surface; below about 60% a busy wallpaper starts competing with the

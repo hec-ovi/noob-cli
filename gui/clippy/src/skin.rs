@@ -14,6 +14,7 @@
 //! returns the same palette at full opacity, which looks deliberate.
 
 use crate::config::Config;
+use crate::dock::View;
 use crate::state::{Kind, Tone};
 
 #[derive(Clone, Copy)]
@@ -26,6 +27,10 @@ pub struct Skin {
     pub panel: [f32; 4],
     /// A tab strip, a shade darker than the panel under it.
     pub strip: [f32; 4],
+    /// The tab that is showing. Lighter than the strip and less solid than it,
+    /// so the block stands off the strip whatever is behind the window: over a
+    /// dark desktop the colour is what shows it, over a bright one the alpha is.
+    pub tab: [f32; 4],
     pub edge: [f32; 4],
     pub edge_focus: [f32; 4],
     pub input: [f32; 4],
@@ -53,6 +58,11 @@ pub struct Skin {
     /// One colour per tool, in the order [`Kind`] declares them.
     pub tools: [[u8; 4]; 14],
 
+    /// One colour per view, in the order [`View`] declares them. A fill rather
+    /// than a text tint: it is drawn as the accent line along the top of the
+    /// tab that is showing.
+    pub views: [[f32; 4]; 8],
+
     pub comment: [u8; 4],
     pub string: [u8; 4],
     pub number: [u8; 4],
@@ -73,6 +83,19 @@ fn text(color: [u8; 3]) -> [u8; 4] {
     [color[0], color[1], color[2], 255]
 }
 
+/// A colour part of the way to another one. A surface that sits between two of
+/// the palette's own colours has to be derived from them, or a theme moves the
+/// window and leaves that one surface behind.
+fn mix(from: [u8; 3], to: [u8; 3], amount: f32) -> [u8; 3] {
+    let amount = amount.clamp(0.0, 1.0);
+    let blend = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * amount).round() as u8;
+    [
+        blend(from[0], to[0]),
+        blend(from[1], to[1]),
+        blend(from[2], to[2]),
+    ]
+}
+
 impl Default for Skin {
     fn default() -> Skin {
         Skin::from(&Config::default())
@@ -89,6 +112,9 @@ impl Skin {
             bar: rgba(config.bar, (o + 0.25).min(1.0)),
             panel: rgba(config.panel, o * 0.86),
             strip: rgba(config.panel, o * 0.97),
+            // Part of the way to the bar, which is the one chrome colour the
+            // window already has, so the block belongs to whatever theme set it.
+            tab: rgba(mix(config.panel, config.bar, 0.6), o * 0.86),
             edge: rgba(config.dim, 0.65),
             edge_focus: rgba(config.accent, 1.0),
             input: rgba(config.panel, (o + 0.12).min(1.0)),
@@ -116,6 +142,10 @@ impl Skin {
             // in, so the two cannot drift.
             tools: config.tools.map(text),
 
+            // Ordered by `View::ALL`, which is the order the config reads them
+            // in, so the two cannot drift.
+            views: config.views.map(|color| rgba(color, 1.0)),
+
             comment: text(config.syntax_comment),
             string: text(config.syntax_string),
             number: text(config.syntax_number),
@@ -133,6 +163,7 @@ impl Skin {
             &mut self.bar,
             &mut self.panel,
             &mut self.strip,
+            &mut self.tab,
             &mut self.input,
         ] {
             fill[3] = 1.0;
@@ -156,6 +187,13 @@ impl Skin {
     pub fn kind(&self, kind: Kind) -> [u8; 4] {
         let at = Kind::ALL.iter().position(|k| *k == kind).unwrap_or(13);
         self.tools[at]
+    }
+
+    /// The accent a view is marked with. Indexed by position in [`View::ALL`],
+    /// the way tools are, so the two tables are read the same way.
+    pub fn view(&self, view: View) -> [f32; 4] {
+        let at = View::ALL.iter().position(|v| *v == view).unwrap_or(0);
+        self.views[at]
     }
 
     pub fn token(&self, token: crate::syntax::Token) -> Option<[u8; 4]> {
@@ -222,6 +260,7 @@ mod tests {
             skin.bar,
             skin.panel,
             skin.strip,
+            skin.tab,
             skin.input,
         ] {
             assert_eq!(fill[3], 1.0, "{fill:?}");
@@ -261,6 +300,70 @@ mod tests {
         assert_eq!(skin.kind(Kind::Other), skin.body, "the catch-all is prose");
         assert_eq!(skin.kind(Kind::Bash), skin.tools[0]);
         assert_eq!(skin.kind(Kind::Plan), skin.tools[12]);
+    }
+
+    /// The tab that is showing has to read as a block over any desktop. Lighter
+    /// than the strip covers a dark one; less solid than it covers a bright one,
+    /// where more of the desktop coming through is what makes it lighter.
+    #[test]
+    fn the_showing_tab_is_lighter_than_the_strip_it_sits_in() {
+        let over_black = |c: [f32; 4]| (c[0] * 0.2 + c[1] * 0.7 + c[2] * 0.1) * c[3];
+        for name in crate::config::THEMES {
+            let skin = Skin::from(&crate::config::theme(name).expect(name));
+            assert!(
+                over_black(skin.tab) > over_black(skin.strip),
+                "{name}: {:?} is not lighter than {:?}",
+                skin.tab,
+                skin.strip
+            );
+            assert!(skin.tab[3] < skin.strip[3], "{name}: and less solid");
+        }
+    }
+
+    /// The table is indexed by position, so it has to have one entry for every
+    /// view or a new view silently takes another one's accent.
+    #[test]
+    fn the_palette_has_one_entry_per_view() {
+        let skin = Skin::default();
+        assert_eq!(skin.views.len(), View::ALL.len());
+        assert_eq!(skin.view(View::Talk), skin.views[0]);
+        assert_eq!(skin.view(View::Avatar), skin.views[7]);
+    }
+
+    /// An accent nobody can tell from its neighbour's says nothing about which
+    /// view is showing, which is the whole reason the tint exists.
+    #[test]
+    fn every_view_accent_is_visible_and_unlike_the_others() {
+        let skin = Skin::default();
+        let apart = |a: [f32; 4], b: [f32; 4]| {
+            (0..3).map(|i| (a[i] - b[i]).abs() * 255.0).sum::<f32>()
+        };
+        for (i, a) in View::ALL.iter().enumerate() {
+            let color = skin.view(*a);
+            assert_eq!(color[3], 1.0, "{a:?}");
+            assert!(
+                color[0] + color[1] + color[2] > 1.5,
+                "{a:?} is too dark to see against the strip"
+            );
+            for b in &View::ALL[i + 1..] {
+                let distance = apart(color, skin.view(*b));
+                assert!(distance > 60.0, "{a:?} and {b:?} are {distance} apart");
+            }
+        }
+    }
+
+    /// A view hue names the view, so a theme moves the window around it. The
+    /// accents are the one part of the palette a preset leaves alone, along
+    /// with the tool hues.
+    #[test]
+    fn a_theme_leaves_the_view_accents_where_they_are() {
+        let noob = Skin::default();
+        for name in crate::config::THEMES {
+            let skin = Skin::from(&crate::config::theme(name).expect(name));
+            for view in View::ALL {
+                assert_eq!(skin.view(view), noob.view(view), "{name}: {view:?}");
+            }
+        }
     }
 
     #[test]

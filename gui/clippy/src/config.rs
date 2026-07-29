@@ -10,7 +10,7 @@
 //! of silently doing nothing.
 //!
 //! The colors ship as commented defaults rather than live lines. An explicit
-//! key beats the `theme` it belongs to, so a file that spelled all 27 colors
+//! key beats the `theme` it belongs to, so a file that spelled all 35 colors
 //! out would make every theme but the first one do nothing.
 
 use std::io::Write;
@@ -45,6 +45,10 @@ pub struct Config {
     /// One color per tool, in the order [`Kind`](crate::state::Kind) declares
     /// them. Read by position, so the order is the same as [`TOOL_KEYS`].
     pub tools: [[u8; 3]; 14],
+
+    /// One color per view, in the order [`View`](crate::dock::View) declares
+    /// them. Read by position, so the order is the same as [`VIEW_KEYS`].
+    pub views: [[u8; 3]; 8],
 
     pub syntax_comment: [u8; 3],
     pub syntax_string: [u8; 3],
@@ -81,6 +85,7 @@ impl Default for Config {
             panel: [0x00, 0x00, 0x00],
             bar: [0x0e, 0x2e, 0x1e],
             tools: TOOLS,
+            views: VIEWS,
             syntax_comment: [0x56, 0x84, 0x66],
             syntax_string: [0xd6, 0xc4, 0x7a],
             syntax_number: [0xb2, 0xce, 0xf0],
@@ -137,6 +142,37 @@ const TOOLS: [[u8; 3]; 14] = [
     [0x7f, 0x7f, 0xf5], // subagent
     [0xce, 0xfa, 0xdb], // plan, the default `bright`
     [0x9a, 0xd6, 0xac], // anything else, the default `text`
+];
+
+/// The key for each view color, in the order `View::ALL` declares the views.
+/// The position here is the position in [`Config::views`].
+pub const VIEW_KEYS: [&str; 8] = [
+    "view_talk",
+    "view_activity",
+    "view_plan",
+    "view_agents",
+    "view_hardware",
+    "view_llm",
+    "view_files",
+    "view_avatar",
+];
+
+/// One hue per view. It marks the tab that is showing, so what a space is
+/// holding is answerable from the corner of the eye rather than by reading
+/// eight labels. Spread the way the tool hues are, and a theme leaves them
+/// alone for the same reason: they name the views, not the window.
+///
+/// The avatar is the grey one. It is the view with nothing to report, so a hue
+/// of its own would compete with the seven that do.
+const VIEWS: [[u8; 3]; 8] = [
+    [0x73, 0xde, 0x9f], // talk
+    [0xf5, 0xc7, 0x5c], // activity
+    [0xc6, 0x82, 0xed], // plan
+    [0x5f, 0xa3, 0xf2], // agents
+    [0x52, 0xe0, 0xe0], // hardware
+    [0xf0, 0x75, 0xc3], // llm
+    [0xf0, 0x7d, 0x4c], // files
+    [0xa9, 0xb1, 0xbc], // avatar
 ];
 
 fn prose_tools(bright: [u8; 3], text: [u8; 3]) -> [[u8; 3]; 14] {
@@ -251,6 +287,7 @@ pub fn keys() -> Vec<&'static str> {
         "avatar",
     ];
     keys.extend(TOOL_KEYS);
+    keys.extend(VIEW_KEYS);
     keys
 }
 
@@ -328,6 +365,12 @@ impl Config {
                 _ if key.starts_with("tool_") => {
                     match TOOL_KEYS.iter().position(|known| *known == key) {
                         Some(at) => set(&mut config.tools[at], color(&value)),
+                        None => false,
+                    }
+                }
+                _ if key.starts_with("view_") => {
+                    match VIEW_KEYS.iter().position(|known| *known == key) {
+                        Some(at) => set(&mut config.views[at], color(&value)),
                         None => false,
                     }
                 }
@@ -657,6 +700,17 @@ theme = noob
 # tool_plan    = #cefadb
 # tool_other   = #9ad6ac
 
+# One color per view. It is the line along the top of the tab that is showing,
+# so these name the views rather than the window and a theme leaves them alone.
+# view_talk     = #73de9f
+# view_activity = #f5c75c
+# view_plan     = #c682ed
+# view_agents   = #5fa3f2
+# view_hardware = #52e0e0
+# view_llm      = #f075c3
+# view_files    = #f07d4c
+# view_avatar   = #a9b1bc
+
 # Code in a message: the five things the highlighter can name.
 # syntax_comment = #568466
 # syntax_string  = #d6c47a
@@ -710,7 +764,7 @@ mod tests {
         for key in keys() {
             assert!(named.contains(&key.to_string()), "{key} is undocumented");
         }
-        assert_eq!(keys().len(), 36, "a new key needs a line in the file");
+        assert_eq!(keys().len(), 44, "a new key needs a line in the file");
     }
 
     /// The commented colors are the noob theme spelled out. A stale hex there
@@ -822,6 +876,22 @@ mod tests {
         assert_eq!(Config::parse("tool_telepathy = #fff").unknown, ["tool_telepathy"]);
     }
 
+    #[test]
+    fn every_view_color_reads_from_the_file() {
+        let mut text = String::new();
+        for (at, key) in VIEW_KEYS.iter().enumerate() {
+            text.push_str(&format!("{key} = #00{:02x}00\n", at + 1));
+        }
+        let config = Config::parse(&text);
+        assert!(config.unknown.is_empty(), "{:?}", config.unknown);
+        for (at, key) in VIEW_KEYS.iter().enumerate() {
+            assert_eq!(config.views[at], [0, at as u8 + 1, 0], "{key}");
+        }
+        // The table is read by position, so it has to have one slot per view.
+        assert_eq!(VIEW_KEYS.len(), crate::dock::View::ALL.len());
+        assert_eq!(Config::parse("view_weather = #fff").unknown, ["view_weather"]);
+    }
+
     /// The whole point of a preset: one word changes every color, and the one
     /// color you also wrote down is still yours.
     #[test]
@@ -853,6 +923,7 @@ mod tests {
             assert!(preset.unknown.is_empty(), "{name}");
             assert_eq!(preset.tools[12], preset.bright, "{name}: plan is prose");
             assert_eq!(preset.tools[13], preset.text, "{name}: the catch-all is prose");
+            assert_eq!(preset.views, VIEWS, "{name}: a view hue names the view");
             if name != "noob" {
                 assert_ne!(preset, Config::default(), "{name} is the default twice");
             }

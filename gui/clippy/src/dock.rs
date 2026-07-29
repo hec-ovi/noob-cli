@@ -32,10 +32,10 @@ pub enum View {
 }
 
 impl View {
-    /// Every view there is. The window builds its arrangement from
-    /// [`Dock::new`] rather than from this, so outside the tests it is the
-    /// definition rather than a thing anyone iterates.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Every view there is, in the order the palette is indexed by. The window
+    /// builds its arrangement from [`Dock::new`] rather than from this, but the
+    /// skin reads a view's accent by position here, so the order is part of
+    /// what a colour means.
     pub const ALL: [View; 8] = [
         View::Talk,
         View::Activity,
