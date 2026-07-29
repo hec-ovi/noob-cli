@@ -1,5 +1,34 @@
 # CLIppy plan
 
+## Landed
+
+Struck off as of `b6874c8`. The entries further down are kept for the reasoning
+behind each one, not as a to-do list.
+
+| Item | What shipped |
+|---|---|
+| 0.1, 0.2, 3, 4 | `gui/layers/text-geometry`, the first contract-isolated layer. Panes count visual rows, so the end of a wrapped message is reachable, the selection lands on its glyphs and the scrollbar tells the truth. |
+| 1 | The desktop's startup notification is answered, so the dock icon appears at once instead of after GNOME's 15 second timeout. |
+| 8 | The footer is gone; its phase word and token budget moved into the title strip and its context gauge became a hairline under it. |
+| 12 (colour) | One colour per view, and the showing tab is a block with a 2px accent line. The close X waits on item 25. |
+| 13, 30 | Symbols Nerd Font embedded. Window marks and file-type marks are real glyphs, and every codepoint is asserted to exist in the font. |
+| 17, 18 | Gauges are ten columns of four dots. The notes and capability report under them are gone. |
+| 19 | All 27 colours are settings, four named themes, and a writer that keeps the file's comments. |
+| 20 | Chamfer and stroke in the rect shader. Every panel has a 10px cut on its top-right corner, and a bordered panel is one rect instead of four. |
+| 24 | The fold arrow is gone. Clicking the showing tab still collapses its space. |
+| 26 | Ctrl+A in the prompt, click to place the caret, and a configurable input height. |
+| 31 | The CLIPPY animation tab is gone; that animation becomes the corner orb. |
+
+Reverted on purpose: markdown tables were box-drawn and then given sideways
+scrolling, and both were rolled back as a detour. Tables pass through as
+written.
+
+Still queued, in order: **25** (overlay, right-click, `Dock::hide`/`unhide`,
+which 21 and the tab close X both need), **22** (the capped 2x2 split grid),
+then **10**, **23**, **21**, **2**/**14** (orb and the ASCII idle loop), **6**,
+**7**, **15**, **27**, **28**, **29**, **5**, **11**.
+
+
 Every item in `featuresandbugs.md`, graded against the code as it actually is.
 Effort figures come from reading the files, not from estimating by feel.
 
