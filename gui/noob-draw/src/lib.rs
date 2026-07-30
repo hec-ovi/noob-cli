@@ -133,12 +133,10 @@ impl Panel {
         Rect::new(self.x, self.y, self.w, self.h, rgba)
     }
 
-    /// A hairline along the top edge, which is how a pane reads as a pane
-    /// without spending four rectangles on a border.
-    pub fn top_edge(self, rgba: [f32; 4]) -> Rect {
-        Rect::new(self.x, self.y, self.w, 1.0, rgba)
-    }
-
+    /// A hairline along an edge, which is how a pane reads as a pane without
+    /// spending four rectangles on a border. There is no `top_edge`: a line
+    /// above a pane sat under its tab strip and separated the tab from its own
+    /// surface, so nothing draws one any more.
     pub fn bottom_edge(self, rgba: [f32; 4]) -> Rect {
         Rect::new(self.x, self.y + self.h - 1.0, self.w, 1.0, rgba)
     }
@@ -266,7 +264,7 @@ impl Rect {
 /// Symbols Nerd Font Mono, shipped in the binary rather than looked for on the
 /// system. It carries the Codicon, Seti and Devicon sets, which is what a
 /// window button and a file-type mark need.
-pub const ICON_FAMILY: &str = "Symbols Nerd Font Mono";
+const ICON_FAMILY: &str = "Symbols Nerd Font Mono";
 
 /// The bytes of that font, embedded at build time.
 const ICON_FONT: &[u8] = include_bytes!("../fonts/SymbolsNerdFontMono-Regular.ttf");
@@ -471,14 +469,14 @@ impl Scene {
     /// arithmetic is here, once, because an off by one at the call site silently
     /// drops the last rectangle of the base layer or draws one of them twice,
     /// and neither looks like a bug worth chasing.
-    pub fn instances(&self) -> (Range<u32>, Range<u32>) {
+    fn instances(&self) -> (Range<u32>, Range<u32>) {
         let base = self.rects.len() as u32;
         let total = base + self.over_rects.len() as u32;
         (0..base, base..total)
     }
 
     /// How many rectangles the storage buffer has to hold: both layers.
-    pub fn rect_count(&self) -> usize {
+    fn rect_count(&self) -> usize {
         self.rects.len() + self.over_rects.len()
     }
 }
@@ -1110,7 +1108,6 @@ mod tests {
     fn edges_stay_inside_the_panel() {
         let panel = Panel::new(5.0, 5.0, 20.0, 20.0);
         let edges = [
-            panel.top_edge([0.0; 4]),
             panel.bottom_edge([0.0; 4]),
             panel.left_edge([0.0; 4]),
             panel.right_edge([0.0; 4]),
