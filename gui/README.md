@@ -89,20 +89,22 @@ the line between two cells** merges the pair and gives its pane both, which is h
 a pane comes to span a whole column or a whole row. A cell you empty gives its
 room to its neighbour, so the window opens as one conversation down the left
 (both cells of that column, because the one under it is empty) with the monitors
-above right and the files below them. Each view has a colour of its
-own, drawn as a line along the top of the tab showing it, so which view a space
-is holding is answerable without reading the labels. A tab strip has no surface
-of its own; the tabs carry the pane's, the showing one at full strength and the
-rest at a lower alpha.
+above right and the files below them. The tab that is showing carries a green
+line along its top, one colour for every view, so which tab you are on is
+answerable without reading the labels. A tab strip has no surface of its own; the
+tabs carry the pane's, the showing one at full strength and the rest at a lower
+alpha.
 
 The title strip reads the orb, then NO0B, then the version and commit this build
-was cut from. The orb is the one animated thing in the window: twelve tilted
-rings of dots around one centre, ported from `thinking-orbs`, turning while a
-turn is running and frozen a shade fainter when nothing is. It is 516 discs a
-frame and no shader, because a disc is a rectangle with its corner radius set to
-half its width. Its clock is a 30 frames a second deadline that exists only while
-the agent is working, so a window with nothing happening in it goes back to
-blocking until you touch it.
+was cut from. The orb is the one animated thing in the window, and it is two
+objects rather than one: while a turn is running it is twelve tilted rings of
+dots around one centre with three runners chasing each ring, 516 discs a frame,
+and at rest it is a dotted globe, 204 dots on a lattice of latitude and
+longitude. Both are ported from `thinking-orbs` and neither needs a shader,
+because a disc is a rectangle with its corner radius set to half its width. Its
+clock is a 30 frames a second deadline that exists only while the agent is
+working; the resting globe reads no clock at all, so a window with nothing
+happening in it goes back to blocking until you touch it.
 
 | view | carries |
 |---|---|
@@ -260,9 +262,9 @@ divider: the pointer takes a resize shape over it, and where you leave it is
 written back to the settings file. The grid is capped at 2x2, so four cells is
 the most there is and no space can be dragged smaller than a tab strip with
 enough pane under it to read. **Double-click the title bar** to shade the
-window down to that one strip, Winamp style: it keeps showing THINKING, WORKING
-or FINISHED with the plan count and how many files changed, so a collapsed
-window is still a status light. Double-click again to bring it back.
+window down to that one strip, Winamp style: it keeps showing INFERING or
+FINISHED with the plan count and how many files changed, so a collapsed window is
+still a status light. Double-click again to bring it back.
 
 Right click the prompt for Copy and Paste, or a pane or its tab for Settings,
 Copy selection, Close this widget and Widgets. A row with nothing to act on is
@@ -312,15 +314,16 @@ across every request this machine has ever run.
 
 `~/.config/noob/no0b.conf`, written with the defaults on first run and
 commented. Opacity, both font sizes, how tall the prompt may grow, where the two
-dividers sit, which panes exist, and the whole palette: the eight base colors, one per tool, one per view,
+dividers sit, which panes exist, and the whole palette: the eight base colors, one per tool,
 ten gauge slots a monitor reading picks from, and the five the highlighter uses
 for code. A key it does not recognise is reported in the ACTIVITY pane rather
-than ignored.
+than ignored, and a key an older build wrote and this one dropped, such as any of
+the nine `view_*` colours, is read off the floor without a word.
 
 `theme = noob | amber | ice | plum` sets the eight base tones, the five code
 colors and the two tool colors that are prose rather than a tool. The rest of the
-tool, view and gauge colors name the thing rather than the window, so a theme
-leaves them alone. The
+tool and gauge colors name the thing rather than the window, so a theme leaves
+them alone. The
 colors ship as commented defaults so the theme has something to set, so
 uncomment one line to keep the theme and override that single color.
 `no0b --set theme=amber` makes the same edit from a terminal without touching

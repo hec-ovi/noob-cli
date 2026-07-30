@@ -94,6 +94,51 @@ tags rather than here; this file starts where it was added.
   line across the whole grid, so the four cells line up rather than each column
   being cut at a height of its own, and no third setting appears in the file.
 
+### Changed
+
+- The orb at rest is a sphere rather than the animation standing still. It was
+  the working frame frozen at zero, which is twelve tilted circles of dots not
+  moving, and a still frame of that reads as scattered dots rather than as an
+  object. The library it was ported from carries a second mode for exactly this
+  and that is what idle draws now: a dotted globe, 204 dots on a lattice of
+  latitude and longitude whose rings close a silhouette all the way round. The
+  turning state is untouched, still the twelve circles with three runners each,
+  so what the two states say is which object is in the corner rather than how
+  bright the one object is. Idle still reads no clock at all: the globe upstream
+  is swept by a scan meridian and that is the only moving part of it, and without
+  the scan there is no term in the frame that time enters, so the window still
+  redraws only on change and still holds no wakeup deadline while it rests.
+- A turn in flight reads INFERING, in the bad colour. The phase carried four
+  words for what is one thing from outside the window: thinking while the
+  endpoint generates, working while the agent runs what it generated. The orb
+  turns for both, so the reading beside it is one word for both now, and it is
+  drawn in the bad colour rather than in the ordinary text tint. The colour is
+  the half that matters: the phase is the one reading that has to be answerable
+  without reading anything, because it is what says whether what you type now is
+  going anywhere, and READY and WORKING in the same green were two words nobody
+  looked at. The phase itself was never stuck on READY: it leaves it on the frame
+  a turn starts on, whether that is a prompt sent from this window or the turn
+  the agent reports, and there is no path back to it inside a turn.
+- The showing tab's line is one green, whichever pane it is. It was a hue of its
+  own per view, nine of them, so a window with four panes open drew four
+  different coloured lines and the strip read as a harlequin; the hue was
+  answering the question the label already answers. It is the good green now, the
+  same one the drop target and the picked row are, and the mark down the left of
+  the open row in the file list is that colour too. The section headings in the
+  settings panel take the same green, since they were the ordinary text tint,
+  which is what the settings under them are written in. The nine `view_*` keys
+  are retired rather than removed: they set a hue that no longer exists, and they
+  are sitting in every settings file that was ever written, so the parser goes on
+  treating them as known and ignoring them instead of reporting them as typos.
+  `view_talk` and `view_overall` go with them for the same reason. A name nobody
+  ever wrote is still a typo.
+- The settings panel's close mark carries no block. It stood on a filled red
+  square while the pointer was on it, which is what a button wears, and the panel
+  is a takeover with no other button on it. The mark sits on the panel's own
+  surface in both states now, and what answers the pointer is the mark itself
+  taking the bad colour, which is what the window uses everywhere for something
+  being thrown away.
+
 ## 0.7.0 - 2026-07-30
 
 All of this is NO0B, the GPU window, which shipped as CLIppy up to 0.6.0. The
