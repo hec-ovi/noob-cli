@@ -884,10 +884,11 @@ pub fn build(frame: &Frame) -> Scene {
     let mut scene = Scene::default();
     let layout = frame.layout;
 
-    // Shaded, the strip is the whole window and nothing else is painted, not
-    // even the backdrop. A compositor is free to hand back a surface taller
-    // than the strip was asked for, and a full-window backdrop under a 30
-    // pixel strip is what drew the black bar below it.
+    // Shaded, the bar is the whole window: no backdrop, no panes, no prompt.
+    // A compositor is free to hand back a surface taller than the strip was
+    // asked for, so what covers that surface has to be the bar itself (see
+    // `title_bar`). A full-window backdrop under the strip is what drew the black
+    // bar below it, and clearing to transparent instead drew the same black.
     if layout.shaded {
         title_bar(&mut scene, frame);
         overlay(&mut scene, frame);
@@ -965,7 +966,27 @@ fn overlay(scene: &mut Scene, frame: &Frame) {
 
 fn title_bar(scene: &mut Scene, frame: &Frame) {
     let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
-    scene.rect(layout.title.fill(skin.bar));
+    // Open, the bar is a strip across the top. Shaded, it is the whole surface,
+    // with the strip's contents drawn at the top of it.
+    //
+    // Asking for a 30 pixel window is a request, not an instruction: a
+    // compositor is free to hand back a taller surface, and this one does unless
+    // the window is maximized. Everything under the strip was then cleared to
+    // transparent, which composites as black, so shading drew a green strip on a
+    // black block. Filling the whole surface in the bar's own colour makes a
+    // surface that stays tall read as a green bar, and one that does shrink is
+    // pixel for pixel what it was.
+    //
+    // The bar colour rather than a new one, so the opacity setting still reaches
+    // it, and one rectangle rather than a full-surface one under the strip's own:
+    // two translucent fills over each other would leave the top 30 pixels more
+    // solid than the rest of the bar.
+    let surface = if layout.shaded {
+        Panel::new(0.0, 0.0, layout.width, layout.height.max(layout.title.h))
+    } else {
+        layout.title
+    };
+    scene.rect(surface.fill(skin.bar));
 
     // How full the context is, as a hairline along the bottom of the strip.
     // It was a bar of its own at the foot of the window; two pixels at the top
@@ -4195,7 +4216,114 @@ mod tests {
         }
     }
 
-    /// Shaded, the window is one strip. Every other region has to be gone, or
+    /// One shaded frame at a given surface size, in a given palette.
+    ///
+    /// The size is an argument because the surface a shaded window actually gets
+    /// is the compositor's answer to a 30 pixel request, not the request.
+    fn shaded_scene(state: &State, w: f32, h: f32, skin: &Skin) -> Scene {
+        let dock = Dock::new();
+        let mut shape = shape(&dock, &["a.rs"]);
+        shape.shaded = true;
+        let layout = Layout::compute(w, h, &shape);
+        build(&Frame {
+            state,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin,
+            layout: &layout,
+            prompt: &crate::prompt::Prompt::default(),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            clock: 0.0,
+            drag: None,
+            hot: None,
+            trouble: None,
+            selection: None,
+            menu: None,
+            picker: None,
+        })
+    }
+
+    /// Item 19: shading collapsed the window to black rather than green unless
+    /// it was maximized.
+    ///
+    /// Asking for a 30 pixel window is a request. Maximized the compositor grants
+    /// it, and otherwise it keeps the surface it had, so everything under the
+    /// strip was cleared to transparent and composited as black. Whatever surface
+    /// comes back is filled in the bar's colour, so a tall one reads as a green
+    /// bar and a short one is unchanged.
+    #[test]
+    fn a_shaded_surface_the_compositor_kept_tall_is_all_bar() {
+        let skin = Skin::from(&Config::default());
+        let state = busy_state();
+        for height in [TITLE_H, 31.0, 120.0, 640.0] {
+            let scene = shaded_scene(&state, 900.0, height, &skin);
+            let bar: Vec<&Rect> = scene
+                .rects
+                .iter()
+                .filter(|rect| rect.rgba() == skin.bar)
+                .collect();
+            assert_eq!(bar.len(), 1, "{height}: {} rects in the bar colour", bar.len());
+            assert_eq!(
+                bar[0].xywh(),
+                [0.0, 0.0, 900.0, height],
+                "{height}: the bar is not the whole surface"
+            );
+            assert_eq!(bar[0].extra()[3], 0.0, "{height}: the bar is an outline");
+
+            // Nothing from the open window is under it: no pane, no prompt, no
+            // gauge dot. A dot is the only round thing in a pane, and the orb's
+            // discs are the only round thing in the strip.
+            for (name, fill) in [
+                ("pane", skin.panel),
+                ("prompt", skin.input),
+                ("backdrop", skin.backdrop),
+            ] {
+                assert!(
+                    !scene.rects.iter().any(|r| r.rgba() == fill),
+                    "{height}: a {name} is drawn under the shaded bar"
+                );
+            }
+            for rect in &scene.rects {
+                let [_, y, _, h] = rect.xywh();
+                if rect.extra()[0] > 0.0 {
+                    assert!(
+                        y + h <= TITLE_H + 0.01,
+                        "{height}: a gauge dot is drawn below the strip: {rect:?}"
+                    );
+                }
+            }
+            // And the strip's own contents are at the top of the bar rather than
+            // spread down it.
+            for text in &scene.texts {
+                assert!(
+                    text.at.y + text.at.h <= TITLE_H + 0.01,
+                    "{height}: {:?} is written below the strip",
+                    text.runs.iter().map(|run| run.text.as_str()).collect::<String>()
+                );
+            }
+        }
+
+        // The bar carries the window's transparency, so a surface that stayed
+        // tall is as see-through as the strip is. A colour of its own here would
+        // have made shading opaque at every opacity setting.
+        let sheer = Skin::from(&Config {
+            opacity: 0.2,
+            ..Config::default()
+        });
+        let scene = shaded_scene(&state, 900.0, 500.0, &sheer);
+        let bar = scene
+            .rects
+            .iter()
+            .find(|rect| rect.xywh() == [0.0, 0.0, 900.0, 500.0])
+            .expect("the surface is not filled");
+        assert_eq!(bar.rgba(), sheer.bar, "the shaded bar is not the bar colour");
+        assert!(bar.rgba()[3] < 1.0, "{:?} ignored the opacity", bar.rgba());
+    }
+
+    /// Shaded, the window is one bar. Every other region has to be gone, or
     /// a click lands on a pane that is not on screen.
     #[test]
     fn shading_leaves_the_bar_and_nothing_else() {
@@ -4213,39 +4341,42 @@ mod tests {
 
         let skin = Skin::from(&Config::default());
         let state = busy_state();
-        let scene = build(&Frame {
-            state: &state,
-            monitor: &Monitor::new(),
-            dock: &dock,
-            skin: &skin,
-            layout: &layout,
-            prompt: &crate::prompt::Prompt::default(),
-            column: 8.0,
-            pane_column: 8.0,
-            body_size: 14.0,
-            pane_size: 13.0,
-            clock: 0.0,
-            drag: None,
-            hot: None,
-            trouble: None,
-            selection: None,
-            menu: None,
-            picker: None,
-        });
+        let scene = shaded_scene(&state, 1200.0, 800.0, &skin);
         let text = text_of(&scene);
         assert!(text.contains("WORKING") || text.contains("THINKING"), "{text}");
         assert!(!text.contains("looking at it now"), "no pane content");
 
-        // Nothing is painted below the strip. The layout is computed at the
-        // size the compositor gave back, which can be the full window when it
-        // refuses to shrink, and a backdrop over that height was a black bar
-        // with the gauge hairline stranded in it.
-        for rect in &scene.rects {
+        // The surface the compositor kept is the bar, all 800 pixels of it, and
+        // the strip's own contents are the only other thing on it. A backdrop
+        // over that height was a black bar with a green strip across the top;
+        // clearing it to transparent composited as the same black.
+        let bar = scene
+            .rects
+            .iter()
+            .find(|rect| rect.rgba() == skin.bar && rect.xywh()[3] > TITLE_H)
+            .unwrap_or_else(|| panic!("the shaded surface is not filled: {:?}", scene.rects[0]));
+        assert_eq!(bar.xywh(), [0.0, 0.0, 1200.0, 800.0], "the bar is not the surface");
+        assert_eq!(
+            scene.rects.iter().filter(|r| r.rgba() == skin.bar).count(),
+            1,
+            "the strip is painted over the bar, so it is a different alpha"
+        );
+        for rect in scene.rects.iter().filter(|r| r.xywh() != bar.xywh()) {
             let [_, y, _, h] = rect.xywh();
             assert!(
                 y + h <= TITLE_H + 0.01,
                 "{rect:?} reaches {} past the strip",
                 y + h - TITLE_H
+            );
+        }
+        for (name, fill) in [
+            ("pane", skin.panel),
+            ("prompt", skin.input),
+            ("backdrop", skin.backdrop),
+        ] {
+            assert!(
+                !scene.rects.iter().any(|r| r.rgba() == fill),
+                "a {name} is drawn under the shaded bar"
             );
         }
     }
@@ -4575,11 +4706,19 @@ mod tests {
             .flat_map(|t| t.runs.iter().map(|r| r.text.as_str()))
             .collect();
         assert!(rows.contains("Close this widget"), "{rows}");
-        // And the strip itself is still the only thing in the base layer: the
-        // menu hangs below it, on the overlay, over the desktop.
+        // And the base layer is still the bar and the strip's contents: the menu
+        // hangs below the strip, on the overlay, over the bar. The bar covering
+        // the whole surface is what item 19 asked for and is checked by
+        // `shading_leaves_the_bar_and_nothing_else`, so it is the one rect
+        // allowed past the strip here.
+        let bar = Panel::new(0.0, 0.0, 1200.0, 800.0);
         for rect in &scene.rects {
             let [_, y, _, h] = rect.xywh();
-            assert!(y + h <= TITLE_H + 0.01, "{rect:?} reaches past the strip");
+            let is_bar = rect.xywh() == [bar.x, bar.y, bar.w, bar.h];
+            assert!(
+                is_bar || y + h <= TITLE_H + 0.01,
+                "{rect:?} reaches past the strip"
+            );
         }
     }
 

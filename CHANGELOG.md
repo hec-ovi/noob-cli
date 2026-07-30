@@ -34,7 +34,11 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
   window to become thirty pixels tall while a minimum size of 680 by 380 was
   still in force: the compositor refused the height, the surface stayed tall, and
   a full window backdrop was painted over it. The minimum is dropped while
-  shaded and restored when it is not.
+  shaded and restored when it is not. Dropping the minimum is a request too, and
+  a compositor can still keep the surface at the height it had, which happened
+  unless the window was maximized: whatever surface comes back is now filled in
+  the bar's own colour, so a shaded window reads as a green bar at any height and
+  carries the window's transparency setting either way.
 
 ### Added
 
