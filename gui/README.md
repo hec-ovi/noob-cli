@@ -19,8 +19,12 @@ goes up, Enter opens what the cursor is on, and Esc quits. Typing dims every
 folder that does not carry what you typed rather than taking it off the list, and
 the arrows then walk the ones that do. The mouse does the same: click a row, dim
 or not, double-click to walk in, and the Open button at the foot confirms. The
-box is one size, so walking into a folder with far more or far fewer entries does
-not move it. Folders you have opened before sit at the top of
+list is a tree: the plus in front of a folder puts what is inside it under that
+folder without leaving the one you are in, and the minus takes it back out. A
+folder nobody has permission to read says so on a row of its own instead of
+looking empty. The row the cursor is on is a green band with the theme's darkest
+colour written over it. The box is one size, so walking into a folder with far
+more or far fewer entries does not move it. Folders you have opened before sit at the top of
 the list, so the second launch is Enter. They live in
 `~/.config/noob/no0b.recent`, one path per line, newest first; delete a line
 to forget it and delete the file to forget them all.

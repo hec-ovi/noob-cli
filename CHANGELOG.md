@@ -76,6 +76,21 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
   The folder being listed and the way out of it are never dim, because they are
   how the list is walked rather than entries in it. A name starting with a dot is
   still out of the list until what has been typed starts with one.
+- The folder picker's list is a tree, and the row the cursor is on can be seen.
+  The list was one directory and walking into a folder replaced the whole of it,
+  so looking inside two folders meant walking in and back out twice. A folder
+  now carries a plus that puts what is inside it into the list under it, one
+  step further in, and a minus that takes it back out; the keyboard still walks
+  in and out, which is the fast way down a deep tree. A folder that cannot be
+  read says why on a row of its own under it rather than opening to nothing,
+  which on screen is a folder that is empty. Shutting a folder that held the
+  cursor somewhere inside it leaves the cursor on that folder, and a folder
+  opening above the cursor carries the cursor down with the row it was on. The
+  plus is a target of its own inside the row, so pressing it opens the folder
+  and pressing the row selects it. The row the cursor is on used to be the same
+  quiet band the file explorer marks its open row with, which on a list of forty
+  folders said almost nothing: it is now filled solid in the theme's green with
+  the theme's darkest colour written over it.
 - The picker's Open button reads as a button. It was drawn in the quietest fill
   in the palette with a hairline around it, and it spelled out the folder it
   would open, which made it as wide as a path and a different width every time
