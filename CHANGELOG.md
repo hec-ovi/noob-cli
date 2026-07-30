@@ -139,6 +139,11 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
   strength with its view's accent line when it is showing and at a lower alpha
   with a dimmer label when it is not, so the difference is weight rather than a
   filled block. Every tab takes the same ten pixel corner cut the panes take.
+- There is no line under a tab strip. It was the top edge of the pane's own
+  border, and with the showing tab in the pane's colour and flush against it, the
+  two are one surface. A pane is bordered on its left, right and bottom, as three
+  hairlines; the right one starts where the corner cut ends. Boxes that are their
+  own thing (the prompt, the picker, a menu) still have all four sides.
 - The fold arrow at the end of each tab strip is gone. Clicking the tab already
   showing still collapses its space.
 

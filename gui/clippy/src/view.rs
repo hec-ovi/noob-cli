@@ -1105,8 +1105,39 @@ fn cut_of(panel: Panel) -> f32 {
 
 /// Its hairline border, as one rectangle. Four of them could not follow the
 /// cut.
+///
+/// For a box that wants all four sides: the prompt, the picker, the menu. A
+/// pane's body uses [`pane_edges`] instead, which leaves the top one out.
 fn panel_edge(panel: Panel, rgba: [f32; 4]) -> Rect {
     panel_fill(panel, rgba).stroke(1.0)
+}
+
+/// A pane's border, minus the top edge.
+///
+/// That top edge was the line under every tab strip. A tab and the pane below it
+/// are one surface (the same fill, and the strip is flush with the body), so a
+/// hairline between them read as the pane being a box hung off the strip instead
+/// of the strip being the top of the pane. The other three sides still tell two
+/// panes over a busy desktop apart, so only the top one goes.
+///
+/// Three thin rectangles rather than the one stroked rect [`panel_edge`] draws,
+/// because a stroke follows the whole shape and cannot leave a side out. The
+/// three that are left are straight lines: the cut is on the top right, which is
+/// the corner the top edge had, and what the remaining right edge has to do about
+/// it is start where the cut stops rather than in a corner that is not there.
+fn pane_edges(scene: &mut Scene, panel: Panel, rgba: [f32; 4]) {
+    let cut = cut_of(panel);
+    scene.rect(panel.left_edge(rgba));
+    scene.rect(panel.bottom_edge(rgba));
+    scene.rect(
+        Panel::new(
+            panel.x + panel.w - 1.0,
+            panel.y + cut,
+            1.0,
+            (panel.h - cut).max(0.0),
+        )
+        .fill(rgba),
+    );
 }
 
 /// One tab of a strip, before its label goes on.
@@ -1117,6 +1148,11 @@ fn panel_edge(panel: Panel, rgba: [f32; 4]) -> Rect {
 /// strength with an accent line in the colour of what it holds, the rest are
 /// the same colour at a lower alpha. A filled block over a filled strip is what
 /// made these look like a row of buttons.
+///
+/// `Skin::tab` is exactly `Skin::panel`, and the showing tab sits flush on the
+/// pane, so the two composite to one surface with nothing between them. That is
+/// the other half of losing the line under the strip ([`pane_edges`]): a step in
+/// colour where the line was is the same complaint as the line.
 fn tab_block(scene: &mut Scene, skin: &Skin, tab: Panel, active: bool, accent: [f32; 4]) {
     let cut = cut_of(tab);
     scene.rect(
@@ -1139,14 +1175,15 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
         return;
     }
 
-    // A space being dragged onto is lit along its whole edge, so a drop target
-    // is a place rather than a guess.
+    // A space being dragged onto is lit along the three edges it has, so a drop
+    // target is a place rather than a guess.
     let target = frame.drag.is_some_and(|drag| drag.onto == Some(space));
     // The strip itself is not drawn. It is the window, not a toolbar, and the
     // tabs standing in it are the only thing up here. Its fill and the hairline
     // along its foot were both square, so they ran past the cut corner of the
-    // pane below and left a stray stroke there; the pane's own outline is the
-    // line now, and it follows the cut.
+    // pane below and left a stray stroke there. Nothing spans the strip now, and
+    // nothing runs along the pane's top edge either: the tab and the pane are one
+    // surface, which is what item 12 asked for.
     for (view, panel) in &placed.tabs {
         let active = slot.active() == Some(*view);
         let lifted = frame.drag.is_some_and(|drag| drag.view == *view);
@@ -1171,10 +1208,14 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
     }
     let panel = placed.body;
     scene.rect(panel_fill(panel, skin.panel));
-    scene.rect(panel_edge(
+    // Three sides, not four. The missing one is the top, which was the line under
+    // the tabs; see [`pane_edges`]. The fill still carries the cut, so the corner
+    // is unchanged.
+    pane_edges(
+        scene,
         panel,
         if target { skin.edge_focus } else { skin.edge },
-    ));
+    );
 
     // Banded in the box the text is actually in, which is the whole body for
     // every pane but the file one: the file view spends its left column on the
@@ -4165,49 +4206,130 @@ mod tests {
     /// Two dark panels side by side over a busy desktop read as one region
     /// with a gap in it. The border is what tells them apart.
     ///
-    /// One stroked rectangle covering the whole panel, not four 1px edges
-    /// around it: a square outline cannot follow the cut corner, and it used to
-    /// cost five rectangles per pane instead of two.
+    /// Item 12: a pane gets three sides of that border and no top. This asserted
+    /// one stroked rectangle around the whole pane, which is what drew the line
+    /// under every tab strip. The prompt and the picker still take the stroke, so
+    /// `panel_edge` is still the way a box that wants four sides is drawn.
     #[test]
-    fn every_space_is_drawn_with_a_border() {
+    fn a_pane_is_bordered_on_three_sides_and_open_at_the_top() {
         let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &["a.rs"]);
         for space in Space::ALL {
             let panel = out.layout.placed(space).body;
+            let cut = cut_of(panel);
+            let edge = |box_: [f32; 4], side: &str| {
+                assert!(
+                    out.scene
+                        .rects
+                        .iter()
+                        .any(|r| r.xywh() == box_ && r.rgba() == out.skin.edge),
+                    "{space:?}: no {side} edge at {box_:?}"
+                );
+            };
+            edge([panel.x, panel.y, 1.0, panel.h], "left");
+            edge([panel.x, panel.y + panel.h - 1.0, panel.w, 1.0], "bottom");
+            // Started at the top and the last pixels of it would hang in the
+            // corner the cut takes away.
+            edge(
+                [panel.x + panel.w - 1.0, panel.y + cut, 1.0, panel.h - cut],
+                "right",
+            );
+
+            // The fill is the only rect the size of the pane, and it is a fill:
+            // a stroke that size is the outline this test used to demand, and it
+            // paints the top edge along with the other three.
             let over_panel: Vec<_> = out
                 .scene
                 .rects
                 .iter()
                 .filter(|r| r.xywh() == [panel.x, panel.y, panel.w, panel.h])
                 .collect();
-            let strokes: Vec<_> = over_panel
-                .iter()
-                .filter(|r| r.extra()[3] > 0.0)
-                .collect();
-            assert_eq!(strokes.len(), 1, "{space:?} is not bordered by one rect");
-            assert_eq!(strokes[0].extra()[3], 1.0, "a hairline, not a slab");
-            // The fill under it is a second rectangle, and no more than that.
-            assert_eq!(over_panel.len(), 2, "{space:?} costs more than fill plus edge");
+            assert_eq!(over_panel.len(), 1, "{space:?} is more than one fill");
+            assert_eq!(over_panel[0].rgba(), out.skin.panel, "{space:?}");
+            assert_eq!(over_panel[0].extra()[3], 0.0, "{space:?} is still stroked");
+
+            // And nothing else runs along the top of it, whatever its size.
+            for rect in &out.scene.rects {
+                let [x, y, w, h] = rect.xywh();
+                let across = x <= panel.x + panel.w * 0.5 && x + w >= panel.x + panel.w * 0.5;
+                let on_top = y <= panel.y + 1.5 && y + h >= panel.y + 0.5;
+                let a_line = h <= 3.0 || rect.extra()[3] > 0.0;
+                assert!(
+                    !(across && on_top && a_line),
+                    "{space:?}: {:?} is a line under the tabs",
+                    rect.xywh()
+                );
+            }
         }
+    }
+
+    /// The other half of item 12. Losing the line is only half of making a tab
+    /// and its pane one surface: a step in colour where the line was reads the
+    /// same way. The showing tab carries the pane's own fill, and it sits flush on
+    /// it, so the two composite to one shape. What tells the other tabs apart is
+    /// weight, which
+    /// `a_tab_that_is_not_showing_is_the_same_tab_with_less_weight` asserts.
+    #[test]
+    fn the_showing_tab_and_its_pane_are_one_surface() {
+        let dock = Dock::new();
+        let out = render(&busy_state(), 1400.0, 900.0, &dock, &["a.rs"]);
+        let mut checked = 0;
+        for space in Space::ALL {
+            let placed = out.layout.placed(space);
+            let Some(active) = dock.slot(space).active() else {
+                continue;
+            };
+            let (_, tab) = placed
+                .tabs
+                .iter()
+                .find(|(view, _)| *view == active)
+                .expect("the showing view has a tab");
+            let fill_of = |box_: Panel, what: &str| {
+                *out.scene
+                    .rects
+                    .iter()
+                    .find(|r| r.xywh() == [box_.x, box_.y, box_.w, box_.h])
+                    .unwrap_or_else(|| panic!("{space:?}: no {what} fill at {box_:?}"))
+            };
+            let pane = fill_of(placed.body, "pane");
+            let showing = fill_of(*tab, "tab");
+            assert_eq!(
+                showing.rgba(),
+                pane.rgba(),
+                "{space:?}: {active:?} is a different colour from its pane"
+            );
+            // Flush, so there is no backdrop showing in a seam between them.
+            assert!(
+                (tab.y + tab.h - placed.body.y).abs() < 0.01,
+                "{space:?}: the tab stops {} above the pane",
+                placed.body.y - (tab.y + tab.h)
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 3, "only {checked} spaces had a showing tab");
     }
 
     /// The cut corner, on the fill and on the border alike. A square fill under
     /// a cut border leaves a triangle of panel colour outside its own edge.
+    ///
+    /// A pane is a fill on its own since item 12 took its top edge away, and the
+    /// prompt is still a fill plus a stroke, so the count is per box rather than
+    /// two everywhere.
     #[test]
     fn a_panel_is_cut_on_its_top_right_corner_only() {
         let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &["a.rs"]);
-        let boxes: Vec<Panel> = Space::ALL
+        let boxes: Vec<(Panel, usize)> = Space::ALL
             .iter()
-            .map(|space| out.layout.placed(*space).body)
-            .chain(std::iter::once(out.layout.input))
+            .map(|space| (out.layout.placed(*space).body, 1))
+            .chain(std::iter::once((out.layout.input, 2)))
             .collect();
-        for panel in boxes {
+        for (panel, want) in boxes {
             let shaped: Vec<_> = out
                 .scene
                 .rects
                 .iter()
                 .filter(|r| r.xywh() == [panel.x, panel.y, panel.w, panel.h])
                 .collect();
-            assert_eq!(shaped.len(), 2, "{panel:?} is not a fill plus an edge");
+            assert_eq!(shaped.len(), want, "{panel:?} is not {want} rect(s)");
             for rect in shaped {
                 let [_, chamfer, corners, _] = rect.extra();
                 assert_eq!(chamfer, CUT, "{rect:?} is not cut");
