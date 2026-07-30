@@ -48,25 +48,28 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
   without saying so. Now the window opens on a list of folders: arrows move,
   right walks in, left goes out, typing narrows the list, Enter opens, and a
   folder named on the command line skips the picker as before. Folders chosen
-  before sit at the top of the list, remembered in `~/.config/noob/clippy.recent`
+  before sit at the top of the list, remembered in `~/.config/noob/no0b.recent`
   beside the settings, so the second launch is one keystroke. No native dialog:
   a toolkit file chooser is dozens of crates and a portal at runtime.
-- Three monitors where there was one. SESSION is this run: which phase, model and
-  workspace, context against where compaction triggers, tool calls, the longest
-  single answer, prefill, cache, output, requests and the measured rates. OVERALL
-  is every run there has ever been. DEBUG is the calls that failed, and clicking
-  one shows the arguments that were sent to it. What DEBUG cannot show is the
-  schema the tool expected: no event carries one.
-- Running totals that outlive the window, in `~/.config/noob/clippy.totals`
+- Three monitors where there was one. CONTEXT is how full this run is: which
+  phase, model and workspace, the context fill, the requests and tool calls it
+  took to get there, and what the last request alone prefilled and generated.
+  SESSION is what the run has spent: tokens prefilled, generated and served from
+  cache, and the measured prefill and decode rates. DEBUG is the calls that
+  failed, and clicking one shows the arguments that were sent to it. What DEBUG
+  cannot show is the schema the tool expected: no event carries one.
+- Running totals that outlive the window, in `~/.config/noob/no0b.totals`
   beside the settings. Tokens prefilled, generated and served from cache, plus a
   mean and a median decode and prefill speed. The median needs the samples
   themselves, so the file keeps the last 512 per-request rates; a mean has
   already forgotten which requests it was made of. Written by rename at the end
   of every turn and when the window closes. A missing file is a first run and an
-  unreadable one reads as zero.
+  unreadable one reads as zero. No pane shows them: a column of counts from
+  sessions nobody remembers reads as this session's, so they are held for the
+  settings panel, where a block can say what they are.
 - A gauge palette: ten colour slots, and every monitor reading names the one it
-  wears. A metric keeps its colour across panes, so PREFILLED is the same blue in
-  SESSION and in OVERALL.
+  wears. A metric keeps its colour across panes, so prefill is the same blue in
+  CONTEXT's LAST PREFILL as in SESSION's PREFILLED.
 - Right click menus. The prompt offers Copy and Paste; a pane or the tab that
   names it offers Settings, Copy selection and Close this widget. A row with
   nothing to act on is greyed rather than dropped, so the menu is the same shape
@@ -113,13 +116,16 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
   scrolls, the wheel over it moves the list rather than the file, and the row of
   whatever the agent just touched is marked and scrolled to. It is a flat set,
   not a filesystem, so there are no directory rows and nothing to expand.
-- A gauge is a block of dots: eight across and five down, in the metric's own
-  colour, filling from the bottom, with the number beside it in large text. It
-  was ten columns of four small dots in one shared colour, which read as a smear.
-  A reading with no maximum draws no block at all now: it used to draw an empty
-  track, so most of a pane was empty rectangles and the two rows that were filled
-  read as noise. The block is as chunky as its pane can afford and shrinks before
-  it pushes a reading off the bottom.
+- A gauge is a block of dots: twenty across and four down, in the metric's own
+  colour, filling from the bottom, with the number beside it at the pane's own
+  size. It was ten columns of four small dots in one shared colour, which read as
+  a smear, then eight across and five down, which stood the panes on end. One row
+  is 25 percent and one dot is 1.25. A reading with no maximum draws no block at
+  all now: it used to draw an empty track, so most of a pane was empty rectangles
+  and the two rows that were filled read as noise. The block is as chunky as its
+  pane can afford and shrinks before it pushes a reading off the bottom; a pane
+  too narrow for a legible dot drops the block and keeps the number, since the
+  number is the reading and the block only describes it.
 - Token counts in the monitors are grouped in thousands. Seven figures ungrouped
   has to be counted rather than read.
 - The rolling trend behind each gauge is gone with the bars. The samples are
