@@ -26,8 +26,6 @@
 //! periodic and periodic is the opposite of the redraw-on-change rule, so the
 //! rule is kept by not sampling when nobody is looking.
 
-use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::path::PathBuf;
 
 /// One measured quantity. `max` present means it can be drawn as a block of
@@ -74,8 +72,6 @@ impl Gauge {
     }
 }
 
-const HISTORY: usize = 240;
-
 /// Which slot of the gauge palette each metric wears, by name so a reading is
 /// read rather than counted. Two readings in one pane must never share one, and
 /// a metric that appears in two panes keeps the same one: prefill is blue in
@@ -90,11 +86,9 @@ const HUE_TEAL: usize = 5;
 const HUE_BLUE: usize = 6;
 const HUE_INDIGO: usize = 7;
 const HUE_VIOLET: usize = 8;
-/// Named and unclaimed since BEST OUTPUT came off the context pane. The ten
-/// names are the palette: a slot nobody has named is a slot the next reading
-/// picks by number, which is how two rows end up the same colour.
-#[allow(dead_code)]
-const HUE_PINK: usize = 9;
+// Slot 9 has no name because no reading wears it. The palette in `skin.rs` is
+// ten wide and wraps, so an unnamed slot costs nothing until something claims
+// it.
 
 pub struct Monitor {
     /// The amdgpu device directory, when there is one.
@@ -105,7 +99,6 @@ pub struct Monitor {
     hardware: Vec<Gauge>,
     context: Vec<Gauge>,
     session: Vec<Gauge>,
-    history: HashMap<&'static str, VecDeque<f32>>,
 }
 
 impl Default for Monitor {
@@ -122,7 +115,6 @@ impl Monitor {
             hardware: Vec::new(),
             context: Vec::new(),
             session: Vec::new(),
-            history: HashMap::new(),
         }
     }
 
@@ -145,22 +137,6 @@ impl Monitor {
     /// cost.
     pub fn session(&self) -> Vec<Gauge> {
         self.session.clone()
-    }
-
-    /// Everything recorded for one key, oldest first. Empty until sampled.
-    ///
-    /// Nothing draws it at the moment. A trend used to be drawn behind the dots
-    /// of every reading and came off with the bars: the reference asked for a
-    /// block and a number, and a rolling graph behind them was the noise that
-    /// made the pane unreadable. The samples are still recorded because the
-    /// hardware pane is getting a proper graph of its own, and a graph cannot be
-    /// backfilled from sums.
-    #[allow(dead_code)]
-    pub fn history(&self, key: &str) -> &[f32] {
-        self.history
-            .get(key)
-            .map(|q| q.as_slices().0)
-            .unwrap_or(&[])
     }
 
     /// Read every source once. Cheap: six small files, no allocation past the
@@ -360,20 +336,6 @@ impl Monitor {
             },
         ];
 
-        // Bounded readings only. An unbounded one has no proportion to plot, and
-        // recording a flat zero for it was noise in the trend of everything
-        // else.
-        for gauge in gauges.iter().chain(context.iter()) {
-            let Some(fraction) = gauge.fraction() else {
-                continue;
-            };
-            let series = self.history.entry(gauge.key).or_default();
-            series.push_back(fraction);
-            while series.len() > HISTORY {
-                series.pop_front();
-            }
-            series.make_contiguous();
-        }
         self.hardware = gauges;
         self.context = context;
         self.session = session;
@@ -596,7 +558,6 @@ Buffers:          100000 kB
             hardware: Vec::new(),
             context: Vec::new(),
             session: Vec::new(),
-            history: HashMap::new(),
         }
     }
 
@@ -783,13 +744,15 @@ Buffers:          100000 kB
         }
     }
 
-    /// History is bounded, or a window left open overnight is a memory leak
-    /// with a graph on it.
+    /// Sampling forever must not grow anything. The three lists are replaced on
+    /// every read rather than appended to, so a window left open overnight
+    /// holds one sample, not a night of them.
     #[test]
-    fn history_is_bounded_and_oldest_first() {
+    fn sampling_forever_holds_one_reading_per_row() {
         let mut monitor = bare();
         let mut state = crate::state::State::new();
-        for n in 0..HISTORY + 50 {
+        let mut first = 0;
+        for n in 0..300 {
             state.apply(noob_proto::Event::UsageReport {
                 usage: noob_proto::Usage {
                     prompt: n as u64 * 10,
@@ -799,22 +762,10 @@ Buffers:          100000 kB
                 },
             });
             monitor.sample(&state);
+            if n == 0 {
+                first = monitor.hardware().len() + monitor.context().len();
+            }
         }
-        let series = monitor.history("context");
-        assert_eq!(series.len(), HISTORY);
-        assert!(
-            series.first() < series.last(),
-            "oldest first: {:?} then {:?}",
-            series.first(),
-            series.last()
-        );
-        // An unbounded reading has no proportion to record, so it has no series
-        // rather than a flat line of zeroes.
-        assert!(monitor.history("prefilled").is_empty());
-    }
-
-    #[test]
-    fn asking_for_a_series_nobody_recorded_is_empty_not_a_panic() {
-        assert!(bare().history("nothing").is_empty());
+        assert_eq!(monitor.hardware().len() + monitor.context().len(), first);
     }
 }

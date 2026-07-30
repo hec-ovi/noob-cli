@@ -22,7 +22,9 @@ noob-proto.workspace = true
 noob-gpu.workspace = true
 noob-draw.workspace = true
 text-geometry.workspace = true
-wgpu.workspace = true
+# No `wgpu` here on purpose. The window never names a GPU type: `noob-gpu` owns
+# the device and the surface, `noob-draw` owns the passes, and both are behind
+# their own API. Naming wgpu again would let a GPU type leak into the shell.
 winit.workspace = true
 pollster.workspace = true
 copypasta = "0.10.2"

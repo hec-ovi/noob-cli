@@ -1024,7 +1024,6 @@ dependencies = [
  "pollster",
  "serde_json",
  "text-geometry",
- "wgpu",
  "winit",
 ]
 
