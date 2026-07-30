@@ -114,9 +114,20 @@ const DRAG_SLOP: f64 = 5.0;
 const MAX_SIZE: LogicalSize<f64> = LogicalSize::new(2200.0, 1400.0);
 const MIN_SIZE: LogicalSize<f64> = LogicalSize::new(680.0, 380.0);
 
-/// What shading asks the window for: the minimum inner size to hold it to, and
-/// the size to become. Split out from [`App::shade`] so the rule can be tested
-/// without a compositor.
+/// Everything shading asks the window for at once, so the order the three are
+/// asked in lives in one place.
+#[derive(Debug, PartialEq)]
+struct ShadeRequest {
+    /// The minimum inner size to hold the window to, or none at all.
+    min: Option<LogicalSize<f64>>,
+    /// The inner size to become, if a size is asked for.
+    size: Option<PhysicalSize<u32>>,
+    /// The maximized state to put the window in, when it has to change.
+    maximized: Option<bool>,
+}
+
+/// What shading asks the window for. Split out from [`App::shade`] so the rule
+/// can be tested without a compositor.
 ///
 /// Shaded there is no minimum at all. `MIN_SIZE` is taller than the strip, and
 /// a window that keeps its minimum while shaded simply does not shrink.
@@ -127,18 +138,109 @@ const MIN_SIZE: LogicalSize<f64> = LogicalSize::new(680.0, 380.0);
 /// which is `Window::inner_size` verbatim, and nothing on the way applies a
 /// scale factor. A logical request would come back multiplied by that factor,
 /// and the strip would be drawn across the top of a surface twice its height.
+///
+/// `maximized` is whether the window is maximized in the open state it is
+/// leaving or coming back to: read off the window while shading, remembered
+/// while unshading. A maximized window ignores a resize request, so it has to
+/// leave that state to become a strip, and shading is not a way of un-maximizing
+/// a window, so opening the strip puts it back. Unshading into maximized asks
+/// for no size at all: the compositor owns the size of a maximized window and a
+/// request beside it is a second answer to a question already settled.
 fn shade_request(
     shaded: bool,
     remembered: Option<PhysicalSize<u32>>,
-) -> (Option<LogicalSize<f64>>, Option<PhysicalSize<u32>>) {
+    maximized: bool,
+) -> ShadeRequest {
     match (shaded, remembered) {
-        (true, Some(was)) => (
-            None,
-            Some(PhysicalSize::new(was.width, view::strip_height() as u32)),
-        ),
-        (true, None) => (None, None),
-        (false, was) => (Some(MIN_SIZE), was),
+        (true, was) => ShadeRequest {
+            min: None,
+            size: was.map(|was| PhysicalSize::new(was.width, view::strip_height() as u32)),
+            maximized: maximized.then_some(false),
+        },
+        (false, was) => ShadeRequest {
+            min: Some(MIN_SIZE),
+            size: if maximized { None } else { was },
+            maximized: maximized.then_some(true),
+        },
     }
+}
+
+/// What a shaded window turned out to be, read off the surface the compositor
+/// handed back. See [`shade_of`].
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum Shade {
+    /// Not shaded, or not shaded any longer because the surface says otherwise.
+    Open,
+    /// Shaded, and the surface is the strip.
+    Strip,
+    /// Shaded, and this surface is the window leaving maximized on its way to
+    /// the strip. The strip has to be asked for again, now that the window is
+    /// in a state that can take the request.
+    Asking,
+    /// Shaded, and the window has been asked to leave maximized but has not left
+    /// it yet. Nothing a maximized window says about its size answers anything
+    /// about the strip, so this waits for the surface that comes after it.
+    Leaving,
+}
+
+/// Whether a window that thinks it is shaded still is, read off the surface the
+/// compositor actually handed back.
+///
+/// Shading is a request, and a compositor is free to answer it with something
+/// else. Dragging a window by its title bar near the top of the screen is a
+/// maximize gesture on GNOME, so the press that begins a move can leave the
+/// window maximized, and a maximized window ignores `request_inner_size`: the
+/// strip is asked for, the surface stays full screen, and the title bar is
+/// painted across the whole of it. Rather than predict what a compositor
+/// decided, this reads what it did. A shaded window that came back maximized, or
+/// simply far taller than a strip, is not shaded any more and the state is
+/// dropped.
+///
+/// `strip.saturating_mul(2)` is the line, and both sides of it have a reason. A
+/// surface a few pixels off the strip is a compositor rounding a request to
+/// whole scaled pixels or to its own increment, and it is still a strip. Two
+/// title bars is not something rounding produces, and it is far below `MIN_SIZE`,
+/// which is the shortest an open window can be asked for, so nothing between the
+/// two is a window state either.
+///
+/// `settling` is the one span where a surface is not an answer, and it is
+/// deliberately the narrowest one: shading a maximized window asks it to leave
+/// that state first, and both the refusal it gives while it is still maximized
+/// ([`Shade::Leaving`]) and the restored size that arrives once it has left
+/// ([`Shade::Asking`]) are the round trip rather than a verdict. It is set only
+/// for that case. Shading a window that was not maximized sets no `settling` at
+/// all, so the first surface that comes back is read, and a compositor that
+/// refuses the strip is answered on the spot.
+fn shade_of(shaded: bool, maximized: bool, settling: bool, height: u32, strip: u32) -> Shade {
+    if !shaded {
+        return Shade::Open;
+    }
+    if maximized {
+        // Nothing a maximized window reports is about the strip: while its own
+        // un-maximize is in flight it is still on the way there, and otherwise
+        // it is a maximized window, which is not a shaded one.
+        return if settling { Shade::Leaving } else { Shade::Open };
+    }
+    if height <= strip.saturating_mul(2) {
+        return Shade::Strip;
+    }
+    if settling {
+        return Shade::Asking;
+    }
+    Shade::Open
+}
+
+/// Whether a press on the title bar has become a move of the window.
+///
+/// The title bar both moves the window and shades it, and the compositor's
+/// interactive move is the one that cannot be taken back: once `drag_window` is
+/// called the pointer belongs to the compositor, the second click of a double
+/// click never arrives here, and on GNOME a pointer near the top of the screen
+/// has already snapped the window maximized by then. So a press waits, the same
+/// `DRAG_SLOP` a held tab waits for, and a double click that never moves the
+/// pointer never reaches the compositor at all.
+fn began_move(pressed: bool, moved: f64) -> bool {
+    pressed && moved >= DRAG_SLOP
 }
 
 /// When the orb wants its next frame, given the deadline it is already holding.
@@ -440,6 +542,19 @@ struct App {
     shaded: bool,
     /// The size to go back to when the window is unshaded.
     unshaded: Option<PhysicalSize<u32>>,
+    /// Whether the window was maximized when it was shaded, so opening the strip
+    /// can put it back. Shading a maximized window has to un-maximize it first,
+    /// because a maximized window ignores a resize request.
+    was_maximized: bool,
+    /// True while a shade is waiting on a window to leave maximized. See
+    /// [`shade_of`]: what a window says about its size across that round trip is
+    /// our own request being worked through rather than evidence about what the
+    /// window is.
+    settling: bool,
+    /// Where the button went down on the title bar, while it is still down.
+    /// The compositor is only handed an interactive move once the pointer has
+    /// moved away from here; see [`began_move`].
+    moving: Option<PhysicalPosition<f64>>,
     column: f32,
     pane_column: f32,
 
@@ -499,6 +614,9 @@ impl App {
             drag: None,
             shaded: false,
             unshaded: None,
+            was_maximized: false,
+            settling: false,
+            moving: None,
             column: 8.0,
             pane_column: 8.0,
             cursor: PhysicalPosition::new(0.0, 0.0),
@@ -1095,20 +1213,118 @@ impl App {
         self.shaded = !self.shaded;
         if self.shaded {
             self.unshaded = Some(window.inner_size());
+            // Read before anything is asked for, and kept until the strip is
+            // opened again: a window maximized on purpose is still a maximized
+            // window afterwards.
+            self.was_maximized = window.is_maximized();
         }
-        let (min, size) = shade_request(self.shaded, self.unshaded);
+        let ask = shade_request(self.shaded, self.unshaded, self.was_maximized);
         // The minimum goes first. A resize request is clamped to it, and
         // asking a 680x380 minimum for a 30 pixel strip left the surface at
         // full height with the strip painted across the top of it, which is
         // the black bar the window showed when it was shaded.
-        window.set_min_inner_size(min);
-        if let Some(size) = size {
-            let _ = window.request_inner_size(size);
+        window.set_min_inner_size(ask.min);
+        // Then the maximized state, before the size and never after it: a
+        // maximized window ignores a resize request, so the strip is asked for
+        // once the window is in a state that can take it.
+        if let Some(maximized) = ask.maximized {
+            window.set_maximized(maximized);
+        }
+        // Every one of those is a request, and what comes back is read in
+        // `reconcile_shade`. Only leaving maximized puts a round trip in the way
+        // of the strip, so only that case waits: every other shade is answered
+        // once, and what it is answered with is the answer. Set before the size
+        // is asked for, because that answer can arrive before the call returns.
+        self.settling = ask.maximized == Some(false);
+        if let Some(size) = ask.size {
+            self.ask_for_size(window, size);
         }
         if !self.shaded {
             self.unshaded = None;
+            self.was_maximized = false;
         }
         self.dirty = true;
+    }
+
+    /// Read the shaded state off the surface the compositor just handed back,
+    /// and drop it when the surface is not a strip.
+    ///
+    /// The rule is [`shade_of`]. Dropping the state asks for no size: the surface
+    /// on screen is what the compositor decided, and a window it snapped
+    /// maximized out of a shade is a maximized window, not a window owed the
+    /// size it had before. Only the minimum goes back, so the next resize by
+    /// hand is held to it again.
+    fn reconcile_shade(&mut self, height: u32) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        let strip = view::strip_height() as u32;
+        let shade = shade_of(
+            self.shaded,
+            window.is_maximized(),
+            self.settling,
+            height,
+            strip,
+        );
+        // Everything but the un-maximize still being in flight is an answer, and
+        // an answer ends the wait for one.
+        self.settling = shade == Shade::Leaving;
+        match shade {
+            Shade::Strip | Shade::Leaving => {}
+            // The window has left maximized and this surface is that. Ask for
+            // the strip again: the request that went out beside the un-maximize
+            // was made to a window that was still maximized and still able to
+            // refuse it, and this one is not. At the width it has now rather
+            // than the width it was remembered at, which was the width of the
+            // whole screen.
+            Shade::Asking => {
+                let size = PhysicalSize::new(window.inner_size().width, strip);
+                self.ask_for_size(&window, size);
+            }
+            Shade::Open if self.shaded => {
+                self.shaded = false;
+                self.unshaded = None;
+                self.was_maximized = false;
+                window.set_min_inner_size(Some(MIN_SIZE));
+                self.dirty = true;
+            }
+            Shade::Open => {}
+        }
+    }
+
+    /// Ask the window for a size, and read the answer it gives back on the spot.
+    ///
+    /// `request_inner_size` answers one of two ways. `None` means the request
+    /// went to the compositor and a `Resized` will follow, which is the event
+    /// path. `Some` means there will be no event at all, and what comes back is
+    /// either the size that was applied or the size the window kept when it
+    /// refused. Read back off this machine's compositor, a shade is answered the
+    /// second way both times: granted, it returns the strip, and refused by a
+    /// maximized window it returns the full screen it stayed at. So the answer
+    /// has to go through the same reconcile the event does, or a refusal is
+    /// never heard about and the window is drawn as a strip it never became.
+    fn ask_for_size(&mut self, window: &Window, size: PhysicalSize<u32>) {
+        if let Some(applied) = window.request_inner_size(size) {
+            self.reconcile_shade(applied.height);
+        }
+    }
+
+    /// Hand the compositor an interactive move, once the pointer has moved far
+    /// enough from the press that it cannot be the first click of a double
+    /// click. The rule is [`began_move`].
+    fn maybe_move(&mut self, window: &Window) {
+        let Some(from) = self.moving else {
+            return;
+        };
+        let moved = (self.cursor.x - from.x).abs() + (self.cursor.y - from.y).abs();
+        if !began_move(true, moved) {
+            return;
+        }
+        // Cleared before the call, not after: the compositor takes the pointer
+        // for the length of the move and the button coming up never arrives
+        // here, so nothing else would ever clear it.
+        self.moving = None;
+        let _ = window.drag_window();
     }
 
     fn click(&mut self, hit: Hit, window: &Window, event_loop: &ActiveEventLoop) {
@@ -1153,9 +1369,18 @@ impl App {
             Hit::Maximize => window.set_maximized(!window.is_maximized()),
             Hit::TitleBar => {
                 if double {
+                    // The first click of the pair is still holding a move that
+                    // never began. It ends here rather than moving the window
+                    // out from under the strip it just became.
+                    self.moving = None;
                     self.shade(window);
                 } else {
-                    let _ = window.drag_window();
+                    // Pressed, not moved: what this is gets decided by the
+                    // pointer, in `maybe_move`. Handing the compositor a move
+                    // now would eat the second click of a double click, and on
+                    // GNOME a press near the top of the screen snaps the window
+                    // maximized before that second click can shade it.
+                    self.moving = Some(self.cursor);
                 }
             }
             Hit::Tab(view, space) => {
@@ -1554,6 +1779,10 @@ impl App {
     fn release(&mut self) {
         self.selecting = false;
         self.prompt_selecting = false;
+        // A press on the title bar that never moved far enough to become a move
+        // of the window. Nothing happens on the way up; it was a click, and a
+        // second one of them shades.
+        self.moving = None;
         // Here rather than on every motion event: a drag across the window is
         // hundreds of events, and rewriting the settings file at each one is
         // hundreds of rename-over-the-file writes for one decision.
@@ -2085,6 +2314,11 @@ impl ApplicationHandler<Wake> for App {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(size.width, size.height);
                 }
+                // Before the frame, not after it: this is the one place the
+                // window finds out what the compositor did with a shade, and a
+                // surface that is no longer a strip has to stop being drawn as
+                // one on this frame rather than the next.
+                self.reconcile_shade(size.height);
                 self.dirty = true;
                 self.redraw();
             }
@@ -2095,6 +2329,11 @@ impl ApplicationHandler<Wake> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = position;
+                // A press on the title bar becomes a move of the window here,
+                // once the pointer has left the place it went down.
+                if let Some(window) = self.window.clone() {
+                    self.maybe_move(&window);
+                }
                 self.maybe_drag();
                 self.drag_divider();
                 if self.selecting {
@@ -2366,13 +2605,138 @@ mod tests {
     fn shading_drops_the_minimum_and_unshading_puts_it_back() {
         let open = PhysicalSize::new(1180, 760);
 
-        let (min, size) = shade_request(true, Some(open));
-        assert_eq!(min, None, "a minimum taller than the strip refuses it");
-        assert_eq!(size, Some(PhysicalSize::new(1180, view::strip_height() as u32)));
+        let ask = shade_request(true, Some(open), false);
+        assert_eq!(ask.min, None, "a minimum taller than the strip refuses it");
+        assert_eq!(
+            ask.size,
+            Some(PhysicalSize::new(1180, view::strip_height() as u32))
+        );
+        assert_eq!(ask.maximized, None, "an ordinary window is left as it is");
 
-        let (min, size) = shade_request(false, Some(open));
-        assert_eq!(min, Some(MIN_SIZE));
-        assert_eq!(size, Some(open), "and it goes back to the size it was");
+        let ask = shade_request(false, Some(open), false);
+        assert_eq!(ask.min, Some(MIN_SIZE));
+        assert_eq!(ask.size, Some(open), "and it goes back to the size it was");
+        assert_eq!(ask.maximized, None);
+    }
+
+    /// Shading a maximized window: it leaves that state to become a strip and
+    /// is put back into it when the strip is opened.
+    ///
+    /// A maximized window ignores `request_inner_size`, so without the first
+    /// half the surface stays full screen and the title bar is painted across
+    /// the whole of it, which is a window that reads as a screenful of the bar
+    /// colour. Without the second half, shading a window twice would be a way of
+    /// un-maximizing it, which is not what either click asked for.
+    #[test]
+    fn shading_a_maximized_window_leaves_maximized_and_unshading_puts_it_back() {
+        let full = PhysicalSize::new(2560, 1400);
+
+        let ask = shade_request(true, Some(full), true);
+        assert_eq!(
+            ask.maximized,
+            Some(false),
+            "a maximized window has to leave that state to be a strip"
+        );
+        assert_eq!(
+            ask.size,
+            Some(PhysicalSize::new(2560, view::strip_height() as u32)),
+            "and it still asks for the strip, at the width it had"
+        );
+        assert_eq!(ask.min, None);
+
+        let ask = shade_request(false, Some(full), true);
+        assert_eq!(ask.maximized, Some(true), "and it goes back maximized");
+        assert_eq!(
+            ask.size, None,
+            "the compositor owns the size of a maximized window"
+        );
+        assert_eq!(ask.min, Some(MIN_SIZE));
+    }
+
+    /// A shaded window that comes back a size no strip can be is not shaded any
+    /// more.
+    ///
+    /// The window is dragged by its title bar; on GNOME a pointer near the top
+    /// of the screen snaps it maximized; a maximized window ignores the resize
+    /// that shading asks for, so the surface stays full screen and the strip is
+    /// painted across all of it. Nothing here predicts that gesture. It reads
+    /// the surface that arrived and drops a state the surface contradicts.
+    #[test]
+    fn a_shaded_window_the_compositor_kept_tall_is_not_shaded_any_more() {
+        let strip = view::strip_height() as u32;
+
+        // The ordinary case: the request was granted, and it is a strip.
+        assert_eq!(shade_of(true, false, false, strip, strip), Shade::Strip);
+        // A few pixels either way is a compositor rounding a request, not a
+        // different window state.
+        assert_eq!(shade_of(true, false, false, strip + 4, strip), Shade::Strip);
+        assert_eq!(shade_of(true, false, false, strip * 2, strip), Shade::Strip);
+
+        // Two title bars is not rounding, and it is far below `MIN_SIZE`, the
+        // shortest an open window is ever asked for, so nothing in between is a
+        // window state either.
+        assert_eq!(
+            shade_of(true, false, false, strip * 2 + 1, strip),
+            Shade::Open
+        );
+        assert_eq!(shade_of(true, false, false, 760, strip), Shade::Open);
+        assert!(
+            (MIN_SIZE.height as u32) > strip * 2,
+            "the line is below any open window"
+        );
+
+        // Maximized is the case he hit, and it is dropped whatever the height
+        // says: a maximized window cannot be a strip, and the height it reports
+        // is its surface rather than the window.
+        assert_eq!(shade_of(true, true, false, strip, strip), Shade::Open);
+        assert_eq!(shade_of(true, true, false, 1400, strip), Shade::Open);
+
+        // The two surfaces that are not answers, both of them the un-maximize a
+        // shade of a maximized window asks for. First the window while it is
+        // still maximized: read back off this machine, `request_inner_size`
+        // answers a maximized window on the spot with the full screen it stayed
+        // at, and that arrives before the un-maximize has landed.
+        assert_eq!(shade_of(true, true, true, 1400, strip), Shade::Leaving);
+        // Then the restored size, once it has left. The strip goes out again
+        // rather than the state being dropped on it.
+        assert_eq!(shade_of(true, false, true, 760, strip), Shade::Asking);
+        // And once it is a strip it is a strip, whether or not one is expected.
+        assert_eq!(shade_of(true, false, true, strip, strip), Shade::Strip);
+
+        // A window that is not shaded is not made shaded by any of this.
+        for height in [strip, 760] {
+            for maximized in [false, true] {
+                for settling in [false, true] {
+                    assert_eq!(
+                        shade_of(false, maximized, settling, height, strip),
+                        Shade::Open
+                    );
+                }
+            }
+        }
+    }
+
+    /// The title bar waits before it hands the compositor a move.
+    ///
+    /// `drag_window` is one way: after it the pointer belongs to the compositor
+    /// and the second click of a double click never arrives, so a press that
+    /// began a move immediately could not also be the first half of a shade. The
+    /// same slop a held tab waits for, so a click that wobbled is still a click.
+    #[test]
+    fn the_title_bar_only_moves_the_window_once_the_pointer_has_moved() {
+        assert!(!began_move(true, 0.0), "a still pointer is a click");
+        assert!(
+            !began_move(true, DRAG_SLOP - 0.5),
+            "a wobble is still a click"
+        );
+        assert!(began_move(true, DRAG_SLOP), "and moving away is a move");
+        assert!(began_move(true, 400.0));
+        // Nothing is held: motion over the title bar with the button up does
+        // not move the window.
+        assert!(!began_move(false, 400.0));
+        // The same threshold a held tab uses, so the two decisions cannot drift
+        // apart into a press that drags a tab but not a window.
+        assert_eq!(DRAG_SLOP, 5.0);
     }
 
     /// The height shading asks for is the height the strip is laid out at, in
@@ -2389,8 +2753,8 @@ mod tests {
     /// writes over in `view`, where the text size lives.
     #[test]
     fn the_shade_request_is_the_strip_the_layout_draws() {
-        let asked = shade_request(true, Some(PhysicalSize::new(1180, 760)))
-            .1
+        let asked = shade_request(true, Some(PhysicalSize::new(1180, 760)), false)
+            .size
             .expect("shading asks for a size");
         let strip = view::strip_height();
         assert_eq!(asked.height as f32, strip, "the request is not the strip");
