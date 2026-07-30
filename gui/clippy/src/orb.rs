@@ -1,22 +1,24 @@
 //! The thinking orb: the one animated thing in the window.
 //!
-//! A port of the `orbits` mode of `thinking-orbs` (MIT), following
-//! `docs/ORB-SPEC.md`, which was written off that source rather than guessed.
-//! Twelve tilted circles of dots share one centre, one spin and one tilt; every
-//! dot is projected orthographically, the whole list is sorted far to near, and
-//! each dot is drawn as a disc. Depth is carried by how big a dot is and how much
-//! weight its colour has, never by blur.
+//! A port of two modes of `thinking-orbs` (MIT), following `docs/ORB-SPEC.md`,
+//! which was written off that source rather than guessed. Both are lists of
+//! dots projected orthographically, sorted far to near and drawn as discs.
+//! Depth is carried by how big a dot is and how much weight its colour has,
+//! never by blur.
 //!
 //! It needs no shader and no second pipeline. A disc is a rectangle with its
 //! corner radius set to half its width, through the rounded-rect distance field
 //! the window already draws every panel with, and painter's order is the order
 //! rectangles are pushed.
 //!
-//! Two states, and no third. While a turn is running the globe turns and three
-//! runners chase each circle. At rest the same globe is drawn once, frozen and
-//! fainter, with no runners: the corner is never empty and never moving for no
-//! reason, and the runners arriving is what says the agent is thinking. The ASCII
-//! face loop that used to fill the idle state is gone.
+//! Two states, and no third, and they are two different objects. While a turn is
+//! running it is `orbits`: twelve tilted circles of path dots sharing one spin,
+//! with three runners chasing each circle. At rest it is `globe`: one sphere of
+//! dots on a latitude and longitude lattice, drawn once and never again. The
+//! resting state used to be the orbits frame frozen at zero, which is twelve
+//! ellipses standing still and reads as scattered dots rather than as an object;
+//! a lattice closes a silhouette, so the corner holds a ball while nothing is
+//! running.
 //!
 //! The maths is here and the drawing is in [`crate::view`], so a frame can be
 //! asserted without a GPU: [`discs`] is a pure function of the block it is given,
@@ -56,6 +58,36 @@ const PART_R_DEPTH: f32 = 1.6;
 const PART_INK: f32 = 0.3;
 const PART_INK_DEPTH: f32 = 0.22;
 
+/// The resting sphere's lattice: rings of latitude from pole to pole, and how
+/// many dots a ring of longitude gets at its widest. A ring nearer a pole is
+/// shorter and takes proportionally fewer, so the dots keep their spacing
+/// instead of crowding into the poles.
+///
+/// The reference's base profile is 17 and 44, and its 64 point preset scales
+/// both by the square root of 0.42 so that the total count scales by 0.42.
+/// These are that already worked out, the way [`GHOSTS`] is the orbits profile
+/// at its own preset of 1.
+const LAT_RINGS: usize = 11;
+const LON_DENSITY: f32 = 29.0;
+
+/// A lattice dot's radius at the back of the sphere and how much it gains coming
+/// forward, before scaling. The reference's 0.6 and 1.7 at its 64 point preset's
+/// size multiplier of 1.15.
+const GLOBE_R: f32 = 0.69;
+const GLOBE_R_DEPTH: f32 = 1.955;
+
+/// A lattice dot's ink at the back of the sphere, and how much darker (so, here,
+/// brighter) it gets coming forward. Unlike a path dot, whose ink is flat, every
+/// dot here is on the one surface, so ink is the whole of what says which side of
+/// it a dot is on.
+const GLOBE_INK_FAR: f32 = 0.62;
+const GLOBE_INK_SPAN: f32 = 0.54;
+
+/// The tilt the resting sphere is seen at. The reference wobbles this by a
+/// twentieth over time to keep a still image alive; nothing here moves at rest,
+/// so it is the middle of that wobble.
+const GLOBE_TILT: f32 = 0.4;
+
 /// The frame the radii were tuned on, and the exponent they scale by.
 ///
 /// Sub-linear on purpose: a 30 pixel orb scaled linearly off a 300 point drawing
@@ -82,9 +114,9 @@ const TILT: f32 = 0.3;
 /// formulas use.
 const SPEED: f32 = 1.885;
 
-/// How much of itself the resting globe keeps.
+/// How much of itself the resting sphere keeps.
 ///
-/// Not from the reference, which had no resting state: it is the step down that
+/// Not from the reference, which has no resting state: it is the step down that
 /// says nothing is running without leaving the corner blank.
 const RESTING: f32 = 0.6;
 
@@ -105,7 +137,10 @@ const MIN_BLOCK: f32 = 8.0;
 struct Dot {
     x: f32,
     y: f32,
-    /// Depth after the tilt, in pixels, and what the list is sorted by.
+    /// Depth after the tilt, and what the list is sorted by. In whatever units
+    /// the mode did its arithmetic in, which is pixels for the orbits and halves
+    /// of the sphere for the lattice: one frame is one mode, so nothing ever
+    /// sorts one against the other.
     z: f32,
     radius: f32,
     alpha: f32,
@@ -150,17 +185,22 @@ fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 
 /// Where a point lands on screen, and how deep it is.
 ///
-/// Orthographic, and the spin and the tilt are shared by every circle, which is
-/// what makes twelve of them read as one solid. Screen y grows downward, so the
-/// projected height is subtracted.
-fn project(p: [f32; 3], yaw: f32, centre: (f32, f32)) -> (f32, f32, f32) {
+/// Orthographic, and the spin and the tilt are shared by every dot of a frame,
+/// which is what makes twelve circles read as one solid and a lattice read as
+/// one ball. Screen y grows downward, so the projected height is subtracted.
+///
+/// `scale` is what the point is measured in: the orbits hand it points already
+/// in pixels and scale them by one, the lattice hands it points on the unit
+/// sphere and scales them by the sphere's radius. The depth that comes back is
+/// in the same units the point went in as.
+fn project(p: [f32; 3], yaw: f32, tilt: f32, centre: (f32, f32), scale: f32) -> (f32, f32, f32) {
     let (sy, cy) = (yaw.sin(), yaw.cos());
-    let (st, ct) = (TILT.sin(), TILT.cos());
+    let (st, ct) = (tilt.sin(), tilt.cos());
     let x1 = p[0] * cy + p[2] * sy;
     let z1 = -p[0] * sy + p[2] * cy;
     let y1 = p[1] * ct - z1 * st;
     let z2 = p[1] * st + z1 * ct;
-    (centre.0 + x1, centre.1 - y1, z2)
+    (centre.0 + x1 * scale, centre.1 - y1 * scale, z2)
 }
 
 /// A point at angle `a` on one circle: where it is, and its depth as 0 at the
@@ -172,7 +212,7 @@ fn place(a: f32, orbit: &Orbit, yaw: f32, centre: (f32, f32)) -> (f32, f32, f32,
         (orbit.u[1] * c + orbit.v[1] * s) * orbit.ro,
         (orbit.u[2] * c + orbit.v[2] * s) * orbit.ro,
     ];
-    let (x, y, z) = project(p, yaw, centre);
+    let (x, y, z) = project(p, yaw, TILT, centre, 1.0);
     let depth = ((z / orbit.ro + 1.0) * 0.5).clamp(0.0, 1.0);
     (x, y, z, depth)
 }
@@ -180,20 +220,31 @@ fn place(a: f32, orbit: &Orbit, yaw: f32, centre: (f32, f32)) -> (f32, f32, f32,
 /// Every dot of one frame, sorted far to near.
 ///
 /// `seconds` is time since the window opened; the formulas run on it multiplied
-/// by the preset speed. At rest the clock is ignored entirely and the frame is
-/// the one at zero, so a resting window redraws the same picture however long it
-/// has been up.
+/// by the preset speed. At rest the clock is not read at all: the lattice has no
+/// term in it, so a resting window redraws the same picture however long it has
+/// been up, which is what lets the window stop redrawing entirely.
 fn dots(block: Panel, seconds: f32, working: bool) -> Vec<Dot> {
     let size = block.w.min(block.h);
     if size < MIN_BLOCK {
         return Vec::new();
     }
-    let t = if working { seconds * SPEED } else { 0.0 };
-    let yaw = t * YAW_RATE;
     let rs = (size / RS_FRAME).powf(RS_POW);
     let sphere = size * 0.5 * FILL;
     let centre = (block.x + block.w * 0.5, block.y + block.h * 0.5);
+    let mut out = match working {
+        true => orbits(seconds * SPEED, rs, sphere, centre),
+        false => lattice(rs, sphere, centre),
+    };
+    // Far to near, so a near dot covers the path behind it. Rectangles inside a
+    // layer are painted in the order they are pushed, so this sort IS the depth
+    // buffer.
+    out.sort_by(|a, b| a.z.total_cmp(&b.z));
+    out
+}
 
+/// The working frame: twelve tilted circles of path dots, with runners on them.
+fn orbits(t: f32, rs: f32, sphere: f32, centre: (f32, f32)) -> Vec<Dot> {
+    let yaw = t * YAW_RATE;
     let mut out = Vec::with_capacity(ORBITS * (GHOSTS + PARTICLES));
     for index in 0..ORBITS {
         let index = index as f32;
@@ -224,11 +275,8 @@ fn dots(block: Panel, seconds: f32, working: bool) -> Vec<Dot> {
             });
         }
 
-        // The runners are what motion is. A frozen one would be three dots
-        // sitting on a path claiming to run, so at rest there are none.
-        if !working {
-            continue;
-        }
+        // The runners are what motion is, and this frame only exists while
+        // something is running, so every circle gets its three.
         for m in 0..PARTICLES {
             let a = t * speed + (m as f32 / PARTICLES as f32) * TAU + h2 * 6.0;
             let (x, y, z, depth) = place(a, &orbit, yaw, centre);
@@ -242,10 +290,39 @@ fn dots(block: Panel, seconds: f32, working: bool) -> Vec<Dot> {
             });
         }
     }
-    // Far to near, so a near dot covers the path behind it. Rectangles inside a
-    // layer are painted in the order they are pushed, so this sort IS the depth
-    // buffer.
-    out.sort_by(|a, b| a.z.total_cmp(&b.z));
+    out
+}
+
+/// The resting frame: one sphere of dots, on rings of latitude, with no clock in
+/// it anywhere.
+///
+/// A ring's dot count follows the cosine of its latitude, so the spacing along a
+/// ring is the spacing between rings and the poles do not become knots. Both
+/// poles come out as a single dot, which is what the reference's `max(1, ...)`
+/// is for.
+fn lattice(rs: f32, sphere: f32, centre: (f32, f32)) -> Vec<Dot> {
+    let mut out = Vec::with_capacity(LAT_RINGS * LON_DENSITY as usize);
+    for ring in 0..=LAT_RINGS {
+        let lat = -TAU * 0.25 + (ring as f32 / LAT_RINGS as f32) * TAU * 0.5;
+        let (sin_lat, cos_lat) = (lat.sin(), lat.cos());
+        let count = (cos_lat.abs() * LON_DENSITY).round().max(1.0);
+        for step in 0..count as usize {
+            let lon = (step as f32 / count) * TAU;
+            let p = [cos_lat * lon.cos(), sin_lat, cos_lat * lon.sin()];
+            // On the unit sphere, so the depth that comes back is already the
+            // near-to-far reading the radius and the ink are written against.
+            let (x, y, z) = project(p, 0.0, GLOBE_TILT, centre, sphere);
+            let depth = ((z + 1.0) * 0.5).clamp(0.0, 1.0);
+            out.push(Dot {
+                x,
+                y,
+                z,
+                radius: (GLOBE_R + GLOBE_R_DEPTH * depth) * rs,
+                alpha: 1.0,
+                ink: GLOBE_INK_FAR - GLOBE_INK_SPAN * depth,
+            });
+        }
+    }
     out
 }
 
@@ -400,27 +477,35 @@ mod tests {
         }
     }
 
-    /// The profile's own numbers, pinned. Twelve circles of forty path dots is
-    /// the globe, and three runners each is the animation, so working is 516
-    /// discs a frame and resting is the 480 that are the paths.
+    /// Both profiles' own numbers, pinned. Working is twelve circles of forty
+    /// path dots with three runners each, so 516 discs a frame; resting is the
+    /// lattice, which is 204 and has nothing to do with the circles.
     ///
     /// It also says what the rectangle buffer has to hold. It grows by powers of
     /// two from 256, so 516 discs plus a window's worth of panels takes it to
     /// 1024 once and never again.
     #[test]
-    fn working_draws_the_whole_profile_and_resting_draws_only_the_paths() {
+    fn each_state_draws_the_whole_of_its_own_profile() {
         let skin = skin();
         let working = discs(block(), 1.0, true, &skin);
         let resting = discs(block(), 1.0, false, &skin);
         assert_eq!(working.len(), ORBITS * (GHOSTS + PARTICLES));
         assert_eq!(working.len(), 516);
-        assert_eq!(resting.len(), ORBITS * GHOSTS);
-        assert!(resting.len() < working.len());
+        // Every ring of the lattice, from one pole to the other, at the count a
+        // ring that far up the sphere earns. Both poles are one dot.
+        let rings: usize = (0..=LAT_RINGS)
+            .map(|ring| {
+                let lat = -TAU * 0.25 + (ring as f32 / LAT_RINGS as f32) * TAU * 0.5;
+                (lat.cos().abs() * LON_DENSITY).round().max(1.0) as usize
+            })
+            .sum();
+        assert_eq!(resting.len(), rings);
+        assert_eq!(resting.len(), 204);
     }
 
-    /// At rest it is one frozen frame, so two moments an hour apart are the same
-    /// picture. This is the whole reason the window can stop redrawing when a
-    /// turn ends.
+    /// At rest it is one frame with no clock in it, so two moments an hour apart
+    /// are the same picture. This is the whole reason the window can stop
+    /// redrawing when a turn ends.
     #[test]
     fn resting_is_the_same_frame_at_every_moment() {
         let (skin, block) = (skin(), block());
@@ -434,31 +519,80 @@ mod tests {
         }
     }
 
-    /// The runners are the brightest thing in the orb and the paths are faint
-    /// behind them, which is the mirrored ink working: a near runner's ink is
-    /// the darkest mark on paper and the brightest dot on a dark window.
+    /// The resting orb is a sphere, not the turning one standing still.
     ///
-    /// Resting has no runners and less alpha, so it is fainter on both counts,
-    /// which is the whole visible difference between the two states.
+    /// What makes a heap of dots read as an object is its outline, so that is
+    /// what is asserted: cut the block into twelve wedges around its middle and
+    /// every one of them has a dot out at the sphere's own edge. The lattice
+    /// closes that outline because its rings run right around the silhouette;
+    /// the twelve circles cannot, because the widest of them stops short of the
+    /// sphere and the wedges between them are empty, which is the scattered dots
+    /// this replaced.
     #[test]
-    fn the_runners_are_the_brightest_thing_and_resting_gives_them_up() {
+    fn the_resting_orb_closes_a_silhouette_and_the_turning_one_does_not() {
         let skin = skin();
-        let weight = |rects: &[Rect]| {
-            rects
-                .iter()
-                .map(|rect| {
-                    let [r, g, b, a] = rect.rgba();
-                    (r + g + b) * a
-                })
-                .fold(0.0f32, f32::max)
+        for panel in [block(), Panel::new(12.0, 40.0, 300.0, 300.0)] {
+            let size = panel.w.min(panel.h);
+            let sphere = size * 0.5 * FILL;
+            let centre = (panel.x + panel.w * 0.5, panel.y + panel.h * 0.5);
+            let rim = |working: bool| {
+                let mut out = [0.0f32; 12];
+                for disc in discs(panel, 1.0, working, &skin) {
+                    let [x, y, w, h] = disc.xywh();
+                    let (dx, dy) = (x + w * 0.5 - centre.0, y + h * 0.5 - centre.1);
+                    let wedge = ((dy.atan2(dx) + TAU) / TAU * 12.0) as usize % 12;
+                    out[wedge] = out[wedge].max(dx.hypot(dy) / sphere);
+                }
+                out
+            };
+            let resting = rim(false);
+            assert!(
+                resting.iter().all(|reach| *reach > 0.97),
+                "the resting orb has a gap in its edge: {resting:?} in {panel:?}"
+            );
+            let working = rim(true);
+            assert!(
+                working.iter().all(|reach| *reach < 0.97),
+                "the turning orb reached the edge: {working:?} in {panel:?}"
+            );
+        }
+    }
+
+    /// The runners are the brightest thing in the turning orb and the paths are
+    /// faint behind them, which is the mirrored ink working: a near runner's ink
+    /// is the darkest mark on paper and the brightest dot on a dark window.
+    ///
+    /// The resting sphere carries the same reading in its own way: a dot on the
+    /// near side of it is brighter than one on the far side, which is the only
+    /// thing telling a ball from a ring of dots once it stops turning.
+    #[test]
+    fn depth_is_carried_by_weight_in_both_states() {
+        let skin = skin();
+        let weight = |rect: &Rect| {
+            let [r, g, b, a] = rect.rgba();
+            (r + g + b) * a
         };
         let working = discs(block(), 1.0, true, &skin);
-        let resting = discs(block(), 1.0, false, &skin);
+        // A runner is at full alpha and a path dot never is, so the two are
+        // separable without knowing where any of them landed.
+        let heaviest = |rects: &[Rect], runner: bool| {
+            rects
+                .iter()
+                .filter(|rect| (rect.rgba()[3] >= 1.0 - 1e-6) == runner)
+                .map(weight)
+                .fold(0.0f32, f32::max)
+        };
         assert!(
-            weight(&working) > weight(&resting) * 2.0,
-            "{} against {}",
-            weight(&working),
-            weight(&resting)
+            heaviest(&working, true) > heaviest(&working, false) * 2.0,
+            "the runners do not stand out from the paths"
+        );
+
+        let resting = discs(block(), 1.0, false, &skin);
+        // The list arrives far to near, so the last disc is the nearest one and
+        // the first is the furthest.
+        assert!(
+            weight(resting.last().expect("a sphere")) > weight(&resting[0]) * 2.0,
+            "the near side is not brighter than the far side"
         );
         // And every dot is the accent's hue turned down, never a colour of its
         // own: no channel may be over the accent's.
