@@ -7189,7 +7189,7 @@ mod tests {
         );
     }
 
-    /// While a turn is running the phase reads INFERING in the bad colour, and
+    /// While a turn is running the phase reads INFERRING in the bad colour, and
     /// at rest it is READY in the ordinary body tint.
     ///
     /// The colour is the point as much as the word: it is the one reading in the
@@ -7216,14 +7216,14 @@ mod tests {
                 .iter()
                 .filter(|text| body.contains(text.at.x, text.at.y))
                 .flat_map(|text| text.runs.iter())
-                .find(|run| run.text.contains("READY") || run.text.contains("INFERING"))
+                .find(|run| run.text.contains("READY") || run.text.contains("INFERRING"))
                 .expect("the phase is drawn in the pane")
                 .clone();
             (run.text.clone(), run.color, out.skin)
         };
 
         let (word, tint, skin) = phase_run(&busy_state());
-        assert_eq!(word, "INFERING");
+        assert_eq!(word, "INFERRING");
         assert_eq!(tint, Some(skin.bad), "the busy word is not the bad colour");
 
         let mut ready = State::new();
@@ -8083,7 +8083,7 @@ mod tests {
         let state = busy_state();
         let scene = shaded_scene(&state, 1200.0, 800.0, &skin);
         let text = text_of(&scene);
-        assert!(text.contains("INFERING"), "{text}");
+        assert!(text.contains("INFERRING"), "{text}");
         assert!(!text.contains("looking at it now"), "no pane content");
 
         // The surface the compositor kept is the bar, all 800 pixels of it, and

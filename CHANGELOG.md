@@ -142,7 +142,7 @@ tags rather than here; this file starts where it was added.
   is swept by a scan meridian and that is the only moving part of it, and without
   the scan there is no term in the frame that time enters, so the window still
   redraws only on change and still holds no wakeup deadline while it rests.
-- A turn in flight reads INFERING, in the bad colour. The phase carried four
+- A turn in flight reads INFERRING, in the bad colour. The phase carried four
   words for what is one thing from outside the window: thinking while the
   endpoint generates, working while the agent runs what it generated. The orb
   turns for both, so the reading beside it is one word for both now, and it is

@@ -441,7 +441,7 @@ impl Phase {
         match self {
             Phase::Starting => "STARTING",
             Phase::Ready => "READY",
-            Phase::Thinking | Phase::Working => "INFERING",
+            Phase::Thinking | Phase::Working => "INFERRING",
             Phase::Finished => "FINISHED",
             Phase::Interrupted => "INTERRUPTED",
             Phase::Gone => "AGENT GONE",
@@ -2186,7 +2186,7 @@ mod tests {
         let mut state = State::new();
         assert_eq!(state.headline(), "STARTING");
         state.apply(Event::TurnStart { turn: 1 });
-        assert_eq!(state.headline(), "INFERING");
+        assert_eq!(state.headline(), "INFERRING");
         state.apply(tool_start(
             "p",
             "plan",
@@ -2196,7 +2196,7 @@ mod tests {
             ]}),
         ));
         assert!(
-            state.headline().starts_with("INFERING"),
+            state.headline().starts_with("INFERRING"),
             "{}",
             state.headline()
         );
@@ -2247,7 +2247,7 @@ mod tests {
         state.submitted("go");
         assert_eq!(state.phase, Phase::Thinking);
         assert!(state.phase.busy());
-        assert_eq!(state.headline(), "INFERING");
+        assert_eq!(state.headline(), "INFERRING");
 
         // Reported by the agent: the same phase from the other direction.
         let mut from_the_agent = State::new();
@@ -2257,17 +2257,17 @@ mod tests {
         state.apply(tool_start("b", "bash", serde_json::json!({"cmd": "ls"})));
         assert_eq!(state.phase, Phase::Working);
         assert!(state.phase.busy());
-        assert!(state.headline().starts_with("INFERING"), "{}", state.headline());
+        assert!(state.headline().starts_with("INFERRING"), "{}", state.headline());
 
         // One word for every phase the orb turns for, and it is never the
         // resting one.
         for phase in [Phase::Thinking, Phase::Working] {
             assert!(phase.busy());
-            assert_eq!(phase.word(), "INFERING");
+            assert_eq!(phase.word(), "INFERRING");
         }
         for phase in [Phase::Starting, Phase::Ready, Phase::Finished, Phase::Gone] {
             assert!(!phase.busy());
-            assert_ne!(phase.word(), "INFERING", "{phase:?}");
+            assert_ne!(phase.word(), "INFERRING", "{phase:?}");
         }
     }
 

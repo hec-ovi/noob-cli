@@ -245,7 +245,7 @@ Display variables can be set in the shell or the checkout's root `.env` for Comp
 
 ## Prompt budget
 
-`noob debug prompt --json` prints the exact system prompt and tool schemas the binary sends. The budget test registers all 14 tools, including websearch and both generic MCP tools, plus a skill and an MCP server. That artifact is 1,874 o200k tokens: 555 for the assembled system prompt and 1,319 for tool schemas. The locked ceiling is 1,900 and the hard limit is 2,000.
+`noob debug prompt --json` prints the exact system prompt and tool schemas the binary sends. The budget test registers all 14 tools, including websearch and both generic MCP tools, plus a skill and an MCP server. That artifact is about 1,875 o200k tokens: the tool schemas are 1,319 exactly, and the system prompt lands within a token or two of 556 because its environment block carries the working directory, so a deeper path costs a little more. The locked ceiling is 1,900 and the hard limit is 2,000. Both figures are o200k; another tokenizer gives another number for the same bytes.
 
 Model-specific chat-template framing is added by the server and is not part of those bytes. llama.cpp caches the prefix, so it is normally prefilled once per slot. Reproduce the noob side with `noob debug prompt --json`; use the server's `/tokenize` endpoint for its framing.
 
