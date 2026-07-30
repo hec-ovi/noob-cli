@@ -1,6 +1,8 @@
 [package]
-name = "clippy"
-description = "CLIppy: the GPU front end for noob."
+# The window is NO0B. The folder is still `clippy` on disk: renaming it moves
+# every path in dev.sh, the docs and the layer index for nothing a user sees.
+name = "no0b"
+description = "NO0B: the GPU front end for noob."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +10,7 @@ license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "clippy"
+name = "no0b"
 path = "src/main.rs"
 
 [dependencies]

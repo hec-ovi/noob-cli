@@ -320,7 +320,46 @@ pub fn path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(base.join("noob").join("clippy.conf"))
+    Some(base.join("noob").join("no0b.conf"))
+}
+
+/// The prefix these files carried while the window was called CLIppy.
+const LEGACY_PREFIX: &str = "clippy";
+/// The prefix they carry now. `no0b.conf`, `no0b.recent`, `no0b.totals`.
+const PREFIX: &str = "no0b";
+
+/// Take over the file the same reading used to live in under the old name.
+///
+/// The window was CLIppy and wrote `clippy.conf`, `clippy.recent` and
+/// `clippy.totals`. Renaming it must not read as a fresh install: the palette
+/// somebody tuned, the folders they have opened and the all-time totals are all
+/// still theirs and still valid, and there is no version of this where losing
+/// them is acceptable.
+///
+/// Called by each of the three readers on the way in, so it runs once per file
+/// and only until the new name exists.
+///
+/// Nothing here is an error. A rename that cannot happen leaves the new name
+/// absent, which every caller already treats as a first run and answers with
+/// defaults; refusing to open a window over a leftover file would be far worse
+/// than starting fresh. A new file that already exists wins and the old one is
+/// left where it is, because the current file is the one the user has been
+/// editing.
+pub fn adopt_legacy(path: &Path) {
+    if path.exists() {
+        return;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let Some(rest) = name.strip_prefix(PREFIX) else {
+        return;
+    };
+    let legacy = path.with_file_name(format!("{LEGACY_PREFIX}{rest}"));
+    if !legacy.exists() {
+        return;
+    }
+    let _ = std::fs::rename(&legacy, path);
 }
 
 impl Config {
@@ -332,13 +371,22 @@ impl Config {
         let Some(path) = path() else {
             return Config::default();
         };
-        if !path.exists() {
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            let _ = std::fs::write(&path, DEFAULT_FILE);
+        Config::load_from(&path)
+    }
+
+    /// The half of [`Config::load`] that knows a path, so a test can hand it one
+    /// instead of setting `$XDG_CONFIG_HOME` for the whole process.
+    pub fn load_from(path: &Path) -> Config {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
         }
-        match std::fs::read_to_string(&path) {
+        // Before the existence check below, or the first run under the new name
+        // writes a defaults file over settings the user still has.
+        adopt_legacy(path);
+        if !path.exists() {
+            let _ = std::fs::write(path, DEFAULT_FILE);
+        }
+        match std::fs::read_to_string(path) {
             Ok(text) => Config::parse(&text),
             Err(_) => Config::default(),
         }
@@ -604,7 +652,7 @@ fn open_temp(path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let name = path
         .file_name()
-        .map_or_else(|| String::from("clippy.conf"), |n| n.to_string_lossy().into());
+        .map_or_else(|| String::from("no0b.conf"), |n| n.to_string_lossy().into());
     for _ in 0..32 {
         let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
         let tmp = dir.join(format!(".{name}.tmp-{}-{serial}", std::process::id()));
@@ -634,7 +682,7 @@ pub fn set_request(args: &[String]) -> Option<Result<(&str, &str), String>> {
         return None;
     }
     let [assignment] = rest else {
-        return Some(Err("usage: clippy --set <key>=<value>".to_string()));
+        return Some(Err(format!("usage: {} --set <key>=<value>", crate::BINARY)));
     };
     match assignment.split_once('=') {
         Some((key, value)) => Some(Ok((key.trim(), value.trim()))),
@@ -682,7 +730,7 @@ fn color(value: &str) -> Option<[u8; 3]> {
 
 /// Written on first run. Every key present, every key commented.
 const DEFAULT_FILE: &str = "\
-# CLIppy settings. `key = value`, one per line, `#` starts a comment.
+# NO0B settings. `key = value`, one per line, `#` starts a comment.
 # Delete this file to get it back with the defaults.
 
 # How solid the window is. 5% is a ghost, 100% is a normal opaque window.
@@ -999,13 +1047,18 @@ mod tests {
 
     impl Scratch {
         fn new(name: &str) -> Scratch {
-            let dir = std::env::temp_dir().join(format!("clippy-conf-{}-{name}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("no0b-conf-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Scratch(dir)
         }
 
         fn conf(&self) -> PathBuf {
+            self.0.join("no0b.conf")
+        }
+
+        /// The same file under the name it had while the window was CLIppy.
+        fn legacy(&self) -> PathBuf {
             self.0.join("clippy.conf")
         }
 
@@ -1017,7 +1070,7 @@ mod tests {
             std::fs::read_dir(&self.0)
                 .unwrap()
                 .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
-                .filter(|name| name != "clippy.conf")
+                .filter(|name| name != "no0b.conf")
                 .collect()
         }
     }
@@ -1026,6 +1079,77 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// The rename must not throw a tuned palette away. Somebody's `clippy.conf`
+    /// is their settings whatever the window is called this week, so the first
+    /// run under the new name moves the file across and reads it.
+    #[test]
+    fn settings_written_under_the_old_name_move_to_the_new_one() {
+        let scratch = Scratch::new("adopt");
+        std::fs::write(scratch.legacy(), "opacity = 40%\ntheme = amber\n").unwrap();
+
+        let config = Config::load_from(&scratch.conf());
+
+        assert_eq!(config.opacity, 0.4);
+        assert_eq!(config.accent, theme("amber").unwrap().accent);
+        // The file is under the new name, with what was in it, and the old name
+        // is gone rather than left to be read by nothing.
+        assert_eq!(scratch.read(), "opacity = 40%\ntheme = amber\n");
+        assert!(!scratch.legacy().exists(), "the old file is still there");
+    }
+
+    /// Both names present is not a migration. The new file is the one being
+    /// edited, so it wins, and the old one is left alone rather than deleted:
+    /// this code does not get to decide that a file it did not write is rubbish.
+    #[test]
+    fn the_current_file_wins_over_a_leftover_old_one() {
+        let scratch = Scratch::new("both");
+        std::fs::write(scratch.conf(), "opacity = 30%\n").unwrap();
+        std::fs::write(scratch.legacy(), "opacity = 40%\n").unwrap();
+
+        let config = Config::load_from(&scratch.conf());
+
+        assert_eq!(config.opacity, 0.3);
+        assert_eq!(
+            std::fs::read_to_string(scratch.legacy()).unwrap(),
+            "opacity = 40%\n"
+        );
+    }
+
+    /// With neither file there it is a first run, which writes the documented
+    /// defaults. The migration must not have turned that into a no-op.
+    #[test]
+    fn a_first_run_with_no_file_either_way_writes_the_defaults() {
+        let scratch = Scratch::new("fresh");
+        let config = Config::load_from(&scratch.conf());
+        assert_eq!(config.opacity, Config::default().opacity);
+        assert_eq!(scratch.read(), DEFAULT_FILE);
+    }
+
+    /// The migration is one function for all three files the window keeps, so it
+    /// carries any of them and touches nothing it was not asked about.
+    #[test]
+    fn the_migration_carries_every_file_the_window_keeps() {
+        let scratch = Scratch::new("every");
+        for (legacy, current) in [
+            ("clippy.recent", "no0b.recent"),
+            ("clippy.totals", "no0b.totals"),
+        ] {
+            std::fs::write(scratch.0.join(legacy), format!("from {legacy}\n")).unwrap();
+            adopt_legacy(&scratch.0.join(current));
+            assert_eq!(
+                std::fs::read_to_string(scratch.0.join(current)).unwrap(),
+                format!("from {legacy}\n")
+            );
+            assert!(!scratch.0.join(legacy).exists());
+        }
+        // A name that is not one of ours is not renamed onto, whatever sits
+        // beside it.
+        std::fs::write(scratch.0.join("clippy.txt"), "not settings").unwrap();
+        adopt_legacy(&scratch.0.join("something.txt"));
+        assert!(scratch.0.join("clippy.txt").exists());
+        assert!(!scratch.0.join("something.txt").exists());
     }
 
     /// The file is mostly comments and they are the documentation, so a write

@@ -88,13 +88,14 @@ case "${1:-}" in
     [ "$crates" -le 45 ] || { echo "FAIL: crate graph exceeds 45"; exit 1; }
     ;;
   gui)
-    # CLIppy, from its own workspace. Built on the host rather than in the
+    # NO0B, from its own workspace. Built on the host rather than in the
     # container: it needs a GPU, a compositor and a window, none of which the
-    # CLI's build image has or should have.
+    # CLI's build image has or should have. The folder is still gui/clippy; the
+    # package and the binary are no0b.
     shift
     cargo build --release --manifest-path gui/Cargo.toml
     NOOB_BIN="${NOOB_BIN:-$PWD/target/release/noob}" \
-      exec gui/target/release/clippy "$@"
+      exec gui/target/release/no0b "$@"
     ;;
   gui-test)
     cargo test --manifest-path gui/Cargo.toml
@@ -114,13 +115,13 @@ case "${1:-}" in
     ;;
   gui-check)
     cargo build --release --manifest-path gui/Cargo.toml
-    size=$(stat -c%s gui/target/release/clippy)
-    echo "clippy binary: $size bytes"
-    [ "$size" -le 41943040 ] || { echo "FAIL: CLIppy exceeds 40 MiB"; exit 1; }
-    crates=$(cargo tree --manifest-path gui/Cargo.toml -p clippy -e normal \
+    size=$(stat -c%s gui/target/release/no0b)
+    echo "no0b binary: $size bytes"
+    [ "$size" -le 41943040 ] || { echo "FAIL: NO0B exceeds 40 MiB"; exit 1; }
+    crates=$(cargo tree --manifest-path gui/Cargo.toml -p no0b -e normal \
       --prefix none | sed 's/ (\*)$//' | awk '{print $1}' | sort -u | grep -c .)
-    echo "clippy runtime crates: $crates"
-    [ "$crates" -le 400 ] || { echo "FAIL: CLIppy crate graph exceeds 400"; exit 1; }
+    echo "no0b runtime crates: $crates"
+    [ "$crates" -le 400 ] || { echo "FAIL: NO0B crate graph exceeds 400"; exit 1; }
     ;;
   gui-package|gui-install)
     # Both routes stage the same directory, because they were two copies of the
@@ -135,13 +136,13 @@ case "${1:-}" in
     shift
     version=$(awk -F'"' '/^version/ {print $2; exit}' gui/Cargo.toml)
     arch=$(uname -m)
-    stage="gui/target/package/clippy-$version-$arch-linux"
+    stage="gui/target/package/no0b-$version-$arch-linux"
     cargo build --release --manifest-path gui/Cargo.toml
     rm -rf "$stage"
     install -d "$stage"
-    install -m 0755 gui/target/release/clippy "$stage/clippy"
+    install -m 0755 gui/target/release/no0b "$stage/no0b"
     install -m 0755 gui/data/install.sh "$stage/install.sh"
-    for asset in gui/data/io.github.hec_ovi.CLIppy*; do
+    for asset in gui/data/io.github.hec_ovi.NO0B*; do
         install -m 0644 "$asset" "$stage/"
     done
     if [ "$command" = gui-install ]; then
@@ -153,7 +154,7 @@ case "${1:-}" in
     echo "$(stat -c%s "$tarball") bytes"
     ;;
   avatar)
-    # Regenerate CLIppy's ASCII avatar from a GIF. The window never decodes an
+    # Regenerate NO0B's ASCII avatar from a GIF. The window never decodes an
     # image: this runs once, here, and what ships is its output.
     shift
     [ $# -ge 1 ] || { echo "usage: ./dev.sh avatar <in.gif> [out.txt] [--cols N]" >&2; exit 2; }
@@ -174,10 +175,10 @@ case "${1:-}" in
     echo "  ./dev.sh --resume <id>      resume a saved session"
     echo "  ./dev.sh --plan | --yolo    any noob flag is forwarded to the agent"
     echo "  ./dev.sh install|test|build|docker|exec \"prompt\"|smoke|size-check|clean"
-    echo "  ./dev.sh gui [workspace]     open CLIppy, the GPU front end"
-    echo "  ./dev.sh gui-test|gui-check  CLIppy tests and its own size gate"
-    echo "  ./dev.sh avatar <in.gif>     regenerate CLIppy's ASCII avatar"
-    echo "  ./dev.sh gui-install         install CLIppy under ~/.local"
+    echo "  ./dev.sh gui [workspace]     open NO0B, the GPU front end"
+    echo "  ./dev.sh gui-test|gui-check  NO0B tests and its own size gate"
+    echo "  ./dev.sh avatar <in.gif>     regenerate NO0B's ASCII avatar"
+    echo "  ./dev.sh gui-install         install NO0B under ~/.local"
     echo "  ./dev.sh gui-package         build the release tarball"
     ;;
   # Bare `./dev.sh`, or leading-dash noob flags (--session, --plan, ...): open

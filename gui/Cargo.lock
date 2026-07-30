@@ -279,21 +279,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "clippy"
-version = "0.7.0"
-dependencies = [
- "copypasta",
- "noob-draw",
- "noob-gpu",
- "noob-proto",
- "pollster",
- "serde_json",
- "text-geometry",
- "wgpu",
- "winit",
-]
-
-[[package]]
 name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1049,6 +1034,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys 0.3.1",
+]
+
+[[package]]
+name = "no0b"
+version = "0.7.0"
+dependencies = [
+ "copypasta",
+ "noob-draw",
+ "noob-gpu",
+ "noob-proto",
+ "pollster",
+ "serde_json",
+ "text-geometry",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]

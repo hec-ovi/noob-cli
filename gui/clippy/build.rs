@@ -14,7 +14,7 @@ fn main() {
         Some(id) => format!("{} {id}", env!("CARGO_PKG_VERSION")),
         None => env!("CARGO_PKG_VERSION").to_string(),
     };
-    println!("cargo:rustc-env=CLIPPY_BUILD={stamp}");
+    println!("cargo:rustc-env=NO0B_BUILD={stamp}");
     // Without this the stamp is baked once and never refreshed, which is worse
     // than no stamp: it would name the wrong commit with confidence.
     println!("cargo:rerun-if-changed=../../.git/HEAD");

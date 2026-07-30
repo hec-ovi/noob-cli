@@ -1903,7 +1903,7 @@ mod tests {
     fn a_running_command_scrolls_its_output_under_its_own_row() {
         let mut state = State::new();
         state.apply(tool_start("b", "bash", serde_json::json!({"cmd": "cargo build"})));
-        for line in ["compiling noob", "compiling clippy"] {
+        for line in ["compiling noob", "compiling no0b"] {
             state.apply(Event::ToolProgress {
                 call_id: "b".into(),
                 line: line.into(),
@@ -1917,7 +1917,7 @@ mod tests {
             .collect();
         assert_eq!(shown[1].0, "compiling noob");
         assert_eq!(shown[1].1, Tone::Call(Kind::Bash), "{shown:?}");
-        assert_eq!(shown[2].0, "compiling clippy");
+        assert_eq!(shown[2].0, "compiling no0b");
     }
 
     /// Compaction ends a file's life in the model's context. The page stays

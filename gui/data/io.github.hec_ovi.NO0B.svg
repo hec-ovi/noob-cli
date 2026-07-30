@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
   <!--
-    CLIppy. The outer bend of a paperclip is an arch, an arch on two legs is an
-    n, and a shape that goes up, turns and comes back down is the agent loop.
+    NO0B. An arch on two legs is an n, and a shape that goes up, turns and
+    comes back down is the agent loop.
 
     One closed path, one flat fill, drawn on a 128 grid with a module of 8, so
     every coordinate is a whole pixel at 16, 32, 64 and 128. Constant wire 24,

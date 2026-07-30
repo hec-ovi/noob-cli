@@ -117,7 +117,7 @@ impl Gpu {
         let info = adapter.get_info();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("clippy"),
+                label: Some("no0b"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),

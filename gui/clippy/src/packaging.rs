@@ -61,15 +61,28 @@ fn usable_token(raw: Option<String>) -> Option<ActivationToken> {
 
 /// The desktop entry, checked against the code rather than trusted.
 #[cfg(test)]
-const DESKTOP: &str = include_str!("../../data/io.github.hec_ovi.CLIppy.desktop");
+const DESKTOP: &str = include_str!("../../data/io.github.hec_ovi.NO0B.desktop");
 #[cfg(test)]
-const ICON: &str = include_str!("../../data/io.github.hec_ovi.CLIppy.svg");
+const ICON: &str = include_str!("../../data/io.github.hec_ovi.NO0B.svg");
 #[cfg(test)]
-const SYMBOLIC: &str = include_str!("../../data/io.github.hec_ovi.CLIppy-symbolic.svg");
+const SYMBOLIC: &str = include_str!("../../data/io.github.hec_ovi.NO0B-symbolic.svg");
 #[cfg(test)]
 const INSTALLER: &str = include_str!("../../data/install.sh");
 #[cfg(test)]
 const MAIN: &str = include_str!("main.rs");
+
+/// The binary this crate builds, which is the name the entry's `Exec` says and
+/// the name the installer places. Taken from cargo rather than typed out, so a
+/// renamed binary fails a test here instead of leaving a launcher that starts
+/// nothing.
+#[cfg(test)]
+const BINARY: &str = env!("CARGO_BIN_NAME");
+
+/// What the window was called up to 0.6.0, kept only so the installer can be
+/// checked for removing it. Two launchers in the menu, one of them dead, is the
+/// failure a rename produces when nobody cleans up.
+#[cfg(test)]
+const OLD_APP_ID: &str = "io.github.hec_ovi.CLIppy";
 
 #[cfg(test)]
 mod tests {
@@ -94,12 +107,12 @@ mod tests {
         // exactly that into the theme.
         assert_eq!(key(DESKTOP, "Icon"), APP_ID);
         // And the entry runs the binary the installer put on PATH. Bare, with
-        // no field code: the argument CLIppy takes is a workspace directory,
-        // and every field code the specification has stands for a file or a
-        // URL. `%f` said "hand me a file", which nothing does anyway because
-        // the entry declares no `MimeType`, and which would be the wrong thing
-        // if something did.
-        assert_eq!(key(DESKTOP, "Exec"), "clippy", "{DESKTOP}");
+        // no field code: the argument NO0B takes is a workspace directory, and
+        // every field code the specification has stands for a file or a URL.
+        // `%f` said "hand me a file", which nothing does anyway because the
+        // entry declares no `MimeType`, and which would be the wrong thing if
+        // something did.
+        assert_eq!(key(DESKTOP, "Exec"), BINARY, "{DESKTOP}");
         assert!(!DESKTOP.contains("MimeType"), "a field code would be needed");
     }
 
@@ -119,8 +132,8 @@ mod tests {
         assert_eq!(usable_token(Some(String::new())), None);
         assert_eq!(usable_token(Some(String::from("  "))), None);
         assert_eq!(
-            usable_token(Some(String::from("clippy-0_TIME42"))),
-            Some(ActivationToken::from_raw(String::from("clippy-0_TIME42")))
+            usable_token(Some(String::from("no0b-0_TIME42"))),
+            Some(ActivationToken::from_raw(String::from("no0b-0_TIME42")))
         );
     }
 
@@ -148,7 +161,7 @@ mod tests {
             let name = name.replace("$APP_ID", crate::APP_ID);
             // The binary is the one thing staged from the build rather than
             // from the repository.
-            if name == "clippy" {
+            if name == BINARY {
                 continue;
             }
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -158,13 +171,88 @@ mod tests {
         }
     }
 
+    /// The rename has to take the old launcher out, and it has to do it on an
+    /// ordinary install rather than only on `--uninstall`.
+    ///
+    /// A desktop reads every entry it finds. Leaving CLIppy's behind means two
+    /// icons in the menu, and the older of the two runs a binary the installer
+    /// no longer writes, so it does nothing at all.
+    #[test]
+    fn the_installer_removes_what_the_old_name_left() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../data");
+        let dir = std::env::temp_dir().join(format!("no0b-install-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (here, prefix) = (dir.join("stage"), dir.join("prefix"));
+        std::fs::create_dir_all(&here).expect("a staging directory");
+        for name in [
+            String::from("install.sh"),
+            format!("{}.desktop", crate::APP_ID),
+            format!("{}.svg", crate::APP_ID),
+            format!("{}-symbolic.svg", crate::APP_ID),
+        ] {
+            std::fs::copy(root.join(&name), here.join(&name)).expect("gui/data has it");
+        }
+        // Standing in for the release build, which a test does not have.
+        std::fs::write(here.join(BINARY), "#!/bin/sh\n").expect("a stand-in binary");
+
+        // A machine that installed CLIppy, exactly as its own installer left it.
+        let apps = prefix.join("share/applications");
+        let scalable = prefix.join("share/icons/hicolor/scalable/apps");
+        let symbolic = prefix.join("share/icons/hicolor/symbolic/apps");
+        for path in [&prefix.join("bin"), &apps, &scalable, &symbolic] {
+            std::fs::create_dir_all(path).expect("a prefix");
+        }
+        let stale = [
+            prefix.join("bin/clippy"),
+            apps.join(format!("{OLD_APP_ID}.desktop")),
+            scalable.join(format!("{OLD_APP_ID}.svg")),
+            symbolic.join(format!("{OLD_APP_ID}-symbolic.svg")),
+        ];
+        for path in &stale {
+            std::fs::write(path, "what the old name installed").expect("a stale file");
+        }
+
+        let run = || {
+            std::process::Command::new("bash")
+                .arg(here.join("install.sh"))
+                .arg("--prefix")
+                .arg(&prefix)
+                .output()
+                .expect("bash runs the installer")
+        };
+        let out = run();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+        // The new set is in place, and the entry points at the binary by its
+        // full path rather than by name.
+        let placed = prefix.join("bin").join(BINARY);
+        assert!(placed.exists(), "{} is not there", placed.display());
+        let entry = std::fs::read_to_string(apps.join(format!("{}.desktop", crate::APP_ID)))
+            .expect("the entry was installed");
+        assert!(entry.contains(&format!("Exec={}", placed.display())), "{entry}");
+        assert!(scalable.join(format!("{}.svg", crate::APP_ID)).exists());
+        assert!(symbolic.join(format!("{}-symbolic.svg", crate::APP_ID)).exists());
+        // And the old set is gone, so the menu holds one launcher.
+        for path in &stale {
+            assert!(!path.exists(), "{} survived the install", path.display());
+        }
+
+        // Removing a file that is not there is not a failure: the second run
+        // has nothing of the old name left to take out, and `set -e` would end
+        // the script on a bare `rm`.
+        let again = run();
+        assert!(again.status.success(), "{}", String::from_utf8_lossy(&again.stderr));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A malformed entry is ignored in full, so the parts that make it valid
     /// are worth pinning.
     #[test]
     fn the_desktop_entry_is_a_valid_one() {
         assert!(DESKTOP.starts_with("[Desktop Entry]\n"), "{DESKTOP}");
         assert_eq!(key(DESKTOP, "Type"), "Application");
-        assert_eq!(key(DESKTOP, "Name"), "CLIppy");
+        assert_eq!(key(DESKTOP, "Name"), "NO0B");
         assert_eq!(key(DESKTOP, "Terminal"), "false");
         // A category the menus actually have. An invented one files the app
         // under nothing at all.

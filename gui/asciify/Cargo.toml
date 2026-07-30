@@ -1,11 +1,11 @@
-# Turns a GIF into the text animation CLIppy plays.
+# Turns a GIF into the text animation NO0B plays.
 #
-# A separate crate, and never a dependency of `clippy`: a GIF decoder in the
+# A separate crate, and never a dependency of `no0b`: a GIF decoder in the
 # window would be a decoder shipped to every user to read one file that never
 # changes. This runs once, at authoring time, and what ships is its output.
 [package]
 name = "asciify"
-description = "GIF to ASCII animation, for CLIppy's avatar."
+description = "GIF to ASCII animation, for NO0B's avatar."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

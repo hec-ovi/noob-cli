@@ -1,13 +1,13 @@
 [Desktop Entry]
 Type=Application
 Version=1.5
-Name=CLIppy
+Name=NO0B
 GenericName=Agent Monitor
 Comment=Watch a noob agent work
-Exec=clippy
-Icon=io.github.hec_ovi.CLIppy
+Exec=no0b
+Icon=io.github.hec_ovi.NO0B
 Terminal=false
 Categories=Development;
-Keywords=agent;llm;ai;noob;terminal;
+Keywords=agent;llm;ai;noob;no0b;terminal;
 StartupNotify=true
-StartupWMClass=io.github.hec_ovi.CLIppy
+StartupWMClass=io.github.hec_ovi.NO0B

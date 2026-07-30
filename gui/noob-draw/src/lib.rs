@@ -727,13 +727,13 @@ impl Renderer {
         ) {
             // A frame with missing text is better than a dead window; the atlas
             // recovers on the next frame once it has been trimmed.
-            eprintln!("clippy: text prepare failed: {e:?}");
+            eprintln!("noob-draw: text prepare failed: {e:?}");
         }
 
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("clippy"),
+                label: Some("no0b"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &frame.view,
                     depth_slice: None,

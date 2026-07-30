@@ -1,6 +1,6 @@
 //! Choosing the folder the agent works in.
 //!
-//! Launched from the dock with no argument, CLIppy used to call `current_dir()`,
+//! Launched from the dock with no argument, NO0B used to call `current_dir()`,
 //! which under a desktop launcher is `$HOME`, and hand the agent the home
 //! directory without ever saying so. This module is the model behind the picker
 //! that opens instead: what is listed, where the cursor is, walking in and out
@@ -497,15 +497,19 @@ impl Picker {
     }
 }
 
-/// Where the remembered folders live: beside `clippy.conf`, under the same
-/// rules. CLIppy has written nothing but its settings until now, so this is the
+/// Where the remembered folders live: beside `no0b.conf`, under the same rules.
+/// The window has written nothing but its settings until now, so this is the
 /// second file and it goes in the same place.
 pub fn recents_path() -> Option<PathBuf> {
-    Some(crate::config::path()?.with_file_name("clippy.recent"))
+    Some(crate::config::path()?.with_file_name("no0b.recent"))
 }
 
 /// Read the file. A missing or unreadable one is a first run.
+///
+/// The list written under the old name is taken over on the way in, so a rename
+/// does not read as somebody who has never opened a folder.
 pub fn load_recents(path: &Path) -> Vec<PathBuf> {
+    crate::config::adopt_legacy(path);
     match std::fs::read_to_string(path) {
         Ok(text) => parse_recents(&text),
         Err(_) => Vec::new(),
@@ -533,7 +537,7 @@ pub fn parse_recents(text: &str) -> Vec<PathBuf> {
 
 pub fn recents_text(list: &[PathBuf]) -> String {
     let mut out = String::from(
-        "# Folders CLIppy has opened, newest first. Delete a line to forget it.\n",
+        "# Folders NO0B has opened, newest first. Delete a line to forget it.\n",
     );
     for path in list.iter().take(REMEMBERED) {
         out.push_str(&path.display().to_string());
@@ -931,7 +935,7 @@ mod tests {
     #[test]
     fn a_missing_or_scribbled_file_is_a_first_run() {
         assert!(parse_recents("").is_empty());
-        assert!(load_recents(Path::new("/nowhere/at/all/clippy.recent")).is_empty());
+        assert!(load_recents(Path::new("/nowhere/at/all/no0b.recent")).is_empty());
         let text = "# a comment\n\n/home/hec/one\n  /home/hec/two  \n/home/hec/one\n";
         assert_eq!(
             parse_recents(text),
@@ -945,5 +949,34 @@ mod tests {
             .map(|n| format!("/p{n}\n"))
             .collect::<String>();
         assert_eq!(parse_recents(&long).len(), REMEMBERED);
+    }
+
+    /// The folders somebody has opened are the difference between the picker
+    /// being one Enter and being a walk through the filesystem, so the rename
+    /// carries the list rather than starting it again.
+    #[test]
+    fn the_folders_remembered_under_the_old_name_are_carried_over() {
+        let dir = std::env::temp_dir().join(format!("no0b-recent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let (legacy, current) = (dir.join("clippy.recent"), dir.join("no0b.recent"));
+        std::fs::write(&legacy, "/home/hec/one\n/home/hec/two\n").expect("the old file");
+
+        assert_eq!(
+            load_recents(&current),
+            vec![
+                PathBuf::from("/home/hec/one"),
+                PathBuf::from("/home/hec/two")
+            ]
+        );
+        assert!(!legacy.exists(), "the old name is still there");
+
+        // Both names present is not a migration: the current list wins and the
+        // old file is left alone.
+        std::fs::write(&legacy, "/home/hec/three\n").expect("the old file again");
+        assert_eq!(load_recents(&current)[0], PathBuf::from("/home/hec/one"));
+        assert!(legacy.exists(), "the old file was deleted");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

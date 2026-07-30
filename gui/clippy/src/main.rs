@@ -1,4 +1,4 @@
-//! CLIppy: a window for watching an agent work.
+//! NO0B: a window for watching an agent work.
 //!
 //! It starts `noob serve` in a workspace, sends what you type as a
 //! `prompt.submit` and renders the frames that come back. There is no terminal
@@ -14,11 +14,11 @@
 //! 3,500 fps and spent a third of a GPU doing it, which is how a UI silently
 //! eats a machine.
 //!
-//! Usage: `clippy [workspace]`, with `NOOB_BIN` naming the agent binary when it
+//! Usage: `no0b [workspace]`, with `NOOB_BIN` naming the agent binary when it
 //! is not `noob` on PATH. With no folder named the window opens on the picker
 //! (see `picker`) rather than on whatever directory the process was started in,
 //! which under a desktop launcher is the home directory. Settings live beside
-//! noob's own; see `config`. `clippy --set <key>=<value>` changes one of them
+//! noob's own; see `config`. `no0b --set <key>=<value>` changes one of them
 //! and exits.
 
 /// The clip player, with nothing drawing it at the moment. Kept compiled and
@@ -1307,10 +1307,15 @@ impl App {
 /// desktop cannot match the two, and an unmatched window gets a generic icon in
 /// the dock and in the switcher no matter what the code does. On Wayland the
 /// code cannot set an icon at all, so this string IS the icon.
-pub const APP_ID: &str = "io.github.hec_ovi.CLIppy";
+pub const APP_ID: &str = "io.github.hec_ovi.NO0B";
+
+/// What this program is called on a command line, which is what it calls itself
+/// when it has to print something. From cargo rather than typed out, so it
+/// cannot say one name while the shell says another.
+pub const BINARY: &str = env!("CARGO_BIN_NAME");
 
 fn window_attributes() -> winit::window::WindowAttributes {
-    let attributes = Window::default_attributes().with_title("CLIppy");
+    let attributes = Window::default_attributes().with_title("NO0B");
     // Set on both, because the same binary runs under either and the two
     // display servers spell the same idea differently.
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -1318,9 +1323,9 @@ fn window_attributes() -> winit::window::WindowAttributes {
         use winit::platform::wayland::WindowAttributesExtWayland;
         use winit::platform::x11::WindowAttributesExtX11;
         WindowAttributesExtX11::with_name(
-            WindowAttributesExtWayland::with_name(attributes, APP_ID, "clippy"),
+            WindowAttributesExtWayland::with_name(attributes, APP_ID, BINARY),
             APP_ID,
-            "clippy",
+            BINARY,
         )
     };
     attributes
@@ -1353,7 +1358,7 @@ impl ApplicationHandler<Wake> for App {
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(e) => {
-                eprintln!("clippy: cannot open a window: {e}");
+                eprintln!("{BINARY}: cannot open a window: {e}");
                 event_loop.exit();
                 return;
             }
@@ -1377,7 +1382,7 @@ impl ApplicationHandler<Wake> for App {
                 self.gpu = Some(gpu);
             }
             Err(e) => {
-                eprintln!("clippy: {e}");
+                eprintln!("{BINARY}: {e}");
                 event_loop.exit();
                 return;
             }
@@ -1576,7 +1581,7 @@ fn resize_cursor(dir: winit::window::ResizeDirection) -> CursorIcon {
 }
 
 fn main() {
-    // `clippy --set theme=amber` edits the settings file and exits. Not an
+    // `no0b --set theme=amber` edits the settings file and exits. Not an
     // editor: it is a terminal one-liner for the same file, and the only
     // caller of the writer.
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -1591,9 +1596,9 @@ fn main() {
                 .map(|()| format!("{key} = {value} in {}", path.display()))
         });
         match written {
-            Ok(line) => println!("clippy: {line}"),
+            Ok(line) => println!("{BINARY}: {line}"),
             Err(error) => {
-                eprintln!("clippy: {error}");
+                eprintln!("{BINARY}: {error}");
                 std::process::exit(1);
             }
         }
@@ -1604,14 +1609,14 @@ fn main() {
     let event_loop = match EventLoop::<Wake>::with_user_event().build() {
         Ok(loop_) => loop_,
         Err(e) => {
-            eprintln!("clippy: no display: {e}");
+            eprintln!("{BINARY}: no display: {e}");
             std::process::exit(1);
         }
     };
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App::new(event_loop.create_proxy(), config, workspace_arg(&args));
     if let Err(e) = event_loop.run_app(&mut app) {
-        eprintln!("clippy: {e}");
+        eprintln!("{BINARY}: {e}");
         std::process::exit(1);
     }
 }

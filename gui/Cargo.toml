@@ -1,4 +1,4 @@
-# CLIppy: the GPU front end. Its own workspace, deliberately.
+# NO0B: the GPU front end. Its own workspace, deliberately.
 #
 # The CLI is capped at 8 MiB and 45 runtime crates, and those are published
 # claims rather than preferences. A GPU stack is several hundred crates. One
@@ -6,6 +6,9 @@
 # they are kept apart and share exactly one thing: `crates/noob-proto`, by path.
 [workspace]
 resolver = "2"
+# `clippy/` is the NO0B window. The package and the binary are both `no0b`; only
+# the folder still carries the old name, because renaming it would move every
+# path in dev.sh, the docs and the layer index and change nothing a user sees.
 members = ["noob-gpu", "noob-draw", "clippy", "asciify", "layers/text-geometry"]
 
 [workspace.package]

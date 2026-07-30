@@ -16,7 +16,7 @@ for line in &lines[window.first..window.first + window.count] { /* draw */ }
 
 ## Why it exists
 
-The rule was previously written out at eight call sites in CLIppy and disagreed
+The rule was previously written out at eight call sites in the window and disagreed
 with itself at three of them. A pane asked for as many logical lines as rows
 fit, the shaper wrapped some of them onto two or more rows, and the overflow
 fell out of the clip box with no scroll position that could reach it, so the end

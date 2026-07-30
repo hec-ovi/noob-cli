@@ -37,6 +37,13 @@ const GUTTER: usize = 4;
 const SMALL: f32 = 12.0;
 const SCROLL_W: f32 = 4.0;
 const BUTTON_W: f32 = 26.0;
+/// The square kept clear at the left end of the title strip, where the orb goes.
+///
+/// The orb is the one animated thing in the window and it is not built yet. The
+/// strip's text starts after this, so drawing the orb later adds it to an empty
+/// slot rather than pushing the name along, and the strip reads
+/// `[orb] NO0B \u{25b8} version` from the first frame it ever draws.
+pub const ORB_W: f32 = TITLE_H;
 const LABEL_COLUMNS: usize = 9;
 /// A gauge is a block of dots: eight across and five down is 0 to 100 percent,
 /// so one row is 20 percent and one dot is 2.5. Squarer than the ten by four bar
@@ -130,7 +137,7 @@ pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// part after it. A version alone cannot tell two test builds of the same
 /// release apart, which is what the commit is for.
 fn build_commit() -> &'static str {
-    env!("CLIPPY_BUILD").strip_prefix(VERSION).unwrap_or("")
+    env!("NO0B_BUILD").strip_prefix(VERSION).unwrap_or("")
 }
 
 /// Something the pointer can land on. Returned by [`Layout::hit`] so every
@@ -995,9 +1002,11 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
         ));
     }
 
-    let room = (layout.width - BUTTON_W * 3.0 - 12.0).max(1.0);
+    // The name, then the marker, and nothing else at full strength. It read
+    // "NO0B \u{25b8} CLIppy" while the window had two names; it has one.
+    let room = (layout.width - BUTTON_W * 3.0 - ORB_W - 12.0).max(1.0);
     let mut runs = vec![
-        Run::tinted("NO0B \u{25b8} CLIppy", skin.bright),
+        Run::tinted("NO0B \u{25b8}", skin.bright),
         // Which build this is: the version the crate carries, then the commit
         // build.rs stamped after it, because a version cannot tell two test
         // builds of the same release apart. At the text tint, not the dim one:
@@ -1019,7 +1028,7 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
     }
     scene.text(Text::rich(
         runs,
-        Panel::new(0.0, 0.0, room, TITLE_H).row(12.0, Text::line_for(SMALL)),
+        Panel::new(ORB_W, 0.0, room, TITLE_H).row(0.0, Text::line_for(SMALL)),
         SMALL,
         skin.title,
     ));
@@ -2212,17 +2221,55 @@ mod tests {
     fn the_title_bar_names_the_build() {
         let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &[]);
         let text = text_of(&out.scene);
-        assert!(text.contains("CLIppy"), "{text}");
+        // The window is NO0B and has one name. It used to draw the product name
+        // twice, "NO0B \u{25b8} CLIppy", and the second one is gone.
+        assert!(text.contains("NO0B"), "{text}");
+        assert!(!text.contains("CLIppy"), "the old name is still drawn: {text}");
         assert!(
-            text.contains(env!("CLIPPY_BUILD")),
+            text.contains(env!("NO0B_BUILD")),
             "the build stamp {:?} is not on screen: {text}",
-            env!("CLIPPY_BUILD")
+            env!("NO0B_BUILD")
         );
         assert!(
-            env!("CLIPPY_BUILD").starts_with(env!("CARGO_PKG_VERSION")),
+            env!("NO0B_BUILD").starts_with(env!("CARGO_PKG_VERSION")),
             "the stamp has to start with the version, got {:?}",
-            env!("CLIPPY_BUILD")
+            env!("NO0B_BUILD")
         );
+    }
+
+    /// What item 21 asked for, read left to right: the orb's slot, the name, the
+    /// marker, the version.
+    ///
+    /// The orb itself belongs to the animation work and is not here yet, so what
+    /// is asserted about it is that its room is empty: no text starts inside the
+    /// leftmost [`ORB_W`] of the strip, which is what makes adding it later a
+    /// draw rather than a relayout.
+    #[test]
+    fn the_title_strip_reads_orb_then_name_then_marker_then_version() {
+        let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &[]);
+        let title = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| text.runs.iter().any(|run| run.text.contains("NO0B")))
+            .expect("the title strip names the window");
+        let line: String = title.runs.iter().map(|run| run.text.as_str()).collect();
+        assert!(
+            line.starts_with(&format!("NO0B \u{25b8} {VERSION}")),
+            "the strip reads {line:?}"
+        );
+        assert!(title.at.x >= ORB_W, "the text starts at {}", title.at.x);
+        for text in &out.scene.texts {
+            if text.at.y >= TITLE_H {
+                continue;
+            }
+            assert!(
+                text.at.x >= ORB_W,
+                "text at x={} is in the orb's room: {:?}",
+                text.at.x,
+                text.runs.iter().map(|run| run.text.as_str()).collect::<String>()
+            );
+        }
     }
 
     /// The reading after the name starts with the version the crate carries.
@@ -2295,10 +2342,10 @@ mod tests {
             .scene
             .texts
             .iter()
-            .find(|text| text.runs.iter().any(|run| run.text.contains("CLIppy")))
+            .find(|text| text.runs.iter().any(|run| run.text.contains("NO0B")))
             .expect("the title strip names the window");
         let line: String = title.runs.iter().map(|run| run.text.as_str()).collect();
-        assert!(line.contains(env!("CLIPPY_BUILD")), "{line}");
+        assert!(line.contains(env!("NO0B_BUILD")), "{line}");
         // The budget was a whole line of readings up here. It is a set of
         // monitor rows now, so what is asserted is that none of its words are.
         for evicted in [
@@ -2318,7 +2365,7 @@ mod tests {
         let stamp = title
             .runs
             .iter()
-            .find(|run| run.text.contains(env!("CLIPPY_BUILD")))
+            .find(|run| run.text.contains(env!("NO0B_BUILD")))
             .expect("the build stamp is a run of its own");
         assert_eq!(stamp.color, Some(out.skin.title));
         assert_ne!(stamp.color, Some(out.skin.dim));

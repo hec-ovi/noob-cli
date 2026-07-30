@@ -1,4 +1,4 @@
-//! GIF to the text animation CLIppy plays.
+//! GIF to the text animation NO0B plays.
 //!
 //! Run once, at authoring time, and commit what it prints. The window never
 //! decodes a GIF: a decoder shipped to every user to read one file that never

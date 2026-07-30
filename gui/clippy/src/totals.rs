@@ -47,14 +47,19 @@ pub struct Totals {
     pub decode_rates: Vec<f32>,
 }
 
-/// Where the file lives: beside `clippy.conf`, under the same rules.
+/// Where the file lives: beside `no0b.conf`, under the same rules.
 pub fn path() -> Option<PathBuf> {
-    Some(crate::config::path()?.with_file_name("clippy.totals"))
+    Some(crate::config::path()?.with_file_name("no0b.totals"))
 }
 
 impl Totals {
     /// Read the file. A missing or unreadable one is a first run, not an error.
+    ///
+    /// The file written under the old name is taken over on the way in: the
+    /// all-time totals are the one reading in the window that cannot be
+    /// recovered once it is lost, and a rename is no reason to zero them.
     pub fn load(path: &Path) -> Totals {
+        crate::config::adopt_legacy(path);
         match std::fs::read_to_string(path) {
             Ok(text) => Totals::parse(&text),
             Err(_) => Totals::default(),
@@ -100,7 +105,7 @@ impl Totals {
                 .join(",")
         };
         format!(
-            "# CLIppy running totals, across every session. Delete to start over.\n\
+            "# NO0B running totals, across every session. Delete to start over.\n\
              prefilled = {}\n\
              generated = {}\n\
              cached = {}\n\
@@ -262,7 +267,7 @@ mod tests {
     fn a_missing_or_corrupt_file_reads_as_nothing_recorded() {
         assert_eq!(Totals::parse(""), Totals::default());
         assert_eq!(
-            Totals::load(Path::new("/nonexistent/clippy.totals")),
+            Totals::load(Path::new("/nonexistent/no0b.totals")),
             Totals::default()
         );
         let junk = Totals::parse(
@@ -293,9 +298,9 @@ mod tests {
     /// Written by rename, and it survives a round trip through the filesystem.
     #[test]
     fn saving_and_loading_keeps_every_number() {
-        let dir = std::env::temp_dir().join(format!("clippy-totals-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("no0b-totals-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a temp dir");
-        let path = dir.join("clippy.totals");
+        let path = dir.join("no0b.totals");
         written().save(&path).expect("saved");
         assert_eq!(Totals::load(&path), written());
         // And again over the top of itself, which is what every save after the
@@ -304,6 +309,34 @@ mod tests {
         more.generated += 5;
         more.save(&path).expect("saved again");
         assert_eq!(Totals::load(&path).generated, written().generated + 5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The totals are the one reading in the window that cannot be measured
+    /// again: they are every session that ever ran. A rename that dropped them
+    /// would set the counters somebody has been watching for weeks back to zero
+    /// and there would be no way back.
+    #[test]
+    fn totals_written_under_the_old_name_are_carried_over() {
+        let dir = std::env::temp_dir().join(format!("no0b-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let (legacy, current) = (dir.join("clippy.totals"), dir.join("no0b.totals"));
+        written().save(&legacy).expect("saved under the old name");
+
+        assert_eq!(Totals::load(&current), written());
+        assert!(current.exists(), "the file was not moved");
+        assert!(!legacy.exists(), "the old name is still there");
+
+        // Both names present is not a migration: the current file is the one
+        // being written and it wins, with the old one left where it is.
+        let mut newer = written();
+        newer.generated += 11;
+        newer.save(&current).expect("saved");
+        written().save(&legacy).expect("saved under the old name again");
+        assert_eq!(Totals::load(&current).generated, written().generated + 11);
+        assert!(legacy.exists(), "the old file was deleted");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

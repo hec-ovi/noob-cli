@@ -1,4 +1,4 @@
-# CLIppy
+# NO0B
 
 A window for watching an agent work. It starts `noob serve` in a workspace,
 sends what you type, and renders the frames that come back.
@@ -19,7 +19,7 @@ Backspace with nothing typed goes up, Enter opens what the cursor is on, and Esc
 quits. The mouse does the same: click a row, double-click to walk in, and the
 button at the foot confirms. Folders you have opened before sit at the top of
 the list, so the second launch is Enter. They live in
-`~/.config/noob/clippy.recent`, one path per line, newest first; delete a line
+`~/.config/noob/no0b.recent`, one path per line, newest first; delete a line
 to forget it and delete the file to forget them all.
 
 `NOOB_BIN` names the agent binary when it is not `noob` on PATH.
@@ -27,12 +27,15 @@ to forget it and delete the file to forget them all.
 ## Installing
 
 ```
-./dev.sh gui-install         # ~/.local/bin/clippy, the launcher and the icon
+./dev.sh gui-install         # ~/.local/bin/no0b, the launcher and the icon
 ./dev.sh gui-package         # the release tarball, same contents
 ```
 
 Everything lands under `~/.local`, so nothing needs root and nothing goes
 outside your home directory. `install.sh --uninstall` takes it all back out.
+Installing also removes what the old CLIppy name left behind, the launcher, the
+entry and both icons, so the menu holds one entry rather than two with the older
+one starting nothing.
 Not a Flatpak or an AppImage: the binary is static apart from the system's own
 GPU drivers, and those are exactly the thing a bundle cannot ship.
 
@@ -100,7 +103,7 @@ transcript costs; decode is from the first token to the last, which is what the
 answer costs.
 
 OVERALL is the same arithmetic over every session, kept in
-`~/.config/noob/clippy.totals` beside the settings and written by rename at the
+`~/.config/noob/no0b.totals` beside the settings and written by rename at the
 end of every turn. It carries a mean and a median: the mean is every request ever,
 and the median is the middle one, which is the reading that survives a cold start
 with a full transcript. That needs the samples themselves, so the file keeps the
@@ -196,7 +199,7 @@ neighbour rather than leaving a hole.
 
 ## Settings
 
-`~/.config/noob/clippy.conf`, written with the defaults on first run and
+`~/.config/noob/no0b.conf`, written with the defaults on first run and
 commented. Opacity, both font sizes, how tall the prompt may grow, which panes
 exist, and the whole palette: the eight base colors, one per tool, one per view,
 ten gauge slots a monitor reading picks from, and the five the highlighter uses
@@ -207,8 +210,14 @@ than ignored.
 gauge colors name the thing rather than the window, so a theme leaves them alone. The
 colors ship as commented defaults so the theme has something to set, so
 uncomment one line to keep the theme and override that single color.
-`clippy --set theme=amber` makes the same edit from a terminal without touching
+`no0b --set theme=amber` makes the same edit from a terminal without touching
 the comments.
+
+The window shipped as CLIppy up to 0.6.0 and wrote `clippy.conf`,
+`clippy.recent` and `clippy.totals`. The first run under the new name moves each
+of those to `no0b.*`, so a tuned palette, the folders you have opened and the
+all-time totals survive the rename. A file that already exists under the new
+name wins and the old one is left alone.
 
 Opacity defaults to 88%. Lower it to see more of your desktop through the
 reading surface; below about 60% a busy wallpaper starts competing with the
@@ -225,7 +234,7 @@ black.
 |---|---|
 | `noob-gpu` | adapter, device, surface, what this machine will actually do |
 | `noob-draw` | instanced rectangles and shaped glyphs, and nothing else |
-| `clippy` | the window shell, the layout, the panes, the agent link |
+| `no0b` | the window shell, the layout, the panes, the agent link (in `gui/clippy/`, which still carries the old folder name) |
 | `asciify` | GIF to a text animation, run at authoring time only |
 
 `gui/data/` holds what the desktop needs: the icon, its small redrawn variant,
@@ -236,7 +245,7 @@ crates and those are published claims; a GPU stack is several hundred crates.
 One lockfile for both would put a `workspace = true` between the two budgets.
 They share exactly one thing, `crates/noob-proto`, by path.
 
-CLIppy has its own ceiling, 40 MiB and 400 crates, enforced by
+NO0B has its own ceiling, 40 MiB and 400 crates, enforced by
 `./dev.sh gui-check` the same way the CLI's is. It currently uses 13.0 MiB and
 147 crates. Most of the size is one asset: the symbol font is embedded rather
 than looked for on the system, because a glyph a machine does not have draws as
