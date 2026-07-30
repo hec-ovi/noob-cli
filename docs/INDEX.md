@@ -16,6 +16,7 @@ open only what the right column names.
 | What a right click offers and what a row does | `gui/clippy/src/menu.rs`, routed in `gui/clippy/src/main.rs` |
 | Choosing the folder the agent works in, and the folders CLIppy remembers | `gui/clippy/src/picker.rs`, drawn by `view::folder_picker`, routed in `gui/clippy/src/main.rs` |
 | The conversation and metrics model: what an event does to state | `gui/clippy/src/state.rs` |
+| Where a pane that is a list is scrolled to, and what clamps it | `gui/clippy/src/scroll.rs`, content measured by `view::scroll_extent` |
 | Which readings the monitors show | `gui/clippy/src/monitor.rs` |
 | Totals that outlive the window, and the file they live in | `gui/clippy/src/totals.rs` |
 | Talking to the agent process | `gui/clippy/src/link.rs` |

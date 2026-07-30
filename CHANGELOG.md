@@ -19,6 +19,18 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
   gutter, and nothing accounted for wrapping.
 - The scrollbar reports how far a pane can actually scroll. Counting lines made
   a pane of wrapped text look shorter than it is.
+- Every pane scrolls inside its own box. PLAN and AGENTS drew every row they had
+  into one text box, so a long plan or a fleet of eight children ran off the
+  bottom edge; DEBUG stopped at the last row that fitted; a monitor stopped at the
+  last reading that fitted. None of the four had a scrollbar, so nothing said
+  there was more, and nothing could reach it. All of them now take their window,
+  their clamp and their thumb from `text-geometry`, the same as the transcript,
+  with one offset per view held in one place and clamped against the content every
+  frame, so a pane whose list shrank under a scroll is not left blank. A click in
+  DEBUG adds the window's own offset back, or a scrolled pane would open a
+  different call than the one under the pointer. Every row of a monitor pane is now
+  the same height whether it draws a block or not, which is what lets the pane say
+  how much of itself is on screen.
 - The dock icon appears as soon as the window opens. The desktop entry asks for
   a startup notification and nothing answered it, so the cursor spun until
   GNOME's own timeout, around fifteen seconds.

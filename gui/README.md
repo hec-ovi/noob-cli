@@ -98,6 +98,9 @@ Twenty dots to a row is a lot of width to ask a pane for, so the number is
 served first and the block takes what is left. A pane dragged narrow enough that
 a dot would be under four pixels across drops the block and keeps the number,
 rather than drawing twenty dots two pixels wide in the room the number needed.
+Every row of a monitor is the same height, block row or not, because that is what
+lets the pane say how much of itself is on screen; the block shrinks to fit the
+readings the pane has, and past four pixels the pane scrolls instead.
 
 HARDWARE reads `/sys/class/drm/card*/device` and `/proc` directly. No vendor
 library, no dependency. It only samples while it is on screen, so an idle window
@@ -135,6 +138,15 @@ and the arguments of that call open under it. Both halves are already on the
 wire, they were being written into the activity log and then dropped, so this
 needed no protocol change. What it does not show is the schema the tool expected:
 that is on no event at all.
+
+Every pane scrolls inside its own box. The plan, the agent list, the failed calls
+and the three monitors used to draw what fitted and lose the rest, so a long plan
+ran off the bottom edge with nothing on screen saying it was there. All of them
+take their window, their clamp and their bar from the same place the conversation
+does, so the wheel and PageUp/PageDown mean the same thing in every pane and a bar
+appears only when there is more than the box holds. CONTEXT keeps its three header
+rows in place while its readings scroll, because a monitor whose first rows
+scrolled away is a monitor of an unnamed session.
 
 A running command scrolls. `cargo build` used to be one row that said nothing
 for two minutes and then said how it went; its output now arrives line by line
