@@ -183,14 +183,43 @@ const SETTING_VALUE_COLUMNS: usize = 28;
 /// listing, and what has been typed.
 const PICKER_HEAD_ROWS: f32 = 3.0;
 
-/// And below it: the keys, then the button that confirms.
-const PICKER_FOOT_ROWS: f32 = 2.0;
+/// What the picker says on its button, and the whole of what it says.
+///
+/// It used to spell out the folder that would be opened, which made the button
+/// as wide as a path and made it change width every time the cursor moved. The
+/// path is already written above the list.
+const PICKER_OPEN_LABEL: &str = "Open";
 
-/// How tall its list is allowed to get, in rows, and how short. Short enough
-/// that a folder with two entries is not a mostly empty box, tall enough that a
-/// deep source tree is not read four rows at a time.
+/// How much taller that button is than the line of text in it, on each side.
+///
+/// A button reads as a button because there is room around what it says. The
+/// same string with a hairline drawn around it reads as a label with a box.
+const PICKER_OPEN_PAD: f32 = 5.0;
+
+/// How tall the picker's list is allowed to get, in rows, and how short.
+///
+/// Bounds on the window, not on the folder. The box takes as many rows as there
+/// is room for between these two and then holds that height whatever it is
+/// listing. It used to take as many rows as the folder had entries, so walking
+/// from a folder with three subfolders into one with forty resized the dialog
+/// and recentred it under the pointer, moving every row while the pointer was
+/// still on one of them. A short folder now gets empty rows under its list,
+/// which is the cheaper of the two: a box that does not move is worth more than
+/// a box with no whitespace in it.
 const PICKER_MIN_ROWS: usize = 6;
 const PICKER_MAX_ROWS: usize = 24;
+
+/// How tall the Open button is for text of this line height.
+fn picker_open_h(line: f32) -> f32 {
+    line + PICKER_OPEN_PAD * 2.0
+}
+
+/// What the picker keeps below its list: the line of keys, a gap, and the
+/// button. One answer, so the box that is measured and the rows that are drawn
+/// into it cannot disagree about where the bottom is.
+fn picker_foot(line: f32) -> f32 {
+    line + GAP + picker_open_h(line)
+}
 
 /// How wide the mark down the left of the selected row is. A tab's accent runs
 /// along its top edge because a strip is read left to right; a row is entered
@@ -1154,8 +1183,15 @@ fn place_files(body: Panel, shape: &Shape) -> (Panel, Panel, Vec<(usize, Panel)>
 /// Centred in `area` and no wider than [`PICKER_COLUMNS`], because the thing
 /// being read is a column of folder names: stretched across a 2200 pixel window
 /// the eye has to travel the whole width to get from a name to the button under
-/// it. The list is as tall as it has entries, between two bounds, so a folder
-/// with three subfolders is not a mostly empty box.
+/// it.
+///
+/// One shape, and it is not the folder's shape. The height is chosen from the
+/// room the window has, between [`PICKER_MIN_ROWS`] and [`PICKER_MAX_ROWS`], and
+/// then held: `picker` says what goes in the box and never how big it is. That
+/// is why nothing here reads `picker.rows().len()`. Walking into a folder with a
+/// different number of entries used to resize and recentre the whole dialog
+/// under the pointer, so every row moved out from under the click that was about
+/// to happen.
 fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> (Panel, Panel, Vec<(usize, Panel)>, Panel) {
     if area.w < 1.0 || area.h < 1.0 {
         return (nowhere(), nowhere(), Vec::new(), nowhere());
@@ -1163,10 +1199,13 @@ fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> (Panel, Panel, V
     let column = shape.pane_column.max(1.0);
     let line = Text::line_for(shape.pane_size);
     let head = PICKER_HEAD_ROWS * line;
-    let foot = PICKER_FOOT_ROWS * line;
-    let want = picker.rows().len().clamp(PICKER_MIN_ROWS, PICKER_MAX_ROWS);
+    let foot = picker_foot(line);
+    // Everything the box spends on something other than its list.
+    let chrome = PAD * 2.0 + head + GAP + foot;
+    let fits = ((area.h - chrome) / line).floor().max(0.0) as usize;
+    let want = fits.clamp(PICKER_MIN_ROWS, PICKER_MAX_ROWS);
     let w = (PICKER_COLUMNS as f32 * column + PAD * 2.0).min(area.w);
-    let h = (PAD * 2.0 + head + want as f32 * line + GAP + foot).min(area.h);
+    let h = (chrome + want as f32 * line).min(area.h);
     let box_ = Panel::new(
         area.x + ((area.w - w) * 0.5).floor(),
         area.y + ((area.h - h) * 0.5).floor(),
@@ -1196,12 +1235,19 @@ fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> (Panel, Panel, V
             )
         })
         .collect();
-    // Exactly as wide as what it says, and the caption comes from the picker, so
-    // the button cannot be a size the text does not fill or say a thing it does
-    // not do.
-    let caption = ((picker.caption().chars().count() + ROW_ICON_COLUMNS + 2) as f32 * column)
+    // Exactly as wide as what it says, and what it says is one fixed word: the
+    // confirm glyph, the space after it, [`PICKER_OPEN_LABEL`], a column of
+    // indent on the left and two on the right so the cut corner never reaches
+    // the text.
+    let open_w = ((ROW_ICON_COLUMNS + 1 + PICKER_OPEN_LABEL.chars().count() + 3) as f32 * column)
         .min(content.w);
-    let open = Panel::new(content.x, content.y + content.h - line, caption, line);
+    let open_h = picker_open_h(line).min(content.h);
+    let open = Panel::new(
+        content.x,
+        content.y + content.h - open_h,
+        open_w,
+        open_h,
+    );
     (box_, list, rows, open)
 }
 
@@ -2810,7 +2856,15 @@ fn folder_picker(scene: &mut Scene, frame: &Frame) {
             scene.rect(row.fill(skin.strip));
             scene.rect(Panel::new(row.x, row.y, MARK_W, row.h).fill(skin.edge_focus));
         }
-        let tint = if on { skin.bright } else { skin.body };
+        // Typing dims what it did not match instead of taking it away, so the
+        // list you were reading is still the list in front of you. The answer
+        // comes from the model, which is the same answer the arrow keys walk by:
+        // a row cannot be dim here and bright to the keyboard.
+        let tint = match (on, picker.matched(entry)) {
+            (true, _) => skin.bright,
+            (false, true) => skin.body,
+            (false, false) => skin.dim,
+        };
         let icon = match entry {
             PickerRow::Here => icons::FOLDER_OPEN,
             PickerRow::Up => icons::UP,
@@ -2843,6 +2897,10 @@ fn folder_picker(scene: &mut Scene, frame: &Frame) {
     // The keys, spelled out. Nothing else in this window needs them written
     // down, but this is the first thing a new install shows and it is the one
     // place where there is no pane to experiment in.
+    //
+    // Placed off the button rather than off the bottom of the box, so the two
+    // cannot end up on top of each other when the button's height changes.
+    let open = layout.picker_open;
     say(
         scene,
         vec![Run::tinted(
@@ -2852,31 +2910,30 @@ fn folder_picker(scene: &mut Scene, frame: &Frame) {
             ),
             skin.dim,
         )],
-        Panel::new(
-            content.x,
-            content.y + content.h - 2.0 * line,
-            content.w,
-            line,
-        ),
+        Panel::new(content.x, open.y - GAP - line, content.w, line),
         skin.dim,
     );
-    let open = layout.picker_open;
-    scene.rect(open.fill(if frame.hot == Some(Hit::PickerOpen) {
-        skin.hot
-    } else {
-        skin.tab_idle
-    }));
-    scene.rect(open.outline(skin.edge, 1.0));
+    // A surface of its own, a cut corner and an accent edge, so the one thing
+    // here that is a button reads as one. It used to be `tab_idle` with a
+    // hairline, which is the quietest surface in the palette.
+    let face = match frame.hot == Some(Hit::PickerOpen) {
+        true => skin.button_hot,
+        false => skin.button,
+    };
+    scene.rect(panel_fill(open, face));
+    scene.rect(panel_edge(open, skin.edge_focus));
     say(
         scene,
         vec![
             Run::icon(icons::CONFIRM.to_string(), skin.bright),
-            Run::tinted(
-                format!(" {}", clip(&picker.caption(), cols)),
-                skin.bright,
-            ),
+            Run::tinted(format!(" {PICKER_OPEN_LABEL}"), skin.bright),
         ],
-        open.row(3.0, line),
+        Panel::new(
+            open.x + frame.pane_column,
+            open.y + PICKER_OPEN_PAD,
+            (open.w - frame.pane_column).max(1.0),
+            line,
+        ),
         skin.bright,
     );
 }
@@ -7378,7 +7435,7 @@ mod tests {
         assert_eq!(layout.hit(middle(layout.close).0, middle(layout.close).1), Some(Hit::Close));
 
         // What it says: the heading, the folder being listed, the remembered
-        // folder, the names inside, and what confirming would do.
+        // folder, the names inside, and the button.
         let text = text_of(&out.scene);
         for wanted in [
             "OPEN A FOLDER",
@@ -7387,7 +7444,7 @@ mod tests {
             "gui",
             "crates",
             "..",
-            "OPEN /home/hec/workspace/noob-cli",
+            PICKER_OPEN_LABEL,
             "enter opens",
         ] {
             assert!(text.contains(wanted), "{wanted:?} is not on screen: {text}");
@@ -7431,25 +7488,199 @@ mod tests {
         }
     }
 
-    /// The button lights up under the pointer, because it is the only thing in
-    /// the picker a mouse can press that is not a row.
+    /// The button says one word, carries the cut corner every panel in this
+    /// window carries, sits on a surface of its own and lights up under the
+    /// pointer. It is the only thing in the picker a mouse can press that is not
+    /// a row, and before this round it was drawn in the quietest fill in the
+    /// palette with a hairline round it, which read as a label.
     #[test]
-    fn the_confirm_button_lights_up_under_the_pointer() {
-        let picker = a_picker(&["gui"], &[]);
+    fn the_open_button_says_one_word_and_reads_as_a_button() {
+        let picker = a_picker(&["gui"], &["/home/hec/workspace/noob-cli"]);
         let cold = render_picker(&picker, 1205.0, 791.0, None);
         let warm = render_picker(&picker, 1205.0, 791.0, Some(Hit::PickerOpen));
         let button = cold.layout.picker_open;
-        assert!(!covered(&cold, button, button.h, cold.skin.hot));
-        assert!(covered(&warm, button, button.h, warm.skin.hot));
-        // The caption is drawn inside the button it names, or the two would say
-        // different things about what Enter does.
-        let inside = warm.scene.texts.iter().any(|text| {
-            let line: String = text.runs.iter().map(|run| run.text.as_str()).collect();
-            line.contains(&picker.caption())
-                && text.at.x >= button.x - 0.01
-                && text.at.x + text.at.w <= button.x + button.w + 0.01
-        });
-        assert!(inside, "the caption is not in the button");
+
+        // Its own surface idle, a stronger one hot, and neither of them the tab
+        // fill it used to borrow.
+        assert!(covered(&cold, button, button.h, cold.skin.button));
+        assert!(covered(&warm, button, button.h, warm.skin.button_hot));
+        assert!(!covered(&cold, button, button.h, cold.skin.tab_idle));
+        assert!(cold.skin.button_hot[3] > cold.skin.button[3]);
+
+        // The same 45 degree cut on the same corner as every panel, on the fill
+        // and on the edge, or the fill pokes a square corner out of a cut one.
+        let shaped: Vec<Rect> = cold
+            .scene
+            .rects
+            .iter()
+            .filter(|rect| {
+                let [x, y, w, h] = rect.xywh();
+                (x - button.x).abs() < 0.01
+                    && (y - button.y).abs() < 0.01
+                    && (w - button.w).abs() < 0.01
+                    && (h - button.h).abs() < 0.01
+            })
+            .copied()
+            .collect();
+        assert_eq!(shaped.len(), 2, "a fill and an edge, and nothing else");
+        for rect in &shaped {
+            let [_, chamfer, corners, _] = rect.extra();
+            assert_eq!(chamfer, CUT, "the button has no corner cut");
+            assert_eq!(corners as u32, Rect::TOP_RIGHT);
+        }
+        assert!(
+            shaped.iter().any(|rect| rect.extra()[3] > 0.0),
+            "one of the two is the outline"
+        );
+
+        // It says "Open" and nothing else. The folder it would open is written
+        // above the list, and spelling it out here made the button as wide as a
+        // path and a different width every time the cursor moved.
+        let inside: String = warm
+            .scene
+            .texts
+            .iter()
+            .filter(|text| {
+                text.at.x >= button.x - 0.01
+                    && text.at.x + text.at.w <= button.x + button.w + 0.01
+                    && text.at.y >= button.y - 0.01
+                    && text.at.y + text.at.h <= button.y + button.h + 0.01
+            })
+            .flat_map(|text| text.runs.iter().map(|run| run.text.as_str()))
+            .collect();
+        assert!(inside.contains(PICKER_OPEN_LABEL), "the button says {inside:?}");
+        assert!(
+            !inside.contains("/home/hec"),
+            "the button still names a folder: {inside:?}"
+        );
+
+        // Taller than its text, which is what stops it reading as a line with a
+        // box round it, and the hit region is the rectangle that was drawn.
+        assert!(button.h > Text::line_for(13.0));
+        let (x, y) = middle(button);
+        assert_eq!(cold.layout.hit(x, y), Some(Hit::PickerOpen));
+        assert_eq!(
+            cold.layout.hit(button.x + button.w + 4.0, y),
+            Some(Hit::Picker),
+            "and beside it there is only the box's own margin"
+        );
+    }
+
+    /// Item 3: the box does not change shape under the pointer. Walking from a
+    /// folder with two entries into one with sixty used to resize and recentre
+    /// the whole dialog, because its height came from the number of rows it was
+    /// holding.
+    #[test]
+    fn the_picker_s_box_is_one_shape_whatever_the_folder_holds() {
+        let short = a_picker(&["one", "two"], &[]);
+        let long_names: Vec<String> = (0..60).map(|n| format!("dir{n:02}")).collect();
+        let long = a_picker(
+            &long_names.iter().map(String::as_str).collect::<Vec<&str>>(),
+            &[],
+        );
+        for (w, h) in [(1205.0, 791.0), (2200.0, 1400.0), (680.0, 380.0)] {
+            let a = render_picker(&short, w, h, None).layout;
+            let b = render_picker(&long, w, h, None).layout;
+            assert_eq!(
+                (a.picker.x, a.picker.y, a.picker.w, a.picker.h),
+                (b.picker.x, b.picker.y, b.picker.w, b.picker.h),
+                "the box moved between two folders at {w}x{h}"
+            );
+            assert_eq!(
+                (a.picker_list.y, a.picker_list.h),
+                (b.picker_list.y, b.picker_list.h),
+                "the list moved at {w}x{h}"
+            );
+            assert_eq!(
+                (a.picker_open.x, a.picker_open.y, a.picker_open.w, a.picker_open.h),
+                (b.picker_open.x, b.picker_open.y, b.picker_open.w, b.picker_open.h),
+                "the button moved at {w}x{h}"
+            );
+            // The short folder simply leaves the bottom of its list empty, which
+            // is the price of a dialog that stays put.
+            assert_eq!(
+                a.picker_rows.len(),
+                4,
+                "this folder, the way out, and the two folders in it"
+            );
+            assert_eq!(b.picker_rows.len(), a.picker_capacity(13.0).min(62));
+            let (x, y) = middle(a.picker_open);
+            assert_eq!(a.hit(x, y), Some(Hit::PickerOpen), "at {w}x{h}");
+            assert_eq!(b.hit(x, y), Some(Hit::PickerOpen), "at {w}x{h}");
+        }
+
+        // And walking really does keep it still: the same picker, before and
+        // after it lists a folder with a very different number of entries.
+        let mut walking = Picker::open(
+            Box::new(crate::picker::Fixed(
+                long_names.iter().map(|s| s.to_string()).collect(),
+            )),
+            std::path::PathBuf::from("/home/hec"),
+            Vec::new(),
+        );
+        let before = render_picker(&walking, 1205.0, 791.0, None).layout.picker;
+        assert!(walking.step(true) && walking.walk_in());
+        let after = render_picker(&walking, 1205.0, 791.0, None).layout.picker;
+        assert_eq!(
+            (before.x, before.y, before.w, before.h),
+            (after.x, after.y, after.w, after.h)
+        );
+    }
+
+    /// Item 5: typing dims the rows it did not match instead of taking them
+    /// away, and the cursor only lands where the model says a match is.
+    #[test]
+    fn typing_in_the_picker_dims_rows_rather_than_dropping_them() {
+        let mut picker = a_picker(&["gui", "crates", "docs"], &[]);
+        let before = render_picker(&picker, 1205.0, 791.0, None);
+        let rows = before.layout.picker_rows.len();
+        assert!(picker.type_text("cra"));
+        let after = render_picker(&picker, 1205.0, 791.0, None);
+        assert_eq!(
+            after.layout.picker_rows.len(),
+            rows,
+            "typing took rows out of the list"
+        );
+
+        // Every name is still on screen; the ones that did not match are drawn
+        // in the dim tint rather than the body one.
+        let text = text_of(&after.scene);
+        for name in ["gui", "crates", "docs"] {
+            assert!(text.contains(name), "{name:?} left the list: {text}");
+        }
+        let tint_of = |out: &Rendered, name: &str| -> Vec<Option<[u8; 4]>> {
+            out.scene
+                .texts
+                .iter()
+                .flat_map(|text| text.runs.iter())
+                .filter(|run| run.text.trim() == name)
+                .map(|run| run.color)
+                .collect()
+        };
+        assert_eq!(tint_of(&after, "gui"), vec![Some(after.skin.dim)]);
+        assert_eq!(tint_of(&after, "docs"), vec![Some(after.skin.dim)]);
+        assert_eq!(tint_of(&before, "gui"), vec![Some(before.skin.body)]);
+        // The match is where the cursor went, so it is the bright row.
+        assert_eq!(
+            picker.row(picker.cursor()),
+            Some(&PickerRow::Folder(String::from("crates")))
+        );
+        assert_eq!(tint_of(&after, "crates"), vec![Some(after.skin.bright)]);
+
+        // One rule: the arrows walk the matches, and a click still lands on a
+        // dim row, so what the pointer can reach is a superset of what the
+        // arrows stop on.
+        let dim = after
+            .layout
+            .picker_rows
+            .iter()
+            .find(|(index, _)| picker.row(*index) == Some(&PickerRow::Folder(String::from("gui"))))
+            .copied()
+            .expect("the dim row is still placed");
+        let (x, y) = middle(dim.1);
+        assert_eq!(after.layout.hit(x, y), Some(Hit::PickerRow(dim.0)));
+        assert!(picker.point_at(dim.0), "a click on a dim row selects it");
+        assert_eq!(picker.confirm(), Some(std::path::PathBuf::from("/home/hec/gui")));
     }
 
     /// A folder with more subfolders than the box has rows scrolls. The rows

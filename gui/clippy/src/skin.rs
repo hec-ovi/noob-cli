@@ -76,6 +76,20 @@ pub struct Skin {
     pub select: [f32; 4],
     /// A window button under the pointer.
     pub hot: [f32; 4],
+    /// The one surface in the window that is a button you press rather than a
+    /// pane you read: the picker's Open.
+    ///
+    /// The accent at low weight, because a button whose fill is the pane colour
+    /// is a rectangle around some text and nothing more. Low enough that green
+    /// text still reads on top of it, which is the same rule the whole skin is
+    /// built on.
+    ///
+    /// Derived rather than given a settings key of its own, the way `menu` and
+    /// `drop_target` are. There is one button and nobody is going to tune it.
+    pub button: [f32; 4],
+    /// The same button under the pointer. Twice the weight, because a hot state
+    /// a shade away from the idle one is a hot state nobody sees.
+    pub button_hot: [f32; 4],
     pub close_hot: [f32; 4],
     /// The orb's ink at full weight.
     ///
@@ -173,6 +187,8 @@ impl Skin {
             // bright one takes the reading surface away from what it selects.
             select: rgba(config.dim, 0.45),
             hot: rgba(config.accent, 0.30),
+            button: rgba(config.accent, 0.22),
+            button_hot: rgba(config.accent, 0.50),
             close_hot: rgba(config.bad, 0.55),
             orb: rgba(config.accent, 1.0),
 

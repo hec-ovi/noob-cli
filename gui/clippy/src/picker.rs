@@ -4,7 +4,14 @@
 //! which under a desktop launcher is `$HOME`, and hand the agent the home
 //! directory without ever saying so. This module is the model behind the picker
 //! that opens instead: what is listed, where the cursor is, walking in and out
-//! of folders, and the filter that narrows the list as you type.
+//! of folders, and the filter that marks what you typed for.
+//!
+//! Typing does not take rows away. Every folder stays in the list and the ones
+//! the filter did not match are drawn dim, so the list you were reading is still
+//! the list in front of you rather than three rows where forty were. [`Picker::matched`]
+//! is the only place that answers whether a row belongs to what was typed, and
+//! the drawing, the arrow keys and the click all ask it, so a row cannot be dim
+//! on screen and live to the keyboard.
 //!
 //! Nothing here draws and nothing here needs a window. [`crate::view`] turns the
 //! rows into rectangles and [`crate::main`] routes keys and clicks at them, and
@@ -150,6 +157,14 @@ impl Picker {
         &self.at
     }
 
+    /// Every row, for a test that wants the whole list at once.
+    ///
+    /// Test-only, and it was not always: the picker's box used to be sized from
+    /// this count, which is what made the dialog change shape every time you
+    /// walked into a folder with a different number of entries. Nothing that
+    /// draws asks how many rows there are any more. [`Picker::row`] answers for
+    /// the row a layout actually placed.
+    #[cfg(test)]
     pub fn rows(&self) -> &[Row] {
         &self.rows
     }
@@ -200,59 +215,105 @@ impl Picker {
         }
     }
 
-    /// What confirming the cursor's row would do, spelled out, for the button
-    /// the mouse confirms with. One place, so the button's width, its text and
-    /// what it actually does come from the same answer.
-    pub fn caption(&self) -> String {
-        match self.rows.get(self.cursor) {
-            Some(Row::Up) => String::from("GO UP"),
-            // Spelled out, not "this folder": the button is the last thing read
-            // before the agent starts somewhere.
-            Some(Row::Here) => format!("OPEN {}", self.at.display()),
-            Some(row) => format!("OPEN {}", self.label(row)),
-            None => String::from("OPEN"),
+    /// Whether a row belongs to what has been typed.
+    ///
+    /// The one rule. What is drawn bright, what the arrow keys stop on and what
+    /// a screenful lands on all come through here, so a row cannot read as dim
+    /// and behave as a match, or the other way round.
+    ///
+    /// The folder being listed and the way out of it are always a match. They
+    /// are how the list is walked rather than entries in it, and a filter that
+    /// took the keyboard's way out of the folder away would leave "wor" with no
+    /// route back to anywhere. Everything else is matched on its label: a
+    /// remembered folder on its whole path, a folder in the list on its name.
+    pub fn matched(&self, row: &Row) -> bool {
+        match row {
+            Row::Here | Row::Up => true,
+            Row::Recent(path) => self.hit(&path.display().to_string()),
+            Row::Folder(name) => self.hit(name),
         }
     }
 
-    /// Move the cursor one row.
+    /// Move the cursor one row, onto the next row the filter matched.
+    ///
+    /// The arrows walk the matches. With nothing typed every row is a match and
+    /// this is a plain step; with something typed the dim rows are passed over,
+    /// because stepping through forty folders to reach the one you named is what
+    /// the typing was meant to save.
     pub fn step(&mut self, down: bool) -> bool {
-        let last = self.rows.len().saturating_sub(1);
         let next = match down {
-            true => (self.cursor + 1).min(last),
-            false => self.cursor.saturating_sub(1),
+            true => self.match_from(self.cursor + 1, true),
+            false => self
+                .cursor
+                .checked_sub(1)
+                .and_then(|from| self.match_from(from, false)),
+        };
+        let Some(next) = next else {
+            return false;
         };
         let moved = next != self.cursor;
         self.cursor = next;
         moved
     }
 
-    /// Move it by a screenful.
+    /// Move it by a screenful, landing on a match.
+    ///
+    /// A screenful of dim rows is still a screenful, so the jump is by rows and
+    /// the landing is the nearest match on from there. Past the end of the
+    /// matches in the direction of travel it takes the last one, which is what
+    /// makes PageDown at the bottom stop rather than do nothing.
     pub fn page(&mut self, rows: usize, down: bool) -> bool {
         let by = rows.max(1);
         let last = self.rows.len().saturating_sub(1);
-        let next = match down {
+        let target = match down {
             true => (self.cursor + by).min(last),
             false => self.cursor.saturating_sub(by),
         };
+        let next = self
+            .match_from(target, down)
+            .or_else(|| self.match_from(target, !down))
+            .unwrap_or(self.cursor);
         let moved = next != self.cursor;
         self.cursor = next;
         moved
     }
 
-    /// To the top or the bottom of the list.
+    /// To the first or the last row the filter matched.
     pub fn jump(&mut self, last: bool) -> bool {
         let next = match last {
-            true => self.rows.len().saturating_sub(1),
-            false => 0,
-        };
+            true => self.match_from(self.rows.len().saturating_sub(1), false),
+            false => self.match_from(0, true),
+        }
+        .unwrap_or(self.cursor);
         let moved = next != self.cursor;
         self.cursor = next;
         moved
+    }
+
+    /// The nearest row at or after `from`, or at or before it going up, that the
+    /// filter matched. Nothing when there is none that way.
+    fn match_from(&self, from: usize, down: bool) -> Option<usize> {
+        let last = self.rows.len().checked_sub(1)?;
+        let mut at = from.min(last);
+        loop {
+            if self.matched(&self.rows[at]) {
+                return Some(at);
+            }
+            match down {
+                true if at < last => at += 1,
+                false if at > 0 => at -= 1,
+                _ => return None,
+            }
+        }
     }
 
     /// Put the cursor on the row the pointer is on. A click that lands on a row
     /// that is no longer there is ignored rather than clamped: the list moved
     /// under the pointer, so the nearest row is not what was aimed at.
+    ///
+    /// A dim row takes the click. It is a real folder that happens not to be
+    /// what was typed, and the pointer is aimed at one row rather than walking
+    /// through them, so there is nothing to skip over.
     pub fn point_at(&mut self, index: usize) -> bool {
         if index >= self.rows.len() || index == self.cursor {
             return false;
@@ -322,7 +383,8 @@ impl Picker {
         }
     }
 
-    /// Narrow the list by what has been typed.
+    /// Add to what has been typed. The list keeps every row it had; the ones
+    /// that do not match go dim.
     pub fn type_text(&mut self, text: &str) -> bool {
         let typed: String = text.chars().filter(|c| !c.is_control()).collect();
         if typed.is_empty() {
@@ -434,17 +496,20 @@ impl Picker {
         self.first = 0;
     }
 
-    /// Rebuild the rows for a filter that changed, and put the cursor on
-    /// something the filter matched.
+    /// Put the cursor on something the filter matched, for a filter that changed.
     ///
-    /// Not on [`Row::Here`], which is always there: after typing a name, Enter
-    /// has to open the folder that was typed, not the folder being listed.
+    /// The rows themselves do not move: typing dims, it does not drop, so this
+    /// only has to find the cursor a home. Not [`Row::Here`], which is always a
+    /// match: after typing a name, Enter has to open the folder that was typed,
+    /// not the folder being listed. With nothing matched it falls back to the
+    /// first row, which is a way through the tree rather than a wrong choice.
     fn refilter(&mut self) {
         self.rebuild();
         self.cursor = self
             .rows
             .iter()
-            .position(|row| matches!(row, Row::Recent(_) | Row::Folder(_)))
+            .position(|row| matches!(row, Row::Recent(_) | Row::Folder(_)) && self.matched(row))
+            .or_else(|| self.match_from(0, true))
             .unwrap_or(0);
         self.first = 0;
     }
@@ -455,14 +520,14 @@ impl Picker {
             rows.extend(
                 self.recents
                     .iter()
-                    .filter(|path| self.matches(&path.display().to_string()))
+                    .filter(|path| self.listed(&path.display().to_string()))
                     .cloned()
                     .map(Row::Recent),
             );
         }
-        // Both unfiltered. The folder you are in and the way out of it are how
-        // the list is navigated, and a way out that disappears because of what
-        // has been typed leaves the keyboard with nowhere to go.
+        // The folder you are in and the way out of it, always. They are how the
+        // list is navigated, and a way out that disappears leaves the keyboard
+        // with nowhere to go.
         rows.push(Row::Here);
         if self.at.parent().is_some() {
             rows.push(Row::Up);
@@ -470,7 +535,7 @@ impl Picker {
         rows.extend(
             self.inside
                 .iter()
-                .filter(|name| self.matches(name))
+                .filter(|name| self.listed(name))
                 .cloned()
                 .map(Row::Folder),
         );
@@ -478,18 +543,23 @@ impl Picker {
         self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
     }
 
-    /// Whether a label survives what has been typed.
+    /// Whether a folder is in the list at all.
+    ///
+    /// This is not the search. The only thing kept out of the list is a folder
+    /// whose name starts with a dot, until the filter starts with one, which is
+    /// the rule `ls` taught everybody. What has been typed past that dims rows,
+    /// it does not remove them: see [`Picker::matched`].
+    fn listed(&self, label: &str) -> bool {
+        let name = label.rsplit('/').next().unwrap_or(label);
+        !name.starts_with('.') || self.filter.starts_with('.')
+    }
+
+    /// Whether a label carries what has been typed.
     ///
     /// Case insensitive and anywhere in the label rather than only at the front:
     /// a project is remembered by a word in the middle of its name as often as
-    /// by the start of it. A folder whose name starts with a dot stays out of
-    /// the way until the filter starts with one, which is the rule `ls` taught
-    /// everybody.
-    fn matches(&self, label: &str) -> bool {
-        let name = label.rsplit('/').next().unwrap_or(label);
-        if name.starts_with('.') && !self.filter.starts_with('.') {
-            return false;
-        }
+    /// by the start of it.
+    fn hit(&self, label: &str) -> bool {
         if self.filter.is_empty() {
             return true;
         }
@@ -627,6 +697,11 @@ mod tests {
         )
     }
 
+    /// Whether the row at `index` is one the filter dims.
+    fn dimmed(picker: &Picker, index: usize) -> bool {
+        picker.row(index).is_some_and(|row| !picker.matched(row))
+    }
+
     fn labels(picker: &Picker) -> Vec<String> {
         picker
             .rows()
@@ -666,7 +741,8 @@ mod tests {
         // With nothing remembered, the cursor is on the folder being listed, so
         // there is no row a blind Enter opens that was never pointed at.
         assert_eq!(picker.cursor(), 0);
-        assert_eq!(picker.caption(), "OPEN /home/hec");
+        // Nothing typed, so every row is a match and nothing is drawn dim.
+        assert!(picker.rows().iter().all(|row| picker.matched(row)));
     }
 
     /// The whole reason the file exists: the folder used last is the first row,
@@ -743,25 +819,91 @@ mod tests {
         assert!(!picker.walk_in());
     }
 
-    /// Typing narrows the list, and the cursor lands on something that was
-    /// typed for rather than on the folder that is always there.
+    /// Typing dims what it did not match rather than taking it away, and the
+    /// cursor lands on something that was typed for rather than on the folder
+    /// that is always there.
     #[test]
-    fn the_filter_narrows_the_list_and_the_cursor_lands_on_a_match() {
+    fn the_filter_dims_what_it_did_not_match_and_keeps_every_row() {
         let mut picker = opened(&["/home/hec/models"]);
+        let before = labels(&picker);
+        assert_eq!(
+            before,
+            vec![
+                "/home/hec/models",
+                "this folder",
+                "..",
+                "Desktop",
+                "models",
+                "Pictures",
+                "workspace"
+            ]
+        );
+
         assert!(picker.type_text("wor"));
-        assert_eq!(labels(&picker), vec!["this folder", "..", "workspace"]);
+        assert_eq!(
+            labels(&picker),
+            before,
+            "every row is still there, matched or not"
+        );
+        let dim: Vec<String> = picker
+            .rows()
+            .iter()
+            .filter(|row| !picker.matched(row))
+            .map(|row| picker.label(row))
+            .collect();
+        assert_eq!(
+            dim,
+            vec!["/home/hec/models", "Desktop", "models", "Pictures"],
+            "the folder being listed and the way out of it are never dim"
+        );
         assert_eq!(
             picker.row(picker.cursor()),
             Some(&Row::Folder(String::from("workspace"))),
             "Enter after typing has to open what was typed"
         );
 
-        // Case does not matter, and it matches anywhere in the name.
-        picker.clear_filter();
-        assert!(picker.type_text("KSP"));
-        assert_eq!(labels(&picker), vec!["this folder", "..", "workspace"]);
+        // The arrows walk the matches: from `workspace` the row above is the way
+        // out, four dim rows further up, and back down again is `workspace`.
+        assert!(picker.step(false));
+        assert_eq!(picker.row(picker.cursor()), Some(&Row::Up));
+        assert!(picker.step(true));
+        assert_eq!(
+            picker.row(picker.cursor()),
+            Some(&Row::Folder(String::from("workspace")))
+        );
+        assert!(!picker.step(true), "and there is no match below it");
+        assert!(picker.jump(false));
+        assert_eq!(
+            picker.row(picker.cursor()),
+            Some(&Row::Here),
+            "the top of the list is the first match, not the first row"
+        );
+        assert!(picker.jump(true));
+        assert_eq!(
+            picker.row(picker.cursor()),
+            Some(&Row::Folder(String::from("workspace")))
+        );
+        // A screenful lands on a match too, rather than on whatever row is that
+        // many down.
+        assert!(picker.page(3, false));
+        assert!(!dimmed(&picker, picker.cursor()));
 
-        // A remembered folder is filtered by its whole path, so a project is
+        // A dim row is a real folder: the pointer may land on it, and Enter then
+        // opens it. Only the arrows skip it.
+        let desktop = before.iter().position(|l| l == "Desktop").unwrap();
+        assert!(dimmed(&picker, desktop));
+        assert!(picker.point_at(desktop));
+        assert_eq!(picker.confirm(), Some(PathBuf::from("/home/hec/Desktop")));
+
+        // Case does not matter, and it matches anywhere in the name.
+        let mut picker = opened(&["/home/hec/models"]);
+        assert!(picker.type_text("KSP"));
+        assert_eq!(
+            picker.row(picker.cursor()),
+            Some(&Row::Folder(String::from("workspace")))
+        );
+
+        // A remembered folder is matched on its whole path, so a project is
         // reachable by a word from any part of it.
         picker.clear_filter();
         assert!(picker.type_text("model"));
@@ -771,17 +913,27 @@ mod tests {
         );
         assert_eq!(picker.cursor(), 0);
 
-        // Nothing matched leaves the two rows that navigate, and the cursor on
-        // the first of them.
+        // Nothing matched at all leaves the cursor on the folder being listed,
+        // which is a way through the tree rather than a wrong choice.
         picker.clear_filter();
         assert!(picker.type_text("zzz"));
-        assert_eq!(labels(&picker), vec!["this folder", ".."]);
-        assert_eq!(picker.cursor(), 0);
+        assert_eq!(labels(&picker), before, "and the list is still whole");
+        assert_eq!(picker.row(picker.cursor()), Some(&Row::Here));
+        assert!(picker.step(true), "the way out is always a match");
+        assert_eq!(picker.row(picker.cursor()), Some(&Row::Up));
+        assert!(!picker.step(true), "and below it there is nothing to walk to");
 
-        // A dot in front shows the hidden folders and nothing else changes.
+        // A dot in front brings the hidden folders into the list. That is the
+        // one thing typing still adds or removes rows for: it is about what is
+        // worth listing, not about what is being searched for.
         picker.clear_filter();
+        assert!(!labels(&picker).contains(&String::from(".cache")));
         assert!(picker.type_text(".ca"));
-        assert_eq!(labels(&picker), vec!["this folder", "..", ".cache"]);
+        assert!(labels(&picker).contains(&String::from(".cache")));
+        assert_eq!(
+            picker.row(picker.cursor()),
+            Some(&Row::Folder(String::from(".cache")))
+        );
 
         // Backspace takes it back a character at a time, and with nothing typed
         // it is the way out of the folder.
@@ -793,7 +945,7 @@ mod tests {
         assert!(!picker.clear_filter(), "and there is nothing left to clear");
 
         // A filter typed against one folder does not survive into the next: it
-        // would silently hide most of what is there.
+        // would leave most of the new one dim for no reason anybody typed.
         assert_eq!(picker.at(), Path::new("/home"));
         assert!(picker.type_text("hec"));
         assert!(picker.walk_in());
@@ -860,7 +1012,6 @@ mod tests {
         let mut picker = opened(&["/home/hec/models"]);
         let up = picker.rows().iter().position(|row| *row == Row::Up).unwrap();
         picker.point_at(up);
-        assert_eq!(picker.caption(), "GO UP");
         assert_eq!(picker.confirm(), None);
         assert_eq!(picker.at(), Path::new("/home"));
 
