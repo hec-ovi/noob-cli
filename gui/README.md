@@ -276,10 +276,12 @@ Copy selection, Close this widget and Widgets. A row with nothing to act on is
 greyed rather than absent, so the menu is the same shape every time and the row
 you were aiming for has not moved. Closing a widget takes it out of the window
 and a space left with no tabs gives its room to its neighbour rather than
-leaving a hole.
+leaving a hole. Every row carries its own icon in front of its label: two sheets
+for a copy, a clipboard for a paste, a gear for Settings, a cross for Close this
+widget and a grid of frames for Widgets.
 
-**Widgets** is the way back, and the way out. It is the last row, marked with a
-`>` at its end, and it opens a list of all nine in a box beside itself, right by
+**Widgets** is the way back, and the way out. It is the last row, marked in front
+with that grid and with a `>` at its end, and it opens a list of all nine in a box beside itself, right by
 default and left when the menu is near the right edge of the window. Every row
 of the list is a switch: a ticked box means the widget is in the window and
 picking it takes the widget out, an empty box means it is closed and picking it

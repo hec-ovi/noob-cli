@@ -17,6 +17,22 @@ pub const MINIMIZE: char = '\u{eaba}';
 /// The gear on a menu's settings row.
 pub const SETTINGS: char = '\u{eb51}';
 
+/// The rest of what a menu row can be: two sheets for taking a copy, a
+/// clipboard for putting one back, a grid of frames for the row that lists every
+/// widget, and a plain cross for the row that takes one out of the window.
+///
+/// The cross is its own codepoint rather than [`CLOSE`] above: that one is the
+/// window button that kills the application, and a menu row wearing the same
+/// mark reads as the same act.
+///
+/// The clipboard is the nearest the symbol font has. There is no paste glyph in
+/// the Codicon set the rest of these come from, and a clipboard is what every
+/// other menu on the desktop puts on that row anyway.
+pub const COPY: char = '\u{ebcc}';
+pub const PASTE: char = '\u{eac0}';
+pub const WIDGETS: char = '\u{eb23}';
+pub const CLOSE_WIDGET: char = '\u{ea76}';
+
 /// The two arrows a tab strip grows when it holds more tabs than it has room
 /// for, one step along the strip each. Chevrons rather than triangles: they are
 /// the same weight as the window controls above them, and a filled triangle at
@@ -125,6 +141,10 @@ mod tests {
             MAXIMIZE,
             MINIMIZE,
             SETTINGS,
+            COPY,
+            PASTE,
+            WIDGETS,
+            CLOSE_WIDGET,
             TABS_LEFT,
             TABS_RIGHT,
             SUBMENU,

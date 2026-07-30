@@ -9509,12 +9509,16 @@ mod tests {
         assert!(surface(list), "the flyout is not a box of its own");
     }
 
-    /// The row that opens the list is marked at its END, with the submenu
-    /// chevron, and carries nothing in the gutter in front of it. It shipped
-    /// with a plus at the front, which is what a row that folds a list out
-    /// underneath itself says.
+    /// The row that opens the list is marked twice: the grid of frames in the
+    /// gutter in front, saying what the row is, and the submenu chevron at its
+    /// END, saying the list is out to the side.
+    ///
+    /// It shipped with a plus at the front, which is what a row that folds a
+    /// list out underneath itself says, and this test then asserted the gutter
+    /// was empty. Empty is not what the gutter is for: it is spent on every row
+    /// either way, and this was the only row in the menu spending it on nothing.
     #[test]
-    fn the_row_that_flies_out_is_marked_at_its_end_and_not_in_its_gutter() {
+    fn the_row_that_flies_out_is_marked_in_its_gutter_and_at_its_end() {
         use crate::menu::Item;
         let dock = Dock::new();
         for open in [false, true] {
@@ -9577,7 +9581,66 @@ mod tests {
                 .find(|text| text.runs.iter().any(|run| run.text.contains("Widgets")))
                 .expect("the label is drawn");
             assert!(label.at.x < mark.at.x, "the label is not before the mark");
+            // And the gutter in front of that label holds the widgets grid, in
+            // the same shaped line as the label so the two cannot come apart.
+            assert_eq!(
+                label.runs.first().map(|run| run.text.as_str()),
+                Some(icons::WIDGETS.to_string().as_str()),
+                "the Widgets row has nothing in its gutter"
+            );
+            assert!(
+                label.runs[0].icon,
+                "the mark is shaped in the label's font, so it draws as a box"
+            );
         }
+    }
+
+    /// Every row of the menu is drawn with a mark in its gutter, and it is the
+    /// mark the model names. Four of them shipped blank: copy selection, close
+    /// this widget, Widgets and paste each spent the gutter on a space, which
+    /// reads as a row whose icon failed to draw rather than a row without one.
+    #[test]
+    fn every_menu_row_is_drawn_with_its_own_mark_in_the_gutter() {
+        use crate::menu::Item;
+        let dock = Dock::hiding(&[View::Debug]);
+        let mut widget = Menu::for_widget((400.0, 300.0), View::Plan, Space::TopLeft, true);
+        widget.toggle_widgets(&dock);
+        for menu in [widget, Menu::for_input((400.0, 300.0), true)] {
+            let out = render_menu(&busy_state(), 1400.0, 900.0, &dock, &menu, None);
+            let rows = out
+                .layout
+                .menu_rows
+                .iter()
+                .chain(out.layout.menu_list_rows.iter());
+            let mut seen = 0;
+            for (index, panel) in rows {
+                let item = menu.rows[*index].item;
+                let icon = item.icon().expect("every row has a mark");
+                let line = out
+                    .scene
+                    .over_texts
+                    .iter()
+                    .find(|text| {
+                        text.at.y >= panel.y - 0.01
+                            && text.at.y + text.at.h <= panel.y + panel.h + 0.01
+                            && text.runs.iter().any(|run| run.text.contains(item.label()))
+                    })
+                    .unwrap_or_else(|| panic!("{item:?} is not drawn"));
+                assert_eq!(
+                    line.runs.first().map(|run| run.text.as_str()),
+                    Some(icon.to_string().as_str()),
+                    "{item:?} carries the wrong mark"
+                );
+                assert!(line.runs[0].icon, "{item:?}: the mark is not a symbol run");
+                seen += 1;
+            }
+            assert!(seen >= menu.top, "not every row was placed");
+        }
+        // The four the requirement named, on the rows the requirement named.
+        assert_eq!(Item::CopySelection.icon(), Some(icons::COPY));
+        assert_eq!(Item::Close.icon(), Some(icons::CLOSE_WIDGET));
+        assert_eq!(Item::Widgets(false).icon(), Some(icons::WIDGETS));
+        assert_eq!(Item::Paste.icon(), Some(icons::PASTE));
     }
 
     /// Whether any text in this list has a glyph box overlapping the panel.

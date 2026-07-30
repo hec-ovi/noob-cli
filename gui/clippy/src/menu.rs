@@ -70,14 +70,29 @@ impl Item {
         }
     }
 
-    /// The glyph in front of the label, for the rows that have one.
+    /// The glyph in front of the label. Every row carries one now, so the type
+    /// is still an `Option` only because the drawing already handles a row
+    /// without a mark and a future row may not have one.
     ///
     /// Named in [`crate::icons`] rather than written here, because a codepoint
     /// the embedded font lacks draws as nothing at all and the coverage test
     /// over there is what catches that.
+    ///
+    /// Written out variant by variant, with no catch-all: a new row then fails
+    /// to compile here rather than shipping with a blank gutter nobody notices.
     pub fn icon(self) -> Option<char> {
         match self {
             Item::Settings => Some(icons::SETTINGS),
+            // Both copies wear the same mark, the prompt's and the pane's. They
+            // are the same act on two different things, and a prompt menu with a
+            // mark on Paste and none on Copy above it reads as half drawn.
+            Item::Copy | Item::CopySelection => Some(icons::COPY),
+            Item::Paste => Some(icons::PASTE),
+            Item::Close => Some(icons::CLOSE_WIDGET),
+            // The row that lists every widget, marked with what it lists. It
+            // keeps its end marker as well: the two say different things, one
+            // what the row is and one that there is more of it out to the side.
+            Item::Widgets(_) => Some(icons::WIDGETS),
             // A box with a tick in it for a widget that is in the window, an
             // empty one for a widget that is out. The row is a switch, so it has
             // to say which way it is set before it is pressed: without the mark
@@ -86,7 +101,6 @@ impl Item {
                 true => icons::UNCHECKED,
                 false => icons::CHECKED,
             }),
-            _ => None,
         }
     }
 
@@ -462,16 +476,24 @@ mod tests {
         assert_eq!(menu.pick(menu.top + View::ALL.len()), None);
     }
 
-    /// The row that opens the list carries a submenu marker at its end, open or
-    /// shut, and carries nothing in the gutter in front of it. This asserted
-    /// the opposite: a plus and a minus in the gutter, which is what a row that
-    /// folds a list out underneath itself says, and this row no longer does
-    /// that.
+    /// The row that opens the list carries two marks, open or shut: the grid of
+    /// frames in the gutter saying what the row is, and the submenu chevron at
+    /// its end saying the list is out to the side.
+    ///
+    /// The gutter half asserted the opposite twice over. First it was a plus and
+    /// a minus, which is what a row that folds a list out underneath itself says
+    /// and this row does not do that. Then it was nothing at all, which left the
+    /// row the only one in the menu with an empty gutter.
     #[test]
-    fn the_widget_row_carries_a_submenu_marker_at_its_end_and_no_mark_in_front() {
+    fn the_widget_row_carries_a_grid_in_its_gutter_and_a_submenu_marker_at_its_end() {
         for open in [false, true] {
             assert_eq!(Item::Widgets(open).marker(), Some(icons::SUBMENU));
-            assert_eq!(Item::Widgets(open).icon(), None);
+            assert_eq!(Item::Widgets(open).icon(), Some(icons::WIDGETS));
+            assert_ne!(
+                icons::WIDGETS,
+                icons::SUBMENU,
+                "the two marks on this row have to be told apart"
+            );
         }
         for item in [
             Item::Copy,
@@ -618,7 +640,56 @@ mod tests {
             assert_eq!(menu.pick(0), Some(Item::Settings));
         }
         assert_eq!(Item::Settings.icon(), Some(icons::SETTINGS));
-        assert_eq!(Item::Close.icon(), None);
+        // This asserted `Item::Close.icon() == None`. The close row has its own
+        // cross now, and it is a different codepoint from the window button that
+        // shuts the application: the same mark on both would say the same thing.
+        assert_eq!(Item::Close.icon(), Some(icons::CLOSE_WIDGET));
+        assert_ne!(icons::CLOSE_WIDGET, icons::CLOSE);
+    }
+
+    /// Every row of both menus is marked, and no two rows that mean different
+    /// things wear the same mark. The gutter is spent on every row whether or
+    /// not it has a glyph in it (`view::MENU_GUTTER`), so an unmarked row is a
+    /// blank column, not a narrower row: the four that shipped blank read as
+    /// rows that had lost their icons.
+    #[test]
+    fn every_row_of_both_menus_is_marked_in_its_gutter() {
+        let dock = Dock::hiding(&[View::Debug]);
+        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, true);
+        menu.toggle_widgets(&dock);
+        let prompt = Menu::for_input((0.0, 0.0), true);
+        for row in menu.rows.iter().chain(prompt.rows.iter()) {
+            assert!(
+                row.item.icon().is_some(),
+                "{:?} has nothing in its gutter",
+                row.item
+            );
+        }
+
+        // The four the right click menu gained, each on the row it belongs to.
+        assert_eq!(Item::CopySelection.icon(), Some(icons::COPY));
+        assert_eq!(Item::Copy.icon(), Some(icons::COPY), "the same act");
+        assert_eq!(Item::Paste.icon(), Some(icons::PASTE));
+        assert_eq!(Item::Close.icon(), Some(icons::CLOSE_WIDGET));
+        assert_eq!(Item::Widgets(false).icon(), Some(icons::WIDGETS));
+        assert_eq!(Item::Widgets(true).icon(), Some(icons::WIDGETS));
+
+        // A copy row and a paste row that look alike are two coin flips, and the
+        // list's two switch states have to stay clear of all of them.
+        let marks = [
+            icons::COPY,
+            icons::PASTE,
+            icons::CLOSE_WIDGET,
+            icons::WIDGETS,
+            icons::SETTINGS,
+            icons::CHECKED,
+            icons::UNCHECKED,
+        ];
+        for (step, one) in marks.iter().enumerate() {
+            for other in &marks[step + 1..] {
+                assert_ne!(one, other, "two rows wear U+{:04X}", *one as u32);
+            }
+        }
     }
 
     #[test]
