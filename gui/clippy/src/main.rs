@@ -21,6 +21,7 @@
 //! noob's own; see `config`. `no0b --set <key>=<value>` changes one of them
 //! and exits.
 
+mod agent;
 mod config;
 mod dock;
 mod icons;
@@ -332,7 +333,12 @@ fn menu_for(
         // Neither is the settings panel. A Settings row on a menu opened over
         // the settings panel would be a row that opens what is already open,
         // and there is no pane behind it to close.
-        Hit::Settings | Hit::SettingsRow(_) | Hit::SettingsValue(_) | Hit::SettingsClose => None,
+        Hit::Settings
+        | Hit::SettingsSection(_)
+        | Hit::SettingsRow(_)
+        | Hit::SettingsValue(_)
+        | Hit::SettingsSlider(_)
+        | Hit::SettingsClose => None,
         // A divider is the gap between two widgets and belongs to neither of
         // them, so there is no one widget for a menu opened here to act on.
         Hit::ColumnDivider | Hit::RowDivider => None,
@@ -520,6 +526,10 @@ struct App {
     ///
     /// Only ever [`Hit::ColumnDivider`] or [`Hit::RowDivider`].
     sizing: Option<Hit>,
+    /// The settings row whose slider the button came down on, while it is being
+    /// dragged. The same cycle again, on the panel: the value follows the
+    /// pointer and the file is written once, when the button comes up.
+    sliding: Option<usize>,
     /// Where the two dividers are, as fractions: how much of the width the left
     /// column takes, and how much of the right column's height the top space
     /// takes. Read out of the settings file at launch and written back when a
@@ -608,6 +618,7 @@ impl App {
             menu: None,
             holding: None,
             sizing: None,
+            sliding: None,
             selecting: false,
             prompt_selecting: false,
             clipboard: None,
@@ -824,8 +835,26 @@ impl App {
             &self.config,
             &totals,
             self.settings_path().as_deref(),
+            self.read_agent(),
         ));
         self.dirty = true;
+    }
+
+    /// What the agent's own files say right now: its `.env`, the skills beside
+    /// it, its MCP servers and the sessions it has written.
+    ///
+    /// Read here rather than in the panel because the sessions come off the same
+    /// reader the picker uses and reading a disk is the window's job, not the
+    /// model's. Once, when the panel opens, and again after the panel writes.
+    fn read_agent(&self) -> agent::Agent {
+        agent::Agent::read(
+            agent::config_dir().as_deref(),
+            match self.state.workspace.is_empty() {
+                true => None,
+                false => Some(Path::new(&self.state.workspace)),
+            },
+            self.saved_sessions(),
+        )
     }
 
     /// Where the settings file is, or nothing when there is no home directory to
@@ -858,25 +887,70 @@ impl App {
         let Some(panel) = self.settings.as_mut() else {
             return;
         };
+        // Typing into the endpoint takes the whole keyboard: the arrow keys
+        // would otherwise walk away from a half typed URL and lose it.
+        if panel.editing().is_some() {
+            match event.logical_key.as_ref() {
+                Key::Named(NamedKey::Escape) => self.dirty |= panel.cancel_edit(),
+                Key::Named(NamedKey::Backspace) => self.dirty |= panel.backspace(),
+                Key::Named(NamedKey::Enter) => self.save_endpoint(),
+                _ => {
+                    if let Some(text) = event.text.as_ref() {
+                        self.dirty |= panel.type_text(text);
+                    }
+                }
+            }
+            self.dirty = true;
+            return;
+        }
         let mut nudge = None;
+        let mut edit = false;
         match event.logical_key.as_ref() {
             Key::Named(NamedKey::Escape) => {
                 self.close_settings();
                 return;
             }
+            // On the rail these walk the sections; inside one they walk its rows.
             Key::Named(NamedKey::ArrowUp) => self.dirty |= panel.step(false),
             Key::Named(NamedKey::ArrowDown) => self.dirty |= panel.step(true),
             Key::Named(NamedKey::PageUp) => self.dirty |= panel.page(rows, false),
             Key::Named(NamedKey::PageDown) => self.dirty |= panel.page(rows, true),
             Key::Named(NamedKey::Home) => self.dirty |= panel.jump(false),
             Key::Named(NamedKey::End) => self.dirty |= panel.jump(true),
-            Key::Named(NamedKey::ArrowLeft) => nudge = Some(false),
-            // Enter and the right arrow are the same nudge. A flag has two
-            // states, so both of them read as "the other one" on a flag, and a
-            // preset list needs the pair to walk both ways.
-            Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Enter) => nudge = Some(true),
-            Key::Named(NamedKey::Tab) => self.dirty |= panel.step(!self.modifiers.shift_key()),
+            // Left is the way back to the rail from a row that has nothing to
+            // nudge, and the nudge itself from a row that has. A section of
+            // readings would otherwise be a place the keyboard cannot leave
+            // without the pointer.
+            Key::Named(NamedKey::ArrowLeft) => match panel.on_row() {
+                true => nudge = Some(false),
+                false => self.dirty |= panel.leave(),
+            },
+            // Right goes into the section from the rail, and nudges inside it.
+            // Enter is the same, except on the endpoint, where it starts typing.
+            Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Enter) => {
+                if !panel.enter() {
+                    match matches!(
+                        panel.row(panel.cursor()),
+                        Some(settings::Row::Field { .. })
+                    ) {
+                        true => edit = true,
+                        false => nudge = Some(true),
+                    }
+                }
+                self.dirty = true;
+            }
+            // Between the rail and the rows, both ways. The one key that does it
+            // without also meaning something to a row.
+            Key::Named(NamedKey::Tab) => {
+                self.dirty |= match self.modifiers.shift_key() {
+                    true => panel.leave(),
+                    false => panel.enter(),
+                }
+            }
             _ => {}
+        }
+        if edit {
+            self.dirty |= panel.edit();
         }
         if let Some(forward) = nudge {
             self.change_setting(forward);
@@ -884,10 +958,53 @@ impl App {
         self.reveal_settings_cursor();
     }
 
-    /// A press inside the panel: a row, the value on it, or the mark that closes.
+    /// Write what was typed into the endpoint field, into the agent's own file,
+    /// and read the whole file back.
+    ///
+    /// The same rule the window's own settings go through, on the other file:
+    /// the writer keeps every other line and every comment, and what the panel
+    /// shows next comes off the disk rather than out of what was typed. A file
+    /// that refuses is said on the panel, where the edit is.
+    fn save_endpoint(&mut self) {
+        let Some(panel) = self.settings.as_mut() else {
+            return;
+        };
+        let Some(path) = panel.agent_file().map(std::path::Path::to_path_buf) else {
+            panel.say_trouble(String::from("there is no config directory to write it in"));
+            self.dirty = true;
+            return;
+        };
+        let Some((key, value)) = panel.finish_edit() else {
+            return;
+        };
+        match settings::write_endpoint(&path, key, &value) {
+            Ok(()) => {
+                let totals = self.totals.plus(&self.state);
+                let agent = self.read_agent();
+                let config = self.config.clone();
+                if let Some(panel) = self.settings.as_mut() {
+                    panel.adopt_agent(agent, &config, &totals);
+                }
+            }
+            Err(why) => {
+                if let Some(panel) = self.settings.as_mut() {
+                    panel.say_trouble(why);
+                }
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// A press inside the panel: a section, a row, the control on it, or the
+    /// mark that closes.
     fn click_in_settings(&mut self, hit: Hit) {
         match hit {
             Hit::SettingsClose => self.close_settings(),
+            Hit::SettingsSection(index) => {
+                if let Some(panel) = self.settings.as_mut() {
+                    self.dirty |= panel.choose(index);
+                }
+            }
             Hit::SettingsRow(index) => {
                 if let Some(panel) = self.settings.as_mut() {
                     self.dirty |= panel.point_at(index);
@@ -895,18 +1012,65 @@ impl App {
             }
             // The value is the control, so clicking it does what the right arrow
             // does, on the row it is on rather than on the row the cursor was
-            // left on.
+            // left on. On the endpoint that is starting to type into it.
             Hit::SettingsValue(index) => {
-                if let Some(panel) = self.settings.as_mut() {
-                    self.dirty |= panel.point_at(index);
+                let field = match self.settings.as_mut() {
+                    Some(panel) => {
+                        self.dirty |= panel.point_at(index);
+                        matches!(panel.row(index), Some(settings::Row::Field { .. }))
+                    }
+                    None => false,
+                };
+                match field {
+                    true => {
+                        if let Some(panel) = self.settings.as_mut() {
+                            self.dirty |= panel.edit();
+                        }
+                    }
+                    false => self.change_setting(true),
                 }
-                self.change_setting(true);
+            }
+            // Pressed, not clicked, the way a divider is: a slider says what it
+            // means while the pointer moves, and it is written when the button
+            // comes up. The press itself already moves it, so a click on the
+            // track jumps the thumb there rather than doing nothing.
+            Hit::SettingsSlider(index) => {
+                self.sliding = Some(index);
+                self.drag_slider();
             }
             // The panel's own margin. Swallowed: it covers the window, so a
             // press here has nothing behind it to reach.
             _ => {}
         }
         self.reveal_settings_cursor();
+    }
+
+    /// Move the slider under the button to where the pointer is now.
+    ///
+    /// Nothing is written here. A drag across the window is hundreds of motion
+    /// events, and the panel carries the value it is being dragged to until the
+    /// button comes up, the same way a divider does.
+    fn drag_slider(&mut self) {
+        let Some(index) = self.sliding else {
+            return;
+        };
+        let layout = self.layout();
+        let Some(at) = layout.slider_at(index, self.cursor.x as f32) else {
+            return;
+        };
+        if let Some(panel) = self.settings.as_mut() {
+            self.dirty |= panel.slide(index, at);
+        }
+    }
+
+    /// The button came up on a slider: write where it was left, once.
+    fn drop_slider(&mut self) {
+        self.sliding = None;
+        let Some(change) = self.settings.as_mut().and_then(Settings::drop_slider) else {
+            return;
+        };
+        self.write_setting(&change);
+        self.dirty = true;
     }
 
     /// Nudge the row under the cursor, write it, and take the file's answer.
@@ -920,6 +1084,13 @@ impl App {
         let Some(change) = self.settings.as_ref().and_then(|panel| panel.change(forward)) else {
             return;
         };
+        self.write_setting(&change);
+    }
+
+    /// Write one change and take the file's answer. The half of
+    /// [`App::change_setting`] the slider shares, since a drag decides its value
+    /// the other way round and lands in exactly the same place.
+    fn write_setting(&mut self, change: &settings::Change) {
         let Some(path) = self.settings_path() else {
             if let Some(panel) = self.settings.as_mut() {
                 panel.say_trouble(String::from("there is no home directory to write settings in"));
@@ -927,7 +1098,7 @@ impl App {
             self.dirty = true;
             return;
         };
-        match settings::commit(&path, &change) {
+        match settings::commit(&path, change) {
             Ok(config) => {
                 self.adopt(config);
                 let totals = self.totals.plus(&self.state);
@@ -1414,8 +1585,13 @@ impl App {
             | Hit::PickerOpen
             | Hit::PickerSessions
             | Hit::Picker => {}
-            // The same for the four the settings panel owns.
-            Hit::SettingsRow(_) | Hit::SettingsValue(_) | Hit::SettingsClose | Hit::Settings => {}
+            // The same for the six the settings panel owns.
+            Hit::SettingsSection(_)
+            | Hit::SettingsRow(_)
+            | Hit::SettingsValue(_)
+            | Hit::SettingsSlider(_)
+            | Hit::SettingsClose
+            | Hit::Settings => {}
             Hit::Input => {
                 // A press, not a placement: the anchor stays here so motion
                 // with the button still down selects the span between the two.
@@ -1788,6 +1964,11 @@ impl App {
         // hundreds of rename-over-the-file writes for one decision.
         if let Some(grip) = self.sizing.take() {
             self.remember_divider(grip);
+            return;
+        }
+        // And the same for a slider on the settings panel, for the same reason.
+        if self.sliding.is_some() {
+            self.drop_slider();
             return;
         }
         let layout = self.layout();
@@ -2336,6 +2517,7 @@ impl ApplicationHandler<Wake> for App {
                 }
                 self.maybe_drag();
                 self.drag_divider();
+                self.drag_slider();
                 if self.selecting {
                     self.extend_selection();
                 }
@@ -2355,6 +2537,8 @@ impl ApplicationHandler<Wake> for App {
                         | Hit::PickerOpen
                         | Hit::PickerMark(_)
                         | Hit::SettingsClose
+                        | Hit::SettingsSection(_)
+                        | Hit::SettingsSlider(_)
                         | Hit::SettingsValue(_)),
                     ) => Some(hit),
                     _ => None,

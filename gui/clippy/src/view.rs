@@ -376,13 +376,20 @@ pub enum Hit {
     /// The picker's box, away from any row. Swallowed, so a press on its margin
     /// does not read as a press on the window behind it.
     Picker,
+    /// A section on the settings panel's rail, by position in it. Choosing one
+    /// swaps what is beside the rail.
+    SettingsSection(usize),
     /// A row of the settings panel, by position in its list. Puts the cursor
     /// there and nothing else: a click anywhere on a row that also changed the
     /// setting would change one every time the pointer missed the value.
     SettingsRow(usize),
     /// The value at the end of that row, which is the control. Clicking it is
-    /// the same nudge the right arrow is.
+    /// the same nudge the right arrow is, or the start of an edit on a field.
     SettingsValue(usize),
+    /// The track at the end of a row whose setting has a range. Pressed and
+    /// dragged, the way a divider is: what it means is where the pointer is,
+    /// and it is written when the button comes up.
+    SettingsSlider(usize),
     /// The mark that closes the panel, for a pointer with no Escape key handy.
     SettingsClose,
     /// The panel's box, away from any row. Swallowed, like the picker's.
@@ -552,13 +559,20 @@ pub struct Layout {
     /// the panes and the prompt are still there behind it, and the panel covers
     /// the lot, because it is a takeover rather than a window over a window.
     pub in_settings: bool,
-    /// Its box, its list, one panel per visible row, the value at the end of
+    /// Its box, the rail of section names down its left, the chosen section's
+    /// list, one panel per visible row of that list, the control at the end of
     /// each of those rows, and the mark that closes it. All empty when it is
     /// not up.
+    ///
+    /// A row's control is either a value (a flag, a preset, the endpoint) or a
+    /// track (anything with a range), never both: what a press means has to be
+    /// one thing.
     pub settings: Panel,
+    pub settings_rail: Vec<(usize, Panel)>,
     pub settings_list: Panel,
     pub settings_rows: Vec<(usize, Panel)>,
     pub settings_values: Vec<(usize, Panel)>,
+    pub settings_tracks: Vec<(usize, Panel)>,
     pub settings_close: Panel,
 
     /// The floating layer. The open menu's box, and one panel per row on
@@ -744,9 +758,11 @@ impl Layout {
                 picker_sessions: nowhere(),
                 in_settings: false,
                 settings: nowhere(),
+                settings_rail: Vec::new(),
                 settings_list: nowhere(),
                 settings_rows: Vec::new(),
                 settings_values: Vec::new(),
+                settings_tracks: Vec::new(),
                 settings_close: nowhere(),
                 menu,
                 menu_rows,
@@ -792,9 +808,11 @@ impl Layout {
                 picker_sessions: places.sessions,
                 in_settings: false,
                 settings: nowhere(),
+                settings_rail: Vec::new(),
                 settings_list: nowhere(),
                 settings_rows: Vec::new(),
                 settings_values: Vec::new(),
+                settings_tracks: Vec::new(),
                 settings_close: nowhere(),
                 menu,
                 menu_rows,
@@ -841,9 +859,11 @@ impl Layout {
                 picker_sessions: nowhere(),
                 in_settings: true,
                 settings: places.box_,
+                settings_rail: places.rail,
                 settings_list: places.list,
                 settings_rows: places.rows,
                 settings_values: places.values,
+                settings_tracks: places.tracks,
                 settings_close: places.close,
                 menu,
                 menu_rows,
@@ -1062,9 +1082,11 @@ impl Layout {
             picker_sessions: nowhere(),
             in_settings: false,
             settings: nowhere(),
+            settings_rail: Vec::new(),
             settings_list: nowhere(),
             settings_rows: Vec::new(),
             settings_values: Vec::new(),
+            settings_tracks: Vec::new(),
             settings_close: nowhere(),
             menu,
             menu_rows,
@@ -1153,10 +1175,20 @@ impl Layout {
             if self.settings_close.w >= 1.0 && self.settings_close.contains(x, y) {
                 return Some(Hit::SettingsClose);
             }
-            // The value before the row it sits in, because it sits inside it.
+            // The control before the row it sits in, because it sits inside it.
+            for (index, panel) in &self.settings_tracks {
+                if panel.contains(x, y) {
+                    return Some(Hit::SettingsSlider(*index));
+                }
+            }
             for (index, panel) in &self.settings_values {
                 if panel.contains(x, y) {
                     return Some(Hit::SettingsValue(*index));
+                }
+            }
+            for (index, panel) in &self.settings_rail {
+                if panel.contains(x, y) {
+                    return Some(Hit::SettingsSection(*index));
                 }
             }
             for (index, panel) in &self.settings_rows {
@@ -1371,6 +1403,22 @@ impl Layout {
     /// How many rows the settings panel's list can show, on the same terms.
     pub fn settings_capacity(&self, size: f32) -> usize {
         Text::rows_for(size, self.settings_list.h)
+    }
+
+    /// Where along one row's track a pointer sits, 0 at the low end and 1 at the
+    /// high. Nothing when that row has no track.
+    ///
+    /// Clamped rather than dropped outside the track, so a drag that ran off the
+    /// end of it holds the end instead of stopping: the pointer is still down,
+    /// and a slider that goes dead when the pointer overshoots by a pixel is a
+    /// slider that cannot reach its own ends.
+    pub fn slider_at(&self, index: usize, x: f32) -> Option<f32> {
+        let (_, track) = self
+            .settings_tracks
+            .iter()
+            .find(|(at, _)| *at == index)
+            .filter(|(_, track)| track.w >= 1.0)?;
+        Some(((x - track.x) / track.w).clamp(0.0, 1.0))
     }
 
     /// How many of the menu's widget list are on screen, for the wheel. Read
@@ -1745,41 +1793,84 @@ fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> PickerPlaces {
     }
 }
 
-/// The settings panel's box, its list, the rows on screen, the value at the end
-/// of each of those rows, and the mark that closes it.
+/// Where the settings panel's pieces are. A struct rather than a tuple: six
+/// panels in a row is a call site nobody can read, and four of them are lists.
 ///
-/// The whole area rather than a centred box: this is a takeover, and a list of
-/// sixty rows in a box the size of the picker's would be six rows of content and
-/// a lot of margin. The value column is a fixed number of columns in from the
-/// right so every value lines up in one column, which is what makes a screen of
+/// The whole area rather than a centred box: this is a takeover, and a list in a
+/// box the size of the picker's would be six rows of content and a lot of
+/// margin. Two columns inside it: the rail of section names down the left, and
+/// the chosen section beside it. The value column is a fixed number of columns in
+/// from the right so every value lines up, which is what makes a screen of
 /// settings scannable rather than a wall of words.
-/// Where the settings panel's pieces are. A struct rather than a tuple: five
-/// panels in a row is a call site nobody can read, and two of them are lists.
 struct SettingsPlaces {
     box_: Panel,
+    rail: Vec<(usize, Panel)>,
     list: Panel,
     rows: Vec<(usize, Panel)>,
     values: Vec<(usize, Panel)>,
+    tracks: Vec<(usize, Panel)>,
     close: Panel,
 }
 
-/// What the value column takes, capped so a narrow window keeps a label: past
-/// half the row the values are what gets clipped, since a row whose label is gone
-/// says nothing at all.
+/// Where a row's control sits: one column in from the label, the width a value
+/// needs and no more.
+///
+/// Beside the label rather than pinned to the right edge of the panel. The panel
+/// is the whole window now, and a value at the far right of a 1400 pixel row is
+/// a value nobody can read against the key it belongs to: the eye has to cross
+/// the width of the screen. Everything lines up in the one column instead, which
+/// is what makes a screen of settings scannable.
 ///
 /// Asked by the placement and by the drawing, so a value is drawn exactly where
 /// the click that changes it is tested for.
-fn settings_value_w(list_w: f32, column: f32) -> f32 {
-    (SETTING_VALUE_COLUMNS as f32 * column).min((list_w * 0.5).floor())
+fn settings_control(row: Panel, label_w: f32, column: f32) -> Panel {
+    let x = row.x + MARK_W + 3.0 + label_w;
+    let room = (row.x + row.w - x).max(1.0);
+    Panel::new(
+        x,
+        row.y,
+        (SETTING_VALUE_COLUMNS as f32 * column).min(room),
+        row.h,
+    )
 }
+
+/// How wide the rail of section names is, and how wide the label column of a row
+/// is, both in columns of pane text.
+///
+/// The rail holds the longest section name with room for its mark; the label
+/// column holds the longest key in the settings file. Both are capped against
+/// the room there is, so a narrow window keeps a list rather than losing it to
+/// two columns of chrome.
+const SETTING_RAIL_COLUMNS: usize = 14;
+const SETTING_LABEL_COLUMNS: usize = 24;
+
+fn settings_rail_w(area_w: f32, column: f32) -> f32 {
+    (SETTING_RAIL_COLUMNS as f32 * column).min((area_w * 0.33).floor())
+}
+
+/// Where a row's value starts when it is a reading rather than a control: after
+/// the label, and running to the end of the row.
+///
+/// A reading's value is usually a path, which is longer than the value column
+/// and would be three dots in it. A control's value is short and lines up down
+/// the right instead.
+fn settings_label_w(list_w: f32, column: f32) -> f32 {
+    (SETTING_LABEL_COLUMNS as f32 * column).min((list_w * 0.5).floor())
+}
+
+/// How much of a slider's row the number beside the track takes. The track gets
+/// the rest.
+const SETTING_TRACK_VALUE_COLUMNS: usize = 6;
 
 fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlaces {
     if area.w < 1.0 || area.h < 1.0 {
         return SettingsPlaces {
             box_: nowhere(),
+            rail: Vec::new(),
             list: nowhere(),
             rows: Vec::new(),
             values: Vec::new(),
+            tracks: Vec::new(),
             close: nowhere(),
         };
     }
@@ -1789,30 +1880,59 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
     // The heading, and the footer that says what the keys do.
     let head = line;
     let foot = line;
-    let list = Panel::new(
+    let body = Panel::new(
         content.x,
         content.y + head + GAP,
         content.w,
         (content.h - head - foot - GAP * 2.0).max(0.0),
     );
+    let rail_w = settings_rail_w(body.w, column);
+    let mut rail = Vec::new();
+    for (index, _) in panel.section_names().iter().enumerate() {
+        let y = body.y + index as f32 * line;
+        // A rail taller than the window keeps the sections that fit rather than
+        // drawing over the footer. Eight names in a window that cannot hold
+        // eight rows is a window nothing is readable in anyway.
+        if y + line > body.y + body.h {
+            break;
+        }
+        rail.push((index, Panel::new(body.x, y, rail_w, line)));
+    }
+    let list = Panel::new(
+        body.x + rail_w + GAP,
+        body.y,
+        (body.w - rail_w - GAP).max(0.0),
+        body.h,
+    );
     let rows_fit = Text::rows_for(shape.pane_size, list.h);
     let heights = panel.heights();
     let back = text_geometry::scrollback_for(&heights, rows_fit, panel.first());
     let window = text_geometry::window(&heights, rows_fit, back);
-    let value_w = settings_value_w(list.w, column);
+    let label_w = settings_label_w(list.w, column);
     let mut rows = Vec::new();
     let mut values = Vec::new();
+    let mut tracks = Vec::new();
     for step in 0..window.count {
         let index = window.first + step;
         let row = Panel::new(list.x, list.y + step as f32 * line, list.w, line);
         rows.push((index, row));
-        // Only a row that carries a control gets one. A heading or a reading
-        // with a click region over its value would answer a press with nothing.
-        if matches!(panel.row(index), Some(SettingRow::Setting { kind, .. }) if kind.changes()) {
-            values.push((
-                index,
-                Panel::new(row.x + row.w - value_w, row.y, value_w, row.h),
-            ));
+        let value_at = settings_control(row, label_w, column);
+        // Only a row that carries a control gets one, and a control is either a
+        // value or a track. A heading or a reading with a click region over its
+        // value would answer a press with nothing.
+        match panel.row(index) {
+            Some(SettingRow::Setting { kind, .. }) if kind.fraction(0.0).is_some() => {
+                let number = (SETTING_TRACK_VALUE_COLUMNS as f32 * column).min(value_at.w * 0.5);
+                tracks.push((
+                    index,
+                    Panel::new(value_at.x, value_at.y, value_at.w - number, value_at.h),
+                ));
+            }
+            Some(SettingRow::Setting { kind, .. }) if kind.changes() => {
+                values.push((index, value_at));
+            }
+            Some(SettingRow::Field { .. }) => values.push((index, value_at)),
+            _ => {}
         }
     }
     // Top right, one cut's reach in from the corner the cut takes away, so the
@@ -1820,9 +1940,11 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
     let close = Panel::new(content.x + content.w - CUT - line, content.y, line, line);
     SettingsPlaces {
         box_: area,
+        rail,
         list,
         rows,
         values,
+        tracks,
         close,
     }
 }
@@ -3606,11 +3728,13 @@ fn folder_picker(scene: &mut Scene, frame: &Frame) {
 
 /// The settings panel: the whole surface under the title strip while it is up.
 ///
-/// Two columns. The label on the left says what a setting is called in the file,
-/// so the panel doubles as the documentation for editing that file by hand, and
-/// the value sits in one column down the right where it can be scanned. Nothing
-/// here is a form widget: a value is text, and what makes it a control is that
-/// the arrow keys and a click on it change it.
+/// A rail of section names down the left and the chosen section beside it. Each
+/// row is two columns: the label says what a setting is called in the file, so
+/// the panel doubles as the documentation for editing that file by hand, and the
+/// value sits down the right where it can be scanned. Only one thing here is a
+/// widget in the usual sense, the slider on a setting with a range; everything
+/// else is text, and what makes it a control is that the arrow keys and a click
+/// on it change it.
 fn settings_panel(scene: &mut Scene, frame: &Frame) {
     let Some(panel) = frame.settings else {
         return;
@@ -3632,14 +3756,20 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
         scene.text(Text::rich(runs, at, size, tint));
     };
 
-    // The heading, and the file it is a view of. The path is a reading further
-    // down as well, where it can be read in full; this is the one line at the
-    // top saying that the panel and the file are the same thing.
+    // The heading, and which section it is showing. The rail says that as well,
+    // in the column below; this is the one line at the top that reads as a
+    // sentence, so a window photographed mid-thought says where it was.
+    let here = panel
+        .section_names()
+        .get(panel.chosen())
+        .copied()
+        .unwrap_or_default();
     say(
         scene,
         vec![
             Run::icon(icons::SETTINGS.to_string(), skin.bright),
-            Run::tinted(" SETTINGS", skin.bright),
+            Run::tinted(" SETTINGS ", skin.bright),
+            Run::tinted(clip(here, cols.saturating_sub(11)), skin.good),
         ],
         Panel::new(content.x, content.y, content.w, line),
         skin.bright,
@@ -3665,37 +3795,111 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
         );
     }
 
+    // The rail. The chosen section carries the band and the mark every list in
+    // this window marks its current row with; the mark is the focus colour only
+    // while the keyboard is on the rail, so the panel says which half of itself
+    // the arrow keys are in.
     let list = layout.settings_list;
-    let value_w = settings_value_w(list.w, column);
-    let label_cols = cols_of(list, column).saturating_sub(SETTING_VALUE_COLUMNS + 1);
+    let names = panel.section_names();
+    for (index, at) in &layout.settings_rail {
+        let Some(name) = names.get(*index) else {
+            continue;
+        };
+        let chosen = *index == panel.chosen();
+        if chosen {
+            scene.rect(at.fill(skin.strip));
+            let mark = match panel.focus() {
+                crate::settings::Focus::Rail => skin.edge_focus,
+                crate::settings::Focus::Content => skin.edge,
+            };
+            scene.rect(Panel::new(at.x, at.y, MARK_W, at.h).fill(mark));
+        }
+        let tint = match (chosen, frame.hot == Some(Hit::SettingsSection(*index))) {
+            (true, _) => skin.good,
+            (false, true) => skin.bright,
+            (false, false) => skin.dim,
+        };
+        let text_at = Panel::new(
+            at.x + MARK_W + 3.0,
+            at.y,
+            (at.w - MARK_W - 3.0).max(1.0),
+            line,
+        );
+        say(
+            scene,
+            vec![Run::tinted(
+                clip(name, columns_in(text_at.w, column)),
+                tint,
+            )],
+            text_at,
+            tint,
+        );
+    }
+    // The hairline between the rail and what it chose, so the two columns read
+    // as two columns rather than as a list with a gap in it.
+    if list.w >= 1.0 && list.h >= 1.0 {
+        scene.rect(Panel::new(list.x - (GAP * 0.5).floor(), list.y, 1.0, list.h).fill(skin.edge));
+    }
+
+    let label_w = settings_label_w(list.w, column);
+    let label_cols = columns_in(label_w, column).saturating_sub(1);
     for (index, row) in &layout.settings_rows {
         let Some(entry) = panel.row(*index) else {
             continue;
         };
-        let on = *index == panel.cursor();
+        let on = *index == panel.cursor() && panel.on_row();
         if on {
-            // The band and the mark every list in this window marks its current
-            // row with, rather than a colour of its own.
             scene.rect(row.fill(skin.strip));
             scene.rect(Panel::new(row.x, row.y, MARK_W, row.h).fill(skin.edge_focus));
         }
         let text_x = row.x + MARK_W + 3.0;
-        let label_room = Panel::new(text_x, row.y, (row.w - value_w - MARK_W - 3.0).max(1.0), line);
-        let value_at = Panel::new(row.x + row.w - value_w, row.y, value_w, line);
+        let whole = Panel::new(text_x, row.y, (row.w - MARK_W - 3.0).max(1.0), line);
+        // One column short of what the box holds, so the mark saying a line was
+        // cut fits inside it: a clipped line whose ellipsis does not fit wraps
+        // out of a one line box and reads as a sentence that simply stops.
+        let whole_cols = columns_in(whole.w, column).saturating_sub(1);
+        let label_room = Panel::new(text_x, row.y, label_w.max(1.0), line);
+        let value_at = settings_control(*row, label_w, column);
         match entry {
             // A heading is the only thing on its row, and it gets the whole
-            // width: `WHICH PANES OPEN` is longer than a label column.
+            // width: `WHERE THE DIVIDERS SIT` is longer than a label column.
             //
             // In the same green the showing tab's line is drawn in. It was the
             // ordinary text tint, which is what the settings under it are
-            // written in, so the sections of a sixty row list did not separate
-            // from their contents at a glance.
+            // written in, so the groups of a long list did not separate from
+            // their contents at a glance.
             SettingRow::Heading(name) => say(
                 scene,
-                vec![Run::tinted(clip(name, cols), skin.good)],
-                Panel::new(text_x, row.y, (row.w - MARK_W - 3.0).max(1.0), line),
+                vec![Run::tinted(clip(name, whole_cols), skin.good)],
+                whole,
                 skin.good,
             ),
+            // Prose, and the one row that can be trouble. The whole width: a
+            // sentence in a label column is two words and three dots.
+            SettingRow::Note { text, bad } => {
+                let tint = match bad {
+                    true => skin.bad,
+                    false => skin.dim,
+                };
+                say(
+                    scene,
+                    vec![Run::tinted(clip(text, whole_cols), tint)],
+                    whole,
+                    tint,
+                );
+            }
+            // One entry of a list off the disk. Also the whole width, because
+            // what identifies a session is the sentence somebody typed into it.
+            SettingRow::Item(text) => say(
+                scene,
+                vec![Run::tinted(clip(text, whole_cols), skin.body)],
+                whole,
+                skin.body,
+            ),
+            // A reading's value starts in the same column a control does and
+            // runs to the end of the row rather than stopping where a value
+            // would: most of them are paths, and a path in a value column is
+            // three dots.
             SettingRow::Reading { label, value } => {
                 say(
                     scene,
@@ -3703,15 +3907,66 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     label_room,
                     skin.dim,
                 );
+                let value_room = Panel::new(
+                    value_at.x,
+                    row.y,
+                    (row.x + row.w - value_at.x).max(1.0),
+                    line,
+                );
                 say(
                     scene,
                     vec![Run::tinted(
-                        clip(value, SETTING_VALUE_COLUMNS),
+                        clip(value, columns_in(value_room.w, column)),
                         skin.body,
                     )],
-                    value_at,
+                    value_room,
                     skin.body,
                 );
+            }
+            // The one field: text, and while it is being typed into, what has
+            // been typed with a caret after it.
+            SettingRow::Field { key, value } => {
+                let tint = if on { skin.bright } else { skin.body };
+                say(
+                    scene,
+                    vec![Run::tinted(clip(key, label_cols), tint)],
+                    label_room,
+                    tint,
+                );
+                let typing = on.then(|| panel.editing()).flatten();
+                let (shown, ink) = match (typing, value.is_empty()) {
+                    (Some(typed), _) => (typed.to_string(), skin.bright),
+                    (None, true) => (String::from(crate::settings::UNSET), skin.dim),
+                    (None, false) => (value.clone(), skin.bright),
+                };
+                if frame.hot == Some(Hit::SettingsValue(*index)) {
+                    scene.rect(value_at.fill(skin.hot));
+                }
+                // The end of it rather than the start: what changes in an
+                // endpoint is the port and the path, and a URL clipped from the
+                // left keeps the half being typed on screen. One column short of
+                // the box, so the caret after it is inside the row.
+                let shown = tail(&shown, SETTING_VALUE_COLUMNS.saturating_sub(1));
+                say(
+                    scene,
+                    vec![Run::tinted(shown.clone(), ink)],
+                    value_at,
+                    ink,
+                );
+                // The same caret the prompt draws, in the same colour: a block
+                // character would be a glyph that can be missing, and a missing
+                // glyph draws as nothing at all.
+                if typing.is_some() {
+                    scene.rect(
+                        Panel::new(
+                            value_at.x + shown.chars().count() as f32 * column,
+                            value_at.y,
+                            2.0,
+                            line,
+                        )
+                        .fill(skin.caret),
+                    );
+                }
             }
             SettingRow::Setting { key, value, kind } => {
                 let tint = if on { skin.bright } else { skin.body };
@@ -3721,11 +3976,17 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     label_room,
                     tint,
                 );
-                match kind {
+                let track = layout
+                    .settings_tracks
+                    .iter()
+                    .find(|(at, _)| at == index)
+                    .map(|(_, track)| *track);
+                let value = panel.preview(*index).unwrap_or(value);
+                match (kind, track) {
                     // A colour is drawn as itself. A hex string is not a colour
                     // to anyone reading a palette, and this is the panel where
                     // the palette is read.
-                    Kind::Colour(rgb) => {
+                    (Kind::Colour(rgb), _) => {
                         let side = (line * 0.6).floor().max(2.0);
                         let up = ((line - side) * 0.5).floor();
                         scene.rect(
@@ -3741,6 +4002,51 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                                 line,
                             ),
                             skin.dim,
+                        );
+                    }
+                    // A setting with a range is a position on a track, with the
+                    // number it is at beside it. Nineteen presses of an arrow
+                    // key from one end of opacity to the other is not a control.
+                    (_, Some(track)) if track.w >= 1.0 => {
+                        if frame.hot == Some(Hit::SettingsSlider(*index)) {
+                            scene.rect(track.fill(skin.hot));
+                        }
+                        let thick = (line * 0.3).floor().max(2.0);
+                        let up = ((line - thick) * 0.5).floor();
+                        let at = panel.fraction(*index).unwrap_or(0.0);
+                        scene.rect(
+                            Panel::new(track.x, track.y + up, track.w, thick)
+                                .fill(skin.gauge_track),
+                        );
+                        scene.rect(
+                            Panel::new(track.x, track.y + up, (track.w * at).floor(), thick)
+                                .fill(skin.gauge),
+                        );
+                        // The grip: a bar at the position, tall enough to press.
+                        let grip = CARET_W;
+                        scene.rect(
+                            Panel::new(
+                                track.x + ((track.w - grip) * at).floor(),
+                                track.y + 1.0,
+                                grip,
+                                (line - 2.0).max(1.0),
+                            )
+                            .fill(skin.edge_focus),
+                        );
+                        let number = Panel::new(
+                            track.x + track.w + column,
+                            row.y,
+                            (value_at.w - track.w - column).max(1.0),
+                            line,
+                        );
+                        say(
+                            scene,
+                            vec![Run::tinted(
+                                clip(value, SETTING_TRACK_VALUE_COLUMNS.saturating_sub(1)),
+                                skin.bright,
+                            )],
+                            number,
+                            skin.bright,
                         );
                     }
                     // The value of a setting that can change is drawn as the
@@ -3986,6 +4292,22 @@ fn clip(text: &str, chars: usize) -> String {
     if text.chars().count() > chars {
         out.push('\u{2026}');
     }
+    out
+}
+
+/// The same, from the other end: the last `chars` characters, with a mark where
+/// the front was cut off.
+///
+/// For a value whose end is the part that changes. A URL clipped from the left
+/// keeps the port and the path, which is what somebody typing one is looking at;
+/// clipped from the right it says `http://localho…` on every endpoint there is.
+fn tail(text: &str, chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= chars {
+        return text.to_string();
+    }
+    let mut out = String::from("\u{2026}");
+    out.extend(text.chars().skip(count - chars.saturating_sub(1)));
     out
 }
 
@@ -9634,12 +9956,60 @@ mod tests {
         }
     }
 
+    /// An agent with one of everything, so every section has rows of its own to
+    /// draw rather than a note saying it is empty.
+    fn an_agent() -> crate::agent::Agent {
+        crate::agent::Agent {
+            env_path: Some(std::path::PathBuf::from("/home/hec/.config/noob/.env")),
+            env_exists: true,
+            env: vec![
+                (
+                    String::from(crate::agent::ENDPOINT),
+                    String::from("http://localhost:8080/v1"),
+                ),
+                (String::from("NOOB_CTX"), String::from("262144")),
+            ],
+            skills_at: Some(std::path::PathBuf::from("/home/hec/.config/noob/skills")),
+            skills: vec![crate::agent::Skill {
+                dir: String::from("coding"),
+                name: String::from("coding"),
+                about: String::from("Changing code that already exists."),
+            }],
+            sessions: crate::sessions::Listing {
+                sessions: vec![crate::sessions::Saved {
+                    id: String::from("abc"),
+                    when: std::time::SystemTime::UNIX_EPOCH,
+                    workspace: Some(std::path::PathBuf::from("/home/hec/workspace/noob-cli")),
+                    gone: false,
+                    opening: String::from("rebuild the settings panel"),
+                }],
+                skipped: Vec::new(),
+            },
+            ..crate::agent::Agent::default()
+        }
+    }
+
     fn a_settings_panel(config: &Config) -> Settings {
         Settings::open(
             config,
             &crate::totals::Totals::default(),
             Some(std::path::Path::new("/home/hec/.config/noob/no0b.conf")),
+            an_agent(),
         )
+    }
+
+    /// The panel with one section chosen and the keyboard inside it, which is
+    /// what a click on the rail leaves behind.
+    fn a_panel_on(config: &Config, section: &str) -> Settings {
+        let mut panel = a_settings_panel(config);
+        let at = panel
+            .section_names()
+            .iter()
+            .position(|name| *name == section)
+            .unwrap_or_else(|| panic!("{section} is not a section"));
+        panel.choose(at);
+        panel.enter();
+        panel
     }
 
     /// The panel is a takeover: while it is up there are no panes, no tabs and
@@ -9679,54 +10049,183 @@ mod tests {
         assert_eq!(layout.hit(x, y), Some(Hit::Close));
     }
 
-    /// Every row is hit where it is drawn, the value at the end of a row that
-    /// can change is its own region, and a row that cannot change has none.
+    /// Every row of every section is hit where it is drawn, the control at the
+    /// end of a row that can change is its own region, and a row that cannot
+    /// change has none.
     #[test]
     fn every_settings_row_lands_where_it_is_drawn() {
-        let panel = a_settings_panel(&Config::default());
-        let out = render_settings(&panel, 1400.0, 900.0, None);
-        let layout = &out.layout;
-        assert!(!layout.settings_rows.is_empty());
-        for (index, row) in &layout.settings_rows {
-            assert!(
-                layout.settings_list.contains(row.x + 1.0, row.y + 1.0),
-                "row {index} is outside the list: {row:?}"
-            );
-            // The left of the row, which is the label, puts the cursor there.
-            assert_eq!(
-                layout.hit(row.x + 2.0, row.y + row.h * 0.5),
-                Some(Hit::SettingsRow(*index))
-            );
-            let control = matches!(
-                panel.row(*index),
-                Some(crate::settings::Row::Setting { kind, .. }) if kind.changes()
-            );
-            let value = layout
+        for section in crate::settings::SECTIONS {
+            let panel = a_panel_on(&Config::default(), section);
+            let out = render_settings(&panel, 1400.0, 900.0, None);
+            let layout = &out.layout;
+            assert!(!layout.settings_rows.is_empty(), "{section} draws no rows");
+            for (index, row) in &layout.settings_rows {
+                assert!(
+                    layout.settings_list.contains(row.x + 1.0, row.y + 1.0),
+                    "row {index} of {section} is outside the list: {row:?}"
+                );
+                // The left of the row, which is the label, puts the cursor there.
+                assert_eq!(
+                    layout.hit(row.x + 2.0, row.y + row.h * 0.5),
+                    Some(Hit::SettingsRow(*index)),
+                    "{section}"
+                );
+                // What a row carries: a track when its setting has a range, a
+                // value when it is a flag, a preset or the endpoint, and nothing
+                // at all when there is nothing to press.
+                let wanted = match panel.row(*index) {
+                    Some(crate::settings::Row::Setting { kind, .. })
+                        if kind.fraction(0.0).is_some() =>
+                    {
+                        Some(Hit::SettingsSlider(*index))
+                    }
+                    Some(crate::settings::Row::Setting { kind, .. }) if kind.changes() => {
+                        Some(Hit::SettingsValue(*index))
+                    }
+                    Some(crate::settings::Row::Field { .. }) => Some(Hit::SettingsValue(*index)),
+                    _ => None,
+                };
+                let control = layout
+                    .settings_values
+                    .iter()
+                    .chain(layout.settings_tracks.iter())
+                    .find(|(at, _)| at == index)
+                    .map(|(_, panel)| *panel);
+                match (wanted, control) {
+                    (Some(hit), Some(control)) => {
+                        let (x, y) = middle(control);
+                        assert_eq!(layout.hit(x, y), Some(hit), "{section}");
+                        assert!(row.contains(x, y), "the control is outside its row");
+                    }
+                    // A heading, a note, an item, a reading or a colour: the
+                    // whole row is the row, and a press on its right hand end
+                    // changes nothing.
+                    (None, None) => assert_eq!(
+                        layout.hit(row.x + row.w - 2.0, row.y + row.h * 0.5),
+                        Some(Hit::SettingsRow(*index)),
+                        "{section}"
+                    ),
+                    other => panic!("row {index} of {section} carries {other:?}"),
+                }
+            }
+            // The controls all start in one column, which is what makes a screen
+            // of settings scannable rather than a wall of words.
+            let lefts: Vec<f32> = layout
                 .settings_values
                 .iter()
-                .find(|(at, _)| at == index)
-                .map(|(_, panel)| *panel);
-            match (control, value) {
-                (true, Some(value)) => {
-                    let (x, y) = middle(value);
-                    assert_eq!(layout.hit(x, y), Some(Hit::SettingsValue(*index)));
-                    assert!(row.contains(x, y), "the value is outside its row");
-                }
-                // A heading, a reading or a colour: the whole row is the row,
-                // and a press on its right hand end changes nothing.
-                (false, None) => assert_eq!(
-                    layout.hit(row.x + row.w - 2.0, row.y + row.h * 0.5),
-                    Some(Hit::SettingsRow(*index))
-                ),
-                other => panic!("row {index} carries {other:?}"),
-            }
+                .chain(layout.settings_tracks.iter())
+                .map(|(_, p)| p.x)
+                .collect();
+            assert!(
+                lefts.windows(2).all(|pair| (pair[0] - pair[1]).abs() < 0.01),
+                "{section}: {lefts:?}"
+            );
         }
-        // The values are one column, which is what makes a screen of settings
-        // scannable rather than a wall of words.
-        let lefts: Vec<f32> = layout.settings_values.iter().map(|(_, p)| p.x).collect();
+    }
+
+    /// Every section is on the rail, is hit where its name is drawn, and picking
+    /// one swaps what is beside it.
+    #[test]
+    fn every_section_is_on_the_rail_and_can_be_pressed() {
+        let mut panel = a_settings_panel(&Config::default());
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let layout = &out.layout;
+        assert_eq!(
+            layout.settings_rail.len(),
+            panel.section_names().len(),
+            "the rail is short of a section"
+        );
+        for (index, at) in &layout.settings_rail {
+            let (x, y) = middle(*at);
+            assert_eq!(layout.hit(x, y), Some(Hit::SettingsSection(*index)));
+            assert!(
+                at.x + at.w <= layout.settings_list.x,
+                "the rail runs into the list: {at:?}"
+            );
+        }
+        // Every name is written, and the chosen one is in the accent green while
+        // the rest are not.
+        let text = text_of(&out.scene);
+        for name in panel.section_names() {
+            assert!(text.contains(name), "{name} is not on the rail: {text}");
+        }
+        let tint_of = |out: &Rendered, name: &str| {
+            out.scene
+                .texts
+                .iter()
+                .flat_map(|text| text.runs.iter())
+                .filter(|run| run.text.trim() == name)
+                .filter_map(|run| run.color)
+                .next_back()
+                .unwrap_or_else(|| panic!("{name} is not drawn"))
+        };
+        assert_eq!(tint_of(&out, "AGENT"), out.skin.good);
+        assert_ne!(tint_of(&out, "COLOURS"), out.skin.good);
+
+        // Pressing one changes what the list shows, which is the whole point of
+        // a rail: the same panel, a different screen.
+        let colours = layout
+            .settings_rail
+            .iter()
+            .find(|(index, _)| panel.section_names()[*index] == crate::settings::COLOURS)
+            .map(|(index, _)| *index)
+            .expect("the colours are on the rail");
+        panel.choose(colours);
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let text = text_of(&out.scene);
+        assert!(text.contains("THE WINDOW"), "{text}");
+        assert!(!text.contains("api keys"), "the agent section is still up");
+        assert_eq!(tint_of(&out, "COLOURS"), out.skin.good);
+    }
+
+    /// The slider is a track a pointer can be anywhere along, and where it is
+    /// along it is the value that would be written.
+    #[test]
+    fn the_slider_reads_a_pointer_as_a_value() {
+        let panel = a_panel_on(&Config::parse("opacity = 0.50"), crate::settings::APPEARANCE);
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let layout = &out.layout;
+        let (index, track) = layout
+            .settings_tracks
+            .first()
+            .copied()
+            .expect("a number is a slider");
         assert!(
-            lefts.windows(2).all(|pair| (pair[0] - pair[1]).abs() < 0.01),
-            "{lefts:?}"
+            matches!(panel.row(index), Some(crate::settings::Row::Setting { key, .. }) if *key == "opacity")
+        );
+
+        // Both ends and the middle, off the geometry the row is drawn with.
+        assert_eq!(layout.slider_at(index, track.x), Some(0.0));
+        assert_eq!(layout.slider_at(index, track.x + track.w), Some(1.0));
+        let half = layout
+            .slider_at(index, track.x + track.w * 0.5)
+            .expect("the middle");
+        assert!((half - 0.5).abs() < 0.01, "{half}");
+        // A pointer that ran off the end holds the end rather than going dead.
+        assert_eq!(layout.slider_at(index, track.x - 500.0), Some(0.0));
+        assert_eq!(layout.slider_at(index, track.x + track.w + 500.0), Some(1.0));
+        // A row with no track has no position along one.
+        assert_eq!(layout.slider_at(index + 500, track.x), None);
+
+        // The track is drawn where it is pressed: an unlit bar the width of the
+        // track and a lit one as far along it as the value.
+        let on_the_track = |rgba: [f32; 4]| {
+            out.scene
+                .rects
+                .iter()
+                .filter(|rect| rect.rgba() == rgba)
+                .map(|rect| rect.xywh())
+                .find(|[x, y, ..]| track.contains(*x + 0.5, *y + 0.5))
+        };
+        let thumb = on_the_track(out.skin.gauge).expect("nothing is lit");
+        assert!((thumb[0] - track.x).abs() < 0.01, "{thumb:?}");
+        let full = on_the_track(out.skin.gauge_track).expect("there is no track");
+        assert!((full[2] - track.w).abs() < 0.01, "{full:?}");
+        // Half way through its range, so the lit part is about half the track.
+        let at = (0.5 - 0.05) / (1.0 - 0.05);
+        assert!(
+            (thumb[2] / full[2] - at).abs() < 0.02,
+            "the lit part is {thumb:?} of {full:?}"
         );
     }
 
@@ -9790,28 +10289,44 @@ mod tests {
         }
     }
 
-    /// Every section heading is the same green the showing tab's line is, and
-    /// none of them is the tint the settings under it are written in.
+    /// Every group heading inside a section is the same green the showing tab's
+    /// line is, and none of them is the tint the settings under it are written
+    /// in.
     ///
-    /// A sixty row list is unreadable if its sections do not separate from their
-    /// contents, and the heading was in the ordinary text tint.
+    /// A list is unreadable if its groups do not separate from their contents,
+    /// and the heading was in the ordinary text tint.
     #[test]
     fn the_settings_headings_are_the_accent_green() {
-        let panel = a_settings_panel(&Config::default());
-        let out = render_settings(&panel, 1400.0, 1200.0, None);
         let mut found = 0;
-        for heading in ["WHAT IT LOOKS LIKE", "WHICH PANES OPEN", "COLOURS"] {
-            let run = out
+        let out = render_settings(
+            &a_panel_on(&Config::default(), crate::settings::PANES),
+            1400.0,
+            1200.0,
+            None,
+        );
+        let colours = render_settings(
+            &a_panel_on(&Config::default(), crate::settings::COLOURS),
+            1400.0,
+            1200.0,
+            None,
+        );
+        for (rendered, heading) in [
+            (&out, "WHICH PANES OPEN"),
+            (&out, "WHERE THE DIVIDERS SIT"),
+            (&colours, "THE WINDOW"),
+            (&colours, "THE HIGHLIGHTER"),
+        ] {
+            let run = rendered
                 .scene
                 .texts
                 .iter()
                 .flat_map(|text| text.runs.iter())
                 .find(|run| run.text.trim() == heading)
                 .unwrap_or_else(|| panic!("{heading} is not on the panel"));
-            assert_eq!(run.color, Some(out.skin.good), "{heading}");
+            assert_eq!(run.color, Some(rendered.skin.good), "{heading}");
             found += 1;
         }
-        assert_eq!(found, 3);
+        assert_eq!(found, 4);
         // The same green the tab wears, and not the tint a setting's key is
         // written in, or the heading is another row of the list.
         assert_eq!(
@@ -9862,29 +10377,45 @@ mod tests {
         }
     }
 
-    /// What the panel says: its own heading, the all-time block, the keys of the
-    /// settings it can change, and the palette drawn as itself.
+    /// What each section says: its own heading, the agent's file, the sessions
+    /// and the skills read off the disk, the settings it can change, and the
+    /// palette drawn as itself.
     #[test]
     fn the_panel_says_what_it_is_and_draws_the_palette() {
         let config = Config::parse("accent = #123456");
-        let panel = a_settings_panel(&config);
-        let out = render_settings(&panel, 1400.0, 1200.0, None);
-        let text = text_of(&out.scene);
-        for wanted in [
-            "SETTINGS",
-            "ALL TIME",
-            "prefilled",
-            "theme",
-            "opacity",
-            "show_files",
-            "COLOURS",
-            "accent",
-            "#123456",
+        let words = |section: &str| {
+            text_of(&render_settings(&a_panel_on(&config, section), 1400.0, 1200.0, None).scene)
+        };
+        for (section, wanted) in [
+            (crate::settings::AGENT, "NOOB_BASE_URL"),
+            (crate::settings::AGENT, "http://localhost:8080/v1"),
+            (crate::settings::AGENT, "/home/hec/.config/noob/.env"),
+            (crate::settings::SESSIONS, "rebuild the settings panel"),
+            (crate::settings::SKILLS, "coding"),
+            (crate::settings::MCP, "none configured"),
+            (crate::settings::APPEARANCE, "theme"),
+            (crate::settings::APPEARANCE, "opacity"),
+            (crate::settings::PANES, "show_files"),
+            (crate::settings::COLOURS, "accent"),
+            (crate::settings::COLOURS, "#123456"),
+            (crate::settings::ALL_TIME, "prefilled"),
         ] {
-            assert!(text.contains(wanted), "{wanted:?} is not on the panel: {text}");
+            let text = words(section);
+            assert!(
+                text.contains(wanted),
+                "{wanted:?} is not in {section}: {text}"
+            );
         }
+        // The panel says what it is and which section it is showing.
+        assert!(words(crate::settings::MCP).contains("SETTINGS"));
 
         // The colour is drawn as a swatch of itself, not only as a hex string.
+        let out = render_settings(
+            &a_panel_on(&config, crate::settings::COLOURS),
+            1400.0,
+            1200.0,
+            None,
+        );
         let wanted = [0x12 as f32 / 255.0, 0x34 as f32 / 255.0, 0x56 as f32 / 255.0, 1.0];
         assert!(
             out.scene.rects.iter().any(|rect| rect.rgba() == wanted),
@@ -9893,6 +10424,8 @@ mod tests {
 
         // The row the cursor is on carries the band and the mark every list in
         // this window marks its current row with.
+        let panel = a_panel_on(&config, crate::settings::APPEARANCE);
+        let out = render_settings(&panel, 1400.0, 1200.0, None);
         let row = out
             .layout
             .settings_rows

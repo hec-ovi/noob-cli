@@ -88,33 +88,17 @@ pub struct Listing {
 
 /// Where the agent keeps them: `sessions/` under its own config directory.
 ///
-/// The agent's, not the window's. `noob` resolves that directory as
-/// `$NOOB_CONFIG_DIR`, then `/config` when it is there (the bind mount it is
-/// given inside a container), then `~/.config/noob`, and the files being read
-/// here are the ones it wrote. Deriving this from where the window keeps its
-/// own settings would come apart the moment either rule changed, and on a
-/// machine with `$XDG_CONFIG_HOME` set it would already be looking in the wrong
-/// place.
+/// The agent's, not the window's, and the rule for finding it lives in
+/// [`crate::agent`] because three other things in that directory are read the
+/// same way. Deriving it from where the window keeps its own settings would come
+/// apart the moment either rule changed, and on a machine with
+/// `$XDG_CONFIG_HOME` set it would already be looking in the wrong place.
 pub fn dir() -> Option<PathBuf> {
-    dir_from(
-        std::env::var_os("NOOB_CONFIG_DIR").map(PathBuf::from),
-        Some(PathBuf::from("/config")).filter(|path| path.is_dir()),
-        std::env::var_os("HOME").map(PathBuf::from),
-    )
+    Some(dir_in(&crate::agent::config_dir()?))
 }
 
-/// That rule with the machine's answers passed in, so it can be checked without
-/// setting environment variables under a test runner that shares them.
-fn dir_from(
-    named: Option<PathBuf>,
-    container: Option<PathBuf>,
-    home: Option<PathBuf>,
-) -> Option<PathBuf> {
-    let base = named
-        .filter(|path| !path.as_os_str().is_empty())
-        .or(container)
-        .or_else(|| Some(home?.join(".config").join("noob")))?;
-    Some(base.join("sessions"))
+fn dir_in(config: &Path) -> PathBuf {
+    config.join("sessions")
 }
 
 /// Describe every session in `at`, newest first.
@@ -659,32 +643,20 @@ mod tests {
         assert_eq!(parse_index(&index_text(&long)).len(), REMEMBERED);
     }
 
-    /// The window has to look where the agent writes, which is the agent's rule
-    /// and not the window's: a named directory wins, then the mount a container
-    /// is given, then the home directory.
+    /// The window has to look where the agent writes: `sessions/` inside the
+    /// agent's own config directory, wherever that resolves to. Which directory
+    /// that is is the agent's rule and is checked where it lives, in
+    /// [`crate::agent`].
     #[test]
     fn the_sessions_are_read_from_the_agents_own_config_directory() {
-        let named = Some(PathBuf::from("/somewhere/noob"));
-        let container = Some(PathBuf::from("/config"));
-        let home = Some(PathBuf::from("/home/hec"));
         assert_eq!(
-            dir_from(named.clone(), container.clone(), home.clone()),
-            Some(PathBuf::from("/somewhere/noob/sessions"))
+            dir_in(Path::new("/somewhere/noob")),
+            PathBuf::from("/somewhere/noob/sessions")
         );
         assert_eq!(
-            dir_from(None, container, home.clone()),
-            Some(PathBuf::from("/config/sessions"))
+            dir_in(Path::new("/home/hec/.config/noob")),
+            PathBuf::from("/home/hec/.config/noob/sessions")
         );
-        assert_eq!(
-            dir_from(None, None, home.clone()),
-            Some(PathBuf::from("/home/hec/.config/noob/sessions"))
-        );
-        assert_eq!(
-            dir_from(Some(PathBuf::new()), None, home),
-            Some(PathBuf::from("/home/hec/.config/noob/sessions")),
-            "an empty variable is a variable nobody set"
-        );
-        assert_eq!(dir_from(None, None, None), None, "and nowhere is nowhere");
     }
 
     /// Through a real file, since that is the only way the write half is
