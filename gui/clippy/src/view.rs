@@ -1452,8 +1452,8 @@ fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>) {
         return;
     }
 
-    // As wide as the longest label in this pane, so PREFILL MEAN is not clipped
-    // and a pane of short labels does not pay for one that has none.
+    // As wide as the longest label in this pane, so TOTAL TOOL CALLS is not
+    // clipped and a pane of short labels does not pay for one that has none.
     let label_cols = gauges
         .iter()
         .map(|gauge| gauge.label.chars().count())
@@ -1464,8 +1464,8 @@ fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>) {
     let label_w = label_cols as f32 * column;
     let gap = (line * 0.12).round().max(1.0);
     // The number is served first: it gets the room its longest reading needs at
-    // the pane's own size, and the block takes what is left, down to a dot two
-    // pixels across and never more than half. A block that pushed the number off
+    // the pane's own size, and the block takes what is left, never more than half
+    // of it and never less than a legible dot. A block that pushed the number off
     // the pane would be hiding the reading it exists to describe.
     let widest = gauges
         .iter()
