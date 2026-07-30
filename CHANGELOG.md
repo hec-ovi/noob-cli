@@ -121,6 +121,21 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
 
 ### Added
 
+- A closed widget can be opened again from the menu that closed it. Closing one
+  took it out of the window with nothing anywhere putting it back, so the only
+  way home was a restart. The widget menu now ends in a Widgets row that opens a
+  list of all nine under itself, each marked with whether it is in the window or
+  closed, so the list is also the answer to where a pane went. Picking a closed
+  one puts it back in the space it opens in by default, since where it used to be
+  is not remembered and an arrangement dragged around since would have nowhere to
+  put it; picking one that is already in the window shows it where it is and
+  unfolds its space, which reaches a tab behind five others without hunting for
+  its strip. The list is collapsible because nine permanent rows in front of a
+  Close row is a wall, and it is last so opening it moves no row above it, which
+  is the one place the menu is allowed to change height. It is clamped into the
+  window like the menu itself, and where the window is too short for all of it
+  the four rows above are kept and the wheel scrolls the rest.
+
 - The first thing the window shows can now open a session that already exists.
   The picker opened on folders alone, so every launch started a fresh
   conversation and the only way back into an old one was the CLI. A Sessions

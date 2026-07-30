@@ -256,11 +256,19 @@ or FINISHED with the plan count and how many files changed, so a collapsed
 window is still a status light. Double-click again to bring it back.
 
 Right click the prompt for Copy and Paste, or a pane or its tab for Settings,
-Copy selection and Close this widget. A row with nothing to act on is greyed
-rather than absent, so the menu is the same shape every time and the row you were
-aiming for has not moved. Closing a widget is one way out for now, and the way
-back is the launcher that is still to come; a space left with no tabs gives its
-room to its neighbour rather than leaving a hole.
+Copy selection, Close this widget and Widgets. A row with nothing to act on is
+greyed rather than absent, so the menu is the same shape every time and the row
+you were aiming for has not moved. Closing a widget takes it out of the window
+and a space left with no tabs gives its room to its neighbour rather than
+leaving a hole.
+
+**Widgets** is the way back. It is the last row, it opens a list of all nine
+under itself so nothing above it moves, and each row is marked with whether that
+widget is in the window or closed. Picking a closed one puts it back in the
+space it opens in by default; picking one that is already there shows it where
+it is, which is the quick way to a tab buried behind five others. The list is
+clamped into the window like the menu itself, and in a window too short for all
+of it the wheel scrolls it while the four rows above stay put.
 
 ## Settings
 
