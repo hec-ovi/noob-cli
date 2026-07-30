@@ -7,7 +7,8 @@
 //! Written on first run with every key present and commented, because a config
 //! file you have to read the source to discover is not a config file. Unknown
 //! keys are kept and reported rather than dropped, so a typo is visible instead
-//! of silently doing nothing.
+//! of silently doing nothing. A key a past build wrote and this one dropped is
+//! not a typo, so [`RETIRED`] names those and the parser passes over them.
 //!
 //! The colors ship as commented defaults rather than live lines. An explicit
 //! key beats the `theme` it belongs to, so a file that spelled all 35 colors
@@ -314,6 +315,33 @@ pub fn keys() -> Vec<&'static str> {
     keys
 }
 
+/// Keys an earlier build wrote into the file and this one deliberately no longer
+/// reads. The parser treats them as known and ignores them.
+///
+/// A settings file is written once and read for years. When a feature goes, the
+/// line it owned is still sitting in everybody's file, and reporting it as "not
+/// a setting" blames the user for a change this window made. Silencing every
+/// unknown key instead would cost the one thing the report is for, which is
+/// making a typo visible, so the retired names are listed here by hand and
+/// nothing else gets the benefit.
+///
+/// The writer refuses these too: writing one back would put a line in the file
+/// that nothing reads.
+///
+/// A name here must not also be in [`keys`]. That would be a live setting
+/// documented as dead, and which of the two checks won would depend on their
+/// order; `no_key_is_both_live_and_retired` fails if it ever happens.
+///
+/// What removed each one:
+///
+/// * `show_avatar`, `avatar`: the ASCII avatar was a docked view with a tab and
+///   a clip path of its own. Removing the CLIPPY tab removed the view, and
+///   nothing has read either key since.
+/// * `view_avatar`: that tab's hue, gone with the tab.
+/// * `view_llm`: the one LLM monitor, since split into the session, overall and
+///   debug monitors. Its hue lives on as `view_session`.
+pub const RETIRED: [&str; 4] = ["show_avatar", "avatar", "view_avatar", "view_llm"];
+
 /// Where the file lives. `$XDG_CONFIG_HOME` when set, `~/.config` otherwise,
 /// beside noob's own settings rather than in a directory of its own.
 pub fn path() -> Option<PathBuf> {
@@ -404,6 +432,11 @@ impl Config {
             .and_then(|(_, name)| theme(name))
             .unwrap_or_default();
         for (key, value) in pairs {
+            // Before the match, because two of the retired names start with
+            // `view_` and the prefix arm below would call them typos.
+            if RETIRED.contains(&key.as_str()) {
+                continue;
+            }
             let known = match key.as_str() {
                 // Already applied above. Resolving it again here is how a name
                 // this build does not have gets reported instead of ignored.
@@ -543,6 +576,11 @@ fn rewritten(line: &str, key: &str, value: &str) -> String {
 /// its own documentation instead of alone at the end of the file.
 pub fn write_setting(path: &Path, key: &str, value: Option<&str>) -> Result<(), String> {
     let key = key.trim().to_ascii_lowercase();
+    // Said apart from an unknown key, because the name was right once. Either
+    // way it is refused: the reader ignores it, so the line would do nothing.
+    if RETIRED.contains(&key.as_str()) {
+        return Err(format!("{key} is no longer a setting"));
+    }
     if !keys().contains(&key.as_str()) {
         return Err(format!("unknown setting {key:?}"));
     }
@@ -916,6 +954,46 @@ mod tests {
         assert_eq!(config.opacity, 0.6, "the good key still applied");
     }
 
+    /// A key in both sets is a bug. Whichever check runs first would decide, so
+    /// the setting is either live and refused by the writer or dead and still
+    /// applied by the reader, depending on nothing anybody can see.
+    #[test]
+    fn no_key_is_both_live_and_retired() {
+        for key in RETIRED {
+            assert!(!keys().contains(&key), "{key} is live and retired at once");
+        }
+    }
+
+    /// The startup report a settings file from an older build used to produce.
+    /// The line was correct when it was written, so it says nothing now, and the
+    /// typo sitting next to it in the same file still does.
+    #[test]
+    fn a_retired_key_says_nothing_and_a_typo_still_does() {
+        let config = Config::parse("show_avatar = true\navatar =\nopacity = 40%\nopacty = 50%\n");
+        assert_eq!(config.unknown, ["opacty"]);
+        assert_eq!(config.opacity, 0.4, "the good key still applied");
+
+        // Each retired name on its own, whatever value it was left carrying,
+        // reports nothing and changes nothing.
+        for key in RETIRED {
+            for value in ["", "true", "off", "#ff0000", "/home/me/clip.txt"] {
+                let config = Config::parse(&format!("{key} = {value}"));
+                assert!(config.unknown.is_empty(), "{key} = {value:?}: {:?}", config.unknown);
+                assert_eq!(config, Config::default(), "{key} = {value:?} changed something");
+            }
+        }
+    }
+
+    /// A retired key is not documented in the shipped file. A fresh install that
+    /// wrote one would be planting the line the migration above has to forgive.
+    #[test]
+    fn the_written_file_documents_no_retired_key() {
+        let named = documented(DEFAULT_FILE);
+        for key in RETIRED {
+            assert!(!named.contains(&key.to_string()), "{key} is retired and still documented");
+        }
+    }
+
     /// A known key with an unreadable value keeps the default and is reported,
     /// rather than quietly becoming zero.
     #[test]
@@ -1244,6 +1322,21 @@ mod tests {
         assert!(write_setting(&conf, "accent", Some("#ff0000\nbad = #fff")).is_err());
         let theme_error = write_setting(&conf, "theme", Some("tangerine")).unwrap_err();
         assert!(theme_error.contains("noob, amber, ice, plum"), "{theme_error}");
+        assert!(!conf.exists(), "a refused write created a file");
+    }
+
+    /// The reader forgives a retired key; the writer must not write one. A line
+    /// nothing reads is worse than an error, because it looks like it worked.
+    #[test]
+    fn the_writer_refuses_a_retired_key() {
+        let scratch = Scratch::new("retired");
+        let conf = scratch.conf();
+        for key in RETIRED {
+            let error = write_setting(&conf, key, Some("true")).unwrap_err();
+            assert!(error.contains("no longer a setting"), "{key}: {error}");
+            // And unsetting one is not a way in either.
+            assert!(write_setting(&conf, key, None).is_err(), "{key} unset");
+        }
         assert!(!conf.exists(), "a refused write created a file");
     }
 
