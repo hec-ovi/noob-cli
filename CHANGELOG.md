@@ -62,6 +62,27 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
   crosshair while a drag is outside the surface, and the tab in the air is drawn
   in the bad colour with no target boxed anywhere, because there is nowhere out
   there to land.
+- The folder picker keeps one shape and keeps every row. Its box was as tall as
+  the folder had entries, so walking from a folder with three subfolders into one
+  with forty resized the dialog, recentred it and moved every row out from under
+  the pointer. The height now comes from the room the window has, between six and
+  twenty-four rows, and is held whatever is being listed; a short folder leaves
+  the bottom of its list empty, which is the price of a dialog that stays put.
+  Typing no longer takes rows away either: every folder stays in the list and the
+  ones that do not carry what was typed are drawn dim. The arrows walk the
+  matches and step over the dim rows, a click still lands on one and Enter still
+  opens it, and one function in the model answers for the drawing, the keyboard
+  and the click alike, so a row cannot be dim on screen and live to the keyboard.
+  The folder being listed and the way out of it are never dim, because they are
+  how the list is walked rather than entries in it. A name starting with a dot is
+  still out of the list until what has been typed starts with one.
+- The picker's Open button reads as a button. It was drawn in the quietest fill
+  in the palette with a hairline around it, and it spelled out the folder it
+  would open, which made it as wide as a path and a different width every time
+  the cursor moved. It says "Open", sits on a surface of its own with a brighter
+  one under the pointer, carries the same 45 degree corner cut every panel in the
+  window has, and is sized to the one word it says. The folder it would open is
+  already written above the list.
 - The dock icon appears as soon as the window opens. The desktop entry asks for
   a startup notification and nothing answered it, so the cursor spun until
   GNOME's own timeout, around fifteen seconds.
@@ -118,8 +139,8 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
   Launched from the dock with no argument, CLIppy called `current_dir()`, which
   under a desktop launcher is your home directory, and handed the agent that
   without saying so. Now the window opens on a list of folders: arrows move,
-  right walks in, left goes out, typing narrows the list, Enter opens, and a
-  folder named on the command line skips the picker as before. Folders chosen
+  right walks in, left goes out, typing dims everything it did not match, Enter
+  opens, and a folder named on the command line skips the picker as before. Folders chosen
   before sit at the top of the list, remembered in `~/.config/noob/no0b.recent`
   beside the settings, so the second launch is one keystroke. No native dialog:
   a toolkit file chooser is dozens of crates and a portal at runtime.

@@ -14,10 +14,13 @@ wgpu and winit, composited against your desktop.
 Named a folder, it starts there. Without one the window opens on a picker
 instead of guessing: launched from the dock, the current directory is your home
 directory, and handing the agent that silently was the old behaviour. Arrows
-move, right walks into a folder, left goes back out, typing narrows the list,
-Backspace with nothing typed goes up, Enter opens what the cursor is on, and Esc
-quits. The mouse does the same: click a row, double-click to walk in, and the
-button at the foot confirms. Folders you have opened before sit at the top of
+move, right walks into a folder, left goes back out, Backspace with nothing typed
+goes up, Enter opens what the cursor is on, and Esc quits. Typing dims every
+folder that does not carry what you typed rather than taking it off the list, and
+the arrows then walk the ones that do. The mouse does the same: click a row, dim
+or not, double-click to walk in, and the Open button at the foot confirms. The
+box is one size, so walking into a folder with far more or far fewer entries does
+not move it. Folders you have opened before sit at the top of
 the list, so the second launch is Enter. They live in
 `~/.config/noob/no0b.recent`, one path per line, newest first; delete a line
 to forget it and delete the file to forget them all.
