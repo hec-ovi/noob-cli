@@ -8,7 +8,7 @@ tags rather than here; this file starts where it was added.
 All of this is NO0B, the GPU window, which shipped as CLIppy up to 0.6.0. The
 CLI's behaviour is unchanged; only its version moved.
 
-### Changed, and it renames things
+### Renamed
 
 - The window is NO0B. The package, the binary, the desktop entry, the icons, the
   window title and the three files under `~/.config/noob` all carry the product
@@ -23,21 +23,19 @@ CLI's behaviour is unchanged; only its version moved.
   instead of two with the older one starting nothing. The folder is still
   `gui/clippy` on disk, which moves no path in `dev.sh` or the docs and changes
   nothing a user sees.
-- Both cargo workspaces are 0.7.0, and the title strip reads its version from
-  the crate. It drew the commit stamp alone, so nothing on screen or in either
-  manifest said which release a build came from.
 - TALK is OUTPUT, the pane that said SESSION says CONTEXT, and the one that said
   OVERALL says SESSION. Each variant keeps the slot it already had, so no view's
   accent colour shifted along by one, and `view_talk` and `view_overall` in an
   older settings file still apply their colour under the current names.
-- A setting a past build wrote and this one dropped is no longer reported as a
-  typo. `show_avatar` and `avatar` were two red lines at startup blaming the
-  user for a change the window made. The retired names are listed by hand, the
-  writer refuses them too, and an unknown key that is not on that list is still
-  reported, so a real typo stays visible.
 
 ### Fixed
 
+- A setting a past build wrote and this one dropped is no longer reported as a
+  typo. `show_avatar` and `avatar` were two red lines at startup blaming the
+  user for a change the window made. The retired names are listed by hand with
+  a note on each saying what removed it, the writer refuses them too, and an
+  unknown key that is not on that list is still reported, so a real typo stays
+  visible.
 - The end of a long message is reachable again. Panes handed the text shaper as
   many logical lines as rows fit, so any line that wrapped overflowed its clip
   box and the newest rows were discarded with no scroll position that could
@@ -312,6 +310,9 @@ CLI's behaviour is unchanged; only its version moved.
 
 ### Changed
 
+- Both cargo workspaces are 0.7.0, and the title strip reads its version from
+  the crate. It drew the commit stamp alone, so nothing on screen or in either
+  manifest said which release a build came from.
 - The file list is a column down the left of the FILES pane, one row per file
   with its type icon, and the diff beside it. It was a strip of tabs across the
   top, which ran out of room at about six files and dropped the rest. The column
