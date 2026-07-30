@@ -380,14 +380,14 @@ pub const RETIRED: [&str; 4] = ["show_avatar", "avatar", "view_avatar", "view_ll
 /// just names the seventh slot now (the pane that carries the SESSION label)
 /// rather than the sixth, so a file that set it still colours the tab it was
 /// named after.
-pub const ALIASES: [(&str, &str); 2] = [
+const ALIASES: [(&str, &str); 2] = [
     ("view_talk", "view_output"),
     ("view_overall", "view_session"),
 ];
 
 /// What this build calls a key. An older name comes back as its current one,
 /// anything else comes back unchanged.
-pub fn canonical(key: &str) -> &str {
+fn canonical(key: &str) -> &str {
     ALIASES
         .iter()
         .find(|(was, _)| *was == key)

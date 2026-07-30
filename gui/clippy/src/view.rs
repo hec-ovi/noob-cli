@@ -28,9 +28,9 @@ use crate::skin::Skin;
 use crate::state::{State, TodoState, Tone};
 
 pub const TITLE_H: f32 = 30.0;
-pub const INPUT_H: f32 = 36.0;
-pub const TAB_H: f32 = 22.0;
-pub const RESIZE_EDGE: f32 = 6.0;
+const INPUT_H: f32 = 36.0;
+const TAB_H: f32 = 22.0;
+const RESIZE_EDGE: f32 = 6.0;
 const GAP: f32 = 6.0;
 const PAD: f32 = 9.0;
 /// Columns the file view spends on its line-number gutter, on every row.
@@ -421,7 +421,7 @@ impl Divider {
     /// Whether there is anything here to drag. A divider beside an empty space
     /// is not there at all: the empty space gave its room away, so there are no
     /// longer two things for it to be between.
-    pub fn live(self) -> bool {
+    fn live(self) -> bool {
         self.band.w >= 1.0 && self.band.h >= 1.0
     }
 }
@@ -1019,7 +1019,7 @@ impl Layout {
     /// [`crate::dock`] because it is the tab panels that answer it, and the caret
     /// drawn between two tabs has to come from the same arithmetic as the drop, or
     /// the mark and the move disagree.
-    pub fn insertion(&self, space: Space, x: f32) -> usize {
+    fn insertion(&self, space: Space, x: f32) -> usize {
         let placed = self.placed(space);
         for (step, (_, panel)) in placed.tabs.iter().enumerate() {
             if x < panel.x + panel.w * 0.5 {
@@ -1035,7 +1035,7 @@ impl Layout {
     /// the last tab on screen when the drop is behind all of them. Clamped into
     /// the strip so a caret at either end is drawn on the strip rather than off
     /// the side of it.
-    pub fn insertion_gap(&self, space: Space, at: usize) -> f32 {
+    fn insertion_gap(&self, space: Space, at: usize) -> f32 {
         let placed = self.placed(space);
         // A place in front of the first tab on screen is that tab's own edge: a
         // scrolled strip has tabs off its left end, and the caret cannot be drawn
@@ -3532,7 +3532,7 @@ pub fn text_columns(view: View, panel: Panel, column: f32) -> (usize, usize) {
 /// The one place a pane's width becomes a column count. Wrapping, hit testing
 /// and the selection band all have to agree on this number, so they all ask
 /// here rather than each dividing by the column width themselves.
-pub fn cols_of(panel: Panel, column: f32) -> usize {
+fn cols_of(panel: Panel, column: f32) -> usize {
     columns_in(panel.inset(PAD).w, column)
 }
 
@@ -3582,7 +3582,7 @@ pub fn short_name(path: &str) -> String {
 /// still does not fit, its tail goes and an ellipsis says so. The tail rather
 /// than the head because the row already carries a type icon, so the extension
 /// is not what the last characters are needed for.
-pub fn fit_name(path: &str, cols: usize) -> String {
+fn fit_name(path: &str, cols: usize) -> String {
     let full = short_name(path);
     if full.chars().count() <= cols {
         return full;

@@ -90,7 +90,7 @@ pub struct Change {
 /// What the `theme` row says when the palette in the file is not one of the
 /// presets. Not a value that can be written: the writer refuses it, and the row
 /// only ever hands it back to itself.
-pub const CUSTOM: &str = "custom";
+const CUSTOM: &str = "custom";
 
 /// The settings a row can change, grouped the way the panel lists them.
 ///
@@ -212,7 +212,7 @@ pub fn colours(config: &Config) -> Vec<(&'static str, [u8; 3])> {
 /// anywhere afterwards, so the only honest way to fill this row in is to ask
 /// which preset the colours in hand match. A file that sets `theme = ice` and
 /// then one colour of its own is custom, which is exactly what it is.
-pub fn theme_name(config: &Config) -> &'static str {
+fn theme_name(config: &Config) -> &'static str {
     let mine = colours(config);
     config::THEMES
         .into_iter()

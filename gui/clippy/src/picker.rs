@@ -439,7 +439,7 @@ impl Picker {
     /// The folder a row names, or nothing when there is none (the root has no
     /// parent, so it has no way out, and a row saying why a folder could not be
     /// read is a message rather than somewhere to go).
-    pub fn path_of(&self, row: &Row) -> Option<PathBuf> {
+    fn path_of(&self, row: &Row) -> Option<PathBuf> {
         match row {
             Row::Here => Some(self.at.clone()),
             Row::Up => self.at.parent().map(Path::to_path_buf),
@@ -1011,7 +1011,7 @@ pub fn load_recents(path: &Path) -> Vec<PathBuf> {
 /// One path per line, newest first, `#` a comment. Not `key = value` like the
 /// settings and the totals: this is a list, and numbering the lines would only
 /// give the file a way to disagree with its own order.
-pub fn parse_recents(text: &str) -> Vec<PathBuf> {
+fn parse_recents(text: &str) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
@@ -1027,7 +1027,7 @@ pub fn parse_recents(text: &str) -> Vec<PathBuf> {
     out
 }
 
-pub fn recents_text(list: &[PathBuf]) -> String {
+fn recents_text(list: &[PathBuf]) -> String {
     let mut out = String::from(
         "# Folders NO0B has opened, newest first. Delete a line to forget it.\n",
     );

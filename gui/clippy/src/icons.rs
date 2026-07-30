@@ -25,7 +25,7 @@ pub const TABS_LEFT: char = '\u{eab5}';
 pub const TABS_RIGHT: char = '\u{eab6}';
 
 /// A file whose type has no mark of its own.
-pub const FILE: char = '\u{ea7b}';
+const FILE: char = '\u{ea7b}';
 /// A folder in the picker's list.
 pub const FOLDER: char = '\u{e5ff}';
 /// The mark in front of a folder in the picker's tree: a plus to put what is

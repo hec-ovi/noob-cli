@@ -43,7 +43,7 @@ impl Scrolls {
 
     /// Put this view on that row. Clamped, so a caller cannot ask for a row past
     /// the last screenful.
-    pub fn put(&mut self, view: View, first: usize, heights: &[usize], rows: usize) -> bool {
+    fn put(&mut self, view: View, first: usize, heights: &[usize], rows: usize) -> bool {
         let most = text_geometry::max_scrollback(heights, rows);
         let next = first.min(most);
         let at = &mut self.firsts[Scrolls::slot(view)];

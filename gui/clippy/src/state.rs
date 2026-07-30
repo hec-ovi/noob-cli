@@ -87,7 +87,7 @@ impl Kind {
     ];
 
     /// From the tool's name, which is all the harness has and all it needs.
-    pub fn of(name: &str) -> Kind {
+    fn of(name: &str) -> Kind {
         match name {
             "bash" => Kind::Bash,
             "read" => Kind::Read,
@@ -108,7 +108,7 @@ impl Kind {
 
     /// The tag printed before every row: the tool's own name, so the colour
     /// has a name for anyone who cannot rely on colour alone.
-    pub fn tag(self) -> &'static str {
+    fn tag(self) -> &'static str {
         match self {
             Kind::Bash => "bash",
             Kind::Read => "read",
@@ -212,11 +212,11 @@ impl Pane {
     }
 
     /// A line that knows where it is in its file.
-    pub fn say_at(&mut self, text: impl Into<String>, tone: Tone, number: u32) {
+    fn say_at(&mut self, text: impl Into<String>, tone: Tone, number: u32) {
         self.push(Line::new(text, tone).at(number));
     }
 
-    pub fn blank_if_needed(&mut self) {
+    fn blank_if_needed(&mut self) {
         if self.lines.back().is_some_and(|l| !l.text.is_empty()) {
             self.push(Line::new("", Tone::Dim));
         }
@@ -225,7 +225,7 @@ impl Pane {
     /// Append streamed text, starting new lines on every newline. This is what
     /// makes token-by-token prose land as paragraphs rather than as one line
     /// per token.
-    pub fn stream(&mut self, chunk: &str, tone: Tone) {
+    fn stream(&mut self, chunk: &str, tone: Tone) {
         for (i, part) in chunk.split('\n').enumerate() {
             if i > 0 {
                 self.push(Line::new("", tone));

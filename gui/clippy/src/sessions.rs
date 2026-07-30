@@ -54,7 +54,7 @@ const OPENING_CHARS: usize = 200;
 /// only this many are opened and read. A machine that has been talking to the
 /// agent for a year has thousands of these, and nobody is scrolling to the one
 /// from March.
-pub const MOST: usize = 200;
+const MOST: usize = 200;
 
 /// How many folders the index remembers. One per session listed, with room to
 /// spare, so a session that is still on screen cannot have lost its folder.
@@ -289,7 +289,7 @@ pub fn ago(when: SystemTime, now: SystemTime) -> String {
 pub struct Index(Vec<(String, PathBuf)>);
 
 impl Index {
-    pub fn folder_of(&self, id: &str) -> Option<PathBuf> {
+    fn folder_of(&self, id: &str) -> Option<PathBuf> {
         self.0
             .iter()
             .find(|(known, _)| known == id)
@@ -338,7 +338,7 @@ pub fn load_index(path: &Path) -> Index {
 /// The id is split off at the first space because it cannot contain one and a
 /// path can: splitting the other way round would break on the first folder with
 /// a space in its name.
-pub fn parse_index(text: &str) -> Index {
+fn parse_index(text: &str) -> Index {
     let mut out: Vec<(String, PathBuf)> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
@@ -358,7 +358,7 @@ pub fn parse_index(text: &str) -> Index {
     Index(out)
 }
 
-pub fn index_text(index: &Index) -> String {
+fn index_text(index: &Index) -> String {
     let mut out = String::from(
         "# Which folder each noob session was started in, newest first.\n\
          # Written by NO0B so a saved session can be resumed where it belongs.\n",

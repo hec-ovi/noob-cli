@@ -96,7 +96,7 @@ impl Totals {
     }
 
     /// The file's text, ready to write.
-    pub fn to_text(&self) -> String {
+    fn to_text(&self) -> String {
         let list = |rates: &[f32]| {
             rates
                 .iter()
