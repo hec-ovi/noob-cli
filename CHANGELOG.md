@@ -85,6 +85,21 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
 
 ### Added
 
+- The dividers between the panes can be dragged. The left column took 0.54 of
+  the width and the top right space 0.46 of the right column's height, both
+  written into the layout as literals, so the only thing that could be
+  rearranged was which space a tab lived in. The grid stays capped at 2x2 rather
+  than becoming a split tree: the three spaces are the same three spaces, and
+  what moves is where the two dividers sit. Neither can be dragged past what a
+  space needs to be read, a tab strip plus the padding and either four rows of
+  gauge dots or twenty-four columns of text, and a window with no room for two
+  of those floors splits down the middle instead of collapsing one of them. The
+  band the pointer grabs is fourteen pixels across a six pixel gap and the
+  pointer takes a resize shape over it, which is the only thing that can say a
+  divider is there, since a divider is nothing but the gap between two panes.
+  Where they were left goes into the settings file as `left_width` and
+  `top_height` when the drag ends, not on every motion event, and both are rows
+  on the settings panel as well.
 - The settings panel, opened from the Settings row of any pane's right click
   menu. It takes the whole window under the title strip: arrows move, left and
   right change the row the cursor is on, Enter flips a switch, the wheel scrolls,

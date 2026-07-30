@@ -227,7 +227,10 @@ does the same, Ctrl-C cancels, Ctrl-Q quits.
 Mouse: drag the title bar to move, drag an edge to resize, click a tab to switch
 to it, and click the tab already showing to fold that space away. **Drag a tab
 into another space** to move it there, or **drag it off the window** to close that
-widget. **Double-click the title bar** to shade the
+widget. **Drag the gap between two panes** to move the divider: the pointer takes
+a resize shape over it, and where you leave it is written back to the settings
+file. The grid is capped at 2x2, so the three spaces stay three spaces and no
+space can be dragged smaller than a tab strip with enough pane under it to read. **Double-click the title bar** to shade the
 window down to that one strip, Winamp style: it keeps showing THINKING, WORKING
 or FINISHED with the plan count and how many files changed, so a collapsed
 window is still a status light. Double-click again to bring it back.
@@ -268,8 +271,8 @@ generated and served from cache, and a mean and a median prefill and decode spee
 across every request this machine has ever run.
 
 `~/.config/noob/no0b.conf`, written with the defaults on first run and
-commented. Opacity, both font sizes, how tall the prompt may grow, which panes
-exist, and the whole palette: the eight base colors, one per tool, one per view,
+commented. Opacity, both font sizes, how tall the prompt may grow, where the two
+dividers sit, which panes exist, and the whole palette: the eight base colors, one per tool, one per view,
 ten gauge slots a monitor reading picks from, and the five the highlighter uses
 for code. A key it does not recognise is reported in the ACTIVITY pane rather
 than ignored.
