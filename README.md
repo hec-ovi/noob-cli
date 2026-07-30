@@ -273,7 +273,8 @@ composited against your desktop.
 
 Its own cargo workspace and its own budget, 40 MiB and 400 crates against the
 CLI's 8 MiB and 45, because a GPU stack is several hundred crates and one
-lockfile for both would put a careless `workspace = true` between the two.
+lockfile for both would put a careless `workspace = true` between the two
+budgets. They share exactly one thing, `crates/noob-proto`, by path.
 Packaged for Linux. [`gui/README.md`](gui/README.md) is its documentation.
 
 ## Planned
