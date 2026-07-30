@@ -38,6 +38,7 @@ mod orb;
 mod packaging;
 mod picker;
 mod prompt;
+mod scroll;
 mod select;
 mod skin;
 mod state;
@@ -909,6 +910,10 @@ impl App {
     /// with, and which failure that row belongs to comes from
     /// [`State::debug_rows`], which is the list that was drawn. Neither end
     /// guesses.
+    ///
+    /// The pane scrolls, so the row under the pointer is a row of the window and
+    /// not of the list: what the window starts at has to be added back, or a
+    /// scrolled pane opens the arguments of a different call than the one clicked.
     fn open_failure_under_pointer(&mut self, space: Space) {
         let layout = self.layout();
         let Some((at, row, _)) = layout.cell(
@@ -922,7 +927,17 @@ impl App {
         if at != space {
             return;
         }
-        self.dirty |= self.state.toggle_failure(row);
+        let first = self.scroll_first(&layout, View::Debug, layout.placed(space).body);
+        self.dirty |= self.state.toggle_failure(first + row);
+    }
+
+    /// The first row of the content a scrolling pane is currently showing.
+    fn scroll_first(&self, layout: &Layout, view: View, panel: noob_draw::Panel) -> usize {
+        let frame = self.frame(layout);
+        match view::scroll_extent(&frame, view, panel) {
+            Some((heights, rows)) => self.state.scrolls.window(view, &heights, rows).first,
+            None => 0,
+        }
     }
 
     /// Press inside a pane: put the anchor where the pointer is, or clear the
@@ -1291,52 +1306,47 @@ impl App {
                 .map(|file| &mut file.pane),
             _ => None,
         };
-        let Some(pane) = pane else {
+        // A pane with a scrollback of its own, which is a transcript: it follows
+        // the live end, so its position is counted back from there.
+        if let Some(pane) = pane {
+            self.dirty |= if pages > 0.0 {
+                pane.scroll_back(by, rows, cols)
+            } else {
+                pane.scroll_forward(by)
+            };
+            return;
+        }
+        // Everything else is a list, scrolled from the top. The extent is asked
+        // for rather than worked out here, because a page of a monitor pane is a
+        // page of its own rows, which are taller than a line of text.
+        let extent = {
+            let frame = self.frame(&layout);
+            view::scroll_extent(&frame, view, panel)
+        };
+        let Some((heights, fit)) = extent else {
             return;
         };
-        self.dirty |= if pages > 0.0 {
-            pane.scroll_back(by, rows, cols)
-        } else {
-            pane.scroll_forward(by)
-        };
+        let by = ((fit.saturating_sub(1).max(1) as f32 * pages.abs()).round() as usize).max(1);
+        self.dirty |= self
+            .state
+            .scrolls
+            .scroll(view, by, pages < 0.0, &heights, fit);
     }
 
-    fn render(&mut self) {
-        // Measured before the surface is borrowed, because the prompt's height
-        // is read off the whole app and the renderer holds it mutably.
-        let Some(input_h) = self.gpu.as_ref().map(|gpu| self.input_height(gpu.width())) else {
-            return;
-        };
-        let (Some(gpu), Some(renderer)) = (self.gpu.as_mut(), self.renderer.as_mut()) else {
-            return;
-        };
-        let Some(frame) = gpu.acquire() else {
-            return;
-        };
-        let shape = Shape {
-            shaded: self.shaded,
-            dock: &self.dock,
-            menu: self.menu.as_ref(),
-            picker: self.picker.as_ref(),
-            file_labels: self
-                .state
-                .files
-                .iter()
-                .map(|file| view::short_name(&file.path))
-                .collect(),
-            file_first: self.state.file_scroll,
-            column: self.column,
-            pane_size: self.config.pane_font_size,
-            pane_column: self.pane_column,
-            input_h,
-        };
-        let layout = Layout::compute(gpu.width(), gpu.height(), &shape);
-        let scene = view::build(&view::Frame {
+    /// Everything a frame is drawn from, for a layout that has already been
+    /// computed.
+    ///
+    /// One builder, because the wheel and the per-frame clamp need the same
+    /// bundle the drawing does: how tall a pane's content is depends on the skin,
+    /// the monitor and the pane metrics, and a second hand-rolled copy of it is a
+    /// pane that scrolls by a different number of rows than it drew.
+    fn frame<'a>(&'a self, layout: &'a Layout) -> view::Frame<'a> {
+        view::Frame {
             state: &self.state,
             monitor: &self.monitor,
             dock: &self.dock,
             skin: &self.skin,
-            layout: &layout,
+            layout,
             prompt: &self.prompt,
             column: self.column,
             pane_column: self.pane_column,
@@ -1346,16 +1356,62 @@ impl App {
             hot: self.hot,
             trouble: self.trouble.as_deref(),
             selection: self.state.selection,
-            // The same menu the layout above was computed from, or the rows
-            // would be drawn somewhere other than where they are hit tested.
+            // The same menu the layout was computed from, or the rows would be
+            // drawn somewhere other than where they are hit tested.
             menu: self.menu.as_ref(),
             picker: self.picker.as_ref(),
             // The orb's clock. Read here rather than inside the scene, so a
             // frame stays a function of what it is handed.
             clock: self.epoch.elapsed().as_secs_f32(),
-        });
+        }
+    }
+
+    fn render(&mut self) {
+        if self.gpu.is_none() || self.renderer.is_none() {
+            return;
+        }
+        // Computed before the surface is borrowed: the prompt's height is read
+        // off the whole app and the renderer holds it mutably.
+        let layout = self.layout();
+        // Every scrolling pane is clamped against what it currently holds, before
+        // anything is drawn from it. This is the only place that catches a window
+        // dragged shorter or a list that shrank while it was scrolled to the end,
+        // neither of which goes anywhere near the pointer.
+        self.settle_scrolls(&layout);
+        let scene = view::build(&self.frame(&layout));
+        let (Some(gpu), Some(renderer)) = (self.gpu.as_mut(), self.renderer.as_mut()) else {
+            return;
+        };
+        let Some(frame) = gpu.acquire() else {
+            return;
+        };
         renderer.draw(gpu, &scene, frame);
         self.dirty = false;
+    }
+
+    /// Pull every scrolling pane's offset back inside the content it is showing.
+    ///
+    /// Only the panes on screen: a folded space or a covered window has nothing
+    /// to clamp against, and clamping a pane by the box it does not currently have
+    /// would lose the reader's place.
+    fn settle_scrolls(&mut self, layout: &Layout) {
+        let mut want = Vec::new();
+        {
+            let frame = self.frame(layout);
+            for space in Space::ALL {
+                let slot = self.dock.slot(space);
+                let Some(view) = slot.active().filter(|_| !slot.folded) else {
+                    continue;
+                };
+                let panel = layout.placed(space).body;
+                if let Some((heights, rows)) = view::scroll_extent(&frame, view, panel) {
+                    want.push((view, heights, rows));
+                }
+            }
+        }
+        for (view, heights, rows) in want {
+            self.dirty |= self.state.scrolls.settle(view, &heights, rows);
+        }
     }
 
     fn redraw(&self) {
@@ -2004,6 +2060,163 @@ mod tests {
         assert_eq!(row, 0);
         assert!(!state.toggle_failure(row));
         assert_eq!(state.open_failure, Some(1), "and it left the open one alone");
+    }
+
+    /// The same path with the pane scrolled. The row under the pointer is a row
+    /// of the window, so which failure it opens depends on where the window
+    /// starts: `App::open_failure_under_pointer` adds that back, and without it a
+    /// scrolled pane expands a call nobody clicked.
+    #[test]
+    fn a_click_in_a_scrolled_debug_pane_opens_the_call_under_the_pointer() {
+        let mut state = State::new();
+        for i in 0..30 {
+            let id = format!("bad-{i:02}");
+            state.apply(noob_proto::Event::ToolStart {
+                call_id: id.clone(),
+                name: "bash".into(),
+                brief: format!("call {i:02}"),
+                args: noob_proto::Value::Object(
+                    [(String::from("which"), noob_proto::Value::String(id.clone()))]
+                        .into_iter()
+                        .collect(),
+                ),
+            });
+            state.apply(noob_proto::Event::ToolEnd {
+                call_id: id,
+                summary: "no".into(),
+                elapsed_ms: 1,
+                error: Some(noob_proto::ToolError {
+                    kind: "denied".into(),
+                    code: None,
+                    message: format!("boom {i:02}"),
+                    detail: None,
+                    remedy: None,
+                }),
+            });
+        }
+
+        let mut dock = Dock::new();
+        assert!(dock.reveal(View::Debug));
+        let layout = laid_out(&dock, None, 0);
+        let body = layout.placed(Space::BottomRight).body;
+        let pane_size = Config::default().pane_font_size;
+        let line = noob_draw::Text::line_for(pane_size);
+        // Every row is clipped to one row, which is what the pane's own extent
+        // reports for this list.
+        let heights = view::flat_heights(state.debug_rows().len());
+        let rows = layout.rows(body, pane_size);
+        assert!(heights.len() > rows, "{} rows in a box of {rows}", heights.len());
+
+        assert!(state.scrolls.scroll(View::Debug, 5, true, &heights, rows));
+        let first = state.scrolls.window(View::Debug, &heights, rows).first;
+        assert_eq!(first, 5, "the window starts five rows down");
+
+        // The third row of the pane, the same pixel arithmetic the window uses.
+        let (x, y) = (body.x + 20.0, body.y + 9.0 + 2.5 * line);
+        let (space, row, _) = layout
+            .cell(x, y, pane_size, COLUMN)
+            .expect("the pointer is over a pane");
+        assert_eq!((space, row), (Space::BottomRight, 2));
+
+        // The count is the first row of the list, so row seven is the seventh
+        // failure.
+        let under = state.debug_rows()[first + row].text.clone();
+        assert!(under.contains("boom 06"), "row {} reads {under:?}", first + row);
+        assert!(state.toggle_failure(first + row));
+        assert_eq!(state.open_failure, Some(6));
+        let list: Vec<String> = state.debug_rows().into_iter().map(|r| r.text).collect();
+        assert!(
+            list.iter().any(|text| text.contains("which = bad-06")),
+            "the arguments of the call under the pointer are not shown"
+        );
+        // Unscrolled, that same row is the second failure and nothing else.
+        state.open_failure = None;
+        assert!(state.scrolls.scroll(View::Debug, 999, false, &heights, rows));
+        assert!(state.toggle_failure(row));
+        assert_eq!(state.open_failure, Some(1));
+    }
+
+    /// The wheel and the page keys reach every pane. A view either keeps its own
+    /// scrollback, which is a transcript counted back from the live end, or
+    /// reports an extent, which is a list counted from the top. One that did
+    /// neither is a pane nothing can move, which is what item 14 reported for
+    /// four of them.
+    #[test]
+    fn every_pane_the_wheel_lands_on_can_be_scrolled() {
+        let mut state = State::new();
+        state.apply(noob_proto::Event::TextDelta { d: "hello".into() });
+        state.apply(noob_proto::Event::ToolStart {
+            call_id: "p".into(),
+            name: "plan".into(),
+            brief: "1 item".into(),
+            args: serde_json::json!({"todos": [{"content": "read it", "status": "pending"}]}),
+        });
+        state.apply(noob_proto::Event::AgentSpawn {
+            agent_id: "kid".into(),
+            prompt: "look".into(),
+            tools: "read".into(),
+        });
+        state.apply(noob_proto::Event::FileEdit {
+            path: "src/calc.py".into(),
+            span: noob_proto::Span {
+                start: 1,
+                end: 1,
+                kind: None,
+                name: None,
+            },
+            before: "a".into(),
+            after: "b".into(),
+            call_id: None,
+        });
+        state.apply(noob_proto::Event::UsageReport {
+            usage: noob_proto::Usage {
+                prompt: 100,
+                cached_prompt: 10,
+                completion: 5,
+                context_total: 1000,
+            },
+        });
+        let mut monitor = Monitor::new();
+        monitor.sample(&state);
+        monitor.sample(&state);
+
+        let skin = Skin::from(&Config::default());
+        let dock = Dock::new();
+        let layout = laid_out(&dock, None, 0);
+        let prompt = Prompt::default();
+        let frame = view::Frame {
+            state: &state,
+            monitor: &monitor,
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &prompt,
+            column: COLUMN,
+            pane_column: COLUMN,
+            body_size: SIZE,
+            pane_size: Config::default().pane_font_size,
+            drag: None,
+            hot: None,
+            trouble: None,
+            selection: None,
+            menu: None,
+            picker: None,
+            clock: 0.0,
+        };
+        let panel = layout.placed(Space::TopRight).body;
+        for view in View::ALL {
+            // A machine that reports no hardware at all has no rows there to
+            // scroll, and that is the one honest exception.
+            if view == View::Hardware && monitor.hardware().is_empty() {
+                continue;
+            }
+            let scrollback = state.pane_of(view).is_some();
+            let extent = view::scroll_extent(&frame, view, panel).is_some();
+            assert!(
+                scrollback != extent,
+                "{view:?} keeps a scrollback: {scrollback}, reports an extent: {extent}"
+            );
+        }
     }
 
     /// A folder on the command line is the workspace and skips the picker.

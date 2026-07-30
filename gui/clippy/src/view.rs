@@ -65,6 +65,10 @@ const DOT_ROWS: usize = 4;
 /// beside the block is kept, so raising this again cannot put a reading over the
 /// edge of a narrow pane.
 const BIG_READING: f32 = 1.0;
+/// Rows the CONTEXT pane spends on its header before its readings start: the
+/// phase, the model and the workspace. They stay put while the readings under
+/// them scroll.
+const CONTEXT_HEAD: usize = 3;
 /// The smallest a dot shrinks to, across or down, when a pane has more readings
 /// than room. Below this the block stops reading as a block, so it is not drawn:
 /// too tall for its rows and they scroll off, too narrow for its columns and the
@@ -676,7 +680,7 @@ fn place_menu(menu: &Menu, column: f32, width: f32, height: f32) -> (Panel, Vec<
 /// [`text_geometry`], so the window and the clamp come from the one place that
 /// owns them rather than from arithmetic at two call sites.
 pub fn file_heights(count: usize) -> Vec<usize> {
-    text_geometry::heights((0..count).map(|_| 0), 1)
+    flat_heights(count)
 }
 
 /// The file view's two columns, and where each visible row of the list is.
@@ -1241,12 +1245,14 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
         Some(View::Activity) => activity(scene, frame, panel),
         Some(View::Plan) => plan(scene, frame, panel),
         Some(View::Agents) => agents(scene, frame, panel),
-        Some(View::Hardware) => gauges(scene, frame, panel, frame.monitor.hardware()),
+        Some(View::Hardware) => {
+            gauges(scene, frame, panel, View::Hardware, frame.monitor.hardware())
+        }
         // The monitor's lists are named for the panes they feed, so a reading in
         // the wrong pane is a rename away from being obvious rather than two
         // files away.
         Some(View::Context) => context(scene, frame, panel),
-        Some(View::Session) => gauges(scene, frame, panel, frame.monitor.session()),
+        Some(View::Session) => gauges(scene, frame, panel, View::Session, frame.monitor.session()),
         Some(View::Debug) => debug(scene, frame, panel),
         Some(View::Files) => files(scene, frame, panel),
     }
@@ -1361,55 +1367,188 @@ fn activity(scene: &mut Scene, frame: &Frame, panel: Panel) {
 }
 
 fn plan(scene: &mut Scene, frame: &Frame, panel: Panel) {
-    let (skin, state) = (frame.skin, frame.state);
-    let mut runs = Vec::new();
+    list_pane(scene, frame, panel, View::Plan, plan_rows(frame.state, frame.skin));
+}
+
+/// One row per todo, wrapped in whatever width the pane has.
+fn plan_rows(state: &State, skin: &Skin) -> Vec<ListRow> {
     if state.plan.is_empty() {
-        runs.push(Run::tinted("no plan yet", skin.dim));
+        return vec![ListRow::new(vec![Run::tinted("no plan yet", skin.dim)])];
     }
-    for todo in &state.plan {
-        let (mark, color) = match todo.state {
-            TodoState::Done => ("[x] ", skin.good),
-            TodoState::Active => ("[>] ", skin.bright),
-            TodoState::Pending => ("[ ] ", skin.dim),
-        };
-        runs.push(Run::tinted(mark, color));
-        runs.push(Run::tinted(&todo.text, color));
-        runs.push(Run::plain("\n"));
-    }
-    text_box(scene, frame, panel, frame.pane_size, runs);
+    state
+        .plan
+        .iter()
+        .map(|todo| {
+            let (mark, color) = match todo.state {
+                TodoState::Done => ("[x] ", skin.good),
+                TodoState::Active => ("[>] ", skin.bright),
+                TodoState::Pending => ("[ ] ", skin.dim),
+            };
+            ListRow::new(vec![
+                Run::tinted(mark, color),
+                Run::tinted(&todo.text, color),
+            ])
+        })
+        .collect()
 }
 
 /// The fleet: one child per row, and under each the last thing it said.
-///
-/// A row alone is a name and a word, which for eight children at once tells
-/// you nothing about any of them. The second line is where the news is: while
-/// a child runs it is that child's own output, and once it ends it is the
-/// reason it ended.
 fn agents(scene: &mut Scene, frame: &Frame, panel: Panel) {
-    let (skin, state) = (frame.skin, frame.state);
-    let mut runs = Vec::new();
+    list_pane(
+        scene,
+        frame,
+        panel,
+        View::Agents,
+        agent_rows(frame.state, frame.skin),
+    );
+}
+
+/// Two rows per child, and the second is where the news is.
+///
+/// A row alone is a name and a word, which for eight children at once tells you
+/// nothing about any of them: while a child runs the second row is that child's
+/// own output, and once it ends it is the reason it ended. Two rows each is also
+/// why this pane needs a scroll more than any other, a fleet of eight being
+/// sixteen rows.
+fn agent_rows(state: &State, skin: &Skin) -> Vec<ListRow> {
     if state.agents.is_empty() {
-        runs.push(Run::tinted("no sub-agents this session", skin.dim));
+        return vec![ListRow::new(vec![Run::tinted(
+            "no sub-agents this session",
+            skin.dim,
+        )])];
     }
+    let mut rows = Vec::new();
     for agent in &state.agents {
-        runs.push(Run::tinted(format!("{:<9}", agent.label), skin.dim));
-        runs.push(Run::tinted(
-            format!("{:<10}", agent.state),
-            skin.tone(agent.tone),
-        ));
+        let mut runs = vec![
+            Run::tinted(format!("{:<9}", agent.label), skin.dim),
+            Run::tinted(format!("{:<10}", agent.state), skin.tone(agent.tone)),
+        ];
         // The tool set says whether this child can change anything, which is
         // the one thing about a detached child worth knowing at a glance.
         if !agent.tools.is_empty() {
             runs.push(Run::tinted(format!("{:<10}", agent.tools), skin.dim));
         }
         runs.push(Run::tinted(clip(&agent.brief, 300), skin.body));
-        runs.push(Run::plain("\n"));
+        rows.push(ListRow::new(runs));
         if !agent.last.is_empty() {
-            runs.push(Run::tinted(format!("           {}", clip(&agent.last, 300)), skin.dim));
-            runs.push(Run::plain("\n"));
+            rows.push(ListRow::new(vec![Run::tinted(
+                format!("           {}", clip(&agent.last, 300)),
+                skin.dim,
+            )]));
         }
     }
-    text_box(scene, frame, panel, frame.pane_size, runs);
+    rows
+}
+
+/// One logical line of a list pane: the runs that draw it, and how long it is in
+/// characters.
+///
+/// The length is counted off the runs rather than passed in beside them. It is
+/// what the scroll window is measured from, and a length that disagreed with what
+/// was drawn is a pane that scrolls by a different number of rows than it has.
+struct ListRow {
+    runs: Vec<Run>,
+    chars: usize,
+}
+
+impl ListRow {
+    fn new(runs: Vec<Run>) -> ListRow {
+        let chars = runs.iter().map(|run| run.text.chars().count()).sum();
+        ListRow { runs, chars }
+    }
+}
+
+/// A pane that is a list of lines, scrolled inside its own box.
+///
+/// PLAN, AGENTS and DEBUG. All three drew every row they had, with no window and
+/// no bar: the first two into one text box that ran off the bottom of the pane,
+/// and the third by taking as many rows as fitted and dropping the rest. What was
+/// past the edge could not be reached at all, which is what item 14 reported.
+///
+/// The window, the clamp and the thumb come from `text_geometry` through
+/// [`crate::scroll::Scrolls`], the same numbers the transcript is drawn from, so a row of
+/// a list and a row of a transcript mean the same thing. A line partly scrolled
+/// off the top is drawn in full and offset by `skip` rather than dropped, which is
+/// what lets a wrapped todo scroll a row at a time.
+fn list_pane(scene: &mut Scene, frame: &Frame, panel: Panel, view: View, rows: Vec<ListRow>) {
+    let size = frame.pane_size;
+    let fit = frame.layout.rows(panel, size);
+    let cols = cols_of(panel, frame.pane_column);
+    let heights = text_geometry::heights(rows.iter().map(|row| row.chars), cols);
+    let scrolls = &frame.state.scrolls;
+    let window = scrolls.window(view, &heights, fit);
+    let mut runs = Vec::new();
+    for row in rows.into_iter().skip(window.first).take(window.count) {
+        runs.extend(row.runs);
+        runs.push(Run::plain("\n"));
+    }
+    if !runs.is_empty() {
+        scene.text(
+            Text::rich(runs, panel.inset(PAD), size, frame.skin.body)
+                .scrolled(window.skip as f32),
+        );
+    }
+    scrollbar(scene, frame.skin, panel, scrolls.thumb(view, &heights, fit));
+}
+
+/// One row each, for a list of lines that are clipped rather than wrapped.
+///
+/// Written as heights and read through [`text_geometry`] so the window and the
+/// clamp come from the one place that owns them.
+pub fn flat_heights(count: usize) -> Vec<usize> {
+    text_geometry::heights((0..count).map(|_| 0), 1)
+}
+
+/// How tall a scrolling pane's content is and how much of it is on screen, as the
+/// heights and the row count every [`crate::scroll::Scrolls`] operation takes.
+///
+/// `None` for a view that keeps its own scrollback on a [`crate::state::Pane`]
+/// (OUTPUT, ACTIVITY and the open file), and for one with nothing to scroll.
+///
+/// The one place outside the drawing that knows how tall a pane's content is: the
+/// wheel, the page keys, the click in the debug pane and the per-frame clamp all
+/// ask here. Anything that worked it out for itself would eventually scroll a pane
+/// by a different number of rows than the pane drew, which is the class of bug
+/// `text_geometry` exists to end.
+pub fn scroll_extent(frame: &Frame, view: View, panel: Panel) -> Option<(Vec<usize>, usize)> {
+    let fit = frame.layout.rows(panel, frame.pane_size);
+    let cols = cols_of(panel, frame.pane_column);
+    let lines = |rows: Vec<ListRow>| {
+        Some((
+            text_geometry::heights(rows.iter().map(|row| row.chars), cols),
+            fit,
+        ))
+    };
+    match view {
+        View::Plan => lines(plan_rows(frame.state, frame.skin)),
+        View::Agents => lines(agent_rows(frame.state, frame.skin)),
+        View::Debug => lines(debug_list(frame.state, cols, frame.skin)),
+        View::Hardware => gauge_extent(frame, panel, frame.monitor.hardware()),
+        View::Session => gauge_extent(frame, panel, frame.monitor.session()),
+        // The readings sit under the header, in a box of their own, and it is that
+        // box they scroll in.
+        View::Context => gauge_extent(
+            frame,
+            gauge_area(panel, frame.pane_size)?,
+            frame.monitor.context(),
+        ),
+        View::Output | View::Activity | View::Files => None,
+    }
+}
+
+/// A monitor pane's content: one row per reading, in rows of the pane's own
+/// pitch rather than of one line. See [`gauges`].
+fn gauge_extent(frame: &Frame, panel: Panel, gauges: Vec<Gauge>) -> Option<(Vec<usize>, usize)> {
+    if gauges.is_empty() {
+        return None;
+    }
+    let grid = gauge_grid(
+        &gauges,
+        panel.inset(PAD),
+        frame.pane_size,
+        frame.pane_column,
+    );
+    Some((flat_heights(gauges.len()), grid.rows))
 }
 
 /// A label column, a block of dots, and the reading, laid out as three boxes
@@ -1435,11 +1574,18 @@ fn agents(scene: &mut Scene, frame: &Frame, panel: Panel) {
 /// function already draws. That is the whole of the narrow case, and it is why
 /// the readings themselves are never clipped or shrunk: a block is only ever
 /// drawn in room the reading did not need.
-fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>) {
+///
+/// The pane scrolls, so a reading past the bottom is reachable rather than
+/// dropped. It used to stop drawing at the last row that fitted, which for the
+/// hardware pane on a machine with two GPUs meant readings nothing could reach.
+/// Every row is the same height ([`Grid::pitch`]) for that reason: the scroll
+/// window is measured in rows of one height, and a pane whose rows differed could
+/// not say how many of itself were on screen. The cost is that an unbounded row in
+/// a pane that has blocks is as tall as a block row instead of one line, which is
+/// a pane of evenly pitched rows rather than a pane of two pitches.
+fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, view: View, gauges: Vec<Gauge>) {
     let skin = frame.skin;
     let content = panel.inset(PAD);
-    let column = frame.pane_column;
-    let line = Text::line_for(frame.pane_size);
 
     if gauges.is_empty() {
         text_box(
@@ -1452,90 +1598,21 @@ fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>) {
         return;
     }
 
-    // As wide as the longest label in this pane, so TOTAL TOOL CALLS is not
-    // clipped and a pane of short labels does not pay for one that has none.
-    let label_cols = gauges
-        .iter()
-        .map(|gauge| gauge.label.chars().count())
-        .max()
-        .unwrap_or(LABEL_COLUMNS)
-        .max(LABEL_COLUMNS)
-        + 1;
-    let label_w = label_cols as f32 * column;
-    let gap = (line * 0.12).round().max(1.0);
-    // The number is served first: it gets the room its longest reading needs at
-    // the pane's own size, and the block takes what is left, never more than half
-    // of it and never less than a legible dot. A block that pushed the number off
-    // the pane would be hiding the reading it exists to describe.
-    let widest = gauges
-        .iter()
-        .filter(|gauge| gauge.fraction().is_some())
-        .map(|gauge| gauge.reading().chars().count())
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    let needed = widest as f32 * column;
-    let free = (content.w - label_w - column).max(1.0);
-    let room = (free - needed).max(0.0).min(free * 0.5);
-    // As chunky as this pane can afford. A dot big enough to read as a block is
-    // the point of the shape, but a pane of thirteen readings cannot spend the
-    // same height per block as one of five, and a block that pushed the last
-    // rows off the bottom would be hiding readings to look better.
-    //
-    // Not clamped up to anything: a pane with no room for a legible dot is meant
-    // to come out of here under [`SMALL_DOT`], which is what says no block.
-    let mut dot = (line * 0.34)
-        .round()
-        .min((room / DOT_COLUMNS as f32 - gap).floor());
-    let blocks = gauges
-        .iter()
-        .filter(|gauge| gauge.fraction().is_some())
-        .count() as f32;
-    let plain = gauges.len() as f32 - blocks;
-    let tall = |dot: f32| {
-        let block = dot * DOT_ROWS as f32 + gap * (DOT_ROWS - 1) as f32;
-        blocks * (block + 2.0 * gap) + plain * line
-    };
-    while dot > SMALL_DOT && tall(dot) > content.h {
-        dot -= 1.0;
-    }
-    // Whether this pane draws blocks at all. Either the dot is legible or the
-    // pane is too narrow (or too short, since the loop above stops at the same
-    // floor) to draw one, and then every reading is a number beside its label.
-    let blocked = dot >= SMALL_DOT;
+    let grid = gauge_grid(&gauges, content, frame.pane_size, frame.pane_column);
+    let heights = flat_heights(gauges.len());
+    let scrolls = &frame.state.scrolls;
+    let window = scrolls.window(view, &heights, grid.rows);
+    let (label_w, gap, dot) = (grid.label_w, grid.gap, grid.dot);
+    let (block_h, pitch) = (grid.block_h, grid.pitch);
     let cell = dot + gap;
-    let (block_w, block_h) = match blocked {
-        true => (
-            cell * DOT_COLUMNS as f32,
-            dot * DOT_ROWS as f32 + gap * (DOT_ROWS - 1) as f32,
-        ),
-        false => (0.0, 0.0),
-    };
-    // The size of the number beside a block, which at [`BIG_READING`] of one is
-    // the pane's own size and nothing else in this arithmetic bites. It is kept
-    // because it is what makes a larger reading safe: capped at the room left
-    // beside the block, so `1,048,576 / 2,097,152` in a pane dragged narrow comes
-    // out smaller rather than clipped halfway through, which reads as a different
-    // number. Floored, not rounded, because rounding up is what puts the last
-    // character over the edge.
-    let beside = (content.w - label_w - block_w - column).max(1.0);
-    let big = (frame.pane_size * BIG_READING)
-        .min(frame.pane_size * beside / needed)
-        .floor()
-        .max(frame.pane_size);
-    let big_line = Text::line_for(big);
-    let pitch = (block_h + 2.0 * gap).max(big_line);
-    let read_x = content.x + label_w + block_w + column;
+    let line = Text::line_for(frame.pane_size);
 
     let mut y = content.y;
-    for gauge in &gauges {
+    for gauge in gauges.iter().skip(window.first).take(window.count) {
         // No block in a pane with no room for one, so the row is the label and
         // the number, exactly as an unbounded reading is drawn.
-        let fraction = gauge.fraction().filter(|_| blocked);
-        let row_h = if fraction.is_some() { pitch } else { line };
-        if y + row_h > content.y + content.h {
-            break;
-        }
+        let fraction = gauge.fraction().filter(|_| grid.blocked);
+        let row_h = pitch;
         let (lit, unlit, ink) = skin.gauge_slot(gauge.hue);
         scene.text(Text::rich(
             vec![Run::tinted(gauge.label, skin.dim)],
@@ -1557,7 +1634,7 @@ fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>) {
             ink
         };
         let (size, at_x) = match fraction {
-            Some(_) => (big, read_x),
+            Some(_) => (grid.reading, grid.read_x),
             None => (frame.pane_size, content.x + label_w),
         };
         let read_line = Text::line_for(size);
@@ -1595,6 +1672,117 @@ fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>) {
         }
         y += row_h;
     }
+    scrollbar(scene, skin, panel, scrolls.thumb(view, &heights, grid.rows));
+}
+
+/// How a monitor pane's rows are sized, worked out once for the pane rather than
+/// per row.
+///
+/// The wheel and the per-frame clamp need [`Grid::rows`] as much as the drawing
+/// does, and a second copy of this arithmetic at the call site is how a pane comes
+/// to scroll by a different number of rows than it drew.
+struct Grid {
+    /// The label column, as wide as the longest label in this pane.
+    label_w: f32,
+    dot: f32,
+    gap: f32,
+    /// Whether a block is drawn at all in this pane.
+    blocked: bool,
+    /// How tall the block is, or zero when it is not drawn. Its width is spent
+    /// rather than carried: what a caller needs is where the reading starts,
+    /// which is [`Grid::read_x`].
+    block_h: f32,
+    /// What every row of this pane is tall, block row or not.
+    pitch: f32,
+    /// The size a reading is drawn at, and where a bounded one starts.
+    reading: f32,
+    read_x: f32,
+    /// How many rows of this pane are on screen.
+    rows: usize,
+}
+
+fn gauge_grid(gauges: &[Gauge], content: Panel, size: f32, column: f32) -> Grid {
+    let line = Text::line_for(size);
+    // As wide as the longest label in this pane, so TOTAL TOOL CALLS is not
+    // clipped and a pane of short labels does not pay for one that has none.
+    let label_cols = gauges
+        .iter()
+        .map(|gauge| gauge.label.chars().count())
+        .max()
+        .unwrap_or(LABEL_COLUMNS)
+        .max(LABEL_COLUMNS)
+        + 1;
+    let label_w = label_cols as f32 * column;
+    let gap = (line * 0.12).round().max(1.0);
+    // The number is served first: it gets the room its longest reading needs at
+    // the pane's own size, and the block takes what is left, never more than half
+    // of it and never less than a legible dot. A block that pushed the number off
+    // the pane would be hiding the reading it exists to describe.
+    let widest = gauges
+        .iter()
+        .filter(|gauge| gauge.fraction().is_some())
+        .map(|gauge| gauge.reading().chars().count())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let needed = widest as f32 * column;
+    let free = (content.w - label_w - column).max(1.0);
+    let room = (free - needed).max(0.0).min(free * 0.5);
+    // As chunky as this pane can afford. A dot big enough to read as a block is
+    // the point of the shape, but a pane of thirteen readings cannot spend the
+    // same height per block as one of five. Past the floor the pane scrolls
+    // instead of shrinking further, which is what item 14 asked for.
+    //
+    // Not clamped up to anything: a pane with no room for a legible dot is meant
+    // to come out of here under [`SMALL_DOT`], which is what says no block.
+    let mut dot = (line * 0.34)
+        .round()
+        .min((room / DOT_COLUMNS as f32 - gap).floor());
+    let bounded = gauges.iter().any(|gauge| gauge.fraction().is_some());
+    let tall = |dot: f32| {
+        let block = dot * DOT_ROWS as f32 + gap * (DOT_ROWS - 1) as f32;
+        gauges.len() as f32 * (block + 2.0 * gap).max(line)
+    };
+    while dot > SMALL_DOT && tall(dot) > content.h {
+        dot -= 1.0;
+    }
+    // Whether this pane draws blocks at all. Either the dot is legible or the
+    // pane is too narrow (or too short, since the loop above stops at the same
+    // floor) to draw one, and then every reading is a number beside its label. A
+    // pane with nothing bounded in it has no block to draw either way, and must
+    // not pay a block's row height for the readings it does have.
+    let blocked = bounded && dot >= SMALL_DOT;
+    let (block_w, block_h) = match blocked {
+        true => (
+            (dot + gap) * DOT_COLUMNS as f32,
+            dot * DOT_ROWS as f32 + gap * (DOT_ROWS - 1) as f32,
+        ),
+        false => (0.0, 0.0),
+    };
+    // The size of the number beside a block, which at [`BIG_READING`] of one is
+    // the pane's own size and nothing else in this arithmetic bites. It is kept
+    // because it is what makes a larger reading safe: capped at the room left
+    // beside the block, so `1,048,576 / 2,097,152` in a pane dragged narrow comes
+    // out smaller rather than clipped halfway through, which reads as a different
+    // number. Floored, not rounded, because rounding up is what puts the last
+    // character over the edge.
+    let beside = (content.w - label_w - block_w - column).max(1.0);
+    let reading = (size * BIG_READING)
+        .min(size * beside / needed)
+        .floor()
+        .max(size);
+    let pitch = (block_h + 2.0 * gap).max(Text::line_for(reading));
+    Grid {
+        label_w,
+        dot,
+        gap,
+        blocked,
+        block_h,
+        pitch,
+        reading,
+        read_x: content.x + label_w + block_w + column,
+        rows: (content.h / pitch).floor().max(0.0) as usize,
+    }
 }
 
 /// The CONTEXT pane: what the agent is, where it is working, and how full it is.
@@ -1609,7 +1797,7 @@ fn context(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let content = panel.inset(PAD);
     let line = Text::line_for(frame.pane_size);
     let label_w = (LABEL_COLUMNS + 1) as f32 * frame.pane_column;
-    let rows: [(&str, String, [u8; 4]); 3] = [
+    let rows: [(&str, String, [u8; 4]); CONTEXT_HEAD] = [
         (
             "PHASE",
             match state.resumed {
@@ -1653,12 +1841,25 @@ fn context(scene: &mut Scene, frame: &Frame, panel: Panel) {
         ));
     }
     // The readings start under the header, in the room that is left.
-    let used = rows.len() as f32 * line + line * 0.5;
-    if panel.h - used < line {
+    let Some(below) = gauge_area(panel, frame.pane_size) else {
         return;
+    };
+    gauges(scene, frame, below, View::Context, frame.monitor.context());
+}
+
+/// The room the CONTEXT pane's readings get, under its header.
+///
+/// `None` when the pane is too short to hold even one reading under it. The
+/// header itself does not scroll: it is three rows saying which agent this is,
+/// and a monitor whose first rows scrolled away would be a monitor of an
+/// unnamed session.
+fn gauge_area(panel: Panel, size: f32) -> Option<Panel> {
+    let line = Text::line_for(size);
+    let used = CONTEXT_HEAD as f32 * line + line * 0.5;
+    if panel.h - used < line {
+        return None;
     }
-    let below = Panel::new(panel.x, panel.y + used, panel.w, panel.h - used);
-    gauges(scene, frame, below, frame.monitor.context());
+    Some(Panel::new(panel.x, panel.y + used, panel.w, panel.h - used))
 }
 
 /// Calls that failed, and what was sent to the one that is open.
@@ -1666,31 +1867,36 @@ fn context(scene: &mut Scene, frame: &Frame, panel: Panel) {
 /// One row per line, clipped rather than wrapped. A click is turned into a row
 /// by dividing by the line height, so a row that wrapped onto two would expand a
 /// different failure than the one under the pointer. The rows themselves come
-/// from [`State::debug_rows`], which is also what resolves the click.
+/// from [`State::debug_rows`], which is also what resolves the click, and the
+/// window they are drawn from is what the click has added back to it: the row
+/// under the pointer is the row on screen, not the row in the list.
 fn debug(scene: &mut Scene, frame: &Frame, panel: Panel) {
-    let (skin, state) = (frame.skin, frame.state);
-    let content = panel.inset(PAD);
-    let line = Text::line_for(frame.pane_size);
     let cols = cols_of(panel, frame.pane_column);
-    let room = frame.layout.rows(panel, frame.pane_size);
+    list_pane(
+        scene,
+        frame,
+        panel,
+        View::Debug,
+        debug_list(frame.state, cols, frame.skin),
+    );
+}
+
+/// The debug pane's rows, each clipped to one row of a pane `cols` wide.
+fn debug_list(state: &State, cols: usize, skin: &Skin) -> Vec<ListRow> {
     // One column short of the pane, because `clip` spends one on the ellipsis it
     // adds: a row exactly as wide as the pane would come back one wider and
     // wrap, which is the one thing this pane cannot allow.
-    let room_for = cols.saturating_sub(1).max(1);
-    for (index, row) in state.debug_rows().iter().take(room).enumerate() {
-        let tint = skin.tone(row.tone);
-        scene.text(Text::rich(
-            vec![Run::tinted(clip(&row.text, room_for), tint)],
-            Panel::new(
-                content.x,
-                content.y + index as f32 * line,
-                content.w,
-                line,
-            ),
-            frame.pane_size,
-            tint,
-        ));
-    }
+    let room = cols.saturating_sub(1).max(1);
+    state
+        .debug_rows()
+        .into_iter()
+        .map(|row| {
+            ListRow::new(vec![Run::tinted(
+                clip(&row.text, room),
+                skin.tone(row.tone),
+            )])
+        })
+        .collect()
 }
 
 /// The file view: the explorer column, and the open file beside it.
@@ -4083,6 +4289,11 @@ mod tests {
     /// One row per line and one line per row, because a click in this pane is
     /// turned into a row by dividing by the line height. A row that wrapped
     /// would open a different failure than the one under the pointer.
+    ///
+    /// The rows are one text box now that the pane scrolls, rather than one box
+    /// each, so what this reads is the lines of that box: every one of them is at
+    /// most as wide as the pane, and the box steps a line at a time, which is what
+    /// the click arithmetic divides by.
     #[test]
     fn every_row_of_the_debug_pane_is_one_line_of_it() {
         let mut state = busy_state();
@@ -4112,26 +4323,284 @@ mod tests {
         let body = out.layout.placed(Space::BottomRight).body;
         let line = Text::line_for(13.0);
         let cols = cols_of(body, 8.0);
-        let rows: Vec<&Text> = out
+        let box_ = out
             .scene
             .texts
             .iter()
-            .filter(|t| body.contains(t.at.x, t.at.y))
-            .collect();
-        assert_eq!(rows.len(), state.debug_rows().len());
-        for (index, text) in rows.iter().enumerate() {
-            let written: String = text.runs.iter().map(|r| r.text.as_str()).collect();
+            .find(|t| body.contains(t.at.x, t.at.y))
+            .expect("the pane wrote its rows");
+        assert_eq!(box_.line_height, line, "the rows do not step by one line");
+        let written: String = box_.runs.iter().map(|r| r.text.as_str()).collect();
+        let rows: Vec<&str> = written.lines().collect();
+        assert_eq!(rows.len(), state.debug_rows().len(), "{rows:?}");
+        for (index, row) in rows.iter().enumerate() {
             assert!(
-                written.chars().count() <= cols,
+                row.chars().count() <= cols,
                 "row {index} is {} columns wide in a pane {cols} wide",
-                written.chars().count()
+                row.chars().count()
             );
-            assert_eq!(text.at.h, line, "row {index} is not one line tall");
         }
         // The long argument was cut rather than wrapped, and it says so.
-        let shown = text_of(&out.scene);
-        assert!(shown.contains("outside the workspace"), "{shown}");
-        assert!(shown.contains('\u{2026}'), "the long argument was not clipped");
+        assert!(written.contains("outside the workspace"), "{written}");
+        assert!(written.contains('\u{2026}'), "the long argument was not clipped");
+    }
+
+    /// A window whose every list is longer than any pane can hold: forty todos,
+    /// twelve children with news each, and thirty failed calls.
+    fn crowded_state() -> State {
+        let mut state = busy_state();
+        let todos: Vec<serde_json::Value> = (0..40)
+            .map(|i| serde_json::json!({"content": format!("step {i:02}"), "status": "pending"}))
+            .collect();
+        state.apply(noob_proto::Event::ToolStart {
+            call_id: "plan-2".into(),
+            name: "plan".into(),
+            brief: "40 items".into(),
+            args: serde_json::json!({"todos": todos}),
+        });
+        for i in 0..12 {
+            state.apply(noob_proto::Event::AgentSpawn {
+                agent_id: format!("kid-{i:02}"),
+                prompt: format!("child {i:02} is reading"),
+                tools: "read".into(),
+            });
+            state.apply(noob_proto::Event::AgentOutput {
+                agent_id: format!("kid-{i:02}"),
+                line: format!("news {i:02}"),
+            });
+        }
+        for i in 0..30 {
+            let id = format!("bad-{i:02}");
+            state.apply(noob_proto::Event::ToolStart {
+                call_id: id.clone(),
+                name: "bash".into(),
+                brief: format!("call {i:02}"),
+                args: serde_json::json!({"cmd": "no"}),
+            });
+            state.apply(noob_proto::Event::ToolEnd {
+                call_id: id,
+                summary: "no".into(),
+                elapsed_ms: 1,
+                error: Some(noob_proto::ToolError {
+                    kind: "denied".into(),
+                    code: None,
+                    message: format!("boom {i:02}"),
+                    detail: None,
+                    remedy: None,
+                }),
+            });
+        }
+        state
+    }
+
+    /// A monitor that has read this state twice, which is what the two token
+    /// panes need before they report a rate.
+    fn sampled(state: &State) -> Monitor {
+        let mut monitor = Monitor::new();
+        monitor.sample(state);
+        monitor.sample(state);
+        monitor
+    }
+
+    /// Where a view is showing and how tall its content is there, taken from the
+    /// pane's own extent so a test drives the arithmetic the wheel drives.
+    fn measured(
+        state: &State,
+        w: f32,
+        h: f32,
+        dock: &Dock,
+        monitor: &Monitor,
+        view: View,
+    ) -> (Space, Vec<usize>, usize) {
+        let space = Space::ALL
+            .into_iter()
+            .find(|space| dock.slot(*space).active() == Some(view))
+            .expect("the view is showing somewhere");
+        let shape = shape(dock, &[]);
+        let layout = Layout::compute(w, h, &shape);
+        let skin = Skin::from(&Config::default());
+        let frame = Frame {
+            state,
+            monitor,
+            dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &crate::prompt::Prompt::default(),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            clock: 0.0,
+            drag: None,
+            hot: None,
+            trouble: None,
+            selection: None,
+            menu: None,
+            picker: None,
+        };
+        let (heights, rows) = scroll_extent(&frame, view, layout.placed(space).body)
+            .expect("the view reports an extent");
+        (space, heights, rows)
+    }
+
+    /// The scrollbar drawn in one space: its track and its thumb, or nothing when
+    /// the pane's content fits and it drew no bar.
+    fn bar_in(out: &Rendered, space: Space) -> Option<([f32; 4], [f32; 4])> {
+        let body = out.layout.placed(space).body;
+        let of = |want: [f32; 4]| {
+            out.scene
+                .rects
+                .iter()
+                .find(|r| r.rgba() == want && body.contains(r.xywh()[0], r.xywh()[1]))
+                .map(|r| r.xywh())
+        };
+        Some((of(out.skin.scroll_track)?, of(out.skin.scroll_thumb)?))
+    }
+
+    /// Everything one space has written, as one string.
+    fn written_in(out: &Rendered, space: Space) -> String {
+        let body = out.layout.placed(space).body;
+        out.scene
+            .texts
+            .iter()
+            .filter(|t| body.contains(t.at.x, t.at.y))
+            .flat_map(|t| t.runs.iter().map(|r| r.text.as_str()))
+            .collect()
+    }
+
+    /// Item 14: a widget whose content is taller than its box scrolls inside
+    /// itself. One mechanism for four panes, so this drives all four.
+    ///
+    /// Every one of them used to lose what did not fit: PLAN and AGENTS drew past
+    /// the bottom edge of the pane, DEBUG stopped at the last row that fitted, and
+    /// a monitor stopped at the last reading that fitted. None of them had a bar,
+    /// so nothing on screen even said there was more.
+    #[test]
+    fn a_pane_with_more_rows_than_its_box_scrolls_to_the_end() {
+        for (view, w, h, last) in [
+            (View::Plan, 1400.0, 900.0, "step 39"),
+            (View::Agents, 1400.0, 900.0, "news 11"),
+            (View::Debug, 1400.0, 900.0, "boom 29"),
+            // The monitor pane is five readings in a box that holds three.
+            (View::Context, 900.0, 520.0, "LAST GENERATED"),
+        ] {
+            let mut state = crowded_state();
+            let monitor = sampled(&state);
+            let mut dock = Dock::new();
+            dock.reveal(view);
+            let (space, heights, rows) = measured(&state, w, h, &dock, &monitor, view);
+            let total: usize = heights.iter().sum();
+            assert!(total > rows, "{view:?}: {total} rows in a box of {rows}");
+
+            // At the top, the last item is off the bottom and the bar says so.
+            let top = render_with(&state, w, h, &dock, &[], &monitor, None);
+            let (track, thumb) = bar_in(&top, space)
+                .unwrap_or_else(|| panic!("{view:?} drew no scrollbar for {total} rows in {rows}"));
+            assert!(
+                thumb[3] < track[3],
+                "{view:?}: the thumb fills a track it cannot fill"
+            );
+            assert!(
+                !written_in(&top, space).contains(last),
+                "{view:?} already shows {last}, so it does not need a scroll"
+            );
+
+            // Scrolled to the end, the last item is on screen, and one notch
+            // further moves nothing.
+            assert!(
+                state.scrolls.scroll(view, 9_999, true, &heights, rows),
+                "{view:?} would not scroll"
+            );
+            assert!(
+                !state.scrolls.scroll(view, 1, true, &heights, rows),
+                "{view:?} scrolled past its own end"
+            );
+            let end = render_with(&state, w, h, &dock, &[], &monitor, None);
+            let written = written_in(&end, space);
+            assert!(written.contains(last), "{view:?} cannot reach {last}: {written}");
+            let (track, thumb) = bar_in(&end, space).expect("still a bar");
+            assert!(
+                (thumb[1] + thumb[3] - track[1] - track[3]).abs() < 1.5,
+                "{view:?}: the thumb is not at the foot of its track: {thumb:?} in {track:?}"
+            );
+
+            // And back to the top, where it started.
+            assert!(state.scrolls.scroll(view, 9_999, false, &heights, rows));
+            assert_eq!(state.scrolls.first(view), 0, "{view:?}");
+        }
+    }
+
+    /// A pane holding less than it can show draws no bar. A bar that is always
+    /// there and always full says nothing, which is why `scrollbar` takes an
+    /// option.
+    #[test]
+    fn a_pane_whose_content_fits_draws_no_bar() {
+        let state = busy_state();
+        let monitor = sampled(&state);
+        for view in [View::Plan, View::Agents, View::Debug, View::Session] {
+            let mut dock = Dock::new();
+            dock.reveal(view);
+            let (space, heights, rows) = measured(&state, 1400.0, 900.0, &dock, &monitor, view);
+            let total: usize = heights.iter().sum();
+            assert!(total <= rows, "{view:?}: {total} rows in a box of {rows}");
+            let out = render_with(&state, 1400.0, 900.0, &dock, &[], &monitor, None);
+            assert!(
+                bar_in(&out, space).is_none(),
+                "{view:?} drew a bar for content that fits"
+            );
+        }
+    }
+
+    /// The one that actually reaches a reader: a pane scrolled to its end whose
+    /// content then shrank under it. The agent replaces a forty-item plan with a
+    /// three-item one and nothing goes near the pointer.
+    ///
+    /// Two halves. What is drawn is never blank, because the window is taken from
+    /// the offset through `text_geometry`, which clamps a position past the end
+    /// rather than refusing it. And the offset itself is pulled back, which is what
+    /// the frame does before it draws, so the next wheel notch moves one row
+    /// instead of thirty-seven.
+    #[test]
+    fn a_pane_that_shrank_under_a_scroll_is_not_left_blank() {
+        let mut state = crowded_state();
+        let monitor = sampled(&state);
+        let mut dock = Dock::new();
+        dock.reveal(View::Plan);
+        let (space, heights, rows) = measured(&state, 1400.0, 900.0, &dock, &monitor, View::Plan);
+        state.scrolls.scroll(View::Plan, 9_999, true, &heights, rows);
+        let scrolled = state.scrolls.first(View::Plan);
+        assert!(scrolled > 0, "the pane did not scroll");
+
+        state.apply(noob_proto::Event::ToolStart {
+            call_id: "plan-3".into(),
+            name: "plan".into(),
+            brief: "3 items".into(),
+            args: serde_json::json!({"todos": [
+                {"content": "late 00", "status": "completed"},
+                {"content": "late 01", "status": "in_progress"},
+                {"content": "late 02", "status": "pending"},
+            ]}),
+        });
+        let out = render_with(&state, 1400.0, 900.0, &dock, &[], &monitor, None);
+        let written = written_in(&out, space);
+        for wanted in ["late 00", "late 01", "late 02"] {
+            assert!(
+                written.contains(wanted),
+                "the pane is blank at row {scrolled} of three: {written:?}"
+            );
+        }
+
+        let (_, short, rows) = measured(&state, 1400.0, 900.0, &dock, &monitor, View::Plan);
+        assert!(
+            state.scrolls.settle(View::Plan, &short, rows),
+            "the offset was left past the end"
+        );
+        assert_eq!(state.scrolls.first(View::Plan), 0);
+        let after = render_with(&state, 1400.0, 900.0, &dock, &[], &monitor, None);
+        assert!(
+            bar_in(&after, space).is_none(),
+            "three todos in eighteen rows still drew a bar"
+        );
     }
 
     /// A frame that is nothing but a prompt: the strip it landed in, its

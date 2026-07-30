@@ -612,6 +612,11 @@ pub struct State {
     /// Top-anchored, unlike a pane's scrollback: a list is read from its first
     /// entry down, and new files arrive at the end without moving the rest.
     pub file_scroll: usize,
+    /// Where every pane that is a list rather than a transcript is scrolled to:
+    /// PLAN, AGENTS, DEBUG and the three monitors. One place for all six, so a
+    /// pane gains a scroll by being added to [`crate::view::scroll_extent`]
+    /// rather than by growing a field of its own here.
+    pub scrolls: crate::scroll::Scrolls,
 
     pub usage: Option<Usage>,
     pub prefilled: u64,
@@ -672,6 +677,7 @@ impl State {
             files: Vec::new(),
             open_file: 0,
             file_scroll: 0,
+            scrolls: crate::scroll::Scrolls::default(),
             usage: None,
             prefilled: 0,
             generated: 0,
