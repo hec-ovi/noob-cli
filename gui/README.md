@@ -264,13 +264,16 @@ you were aiming for has not moved. Closing a widget takes it out of the window
 and a space left with no tabs gives its room to its neighbour rather than
 leaving a hole.
 
-**Widgets** is the way back. It is the last row, it opens a list of all nine
-under itself so nothing above it moves, and each row is marked with whether that
-widget is in the window or closed. Picking a closed one puts it back in the
-space it opens in by default; picking one that is already there shows it where
-it is, which is the quick way to a tab buried behind five others. The list is
-clamped into the window like the menu itself, and in a window too short for all
-of it the wheel scrolls it while the four rows above stay put.
+**Widgets** is the way back, and the way out. It is the last row, marked with a
+`>` at its end, and it opens a list of all nine in a box beside itself, right by
+default and left when the menu is near the right edge of the window. Every row
+of the list is a switch: a ticked box means the widget is in the window and
+picking it takes the widget out, an empty box means it is closed and picking it
+puts it back in the space it opens in by default. The menu stays open over the
+list so you can switch a second widget without opening it again, unless what you
+switched off is the widget the menu was opened over, which takes the rest of its
+rows with it. The list is clamped into the window like the menu itself, and in a
+window too short for all nine the wheel scrolls it.
 
 ## Settings
 

@@ -3,6 +3,27 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## Unreleased
+
+### Fixed
+
+- The widget list is a submenu, and picking a widget switches it. Three things
+  were wrong with the list that shipped. It opened downwards into the menu's own
+  column, which is an accordion rather than a submenu: the Widgets row now stays
+  where it is and the list flies out beside it in a box of its own, out to the
+  right, or out to the left when the menu is near the right edge of the window
+  and there is no room over there. The row that opens it is marked with a `>` at
+  its end, which is what a row with more behind it says on every other desktop,
+  in place of the plus and minus it carried in the gutter, which is what a row
+  that folds a list out underneath itself says. And picking a widget hides it or
+  shows it: a ticked box means the widget is in the window and picking it takes
+  the widget out, an empty box means it is closed and picking it puts it back.
+  The list could only ever add before, because picking a widget that was already
+  in the window merely revealed it. The menu stays open over the list so a second
+  widget can be switched without opening the menu again, and closes when what
+  went out is the widget the menu was opened over, because the rest of its rows
+  act on that widget.
+
 ## 0.7.0 - 2026-07-30
 
 All of this is NO0B, the GPU window, which shipped as CLIppy up to 0.6.0. The
