@@ -733,7 +733,14 @@ impl State {
     }
 
     /// Fold one frame in, untimed. The window always has a clock and uses
-    /// [`State::apply_at`]; this is the shape the tests read better in.
+    /// [`State::apply_at`], so this has no caller in the build that ships and
+    /// is not waiting for one.
+    ///
+    /// It stays because the tests are its point: a hundred of them fold a frame
+    /// in and assert on what came out, and none of them is about time. Written
+    /// through `apply_at` they would each carry a `None` that says nothing, and
+    /// the one argument that matters would be the one nobody notices. The
+    /// allowance below is what that costs.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn apply(&mut self, event: Event) -> bool {
         self.apply_at(event, None)
