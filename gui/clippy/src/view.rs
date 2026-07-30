@@ -1144,9 +1144,9 @@ fn strip_tabs(
     let mut at = first.min(furthest);
     if let Some(active) = active {
         // Behind the window, the strip starts at the showing tab; ahead of it,
-        // it walks forward until that tab is in view. `max(1)` only guards the
-        // case where a single tab is wider than the whole strip, which would
-        // otherwise never satisfy the loop.
+        // it walks forward until that tab is in view. `max(1)` is only there so
+        // an offset showing no tabs cannot spin the loop; the check above rules
+        // that out for every offset a caller can reach.
         at = at.min(active);
         while active >= at + lay(at, room).len().max(1) {
             at += 1;
