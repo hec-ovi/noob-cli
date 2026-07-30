@@ -380,7 +380,7 @@ impl App {
             }
             Err(message) => {
                 self.trouble = Some(message.clone());
-                self.state.talk.say(message, Tone::Bad);
+                self.state.output.say(message, Tone::Bad);
             }
         }
         self.dirty = true;
@@ -521,7 +521,7 @@ impl App {
                     self.dirty |= self.state.apply_at(event, Some(at));
                 }
                 Incoming::Diagnostic(line) => {
-                    self.state.talk.say(format!("noob: {line}"), Tone::Bad);
+                    self.state.output.say(format!("noob: {line}"), Tone::Bad);
                     self.dirty = true;
                 }
                 Incoming::Ended(reason) => {
@@ -565,7 +565,7 @@ impl App {
             if !self.totals_trouble {
                 self.totals_trouble = true;
                 self.state
-                    .talk
+                    .output
                     .say(format!("cannot keep the running totals: {error}"), Tone::Bad);
                 self.dirty = true;
             }
@@ -581,7 +581,7 @@ impl App {
         self.state.submitted(&text);
         match self.link.as_mut() {
             Some(link) if link.is_alive() => link.send(Cmd::PromptSubmit { text }),
-            _ => self.state.talk.say("no agent is running", Tone::Bad),
+            _ => self.state.output.say("no agent is running", Tone::Bad),
         }
         self.dirty = true;
     }
@@ -883,9 +883,9 @@ impl App {
     /// still resolve after it has scrolled.
     fn spot_at(&self, layout: &view::Layout, space: Space, view: View) -> Option<select::Spot> {
         let pane = self.state.pane_of(view)?;
-        // Talk is drawn at the transcript size, not the pane size. Hit testing
-        // it with the smaller one put every click a growing number of rows
-        // away from the character under the pointer.
+        // The output pane is drawn at the transcript size, not the pane size.
+        // Hit testing it with the smaller one put every click a growing number
+        // of rows away from the character under the pointer.
         let (size, column) = self.metrics_of(view);
         let (over, row, at) =
             layout.cell(self.cursor.x as f32, self.cursor.y as f32, size, column)?;
@@ -918,7 +918,7 @@ impl App {
     /// frame exists.
     fn metrics_of(&self, view: View) -> (f32, f32) {
         match view {
-            View::Talk => (self.config.font_size, self.column),
+            View::Output => (self.config.font_size, self.column),
             _ => (self.config.pane_font_size, self.pane_column),
         }
     }
@@ -1122,7 +1122,7 @@ impl App {
                 let showing = Space::ALL
                     .into_iter()
                     .find_map(|space| self.dock.slot(space).active())
-                    .unwrap_or(View::Talk);
+                    .unwrap_or(View::Output);
                 let at = self
                     .dock
                     .slot(Space::TopRight)
@@ -1221,7 +1221,7 @@ impl App {
         let by = ((rows as f32 * pages.abs()).round() as usize).max(1);
         let open_file = self.state.open_file;
         let pane = match view {
-            View::Talk => Some(&mut self.state.talk),
+            View::Output => Some(&mut self.state.output),
             View::Activity => Some(&mut self.state.activity),
             View::Files => self
                 .state
@@ -1536,7 +1536,7 @@ impl ApplicationHandler<Wake> for App {
                     !slot.folded && slot.active().is_some_and(|view| wanted.contains(&view))
                 })
         };
-        if showing(&[View::Hardware, View::Session, View::Overall]) {
+        if showing(&[View::Hardware, View::Context, View::Session]) {
             let now = Instant::now();
             if self.next_sample.is_none_or(|at| now >= at) {
                 // Merged here rather than inside the monitor, so there is one
@@ -1724,7 +1724,7 @@ mod tests {
 
         let mine = menu_for(hit, at, &dock, false, Some(view)).unwrap();
         assert_eq!(mine.pick(1), Some(Item::CopySelection));
-        let elsewhere = menu_for(hit, at, &dock, false, Some(View::Talk)).unwrap();
+        let elsewhere = menu_for(hit, at, &dock, false, Some(View::Output)).unwrap();
         assert_eq!(elsewhere.pick(1), None);
         assert_eq!(
             mine.rows.len(),

@@ -191,8 +191,8 @@ mod tests {
                 Menu::for_input((0.0, 0.0), false),
             ),
             (
-                Menu::for_widget((0.0, 0.0), View::Talk, Space::Left, true),
-                Menu::for_widget((0.0, 0.0), View::Talk, Space::Left, false),
+                Menu::for_widget((0.0, 0.0), View::Output, Space::Left, true),
+                Menu::for_widget((0.0, 0.0), View::Output, Space::Left, false),
             ),
         ] {
             assert_eq!(items(&with), items(&without), "the shape changed");
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn a_menu_is_as_wide_as_its_longest_label() {
-        let menu = Menu::for_widget((0.0, 0.0), View::Talk, Space::Left, false);
+        let menu = Menu::for_widget((0.0, 0.0), View::Output, Space::Left, false);
         assert_eq!(menu.width_chars(), Item::Close.label().chars().count());
         assert_eq!(
             Menu::for_input((0.0, 0.0), false).width_chars(),

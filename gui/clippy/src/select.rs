@@ -138,7 +138,7 @@ mod tests {
     }
 
     fn drag(from: (usize, usize), to: (usize, usize)) -> Selection {
-        let mut selection = Selection::new(View::Talk, Spot::new(from.0, from.1));
+        let mut selection = Selection::new(View::Output, Spot::new(from.0, from.1));
         selection.extend(Spot::new(to.0, to.1));
         selection
     }
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn a_click_that_never_moved_selects_nothing() {
         let pane = pane(&["hello"]);
-        let click = Selection::new(View::Talk, Spot::new(0, 2));
+        let click = Selection::new(View::Output, Spot::new(0, 2));
         assert!(click.is_empty());
         assert_eq!(click.text(&pane), "");
         assert_eq!(click.columns_on(0, 5), None);

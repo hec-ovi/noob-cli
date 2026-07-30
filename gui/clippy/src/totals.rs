@@ -2,8 +2,8 @@
 //!
 //! Everything else in the window is this session and dies with it. These are
 //! carried in a small file beside the settings, in the same `key = value` shape,
-//! so the OVERALL monitor can answer "how much has this machine done" rather
-//! than "how much since you opened the window".
+//! so the monitor reading them can answer "how much has this machine done"
+//! rather than "how much since you opened the window".
 //!
 //! The file holds the sessions that came before, never the one running. The
 //! window keeps this loaded copy untouched and adds the live session to it with

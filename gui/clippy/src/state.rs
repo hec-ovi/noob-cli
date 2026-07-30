@@ -3,7 +3,7 @@
 //!
 //! | view | carries |
 //! |---|---|
-//! | `talk` | the model's prose and reasoning, streamed |
+//! | `output` | the model's prose and reasoning, streamed |
 //! | `activity` | every call it makes, colored by what kind of thing it is |
 //! | `plan` | the checklist, from the plan tool's own arguments |
 //! | `agents` | sub-agents, their brief and how they ended |
@@ -602,7 +602,7 @@ pub struct State {
     pub workspace: String,
     pub resumed: bool,
 
-    pub talk: Pane,
+    pub output: Pane,
     pub activity: Pane,
     pub plan: Vec<Todo>,
     pub agents: Vec<AgentRow>,
@@ -665,7 +665,7 @@ impl State {
             model: String::new(),
             workspace: String::new(),
             resumed: false,
-            talk: Pane::new(6000),
+            output: Pane::new(6000),
             activity: Pane::new(4000),
             plan: Vec::new(),
             agents: Vec::new(),
@@ -696,9 +696,9 @@ impl State {
     /// What the human typed, echoed into the transcript so the conversation
     /// reads as a conversation.
     pub fn submitted(&mut self, text: &str) {
-        self.talk.blank_if_needed();
-        self.talk.say(format!("› {text}"), Tone::Bright);
-        self.talk.push(Line::new("", Tone::Body));
+        self.output.blank_if_needed();
+        self.output.say(format!("› {text}"), Tone::Bright);
+        self.output.push(Line::new("", Tone::Body));
         self.phase = Phase::Thinking;
         self.status = String::from("thinking");
     }
@@ -786,8 +786,8 @@ impl State {
                         .say(format!("       {brief} never reported back"), Tone::Bad);
                 }
             }
-            Event::TextDelta { d } => self.talk.stream(&d, Tone::Body),
-            Event::ReasoningDelta { d } => self.talk.stream(&d, Tone::Dim),
+            Event::TextDelta { d } => self.output.stream(&d, Tone::Body),
+            Event::ReasoningDelta { d } => self.output.stream(&d, Tone::Dim),
 
             Event::ToolStart {
                 call_id,
@@ -967,10 +967,10 @@ impl State {
                 self.usage = Some(usage);
             }
 
-            Event::Note { line } => self.talk.say(line, Tone::Dim),
+            Event::Note { line } => self.output.say(line, Tone::Dim),
             Event::Error { line } => {
-                self.talk.blank_if_needed();
-                self.talk.say(line, Tone::Bad);
+                self.output.blank_if_needed();
+                self.output.say(line, Tone::Bad);
             }
 
             // The agent's own reading of how full it is, which is a better
@@ -1015,7 +1015,7 @@ impl State {
     /// where it would mean guessing at a layout.
     pub fn pane_of(&self, view: crate::dock::View) -> Option<&Pane> {
         match view {
-            crate::dock::View::Talk => Some(&self.talk),
+            crate::dock::View::Output => Some(&self.output),
             crate::dock::View::Activity => Some(&self.activity),
             crate::dock::View::Files => self.files.get(self.open_file).map(|file| &file.pane),
             _ => None,
@@ -2044,7 +2044,7 @@ mod tests {
 
         // A selection somewhere else is none of this pane's business.
         state.selection = Some(crate::select::Selection::new(
-            crate::dock::View::Talk,
+            crate::dock::View::Output,
             crate::select::Spot::new(1, 0),
         ));
         assert!(state.show_file(2));
@@ -2144,7 +2144,7 @@ mod tests {
         for chunk in ["Hel", "lo ", "there", "\nsecond ", "line"] {
             state.apply(Event::TextDelta { d: chunk.into() });
         }
-        assert_eq!(texts(&state.talk), ["Hello there", "second line"]);
+        assert_eq!(texts(&state.output), ["Hello there", "second line"]);
     }
 
     #[test]
@@ -2156,7 +2156,7 @@ mod tests {
         state.apply(Event::TextDelta {
             d: "the answer".into(),
         });
-        let lines: Vec<_> = state.talk.visible(usize::MAX, 200);
+        let lines: Vec<_> = state.output.visible(usize::MAX, 200);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].tone, Tone::Dim);
         assert_eq!(lines[1].tone, Tone::Body);

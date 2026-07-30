@@ -66,8 +66,8 @@ rest at a lower alpha.
 | PLAN | the checklist, straight from the plan tool's own arguments |
 | AGENTS | sub-agents: their tool set, their brief, the last thing each one said, and how it ended |
 | HARDWARE | CPU and RAM, plus GPU, VRAM and GTT on an AMD card |
-| SESSION | this run: which phase, model and workspace, context against where compaction triggers, tool calls, the longest single answer, prefill, cache, output, requests, and the measured rates |
-| OVERALL | every run there has ever been: tokens prefilled, generated and served from cache, and the mean and median decode and prefill speed |
+| CONTEXT | this run: which phase, model and workspace, context against where compaction triggers, tool calls, the longest single answer, prefill, cache, output, requests, and the measured rates |
+| SESSION | every run there has ever been: tokens prefilled, generated and served from cache, and the mean and median decode and prefill speed |
 | DEBUG | tool calls that failed, and the arguments that were sent to the one you click |
 | FILES | every file touched, listed down the left, with the open one's diff, a line-number gutter and syntax coloring |
 
@@ -81,8 +81,8 @@ down, in the metric's own colour: one row is 20 percent and one dot is 2.5, and
 the block fills from the bottom. The number sits beside it in large text. A
 reading with no maximum has nothing to be a proportion of, so it is the number
 alone, in the same colour, with no empty track under it. Each metric keeps its
-colour wherever it appears, so PREFILLED is the same blue in SESSION and in
-OVERALL.
+colour wherever it appears, so PREFILLED is the same blue in CONTEXT and in
+SESSION.
 
 HARDWARE reads `/sys/class/drm/card*/device` and `/proc` directly. No vendor
 library, no dependency. It only samples while it is on screen, so an idle window
@@ -94,7 +94,7 @@ On anything else those rows are simply absent and the pane shows CPU and memory
 alone. Reading an Nvidia card means its own library, which is the dependency
 this deliberately does not have.
 
-SESSION is the other question: not whether the machine is keeping up but whether
+CONTEXT is the other question: not whether the machine is keeping up but whether
 the budget is. Context comes from the agent's own estimate rather than from the
 last request, so it moves while a turn is still running, and COMPACTS AT is the
 line that actually runs out. The rates are measured rather than reported. Prefill
@@ -102,7 +102,7 @@ is from the request leaving to the first token arriving, which is what a long
 transcript costs; decode is from the first token to the last, which is what the
 answer costs.
 
-OVERALL is the same arithmetic over every session, kept in
+SESSION is the same arithmetic over every session, kept in
 `~/.config/noob/no0b.totals` beside the settings and written by rename at the
 end of every turn. It carries a mean and a median: the mean is every request ever,
 and the median is the middle one, which is the reading that survives a cold start

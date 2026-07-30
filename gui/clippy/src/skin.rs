@@ -397,9 +397,12 @@ mod tests {
     fn the_palette_has_one_entry_per_view() {
         let skin = Skin::default();
         assert_eq!(skin.views.len(), View::ALL.len());
-        assert_eq!(skin.view(View::Talk), skin.views[0]);
+        assert_eq!(skin.view(View::Output), skin.views[0]);
         assert_eq!(skin.view(View::Files), skin.views[8]);
-        assert_eq!(skin.view(View::Session), skin.views[5]);
+        // The two that swapped labels kept their slots, so neither of them took
+        // the other's accent along with the name.
+        assert_eq!(skin.view(View::Context), skin.views[5]);
+        assert_eq!(skin.view(View::Session), skin.views[6]);
         assert_eq!(skin.view(View::Debug), skin.views[7]);
     }
 

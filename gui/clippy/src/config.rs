@@ -8,7 +8,9 @@
 //! file you have to read the source to discover is not a config file. Unknown
 //! keys are kept and reported rather than dropped, so a typo is visible instead
 //! of silently doing nothing. A key a past build wrote and this one dropped is
-//! not a typo, so [`RETIRED`] names those and the parser passes over them.
+//! not a typo, so [`RETIRED`] names those and the parser passes over them. A key
+//! that was merely renamed is not a typo either and its value is still wanted,
+//! so [`ALIASES`] maps the old name onto the current one.
 //!
 //! The colors ship as commented defaults rather than live lines. An explicit
 //! key beats the `theme` it belongs to, so a file that spelled all 35 colors
@@ -145,13 +147,13 @@ const TOOLS: [[u8; 3]; 14] = [
 /// The key for each view color, in the order `View::ALL` declares the views.
 /// The position here is the position in [`Config::views`].
 pub const VIEW_KEYS: [&str; 9] = [
-    "view_talk",
+    "view_output",
     "view_activity",
     "view_plan",
     "view_agents",
     "view_hardware",
+    "view_context",
     "view_session",
-    "view_overall",
     "view_debug",
     "view_files",
 ];
@@ -161,13 +163,13 @@ pub const VIEW_KEYS: [&str; 9] = [
 /// seven labels. Spread the way the tool hues are, and a theme leaves them
 /// alone for the same reason: they name the views, not the window.
 const VIEWS: [[u8; 3]; 9] = [
-    [0x73, 0xde, 0x9f], // talk
+    [0x73, 0xde, 0x9f], // output
     [0xf5, 0xc7, 0x5c], // activity
     [0xc6, 0x82, 0xed], // plan
     [0x5f, 0xa3, 0xf2], // agents
     [0x52, 0xe0, 0xe0], // hardware
-    [0xf0, 0x75, 0xc3], // session
-    [0x8f, 0x7f, 0xf5], // overall
+    [0xf0, 0x75, 0xc3], // context
+    [0x8f, 0x7f, 0xf5], // session
     [0xf0, 0x4f, 0x8f], // debug
     [0xf0, 0x7d, 0x4c], // files
 ];
@@ -338,9 +340,38 @@ pub fn keys() -> Vec<&'static str> {
 ///   a clip path of its own. Removing the CLIPPY tab removed the view, and
 ///   nothing has read either key since.
 /// * `view_avatar`: that tab's hue, gone with the tab.
-/// * `view_llm`: the one LLM monitor, since split into the session, overall and
-///   debug monitors. Its hue lives on as `view_session`.
+/// * `view_llm`: the one LLM monitor, since split into three. Its hue lives on
+///   as `view_context`, which was called `view_session` in between.
 pub const RETIRED: [&str; 4] = ["show_avatar", "avatar", "view_avatar", "view_llm"];
+
+/// Names an earlier build wrote that this one reads under a different name.
+/// `(what the file may say, what this build calls it)`.
+///
+/// Not the same mechanism as [`RETIRED`] and deliberately kept apart from it: a
+/// retired key is dropped on the floor because nothing is behind it any more,
+/// while an alias still applies its value to the slot its current name owns. A
+/// name in one list must not be in the other, and neither may be in [`keys`],
+/// which `an_alias_is_not_a_live_key_and_not_a_retired_one` holds.
+///
+/// The view colours are read by position, so renaming a view renames its key and
+/// an old file would otherwise lose that colour without saying anything. Only
+/// names that no longer exist are listed: `view_session` is still a live key, it
+/// just names the seventh slot now (the pane that carries the SESSION label)
+/// rather than the sixth, so a file that set it still colours the tab it was
+/// named after.
+pub const ALIASES: [(&str, &str); 2] = [
+    ("view_talk", "view_output"),
+    ("view_overall", "view_session"),
+];
+
+/// What this build calls a key. An older name comes back as its current one,
+/// anything else comes back unchanged.
+pub fn canonical(key: &str) -> &str {
+    ALIASES
+        .iter()
+        .find(|(was, _)| *was == key)
+        .map_or(key, |(_, now)| *now)
+}
 
 /// Where the file lives. `$XDG_CONFIG_HOME` when set, `~/.config` otherwise,
 /// beside noob's own settings rather than in a directory of its own.
@@ -437,7 +468,11 @@ impl Config {
             if RETIRED.contains(&key.as_str()) {
                 continue;
             }
-            let known = match key.as_str() {
+            // A name an earlier build wrote still applies its value, at the slot
+            // its current name owns. Resolved here rather than in each arm, so
+            // every key gets the same treatment and none of them can forget.
+            let name = canonical(&key);
+            let known = match name {
                 // Already applied above. Resolving it again here is how a name
                 // this build does not have gets reported instead of ignored.
                 "theme" => theme(&value).is_some(),
@@ -466,20 +501,20 @@ impl Config {
                 "syntax_number" => set(&mut config.syntax_number, color(&value)),
                 "syntax_keyword" => set(&mut config.syntax_keyword, color(&value)),
                 "syntax_markup" => set(&mut config.syntax_markup, color(&value)),
-                _ if key.starts_with("tool_") => {
-                    match TOOL_KEYS.iter().position(|known| *known == key) {
+                _ if name.starts_with("tool_") => {
+                    match TOOL_KEYS.iter().position(|known| *known == name) {
                         Some(at) => set(&mut config.tools[at], color(&value)),
                         None => false,
                     }
                 }
-                _ if key.starts_with("view_") => {
-                    match VIEW_KEYS.iter().position(|known| *known == key) {
+                _ if name.starts_with("view_") => {
+                    match VIEW_KEYS.iter().position(|known| *known == name) {
                         Some(at) => set(&mut config.views[at], color(&value)),
                         None => false,
                     }
                 }
-                _ if key.starts_with("gauge_") => {
-                    match GAUGE_KEYS.iter().position(|known| *known == key) {
+                _ if name.starts_with("gauge_") => {
+                    match GAUGE_KEYS.iter().position(|known| *known == name) {
                         Some(at) => set(&mut config.gauges[at], color(&value)),
                         None => false,
                     }
@@ -489,6 +524,8 @@ impl Config {
                 _ => false,
             };
             if !known {
+                // Reported the way the file spells it, alias or not, so the
+                // message names a line somebody can go and find.
                 config.unknown.push(key);
             }
         }
@@ -581,6 +618,10 @@ pub fn write_setting(path: &Path, key: &str, value: Option<&str>) -> Result<(), 
     if RETIRED.contains(&key.as_str()) {
         return Err(format!("{key} is no longer a setting"));
     }
+    // An older name is accepted and written under the name this build reads, so
+    // the value lands on the commented default that documents it rather than
+    // adding a second line for the same slot.
+    let key = canonical(&key).to_string();
     if !keys().contains(&key.as_str()) {
         return Err(format!("unknown setting {key:?}"));
     }
@@ -817,13 +858,13 @@ theme = noob
 
 # One color per view. It is the line along the top of the tab that is showing,
 # so these name the views rather than the window and a theme leaves them alone.
-# view_talk     = #73de9f
+# view_output   = #73de9f
 # view_activity = #f5c75c
 # view_plan     = #c682ed
 # view_agents   = #5fa3f2
 # view_hardware = #52e0e0
-# view_session  = #f075c3
-# view_overall  = #8f7ff5
+# view_context  = #f075c3
+# view_session  = #8f7ff5
 # view_debug    = #f04f8f
 # view_files    = #f07d4c
 
@@ -992,6 +1033,81 @@ mod tests {
         for key in RETIRED {
             assert!(!named.contains(&key.to_string()), "{key} is retired and still documented");
         }
+    }
+
+    /// The two mechanisms are different and must stay so. A retired name is
+    /// dropped on the floor, an alias applies its value, and a name that ended
+    /// up in both lists or in [`keys`] would be decided by whichever check the
+    /// parser happens to run first.
+    #[test]
+    fn an_alias_is_not_a_live_key_and_not_a_retired_one() {
+        let named = documented(DEFAULT_FILE);
+        for (was, now) in ALIASES {
+            assert!(!keys().contains(&was), "{was} is an alias and a live key");
+            assert!(!RETIRED.contains(&was), "{was} is an alias and retired");
+            assert!(keys().contains(&now), "{was} points at {now}, which is dead");
+            assert!(!RETIRED.contains(&now), "{now} is aliased to and retired");
+            assert_eq!(canonical(was), now);
+            assert_eq!(canonical(now), now, "a current name is left alone");
+            // The shipped file teaches the current name only, or a fresh install
+            // would write a line that only exists to be translated.
+            assert!(!named.contains(&was.to_string()), "{was} is still documented");
+            assert!(named.contains(&now.to_string()), "{now} is not documented");
+        }
+        assert_eq!(canonical("opacity"), "opacity", "and so is anything else");
+    }
+
+    /// The rename this build did to the views renamed their colour keys with
+    /// them, and the keys are read by position. A settings file written before it
+    /// still has to land its colours where they were meant to go, or a palette
+    /// somebody tuned quietly reverts.
+    #[test]
+    fn a_view_colour_written_under_the_old_name_still_applies() {
+        let config = Config::parse("view_talk = #010203\nview_overall = #040506\n");
+        assert!(config.unknown.is_empty(), "{:?}", config.unknown);
+        assert_eq!(config.views[0], [0x01, 0x02, 0x03], "view_talk is view_output");
+        assert_eq!(config.views[6], [0x04, 0x05, 0x06], "view_overall is view_session");
+        // The rest of the palette is untouched by an old name landing.
+        for at in [1, 2, 3, 4, 5, 7, 8] {
+            assert_eq!(config.views[at], Config::default().views[at], "slot {at}");
+        }
+
+        // Both spellings of a slot, in either order: the later line wins, the
+        // same as two lines with the same name.
+        let current = Config::parse("view_talk = #010203\nview_output = #0a0b0c\n");
+        assert_eq!(current.views[0], [0x0a, 0x0b, 0x0c]);
+        let old_last = Config::parse("view_output = #0a0b0c\nview_talk = #010203\n");
+        assert_eq!(old_last.views[0], [0x01, 0x02, 0x03]);
+
+        // `view_session` was not retired and is not an alias: it is a live key
+        // that names the seventh slot now, which is the pane still labelled
+        // SESSION, and the sixth slot answers to `view_context`.
+        let renamed = Config::parse("view_session = #111213\nview_context = #141516\n");
+        assert!(renamed.unknown.is_empty(), "{:?}", renamed.unknown);
+        assert_eq!(renamed.views[6], [0x11, 0x12, 0x13]);
+        assert_eq!(renamed.views[5], [0x14, 0x15, 0x16]);
+
+        // An alias is not a licence for anything else: a name nobody ever wrote
+        // is still a typo, and so is an old name with an unreadable value.
+        assert_eq!(Config::parse("view_chatter = #fff").unknown, ["view_chatter"]);
+        assert_eq!(Config::parse("view_talk = chartreuse").unknown, ["view_talk"]);
+    }
+
+    /// The writer accepts an old name and writes the current one, so the value
+    /// lands on the commented default that documents it instead of adding a
+    /// second line for the same slot.
+    #[test]
+    fn the_writer_takes_an_old_name_and_writes_the_new_one() {
+        let scratch = Scratch::new("alias");
+        let conf = scratch.conf();
+        std::fs::write(&conf, DEFAULT_FILE).unwrap();
+        write_setting(&conf, "view_talk", Some("#ff0000")).unwrap();
+        let text = scratch.read();
+        assert!(text.contains("view_output = #ff0000"), "{text}");
+        assert!(!text.contains("view_talk"), "the old name went into the file");
+        assert_eq!(Config::parse(&text).views[0], [0xff, 0x00, 0x00]);
+        // One line for the slot, not one per spelling.
+        assert_eq!(text.matches("view_output").count(), 1, "{text}");
     }
 
     /// A known key with an unreadable value keeps the default and is reported,

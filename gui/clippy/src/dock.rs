@@ -16,16 +16,18 @@
 /// One of the things that can occupy a tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
-    Talk,
+    /// What the model said: its prose and its reasoning, streamed.
+    Output,
     Activity,
     Plan,
     Agents,
     /// GPU, CPU, memory: what the machine is doing.
     Hardware,
-    /// This run only: what it is holding, what it has asked for, what it cost.
+    /// What this run is holding: how full the context is and what has been
+    /// asked of it.
+    Context,
+    /// What this run has cost: tokens in, tokens out, and how fast.
     Session,
-    /// Every run there has ever been, read from the totals file.
-    Overall,
     /// Tool calls that failed, and what was sent to them.
     Debug,
     /// The files the agent has touched, listed down the left of the pane with
@@ -38,27 +40,32 @@ impl View {
     /// builds its arrangement from [`Dock::new`] rather than from this, but the
     /// skin reads a view's accent by position here, so the order is part of
     /// what a colour means.
+    ///
+    /// The order has not moved since the views were renamed: OUTPUT was TALK,
+    /// CONTEXT was the pane called SESSION and SESSION was the one called
+    /// OVERALL, each in the same slot it already had, so nobody's accents
+    /// shifted along by one when the labels changed.
     pub const ALL: [View; 9] = [
-        View::Talk,
+        View::Output,
         View::Activity,
         View::Plan,
         View::Agents,
         View::Hardware,
+        View::Context,
         View::Session,
-        View::Overall,
         View::Debug,
         View::Files,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            View::Talk => "TALK",
+            View::Output => "OUTPUT",
             View::Activity => "ACTIVITY",
             View::Plan => "PLAN",
             View::Agents => "AGENTS",
             View::Hardware => "HARDWARE",
+            View::Context => "CONTEXT",
             View::Session => "SESSION",
-            View::Overall => "OVERALL",
             View::Debug => "DEBUG",
             View::Files => "FILES",
         }
@@ -176,7 +183,7 @@ impl Dock {
             hidden: Vec::new(),
             slots: [
                 Slot {
-                    views: vec![View::Talk],
+                    views: vec![View::Output],
                     active: 0,
                     folded: false,
                 },
@@ -186,8 +193,8 @@ impl Dock {
                         View::Plan,
                         View::Agents,
                         View::Hardware,
+                        View::Context,
                         View::Session,
-                        View::Overall,
                     ],
                     active: 0,
                     folded: false,
@@ -348,7 +355,7 @@ mod tests {
     fn the_default_arrangement_holds_every_view_once() {
         let dock = Dock::new();
         assert!(dock.is_sound());
-        assert_eq!(dock.slot(Space::Left).active(), Some(View::Talk));
+        assert_eq!(dock.slot(Space::Left).active(), Some(View::Output));
         assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Activity));
         assert_eq!(dock.slot(Space::BottomRight).active(), Some(View::Files));
         assert_eq!(dock.walk().len(), View::ALL.len());
@@ -358,14 +365,19 @@ mod tests {
     /// the one LLM monitor is now three. Both are asserted by absence: the
     /// palette and the walk are indexed by `View::ALL`, so a leftover variant
     /// would keep a tab and an accent alive with nothing behind them.
+    ///
+    /// TALK and OVERALL are gone the same way. They were renamed rather than
+    /// removed, so the count is the same and only the labels moved: a tab still
+    /// reading either of them means a variant kept its old label.
     #[test]
     fn there_are_nine_views_and_no_avatar_and_no_single_llm_monitor() {
         assert_eq!(View::ALL.len(), 9);
         for view in View::ALL {
-            assert_ne!(view.label(), "CLIPPY", "{view:?}");
-            assert_ne!(view.label(), "LLM", "{view:?}");
+            for gone in ["CLIPPY", "LLM", "TALK", "OVERALL"] {
+                assert_ne!(view.label(), gone, "{view:?}");
+            }
         }
-        for wanted in [View::Session, View::Overall, View::Debug] {
+        for wanted in [View::Context, View::Session, View::Debug] {
             assert!(View::ALL.contains(&wanted), "{wanted:?}");
         }
         let dock = Dock::new();
@@ -377,26 +389,45 @@ mod tests {
         assert_eq!(dock.slot(Space::BottomRight).active(), Some(View::Files));
     }
 
+    /// The three labels the rename asked for, each in the slot it already had.
+    /// The slot indexes the accent palette and the `view_*` colour keys, so a
+    /// variant that shifted along would take another one's colour with it.
+    #[test]
+    fn the_renamed_views_keep_their_slots() {
+        assert_eq!(View::ALL[0], View::Output);
+        assert_eq!(View::ALL[5], View::Context);
+        assert_eq!(View::ALL[6], View::Session);
+        assert_eq!(View::Output.label(), "OUTPUT");
+        assert_eq!(View::Context.label(), "CONTEXT");
+        assert_eq!(View::Session.label(), "SESSION");
+        // No two tabs may read the same, or the swap put one label on two views.
+        let mut labels: Vec<&str> = View::ALL.iter().map(|view| view.label()).collect();
+        let all = labels.len();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), all, "{labels:?}");
+    }
+
     /// The invariant the rest of the window relies on: whatever gets dragged
     /// where, every view is in exactly one space.
     #[test]
     fn every_move_leaves_every_view_in_exactly_one_space() {
         let mut dock = Dock::new();
         let moves = [
-            (View::Talk, Space::BottomRight),
+            (View::Output, Space::BottomRight),
             (View::Files, Space::Left),
             (View::Activity, Space::Left),
             (View::Plan, Space::BottomRight),
             (View::Hardware, Space::Left),
-            (View::Overall, Space::BottomRight),
+            (View::Session, Space::BottomRight),
             (View::Agents, Space::TopRight),
-            (View::Talk, Space::Left),
+            (View::Output, Space::Left),
         ];
         for (view, to) in moves {
             dock.move_view(view, to);
             assert!(dock.is_sound(), "after moving {view:?} to {to:?}: {dock:?}");
         }
-        assert_eq!(dock.space_of(View::Talk), Some(Space::Left));
+        assert_eq!(dock.space_of(View::Output), Some(Space::Left));
     }
 
     /// A space can be emptied. It must stay sound and stay usable.
@@ -408,8 +439,8 @@ mod tests {
             View::Plan,
             View::Agents,
             View::Hardware,
+            View::Context,
             View::Session,
-            View::Overall,
         ] {
             dock.move_view(view, Space::Left);
         }
@@ -438,8 +469,8 @@ mod tests {
     fn removing_the_active_tab_leaves_a_valid_one_showing() {
         let mut dock = Dock::new();
         // Show the last tab, then move it out.
-        dock.slot_mut(Space::TopRight).show(View::Overall);
-        dock.move_view(View::Overall, Space::Left);
+        dock.slot_mut(Space::TopRight).show(View::Session);
+        dock.move_view(View::Session, Space::Left);
         let slot = dock.slot(Space::TopRight);
         assert!(slot.active().is_some());
         assert!(slot.views.contains(&slot.active().unwrap()));
@@ -464,16 +495,16 @@ mod tests {
     fn the_walk_covers_every_view_and_wraps() {
         let mut dock = Dock::new();
         dock.move_view(View::Files, Space::Left);
-        dock.move_view(View::Talk, Space::BottomRight);
-        let mut seen = vec![View::Talk];
-        let mut at = View::Talk;
+        dock.move_view(View::Output, Space::BottomRight);
+        let mut seen = vec![View::Output];
+        let mut at = View::Output;
         for _ in 0..View::ALL.len() - 1 {
             at = dock.after(at).unwrap();
             assert!(!seen.contains(&at), "{at:?} twice in {seen:?}");
             seen.push(at);
         }
         assert_eq!(seen.len(), View::ALL.len());
-        assert_eq!(dock.after(at), Some(View::Talk), "and it wraps");
+        assert_eq!(dock.after(at), Some(View::Output), "and it wraps");
     }
 
     /// A view the settings turned off has no tab, nothing walks to it, and it
@@ -497,11 +528,11 @@ mod tests {
         assert_eq!(dock.space_of(View::Files), None);
         assert!(dock.is_sound());
         // The views that are on still walk, and still wrap.
-        let mut at = View::Talk;
+        let mut at = View::Output;
         for _ in 0..dock.walk().len() {
             at = dock.after(at).unwrap();
         }
-        assert_eq!(at, View::Talk);
+        assert_eq!(at, View::Output);
     }
 
     /// Closing a widget and reopening it, which is the same pair of states the
@@ -570,13 +601,13 @@ mod tests {
             assert!(dock.is_sound(), "{view:?}");
         }
         assert!(dock.walk().is_empty());
-        assert_eq!(dock.after(View::Talk), None);
+        assert_eq!(dock.after(View::Output), None);
         for space in Space::ALL {
             assert!(dock.slot(space).is_empty(), "{space:?}");
             assert_eq!(dock.slot(space).active(), None);
         }
-        assert!(dock.unhide(View::Talk));
-        assert_eq!(dock.slot(Space::Left).active(), Some(View::Talk));
+        assert!(dock.unhide(View::Output));
+        assert_eq!(dock.slot(Space::Left).active(), Some(View::Output));
         assert!(dock.is_sound());
     }
 
@@ -584,8 +615,8 @@ mod tests {
     fn revealing_a_view_shows_it_and_unfolds_its_space() {
         let mut dock = Dock::new();
         dock.slot_mut(Space::TopRight).folded = true;
-        assert!(dock.reveal(View::Overall));
-        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Overall));
+        assert!(dock.reveal(View::Session));
+        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Session));
         assert!(!dock.slot(Space::TopRight).folded);
     }
 }

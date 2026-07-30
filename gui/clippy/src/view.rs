@@ -860,14 +860,15 @@ pub struct Frame<'a> {
 impl Frame<'_> {
     /// The font size and column width a view is actually drawn with.
     ///
-    /// Talk uses the transcript size and every other pane the smaller one.
+    /// The output pane uses the transcript size and every other pane the
+    /// smaller one.
     /// Measuring a pane with the wrong one of the two is what put the
     /// selection band and the hit test off the glyphs they were describing,
     /// so nothing may reach for `body_size` or `pane_size` directly when the
     /// view is a variable.
     pub fn metrics_of(&self, view: View) -> (f32, f32) {
         match view {
-            View::Talk => (self.body_size, self.column),
+            View::Output => (self.body_size, self.column),
             _ => (self.pane_size, self.pane_column),
         }
     }
@@ -1133,13 +1134,17 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
 
     match slot.active() {
         None => {}
-        Some(View::Talk) => talk(scene, frame, panel),
+        Some(View::Output) => output(scene, frame, panel),
         Some(View::Activity) => activity(scene, frame, panel),
         Some(View::Plan) => plan(scene, frame, panel),
         Some(View::Agents) => agents(scene, frame, panel),
         Some(View::Hardware) => gauges(scene, frame, panel, frame.monitor.hardware()),
-        Some(View::Session) => session(scene, frame, panel),
-        Some(View::Overall) => gauges(scene, frame, panel, frame.monitor.overall()),
+        // The monitor's own three lists are still called hardware, session and
+        // overall. Which readings belong in which pane is a separate change from
+        // what the panes are called, so the labels moved here first and the
+        // lists behind them keep the names they had.
+        Some(View::Context) => context(scene, frame, panel),
+        Some(View::Session) => gauges(scene, frame, panel, frame.monitor.overall()),
         Some(View::Debug) => debug(scene, frame, panel),
         Some(View::Files) => files(scene, frame, panel),
     }
@@ -1160,9 +1165,9 @@ fn selection_band(scene: &mut Scene, frame: &Frame, panel: Panel, showing: Optio
     let Some(pane) = frame.state.pane_of(view) else {
         return;
     };
-    // The pane's own size, not the pane size for everything: Talk is drawn at
-    // the transcript size, and banding it at the smaller one is what put the
-    // highlight off the glyphs it was supposed to cover.
+    // The pane's own size, not the pane size for everything: the output pane is
+    // drawn at the transcript size, and banding it at the smaller one is what
+    // put the highlight off the glyphs it was supposed to cover.
     let (size, column) = frame.metrics_of(view);
     let content = panel.inset(PAD);
     let rows = frame.layout.rows(panel, size);
@@ -1210,15 +1215,16 @@ fn text_box(scene: &mut Scene, frame: &Frame, panel: Panel, size: f32, runs: Vec
     scene.text(Text::rich(runs, panel.inset(PAD), size, frame.skin.body));
 }
 
-fn talk(scene: &mut Scene, frame: &Frame, panel: Panel) {
+/// The OUTPUT pane: what the model said, as Markdown.
+fn output(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let (skin, state) = (frame.skin, frame.state);
     let rows = frame.layout.rows(panel, frame.body_size);
     let cols = cols_of(panel, frame.column);
     let mut runs = Vec::new();
     // A window that starts inside a fenced block has to know it is looking at
     // code, so the state is carried in from the lines above it.
-    let mut fence = state.talk.fence_before(rows, cols);
-    for line in state.talk.visible(rows, cols) {
+    let mut fence = state.output.fence_before(rows, cols);
+    for line in state.output.visible(rows, cols) {
         match line.tone {
             // Only the model's prose is Markdown. What the human typed and
             // what the harness noted are shown as written.
@@ -1231,9 +1237,9 @@ fn talk(scene: &mut Scene, frame: &Frame, panel: Panel) {
     // it, so the shaped buffer is scrolled by the rows that sit above.
     scene.text(
         Text::rich(runs, panel.inset(PAD), frame.body_size, frame.skin.body)
-            .scrolled(state.talk.window(rows, cols).skip as f32),
+            .scrolled(state.output.window(rows, cols).skip as f32),
     );
-    scrollbar(scene, skin, panel, state.talk.thumb(rows, cols));
+    scrollbar(scene, skin, panel, state.output.thumb(rows, cols));
 }
 
 fn activity(scene: &mut Scene, frame: &Frame, panel: Panel) {
@@ -1477,7 +1483,8 @@ fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>) {
 /// back to the build stamp. They are readings with labels, which is what they
 /// never were up there: the phase, the model and the workspace sat unlabelled
 /// on one line with the token budget, and nothing said which was which.
-fn session(scene: &mut Scene, frame: &Frame, panel: Panel) {
+/// The CONTEXT pane: which phase, model and workspace, then its readings.
+fn context(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let (skin, state) = (frame.skin, frame.state);
     let content = panel.inset(PAD);
     let line = Text::line_for(frame.pane_size);
@@ -2188,8 +2195,8 @@ mod tests {
     }
 
     /// The running totals a monitor is sampled against: enough in them that the
-    /// overall pane has something to write, and the same every time so a test
-    /// does not depend on the machine's own file.
+    /// pane reading them has something to write, and the same every time so a
+    /// test does not depend on the machine's own file.
     fn sample_totals() -> crate::totals::Totals {
         crate::totals::Totals {
             prefilled: 4_200_000,
@@ -3045,7 +3052,7 @@ mod tests {
     #[test]
     fn a_moved_view_is_drawn_in_its_new_space() {
         let mut dock = Dock::new();
-        dock.move_view(View::Overall, Space::Left);
+        dock.move_view(View::Session, Space::Left);
         let out = render(&busy_state(), 1400.0, 900.0, &dock, &["a.rs"]);
         let left: Vec<View> = out
             .layout
@@ -3054,8 +3061,8 @@ mod tests {
             .iter()
             .map(|(v, _)| *v)
             .collect();
-        assert!(left.contains(&View::Overall), "{left:?}");
-        assert!(left.contains(&View::Talk), "{left:?}");
+        assert!(left.contains(&View::Session), "{left:?}");
+        assert!(left.contains(&View::Output), "{left:?}");
         let top: Vec<View> = out
             .layout
             .placed(Space::TopRight)
@@ -3063,7 +3070,7 @@ mod tests {
             .iter()
             .map(|(v, _)| *v)
             .collect();
-        assert!(!top.contains(&View::Overall), "{top:?}");
+        assert!(!top.contains(&View::Session), "{top:?}");
     }
 
     /// An emptied space gives its room away rather than leaving a hole.
@@ -3076,8 +3083,8 @@ mod tests {
             View::Plan,
             View::Agents,
             View::Hardware,
+            View::Context,
             View::Session,
-            View::Overall,
         ] {
             emptied.move_view(view, Space::BottomRight);
         }
@@ -3096,7 +3103,7 @@ mod tests {
     #[test]
     fn an_empty_left_column_hands_the_width_over() {
         let mut dock = Dock::new();
-        dock.move_view(View::Talk, Space::TopRight);
+        dock.move_view(View::Output, Space::TopRight);
         let out = render(&busy_state(), 1200.0, 800.0, &dock, &[]);
         assert_eq!(out.layout.placed(Space::Left).strip.w, 0.0);
         let top = out.layout.placed(Space::TopRight);
@@ -3154,11 +3161,11 @@ mod tests {
         let mut state = busy_state();
         // Three known lines at the end of the conversation.
         for text in ["alpha alpha", "beta beta", "gamma gamma"] {
-            state.talk.say(text, Tone::Body);
+            state.output.say(text, Tone::Body);
         }
-        let last = state.talk.last() - 1;
+        let last = state.output.last() - 1;
         let mut selection =
-            crate::select::Selection::new(View::Talk, crate::select::Spot::new(last - 2, 6));
+            crate::select::Selection::new(View::Output, crate::select::Spot::new(last - 2, 6));
         selection.extend(crate::select::Spot::new(last, 5));
         state.selection = Some(selection);
 
@@ -3197,10 +3204,10 @@ mod tests {
         assert_eq!(bands.len(), 3, "{bands:?}");
         // Consecutive rows, top to bottom, each one line tall.
         //
-        // At the size Talk is *drawn* with, not the pane size. This assertion
-        // used to read `line_for(13.0)` while the transcript rendered at 14.0,
-        // so it passed while the highlight sat a growing fraction of a row
-        // above the glyphs it was supposed to cover.
+        // At the size the output pane is *drawn* with, not the pane size. This
+        // assertion used to read `line_for(13.0)` while the transcript rendered
+        // at 14.0, so it passed while the highlight sat a growing fraction of a
+        // row above the glyphs it was supposed to cover.
         let line = Text::line_for(14.0);
         let mut ys: Vec<f32> = bands.iter().map(|b| b[1]).collect();
         ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -3335,16 +3342,57 @@ mod tests {
         // every run, and what failed.
         let hardware = seen(View::Hardware);
         assert!(hardware.contains("CPU") || hardware.contains("RAM"), "{hardware}");
+        let context = seen(View::Context);
+        assert!(context.contains("TOOL CALLS"), "{context}");
+        assert!(context.contains("laguna-s21"), "the model belongs here: {context}");
+        assert!(!context.contains("CPU"), "hardware leaked into CONTEXT: {context}");
         let session = seen(View::Session);
-        assert!(session.contains("TOOL CALLS"), "{session}");
-        assert!(session.contains("laguna-s21"), "the model belongs here: {session}");
-        assert!(!session.contains("CPU"), "hardware leaked into SESSION: {session}");
-        let overall = seen(View::Overall);
-        assert!(overall.contains("DECODE MID"), "{overall}");
-        assert!(!overall.contains("TOOL CALLS"), "the session leaked: {overall}");
+        assert!(session.contains("DECODE MID"), "{session}");
+        assert!(!session.contains("TOOL CALLS"), "the other pane leaked: {session}");
         assert!(!hardware.contains("DECODE"), "the reverse: {hardware}");
         let debug = seen(View::Debug);
         assert!(debug.contains("failed calls"), "{debug}");
+    }
+
+    /// The tabs are the whole of what the rename changed, so this reads them off
+    /// the strip rather than out of the scene as a whole: a label is matched
+    /// inside the box the layout gave that tab, so a reading of the same name
+    /// inside a pane (CONTEXT is also a gauge) cannot stand in for it.
+    #[test]
+    fn the_tab_strips_read_the_renamed_labels() {
+        let out = render(&busy_state(), 1600.0, 1000.0, &Dock::new(), &["calc.py"]);
+        let mut on_strip: Vec<&str> = Vec::new();
+        for space in Space::ALL {
+            for (view, tab) in &out.layout.placed(space).tabs {
+                let drawn: Vec<&str> = out
+                    .scene
+                    .texts
+                    .iter()
+                    .filter(|text| {
+                        text.at.x + 0.01 >= tab.x
+                            && text.at.x <= tab.x + tab.w + 0.01
+                            && text.at.y + 0.01 >= tab.y
+                            && text.at.y <= tab.y + tab.h + 0.01
+                    })
+                    .flat_map(|text| text.runs.iter().map(|run| run.text.as_str()))
+                    .collect();
+                assert!(
+                    drawn.contains(&view.label()),
+                    "{view:?} does not say {:?} on its own tab: {drawn:?}",
+                    view.label()
+                );
+                on_strip.push(view.label());
+            }
+        }
+        for wanted in ["OUTPUT", "CONTEXT", "SESSION"] {
+            assert!(on_strip.contains(&wanted), "no {wanted} tab: {on_strip:?}");
+        }
+        // Renamed, not added: the old readings must not still have tabs of their
+        // own beside the new ones.
+        for gone in ["TALK", "OVERALL"] {
+            assert!(!on_strip.contains(&gone), "{gone} still has a tab");
+        }
+        assert_eq!(on_strip.len(), View::ALL.len(), "{on_strip:?}");
     }
 
     /// The conversation and what has been typed are on screen whichever tab is
@@ -3426,7 +3474,7 @@ mod tests {
         monitor.sample(&state, &totals);
 
         let mut dock = Dock::new();
-        dock.reveal(View::Session);
+        dock.reveal(View::Context);
         // Deliberately mismatched: the transcript's columns are wider than the
         // pane's, which is the situation that produced the overlap.
         for (column, pane_column) in [(8.4, 7.8), (7.8, 8.4), (8.0, 8.0)] {
@@ -3519,7 +3567,7 @@ mod tests {
         monitor.sample(&state, &sample_totals());
 
         let mut dock = Dock::new();
-        dock.reveal(View::Session);
+        dock.reveal(View::Context);
         let shape = Shape {
             shaded: false,
             dock: &dock,
@@ -3640,7 +3688,7 @@ mod tests {
         let mut monitor = Monitor::new();
         monitor.sample(&state, &sample_totals());
         let mut dock = Dock::new();
-        dock.reveal(View::Session);
+        dock.reveal(View::Context);
 
         let mut sizes = Vec::new();
         for width in [1600.0, 760.0] {
@@ -3681,7 +3729,7 @@ mod tests {
         let mut monitor = Monitor::new();
         monitor.sample(&state, &sample_totals());
         let mut dock = Dock::new();
-        dock.reveal(View::Session);
+        dock.reveal(View::Context);
         let out = render_with(&state, 1400.0, 900.0, &dock, &[], &monitor, None);
         let text = text_of(&out.scene);
         for wanted in [
