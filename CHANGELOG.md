@@ -32,6 +32,15 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
 
 ### Added
 
+- A folder picker, drawn with the same rectangles as the rest of the window.
+  Launched from the dock with no argument, CLIppy called `current_dir()`, which
+  under a desktop launcher is your home directory, and handed the agent that
+  without saying so. Now the window opens on a list of folders: arrows move,
+  right walks in, left goes out, typing narrows the list, Enter opens, and a
+  folder named on the command line skips the picker as before. Folders chosen
+  before sit at the top of the list, remembered in `~/.config/noob/clippy.recent`
+  beside the settings, so the second launch is one keystroke. No native dialog:
+  a toolkit file chooser is dozens of crates and a portal at runtime.
 - Three monitors where there was one. SESSION is this run: which phase, model and
   workspace, context against where compaction triggers, tool calls, the longest
   single answer, prefill, cache, output, requests and the measured rates. OVERALL

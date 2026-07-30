@@ -7,9 +7,20 @@ No terminal, no web stack, no system window chrome. One GPU surface, drawn with
 wgpu and winit, composited against your desktop.
 
 ```
-./dev.sh gui                 # in the current directory
-./dev.sh gui ~/some/project  # somewhere else
+./dev.sh gui                 # opens the folder picker
+./dev.sh gui ~/some/project  # straight into that folder
 ```
+
+Named a folder, it starts there. Without one the window opens on a picker
+instead of guessing: launched from the dock, the current directory is your home
+directory, and handing the agent that silently was the old behaviour. Arrows
+move, right walks into a folder, left goes back out, typing narrows the list,
+Backspace with nothing typed goes up, Enter opens what the cursor is on, and Esc
+quits. The mouse does the same: click a row, double-click to walk in, and the
+button at the foot confirms. Folders you have opened before sit at the top of
+the list, so the second launch is Enter. They live in
+`~/.config/noob/clippy.recent`, one path per line, newest first; delete a line
+to forget it and delete the file to forget them all.
 
 `NOOB_BIN` names the agent binary when it is not `noob` on PATH.
 

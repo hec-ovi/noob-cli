@@ -19,10 +19,18 @@ pub const SETTINGS: char = '\u{eb51}';
 
 /// A file whose type has no mark of its own.
 pub const FILE: char = '\u{ea7b}';
-/// For the explorer tree. Named here already so the font coverage test in
-/// `noob-draw` guards it before anything draws it.
-#[allow(dead_code)]
+/// A folder in the picker's list.
 pub const FOLDER: char = '\u{e5ff}';
+/// The folder the picker is listing, which is also the one it would open.
+pub const FOLDER_OPEN: char = '\u{eaf7}';
+/// The way out of it.
+pub const UP: char = '\u{eaa1}';
+/// A folder opened in an earlier session.
+pub const RECENT: char = '\u{ea82}';
+/// In front of what has been typed to narrow a list.
+pub const FILTER: char = '\u{eaf1}';
+/// On the button that confirms a choice.
+pub const CONFIRM: char = '\u{eab2}';
 
 /// The mark for a file, chosen by extension.
 ///
@@ -86,7 +94,19 @@ mod tests {
             "cfg", "conf", "yml", "yaml", "sh", "bash", "zsh", "html", "htm", "css", "c", "h",
             "cpp", "cc", "hpp", "go", "lock", "txt", "log", "nothing-in-particular",
         ];
-        let named = [CLOSE, MAXIMIZE, MINIMIZE, SETTINGS, FILE, FOLDER]
+        let named = [
+            CLOSE,
+            MAXIMIZE,
+            MINIMIZE,
+            SETTINGS,
+            FILE,
+            FOLDER,
+            FOLDER_OPEN,
+            UP,
+            RECENT,
+            FILTER,
+            CONFIRM,
+        ]
             .into_iter()
             .chain(extensions.iter().map(|e| for_path(&format!("a.{e}"))));
         for ch in named {

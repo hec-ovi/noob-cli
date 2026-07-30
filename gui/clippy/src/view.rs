@@ -10,15 +10,19 @@
 //! another; [`crate::dock`] owns that arrangement, and this module only asks it
 //! where things are.
 //!
-//! The window has two shapes. Open, it is three spaces. Shaded, it is one strip
-//! carrying [`State::headline`] and nothing else, the way Winamp collapsed to
-//! its title. Double-click the bar to go between them.
+//! The window has three shapes. Open, it is three spaces. Shaded, it is one
+//! strip carrying [`State::headline`] and nothing else, the way Winamp collapsed
+//! to its title; double-click the bar to go between those two. Before a folder
+//! has been chosen it is the picker and nothing else, because there is no agent
+//! to arrange panes around yet.
 
 use noob_draw::{Panel, Rect, Run, Scene, Text};
 
 use crate::dock::{Dock, Space, View};
+use crate::icons;
 use crate::menu::Menu;
 use crate::monitor::{Gauge, Monitor};
+use crate::picker::{Picker, Row as PickerRow};
 use crate::skin::Skin;
 use crate::state::{State, TodoState, Tone};
 
@@ -87,6 +91,24 @@ const LIST_MIN_COLUMNS: usize = 9;
 /// looked at unreadable. At that size this floor wins and the list goes below
 /// [`LIST_MIN_COLUMNS`], because the file is what is being read.
 const DIFF_MIN_COLUMNS: usize = GUTTER + 20;
+/// How wide the folder picker gets, in pane columns. Wide enough for a deep
+/// path and no wider: folder names in a 200 column box are one word per row with
+/// the rest of it empty.
+const PICKER_COLUMNS: usize = 64;
+
+/// The rows the picker spends above its list: the heading, the folder it is
+/// listing, and what has been typed.
+const PICKER_HEAD_ROWS: f32 = 3.0;
+
+/// And below it: the keys, then the button that confirms.
+const PICKER_FOOT_ROWS: f32 = 2.0;
+
+/// How tall its list is allowed to get, in rows, and how short. Short enough
+/// that a folder with two entries is not a mostly empty box, tall enough that a
+/// deep source tree is not read four rows at a time.
+const PICKER_MIN_ROWS: usize = 6;
+const PICKER_MAX_ROWS: usize = 24;
+
 /// How wide the mark down the left of the selected row is. A tab's accent runs
 /// along its top edge because a strip is read left to right; a row is entered
 /// from the left, so its accent runs down that edge instead.
@@ -117,6 +139,14 @@ pub enum Hit {
     /// The open menu's box, away from any row. Swallowed for the same reason:
     /// a press on its margin must not reach what is behind it.
     Menu,
+    /// A row of the folder picker, by position in its list.
+    PickerRow(usize),
+    /// The button that confirms the row the cursor is on, which is how the
+    /// mouse chooses a folder without a keyboard.
+    PickerOpen,
+    /// The picker's box, away from any row. Swallowed, so a press on its margin
+    /// does not read as a press on the window behind it.
+    Picker,
 }
 
 impl Hit {
@@ -175,6 +205,16 @@ pub struct Layout {
     pub files_in: Option<Space>,
     pub input: Panel,
 
+    /// True while the folder picker is up, which is a shape of its own: there is
+    /// no arrangement of panes and no prompt, because there is no agent yet.
+    pub picking: bool,
+    /// Its box, its list, one panel per visible row of that list, and the button
+    /// that confirms. All empty when it is not up.
+    pub picker: Panel,
+    pub picker_list: Panel,
+    pub picker_rows: Vec<(usize, Panel)>,
+    pub picker_open: Panel,
+
     /// The floating layer. The open menu's box, and one panel per row, both
     /// empty when no menu is open. Drawn last and hit tested first.
     pub menu: Panel,
@@ -190,6 +230,9 @@ pub struct Shape<'a> {
     /// only way a click on a menu row and the row it looks like it landed on
     /// can never come apart.
     pub menu: Option<&'a Menu>,
+    /// The folder picker, while it is up. Part of the shape because the picker
+    /// replaces the whole window: with it up there are no panes and no prompt.
+    pub picker: Option<&'a Picker>,
     /// One label per file in the explorer, in order.
     pub file_labels: Vec<String>,
     /// Which row the explorer list starts on, counted from its top. The layout
@@ -253,6 +296,41 @@ impl Layout {
                 file_rows: Vec::new(),
                 files_in: None,
                 input: nowhere(),
+                picking: false,
+                picker: nowhere(),
+                picker_list: nowhere(),
+                picker_rows: Vec::new(),
+                picker_open: nowhere(),
+                menu,
+                menu_rows,
+            };
+        }
+
+        // The picker is the whole window while it is up, and every other region
+        // collapses to nothing the way it does when the window is shaded: a
+        // stale hit region left behind here would let a click reach a pane that
+        // has no agent behind it.
+        if let Some(picker) = shape.picker {
+            let (box_, list, rows, open) = place_picker(rest.inset(GAP), shape, picker);
+            return Layout {
+                width,
+                height,
+                shaded: false,
+                title,
+                minimize: buttons[0],
+                maximize: buttons[1],
+                close: buttons[2],
+                spaces: [empty_placed(), empty_placed(), empty_placed()],
+                file_list: nowhere(),
+                file_diff: nowhere(),
+                file_rows: Vec::new(),
+                files_in: None,
+                input: nowhere(),
+                picking: true,
+                picker: box_,
+                picker_list: list,
+                picker_rows: rows,
+                picker_open: open,
                 menu,
                 menu_rows,
             };
@@ -357,6 +435,11 @@ impl Layout {
             file_rows,
             files_in,
             input: input.inset(GAP),
+            picking: false,
+            picker: nowhere(),
+            picker_list: nowhere(),
+            picker_rows: Vec::new(),
+            picker_open: nowhere(),
             menu,
             menu_rows,
         }
@@ -394,6 +477,22 @@ impl Layout {
             return Some(Hit::TitleBar);
         }
         if self.shaded {
+            return None;
+        }
+        // Nothing else exists while the picker is up, so this answers for the
+        // whole window below the title strip.
+        if self.picking {
+            for (index, panel) in &self.picker_rows {
+                if panel.contains(x, y) {
+                    return Some(Hit::PickerRow(*index));
+                }
+            }
+            if self.picker_open.w >= 1.0 && self.picker_open.contains(x, y) {
+                return Some(Hit::PickerOpen);
+            }
+            if self.picker.w >= 1.0 && self.picker.contains(x, y) {
+                return Some(Hit::Picker);
+            }
             return None;
         }
         for space in Space::ALL {
@@ -442,6 +541,13 @@ impl Layout {
     /// Rows a panel can show. The header line is content, not scrollback.
     pub fn rows(&self, panel: Panel, size: f32) -> usize {
         Text::rows_for(size, panel.inset(PAD).h)
+    }
+
+    /// How many rows the picker's list can show. Its box is already the content
+    /// box, so this does not inset again; taking [`Layout::rows`] to it would
+    /// lose a row and put the cursor's own row off screen at the bottom.
+    pub fn picker_capacity(&self, size: f32) -> usize {
+        Text::rows_for(size, self.picker_list.h)
     }
 
     /// The box a space's text is drawn in.
@@ -595,6 +701,62 @@ fn place_files(body: Panel, shape: &Shape) -> (Panel, Panel, Vec<(usize, Panel)>
     (list, diff, panels)
 }
 
+/// The folder picker's box, its list, the rows on screen and its button.
+///
+/// Centred in `area` and no wider than [`PICKER_COLUMNS`], because the thing
+/// being read is a column of folder names: stretched across a 2200 pixel window
+/// the eye has to travel the whole width to get from a name to the button under
+/// it. The list is as tall as it has entries, between two bounds, so a folder
+/// with three subfolders is not a mostly empty box.
+fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> (Panel, Panel, Vec<(usize, Panel)>, Panel) {
+    if area.w < 1.0 || area.h < 1.0 {
+        return (nowhere(), nowhere(), Vec::new(), nowhere());
+    }
+    let column = shape.pane_column.max(1.0);
+    let line = Text::line_for(shape.pane_size);
+    let head = PICKER_HEAD_ROWS * line;
+    let foot = PICKER_FOOT_ROWS * line;
+    let want = picker.rows().len().clamp(PICKER_MIN_ROWS, PICKER_MAX_ROWS);
+    let w = (PICKER_COLUMNS as f32 * column + PAD * 2.0).min(area.w);
+    let h = (PAD * 2.0 + head + want as f32 * line + GAP + foot).min(area.h);
+    let box_ = Panel::new(
+        area.x + ((area.w - w) * 0.5).floor(),
+        area.y + ((area.h - h) * 0.5).floor(),
+        w,
+        h,
+    );
+    let content = box_.inset(PAD);
+    let list = Panel::new(
+        content.x,
+        content.y + head,
+        content.w,
+        (content.h - head - foot - GAP).max(0.0),
+    );
+    let rows_fit = Text::rows_for(shape.pane_size, list.h);
+    let heights = picker.heights();
+    let back = text_geometry::scrollback_for(&heights, rows_fit, picker.first());
+    let window = text_geometry::window(&heights, rows_fit, back);
+    let rows = (0..window.count)
+        .map(|step| {
+            // The full width of the list, so the whole row answers the click the
+            // way a row of a file manager does, not just the characters of the
+            // name.
+            let index = window.first + step;
+            (
+                index,
+                Panel::new(list.x, list.y + step as f32 * line, list.w, line),
+            )
+        })
+        .collect();
+    // Exactly as wide as what it says, and the caption comes from the picker, so
+    // the button cannot be a size the text does not fill or say a thing it does
+    // not do.
+    let caption = ((picker.caption().chars().count() + ROW_ICON_COLUMNS + 2) as f32 * column)
+        .min(content.w);
+    let open = Panel::new(content.x, content.y + content.h - line, caption, line);
+    (box_, list, rows, open)
+}
+
 /// Lay tabs left to right at the width their labels need, dropping any that do
 /// not fit rather than squeezing them into unreadable slivers.
 fn strip_tabs(bar: Panel, widths: impl Iterator<Item = usize>, column: f32) -> Vec<Panel> {
@@ -665,6 +827,8 @@ pub struct Frame<'a> {
     /// The open menu. The same one the layout was computed from, or the rows
     /// would be drawn somewhere other than where they are hit tested.
     pub menu: Option<&'a Menu>,
+    /// The folder picker, while it is up. The same one, for the same reason.
+    pub picker: Option<&'a Picker>,
 }
 
 impl Frame<'_> {
@@ -699,6 +863,13 @@ pub fn build(frame: &Frame) -> Scene {
 
     scene.rect(Panel::new(0.0, 0.0, layout.width, layout.height).fill(frame.skin.backdrop));
     title_bar(&mut scene, frame);
+
+    // No folder chosen yet, so there is nothing to arrange panes around and
+    // nothing to type at.
+    if layout.picking {
+        folder_picker(&mut scene, frame);
+        return scene;
+    }
 
     for space in Space::ALL {
         space_pane(&mut scene, frame, space);
@@ -1502,6 +1673,157 @@ fn explorer(scene: &mut Scene, frame: &Frame, list: Panel) {
     scrollbar(scene, skin, list, state.files_thumb(rows));
 }
 
+/// The folder picker: the whole window until a folder is chosen.
+///
+/// One box in the middle of the surface, drawn with the same rectangles and the
+/// same text as everything else here. No native dialog: a file chooser from the
+/// desktop's toolkit would pull in dozens of crates and a portal at runtime, for
+/// a window whose whole point is that it is one GPU surface.
+fn folder_picker(scene: &mut Scene, frame: &Frame) {
+    let Some(picker) = frame.picker else {
+        return;
+    };
+    let (skin, layout) = (frame.skin, frame.layout);
+    let box_ = layout.picker;
+    if box_.w < 1.0 || box_.h < 1.0 {
+        return;
+    }
+    scene.rect(panel_fill(box_, skin.panel));
+    scene.rect(panel_edge(box_, skin.edge_focus));
+
+    let size = frame.pane_size;
+    let line = Text::line_for(size);
+    let content = box_.inset(PAD);
+    let cols = cols_of(content, frame.pane_column);
+    let say = |scene: &mut Scene, runs: Vec<Run>, at: Panel, tint: [u8; 4]| {
+        scene.text(Text::rich(runs, at, size, tint));
+    };
+
+    say(
+        scene,
+        vec![Run::tinted("OPEN A FOLDER", skin.bright)],
+        Panel::new(content.x, content.y, content.w, line),
+        skin.bright,
+    );
+    // The folder being listed, in full. The rows under it are names, so this is
+    // the only thing on screen saying where in the tree they are.
+    say(
+        scene,
+        vec![Run::tinted(
+            clip(&picker.at().display().to_string(), cols),
+            skin.body,
+        )],
+        Panel::new(content.x, content.y + line, content.w, line),
+        skin.body,
+    );
+    // What has been typed, or why the list is empty when it is empty for a
+    // reason. A folder with no permission looks exactly like an empty folder
+    // otherwise.
+    let mut runs = vec![Run::icon(icons::FILTER.to_string(), skin.dim), Run::plain(" ")];
+    let tint = match (picker.trouble(), picker.filter()) {
+        (Some(why), _) => {
+            runs.push(Run::tinted(clip(why, cols), skin.bad));
+            skin.bad
+        }
+        (None, "") => {
+            runs.push(Run::tinted("type to narrow the list", skin.dim));
+            skin.dim
+        }
+        (None, typed) => {
+            runs.push(Run::tinted(typed, skin.bright));
+            skin.bright
+        }
+    };
+    say(
+        scene,
+        runs,
+        Panel::new(content.x, content.y + 2.0 * line, content.w, line),
+        tint,
+    );
+
+    for (index, row) in &layout.picker_rows {
+        let Some(entry) = picker.row(*index) else {
+            continue;
+        };
+        let on = *index == picker.cursor();
+        if on {
+            // The band and the mark the file explorer marks its open row with,
+            // rather than a block in a colour of its own: one language for "this
+            // is the row you are on" in the whole window.
+            scene.rect(row.fill(skin.strip));
+            scene.rect(Panel::new(row.x, row.y, MARK_W, row.h).fill(skin.edge_focus));
+        }
+        let tint = if on { skin.bright } else { skin.body };
+        let icon = match entry {
+            PickerRow::Here => icons::FOLDER_OPEN,
+            PickerRow::Up => icons::UP,
+            PickerRow::Recent(_) => icons::RECENT,
+            PickerRow::Folder(_) => icons::FOLDER,
+        };
+        let room = cols.saturating_sub(ROW_ICON_COLUMNS + 1).max(1);
+        say(
+            scene,
+            vec![
+                Run::icon(icon.to_string(), tint),
+                Run::tinted(format!(" {}", clip(&picker.label(entry), room)), tint),
+            ],
+            Panel::new(
+                row.x + MARK_W + 3.0,
+                row.y,
+                (row.w - MARK_W - 3.0).max(1.0),
+                line,
+            ),
+            tint,
+        );
+    }
+    scrollbar(
+        scene,
+        skin,
+        layout.picker,
+        picker.thumb(layout.picker_capacity(size)),
+    );
+
+    // The keys, spelled out. Nothing else in this window needs them written
+    // down, but this is the first thing a new install shows and it is the one
+    // place where there is no pane to experiment in.
+    say(
+        scene,
+        vec![Run::tinted(
+            clip(
+                "enter opens \u{2022} right walks in \u{2022} left goes out \u{2022} esc quits",
+                cols,
+            ),
+            skin.dim,
+        )],
+        Panel::new(
+            content.x,
+            content.y + content.h - 2.0 * line,
+            content.w,
+            line,
+        ),
+        skin.dim,
+    );
+    let open = layout.picker_open;
+    scene.rect(open.fill(if frame.hot == Some(Hit::PickerOpen) {
+        skin.hot
+    } else {
+        skin.tab_idle
+    }));
+    scene.rect(open.outline(skin.edge, 1.0));
+    say(
+        scene,
+        vec![
+            Run::icon(icons::CONFIRM.to_string(), skin.bright),
+            Run::tinted(
+                format!(" {}", clip(&picker.caption(), cols)),
+                skin.bright,
+            ),
+        ],
+        open.row(3.0, line),
+        skin.bright,
+    );
+}
+
 /// The tab under the pointer while it is being dragged, so the drag has
 /// something following it and the drop has somewhere to be aimed.
 fn dragging(scene: &mut Scene, frame: &Frame) {
@@ -1747,6 +2069,7 @@ mod tests {
             shaded: false,
             dock,
             menu: None,
+            picker: None,
             file_labels: files.iter().map(|f| f.to_string()).collect(),
             file_first: first,
             column: 8.0,
@@ -2024,6 +2347,7 @@ mod tests {
             trouble: None,
             selection: None,
             menu: None,
+            picker: None,
         });
         Rendered {
             scene,
@@ -2736,6 +3060,7 @@ mod tests {
             trouble: None,
             selection: Some(selection),
             menu: None,
+            picker: None,
         });
 
         let body = layout.placed(Space::Left).body.inset(PAD);
@@ -2811,6 +3136,7 @@ mod tests {
             trouble: None,
             selection: Some(selection),
             menu: None,
+            picker: None,
         });
         assert!(!scene.rects.iter().any(|r| r.rgba() == skin.select));
     }
@@ -2986,6 +3312,7 @@ mod tests {
                 shaded: false,
                 dock: &dock,
                 menu: None,
+                picker: None,
                 file_labels: vec![],
                 file_first: 0,
                 column,
@@ -3011,6 +3338,7 @@ mod tests {
                 trouble: None,
                 selection: None,
                 menu: None,
+                picker: None,
             });
             let body = layout.placed(Space::TopRight).body;
             let hues: Vec<[f32; 4]> = skin
@@ -3074,6 +3402,7 @@ mod tests {
             shaded: false,
             dock: &dock,
             menu: None,
+            picker: None,
             file_labels: vec![],
             file_first: 0,
             column: 8.0,
@@ -3099,6 +3428,7 @@ mod tests {
             trouble: None,
             selection: None,
             menu: None,
+            picker: None,
         });
 
         // CONTEXT is the only bounded reading in this pane with anything in it,
@@ -3336,6 +3666,7 @@ mod tests {
             trouble: None,
             selection: None,
             menu: None,
+            picker: None,
         });
         (layout.input, layout, scene)
     }
@@ -3564,6 +3895,7 @@ mod tests {
             trouble: None,
             selection: None,
             menu: None,
+            picker: None,
         });
         let text = text_of(&scene);
         assert!(text.contains("WORKING") || text.contains("THINKING"), "{text}");
@@ -3674,6 +4006,7 @@ mod tests {
             trouble: None,
             selection: None,
             menu: Some(menu),
+            picker: None,
         });
         Rendered {
             scene,
@@ -3900,6 +4233,219 @@ mod tests {
         // with nothing in it.
         assert_eq!(out.layout.hit(700.0, 450.0), None);
     }
-}
 
+    /// The window with the folder picker up, laid out and drawn off one shape,
+    /// which is what makes a row land where it is drawn.
+    fn render_picker(picker: &Picker, w: f32, h: f32, hot: Option<Hit>) -> Rendered {
+        let dock = Dock::new();
+        let state = State::new();
+        let mut shape = shape(&dock, &[]);
+        shape.picker = Some(picker);
+        let layout = Layout::compute(w, h, &shape);
+        let skin = Skin::from(&Config::default());
+        let scene = build(&Frame {
+            state: &state,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &crate::prompt::Prompt::default(),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            drag: None,
+            hot,
+            trouble: None,
+            selection: None,
+            menu: None,
+            picker: Some(picker),
+        });
+        Rendered {
+            scene,
+            layout,
+            skin,
+        }
+    }
+
+    fn a_picker(inside: &[&str], recents: &[&str]) -> Picker {
+        Picker::open(
+            Box::new(crate::picker::Fixed(
+                inside.iter().map(|s| s.to_string()).collect(),
+            )),
+            std::path::PathBuf::from("/home/hec"),
+            recents.iter().map(std::path::PathBuf::from).collect(),
+        )
+    }
+
+    /// With no folder chosen there is nothing to arrange panes around and
+    /// nothing to type at, so the picker is the window: no spaces, no prompt,
+    /// and it answers for every point below the title strip.
+    #[test]
+    fn the_window_opens_on_the_picker_instead_of_a_workspace() {
+        let picker = a_picker(&["gui", "crates", "docs"], &["/home/hec/workspace/noob-cli"]);
+        let out = render_picker(&picker, 1205.0, 791.0, None);
+        let layout = &out.layout;
+        assert!(layout.picking);
+        for space in Space::ALL {
+            assert!(layout.placed(space).tabs.is_empty(), "{space:?}");
+            assert_eq!(layout.placed(space).body.w, 0.0, "{space:?}");
+        }
+        assert_eq!(layout.input.w, 0.0, "there is nothing to type at yet");
+        assert_eq!(layout.cell(600.0, 400.0, 13.0, 8.0), None);
+
+        // Inside the surface, under the title strip, and centred.
+        let box_ = layout.picker;
+        assert!(box_.y >= TITLE_H, "it starts below the strip: {box_:?}");
+        assert!(box_.y + box_.h <= 791.0 && box_.x + box_.w <= 1205.0, "{box_:?}");
+        let left = box_.x;
+        let right = 1205.0 - (box_.x + box_.w);
+        assert!((left - right).abs() <= 1.0, "off centre: {left} then {right}");
+
+        // Every row of the list is hit where it is drawn, and the button and the
+        // margin answer for themselves.
+        assert_eq!(layout.picker_rows.len(), picker.rows().len());
+        for (index, row) in &layout.picker_rows {
+            let (x, y) = middle(*row);
+            assert_eq!(layout.hit(x, y), Some(Hit::PickerRow(*index)));
+            assert!(layout.picker_list.contains(x, y), "row {index} is outside the list");
+        }
+        let (x, y) = middle(layout.picker_open);
+        assert_eq!(layout.hit(x, y), Some(Hit::PickerOpen));
+        assert_eq!(
+            layout.hit(box_.x + box_.w - 2.0, box_.y + 2.0),
+            Some(Hit::Picker),
+            "its own margin swallows a press rather than passing it on"
+        );
+        assert_eq!(layout.hit(2.0, 400.0), None, "and outside it there is nothing");
+        // The strip is still the strip: the window can be moved and closed
+        // before a folder is chosen.
+        assert_eq!(layout.hit(400.0, 8.0), Some(Hit::TitleBar));
+        assert_eq!(layout.hit(middle(layout.close).0, middle(layout.close).1), Some(Hit::Close));
+
+        // What it says: the heading, the folder being listed, the remembered
+        // folder, the names inside, and what confirming would do.
+        let text = text_of(&out.scene);
+        for wanted in [
+            "OPEN A FOLDER",
+            "/home/hec",
+            "/home/hec/workspace/noob-cli",
+            "gui",
+            "crates",
+            "..",
+            "OPEN /home/hec/workspace/noob-cli",
+            "enter opens",
+        ] {
+            assert!(text.contains(wanted), "{wanted:?} is not on screen: {text}");
+        }
+
+        // The row the cursor is on is banded and marked, the same way the file
+        // explorer marks the file it is showing.
+        let (index, cursor_row) = layout.picker_rows[0];
+        assert_eq!(index, picker.cursor());
+        assert!(
+            covered(&out, cursor_row, cursor_row.h, out.skin.strip),
+            "the cursor's row has no band"
+        );
+        assert!(
+            out.scene.rects.iter().any(|rect| {
+                let [x, y, w, _] = rect.xywh();
+                (x - cursor_row.x).abs() < 0.01
+                    && (y - cursor_row.y).abs() < 0.01
+                    && (w - MARK_W).abs() < 0.01
+                    && rect.rgba() == out.skin.edge_focus
+            }),
+            "the cursor's row has no mark down its edge"
+        );
+        // And no other row is banded, or every row would read as the one.
+        let banded = out
+            .scene
+            .rects
+            .iter()
+            .filter(|rect| rect.rgba() == out.skin.strip)
+            .count();
+        assert_eq!(banded, 1, "more than one row is banded");
+
+        // Nothing hangs off the surface.
+        for rect in &out.scene.rects {
+            let [x, y, w, h] = rect.xywh();
+            assert!(
+                x >= -0.01 && y >= -0.01 && x + w <= 1205.01 && y + h <= 791.01,
+                "{:?} is outside the window",
+                rect.xywh()
+            );
+        }
+    }
+
+    /// The button lights up under the pointer, because it is the only thing in
+    /// the picker a mouse can press that is not a row.
+    #[test]
+    fn the_confirm_button_lights_up_under_the_pointer() {
+        let picker = a_picker(&["gui"], &[]);
+        let cold = render_picker(&picker, 1205.0, 791.0, None);
+        let warm = render_picker(&picker, 1205.0, 791.0, Some(Hit::PickerOpen));
+        let button = cold.layout.picker_open;
+        assert!(!covered(&cold, button, button.h, cold.skin.hot));
+        assert!(covered(&warm, button, button.h, warm.skin.hot));
+        // The caption is drawn inside the button it names, or the two would say
+        // different things about what Enter does.
+        let inside = warm.scene.texts.iter().any(|text| {
+            let line: String = text.runs.iter().map(|run| run.text.as_str()).collect();
+            line.contains(&picker.caption())
+                && text.at.x >= button.x - 0.01
+                && text.at.x + text.at.w <= button.x + button.w + 0.01
+        });
+        assert!(inside, "the caption is not in the button");
+    }
+
+    /// A folder with more subfolders than the box has rows scrolls. The rows
+    /// that are drawn are the rows the list is showing, and nothing is dropped
+    /// off the bottom of the box.
+    #[test]
+    fn the_picker_s_list_scrolls_instead_of_dropping_folders() {
+        let names: Vec<String> = (0..60).map(|n| format!("dir{n:02}")).collect();
+        let inside: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut picker = a_picker(&inside, &[]);
+        let out = render_picker(&picker, 1205.0, 791.0, None);
+        let rows = out.layout.picker_capacity(13.0);
+        assert!(
+            (PICKER_MIN_ROWS..=PICKER_MAX_ROWS).contains(&rows),
+            "{rows} rows"
+        );
+        assert_eq!(out.layout.picker_rows.len(), rows);
+        assert_eq!(out.layout.picker_rows[0].0, 0, "anchored at the top");
+        let last = out.layout.picker_rows.last().unwrap().1;
+        assert!(
+            last.y + last.h <= out.layout.picker_list.y + out.layout.picker_list.h + 0.01,
+            "the last row hangs out of the list"
+        );
+        assert!(
+            picker.thumb(rows).is_some(),
+            "a list that does not fit says so"
+        );
+
+        // Moved down, the rows drawn are the rows the list moved to.
+        assert!(picker.scroll(5, true, rows));
+        let out = render_picker(&picker, 1205.0, 791.0, None);
+        assert_eq!(out.layout.picker_rows[0].0, 5);
+        assert_eq!(out.layout.picker_rows.len(), rows);
+        for (index, row) in &out.layout.picker_rows {
+            let (x, y) = middle(*row);
+            assert_eq!(out.layout.hit(x, y), Some(Hit::PickerRow(*index)));
+        }
+
+        // A short list keeps the box a readable size rather than collapsing to
+        // two rows, and a window too small for the whole box does not push it
+        // off the surface.
+        let short = render_picker(&a_picker(&["one"], &[]), 1205.0, 791.0, None);
+        assert!(short.layout.picker_capacity(13.0) >= PICKER_MIN_ROWS);
+        let tiny = render_picker(&picker, 680.0, 380.0, None);
+        assert!(tiny.layout.picker.h <= 380.0 - TITLE_H);
+        assert!(!tiny.layout.picker_rows.is_empty(), "it still lists folders");
+        for rect in &tiny.scene.rects {
+            let [x, y, w, h] = rect.xywh();
+            assert!(x >= -0.01 && y >= -0.01 && x + w <= 680.01 && y + h <= 380.01);
+        }
+    }
+}
 

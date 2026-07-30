@@ -15,8 +15,11 @@
 //! eats a machine.
 //!
 //! Usage: `clippy [workspace]`, with `NOOB_BIN` naming the agent binary when it
-//! is not `noob` on PATH. Settings live beside noob's own; see `config`.
-//! `clippy --set <key>=<value>` changes one of them and exits.
+//! is not `noob` on PATH. With no folder named the window opens on the picker
+//! (see `picker`) rather than on whatever directory the process was started in,
+//! which under a desktop launcher is the home directory. Settings live beside
+//! noob's own; see `config`. `clippy --set <key>=<value>` changes one of them
+//! and exits.
 
 /// The clip player, with nothing drawing it at the moment. Kept compiled and
 /// tested because the format it reads is about to carry an idle animation in
@@ -32,6 +35,7 @@ mod markdown;
 mod menu;
 mod monitor;
 mod packaging;
+mod picker;
 mod prompt;
 mod select;
 mod skin;
@@ -40,6 +44,7 @@ mod syntax;
 mod totals;
 mod view;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -56,6 +61,7 @@ use dock::{Dock, Space, View};
 use link::{Incoming, Link};
 use menu::{Item, Menu, Target};
 use monitor::Monitor;
+use picker::Picker;
 use prompt::Prompt;
 use skin::Skin;
 use state::{State, Tone};
@@ -104,6 +110,17 @@ fn shade_request(
     }
 }
 
+/// The folder named on the command line, if one was.
+///
+/// The first argument that is not a flag. Without one the window opens on the
+/// picker: `current_dir()` under a desktop launcher is `$HOME`, and handing the
+/// agent the home directory because nobody said otherwise is what this replaces.
+fn workspace_arg(args: &[String]) -> Option<PathBuf> {
+    args.iter()
+        .find(|arg| !arg.starts_with('-'))
+        .map(PathBuf::from)
+}
+
 /// What a right click opens, for what it landed on, or nothing when it landed
 /// on something no menu belongs to: the title strip, a window button, the
 /// margin between panes.
@@ -137,6 +154,9 @@ fn menu_for(
         // The menu already open. Its own right click is handled before this is
         // reached, and a row is picked with the left button.
         Hit::Menu | Hit::MenuRow(_) => None,
+        // The picker is not a widget: there is no pane to close, no settings
+        // behind it, and nothing in it to select.
+        Hit::Picker | Hit::PickerRow(_) | Hit::PickerOpen => None,
     }
 }
 
@@ -188,6 +208,13 @@ struct App {
     link: Option<Link>,
     trouble: Option<String>,
 
+    /// The folder named on the command line, until it has been connected to.
+    /// Taken in `resumed`, because a folder given up front skips the picker.
+    workspace: Option<PathBuf>,
+    /// The folder picker, while it is up. Nothing else in the window is live
+    /// while it is: there is no agent until it closes.
+    picker: Option<Picker>,
+
     prompt: Prompt,
     dock: Dock,
     /// The open right click menu, or nothing. Held here rather than in the
@@ -227,7 +254,7 @@ struct App {
 }
 
 impl App {
-    fn new(proxy: EventLoopProxy<Wake>, config: Config) -> App {
+    fn new(proxy: EventLoopProxy<Wake>, config: Config, workspace: Option<PathBuf>) -> App {
         let skin = Skin::from(&config);
         let totals_path = totals::path();
         // A view the settings turned off has no tab at all. Folding it away
@@ -256,6 +283,8 @@ impl App {
             skin,
             link: None,
             trouble: None,
+            workspace,
+            picker: None,
             prompt: Prompt::default(),
             menu: None,
             holding: None,
@@ -282,6 +311,7 @@ impl App {
             shaded: self.shaded,
             dock: &self.dock,
             menu: self.menu.as_ref(),
+            picker: self.picker.as_ref(),
             file_labels: self
                 .state
                 .files
@@ -327,15 +357,19 @@ impl App {
         Some((view, layout.content(space)))
     }
 
-    /// Start the agent. A failure is shown in the window rather than printed to
-    /// a terminal nobody is watching.
-    fn connect(&mut self) {
+    /// Start the agent in `workspace`. A failure is shown in the window rather
+    /// than printed to a terminal nobody is watching.
+    ///
+    /// Re-entrant: the picker calls it after the window is already up, so an
+    /// agent from an earlier call has to be let go first. Nothing clears the
+    /// transcript, because the only way here twice is through the picker before
+    /// a turn has been taken and what is in it is the picker's own messages.
+    fn connect(&mut self, workspace: PathBuf) {
+        if let Some(mut link) = self.link.take() {
+            link.shutdown();
+        }
+        self.trouble = None;
         let program = std::env::var("NOOB_BIN").unwrap_or_else(|_| String::from("noob"));
-        let workspace = std::env::args()
-            .nth(1)
-            .map(std::path::PathBuf::from)
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
         let proxy = self.proxy.clone();
         match Link::spawn(&program, &workspace, None, move || {
             let _ = proxy.send_event(Wake);
@@ -350,6 +384,128 @@ impl App {
             }
         }
         self.dirty = true;
+    }
+
+    /// Open the picker, on the folder the process happens to be in.
+    ///
+    /// That folder is `$HOME` when the launcher started us, which is exactly why
+    /// the picker exists: it is a place to start walking from, not a workspace.
+    fn open_picker(&mut self) {
+        let start = std::env::current_dir()
+            .ok()
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let recents = picker::recents_path()
+            .map(|path| picker::load_recents(&path))
+            .unwrap_or_default();
+        self.picker = Some(Picker::open(Box::new(picker::Disk), start, recents));
+        self.dirty = true;
+    }
+
+    /// A folder was chosen: remember it and start the agent there.
+    fn choose(&mut self, workspace: PathBuf) {
+        self.picker = None;
+        if let Some(file) = picker::recents_path() {
+            // Read again immediately before writing, rather than reusing what
+            // the picker opened with, so a second window that chose a folder in
+            // the meantime does not have its entry erased.
+            let list = picker::remember(&picker::load_recents(&file), &workspace);
+            // A recents file that cannot be written costs the next launch one
+            // keystroke. Not worth a line in a conversation that is about to
+            // start.
+            let _ = picker::save_recents(&file, &list);
+        }
+        self.connect(workspace);
+    }
+
+    /// Keys while the picker is up. Nothing else in the window is live, so this
+    /// is the whole keyboard rather than a branch inside [`App::key`].
+    fn key_in_picker(&mut self, event: &winit::event::KeyEvent, event_loop: &ActiveEventLoop) {
+        let rows = self.picker_rows();
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        let mut chosen = None;
+        self.dirty |= match event.logical_key.as_ref() {
+            Key::Named(NamedKey::ArrowUp) => picker.step(false),
+            Key::Named(NamedKey::ArrowDown) => picker.step(true),
+            Key::Named(NamedKey::PageUp) => picker.page(rows, false),
+            Key::Named(NamedKey::PageDown) => picker.page(rows, true),
+            Key::Named(NamedKey::Home) => picker.jump(false),
+            Key::Named(NamedKey::End) => picker.jump(true),
+            // Walking in has its own key so Enter can mean "this one": a picker
+            // where Enter walks into folders needs a second gesture to choose,
+            // and choosing is what it is for.
+            Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Tab) => picker.walk_in(),
+            Key::Named(NamedKey::ArrowLeft) => picker.walk_out(),
+            Key::Named(NamedKey::Backspace) => picker.backspace(),
+            Key::Named(NamedKey::Enter) => {
+                chosen = picker.confirm();
+                true
+            }
+            // Nothing has started yet, so there is nothing to cancel and no
+            // pane to fall back to: Escape drops what has been typed, and with
+            // nothing typed it closes the window.
+            Key::Named(NamedKey::Escape) => {
+                if !picker.clear_filter() {
+                    event_loop.exit();
+                }
+                true
+            }
+            Key::Character("q") if self.modifiers.control_key() => {
+                event_loop.exit();
+                true
+            }
+            _ => match event.text.as_ref() {
+                Some(text) if !self.modifiers.control_key() && !self.modifiers.super_key() => {
+                    picker.type_text(text)
+                }
+                _ => false,
+            },
+        };
+        if let Some(workspace) = chosen {
+            self.choose(workspace);
+            return;
+        }
+        self.reveal_picker_cursor();
+    }
+
+    /// How many rows the picker's list can show right now.
+    fn picker_rows(&self) -> usize {
+        self.layout().picker_capacity(self.config.pane_font_size)
+    }
+
+    /// Keep the cursor on screen after it has moved. Here rather than in the
+    /// picker, because how many rows the list can show is a question about the
+    /// window and the layout is the only thing that knows.
+    fn reveal_picker_cursor(&mut self) {
+        let rows = self.picker_rows();
+        if let Some(picker) = self.picker.as_mut() {
+            self.dirty |= picker.reveal(rows);
+        }
+    }
+
+    /// A press inside the picker: a row, or the button that confirms.
+    fn click_in_picker(&mut self, hit: Hit, double: bool) {
+        let mut chosen = None;
+        if let Some(picker) = self.picker.as_mut() {
+            self.dirty |= match hit {
+                Hit::PickerRow(index) if double => {
+                    chosen = picker.double(index);
+                    true
+                }
+                Hit::PickerRow(index) => picker.point_at(index),
+                Hit::PickerOpen => {
+                    chosen = picker.confirm();
+                    true
+                }
+                _ => false,
+            };
+        }
+        match chosen {
+            Some(workspace) => self.choose(workspace),
+            None => self.reveal_picker_cursor(),
+        }
     }
 
     fn drain(&mut self) {
@@ -485,6 +641,15 @@ impl App {
             if last == hit && now.duration_since(at) < DOUBLE_CLICK);
         self.last_click = Some((hit, now));
 
+        if self.picker.is_some() {
+            // The title bar is still the title bar while the picker is up: the
+            // window can be moved, shaded and closed before a folder is chosen.
+            if !matches!(hit, Hit::TitleBar | Hit::Close | Hit::Maximize | Hit::Minimize) {
+                self.click_in_picker(hit, double);
+                return;
+            }
+        }
+
         match hit {
             Hit::Close => event_loop.exit(),
             Hit::Minimize => window.set_minimized(true),
@@ -514,6 +679,9 @@ impl App {
                 self.open_failure_under_pointer(space);
             }
             Hit::Body(space) => self.begin_selection(space),
+            // All three are handled above, while the picker is up, which is the
+            // only time any of them can be hit at all.
+            Hit::PickerRow(_) | Hit::PickerOpen | Hit::Picker => {}
             Hit::Input => {
                 // A press, not a placement: the anchor stays here so motion
                 // with the button still down selects the span between the two.
@@ -901,6 +1069,10 @@ impl App {
                 return;
             }
         }
+        if self.picker.is_some() {
+            self.key_in_picker(&event, event_loop);
+            return;
+        }
         let ctrl = self.modifiers.control_key();
         match event.logical_key.as_ref() {
             Key::Named(NamedKey::Enter) => self.submit(),
@@ -1015,6 +1187,17 @@ impl App {
     /// history.
     fn scroll_hovered(&mut self, pages: f32) {
         let layout = self.layout();
+        // The picker is the only thing on screen while it is up, so the wheel is
+        // its list wherever the pointer happens to be. The cursor stays where it
+        // was: the wheel moves what you are looking at, not what you have picked.
+        if self.picker.is_some() {
+            let rows = layout.picker_capacity(self.config.pane_font_size);
+            let by = ((rows as f32 * pages.abs()).round() as usize).max(1);
+            if let Some(picker) = self.picker.as_mut() {
+                self.dirty |= picker.scroll(by, pages < 0.0, rows);
+            }
+            return;
+        }
         // Over the explorer, the wheel moves the list rather than the file. The
         // pointer is on the thing being scrolled, which is what every file tree
         // does, and the list is the only way to reach a file that is off it.
@@ -1073,6 +1256,7 @@ impl App {
             shaded: self.shaded,
             dock: &self.dock,
             menu: self.menu.as_ref(),
+            picker: self.picker.as_ref(),
             file_labels: self
                 .state
                 .files
@@ -1104,6 +1288,7 @@ impl App {
             // The same menu the layout above was computed from, or the rows
             // would be drawn somewhere other than where they are hit tested.
             menu: self.menu.as_ref(),
+            picker: self.picker.as_ref(),
         });
         renderer.draw(gpu, &scene, frame);
         self.dirty = false;
@@ -1198,7 +1383,13 @@ impl ApplicationHandler<Wake> for App {
             }
         }
         self.window = Some(window);
-        self.connect();
+        // A folder on the command line means the window was opened for it and
+        // there is nothing to ask. Without one, the picker is the first thing on
+        // screen and it calls `connect` itself.
+        match self.workspace.take() {
+            Some(workspace) => self.connect(workspace),
+            None => self.open_picker(),
+        }
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _wake: Wake) {
@@ -1234,9 +1425,13 @@ impl ApplicationHandler<Wake> for App {
                 let (x, y) = (position.x as f32, position.y as f32);
                 let layout = self.layout();
                 let hot = match layout.hit(x, y) {
-                    Some(hit @ (Hit::Close | Hit::Maximize | Hit::Minimize | Hit::MenuRow(_))) => {
-                        Some(hit)
-                    }
+                    Some(
+                        hit @ (Hit::Close
+                        | Hit::Maximize
+                        | Hit::Minimize
+                        | Hit::MenuRow(_)
+                        | Hit::PickerOpen),
+                    ) => Some(hit),
                     _ => None,
                 };
                 if hot != self.hot {
@@ -1330,6 +1525,7 @@ impl ApplicationHandler<Wake> for App {
         // keeps an idle window free.
         let showing = |wanted: &[View]| {
             !self.shaded
+                && self.picker.is_none()
                 && Space::ALL.into_iter().any(|space| {
                     let slot = self.dock.slot(space);
                     !slot.folded && slot.active().is_some_and(|view| wanted.contains(&view))
@@ -1413,7 +1609,7 @@ fn main() {
         }
     };
     event_loop.set_control_flow(ControlFlow::Wait);
-    let mut app = App::new(event_loop.create_proxy(), config);
+    let mut app = App::new(event_loop.create_proxy(), config, workspace_arg(&args));
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("clippy: {e}");
         std::process::exit(1);
@@ -1450,6 +1646,7 @@ mod tests {
             shaded: false,
             dock,
             menu,
+            picker: None,
             file_labels: Vec::new(),
             file_first: 0,
             column: COLUMN,
@@ -1663,6 +1860,33 @@ mod tests {
         assert_eq!(row, 0);
         assert!(!state.toggle_failure(row));
         assert_eq!(state.open_failure, Some(1), "and it left the open one alone");
+    }
+
+    /// A folder on the command line is the workspace and skips the picker.
+    /// Without one there is no workspace to fall back to: `current_dir()` under
+    /// a desktop launcher is `$HOME`, which is the folder this stopped handing
+    /// the agent by default.
+    #[test]
+    fn a_folder_on_the_command_line_is_the_one_that_opens() {
+        let args = |list: &[&str]| -> Vec<String> {
+            list.iter().map(|s| s.to_string()).collect()
+        };
+        assert_eq!(
+            workspace_arg(&args(&["/home/hec/workspace/noob-cli"])),
+            Some(PathBuf::from("/home/hec/workspace/noob-cli"))
+        );
+        assert_eq!(workspace_arg(&args(&[])), None, "the picker opens");
+        assert_eq!(
+            workspace_arg(&args(&["--anything"])),
+            None,
+            "a flag is not a folder"
+        );
+        // A flag before the folder still finds it, so the order arguments were
+        // typed in does not decide whether the picker opens.
+        assert_eq!(
+            workspace_arg(&args(&["--flag", "code"])),
+            Some(PathBuf::from("code"))
+        );
     }
 
     /// The prompt is one line and Enter submits it, so a pasted newline cannot
