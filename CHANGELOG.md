@@ -3,7 +3,7 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
-## Unreleased
+## 0.7.1 - 2026-07-30
 
 ### Fixed
 
