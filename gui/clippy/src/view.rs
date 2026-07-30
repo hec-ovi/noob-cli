@@ -2363,8 +2363,15 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
         runs.push(Run::tinted(format!("   {trouble}"), skin.bad));
     } else if layout.shaded {
         // Shaded, this strip is the whole window, so it carries the one thing
-        // worth knowing while there is nowhere else to read it.
-        runs.push(Run::tinted(format!("   {}", state.headline()), skin.good));
+        // worth knowing while there is nowhere else to read it. In the bad
+        // colour while a turn is running, the same as the phase reads in the
+        // pane it comes from: the word and the orb beside it then say the same
+        // thing, which is the whole job of a strip this small.
+        let tint = match state.phase.busy() {
+            true => skin.bad,
+            false => skin.good,
+        };
+        runs.push(Run::tinted(format!("   {}", state.headline()), tint));
     }
     let row = strip_row(Panel::new(ORB_W, layout.title.y, room, layout.title.h));
     scene.text(Text::rich(runs, row, SMALL, skin.title).line_height(row.h));
@@ -3124,8 +3131,12 @@ fn context(scene: &mut Scene, frame: &Frame, panel: Panel) {
                 true => format!("{} (resumed)", state.phase.word()),
                 false => state.phase.word().to_string(),
             },
+            // The bad colour while a turn is running, which is the one tint in
+            // the palette that pulls the eye off whatever it was reading. It is
+            // not a fault: it is the reading that says the machine has the turn
+            // and anything you type is queued behind it.
             if state.phase.busy() {
-                skin.bright
+                skin.bad
             } else {
                 skin.body
             },
@@ -6789,6 +6800,56 @@ mod tests {
         );
     }
 
+    /// While a turn is running the phase reads INFERING in the bad colour, and
+    /// at rest it is READY in the ordinary body tint.
+    ///
+    /// The colour is the point as much as the word: it is the one reading in the
+    /// window that has to be answerable from the corner of the eye, because it
+    /// is what says whether anything typed now is going anywhere.
+    #[test]
+    fn the_phase_reads_infering_in_the_bad_colour_while_a_turn_runs() {
+        let mut dock = Dock::new();
+        dock.reveal(View::Context);
+        let phase_run = |state: &State| {
+            let out = render_with(
+                state,
+                1400.0,
+                900.0,
+                &dock,
+                &[],
+                &Monitor::new(),
+                None,
+            );
+            let body = out.layout.placed(Space::TopRight).body;
+            let run = out
+                .scene
+                .texts
+                .iter()
+                .filter(|text| body.contains(text.at.x, text.at.y))
+                .flat_map(|text| text.runs.iter())
+                .find(|run| run.text.contains("READY") || run.text.contains("INFERING"))
+                .expect("the phase is drawn in the pane")
+                .clone();
+            (run.text.clone(), run.color, out.skin)
+        };
+
+        let (word, tint, skin) = phase_run(&busy_state());
+        assert_eq!(word, "INFERING");
+        assert_eq!(tint, Some(skin.bad), "the busy word is not the bad colour");
+
+        let mut ready = State::new();
+        ready.apply(noob_proto::Event::SessionStart {
+            id: "s1".into(),
+            workspace: "/tmp".into(),
+            model: "laguna-s21".into(),
+            resumed: false,
+        });
+        let (word, tint, skin) = phase_run(&ready);
+        assert_eq!(word, "READY");
+        assert_eq!(tint, Some(skin.body));
+        assert_ne!(skin.body, skin.bad);
+    }
+
     /// One row per line and one line per row, because a click in this pane is
     /// turned into a row by dividing by the line height. A row that wrapped
     /// would open a different failure than the one under the pointer.
@@ -7633,7 +7694,7 @@ mod tests {
         let state = busy_state();
         let scene = shaded_scene(&state, 1200.0, 800.0, &skin);
         let text = text_of(&scene);
-        assert!(text.contains("WORKING") || text.contains("THINKING"), "{text}");
+        assert!(text.contains("INFERING"), "{text}");
         assert!(!text.contains("looking at it now"), "no pane content");
 
         // The surface the compositor kept is the bar, all 800 pixels of it, and

@@ -432,12 +432,16 @@ pub enum Phase {
 }
 
 impl Phase {
+    /// One word for both busy phases, on purpose. Thinking and working are the
+    /// endpoint generating and the agent running what it generated, and from
+    /// outside they are the same thing: the model has the turn and you are
+    /// waiting. The orb turns for both, so two words up here would have said
+    /// something the one moving thing on screen does not.
     pub fn word(self) -> &'static str {
         match self {
             Phase::Starting => "STARTING",
             Phase::Ready => "READY",
-            Phase::Thinking => "THINKING",
-            Phase::Working => "WORKING",
+            Phase::Thinking | Phase::Working => "INFERING",
             Phase::Finished => "FINISHED",
             Phase::Interrupted => "INTERRUPTED",
             Phase::Gone => "AGENT GONE",
@@ -2182,7 +2186,7 @@ mod tests {
         let mut state = State::new();
         assert_eq!(state.headline(), "STARTING");
         state.apply(Event::TurnStart { turn: 1 });
-        assert_eq!(state.headline(), "THINKING");
+        assert_eq!(state.headline(), "INFERING");
         state.apply(tool_start(
             "p",
             "plan",
@@ -2192,7 +2196,7 @@ mod tests {
             ]}),
         ));
         assert!(
-            state.headline().starts_with("WORKING"),
+            state.headline().starts_with("INFERING"),
             "{}",
             state.headline()
         );
@@ -2215,6 +2219,56 @@ mod tests {
         });
         assert_eq!(state.headline(), "FINISHED   plan 1/2   1 file changed");
         assert!(!state.phase.busy());
+    }
+
+    /// The word and the orb say the same thing, which they can only do if the
+    /// phase leaves READY the moment a turn starts and every phase the orb turns
+    /// for writes one word.
+    ///
+    /// Both halves are asserted here because a window that said READY while the
+    /// orb turned would be a bug in the phase rather than in the word, and the
+    /// route in is not one event: a prompt sent from this window moves it, and
+    /// so does the turn the agent reports having started.
+    #[test]
+    fn a_turn_leaves_ready_and_every_busy_phase_says_infering() {
+        let mut state = State::new();
+        state.apply(Event::SessionStart {
+            id: "s1".into(),
+            workspace: "/tmp".into(),
+            model: "a-model".into(),
+            resumed: false,
+        });
+        assert_eq!(state.phase, Phase::Ready);
+        assert_eq!(state.headline(), "READY");
+        assert!(!state.phase.busy());
+
+        // Typed here: the window moves the phase itself rather than waiting for
+        // the agent to report a turn, so the orb starts with the keystroke.
+        state.submitted("go");
+        assert_eq!(state.phase, Phase::Thinking);
+        assert!(state.phase.busy());
+        assert_eq!(state.headline(), "INFERING");
+
+        // Reported by the agent: the same phase from the other direction.
+        let mut from_the_agent = State::new();
+        from_the_agent.apply(Event::TurnStart { turn: 1 });
+        assert_eq!(from_the_agent.phase, Phase::Thinking);
+
+        state.apply(tool_start("b", "bash", serde_json::json!({"cmd": "ls"})));
+        assert_eq!(state.phase, Phase::Working);
+        assert!(state.phase.busy());
+        assert!(state.headline().starts_with("INFERING"), "{}", state.headline());
+
+        // One word for every phase the orb turns for, and it is never the
+        // resting one.
+        for phase in [Phase::Thinking, Phase::Working] {
+            assert!(phase.busy());
+            assert_eq!(phase.word(), "INFERING");
+        }
+        for phase in [Phase::Starting, Phase::Ready, Phase::Finished, Phase::Gone] {
+            assert!(!phase.busy());
+            assert_ne!(phase.word(), "INFERING", "{phase:?}");
+        }
     }
 
     #[test]
