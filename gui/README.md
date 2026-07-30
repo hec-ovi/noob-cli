@@ -102,6 +102,7 @@ blocking until you touch it.
 
 | view | carries |
 |---|---|
+| OUTPUT | the conversation: what you asked and what the model said, prose and reasoning, streamed as it arrives |
 | ACTIVITY | every call, one colour and one tag per tool: bash, read, ls, glob, grep, context, write, edit, web, skill, mcp, agent, plan, and one for anything else, plus a running command's output as it arrives |
 | PLAN | the checklist, straight from the plan tool's own arguments |
 | AGENTS | sub-agents: their tool set, their brief, the last thing each one said, and how it ended |
