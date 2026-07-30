@@ -1,20 +1,21 @@
 //! Layout, hit regions, and turning state into a scene.
 //!
-//! One surface carved into three spaces, never several OS windows. The window
+//! One surface carved into a 2x2 grid, never several OS windows. The window
 //! has no system chrome, so the title bar, its three buttons, the tab strips,
 //! the scrollbars and the resize edges are all rectangles here and hit regions
 //! in [`Layout`]. Drawing and hit testing take the same numbers from the same
 //! place, which is the only way they can never disagree.
 //!
-//! Every view is a tab in one of the three spaces and can be dragged into
-//! another; [`crate::dock`] owns that arrangement, and this module only asks it
-//! where things are.
+//! Every view is a tab in one cell of that grid and can be dragged into another
+//! cell, or onto the line between two cells, which gives its pane the pair;
+//! [`crate::dock`] owns that arrangement, and this module only asks it where
+//! things are and turns cells into boxes.
 //!
-//! The window has three shapes. Open, it is three spaces. Shaded, it is one
-//! strip carrying [`State::headline`] and nothing else, the way Winamp collapsed
-//! to its title; double-click the bar to go between those two. Before a folder
-//! has been chosen it is the picker and nothing else, because there is no agent
-//! to arrange panes around yet.
+//! The window has three shapes. Open, it is the grid. Shaded, it is one strip
+//! carrying [`State::headline`] and nothing else, the way Winamp collapsed to
+//! its title; double-click the bar to go between those two. Before a folder has
+//! been chosen it is the picker and nothing else, because there is no agent to
+//! arrange panes around yet.
 
 use noob_draw::{Panel, Rect, Run, Scene, Text};
 
@@ -181,6 +182,15 @@ pub const TOP_HEIGHT: f32 = 0.46;
 /// you can hit. This takes the target to fourteen without widening anything that
 /// is drawn.
 const GRAB: f32 = 4.0;
+/// How far either side of a grid line a drop counts as being between the two
+/// cells rather than inside one of them.
+///
+/// Wider than [`GRAB`], which is a target for a pointer that can see the line it
+/// is aiming at. This one is aimed at with a tab in the air over the line, so it
+/// is worth more room. Cut down on a grid whose cells are shorter than the band
+/// is deep, so it can never swallow a whole cell and leave no way to drop inside
+/// one.
+const SPAN_BAND: f32 = 16.0;
 /// The least height a space can be dragged down to: its tab strip ([`TAB_H`]),
 /// the [`PAD`] above and below its content, and the shortest gauge block that
 /// still reads as a block ([`DOT_ROWS`] rows of [`SMALL_DOT`]). Fifty-six pixels.
@@ -409,11 +419,29 @@ pub enum Landing {
     /// below says which space and nothing more. Without one, a drop back into
     /// the space the view is already in is the no-op it always was.
     In(Space, Option<usize>),
+    /// Onto the line between two cells, which gives the pane both of them: the
+    /// two are merged into one and it spans the pair. The two always share a
+    /// divider, never a corner.
+    Span(Space, Space),
     /// Off the window entirely, which takes the view out of it.
     Out,
     /// Somewhere in the window that is not a space: the title strip, the
-    /// prompt, the margin between two panes. Nothing happens.
+    /// prompt, the margin around the panes. Nothing happens.
     Nowhere,
+}
+
+impl Landing {
+    /// A pair, with the two cells in grid order.
+    ///
+    /// So the same pair is one answer rather than two: a drop a pixel above the
+    /// line and one a pixel below it name the same pair, and nothing downstream
+    /// has to know that `(a, b)` and `(b, a)` mean the same drop.
+    pub fn span(a: Space, b: Space) -> Landing {
+        match a.index() < b.index() {
+            true => Landing::Span(a, b),
+            false => Landing::Span(b, a),
+        }
+    }
 }
 
 /// Where one space is, and where its tabs are.
@@ -479,8 +507,16 @@ pub struct Layout {
     pub maximize: Panel,
     pub close: Panel,
 
-    /// One per [`Space`], in `Space::ALL` order.
-    pub spaces: [Placed; 3],
+    /// One per [`Space`], in `Space::ALL` order. A space with no tabs gets an
+    /// empty one, and a space covering two cells gets the pair's box.
+    pub spaces: [Placed; 4],
+    /// The four cells of the grid, in `Space::ALL` order, from the two ratios
+    /// alone.
+    ///
+    /// Where the dividers are, rather than what is drawn: a cell standing empty
+    /// still has its box here, because that is the box a drop into it would
+    /// take. Empty in every shape that has no panes.
+    pub grid: [Panel; 4],
     /// The two dividers, both empty in every shape that has no panes and beside
     /// any space that is standing empty or folded away.
     pub column_divider: Divider,
@@ -587,6 +623,54 @@ fn nowhere() -> Panel {
     Panel::new(0.0, 0.0, 0.0, 0.0)
 }
 
+/// The box around two boxes. A box with nothing in it is not a corner of the
+/// answer: two cells and one empty cell would otherwise reach back to the
+/// window's origin.
+fn around(a: Panel, b: Panel) -> Panel {
+    if a.w < 1.0 || a.h < 1.0 {
+        return b;
+    }
+    if b.w < 1.0 || b.h < 1.0 {
+        return a;
+    }
+    let (x, y) = (a.x.min(b.x), a.y.min(b.y));
+    Panel::new(
+        x,
+        y,
+        (a.x + a.w).max(b.x + b.w) - x,
+        (a.y + a.h).max(b.y + b.h) - y,
+    )
+}
+
+/// The four cells of the grid, in [`Space::ALL`] order, from the box the panes
+/// share and the two ratios.
+///
+/// One vertical line and one horizontal line across the whole box, so the four
+/// cells are a grid rather than two columns each cut at a height of its own.
+/// That is what keeps the two ratios the window already remembers ([`LEFT_WIDTH`]
+/// and [`TOP_HEIGHT`]) enough for four cells: a second horizontal ratio would
+/// buy columns whose panes do not line up, and cost a settings key for it.
+///
+/// Both ratios are held off the same floors the dividers are dragged with, so a
+/// cell is never narrower than a file view can be read in nor shorter than a
+/// gauge can be drawn in.
+fn grid_cells(body: Panel, left_width: f32, top_height: f32, column_floor: f32) -> [Panel; 4] {
+    let room_w = (body.w - GAP).max(0.0);
+    let left_w = (room_w * held(left_width, room_w, column_floor)).floor();
+    let room_h = (body.h - GAP).max(0.0);
+    let top_h = (room_h * held(top_height, room_h, MIN_SPACE_H)).floor();
+    let right_x = body.x + left_w + GAP;
+    let right_w = body.w - left_w - GAP;
+    let bottom_y = body.y + top_h + GAP;
+    let bottom_h = body.h - top_h - GAP;
+    [
+        Panel::new(body.x, body.y, left_w, top_h),
+        Panel::new(body.x, bottom_y, left_w, bottom_h),
+        Panel::new(right_x, body.y, right_w, top_h),
+        Panel::new(right_x, bottom_y, right_w, bottom_h),
+    ]
+}
+
 fn empty_placed() -> Placed {
     Placed {
         strip: nowhere(),
@@ -637,7 +721,13 @@ impl Layout {
                 minimize: buttons[0],
                 maximize: buttons[1],
                 close: buttons[2],
-                spaces: [empty_placed(), empty_placed(), empty_placed()],
+                spaces: [
+                    empty_placed(),
+                    empty_placed(),
+                    empty_placed(),
+                    empty_placed(),
+                ],
+                grid: [nowhere(), nowhere(), nowhere(), nowhere()],
                 column_divider: Divider::none(),
                 row_divider: Divider::none(),
                 file_list: nowhere(),
@@ -679,7 +769,13 @@ impl Layout {
                 minimize: buttons[0],
                 maximize: buttons[1],
                 close: buttons[2],
-                spaces: [empty_placed(), empty_placed(), empty_placed()],
+                spaces: [
+                    empty_placed(),
+                    empty_placed(),
+                    empty_placed(),
+                    empty_placed(),
+                ],
+                grid: [nowhere(), nowhere(), nowhere(), nowhere()],
                 column_divider: Divider::none(),
                 row_divider: Divider::none(),
                 file_list: nowhere(),
@@ -722,7 +818,13 @@ impl Layout {
                 minimize: buttons[0],
                 maximize: buttons[1],
                 close: buttons[2],
-                spaces: [empty_placed(), empty_placed(), empty_placed()],
+                spaces: [
+                    empty_placed(),
+                    empty_placed(),
+                    empty_placed(),
+                    empty_placed(),
+                ],
+                grid: [nowhere(), nowhere(), nowhere(), nowhere()],
                 column_divider: Divider::none(),
                 row_divider: Divider::none(),
                 file_list: nowhere(),
@@ -753,68 +855,125 @@ impl Layout {
         let (body, input) = rest.split_bottom(shape.input_h.max(INPUT_H).min(rest.h));
         let body = body.inset(GAP);
 
-        // An empty space gives its room away rather than leaving a hole, and a
-        // divider with an empty space on one side of it has nothing left to
-        // divide, so it goes with the room.
-        let has = |space: Space| !shape.dock.slot(space).is_empty();
+        // The grid is the two ratios and nothing else: four cells, whether or
+        // not anything is standing in them, because that is what a drop is read
+        // off. What is drawn comes next.
         let column_floor = min_column_w(shape.pane_column);
-        let (left, right, column_divider) =
-            if has(Space::Left) && (has(Space::TopRight) || has(Space::BottomRight)) {
-                let room = (body.w - GAP).max(0.0);
-                let taken = (room * held(shape.left_width, room, column_floor)).floor();
-                let (left, rest) = body.split_left(taken);
-                let band = Panel::new(left.x + left.w - GRAB, body.y, GAP + GRAB * 2.0, body.h);
-                (
-                    left,
-                    Panel::new(rest.x + GAP, rest.y, (rest.w - GAP).max(1.0), rest.h),
-                    Divider {
-                        band,
-                        track: body,
-                        floor: column_floor,
-                    },
-                )
-            } else if has(Space::Left) {
-                (body, nowhere(), Divider::none())
-            } else {
-                (nowhere(), body, Divider::none())
-            };
+        let grid = grid_cells(body, shape.left_width, shape.top_height, column_floor);
+
+        // An empty space gives its room away rather than leaving a hole: the
+        // dock says which pane covers which cell, and a pane's box is the box
+        // around the cells it covers.
+        let cover = shape.dock.cover();
+        let mut areas = [nowhere(); 4];
+        for cell in Space::ALL {
+            if let Some(head) = cover[cell.index()] {
+                areas[head.index()] = around(areas[head.index()], grid[cell.index()]);
+            }
+        }
 
         let folded = |space: Space| shape.dock.slot(space).folded;
-        let (top, bottom, row_divider) = match (has(Space::TopRight), has(Space::BottomRight)) {
-            (false, false) => (nowhere(), nowhere(), Divider::none()),
-            (true, false) => (right, nowhere(), Divider::none()),
-            (false, true) => (nowhere(), right, Divider::none()),
-            (true, true) => {
-                let room = (right.h - GAP).max(0.0);
-                // A folded space is already as short as it goes and its
-                // neighbour has taken the rest, so there is nothing between the
-                // two to move until it is opened again.
-                let (top_h, movable) = match (folded(Space::TopRight), folded(Space::BottomRight)) {
-                    (true, _) => (TAB_H, false),
-                    (false, true) => ((room - TAB_H).max(TAB_H), false),
-                    (false, false) => (
-                        (room * held(shape.top_height, room, MIN_SPACE_H))
-                            .floor()
-                            .max(TAB_H),
-                        true,
-                    ),
+        let live = |space: Space| !shape.dock.slot(space).is_empty();
+        let rows_first = shape.dock.rows_first();
+        // The two cells of one half of the grid: a column apiece when the grid
+        // splits into columns first, a row apiece when it splits into rows.
+        let cell = |major: usize, minor: usize| match rows_first {
+            true => Space::at(major, minor),
+            false => Space::at(minor, major),
+        };
+        // A half is split when both of its cells are standing in, which is also
+        // when the divider inside it is there at all.
+        let split = |major: usize| live(cell(major, 0)) && live(cell(major, 1));
+
+        // A folded space is already as short as it goes and its neighbour takes
+        // the rest of the column. Only down a column: a tab strip runs across
+        // the top of a pane, so folding collapses it downwards, and the pane
+        // that can take the room is the one under it. Folded beside another
+        // pane, it keeps its own cell and leaves the rest of it empty.
+        if !rows_first {
+            for column in 0..2 {
+                let (top, bottom) = (Space::at(0, column), Space::at(1, column));
+                if !(live(top) && live(bottom)) {
+                    continue;
+                }
+                let whole = around(areas[top.index()], areas[bottom.index()]);
+                let (top_h, bottom_h) = match (folded(top), folded(bottom)) {
+                    (true, false) => {
+                        let taken = TAB_H.min(whole.h);
+                        (taken, whole.h - taken - GAP)
+                    }
+                    (false, true) => {
+                        let taken = TAB_H.min(whole.h);
+                        (whole.h - taken - GAP, taken)
+                    }
+                    _ => continue,
                 };
-                let top_h = top_h.min(right.h);
-                let (top, lower) = right.split_top(top_h);
-                let divider = match movable {
-                    true => Divider {
-                        band: Panel::new(right.x, right.y + top_h - GRAB, right.w, GAP + GRAB * 2.0),
-                        track: right,
-                        floor: MIN_SPACE_H,
-                    },
-                    false => Divider::none(),
-                };
-                (
-                    top,
-                    Panel::new(lower.x, lower.y + GAP, lower.w, (lower.h - GAP).max(0.0)),
-                    divider,
-                )
+                areas[top.index()] = Panel::new(whole.x, whole.y, whole.w, top_h);
+                areas[bottom.index()] =
+                    Panel::new(whole.x, whole.y + top_h + GAP, whole.w, bottom_h);
             }
+        }
+
+        // The line between the two halves, and the line inside them. Which of
+        // the two is the column divider and which the row divider is the same
+        // transpose the cells are read with.
+        let across = Divider {
+            band: match rows_first {
+                true => Panel::new(body.x, grid[0].y + grid[0].h - GRAB, body.w, GRAB * 2.0 + GAP),
+                false => Panel::new(grid[0].x + grid[0].w - GRAB, body.y, GRAB * 2.0 + GAP, body.h),
+            },
+            track: body,
+            floor: match rows_first {
+                true => MIN_SPACE_H,
+                false => column_floor,
+            },
+        };
+        // Inside the halves the line is only as long as the halves that are
+        // actually split, and a half whose split came from a fold has no line
+        // to drag: the fold owns where it sits until it is opened again.
+        let inside = match (0..2)
+            .filter(|major| {
+                split(*major) && (rows_first || !(folded(cell(*major, 0)) || folded(cell(*major, 1))))
+            })
+            // The panes on either side of it, not the cells: a half whose
+            // opposite number is empty has taken that room, and the line
+            // between its two panes runs the whole way across with them.
+            .map(|major| around(areas[cell(major, 0).index()], areas[cell(major, 1).index()]))
+            .reduce(around)
+        {
+            Some(reach) => Divider {
+                band: match rows_first {
+                    true => Panel::new(
+                        grid[0].x + grid[0].w - GRAB,
+                        reach.y,
+                        GRAB * 2.0 + GAP,
+                        reach.h,
+                    ),
+                    false => Panel::new(
+                        reach.x,
+                        grid[0].y + grid[0].h - GRAB,
+                        reach.w,
+                        GRAB * 2.0 + GAP,
+                    ),
+                },
+                track: body,
+                floor: match rows_first {
+                    true => column_floor,
+                    false => MIN_SPACE_H,
+                },
+            },
+            None => Divider::none(),
+        };
+        // The line between the halves is there only when both halves have
+        // something in them, or there is nothing left for it to divide.
+        let halves = (live(cell(0, 0)) || live(cell(0, 1))) && (live(cell(1, 0)) || live(cell(1, 1)));
+        let across = match halves {
+            true => across,
+            false => Divider::none(),
+        };
+        let (column_divider, row_divider) = match rows_first {
+            true => (inside, across),
+            false => (across, inside),
         };
 
         let place = |space: Space, area: Panel| -> Placed {
@@ -860,9 +1019,10 @@ impl Layout {
         };
 
         let spaces = [
-            place(Space::Left, left),
-            place(Space::TopRight, top),
-            place(Space::BottomRight, bottom),
+            place(Space::TopLeft, areas[0]),
+            place(Space::BottomLeft, areas[1]),
+            place(Space::TopRight, areas[2]),
+            place(Space::BottomRight, areas[3]),
         ];
 
         // The file view's explorer runs down the left of whichever space is
@@ -872,10 +1032,7 @@ impl Layout {
                 && !shape.dock.slot(*space).folded
         });
         let (file_list, file_diff, file_rows) = match files_in {
-            Some(space) => place_files(
-                spaces[Space::ALL.iter().position(|s| *s == space).unwrap()].body,
-                shape,
-            ),
+            Some(space) => place_files(spaces[space.index()].body, shape),
             None => (nowhere(), nowhere(), Vec::new()),
         };
 
@@ -888,6 +1045,7 @@ impl Layout {
             maximize: buttons[1],
             close: buttons[2],
             spaces,
+            grid,
             column_divider,
             row_divider,
             file_list,
@@ -916,7 +1074,7 @@ impl Layout {
     }
 
     pub fn placed(&self, space: Space) -> &Placed {
-        &self.spaces[Space::ALL.iter().position(|s| *s == space).unwrap()]
+        &self.spaces[space.index()]
     }
 
     /// What is under a point. One place, so a click and the thing it appears to
@@ -1067,23 +1225,67 @@ impl Layout {
     /// outside to put a pane, so the only two readings of a tab thrown out of
     /// the window are "close it" and "put it back where it was", and a tab that
     /// snaps back after being thrown away is the more surprising of the two.
+    ///
+    /// Everything below the tab strips is read off the grid rather than off the
+    /// arrangement, so a pane spanning two cells can be dropped into either half
+    /// of itself and a pair of cells can be merged whether or not anything is
+    /// standing in them. See [`Layout::grid_landing`].
     pub fn landing(&self, x: f32, y: f32) -> Landing {
         if x < 0.0 || y < 0.0 || x > self.width || y > self.height {
             return Landing::Out;
         }
-        let Some(space) = self.hit(x, y).and_then(Hit::space) else {
+        // On a strip, the drop names a place among that space's tabs, which is
+        // how a strip is reordered. The strip belongs to the pane rather than to
+        // the grid, so it answers before the cells do, and the band around a
+        // grid line stops where the strip under it starts. The gap that is drawn
+        // between two panes is always outside a strip, so the line itself is
+        // always a pair.
+        if let Some(space) = self.hit(x, y).and_then(Hit::space)
+            && self.placed(space).strip.contains(x, y)
+        {
+            return Landing::In(space, Some(self.insertion(space, x)));
+        }
+        self.grid_landing(x, y)
+    }
+
+    /// Which cell of the grid a point is in, or which two it is between.
+    ///
+    /// Inside a cell the drop takes that one cell, which is what breaks a span:
+    /// the pane that was covering the pair keeps the other half of it. On or
+    /// near the line between two cells the drop takes both, and the pane spans
+    /// the pair. The band around a line is [`SPAN_BAND`] either side of it, cut
+    /// down so it can never cover a whole cell.
+    ///
+    /// Where the two lines cross, the nearer of them wins, measured against its
+    /// own band so a shallow band and a deep one are compared fairly. A dead
+    /// heat goes to the horizontal line, which is the pair that spans a column:
+    /// that is the arrangement the window opens with, so it is the one a tie
+    /// should not surprise anyone by inverting.
+    fn grid_landing(&self, x: f32, y: f32) -> Landing {
+        let whole = around(around(self.grid[0], self.grid[1]), self.grid[3]);
+        if !whole.contains(x, y) {
             return Landing::Nowhere;
-        };
-        // On the strip, the drop names a place among the tabs. In the pane below
-        // it, it names the space only: a tab dragged into the middle of its own
-        // pane and let go has not been put in front of anything, so the order it
-        // was in is the order it keeps.
-        let at = self
-            .placed(space)
-            .strip
-            .contains(x, y)
-            .then(|| self.insertion(space, x));
-        Landing::In(space, at)
+        }
+        // The middle of the gap between the cells, which is the line itself.
+        let line_x = self.grid[0].x + self.grid[0].w + GAP * 0.5;
+        let line_y = self.grid[0].y + self.grid[0].h + GAP * 0.5;
+        let column = usize::from(x >= line_x);
+        let row = usize::from(y >= line_y);
+        let reach_x = GAP * 0.5 + SPAN_BAND.min(self.grid[0].w.min(self.grid[2].w) * 0.5);
+        let reach_y = GAP * 0.5 + SPAN_BAND.min(self.grid[0].h.min(self.grid[1].h) * 0.5);
+        let (off_x, off_y) = ((x - line_x).abs(), (y - line_y).abs());
+        let near_x = off_x <= reach_x && reach_x > 0.0;
+        let near_y = off_y <= reach_y && reach_y > 0.0;
+        let cell = Space::at(row, column);
+        match (near_x, near_y) {
+            (true, true) => match off_x / reach_x < off_y / reach_y {
+                true => Landing::span(cell, cell.in_row()),
+                false => Landing::span(cell, cell.in_column()),
+            },
+            (true, false) => Landing::span(cell, cell.in_row()),
+            (false, true) => Landing::span(cell, cell.in_column()),
+            (false, false) => Landing::In(cell, None),
+        }
     }
 
     /// Which place among a space's tabs a drop at this `x` takes.
@@ -1867,17 +2069,23 @@ pub fn build(frame: &Frame) -> Scene {
     scene
 }
 
-/// What a drop would do, drawn over the space it would do it to: a translucent
-/// green box over the whole space, and a caret in the gap between the two tabs
-/// the tab would land between.
+/// What a drop would do, drawn over the room it would take: a translucent green
+/// box, and a caret in the gap between the two tabs the tab would land between.
 ///
 /// On the floating layer, so it covers the pane rather than being painted under
 /// the pane's own text the way a base-layer rectangle is (see [`overlay`]). A
 /// wash under the glyphs is exactly the feedback item 17 said it could not see.
 ///
-/// The box is the strip and the body together, because the space is what the drop
-/// lands in and its tabs are part of it. Folded, the body is zero tall and the
-/// box is the strip, which is all there is of that space to point at.
+/// The box is the room the pane would have after the drop, which is one cell of
+/// the grid or two, so a drop between two cells shows the pair before the button
+/// comes up. It is taken by making the move on a copy of the dock and asking that
+/// copy which cells the pane would cover: the box and the move come off one
+/// answer rather than two, so they cannot promise different things.
+///
+/// A drop on a tab strip is the exception: it names a place among tabs and does
+/// not move anything on the grid, so the box is the pane that is already drawn
+/// there. Folded, that pane is its strip and nothing else, which is all there is
+/// of it to point at.
 ///
 /// The caret is only drawn for a drop that names a place, which is a drop on a
 /// tab strip. In the body of a pane there is no gap being aimed at: the tab goes
@@ -1887,30 +2095,59 @@ fn drop_target(scene: &mut Scene, frame: &Frame) {
     let Some(drag) = frame.drag else {
         return;
     };
-    let Landing::In(space, at) = drag.landing else {
-        return;
-    };
     let (skin, layout) = (frame.skin, frame.layout);
-    let placed = layout.placed(space);
-    if placed.strip.w < 1.0 {
+    let box_ = match drag.landing {
+        Landing::In(space, Some(_)) => {
+            let placed = layout.placed(space);
+            Panel::new(
+                placed.strip.x,
+                placed.strip.y,
+                placed.strip.w,
+                placed.strip.h + placed.body.h,
+            )
+        }
+        Landing::In(..) | Landing::Span(..) => drop_room(layout, frame.dock, drag),
+        Landing::Out | Landing::Nowhere => return,
+    };
+    if box_.w < 1.0 || box_.h < 1.0 {
         return;
     }
-    let box_ = Panel::new(
-        placed.strip.x,
-        placed.strip.y,
-        placed.strip.w,
-        placed.strip.h + placed.body.h,
-    );
     // The same cut corner every panel in the window has, so the box lies on the
     // pane instead of squaring off its top right corner.
     scene.over_rect(box_.fill(skin.drop_target).chamfer(cut_of(box_), Rect::TOP_RIGHT));
-    let Some(at) = at else {
+    let Landing::In(space, Some(at)) = drag.landing else {
         return;
     };
+    let placed = layout.placed(space);
     let x = layout
         .insertion_gap(space, at)
         .min(placed.strip.x + placed.strip.w - CARET_W);
     scene.over_rect(Panel::new(x, placed.strip.y, CARET_W, placed.strip.h).fill(skin.drop_mark));
+}
+
+/// The room a pane would have once this drop had happened.
+///
+/// The move is made on a copy of the dock, so the cells it answers with are the
+/// cells the real move would give it, spans and emptied neighbours included.
+fn drop_room(layout: &Layout, dock: &Dock, drag: Drag) -> Panel {
+    let mut after = dock.clone();
+    match drag.landing {
+        Landing::In(space, None) => {
+            after.move_view(drag.view, space);
+        }
+        Landing::Span(a, b) => {
+            after.span_view(drag.view, a, b);
+        }
+        _ => return nowhere(),
+    }
+    let Some(head) = after.space_of(drag.view) else {
+        return nowhere();
+    };
+    let cover = after.cover();
+    Space::ALL
+        .into_iter()
+        .filter(|cell| cover[cell.index()] == Some(head))
+        .fold(nowhere(), |box_, cell| around(box_, layout.grid[cell.index()]))
 }
 
 /// The floating layer, and the last thing painted.
@@ -4307,12 +4544,22 @@ mod tests {
             .collect()
     }
 
+    /// Every cell that has tabs in it, which is not every cell of the grid: the
+    /// window opens with the one under the conversation empty, and an empty cell
+    /// has no strip and no body because its room went to its neighbour.
+    fn occupied(dock: &Dock) -> Vec<Space> {
+        Space::ALL
+            .into_iter()
+            .filter(|space| !dock.slot(*space).is_empty())
+            .collect()
+    }
+
     #[test]
     fn the_default_arrangement_puts_every_space_on_screen() {
         let dock = Dock::new();
         for (w, h) in [(1200.0, 800.0), (700.0, 460.0), (2200.0, 1400.0)] {
             let out = render(&busy_state(), w, h, &dock, &["a.rs"]);
-            for space in Space::ALL {
+            for space in occupied(&dock) {
                 let placed = out.layout.placed(space);
                 assert!(placed.strip.w > 1.0, "{space:?} at {w}x{h}");
                 assert!(placed.strip.x >= 0.0 && placed.strip.y >= TITLE_H - 0.1);
@@ -4744,8 +4991,8 @@ mod tests {
         assert_eq!(out.layout.content(space), out.layout.file_diff);
         // The other spaces are unchanged: their content is their whole body.
         assert_eq!(
-            out.layout.content(Space::Left),
-            out.layout.placed(Space::Left).body
+            out.layout.content(Space::TopLeft),
+            out.layout.placed(Space::TopLeft).body
         );
 
         let diff = out.layout.file_diff.inset(PAD);
@@ -4839,20 +5086,22 @@ mod tests {
         }
     }
 
-    /// A drop lands somewhere. Every point inside a space's body or its strip
-    /// names that space, or a drag can be released over nothing.
+    /// Every point inside a pane's body or its strip is hit as that pane,
+    /// wherever the pane sits on the grid and however many cells it covers.
+    ///
+    /// The pointer, not the drop: a drop below the strips is read off the grid
+    /// rather than off the pane that happens to be drawn there, which is what
+    /// lets a pane covering two cells be dropped into either half of itself.
     #[test]
-    fn every_point_in_a_space_names_that_space_for_a_drop() {
+    fn every_point_in_a_space_is_hit_as_that_space() {
         let dock = Dock::new();
         let out = render(&busy_state(), 1400.0, 900.0, &dock, &["a.rs"]);
         // How far in from an edge a point has to be to be in the pane rather
         // than on a divider: the band a divider is grabbed by is [`GRAB`] wider
         // than the gap it stands in on each side, so the outermost few pixels of
-        // a pane beside one belong to the divider. A release there is
-        // `Landing::Nowhere`, which is what the margin between two panes has
-        // always been.
+        // a pane beside one belong to the divider.
         let in_ = GRAB + 4.0;
-        for space in Space::ALL {
+        for space in occupied(&dock) {
             let placed = out.layout.placed(space);
             for point in [
                 (placed.body.x + in_, placed.body.y + in_),
@@ -4873,11 +5122,11 @@ mod tests {
     #[test]
     fn a_moved_view_is_drawn_in_its_new_space() {
         let mut dock = Dock::new();
-        dock.move_view(View::Session, Space::Left);
+        dock.move_view(View::Session, Space::TopLeft);
         let out = render(&busy_state(), 1400.0, 900.0, &dock, &["a.rs"]);
         let left: Vec<View> = out
             .layout
-            .placed(Space::Left)
+            .placed(Space::TopLeft)
             .tabs
             .iter()
             .map(|(v, _)| *v)
@@ -4926,7 +5175,7 @@ mod tests {
         let mut dock = Dock::new();
         dock.move_view(View::Output, Space::TopRight);
         let out = render(&busy_state(), 1200.0, 800.0, &dock, &[]);
-        assert_eq!(out.layout.placed(Space::Left).strip.w, 0.0);
+        assert_eq!(out.layout.placed(Space::TopLeft).strip.w, 0.0);
         let top = out.layout.placed(Space::TopRight);
         assert!(top.body.w > 1000.0, "{:?}", top.body);
     }
@@ -4949,7 +5198,7 @@ mod tests {
             let layout = Layout::compute(1400.0, 900.0, &split_shape(&dock, left_width, top_height));
             let body = layout.column_divider.track;
             let room = body.w - GAP;
-            let (left_w, _) = box_of(&layout, Space::Left);
+            let (left_w, _) = box_of(&layout, Space::TopLeft);
             let (right_w, _) = box_of(&layout, Space::TopRight);
             assert!(
                 (left_w - room * left_width).abs() <= 1.0,
@@ -4995,7 +5244,7 @@ mod tests {
         for x in [body.x + 400.0, body.x + 700.0, body.x + 1000.0] {
             let moved =
                 Layout::compute(1400.0, 900.0, &split_shape(&dock, layout.column_ratio_at(x), 0.46));
-            let gap = moved.placed(Space::Left).strip.x + moved.placed(Space::Left).strip.w;
+            let gap = moved.placed(Space::TopLeft).strip.x + moved.placed(Space::TopLeft).strip.w;
             assert!((gap + GAP * 0.5 - x).abs() <= 1.0, "{x} put the gap at {gap}");
         }
         for y in [right.y + 200.0, right.y + 400.0, right.y + 600.0] {
@@ -5021,7 +5270,7 @@ mod tests {
         for x in [-4000.0, -1.0, 700.0, 1401.0, 9000.0] {
             let ratio = layout.column_ratio_at(x);
             let moved = Layout::compute(1400.0, 900.0, &split_shape(&dock, ratio, TOP_HEIGHT));
-            let (left_w, _) = box_of(&moved, Space::Left);
+            let (left_w, _) = box_of(&moved, Space::TopLeft);
             let (right_w, _) = box_of(&moved, Space::TopRight);
             assert!(left_w >= column_floor, "{x}: the left column is {left_w}");
             assert!(right_w >= column_floor, "{x}: the right column is {right_w}");
@@ -5038,7 +5287,7 @@ mod tests {
         // A ratio out of a settings file nobody clamped is held the same way.
         for ratio in [0.0, 1.0, -5.0, 12.0] {
             let moved = Layout::compute(1400.0, 900.0, &split_shape(&dock, ratio, ratio));
-            assert!(box_of(&moved, Space::Left).0 >= column_floor, "{ratio}");
+            assert!(box_of(&moved, Space::TopLeft).0 >= column_floor, "{ratio}");
             assert!(box_of(&moved, Space::TopRight).0 >= column_floor, "{ratio}");
             assert!(box_of(&moved, Space::TopRight).1 >= row_floor, "{ratio}");
             assert!(box_of(&moved, Space::BottomRight).1 >= row_floor, "{ratio}");
@@ -5052,7 +5301,7 @@ mod tests {
         let dock = Dock::new();
         // 320 wide leaves about 300 for two columns that want 210 each.
         let layout = Layout::compute(320.0, 240.0, &split_shape(&dock, 0.9, 0.9));
-        let (left_w, _) = box_of(&layout, Space::Left);
+        let (left_w, _) = box_of(&layout, Space::TopLeft);
         let (right_w, _) = box_of(&layout, Space::TopRight);
         assert!(left_w < layout.column_divider.floor, "the floor still fits");
         assert!((left_w - right_w).abs() <= 1.0, "{left_w} against {right_w}");
@@ -5078,7 +5327,7 @@ mod tests {
         for x in [band.x + 0.5, band.x + band.w * 0.5, band.x + band.w - 0.5] {
             assert_eq!(out.layout.hit(x, y), Some(Hit::ColumnDivider), "at {x}");
         }
-        assert_eq!(out.layout.hit(band.x - 1.0, y), Some(Hit::Body(Space::Left)));
+        assert_eq!(out.layout.hit(band.x - 1.0, y), Some(Hit::Body(Space::TopLeft)));
         assert_eq!(
             out.layout.hit(band.x + band.w + 1.0, y),
             Some(Hit::Body(Space::TopRight))
@@ -5104,9 +5353,13 @@ mod tests {
         let tab = out.layout.placed(Space::TopRight).tabs[0];
         let (tx, ty) = middle(tab.1);
         assert_eq!(out.layout.hit(tx, ty), Some(Hit::Tab(tab.0, Space::TopRight)));
-        // And a divider is not a drop target: a tab let go on one goes back
-        // where it was, the way it does on the margin between two panes.
-        assert_eq!(out.layout.landing(x, band.y + 1.0), Landing::Nowhere);
+        // A divider is a drop target of its own: a tab let go on the line
+        // between two cells takes both of them. It is the same band the pointer
+        // grabs the divider by, read for a drop rather than for a press.
+        assert_eq!(
+            out.layout.landing(x, band.y + 1.0),
+            Landing::Span(Space::TopRight, Space::BottomRight)
+        );
     }
 
     /// A divider beside an empty space has nothing to divide, so it is not
@@ -5206,11 +5459,11 @@ mod tests {
             Some(Drag {
                 view: View::Activity,
                 at: (400.0, 500.0),
-                landing: Landing::In(Space::Left, None),
+                landing: Landing::In(Space::TopLeft, None),
             }),
         );
         // The box covers the whole space: its tab strip and its pane.
-        let placed = dragging.layout.placed(Space::Left);
+        let placed = dragging.layout.placed(Space::TopLeft);
         let want = [
             placed.strip.x,
             placed.strip.y,
@@ -5283,6 +5536,374 @@ mod tests {
         );
     }
 
+    /// The grid is the two ratios, and it tiles the room the panes share with
+    /// one gap each way. Four cells, whatever is standing in them.
+    #[test]
+    fn the_four_cells_tile_the_room_the_panes_share() {
+        let dock = Dock::new();
+        for (w, h) in [(1400.0, 900.0), (700.0, 460.0), (2200.0, 1400.0)] {
+            for (left_width, top_height) in [(0.3, 0.3), (LEFT_WIDTH, TOP_HEIGHT), (0.7, 0.72)] {
+                let layout =
+                    Layout::compute(w, h, &split_shape(&dock, left_width, top_height));
+                let cells = layout.grid;
+                let at = |space: Space| cells[space.index()];
+                let what = format!("{w}x{h} at {left_width},{top_height}");
+                for space in Space::ALL {
+                    assert!(at(space).w > 1.0 && at(space).h > 1.0, "{space:?} {what}");
+                }
+                // One gap between the columns and one between the rows, and the
+                // cells of a column are the same width as each other.
+                assert_eq!(at(Space::TopLeft).w, at(Space::BottomLeft).w, "{what}");
+                assert_eq!(at(Space::TopRight).w, at(Space::BottomRight).w, "{what}");
+                assert_eq!(at(Space::TopLeft).h, at(Space::TopRight).h, "{what}");
+                assert_eq!(at(Space::BottomLeft).h, at(Space::BottomRight).h, "{what}");
+                let gap_x = at(Space::TopRight).x - (at(Space::TopLeft).x + at(Space::TopLeft).w);
+                let gap_y = at(Space::BottomLeft).y - (at(Space::TopLeft).y + at(Space::TopLeft).h);
+                assert!((gap_x - GAP).abs() < 0.01, "{gap_x} {what}");
+                assert!((gap_y - GAP).abs() < 0.01, "{gap_y} {what}");
+                // And the whole grid is the box the panes share: the window
+                // under the title strip, less the prompt and the margin.
+                let whole = around(at(Space::TopLeft), at(Space::BottomRight));
+                assert!((whole.x - GAP).abs() < 0.01, "{whole:?} {what}");
+                assert!((whole.x + whole.w - (w - GAP)).abs() < 0.01, "{whole:?} {what}");
+                assert!(
+                    (whole.y + whole.h - (layout.input.y - GAP * 2.0)).abs() < 0.01,
+                    "{whole:?} {what}"
+                );
+            }
+        }
+    }
+
+    /// Every pane is the box around the cells it covers, so the arrangement on
+    /// screen is exactly the arrangement the dock describes. This is what makes
+    /// the drop preview and the drop agree: both read the same cells.
+    #[test]
+    fn every_pane_is_the_cells_it_covers() {
+        let mut docks = vec![Dock::new()];
+        let mut split = Dock::new();
+        split.move_view(View::Debug, Space::BottomLeft);
+        docks.push(split.clone());
+        let mut rows = Dock::new();
+        rows.span_view(View::Files, Space::TopLeft, Space::TopRight);
+        docks.push(rows);
+        let mut one = Dock::new();
+        for view in View::ALL {
+            if view != View::Output {
+                one.hide(view);
+            }
+        }
+        docks.push(one);
+        for dock in docks {
+            let layout = Layout::compute(1400.0, 900.0, &shape(&dock, &[]));
+            let cover = dock.cover();
+            for space in Space::ALL {
+                let want = Space::ALL
+                    .into_iter()
+                    .filter(|cell| cover[cell.index()] == Some(space))
+                    .fold(nowhere(), |box_, cell| {
+                        around(box_, layout.grid[cell.index()])
+                    });
+                let placed = layout.placed(space);
+                let got = Panel::new(
+                    placed.strip.x,
+                    placed.strip.y,
+                    placed.strip.w,
+                    placed.strip.h + placed.body.h,
+                );
+                assert_eq!(got, want, "{space:?} in {dock:?}");
+            }
+        }
+    }
+
+    /// A divider is as long as the panes it divides. With one column standing
+    /// empty the two panes in the other one are full width, so the line between
+    /// them is too, and it can be grabbed at either end of the window.
+    #[test]
+    fn a_divider_runs_as_far_as_the_panes_it_divides() {
+        let mut dock = Dock::new();
+        for view in [
+            View::Activity,
+            View::Plan,
+            View::Agents,
+            View::Hardware,
+            View::Context,
+            View::Session,
+        ] {
+            dock.move_view(view, Space::TopLeft);
+        }
+        for view in [View::Files, View::Debug] {
+            dock.move_view(view, Space::BottomLeft);
+        }
+        let layout = Layout::compute(1200.0, 800.0, &shape(&dock, &[]));
+        assert!(!layout.column_divider.live(), "there is one column");
+        assert!(layout.row_divider.live());
+        let (band, body) = (layout.row_divider.band, layout.row_divider.track);
+        assert!((band.x - body.x).abs() < 0.01, "{band:?} in {body:?}");
+        assert!((band.w - body.w).abs() < 0.01, "{band:?} in {body:?}");
+        let y = band.y + band.h * 0.5;
+        for x in [band.x + 1.0, band.x + band.w - 1.0] {
+            assert_eq!(layout.hit(x, y), Some(Hit::RowDivider), "at {x}");
+        }
+    }
+
+    /// A folded pane collapses to its strip and the pane under it in the same
+    /// column takes the room, in either column now that both of them can be
+    /// split. Nothing in the other column moves, and the line the fold decided
+    /// cannot be dragged until it is opened again.
+    #[test]
+    fn folding_a_pane_hands_its_room_down_its_own_column() {
+        let mut dock = Dock::new();
+        dock.move_view(View::Debug, Space::BottomLeft);
+        let open = Layout::compute(1200.0, 800.0, &shape(&dock, &[]));
+        dock.slot_mut(Space::TopLeft).folded = true;
+        let folded = Layout::compute(1200.0, 800.0, &shape(&dock, &[]));
+
+        assert_eq!(folded.placed(Space::TopLeft).body.h, 0.0);
+        assert!(folded.placed(Space::TopLeft).strip.h > 1.0, "no strip left");
+        assert!(
+            folded.placed(Space::BottomLeft).body.h
+                > open.placed(Space::BottomLeft).body.h + TAB_H,
+            "the pane under it did not take the room"
+        );
+        for space in [Space::TopRight, Space::BottomRight] {
+            assert_eq!(
+                folded.placed(space).body,
+                open.placed(space).body,
+                "{space:?} moved"
+            );
+        }
+        // The line inside the folded column has nothing to drag; the one inside
+        // the other column still has.
+        assert!(folded.row_divider.live());
+        assert!(
+            folded.row_divider.band.x >= folded.grid[Space::TopRight.index()].x - 0.01,
+            "the band reaches over the column the fold owns: {:?}",
+            folded.row_divider.band
+        );
+    }
+
+    /// A drop is read off the grid: inside a cell it takes that one cell, and on
+    /// or near the line between two it takes both. Walked over the whole of the
+    /// room the panes share, every band and every corner included.
+    #[test]
+    fn a_drop_names_one_cell_inside_it_and_two_between_them() {
+        let dock = Dock::new();
+        let layout = Layout::compute(1400.0, 900.0, &shape(&dock, &[]));
+        let cells = layout.grid;
+        let line_x = cells[0].x + cells[0].w + GAP * 0.5;
+        let line_y = cells[0].y + cells[0].h + GAP * 0.5;
+        let far = SPAN_BAND + GAP + 4.0;
+
+        // Inside a cell, clear of both lines and below any tab strip: one cell,
+        // and the cell the pointer is actually in.
+        for cell in Space::ALL {
+            let box_ = cells[cell.index()];
+            for (x, y) in [
+                (box_.x + far, box_.y + TAB_H + far),
+                (box_.x + box_.w - far, box_.y + TAB_H + far),
+                (box_.x + far, box_.y + box_.h - far),
+                (box_.x + box_.w - far, box_.y + box_.h - far),
+                (box_.x + box_.w * 0.5, box_.y + box_.h * 0.5),
+            ] {
+                assert_eq!(
+                    layout.landing(x, y),
+                    Landing::In(cell, None),
+                    "{cell:?} at {x},{y}"
+                );
+            }
+        }
+
+        // On the line between two cells of a column: both of them, from above
+        // it and from the gap itself. The band stops where the lower pane's tab
+        // strip starts, because a strip names a place among its tabs and that is
+        // the older answer; the gap that is drawn is always outside it.
+        for column in 0..2 {
+            let (top, bottom) = (Space::at(0, column), Space::at(1, column));
+            let x = cells[top.index()].x + cells[top.index()].w * 0.5;
+            for y in [line_y - SPAN_BAND, line_y - 1.0, line_y, line_y + 2.0] {
+                assert_eq!(
+                    layout.landing(x, y),
+                    Landing::Span(top, bottom),
+                    "the column line at {x},{y}"
+                );
+            }
+            // And a hair outside the band is one cell again.
+            for (y, want) in [
+                (line_y - SPAN_BAND - GAP, top),
+                (line_y + SPAN_BAND + GAP + TAB_H, bottom),
+            ] {
+                assert_eq!(layout.landing(x, y), Landing::In(want, None), "at {x},{y}");
+            }
+        }
+        // Under the line the band runs its full depth wherever no strip is in
+        // the way, which is any cell standing empty: the left column is one
+        // pane over both of its cells, so the whole band there is a pair.
+        let x = cells[0].x + cells[0].w * 0.5;
+        assert_eq!(
+            layout.landing(x, line_y + SPAN_BAND),
+            Landing::Span(Space::TopLeft, Space::BottomLeft),
+        );
+
+        // The same across a row. The top row's line runs behind its tab strips,
+        // so it is walked below them: a strip names a place among tabs, which is
+        // the older answer and still the right one there.
+        for row in 0..2 {
+            let (left, right) = (Space::at(row, 0), Space::at(row, 1));
+            let box_ = cells[left.index()];
+            let y = box_.y + box_.h - far;
+            for x in [line_x - SPAN_BAND, line_x - 1.0, line_x, line_x + SPAN_BAND] {
+                assert_eq!(
+                    layout.landing(x, y),
+                    Landing::Span(left, right),
+                    "the row line at {x},{y}"
+                );
+            }
+        }
+
+        // Where the two lines cross, the nearer one wins, and a dead heat goes
+        // to the pair that spans a column.
+        assert_eq!(
+            layout.landing(line_x, line_y),
+            Landing::Span(Space::TopRight, Space::BottomRight),
+            "the crossing"
+        );
+        assert_eq!(
+            layout.landing(line_x + 2.0, line_y - SPAN_BAND),
+            Landing::Span(Space::TopLeft, Space::TopRight),
+            "hard against the vertical line, so the pair is across the row"
+        );
+        assert_eq!(
+            layout.landing(line_x - SPAN_BAND, line_y - 2.0),
+            Landing::Span(Space::TopLeft, Space::BottomLeft),
+            "hard against the horizontal one, so the pair is down the column"
+        );
+
+        // Nothing below the strips is a miss: every point in the grid names a
+        // cell or a pair, and every point outside it names nothing.
+        let whole = around(cells[0], cells[3]);
+        let mut x = whole.x;
+        while x < whole.x + whole.w {
+            let mut y = whole.y + TAB_H + 1.0;
+            while y < whole.y + whole.h {
+                // A cell, a pair, or a place among the tabs of a strip. Never
+                // a miss: the room the panes share is all target.
+                assert!(
+                    matches!(layout.landing(x, y), Landing::In(..) | Landing::Span(..)),
+                    "nothing at {x},{y}"
+                );
+                y += 7.0;
+            }
+            x += 11.0;
+        }
+        for (x, y) in [
+            (700.0, 10.0),
+            (700.0, whole.y - 2.0),
+            (whole.x - 2.0, 400.0),
+            (700.0, layout.input.y + 4.0),
+        ] {
+            assert_eq!(layout.landing(x, y), Landing::Nowhere, "at {x},{y}");
+        }
+    }
+
+    /// The band around a line never swallows a cell whole, however short the
+    /// cells are: there is always a way to drop into one alone.
+    #[test]
+    fn a_short_cell_still_has_room_to_be_dropped_into() {
+        let dock = Dock::new();
+        for (w, h) in [(680.0, 380.0), (680.0, 420.0), (900.0, 400.0)] {
+            let layout = Layout::compute(w, h, &shape(&dock, &[]));
+            for cell in Space::ALL {
+                let box_ = layout.grid[cell.index()];
+                let (x, y) = (box_.x + box_.w * 0.5, box_.y + box_.h * 0.5);
+                assert_eq!(
+                    layout.landing(x, y),
+                    Landing::In(cell, None),
+                    "{cell:?} at {w}x{h} is all band"
+                );
+            }
+        }
+    }
+
+    /// The green box is the room the drop would take: one cell for a drop
+    /// inside one, both for a drop between two, and the pair a pane would end up
+    /// covering when its neighbour is left empty.
+    #[test]
+    fn the_green_box_is_the_room_the_drop_would_take() {
+        let dock = Dock::new();
+        let boxed_view = |view: View, landing: Landing| {
+            let out = render_with(
+                &busy_state(),
+                1200.0,
+                800.0,
+                &dock,
+                &["a.rs"],
+                &Monitor::new(),
+                Some(Drag {
+                    view,
+                    at: (600.0, 400.0),
+                    landing,
+                }),
+            );
+            let rect = out
+                .scene
+                .over_rects
+                .iter()
+                .find(|rect| rect.rgba() == out.skin.drop_target)
+                .unwrap_or_else(|| panic!("no green box for {landing:?}"))
+                .xywh();
+            (rect, out.layout.grid)
+        };
+        let boxed = |landing: Landing| boxed_view(View::Session, landing);
+        let want = |cells: &[Space], grid: [Panel; 4]| {
+            let box_ = cells
+                .iter()
+                .fold(nowhere(), |box_, cell| around(box_, grid[cell.index()]));
+            [box_.x, box_.y, box_.w, box_.h]
+        };
+
+        // One cell: the pane that takes it is beside another, so it gets that
+        // cell and no more.
+        let (rect, grid) = boxed(Landing::In(Space::BottomRight, None));
+        assert_eq!(rect, want(&[Space::BottomRight], grid), "one cell");
+
+        // Two: the drop merges the pair, so the box is both.
+        let (rect, grid) = boxed(Landing::span(Space::TopRight, Space::BottomRight));
+        assert_eq!(
+            rect,
+            want(&[Space::TopRight, Space::BottomRight], grid),
+            "a column pair"
+        );
+        let (rect, grid) = boxed(Landing::span(Space::TopLeft, Space::TopRight));
+        assert_eq!(
+            rect,
+            want(&[Space::TopLeft, Space::TopRight], grid),
+            "a row pair"
+        );
+
+        // A cell whose neighbour is left empty by the drop: the pane covers
+        // both, so the box says both. The conversation dropped back into the
+        // cell it is already in leaves the cell under it empty, and it keeps the
+        // whole column.
+        let (rect, grid) = boxed_view(View::Output, Landing::In(Space::TopLeft, None));
+        assert_eq!(
+            rect,
+            want(&[Space::TopLeft, Space::BottomLeft], grid),
+            "the pane still spans the column it is alone in"
+        );
+        // And the same drop one cell down moves it there, where it still has
+        // the column to itself.
+        let (rect, grid) = boxed_view(View::Output, Landing::In(Space::BottomLeft, None));
+        assert_eq!(
+            rect,
+            want(&[Space::TopLeft, Space::BottomLeft], grid),
+            "nothing is left above it, so it still spans"
+        );
+        // A second pane in that column is what takes the span apart, and then
+        // the box is one cell.
+        let (rect, grid) = boxed(Landing::In(Space::BottomLeft, None));
+        assert_eq!(rect, want(&[Space::BottomLeft], grid), "beside the conversation");
+    }
+
     /// Item 7's other half: the tab in the air over the outside of the window
     /// says the drop closes it. There is nowhere to land, so there is no green
     /// box either, and the ghost's edge and label go to the bad colour.
@@ -5330,7 +5951,7 @@ mod tests {
         assert_eq!(label.color, Some(out.skin.bad));
 
         // Back over a space it is the ordinary ghost again, over a green box.
-        let in_ = ghost_of(Landing::In(Space::Left, None), (400.0, 500.0));
+        let in_ = ghost_of(Landing::In(Space::TopLeft, None), (400.0, 500.0));
         assert!(
             !in_.scene
                 .over_rects
@@ -5498,7 +6119,7 @@ mod tests {
             settings: None,
         });
 
-        let body = layout.placed(Space::Left).body.inset(PAD);
+        let body = layout.placed(Space::TopLeft).body.inset(PAD);
         let bands: Vec<[f32; 4]> = scene
             .rects
             .iter()
@@ -6666,8 +7287,9 @@ mod tests {
     /// `panel_edge` is still the way a box that wants four sides is drawn.
     #[test]
     fn a_pane_is_bordered_on_three_sides_and_open_at_the_top() {
-        let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &["a.rs"]);
-        for space in Space::ALL {
+        let dock = Dock::new();
+        let out = render(&busy_state(), 1400.0, 900.0, &dock, &["a.rs"]);
+        for space in occupied(&dock) {
             let panel = out.layout.placed(space).body;
             let cut = cut_of(panel);
             let edge = |box_: [f32; 4], side: &str| {
@@ -6770,8 +7392,9 @@ mod tests {
     /// two everywhere.
     #[test]
     fn a_panel_is_cut_on_its_top_right_corner_only() {
-        let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &["a.rs"]);
-        let boxes: Vec<(Panel, usize)> = Space::ALL
+        let dock = Dock::new();
+        let out = render(&busy_state(), 1400.0, 900.0, &dock, &["a.rs"]);
+        let boxes: Vec<(Panel, usize)> = occupied(&dock)
             .iter()
             .map(|space| (out.layout.placed(*space).body, 1))
             .chain(std::iter::once((out.layout.input, 2)))
@@ -7072,10 +7695,10 @@ mod tests {
         // hold. The one left behind keeps the space split, so the strip is the
         // width it usually is rather than the whole window.
         for view in View::ALL.into_iter().filter(|v| *v != View::Files) {
-            dock.move_view(view, Space::Left);
+            dock.move_view(view, Space::TopLeft);
         }
         let out = render(&busy_state(), 900.0, 700.0, &dock, &["calc.py"]);
-        let placed = out.layout.placed(Space::Left);
+        let placed = out.layout.placed(Space::TopLeft);
         let tabs = &placed.tabs;
         assert!(tabs.len() < View::ALL.len(), "every tab fitted");
         for (_, panel) in tabs {
@@ -7646,7 +8269,7 @@ mod tests {
     fn the_widget_list_is_clamped_into_the_window_and_scrolls_when_it_cannot_fit() {
         let dock = Dock::new();
         let (w, h) = (900.0, 600.0);
-        let mut menu = Menu::for_widget((w - 2.0, h - 2.0), View::Plan, Space::Left, false);
+        let mut menu = Menu::for_widget((w - 2.0, h - 2.0), View::Plan, Space::TopLeft, false);
         menu.toggle_widgets(&dock);
         let layout = with_menu(&dock, &menu, w, h);
         let box_ = layout.menu_list;
@@ -7720,7 +8343,7 @@ mod tests {
         let dock = Dock::new();
         let (w, h) = (1400.0, 900.0);
         let at = (400.0, 300.0);
-        let shut = Menu::for_widget(at, View::Plan, Space::Left, false);
+        let shut = Menu::for_widget(at, View::Plan, Space::TopLeft, false);
         let closed = with_menu(&dock, &shut, w, h);
         assert_eq!(closed.menu_list.w, 0.0, "shut, there is no second box");
         assert!(closed.menu_list_rows.is_empty());
@@ -7768,7 +8391,7 @@ mod tests {
     fn the_widget_list_flips_to_the_left_at_the_right_edge() {
         let dock = Dock::new();
         let (w, h) = (1400.0, 900.0);
-        let mut menu = Menu::for_widget((w - 4.0, 200.0), View::Plan, Space::Left, false);
+        let mut menu = Menu::for_widget((w - 4.0, 200.0), View::Plan, Space::TopLeft, false);
         menu.toggle_widgets(&dock);
         let layout = with_menu(&dock, &menu, w, h);
         let (box_, list) = (layout.menu, layout.menu_list);
@@ -7801,7 +8424,7 @@ mod tests {
             "the menu is not over a pane, so this proves nothing"
         );
 
-        let mut menu = Menu::for_widget(at, View::Plan, Space::Left, false);
+        let mut menu = Menu::for_widget(at, View::Plan, Space::TopLeft, false);
         menu.toggle_widgets(&dock);
         let layout = with_menu(&dock, &menu, w, h);
 
@@ -7838,7 +8461,7 @@ mod tests {
     #[test]
     fn the_widget_list_is_drawn_on_the_floating_layer() {
         let dock = Dock::hiding(&[View::Debug]);
-        let mut menu = Menu::for_widget((400.0, 200.0), View::Plan, Space::Left, false);
+        let mut menu = Menu::for_widget((400.0, 200.0), View::Plan, Space::TopLeft, false);
         menu.toggle_widgets(&dock);
         let out = render_menu(&busy_state(), 1400.0, 900.0, &dock, &menu, None);
         let (box_, list) = (out.layout.menu, out.layout.menu_list);
@@ -7901,7 +8524,7 @@ mod tests {
         use crate::menu::Item;
         let dock = Dock::new();
         for open in [false, true] {
-            let mut menu = Menu::for_widget((400.0, 300.0), View::Plan, Space::Left, false);
+            let mut menu = Menu::for_widget((400.0, 300.0), View::Plan, Space::TopLeft, false);
             if open {
                 menu.toggle_widgets(&dock);
             }
@@ -8153,9 +8776,13 @@ mod tests {
         ] {
             assert_eq!(layout.landing(x, y), Landing::Out, "at {x},{y}");
         }
-        // The body of a pane names the space and no place in its strip.
-        let (x, y) = middle(layout.placed(Space::Left).body);
-        assert_eq!(layout.landing(x, y), Landing::In(Space::Left, None));
+        // Inside a cell the drop names that cell and no place in any strip. The
+        // conversation covers both cells of the left column, and each half of it
+        // still names its own cell: that is what takes a span back apart.
+        let (x, y) = middle(layout.grid[Space::TopLeft.index()]);
+        assert_eq!(layout.landing(x, y), Landing::In(Space::TopLeft, None));
+        let (x, y) = middle(layout.grid[Space::BottomLeft.index()]);
+        assert_eq!(layout.landing(x, y), Landing::In(Space::BottomLeft, None));
         // A tab does name a place: the middle of the first tab is its right half,
         // so a drop there goes behind it.
         let (x, y) = middle(layout.placed(Space::TopRight).tabs[0].1);
@@ -8184,8 +8811,8 @@ mod tests {
         );
         // The left column is untouched and the prompt is still there.
         assert_eq!(
-            out.layout.placed(Space::Left).body,
-            full.placed(Space::Left).body
+            out.layout.placed(Space::TopLeft).body,
+            full.placed(Space::TopLeft).body
         );
         assert_eq!(out.layout.input, full.input);
 

@@ -1,17 +1,25 @@
-//! Which view lives in which space, and moving them between spaces.
+//! Which view lives in which cell of the grid, and moving them between cells.
 //!
-//! Three spaces: the wide column on the left and two stacked on the right.
-//! Every view is a tab in exactly one of them, and dragging its tab onto
-//! another space moves it there. That is the whole model. It is deliberately
-//! not a general splitter tree: a tree lets you make arrangements nobody wants
-//! and costs a drag target for every edge of every node, and three spaces
-//! covers reading a conversation beside two things at once, which is what this
-//! window is for.
+//! The window is a capped 2x2 grid: four cells, two dividers, nothing nested
+//! deeper. Every view is a tab in exactly one cell, and dragging its tab onto
+//! the grid moves it there. That is the whole model. It is deliberately not a
+//! general splitter tree: a tree lets you make arrangements nobody wants, costs
+//! a drag target for every edge of every node, and can split a pane down past
+//! the size at which anything can be drawn in it. Four cells cover reading a
+//! conversation beside two or three things at once, which is what this window
+//! is for.
 //!
-//! The invariant everything else relies on: every view is in exactly one
-//! space, always. A move takes it out of where it was before it puts it
-//! anywhere, and a space that ends up empty gives its room to its neighbour
-//! rather than becoming a hole.
+//! A pane spans two cells rather than being pinned to one. A space with tabs
+//! whose neighbour has none takes that neighbour's room ([`Dock::cover`]), so
+//! the column the conversation opens in spans both rows because the cell under
+//! it is empty, not because anything is hardcoded. Dropping a tab between two
+//! cells merges them and gives the pane the pair; dropping it inside one cell
+//! fills that cell and takes the span back apart.
+//!
+//! The invariant everything else relies on: every view is in exactly one cell,
+//! always. A move takes it out of where it was before it puts it anywhere, and
+//! a space that ends up empty gives its room to its neighbour rather than
+//! becoming a hole.
 //!
 //! Tabs also have an order, and a drop can name a place in it: dropping a tab in
 //! front of another puts it there ([`Dock::place_view`]), in the space it is
@@ -76,24 +84,72 @@ impl View {
     }
 }
 
-/// Where a space is on screen. Only three, and they are named rather than
-/// indexed so a caller cannot ask for the fourth.
+/// One cell of the grid. Four, and they are named rather than indexed so a
+/// caller cannot ask for the fifth.
+///
+/// A cell is a place on the grid, not a pane: a pane covers the cell it is in
+/// and any neighbouring cell that is standing empty, which is how one pane comes
+/// to fill a whole column. [`Dock::cover`] answers which pane is over which cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Space {
-    Left,
+    TopLeft,
+    BottomLeft,
     TopRight,
     BottomRight,
 }
 
 impl Space {
-    pub const ALL: [Space; 3] = [Space::Left, Space::TopRight, Space::BottomRight];
+    /// Every cell, down the left column and then down the right one. That is
+    /// the order the keyboard walks the window in, and the order the layout
+    /// indexes its boxes by.
+    pub const ALL: [Space; 4] = [
+        Space::TopLeft,
+        Space::BottomLeft,
+        Space::TopRight,
+        Space::BottomRight,
+    ];
 
-    fn index(self) -> usize {
+    pub fn index(self) -> usize {
         match self {
-            Space::Left => 0,
-            Space::TopRight => 1,
-            Space::BottomRight => 2,
+            Space::TopLeft => 0,
+            Space::BottomLeft => 1,
+            Space::TopRight => 2,
+            Space::BottomRight => 3,
         }
+    }
+
+    /// Which row of the grid it is in, counted from the top, and which column,
+    /// counted from the left.
+    pub fn row(self) -> usize {
+        self.index() % 2
+    }
+
+    pub fn column(self) -> usize {
+        self.index() / 2
+    }
+
+    /// The cell at these coordinates. Both are taken modulo two, so no caller
+    /// can name a cell off the grid.
+    pub fn at(row: usize, column: usize) -> Space {
+        Space::ALL[(column % 2) * 2 + row % 2]
+    }
+
+    /// The other cell of its column: the one under it, or the one over it.
+    /// What a drop on the horizontal grid line pairs it with.
+    pub fn in_column(self) -> Space {
+        Space::at(1 - self.row(), self.column())
+    }
+
+    /// The other cell of its row, for the vertical line.
+    pub fn in_row(self) -> Space {
+        Space::at(self.row(), 1 - self.column())
+    }
+
+    /// Whether these two cells share a divider, which is the only way two of
+    /// them can be dropped on as a pair. The two diagonals do not: a pane over
+    /// them would not be a rectangle.
+    pub fn neighbours(self, other: Space) -> bool {
+        other == self.in_column() || other == self.in_row()
     }
 }
 
@@ -194,7 +250,17 @@ impl Slot {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Dock {
-    slots: [Slot; 3],
+    slots: [Slot; 4],
+    /// Whether the grid splits into two rows before it splits into columns.
+    ///
+    /// The one thing four cells need that three spaces did not. With every cell
+    /// full both readings draw the same 2x2 grid, but with one cell empty they
+    /// do not: a window with nothing in the top right is either a left column
+    /// spanning both rows beside a single right pane, or a top row spanning both
+    /// columns above two. Which one it is comes from the last pair a drop
+    /// merged: dropping between two cells of a column says columns, dropping
+    /// between two of a row says rows. A drop inside one cell leaves it alone.
+    rows_first: bool,
     /// Views the settings turned off. Kept rather than merely absent, so a
     /// hidden view cannot be dragged back in and so the soundness check knows
     /// which views it is supposed to find.
@@ -230,6 +296,11 @@ impl Dock {
     fn full() -> Dock {
         Dock {
             hidden: Vec::new(),
+            // Columns before rows, and the cell under the conversation left
+            // empty, which is today's window written in the grid: the left
+            // column spans both rows because nothing is under it, the monitors
+            // sit above right and the files below them.
+            rows_first: false,
             slots: [
                 Slot {
                     views: vec![View::Output],
@@ -237,6 +308,7 @@ impl Dock {
                     folded: false,
                     tab_first: 0,
                 },
+                Slot::default(),
                 Slot {
                     views: vec![
                         View::Activity,
@@ -268,6 +340,56 @@ impl Dock {
 
     pub fn slot(&self, space: Space) -> &Slot {
         &self.slots[space.index()]
+    }
+
+    /// Whether the grid splits into rows before columns. Read by the layout,
+    /// which is the only thing that turns cells into pixels.
+    pub fn rows_first(&self) -> bool {
+        self.rows_first
+    }
+
+    /// Which pane is over each cell of the grid, in [`Space::ALL`] order.
+    ///
+    /// The whole of "an empty space gives its room to its neighbour", said once
+    /// so the layout, the drop preview and the soundness check read one answer.
+    /// A cell whose space has tabs is covered by itself. A cell whose space is
+    /// empty goes to the other cell of its half of the grid, and if that whole
+    /// half is empty its cells go across to the other half, cell for cell.
+    ///
+    /// Which half is which is [`Dock::rows_first`]: halves are the two columns,
+    /// or the two rows. Every cell is `None` only when the window holds nothing
+    /// at all.
+    pub fn cover(&self) -> [Option<Space>; 4] {
+        // The cell in half `major` at place `minor` along it. Transposing here
+        // is what keeps one piece of arithmetic answering for both readings of
+        // the grid.
+        let cell = |major: usize, minor: usize| match self.rows_first {
+            true => Space::at(major, minor),
+            false => Space::at(minor, major),
+        };
+        let live = |space: Space| !self.slot(space).is_empty();
+        let half_live = |major: usize| live(cell(major, 0)) || live(cell(major, 1));
+
+        let mut cover = [None; 4];
+        for major in 0..2 {
+            if !half_live(major) {
+                continue;
+            }
+            // Nothing in the other half, so this one takes its cells too.
+            let spread = !half_live(1 - major);
+            for minor in 0..2 {
+                let here = cell(major, minor);
+                let occupant = match live(here) {
+                    true => here,
+                    false => cell(major, 1 - minor),
+                };
+                cover[here.index()] = Some(occupant);
+                if spread {
+                    cover[cell(1 - major, minor).index()] = Some(occupant);
+                }
+            }
+        }
+        cover
     }
 
     pub fn slot_mut(&mut self, space: Space) -> &mut Slot {
@@ -343,6 +465,46 @@ impl Dock {
         slot.active = at;
         slot.folded = false;
         true
+    }
+
+    /// Move a view onto two cells at once, so its pane spans the pair.
+    ///
+    /// What a drop between two cells does. The two must share a divider; the
+    /// diagonals are refused, because a pane over them would not be a rectangle.
+    ///
+    /// The pair becomes one pane: whatever was in either cell ends up in the
+    /// first of the two, in the order the tabs were already in, with the dropped
+    /// view last and showing. The second cell is left empty, which is what makes
+    /// the pane span it ([`Dock::cover`]), and the grid is turned to read along
+    /// the pair, so a column pair spans a column and a row pair spans a row.
+    ///
+    /// Both cells are emptied and refilled inside this one call, so no caller
+    /// can observe a view in two cells or in none.
+    pub fn span_view(&mut self, view: View, a: Space, b: Space) -> bool {
+        if self.hidden.contains(&view) || !a.neighbours(b) {
+            return false;
+        }
+        let before = self.clone();
+        let (head, tail) = match a.index() < b.index() {
+            true => (a, b),
+            false => (b, a),
+        };
+        for space in Space::ALL {
+            self.slot_mut(space).remove(view);
+        }
+        let mut moved: Vec<View> = self.slot(tail).views.clone();
+        let slot = self.slot_mut(tail);
+        slot.views.clear();
+        slot.active = 0;
+        slot.tab_first = 0;
+        slot.folded = false;
+        let slot = self.slot_mut(head);
+        slot.views.append(&mut moved);
+        slot.views.push(view);
+        slot.active = slot.views.len() - 1;
+        slot.folded = false;
+        self.rows_first = head.row() == tail.row();
+        *self != before
     }
 
     /// Take a view out of the window: no tab, no space, nothing walks to it.
@@ -429,7 +591,8 @@ impl Dock {
     }
 
     /// Whether the arrangement still holds: every view in exactly one space,
-    /// and every space showing one of its own.
+    /// every space showing one of its own, and every cell of the grid covered
+    /// by a pane that exists.
     ///
     /// Reachable from the rest of the crate's tests, not only from this
     /// module's: anything that moves a view around has to leave the dock sound,
@@ -437,6 +600,10 @@ impl Dock {
     /// again beside each caller.
     #[cfg(test)]
     pub(crate) fn is_sound(&self) -> bool {
+        let cover = self.cover();
+        let anything = Space::ALL
+            .into_iter()
+            .any(|space| !self.slot(space).is_empty());
         View::ALL.into_iter().all(|view| {
             let want = usize::from(!self.hidden.contains(&view));
             Space::ALL
@@ -447,6 +614,14 @@ impl Dock {
         }) && Space::ALL.into_iter().all(|space| {
             let slot = self.slot(space);
             slot.views.is_empty() || slot.active < slot.views.len()
+        }) && Space::ALL.into_iter().all(|cell| match cover[cell.index()] {
+            // Nothing is ever covered by an empty pane, and no cell is left
+            // uncovered while there is a pane that could have taken it.
+            Some(space) => !self.slot(space).is_empty(),
+            None => !anything,
+        }) && Space::ALL.into_iter().all(|space| {
+            // A pane always covers its own cell, wherever else it reaches.
+            self.slot(space).is_empty() || cover[space.index()] == Some(space)
         })
     }
 }
@@ -459,7 +634,7 @@ mod tests {
     fn the_default_arrangement_holds_every_view_once() {
         let dock = Dock::new();
         assert!(dock.is_sound());
-        assert_eq!(dock.slot(Space::Left).active(), Some(View::Output));
+        assert_eq!(dock.slot(Space::TopLeft).active(), Some(View::Output));
         assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Activity));
         assert_eq!(dock.slot(Space::BottomRight).active(), Some(View::Files));
         assert_eq!(dock.walk().len(), View::ALL.len());
@@ -519,19 +694,19 @@ mod tests {
         let mut dock = Dock::new();
         let moves = [
             (View::Output, Space::BottomRight),
-            (View::Files, Space::Left),
-            (View::Activity, Space::Left),
+            (View::Files, Space::TopLeft),
+            (View::Activity, Space::TopLeft),
             (View::Plan, Space::BottomRight),
-            (View::Hardware, Space::Left),
+            (View::Hardware, Space::TopLeft),
             (View::Session, Space::BottomRight),
             (View::Agents, Space::TopRight),
-            (View::Output, Space::Left),
+            (View::Output, Space::TopLeft),
         ];
         for (view, to) in moves {
             dock.move_view(view, to);
             assert!(dock.is_sound(), "after moving {view:?} to {to:?}: {dock:?}");
         }
-        assert_eq!(dock.space_of(View::Output), Some(Space::Left));
+        assert_eq!(dock.space_of(View::Output), Some(Space::TopLeft));
     }
 
     /// A space can be emptied. It must stay sound and stay usable.
@@ -546,7 +721,7 @@ mod tests {
             View::Context,
             View::Session,
         ] {
-            dock.move_view(view, Space::Left);
+            dock.move_view(view, Space::TopLeft);
         }
         assert!(dock.slot(Space::TopRight).is_empty());
         assert_eq!(dock.slot(Space::TopRight).active(), None);
@@ -652,7 +827,7 @@ mod tests {
         assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Output));
         assert_eq!(dock.space_of(View::Output), Some(Space::TopRight));
         // Its old space is empty rather than still holding it.
-        assert!(dock.slot(Space::Left).is_empty());
+        assert!(dock.slot(Space::TopLeft).is_empty());
 
         // A place past the end is the end, not a panic and not a hole.
         assert!(dock.place_view(View::Output, Space::BottomRight, 99));
@@ -662,8 +837,8 @@ mod tests {
             vec![View::Files, View::Debug, View::Output]
         );
         // An empty space takes a drop at any place at all.
-        assert!(dock.place_view(View::Output, Space::Left, 7));
-        assert_eq!(dock.slot(Space::Left).views, vec![View::Output]);
+        assert!(dock.place_view(View::Output, Space::TopLeft, 7));
+        assert_eq!(dock.slot(Space::TopLeft).views, vec![View::Output]);
         assert!(dock.is_sound());
     }
 
@@ -677,8 +852,8 @@ mod tests {
             (View::Session, Space::TopRight, 6),
             (View::Files, Space::TopRight, 3),
             (View::Output, Space::BottomRight, 0),
-            (View::Debug, Space::Left, 0),
-            (View::Debug, Space::Left, 2),
+            (View::Debug, Space::TopLeft, 0),
+            (View::Debug, Space::TopLeft, 2),
             (View::Plan, Space::BottomRight, 99),
             (View::Activity, Space::TopRight, 1),
         ];
@@ -691,7 +866,7 @@ mod tests {
         // A view the settings turned off cannot be dropped in by naming a place
         // either.
         assert!(dock.hide(View::Plan));
-        assert!(!dock.place_view(View::Plan, Space::Left, 0));
+        assert!(!dock.place_view(View::Plan, Space::TopLeft, 0));
         assert_eq!(dock.space_of(View::Plan), None);
         assert!(dock.is_sound());
     }
@@ -718,7 +893,7 @@ mod tests {
         let mut dock = Dock::new();
         // Show the last tab, then move it out.
         dock.slot_mut(Space::TopRight).show(View::Session);
-        dock.move_view(View::Session, Space::Left);
+        dock.move_view(View::Session, Space::TopLeft);
         let slot = dock.slot(Space::TopRight);
         assert!(slot.active().is_some());
         assert!(slot.views.contains(&slot.active().unwrap()));
@@ -735,14 +910,14 @@ mod tests {
         }
         assert_eq!(slot.active(), Some(first), "it came back round");
         // A space with one tab has nowhere to cycle to.
-        assert!(!dock.slot_mut(Space::Left).cycle());
+        assert!(!dock.slot_mut(Space::TopLeft).cycle());
     }
 
     /// The keyboard walk visits everything, wherever it has been dragged.
     #[test]
     fn the_walk_covers_every_view_and_wraps() {
         let mut dock = Dock::new();
-        dock.move_view(View::Files, Space::Left);
+        dock.move_view(View::Files, Space::TopLeft);
         dock.move_view(View::Output, Space::BottomRight);
         let mut seen = vec![View::Output];
         let mut at = View::Output;
@@ -772,7 +947,7 @@ mod tests {
         assert_eq!(dock.slot(Space::BottomRight).active(), None);
 
         let mut dock = dock;
-        assert!(!dock.move_view(View::Files, Space::Left));
+        assert!(!dock.move_view(View::Files, Space::TopLeft));
         assert_eq!(dock.space_of(View::Files), None);
         assert!(dock.is_sound());
         // The views that are on still walk, and still wrap.
@@ -795,7 +970,7 @@ mod tests {
         assert!(!dock.walk().contains(&View::Plan));
         assert_eq!(dock.walk().len(), View::ALL.len() - 1);
         // Hidden means out, so a drag cannot put it back either.
-        assert!(!dock.move_view(View::Plan, Space::Left));
+        assert!(!dock.move_view(View::Plan, Space::TopLeft));
         assert_eq!(dock.space_of(View::Plan), None);
         // Hiding it twice is not two hidden entries.
         assert!(!dock.hide(View::Plan));
@@ -815,7 +990,7 @@ mod tests {
     #[test]
     fn a_view_comes_back_in_the_space_it_opens_in() {
         let mut dock = Dock::new();
-        dock.move_view(View::Files, Space::Left);
+        dock.move_view(View::Files, Space::TopLeft);
         assert!(dock.hide(View::Files));
         assert!(dock.unhide(View::Files));
         assert_eq!(dock.space_of(View::Files), Some(Space::BottomRight));
@@ -855,7 +1030,7 @@ mod tests {
             assert_eq!(dock.slot(space).active(), None);
         }
         assert!(dock.unhide(View::Output));
-        assert_eq!(dock.slot(Space::Left).active(), Some(View::Output));
+        assert_eq!(dock.slot(Space::TopLeft).active(), Some(View::Output));
         assert!(dock.is_sound());
     }
 
@@ -877,7 +1052,7 @@ mod tests {
         assert_eq!(slot.tab_first(), 0);
         // A space with no tabs has nowhere to scroll to rather than an offset of
         // its own.
-        let empty = dock.slot_mut(Space::Left);
+        let empty = dock.slot_mut(Space::TopLeft);
         empty.views.clear();
         assert!(!empty.scroll_tabs(3));
         assert_eq!(empty.tab_first(), 0);
@@ -895,15 +1070,15 @@ mod tests {
         assert!(dock.hide(View::Session));
         assert_eq!(dock.slot(Space::TopRight).tab_first(), tabs - 2);
         // Dragging two more away is two more.
-        assert!(dock.move_view(View::Context, Space::Left));
-        assert!(dock.move_view(View::Hardware, Space::Left));
+        assert!(dock.move_view(View::Context, Space::TopLeft));
+        assert!(dock.move_view(View::Hardware, Space::TopLeft));
         let slot = dock.slot(Space::TopRight);
         assert!(slot.tab_first() < slot.views.len(), "{:?}", slot);
         assert_eq!(slot.tab_first(), slot.views.len() - 1);
         assert!(dock.is_sound());
         // And emptying it leaves no offset behind.
         for view in [View::Activity, View::Plan, View::Agents] {
-            assert!(dock.move_view(view, Space::Left));
+            assert!(dock.move_view(view, Space::TopLeft));
         }
         assert!(dock.slot(Space::TopRight).is_empty());
         assert_eq!(dock.slot(Space::TopRight).tab_first(), 0);
@@ -924,7 +1099,7 @@ mod tests {
         assert_eq!(slot.active_index(), Some(3));
         // A space with no tabs shows nothing, rather than showing the first of
         // none.
-        let empty = dock.slot_mut(Space::Left);
+        let empty = dock.slot_mut(Space::TopLeft);
         empty.views.clear();
         assert_eq!(empty.active_index(), None);
         assert!(!empty.show_at(0));
@@ -937,5 +1112,239 @@ mod tests {
         assert!(dock.reveal(View::Session));
         assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Session));
         assert!(!dock.slot(Space::TopRight).folded);
+    }
+
+    /// The arrangement the window has always opened with, said in cells: the
+    /// conversation covers both cells of the left column because the cell under
+    /// it is empty, the monitors sit above right and the files below them.
+    ///
+    /// Nothing an existing user sees changes, and the grid can say what was
+    /// hardcoded before, which is the whole point of the model.
+    #[test]
+    fn the_window_opens_with_the_left_column_spanning_both_rows() {
+        let dock = Dock::new();
+        assert!(!dock.rows_first(), "columns before rows");
+        assert_eq!(dock.slot(Space::TopLeft).active(), Some(View::Output));
+        assert!(dock.slot(Space::BottomLeft).is_empty());
+        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Activity));
+        assert_eq!(dock.slot(Space::BottomRight).active(), Some(View::Files));
+        assert_eq!(
+            dock.cover(),
+            [
+                Some(Space::TopLeft),
+                Some(Space::TopLeft),
+                Some(Space::TopRight),
+                Some(Space::BottomRight),
+            ],
+            "the conversation covers the cell under it"
+        );
+        assert!(dock.is_sound());
+    }
+
+    /// A drop between two cells of a column merges them: one pane over the pair,
+    /// holding what was in both with the dropped tab last and showing.
+    #[test]
+    fn a_drop_between_two_cells_gives_the_pane_the_pair() {
+        let mut dock = Dock::new();
+        assert!(dock.span_view(View::Session, Space::TopRight, Space::BottomRight));
+        assert!(dock.is_sound());
+        assert_eq!(
+            dock.slot(Space::TopRight).views,
+            vec![
+                View::Activity,
+                View::Plan,
+                View::Agents,
+                View::Hardware,
+                View::Context,
+                View::Files,
+                View::Debug,
+                View::Session,
+            ],
+            "both cells' tabs, in the order they were in"
+        );
+        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Session));
+        assert!(dock.slot(Space::BottomRight).is_empty());
+        assert!(!dock.rows_first(), "a column pair leaves the grid in columns");
+        assert_eq!(
+            dock.cover(),
+            [
+                Some(Space::TopLeft),
+                Some(Space::TopLeft),
+                Some(Space::TopRight),
+                Some(Space::TopRight),
+            ],
+            "two columns, each spanning both rows"
+        );
+        assert_eq!(dock.walk().len(), View::ALL.len());
+    }
+
+    /// And a drop inside one cell takes a span back apart: the pane that was
+    /// covering the pair keeps the cell it is in, the drop fills the other, and
+    /// nothing else moves.
+    #[test]
+    fn a_drop_inside_one_cell_takes_a_span_apart() {
+        let mut dock = Dock::new();
+        assert_eq!(dock.cover()[Space::BottomLeft.index()], Some(Space::TopLeft));
+        assert!(dock.move_view(View::Debug, Space::BottomLeft));
+        assert!(dock.is_sound());
+        assert_eq!(dock.space_of(View::Output), Some(Space::TopLeft));
+        assert_eq!(dock.slot(Space::BottomLeft).views, vec![View::Debug]);
+        assert_eq!(
+            dock.cover(),
+            [
+                Some(Space::TopLeft),
+                Some(Space::BottomLeft),
+                Some(Space::TopRight),
+                Some(Space::BottomRight),
+            ],
+            "four cells, four panes"
+        );
+    }
+
+    /// A drop between two cells of a row spans a row, and turns the grid the
+    /// other way round: with one cell empty a grid split into rows and a grid
+    /// split into columns are two different windows, and the last pair a drop
+    /// merged is what says which one this is.
+    #[test]
+    fn a_span_across_a_row_turns_the_grid_the_other_way() {
+        let mut dock = Dock::new();
+        assert!(dock.span_view(View::Files, Space::TopLeft, Space::TopRight));
+        assert!(dock.is_sound());
+        assert!(dock.rows_first());
+        assert_eq!(dock.slot(Space::TopLeft).views.first(), Some(&View::Output));
+        assert_eq!(dock.slot(Space::TopLeft).views.last(), Some(&View::Files));
+        assert!(dock.slot(Space::TopRight).is_empty());
+        assert_eq!(
+            dock.cover(),
+            [
+                Some(Space::TopLeft),
+                Some(Space::BottomRight),
+                Some(Space::TopLeft),
+                Some(Space::BottomRight),
+            ],
+            "a full width row over another"
+        );
+        // And back: a column pair turns it round again.
+        assert!(dock.span_view(View::Debug, Space::TopLeft, Space::BottomLeft));
+        assert!(!dock.rows_first());
+        assert!(dock.is_sound());
+        assert_eq!(dock.cover()[Space::BottomLeft.index()], Some(Space::TopLeft));
+    }
+
+    /// Only cells that share a divider can be dropped on as a pair. A pane over
+    /// two diagonal cells would not be a rectangle.
+    #[test]
+    fn the_diagonals_cannot_be_spanned() {
+        let mut dock = Dock::new();
+        let before = dock.clone();
+        for (a, b) in [
+            (Space::TopLeft, Space::BottomRight),
+            (Space::BottomLeft, Space::TopRight),
+            (Space::TopLeft, Space::TopLeft),
+        ] {
+            assert!(!dock.span_view(View::Files, a, b), "{a:?} with {b:?}");
+            assert_eq!(dock, before, "{a:?} with {b:?}");
+        }
+        assert!(Space::TopLeft.neighbours(Space::TopRight));
+        assert!(Space::TopLeft.neighbours(Space::BottomLeft));
+        assert!(!Space::TopLeft.neighbours(Space::BottomRight));
+        // A view the settings turned off cannot be dropped anywhere either.
+        assert!(dock.hide(View::Plan));
+        assert!(!dock.span_view(View::Plan, Space::TopLeft, Space::BottomLeft));
+        assert_eq!(dock.space_of(View::Plan), None);
+        assert!(dock.is_sound());
+    }
+
+    /// A half of the grid with nothing in it gives its room across rather than
+    /// leaving a hole, and both cells of the other half keep their own row.
+    #[test]
+    fn an_empty_half_of_the_grid_gives_its_room_across() {
+        let mut dock = Dock::new();
+        // Everything into the left column, split between its two cells.
+        for view in [View::Activity, View::Plan, View::Agents] {
+            assert!(dock.move_view(view, Space::TopLeft));
+        }
+        for view in [
+            View::Hardware,
+            View::Context,
+            View::Session,
+            View::Files,
+            View::Debug,
+        ] {
+            assert!(dock.move_view(view, Space::BottomLeft));
+        }
+        assert!(dock.is_sound());
+        assert!(dock.slot(Space::TopRight).is_empty());
+        assert!(dock.slot(Space::BottomRight).is_empty());
+        assert_eq!(
+            dock.cover(),
+            [
+                Some(Space::TopLeft),
+                Some(Space::BottomLeft),
+                Some(Space::TopLeft),
+                Some(Space::BottomLeft),
+            ],
+            "two full width rows"
+        );
+        // One widget left is still a window: it covers the lot.
+        for view in View::ALL {
+            if view != View::Output {
+                assert!(dock.hide(view), "{view:?}");
+            }
+        }
+        assert_eq!(dock.walk(), vec![View::Output]);
+        assert!(dock.is_sound());
+        assert_eq!(dock.cover(), [Some(Space::TopLeft); 4]);
+        // And nothing at all covers nothing at all, rather than half a grid.
+        assert!(dock.hide(View::Output));
+        assert_eq!(dock.cover(), [None; 4]);
+        assert!(dock.is_sound());
+    }
+
+    /// The invariant under a long sequence of drops of every kind: the cells,
+    /// the pairs, the strips and the close, in the order a hand would do them.
+    #[test]
+    fn a_long_sequence_of_drops_leaves_the_dock_sound() {
+        let mut dock = Dock::new();
+        let mut step = 0;
+        let mut check = |dock: &Dock, what: &str| {
+            step += 1;
+            assert!(dock.is_sound(), "step {step} after {what}: {dock:?}");
+            let placed: usize = Space::ALL
+                .into_iter()
+                .map(|space| dock.slot(space).views.len())
+                .sum();
+            assert_eq!(
+                placed + dock.hidden.len(),
+                View::ALL.len(),
+                "step {step} after {what}"
+            );
+        };
+        dock.span_view(View::Files, Space::TopLeft, Space::BottomLeft);
+        check(&dock, "spanning the left column");
+        dock.move_view(View::Debug, Space::BottomLeft);
+        check(&dock, "splitting it again");
+        dock.span_view(View::Plan, Space::BottomLeft, Space::BottomRight);
+        check(&dock, "spanning the bottom row");
+        dock.place_view(View::Session, Space::BottomLeft, 1);
+        check(&dock, "a drop among the tabs");
+        dock.span_view(View::Output, Space::TopRight, Space::BottomRight);
+        check(&dock, "spanning the right column");
+        dock.hide(View::Output);
+        check(&dock, "closing the tab that was just dropped");
+        dock.move_view(View::Context, Space::TopLeft);
+        check(&dock, "a drop into an empty cell");
+        dock.unhide(View::Output);
+        check(&dock, "opening it again");
+        dock.span_view(View::Activity, Space::TopLeft, Space::TopRight);
+        check(&dock, "spanning the top row");
+        for view in View::ALL {
+            dock.hide(view);
+            check(&dock, "closing everything");
+        }
+        assert!(dock.walk().is_empty());
+        dock.unhide(View::Output);
+        check(&dock, "one widget back");
+        assert_eq!(dock.slot(Space::TopLeft).active(), Some(View::Output));
     }
 }

@@ -335,14 +335,16 @@ fn walk_tabs(dock: &mut Dock, space: Space, showing: usize, forward: bool) -> bo
 /// What a released tab does to the arrangement.
 ///
 /// A drop on a tab strip names a place among that space's tabs, so it reorders
-/// them; one in the body of a pane names the space alone and puts the tab at the
-/// end of it. Off the window closes the widget. Pure so the rule can be tested
+/// them; one inside a cell of the grid names that cell and puts the tab at the
+/// end of it; one on the line between two cells merges the pair and gives the
+/// pane both. Off the window closes the widget. Pure so the rule can be tested
 /// without a compositor, and so the one place a drop changes the dock is the one
 /// place a test drives.
 fn land(dock: &mut Dock, view: View, landing: Landing) -> bool {
     match landing {
         Landing::In(space, Some(at)) => dock.place_view(view, space, at),
         Landing::In(space, None) => dock.move_view(view, space),
+        Landing::Span(a, b) => dock.span_view(view, a, b),
         Landing::Out => dock.hide(view),
         Landing::Nowhere => false,
     }
@@ -2284,7 +2286,7 @@ fn cursor_for(
     if dragging {
         return match landing {
             Landing::Out => CursorIcon::Crosshair,
-            Landing::In(..) | Landing::Nowhere => CursorIcon::Default,
+            Landing::In(..) | Landing::Span(..) | Landing::Nowhere => CursorIcon::Default,
         };
     }
     match over {
@@ -2639,10 +2641,10 @@ mod tests {
         assert_eq!(menu.target, Target::Widget(view, Space::TopRight));
         assert_eq!(menu.pick(2), Some(Item::Close));
 
-        let showing = dock.slot(Space::Left).active().unwrap();
-        let menu = opened(&layout, &dock, middle(layout.placed(Space::Left).body))
+        let showing = dock.slot(Space::TopLeft).active().unwrap();
+        let menu = opened(&layout, &dock, middle(layout.placed(Space::TopLeft).body))
             .expect("a pane has a menu");
-        assert_eq!(menu.target, Target::Widget(showing, Space::Left));
+        assert_eq!(menu.target, Target::Widget(showing, Space::TopLeft));
 
         // Nothing a menu could act on.
         for at in [middle(layout.close), (400.0, 8.0)] {
@@ -2708,12 +2710,12 @@ mod tests {
     #[test]
     fn picking_a_widget_takes_it_out_of_the_window_or_puts_it_back() {
         let mut dock = Dock::new();
-        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::Left, false);
+        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
         menu.toggle_widgets(&dock);
 
         // In the window, and out: no tab, no space, nothing walks to it. Dragged
         // somewhere else first, so where it comes back to says something.
-        assert!(dock.move_view(View::Files, Space::Left));
+        assert!(dock.move_view(View::Files, Space::TopLeft));
         let toggled = toggle_view(&mut dock, &mut menu, View::Files);
         assert!(toggled.hidden);
         assert!(dock.is_hidden(View::Files));
@@ -2735,7 +2737,7 @@ mod tests {
                 .expect("its default space"),
             "back where it opens rather than where it was"
         );
-        assert_ne!(home, Space::Left, "which is not where it was dragged to");
+        assert_ne!(home, Space::TopLeft, "which is not where it was dragged to");
         assert!(dock.is_sound(), "{dock:?}");
 
         // And the marks follow, so the row says which way it will go next.
@@ -2759,7 +2761,7 @@ mod tests {
     #[test]
     fn the_menu_stays_open_over_the_list_unless_its_own_widget_goes_out() {
         let mut dock = Dock::new();
-        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::Left, false);
+        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
         menu.toggle_widgets(&dock);
 
         // Another widget, either way round: the menu stays.
@@ -2785,7 +2787,7 @@ mod tests {
     #[test]
     fn switching_every_widget_off_and_back_on_keeps_the_dock_sound() {
         let mut dock = Dock::new();
-        let mut menu = Menu::for_widget((0.0, 0.0), View::Output, Space::Left, false);
+        let mut menu = Menu::for_widget((0.0, 0.0), View::Output, Space::TopLeft, false);
         menu.toggle_widgets(&dock);
         for view in View::ALL {
             assert!(toggle_view(&mut dock, &mut menu, view).hidden);
@@ -2853,8 +2855,8 @@ mod tests {
     #[test]
     fn a_tab_dropped_off_the_window_is_closed_rather_than_moved() {
         let mut dock = Dock::new();
-        assert!(land(&mut dock, View::Files, Landing::In(Space::Left, None)));
-        assert_eq!(dock.space_of(View::Files), Some(Space::Left));
+        assert!(land(&mut dock, View::Files, Landing::In(Space::TopLeft, None)));
+        assert_eq!(dock.space_of(View::Files), Some(Space::TopLeft));
 
         let before = dock.clone();
         assert!(!land(&mut dock, View::Files, Landing::Nowhere));
@@ -2869,7 +2871,7 @@ mod tests {
             "and throwing it out twice is not two hidden entries"
         );
         // A view that is out stays out until something unhides it.
-        assert!(!land(&mut dock, View::Files, Landing::In(Space::Left, None)));
+        assert!(!land(&mut dock, View::Files, Landing::In(Space::TopLeft, None)));
     }
 
     /// Item 7: while a tab is being dragged outside the window the pointer says
@@ -2892,7 +2894,7 @@ mod tests {
         );
         // Back inside, it is an ordinary pointer again.
         for landing in [
-            Landing::In(Space::Left, None),
+            Landing::In(Space::TopLeft, None),
             Landing::In(Space::TopRight, Some(2)),
             Landing::Nowhere,
         ] {
@@ -2947,11 +2949,11 @@ mod tests {
         // Off the band it is the ordinary pointer again, and the border still
         // answers where there is no divider.
         assert_eq!(
-            cursor_for(false, Landing::Nowhere, None, Some(Hit::Body(Space::Left))),
+            cursor_for(false, Landing::Nowhere, None, Some(Hit::Body(Space::TopLeft))),
             CursorIcon::Default
         );
         assert_eq!(
-            cursor_for(false, Landing::Nowhere, Some(Dir::South), Some(Hit::Body(Space::Left))),
+            cursor_for(false, Landing::Nowhere, Some(Dir::South), Some(Hit::Body(Space::TopLeft))),
             CursorIcon::SResize
         );
         // And a tab in the air outranks both: what the drop will do is the more
@@ -3010,6 +3012,74 @@ mod tests {
         assert_eq!(
             dock.slot(Space::BottomRight).views.last(),
             Some(&View::Output)
+        );
+    }
+
+    /// The whole drop path, from a pointer position to the arrangement it
+    /// leaves: on the line between two cells the pane takes both of them, and
+    /// inside one cell it takes that one and the span comes apart.
+    ///
+    /// Driven through `Layout::landing` rather than by naming a landing, so the
+    /// pixels a hand actually aims at are what is under test.
+    #[test]
+    fn a_drop_between_two_cells_spans_them_and_one_inside_a_cell_splits_them() {
+        const AT: (f32, f32) = (1400.0, 900.0);
+        let mut dock = Dock::new();
+        let cell = |dock: &Dock, space: Space| {
+            laid_out_at(dock, None, 0, AT.0, AT.1).grid[space.index()]
+        };
+        let drop_at = |dock: &mut Dock, view: View, (x, y): (f32, f32)| {
+            let landing = laid_out_at(dock, None, 0, AT.0, AT.1).landing(x, y);
+            let moved = land(dock, view, landing);
+            assert!(dock.is_sound(), "{landing:?}: {dock:?}");
+            (landing, moved)
+        };
+
+        // The line between the two cells of the right column, aimed at the gap
+        // that is drawn there.
+        let top = cell(&dock, Space::TopRight);
+        let line = (top.x + top.w * 0.5, top.y + top.h + 2.0);
+        let (landing, moved) = drop_at(&mut dock, View::Output, line);
+        assert_eq!(landing, Landing::span(Space::TopRight, Space::BottomRight));
+        assert!(moved);
+        assert_eq!(dock.space_of(View::Output), Some(Space::TopRight));
+        assert!(dock.slot(Space::BottomRight).is_empty(), "{dock:?}");
+        assert_eq!(
+            dock.cover()[Space::BottomRight.index()],
+            Some(Space::TopRight),
+            "the pane covers the pair"
+        );
+        // Which is what the layout draws: one pane down the whole column.
+        let layout = laid_out_at(&dock, None, 0, AT.0, AT.1);
+        let placed = layout.placed(Space::TopRight);
+        let (over, under) = (
+            layout.grid[Space::TopRight.index()],
+            layout.grid[Space::BottomRight.index()],
+        );
+        assert!((placed.strip.y - over.y).abs() < 0.01);
+        assert!((placed.body.y + placed.body.h - (under.y + under.h)).abs() < 0.01);
+
+        // And a drop inside the lower cell of that column takes the span apart:
+        // the pane that was covering both keeps the upper cell.
+        let bottom = cell(&dock, Space::BottomRight);
+        let (landing, moved) = drop_at(
+            &mut dock,
+            View::Debug,
+            (bottom.x + bottom.w * 0.5, bottom.y + bottom.h * 0.5),
+        );
+        assert_eq!(landing, Landing::In(Space::BottomRight, None));
+        assert!(moved);
+        assert_eq!(dock.slot(Space::BottomRight).views, vec![View::Debug]);
+        assert_eq!(
+            dock.cover()[Space::BottomRight.index()],
+            Some(Space::BottomRight),
+            "two panes, one cell each"
+        );
+        let layout = laid_out_at(&dock, None, 0, AT.0, AT.1);
+        assert!(
+            layout.placed(Space::TopRight).body.y + layout.placed(Space::TopRight).body.h
+                < layout.placed(Space::BottomRight).strip.y,
+            "the two panes overlap"
         );
     }
 

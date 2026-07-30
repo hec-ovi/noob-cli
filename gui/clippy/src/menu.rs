@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn the_widget_row_opens_into_one_row_per_widget_and_shuts_again() {
         let dock = Dock::new();
-        let mut menu = Menu::for_widget((10.0, 10.0), View::Plan, Space::Left, false);
+        let mut menu = Menu::for_widget((10.0, 10.0), View::Plan, Space::TopLeft, false);
         let shut = items(&menu);
 
         assert!(menu.toggle_widgets(&dock));
@@ -412,7 +412,7 @@ mod tests {
     /// each other.
     #[test]
     fn a_row_that_flies_out_keeps_room_at_its_end_for_the_marker() {
-        let menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::Left, false);
+        let menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
         let widgets = "Widgets".chars().count();
         assert!(
             menu.width_chars() >= widgets + MARKER_COLUMNS,
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn the_list_marks_what_is_closed_and_every_row_of_it_can_be_picked() {
         let dock = Dock::hiding(&[View::Debug, View::Files]);
-        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::Left, false);
+        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
         menu.toggle_widgets(&dock);
         for (step, view) in View::ALL.into_iter().enumerate() {
             let index = menu.top + step;
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn the_list_reads_its_marks_off_the_dock_again_without_moving_a_row() {
         let mut dock = Dock::new();
-        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::Left, false);
+        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
         menu.toggle_widgets(&dock);
         menu.scroll(3, true, 4);
         let places: Vec<View> = menu.rows[menu.top..]
@@ -543,7 +543,7 @@ mod tests {
     #[test]
     fn the_list_scrolls_and_stops_at_both_ends() {
         let dock = Dock::new();
-        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::Left, false);
+        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
         assert!(
             !menu.scroll(1, true, 3),
             "a shut list has nothing to scroll"
@@ -585,8 +585,8 @@ mod tests {
                 Menu::for_input((0.0, 0.0), false),
             ),
             (
-                Menu::for_widget((0.0, 0.0), View::Output, Space::Left, true),
-                Menu::for_widget((0.0, 0.0), View::Output, Space::Left, false),
+                Menu::for_widget((0.0, 0.0), View::Output, Space::TopLeft, true),
+                Menu::for_widget((0.0, 0.0), View::Output, Space::TopLeft, false),
             ),
         ] {
             assert_eq!(items(&with), items(&without), "the shape changed");
@@ -623,7 +623,7 @@ mod tests {
 
     #[test]
     fn a_menu_is_as_wide_as_its_longest_label() {
-        let menu = Menu::for_widget((0.0, 0.0), View::Output, Space::Left, false);
+        let menu = Menu::for_widget((0.0, 0.0), View::Output, Space::TopLeft, false);
         assert_eq!(menu.width_chars(), Item::Close.label().chars().count());
         assert_eq!(
             Menu::for_input((0.0, 0.0), false).width_chars(),
