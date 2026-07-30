@@ -169,8 +169,8 @@ that survives a cold start with a full transcript. That needs the samples
 themselves, so the file keeps the last 512 per-request rates. A missing file is a
 first run and an unreadable one reads as zero; neither stops the window opening.
 They had a pane and it showed those counts with nothing on it to say they were
-not this session, which is why it went. They are on the settings panel now, under
-a heading that says ALL TIME, with this session already added in.
+not this session, which is why it went. They are a section of the settings panel
+now, called ALL TIME, with this session already added in.
 
 DEBUG counts the calls that failed and shows what was sent to them. Click a row
 and the arguments of that call open under it. Both halves are already on the
@@ -287,30 +287,57 @@ window too short for all nine the wheel scrolls it.
 ## Settings
 
 **Settings opens the panel**, from a right click on any pane or tab. It takes the
-whole window under the title strip: arrows move, left and right change the row the
-cursor is on, Enter flips a switch, the wheel scrolls, and Esc puts it away. The
-panes are exactly where they were when it closes, and the agent keeps working
-behind it.
+whole window under the title strip and it is eight sections, named down a rail on
+the left with the chosen one beside it. Up and down on the rail walk the sections,
+right goes into one, left comes back out, and inside a section up and down walk
+its rows while left and right change the row the cursor is on. Enter flips a
+switch and starts an edit on the endpoint, Tab crosses between the rail and the
+rows, the wheel scrolls, and Esc puts the panel away. The panes are exactly where
+they were when it closes, and the agent keeps working behind it.
 
-Every key in the file is on it. Each row is the key as the file spells it and the
-value as the file spells it, so the panel doubles as the reference for editing the
-file by hand. A change is written straight away through the same writer
-`no0b --set` uses, so the comments stay, and then the whole file is read back and
-the window is restyled from it: the palette, both font sizes and the two panes
-that can be turned off all move without a restart. That read-back is also why a
-row cannot show a value the file will not carry, since what you see is what the
-next launch reads.
+Four of the sections are the agent's own files rather than the window's. AGENT
+reads `~/.config/noob/.env`, the file the CLI re-reads on every request: it names
+the file, shows the endpoint and every other key that is set, and the endpoint can
+be typed over. That write goes through a port of the CLI's own `.env` writer, so
+every other line and every comment survives it, and the file is read back
+afterwards. No credential is ever shown or written from here: a key, token, secret
+or password reads as `set, and not shown here`, which is the same line the CLI
+takes by keeping secrets out of settable config. SESSIONS lists the saved
+conversations the folder picker offers, through the same reader, with when each
+one was, which folder it belongs to and the opening of what was first said in it.
+SKILLS lists the directories under `~/.config/noob/skills`, named and described
+from each `SKILL.md`'s front matter and by the directory name when it has none.
+MCP names both files the CLI merges, `<config>/mcp.json` and
+`<workspace>/.noob/mcp.json`, and says `none configured` when neither is there
+rather than showing an empty list that reads as broken; a malformed one is a line
+saying so, and the servers from the file that did parse are still listed.
 
-The palette is on the panel as swatches to read rather than fields to edit, with
-the path of the file at the bottom of the list. Changing a colour means typing a
-hex value, and nothing in this window can take the keyboard focus yet. `theme`
-is one row away and repaints the window in a preset; a file carrying a palette
-that is not one of the four exactly reads as `custom`, which is what one
-hand-tuned colour over a preset makes it.
+The other four are the window's own settings file, and every key in it is on one
+of them: APPEARANCE, PANES, COLOURS and ALL TIME. Each row is the key as the file
+spells it and the value as the file spells it, so the panel doubles as the
+reference for editing the file by hand. A change is written straight away through
+the same writer `no0b --set` uses, so the comments stay, and then the whole file
+is read back and the window is restyled from it: the palette, both font sizes and
+the two panes that can be turned off all move without a restart. That read-back is
+also why a row cannot show a value the file will not carry, since what you see is
+what the next launch reads.
 
-Above the settings the panel carries the all-time totals: tokens prefilled,
-generated and served from cache, and a mean and a median prefill and decode speed
-across every request this machine has ever run.
+A setting with a range is a slider: opacity, both font sizes, how tall the prompt
+may grow and both dividers. Press the track and drag it, with the value beside it
+and the arrow keys still nudging it one step. The file is written when the button
+comes up rather than on every motion event, which would be hundreds of writes for
+one decision, and the panel carries the value it is being dragged to until then.
+
+The palette is its own section, as swatches to read rather than fields to edit,
+with the path of the file beside them. Changing a colour means typing a hex value,
+and the one field this window has is the endpoint. `theme` is one section away and
+repaints the window in a preset; a file carrying a palette that is not one of the
+four exactly reads as `custom`, which is what one hand-tuned colour over a preset
+makes it.
+
+ALL TIME is the all-time totals: tokens prefilled, generated and served from
+cache, and a mean and a median prefill and decode speed across every request this
+machine has ever run.
 
 `~/.config/noob/no0b.conf`, written with the defaults on first run and
 commented. Opacity, both font sizes, how tall the prompt may grow, where the two

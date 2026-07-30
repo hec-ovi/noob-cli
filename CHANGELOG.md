@@ -71,6 +71,40 @@ tags rather than here; this file starts where it was added.
 
 ### Added
 
+- The settings panel is eight sections with a rail, and four of them are the
+  agent's own files. What shipped was one flat scroll: the all-time totals, four
+  unlabelled groups of settings, then forty six colour swatches, with nothing
+  saying where you were in it and nothing on it about the agent the window is a
+  front end for. It is a rail of section names down the left now, with the chosen
+  section's rows beside it, and every section short enough to read at a glance.
+  AGENT reads `~/.config/noob/.env`, the file the CLI re-reads on every request:
+  it names the file, shows the endpoint and every other key that is set, and the
+  endpoint can be typed over. That write is a port of the CLI's own `.env` writer,
+  so every other line and every comment survives it and a key this window has
+  never heard of cannot be lost, and the file is read back afterwards the same way
+  the window's own settings are. Nothing shows or writes a credential: a key,
+  token, secret or password reads as set and never as itself, which is the line
+  the CLI already takes by keeping secrets out of settable config. SESSIONS lists
+  the saved conversations through the reader the folder picker already uses,
+  rather than a second one, with when each was, which folder it belongs to and the
+  opening of what was first said in it. SKILLS lists the directories under
+  `skills/`, named and described from each `SKILL.md`'s front matter and by the
+  directory name when it has none. MCP names both files the CLI merges,
+  `<config>/mcp.json` and `<workspace>/.noob/mcp.json`, and says none are
+  configured when neither exists rather than showing an empty list that reads as a
+  panel which failed to load one; a malformed file is a line saying so and the
+  servers from the file that did parse are still listed. The other four sections
+  are the window's own file, and the guard test that every key in that file has a
+  row somewhere on the panel still holds across all of them.
+- A setting with a range is a slider. Opacity, both font sizes, how tall the
+  prompt may grow and both dividers are a track you can press and drag, with the
+  value beside it, on the same press, motion and release cycle the pane dividers
+  use. The file is written when the button comes up and not on every motion event,
+  which for one drag would be hundreds of rename-over-the-file writes, so while
+  the pointer is down the panel carries the value it is being dragged to and says
+  so. A position on the track snaps to the same step the arrow keys take, so a
+  slider cannot write a value the keys could not reach, and the arrow keys still
+  nudge it one step at a time.
 - A drop is read off the grid, and a pane can take one cell or two. The window
   was three fixed spaces, one of them a full height column on the left that
   nothing could change, and a drop could only ever name one of the three. It is
