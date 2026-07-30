@@ -15,12 +15,16 @@ Named a folder, it starts there. Without one the window opens on a picker
 instead of guessing: launched from the dock, the current directory is your home
 directory, and handing the agent that silently was the old behaviour. Arrows
 move, right walks into a folder, left goes back out, Backspace with nothing typed
-goes up, Enter opens what the cursor is on, and Esc quits. Typing dims every
-folder that does not carry what you typed rather than taking it off the list, and
-the arrows then walk the ones that do. The mouse does the same: click a row, dim
+goes up, Enter opens what the cursor is on, and Esc quits. What you type goes in
+the search field above the list, a bordered box with a magnifier in it and the
+same cut corner as everything else here. Typing dims every folder that does not
+carry what you typed rather than taking it off the list, and the arrows then walk
+the ones that do. The mouse does the same: click a row, dim
 or not, double-click to walk in, and the Open button at the foot confirms. The
 list is a tree: the plus in front of a folder puts what is inside it under that
-folder without leaving the one you are in, and the minus takes it back out. A
+folder without leaving the one you are in, and the minus takes it back out. Both
+are a small green box with nothing filled in, drawn out of rectangles rather than
+out of a glyph, so the mark is a control instead of a block. A
 folder nobody has permission to read says so on a row of its own instead of
 looking empty. The row the cursor is on is a green band with the theme's darkest
 colour written over it. The box is one size, so walking into a folder with far
@@ -30,8 +34,9 @@ the list, so the second launch is Enter. They live in
 to forget it and delete the file to forget them all.
 
 The Sessions button beside Open, or Ctrl-R, lists the conversations the agent
-has already saved, in the same box with the same keys, and the button then says
-Folders to go back (so does Esc). A row says how long ago it was, the folder it belongs to
+has already saved, in the same box with the same keys. An arrow at the left of
+the heading goes back to the folders, and so do the button at the foot, which
+then says Folders, and Esc. A row says how long ago it was, the folder it belongs to
 and the start of the first thing you asked in it; Enter carries it on, which is
 `noob serve --resume <id>` in that folder. The ones belonging to the folder you
 are looking at come first. Transcripts do not record which folder they happened

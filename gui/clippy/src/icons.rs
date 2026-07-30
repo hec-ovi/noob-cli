@@ -55,12 +55,11 @@ pub const UNCHECKED: char = '\u{f096}';
 const FILE: char = '\u{ea7b}';
 /// A folder in the picker's list.
 pub const FOLDER: char = '\u{e5ff}';
-/// The mark in front of a folder in the picker's tree: a plus to put what is
-/// inside it into the list under it, a minus to take it away again. Boxed rather
-/// than bare, because the mark is a hit region of its own and a plus with an
-/// edge round it reads as something you press.
-pub const EXPAND: char = '\u{f0fe}';
-pub const COLLAPSE: char = '\u{f146}';
+/// The mark in front of a folder in the picker's tree used to be two glyphs
+/// here, Font Awesome's filled plus-square and minus-square. It is drawn out of
+/// rectangles now, in `view.rs`, because the filled boxes were the biggest thing
+/// on a row and read as blocks rather than as a control: see `picker_mark`.
+///
 /// The folder the picker is listing, which is also the one it would open.
 pub const FOLDER_OPEN: char = '\u{eaf7}';
 /// The way out of it.
@@ -69,8 +68,15 @@ pub const UP: char = '\u{eaa1}';
 pub const LOCKED: char = '\u{f023}';
 /// A folder opened in an earlier session.
 pub const RECENT: char = '\u{ea82}';
-/// In front of what has been typed to narrow a list.
-pub const FILTER: char = '\u{eaf1}';
+/// In front of what has been typed to narrow a list. A magnifier rather than
+/// the funnel that was here before: the field it sits in is typed into, and a
+/// funnel says the list has been filtered rather than saying type here.
+pub const SEARCH: char = '\u{ea6d}';
+/// On the button that takes the picker back from the sessions to the folders.
+///
+/// A full arrow, not the chevron the tab strip walks with: a chevron means one
+/// step along a row of tabs, and this is the way out of a list.
+pub const BACK: char = '\u{ea9b}';
 /// On the button that confirms a choice.
 pub const CONFIRM: char = '\u{eab2}';
 
@@ -152,13 +158,12 @@ mod tests {
             UNCHECKED,
             FILE,
             FOLDER,
-            EXPAND,
-            COLLAPSE,
             FOLDER_OPEN,
             UP,
             LOCKED,
             RECENT,
-            FILTER,
+            SEARCH,
+            BACK,
             CONFIRM,
         ]
             .into_iter()
@@ -172,3 +177,4 @@ mod tests {
         }
     }
 }
+

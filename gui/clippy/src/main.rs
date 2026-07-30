@@ -358,6 +358,7 @@ fn menu_for(
         | Hit::PickerRow(_)
         | Hit::PickerMark(_)
         | Hit::PickerOpen
+        | Hit::PickerBack
         | Hit::PickerSessions => None,
         // Neither is the settings panel. A Settings row on a menu opened over
         // the settings panel would be a row that opens what is already open,
@@ -1350,6 +1351,10 @@ impl App {
                 // and answering by also selecting it would make every look a
                 // choice.
                 Hit::PickerMark(index) => picker.toggle(index),
+                // The way back out of the session list. Nothing is read off
+                // the disk to go back, which is why this one does not need the
+                // pre-borrow the swap button above takes.
+                Hit::PickerBack => picker.show_folders(),
                 Hit::PickerRow(index) if double => {
                     chosen = picker.double(index);
                     true
@@ -1684,6 +1689,7 @@ impl App {
             Hit::PickerRow(_)
             | Hit::PickerMark(_)
             | Hit::PickerOpen
+            | Hit::PickerBack
             | Hit::PickerSessions
             | Hit::Picker => {}
             // The same for the six the settings panel owns.
@@ -2622,6 +2628,7 @@ impl ApplicationHandler<Wake> for App {
                         | Hit::Minimize
                         | Hit::MenuRow(_)
                         | Hit::PickerOpen
+                        | Hit::PickerBack
                         | Hit::PickerMark(_)
                         | Hit::SettingsClose
                         | Hit::SettingsSection(_)

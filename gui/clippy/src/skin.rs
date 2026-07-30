@@ -92,6 +92,20 @@ pub struct Skin {
     /// palette has, rather than a flat black: a theme whose panel is not near
     /// black would then be writing in a colour that is in no palette at all.
     pub picked_ink: [u8; 4],
+    /// The mark in front of a folder in the picker's tree: the hairline box and
+    /// the plus inside it. Green, the same green [`Skin::picked`] is, because
+    /// both say the same thing about a row.
+    ///
+    /// A fill rather than a text tint, because the mark is drawn out of
+    /// rectangles rather than out of a glyph, and its own field rather than
+    /// `picked` reused: one is a band across a whole row and the other is a
+    /// hairline three characters wide, and a change to either has no business
+    /// moving the other.
+    pub mark_edge: [f32; 4],
+    /// The same mark on the row the cursor is on, where the band behind it is
+    /// already that green. The panel colour, which is what
+    /// [`Skin::picked_ink`] is for the writing beside it.
+    pub mark_on_band: [f32; 4],
     /// A window button under the pointer.
     pub hot: [f32; 4],
     /// The one surface in the window that is a button you press rather than a
@@ -215,6 +229,8 @@ impl Skin {
             // desktop through is the band this replaced.
             picked: rgba(config.good, 1.0),
             picked_ink: text(config.panel),
+            mark_edge: rgba(config.good, 1.0),
+            mark_on_band: rgba(config.panel, 1.0),
             hot: rgba(config.accent, 0.30),
             button: rgba(config.accent, 0.22),
             button_hot: rgba(config.accent, 0.50),

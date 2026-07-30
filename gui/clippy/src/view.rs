@@ -252,9 +252,18 @@ fn held(ratio: f32, room: f32, floor: f32) -> f32 {
 /// rather than what it says.
 const SETTING_VALUE_COLUMNS: usize = 28;
 
-/// The rows the picker spends above its list: the heading, the folder it is
-/// listing, and what has been typed.
-const PICKER_HEAD_ROWS: f32 = 3.0;
+/// The rows the picker spends above its list on plain writing: the heading and
+/// the folder it is listing. What has been typed sits under them in a bordered
+/// field of its own, which is [`picker_field_h`] rather than one row.
+const PICKER_HEAD_ROWS: f32 = 2.0;
+
+/// How much taller the search field is than the line of text in it, on each
+/// side.
+///
+/// The field carries the same cut corner and the same hairline every panel in
+/// this window carries, and a box drawn tight around a line of text reads as a
+/// line of text with a box round it rather than as something to type in.
+const PICKER_FIELD_PAD: f32 = 4.0;
 
 /// How far in from the left edge of a picker row its first mark sits.
 ///
@@ -271,6 +280,12 @@ const PICKER_ROW_PAD: f32 = 5.0;
 /// plus in front of them standing out of the ones without.
 const PICKER_MARK_COLUMNS: usize = 2;
 const PICKER_INDENT_COLUMNS: usize = 2;
+/// Columns the back arrow in the heading row takes, the arrow and a column
+/// either side of it, and how far the heading is pushed along to clear it.
+///
+/// Three, which is what a tab spends on padding around its label: an arrow one
+/// glyph wide is a target the size of a character.
+const PICKER_BACK_COLUMNS: usize = 3;
 /// The columns a row keeps for what it says, however deep it sits. Past this the
 /// indent stops growing: a name at depth twelve pushed off the right of the box
 /// is a row that says nothing.
@@ -312,6 +327,21 @@ const PICKER_MAX_ROWS: usize = 24;
 /// How tall the Open button is for text of this line height.
 fn picker_open_h(line: f32) -> f32 {
     line + PICKER_OPEN_PAD * 2.0
+}
+
+/// How tall the search field is, for the same line height.
+fn picker_field_h(line: f32) -> f32 {
+    line + PICKER_FIELD_PAD * 2.0
+}
+
+/// What the picker keeps above its list: [`PICKER_HEAD_ROWS`] of writing, the
+/// search field, and a gap between that field and the first row.
+///
+/// One answer, the way [`picker_foot`] is one answer for the bottom, and it does
+/// not read the picker: the head is the same height on the folder list and on
+/// the session list, so swapping between the two cannot move the box.
+fn picker_head_h(line: f32) -> f32 {
+    PICKER_HEAD_ROWS * line + picker_field_h(line) + GAP
 }
 
 /// What the picker keeps below its list: the line of keys, a gap, and the
@@ -395,6 +425,10 @@ pub enum Hit {
     /// sessions the agent has already written. The only way in to a past
     /// conversation from a window that has just opened.
     PickerSessions,
+    /// The arrow in the picker's heading row, which goes back from the sessions
+    /// to the folders. Only there while the sessions are showing, because there
+    /// is nothing behind the folder list to go back to.
+    PickerBack,
     /// The picker's box, away from any row. Swallowed, so a press on its margin
     /// does not read as a press on the window behind it.
     Picker,
@@ -572,6 +606,13 @@ pub struct Layout {
     pub picker_rows: Vec<(usize, Panel)>,
     pub picker_marks: Vec<(usize, Panel)>,
     pub picker_open: Panel,
+    /// The bordered field what has been typed goes in, above the list. A panel
+    /// rather than a rectangle worked out where it is drawn, so the border and
+    /// the writing inside it come off one shape.
+    pub picker_filter: Panel,
+    /// The back arrow in its heading row. Empty on the folder list, so the
+    /// region cannot be pressed where there is nothing to go back to.
+    pub picker_back: Panel,
     /// The button beside it, which swaps the list between folders and saved
     /// sessions. Empty when there is no room for it beside Open, which is the
     /// only reason a button in this box ever goes away.
@@ -777,6 +818,8 @@ impl Layout {
                 picker_rows: Vec::new(),
                 picker_marks: Vec::new(),
                 picker_open: nowhere(),
+                picker_filter: nowhere(),
+                picker_back: nowhere(),
                 picker_sessions: nowhere(),
                 in_settings: false,
                 settings: nowhere(),
@@ -827,6 +870,8 @@ impl Layout {
                 picker_rows: places.rows,
                 picker_marks: places.marks,
                 picker_open: places.open,
+                picker_filter: places.filter,
+                picker_back: places.back,
                 picker_sessions: places.sessions,
                 in_settings: false,
                 settings: nowhere(),
@@ -878,6 +923,8 @@ impl Layout {
                 picker_rows: Vec::new(),
                 picker_marks: Vec::new(),
                 picker_open: nowhere(),
+                picker_filter: nowhere(),
+                picker_back: nowhere(),
                 picker_sessions: nowhere(),
                 in_settings: true,
                 settings: places.box_,
@@ -1101,6 +1148,8 @@ impl Layout {
             picker_rows: Vec::new(),
             picker_marks: Vec::new(),
             picker_open: nowhere(),
+            picker_filter: nowhere(),
+            picker_back: nowhere(),
             picker_sessions: nowhere(),
             in_settings: false,
             settings: nowhere(),
@@ -1168,6 +1217,11 @@ impl Layout {
         // Nothing else exists while the picker is up, so this answers for the
         // whole window below the title strip.
         if self.picking {
+            // In the heading, above every row, and empty unless the sessions
+            // are showing.
+            if self.picker_back.w >= 1.0 && self.picker_back.contains(x, y) {
+                return Some(Hit::PickerBack);
+            }
             // The mark before the row it sits in, because it sits inside it.
             // The other way round the mark could never be pressed.
             for (index, panel) in &self.picker_marks {
@@ -1702,6 +1756,8 @@ struct PickerPlaces {
     rows: Vec<(usize, Panel)>,
     marks: Vec<(usize, Panel)>,
     open: Panel,
+    filter: Panel,
+    back: Panel,
     sessions: Panel,
 }
 
@@ -1721,6 +1777,37 @@ fn picker_indent(depth: usize, column: f32, cols: usize) -> (f32, f32) {
     (
         PICKER_ROW_PAD + (steps * PICKER_INDENT_COLUMNS) as f32 * column,
         PICKER_MARK_COLUMNS as f32 * column,
+    )
+}
+
+/// How much of the region that answers for the mark in front of a folder the
+/// mark itself is drawn in, and the least it is ever drawn at.
+///
+/// Well under half of it. The mark used to be a filled glyph as tall as the row,
+/// which made it the loudest thing on a row whose point is the folder's name,
+/// and a solid block is a state rather than a control.
+const PICKER_MARK_SIDE: f32 = 0.6;
+const PICKER_MARK_MIN: f32 = 5.0;
+
+/// The box that mark is drawn in, centred in the region that answers for
+/// pressing it.
+///
+/// An odd side, so the plus inside it has a middle column and a middle row to
+/// sit on. An even one puts the two bars off centre by half a pixel each and the
+/// mark reads as a lower-case t.
+fn picker_mark_box(mark: Panel) -> Panel {
+    let side = (mark.w.min(mark.h) * PICKER_MARK_SIDE)
+        .floor()
+        .max(PICKER_MARK_MIN);
+    let side = match side as i32 % 2 {
+        0 => side + 1.0,
+        _ => side,
+    };
+    Panel::new(
+        mark.x + ((mark.w - side) * 0.5).floor(),
+        mark.y + ((mark.h - side) * 0.5).floor(),
+        side,
+        side,
     )
 }
 
@@ -1747,12 +1834,14 @@ fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> PickerPlaces {
             rows: Vec::new(),
             marks: Vec::new(),
             open: nowhere(),
+            filter: nowhere(),
+            back: nowhere(),
             sessions: nowhere(),
         };
     }
     let column = shape.pane_column.max(1.0);
     let line = Text::line_for(shape.pane_size);
-    let head = PICKER_HEAD_ROWS * line;
+    let head = picker_head_h(line);
     let foot = picker_foot(line);
     // Everything the box spends on something other than its list.
     let chrome = PAD * 2.0 + head + GAP + foot;
@@ -1830,12 +1919,36 @@ fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> PickerPlaces {
         * column)
         .min((content.w - open.w - GAP).max(0.0));
     let sessions = Panel::new(open.x + open.w + GAP, open.y, toggle_w, open_h);
+    // The search field, under the two lines of writing and above the list. Its
+    // own panel rather than a rectangle worked out where the text is drawn, so
+    // the border, the icon and what has been typed all come off one shape.
+    let filter = Panel::new(
+        content.x,
+        content.y + PICKER_HEAD_ROWS * line,
+        content.w,
+        picker_field_h(line).min(content.h),
+    );
+    // The way back, at the left of the heading row, and only where there is a
+    // list behind this one. On the folders it is nothing at all rather than a
+    // greyed button: the picker opens on that list, so back from it is out of
+    // the window, which is what the key legend already says Escape does.
+    let back_button = match picker.on_sessions() {
+        true => Panel::new(
+            content.x,
+            content.y,
+            (PICKER_BACK_COLUMNS as f32 * column).min(content.w),
+            line,
+        ),
+        false => nowhere(),
+    };
     PickerPlaces {
         box_,
         list,
         rows,
         marks,
         open,
+        filter,
+        back: back_button,
         sessions,
     }
 }
@@ -3646,17 +3759,54 @@ fn folder_picker(scene: &mut Scene, frame: &Frame) {
         true => "OPEN A SESSION",
         false => "OPEN A FOLDER",
     };
+    // The way back out of the session list, at the left of the heading, drawn
+    // as the two buttons at the foot are: a surface, the window's cut corner,
+    // and it lights under the pointer. The word on the foot button already
+    // swaps to Folders, but it is a word in the corner furthest from the list
+    // it acts on, and it carries a clock rather than an arrow.
+    let back = layout.picker_back;
+    let mut heading_at = content.x;
+    let mut heading_room = cols;
+    if back.w >= 1.0 && back.h >= 1.0 {
+        let face = match frame.hot == Some(Hit::PickerBack) {
+            true => skin.button_hot,
+            false => skin.button,
+        };
+        scene.rect(panel_fill(back, face));
+        scene.rect(panel_edge(back, skin.edge_focus));
+        say(
+            scene,
+            vec![Run::icon(icons::BACK.to_string(), skin.bright)],
+            Panel::new(
+                back.x + frame.pane_column,
+                back.y,
+                (back.w - frame.pane_column).max(1.0),
+                line,
+            ),
+            skin.bright,
+        );
+        // Past the arrow and one column clear of it, so the heading is beside
+        // the button rather than written over the end of it.
+        let step = (PICKER_BACK_COLUMNS + 1) as f32 * frame.pane_column;
+        heading_at += step;
+        heading_room = cols.saturating_sub(PICKER_BACK_COLUMNS + 1);
+    }
     // The heading, and what the session list says about itself: how many there
     // are, and how many files in the directory could not be described.
     let mut head = vec![Run::tinted(heading, skin.bright)];
     if let Some(note) = picker.note() {
-        let room = cols.saturating_sub(heading.chars().count() + 2);
+        let room = heading_room.saturating_sub(heading.chars().count() + 2);
         head.push(Run::tinted(format!("  {}", clip(note, room)), skin.dim));
     }
     say(
         scene,
         head,
-        Panel::new(content.x, content.y, content.w, line),
+        Panel::new(
+            heading_at,
+            content.y,
+            (content.w - (heading_at - content.x)).max(1.0),
+            line,
+        ),
         skin.bright,
     );
     // The folder being listed, in full. The rows under it are names, so this is
@@ -3676,10 +3826,17 @@ fn folder_picker(scene: &mut Scene, frame: &Frame) {
     // or why the last press did nothing. A folder with no permission looks
     // exactly like an empty folder otherwise, and a button that silently does
     // not work looks exactly like a button that is broken.
-    let mut runs = vec![Run::icon(icons::FILTER.to_string(), skin.dim), Run::plain(" ")];
+    //
+    // In a box of its own, with the surface the prompt is drawn on, the hairline
+    // every panel here carries and the same cut corner. It was a line of text
+    // with a funnel in front of it, which said the list had been narrowed and
+    // never said that this is the thing you type into.
+    let field = layout.picker_filter;
+    let mut runs = vec![Run::icon(icons::SEARCH.to_string(), skin.dim), Run::plain(" ")];
+    let room = cols.saturating_sub(ROW_ICON_COLUMNS + 2);
     let tint = match (picker.refused().or(picker.trouble()), picker.filter()) {
         (Some(why), _) => {
-            runs.push(Run::tinted(clip(why, cols), skin.bad));
+            runs.push(Run::tinted(clip(why, room), skin.bad));
             skin.bad
         }
         (None, "") => {
@@ -3687,16 +3844,25 @@ fn folder_picker(scene: &mut Scene, frame: &Frame) {
             skin.dim
         }
         (None, typed) => {
-            runs.push(Run::tinted(typed, skin.bright));
+            runs.push(Run::tinted(clip(typed, room), skin.bright));
             skin.bright
         }
     };
-    say(
-        scene,
-        runs,
-        Panel::new(content.x, content.y + 2.0 * line, content.w, line),
-        tint,
-    );
+    if field.w >= 1.0 && field.h >= 1.0 {
+        scene.rect(panel_fill(field, skin.input));
+        scene.rect(panel_edge(field, skin.edge_focus));
+        say(
+            scene,
+            runs,
+            Panel::new(
+                field.x + PAD,
+                field.y + PICKER_FIELD_PAD,
+                (field.w - 2.0 * PAD).max(1.0),
+                line,
+            ),
+            tint,
+        );
+    }
 
     let list_cols = cols_of(layout.picker_list, frame.pane_column);
     for (index, row) in &layout.picker_rows {
@@ -3740,26 +3906,41 @@ fn folder_picker(scene: &mut Scene, frame: &Frame) {
                 false => icons::RECENT,
             },
         };
-        // The mark that opens and shuts the folder, where the layout put it, so
-        // the glyph is inside the region that answers for pressing it.
+        // The mark that opens and shuts the folder, drawn inside the region that
+        // answers for pressing it: a hairline box with a plus in it, or with the
+        // plus's upright taken away once the folder is open.
+        //
+        // Rectangles rather than a glyph. It was Font Awesome's filled
+        // plus-square at the size of the row's text, which put a solid block at
+        // the front of every folder in the list: the biggest, heaviest thing on
+        // a row whose point is the folder's name. Nothing is filled here and the
+        // box is well under the height of the row.
         let (indent, wide) = picker_indent(entry.depth(), frame.pane_column, list_cols);
         if let Some(open) = entry.open() {
-            let mark = match open {
-                true => icons::COLLAPSE,
-                false => icons::EXPAND,
-            };
             let hot = frame.hot == Some(Hit::PickerMark(*index));
-            let ink = match (on, hot) {
-                (true, _) => skin.picked_ink,
-                (false, true) => skin.bright,
-                (false, false) => tint,
+            // Green, and the panel colour instead on the row the cursor is on,
+            // where the band behind it is already that green. Under the pointer
+            // it keeps its colour and doubles its weight: a second colour for a
+            // hover is a mark that means two things.
+            let edge = match on {
+                true => skin.mark_on_band,
+                false => skin.mark_edge,
             };
-            say(
-                scene,
-                vec![Run::icon(mark.to_string(), ink)],
-                Panel::new(row.x + indent, row.y, wide, line),
-                ink,
-            );
+            let weight = match hot {
+                true => 2.0,
+                false => 1.0,
+            };
+            let square = picker_mark_box(Panel::new(row.x + indent, row.y, wide, line));
+            scene.rect(square.outline(edge, weight));
+            // The bars sit two pixels inside the box on every side, so the plus
+            // never touches the edge round it, and both are one pixel: the box
+            // is nine across and a thicker bar closes the gap up.
+            let middle = ((square.w - 1.0) * 0.5).floor();
+            let arm = (square.w - 4.0).max(1.0);
+            scene.rect(Panel::new(square.x + 2.0, square.y + middle, arm, 1.0).fill(edge));
+            if !open {
+                scene.rect(Panel::new(square.x + middle, square.y + 2.0, 1.0, arm).fill(edge));
+            }
         }
         let start = indent + wide;
         let room = cols
@@ -9560,13 +9741,16 @@ mod tests {
             );
             assert!(mark.at.x + mark.at.w <= row.x + row.w - MENU_PAD + 0.01);
             // And nothing of the old plus and minus is anywhere on the overlay.
+            // Written out rather than named: these are Font Awesome's filled
+            // plus-square and minus-square, which the picker's mark used to be
+            // drawn with and which no longer have a constant anywhere.
             let runs: Vec<&str> = out
                 .scene
                 .over_texts
                 .iter()
                 .flat_map(|t| t.runs.iter().map(|r| r.text.as_str()))
                 .collect();
-            for gone in [icons::EXPAND, icons::COLLAPSE] {
+            for gone in ['\u{f0fe}', '\u{f146}'] {
                 assert!(
                     !runs.contains(&gone.to_string().as_str()),
                     "U+{:04X} is still drawn on a menu row",
@@ -9930,6 +10114,56 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// The hairline box the picker draws inside a mark's region, if it drew one.
+    ///
+    /// Found by shape rather than by position: it is the only stroked rectangle
+    /// that fits inside the region, and everything else in there is a solid bar.
+    fn outline_of(out: &Rendered, mark: Panel) -> Option<Rect> {
+        out.scene
+            .rects
+            .iter()
+            .find(|rect| rect.extra()[3] > 0.0 && inside(**rect, mark))
+            .copied()
+    }
+
+    /// How many one pixel bars are drawn in that box: two for a plus, one for
+    /// the minus an open folder carries.
+    fn bars_in(out: &Rendered, mark: Panel) -> usize {
+        out.scene
+            .rects
+            .iter()
+            .filter(|rect| {
+                let [_, _, w, h] = rect.xywh();
+                rect.extra()[3] == 0.0 && (w == 1.0 || h == 1.0) && inside(**rect, mark)
+            })
+            .count()
+    }
+
+    fn inside(rect: Rect, box_: Panel) -> bool {
+        let [x, y, w, h] = rect.xywh();
+        x >= box_.x - 0.01
+            && y >= box_.y - 0.01
+            && x + w <= box_.x + box_.w + 0.01
+            && y + h <= box_.y + box_.h + 0.01
+    }
+
+    /// The picker with the two sessions the swap test uses already showing.
+    fn a_session_picker() -> Picker {
+        let mut picker = a_picker(&["gui"], &[]);
+        let now = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        picker.show_sessions_at(
+            crate::sessions::Listing {
+                sessions: vec![
+                    a_saved("live", Some("/home/hec"), "carry this on", 600),
+                    a_saved("older", Some("/home/hec"), "the one before", 86_400),
+                ],
+                skipped: Vec::new(),
+            },
+            now,
+        );
+        picker
+    }
+
     fn a_picker(inside: &[&str], recents: &[&str]) -> Picker {
         Picker::open(
             Box::new(crate::picker::Fixed(
@@ -10016,12 +10250,14 @@ mod tests {
             covered(&out, cursor_row, cursor_row.h, out.skin.picked),
             "the cursor's row has no band"
         );
-        // And no other row is banded, or every row would read as the one.
+        // And no other row is banded, or every row would read as the one. Only
+        // the full width of a row counts: `skin.mark_edge` is the same green,
+        // and the hairline box in front of every folder is not a band.
         let banded = out
             .scene
             .rects
             .iter()
-            .filter(|rect| rect.rgba() == out.skin.picked)
+            .filter(|rect| rect.rgba() == out.skin.picked && rect.xywh()[2] >= cursor_row.w - 0.01)
             .count();
         assert_eq!(banded, 1, "more than one row is banded");
         // Everything written on that band is the dark ink. Green text on a
@@ -10413,18 +10649,23 @@ mod tests {
             );
         }
         // It lights up under the pointer, so it reads as something to press.
+        // The colour is the mark's own green either way and what changes is the
+        // weight of the box: the old glyph swapped tint instead, which it had to,
+        // because a glyph has no border to thicken.
         let (index, mark) = out.layout.picker_marks[0];
         let warm = render_picker(&picker, 1205.0, 791.0, Some(Hit::PickerMark(index)));
-        let lit = |out: &Rendered, at: Panel| -> Vec<Option<[u8; 4]>> {
-            out.scene
-                .texts
-                .iter()
-                .filter(|text| (text.at.x - at.x).abs() < 0.01 && (text.at.y - at.y).abs() < 0.01)
-                .flat_map(|text| text.runs.iter().map(|run| run.color))
-                .collect()
-        };
-        assert_eq!(lit(&warm, mark), vec![Some(warm.skin.bright)]);
-        assert_eq!(lit(&out, mark), vec![Some(out.skin.body)]);
+        assert_eq!(outline_of(&out, mark).map(|rect| rect.extra()[3]), Some(1.0));
+        assert_eq!(
+            outline_of(&warm, mark).map(|rect| rect.extra()[3]),
+            Some(2.0),
+            "the mark does not thicken under the pointer"
+        );
+        for at in [&out, &warm] {
+            assert_eq!(
+                outline_of(at, mark).map(|rect| rect.rgba()),
+                Some(at.skin.mark_edge)
+            );
+        }
 
         // Pressing it puts what is inside the folder in the list under it, at a
         // deeper indent, and the mark turns over.
@@ -10443,15 +10684,10 @@ mod tests {
             mark,
             deeper.1
         );
-        let glyph = |out: &Rendered, at: Panel| -> String {
-            out.scene
-                .texts
-                .iter()
-                .filter(|text| (text.at.x - at.x).abs() < 0.01 && (text.at.y - at.y).abs() < 0.01)
-                .flat_map(|text| text.runs.iter().map(|run| run.text.as_str()))
-                .collect()
-        };
-        assert_eq!(glyph(&out, mark), icons::EXPAND.to_string());
+        // A shut folder carries a plus, an open one carries the same box with
+        // the upright taken out of it, and neither is a glyph: nothing is drawn
+        // as text inside a mark any more.
+        assert_eq!(bars_in(&out, mark), 2, "a shut folder is not a plus");
         let (_, reopened) = after
             .layout
             .picker_marks
@@ -10459,7 +10695,15 @@ mod tests {
             .find(|(at, _)| *at == index)
             .copied()
             .expect("the folder that was opened lost its mark");
-        assert_eq!(glyph(&after, reopened), icons::COLLAPSE.to_string());
+        assert_eq!(bars_in(&after, reopened), 1, "an open folder is not a minus");
+        for (at, mark) in [(&out, mark), (&after, reopened)] {
+            assert!(
+                !at.scene.texts.iter().any(|text| {
+                    (text.at.x - mark.x).abs() < 0.01 && (text.at.y - mark.y).abs() < 0.01
+                }),
+                "the mark is still drawn as a glyph"
+            );
+        }
 
         // And the name beside it is still drawn inside the box, however deep it
         // sits: the indent stops before it pushes a row off the right.
@@ -10474,6 +10718,259 @@ mod tests {
                 "{said:?} is not drawn"
             );
             assert!(row.x + row.w <= after.layout.picker_list.x + after.layout.picker_list.w + 0.01);
+        }
+    }
+
+    /// Item A6: the mark in front of a folder is a small unfilled green box with
+    /// a green plus in it. It used to be Font Awesome's filled plus-square drawn
+    /// at the row's own text size, which is a solid block at the front of every
+    /// folder in the list.
+    #[test]
+    fn the_folder_mark_is_a_small_unfilled_green_box() {
+        let picker = a_picker(&["gui", "crates"], &[]);
+        let out = render_picker(&picker, 1205.0, 791.0, None);
+        // Not the row the cursor is on, whose mark is drawn in the ink that
+        // reads on the green band rather than in the green itself.
+        let (index, mark) = *out
+            .layout
+            .picker_marks
+            .iter()
+            .find(|(index, _)| *index != picker.cursor())
+            .expect("no mark off the cursor's row");
+
+        let box_ = outline_of(&out, mark).expect("the mark has no box round it");
+        let [x, y, w, h] = box_.xywh();
+        // Square, odd sided so the plus has a middle to sit on, and well under
+        // the region it is drawn in: smaller is the whole point.
+        assert_eq!(w, h, "the mark is not square");
+        assert_eq!(w as i32 % 2, 1, "an even side puts the plus off centre");
+        assert!(
+            w <= mark.w.min(mark.h) * 0.7,
+            "{w} is not smaller than the {:?} it is drawn in",
+            (mark.w, mark.h)
+        );
+        assert!(
+            (x + w * 0.5 - (mark.x + mark.w * 0.5)).abs() <= 1.0
+                && (y + h * 0.5 - (mark.y + mark.h * 0.5)).abs() <= 1.0,
+            "the mark is not centred in its region"
+        );
+        // A border and nothing behind it: an outline is a stroke, and a filled
+        // rectangle of this colour anywhere in the region would be the fill the
+        // glyph used to be.
+        assert_eq!(box_.extra()[3], 1.0, "the box is not a hairline");
+        assert_eq!(box_.rgba(), out.skin.mark_edge, "the box is not green");
+        assert!(
+            out.skin.mark_edge[1] > out.skin.mark_edge[0]
+                && out.skin.mark_edge[1] > out.skin.mark_edge[2],
+            "{:?} is not green",
+            out.skin.mark_edge
+        );
+        let filled = out
+            .scene
+            .rects
+            .iter()
+            .filter(|rect| {
+                let [_, _, w, h] = rect.xywh();
+                rect.extra()[3] == 0.0 && w > 1.0 && h > 1.0 && inside(**rect, mark)
+            })
+            .count();
+        assert_eq!(filled, 0, "something inside the mark is filled");
+
+        // The plus is two bars, both green, both one pixel, and both clear of
+        // the border round them.
+        let bars: Vec<Rect> = out
+            .scene
+            .rects
+            .iter()
+            .filter(|rect| {
+                let [_, _, w, h] = rect.xywh();
+                rect.extra()[3] == 0.0 && (w == 1.0 || h == 1.0) && inside(**rect, mark)
+            })
+            .copied()
+            .collect();
+        assert_eq!(bars.len(), 2, "a shut folder does not carry a plus");
+        for bar in &bars {
+            assert_eq!(bar.rgba(), out.skin.mark_edge);
+            let [bx, by, bw, bh] = bar.xywh();
+            assert!(bx > x && by > y && bx + bw < x + w && by + bh < y + h, "{bar:?} touches the box");
+        }
+        assert!(
+            bars.iter().any(|bar| bar.xywh()[2] > 1.0) && bars.iter().any(|bar| bar.xywh()[3] > 1.0),
+            "the two bars do not cross"
+        );
+
+        // On the row the cursor is on the same box is drawn in the ink that
+        // reads on the band, because the band there is already this green.
+        let mut picker = picker;
+        assert!(picker.point_at(index), "the cursor will not go on a folder");
+        let banded = render_picker(&picker, 1205.0, 791.0, None);
+        let (_, on_band) = *banded
+            .layout
+            .picker_marks
+            .iter()
+            .find(|(at, _)| *at == index)
+            .expect("the row the cursor moved to lost its mark");
+        assert_eq!(
+            outline_of(&banded, on_band).map(|rect| rect.rgba()),
+            Some(banded.skin.mark_on_band),
+            "the mark is green on a green band"
+        );
+        assert_eq!(bars_in(&banded, on_band), 2, "and it is still a plus");
+    }
+
+    /// Item A6: what is typed to narrow the list sits in a field, with the
+    /// magnifier that says type here and the cut corner every other box in this
+    /// window carries. It was a line of writing with a funnel in front of it.
+    #[test]
+    fn the_picker_s_filter_is_a_bordered_field_with_a_search_icon() {
+        let mut picker = a_picker(&["gui", "crates"], &[]);
+        let out = render_picker(&picker, 1205.0, 791.0, None);
+        let field = out.layout.picker_filter;
+
+        // Under the two lines of writing, above the list, the full width of the
+        // box's content, and taller than the line in it.
+        let line = Text::line_for(13.0);
+        assert!(field.w > 1.0 && field.h > line, "{field:?} is not a field");
+        assert!(
+            field.y > out.layout.picker.y && field.y + field.h <= out.layout.picker_list.y + 0.01,
+            "{field:?} is not between the heading and the list"
+        );
+
+        // A surface, a hairline round it, and both take the window's cut corner.
+        let shaped: Vec<Rect> = out
+            .scene
+            .rects
+            .iter()
+            .filter(|rect| {
+                let [x, y, w, h] = rect.xywh();
+                (x - field.x).abs() < 0.01
+                    && (y - field.y).abs() < 0.01
+                    && (w - field.w).abs() < 0.01
+                    && (h - field.h).abs() < 0.01
+            })
+            .copied()
+            .collect();
+        assert_eq!(shaped.len(), 2, "the field is not a fill and an edge");
+        for rect in &shaped {
+            assert_eq!(rect.extra()[1], CUT, "the field has no cut corner");
+            assert_eq!(rect.extra()[2], Rect::TOP_RIGHT as f32);
+        }
+        assert!(shaped.iter().any(|rect| rect.rgba() == out.skin.input));
+        assert!(
+            shaped
+                .iter()
+                .any(|rect| rect.rgba() == out.skin.edge_focus && rect.extra()[3] == 1.0)
+        );
+
+        // The magnifier is inside the field, and the funnel that was there is
+        // gone from the window.
+        let runs: Vec<&str> = out
+            .scene
+            .texts
+            .iter()
+            .filter(|text| {
+                text.at.x >= field.x
+                    && text.at.y >= field.y
+                    && text.at.y < field.y + field.h
+            })
+            .flat_map(|text| text.runs.iter().map(|run| run.text.as_str()))
+            .collect();
+        assert!(
+            runs.contains(&icons::SEARCH.to_string().as_str()),
+            "the search icon is not in the field: {runs:?}"
+        );
+        let every: String = out
+            .scene
+            .texts
+            .iter()
+            .flat_map(|text| text.runs.iter().map(|run| run.text.as_str()))
+            .collect();
+        assert!(!every.contains('\u{eaf1}'), "the funnel is still drawn");
+        assert!(every.contains("type to narrow the list"));
+
+        // And what is typed goes in the same field.
+        assert!(picker.type_text("cra"));
+        let typed = render_picker(&picker, 1205.0, 791.0, None);
+        assert_eq!(typed.layout.picker_filter, field, "the field moved");
+        let said: String = typed
+            .scene
+            .texts
+            .iter()
+            .filter(|text| (text.at.y - field.y - PICKER_FIELD_PAD).abs() < 0.01)
+            .flat_map(|text| text.runs.iter().map(|run| run.text.as_str()))
+            .collect();
+        assert!(said.contains("cra"), "what was typed is not in the field: {said:?}");
+    }
+
+    /// Item A6: the sessions list carries an arrow back to the folders. The word
+    /// on the button at the foot already swaps to Folders, but it is in the
+    /// corner furthest from the list and it wears a clock.
+    #[test]
+    fn the_session_list_carries_an_arrow_back_to_the_folders() {
+        let mut picker = a_session_picker();
+        let out = render_picker(&picker, 1205.0, 791.0, None);
+        let back = out.layout.picker_back;
+
+        // In the heading row, at the left of the box, and its own target.
+        assert!(back.w > 1.0 && back.h > 1.0, "there is no back arrow");
+        assert!(
+            back.y >= out.layout.picker.y && back.y + back.h <= out.layout.picker_filter.y,
+            "{back:?} is not in the heading row"
+        );
+        let (x, y) = middle(back);
+        assert_eq!(out.layout.hit(x, y), Some(Hit::PickerBack));
+
+        // It is drawn where it answers: a surface, the cut corner, the arrow,
+        // and it lights up under the pointer the way the two buttons do.
+        let warm = render_picker(&picker, 1205.0, 791.0, Some(Hit::PickerBack));
+        assert!(covered(&out, back, back.h, out.skin.button));
+        assert!(covered(&warm, back, back.h, warm.skin.button_hot));
+        let arrow: String = out
+            .scene
+            .texts
+            .iter()
+            .filter(|text| (text.at.y - back.y).abs() < 0.01 && text.at.x < back.x + back.w)
+            .flat_map(|text| text.runs.iter().map(|run| run.text.as_str()))
+            .collect();
+        assert_eq!(arrow, icons::BACK.to_string());
+        // And the heading has moved along to clear it rather than being written
+        // under the arrow.
+        let heading = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| text.runs.iter().any(|run| run.text.contains("OPEN A SESSION")))
+            .expect("the heading is drawn");
+        assert!(
+            heading.at.x >= back.x + back.w,
+            "the heading is written over the arrow"
+        );
+
+        // Pressing it is what Escape does: back to the folders, and then there
+        // is nothing there to press.
+        assert!(picker.show_folders());
+        assert!(!picker.on_sessions());
+        let folders = render_picker(&picker, 1205.0, 791.0, None);
+        assert_eq!(folders.layout.picker_back.w, 0.0, "the arrow outlived the list");
+        assert_ne!(folders.layout.hit(x, y), Some(Hit::PickerBack));
+        let heading = text_of(&folders.scene);
+        assert!(heading.contains("OPEN A FOLDER"));
+        assert!(
+            !heading.contains(icons::BACK.to_string().as_str()),
+            "the arrow is still drawn on the folder list"
+        );
+
+        // And it goes with the picker, like every other region in this box.
+        let dock = Dock::new();
+        let panel = a_settings_panel(&Config::default());
+        for (what, shape) in [
+            ("shaded", Shape { shaded: true, ..shape(&dock, &[]) }),
+            ("settings", Shape { settings: Some(&panel), ..shape(&dock, &[]) }),
+        ] {
+            let layout = Layout::compute(1205.0, 791.0, &shape);
+            assert_eq!(layout.picker_back.w, 0.0, "{what}");
+            assert_eq!(layout.picker_filter.w, 0.0, "{what}");
+            assert_ne!(layout.hit(x, y), Some(Hit::PickerBack), "{what}");
         }
     }
 
