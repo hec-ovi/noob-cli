@@ -157,10 +157,19 @@ impl Totals {
     }
 
     /// Tokens per second over every request ever, prefill and decode.
+    ///
+    /// The four reading functions below have no caller in the window at the
+    /// moment. They had one: the pane called OVERALL, which showed these numbers
+    /// with nothing on it to say they were not this session, and came off for
+    /// exactly that. The coming caller is the settings panel, where the all-time
+    /// block is labelled as what it is. Kept and tested rather than deleted,
+    /// because the file is still being written and these are what read it.
+    #[allow(dead_code)]
     pub fn average_prefill(&self) -> f64 {
         per_second(self.prefill_tokens, self.prefill_seconds)
     }
 
+    #[allow(dead_code)]
     pub fn average_decode(&self) -> f64 {
         per_second(self.decode_tokens, self.decode_seconds)
     }
@@ -168,10 +177,14 @@ impl Totals {
     /// The middle request, which is the reading an average cannot give: one
     /// cold start with a huge transcript drags an average down for the rest of
     /// the day, and the median says what a typical request actually did.
+    ///
+    /// Waiting on the settings panel, like the two averages above it.
+    #[allow(dead_code)]
     pub fn median_prefill(&self) -> f64 {
         median(&self.prefill_rates)
     }
 
+    #[allow(dead_code)]
     pub fn median_decode(&self) -> f64 {
         median(&self.decode_rates)
     }

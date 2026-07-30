@@ -81,6 +81,22 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// redraw-on-change rule; the rule is kept by not sampling when nobody looks.
 const SAMPLE_EVERY: Duration = Duration::from_millis(500);
 
+/// The views this clock exists for. Every one of the three reads its numbers out
+/// of [`Monitor::sample`], the two token panes included, so a pane left off this
+/// list would show whatever the counters said when it was opened.
+const SAMPLED: [View; 3] = [View::Hardware, View::Context, View::Session];
+
+/// Whether the sampling clock should be running: one of [`SAMPLED`] is the
+/// showing view of an unfolded space, and nothing is covering the window.
+fn sampling(shaded: bool, picking: bool, dock: &Dock) -> bool {
+    !shaded
+        && !picking
+        && Space::ALL.into_iter().any(|space| {
+            let slot = dock.slot(space);
+            !slot.folded && slot.active().is_some_and(|view| SAMPLED.contains(&view))
+        })
+}
+
 /// How often the orb gets a new frame while a turn is running. Thirty a second
 /// is enough for an orbit to read as motion and it costs 516 rectangles a frame,
 /// which is one draw call.
@@ -1576,21 +1592,13 @@ impl ApplicationHandler<Wake> for App {
         // while it is the case: the monitor while a monitor is on screen, and the
         // orb while a turn is running. Everything else redraws because something
         // happened, which is what keeps an idle window free.
-        let showing = |wanted: &[View]| {
-            !self.shaded
-                && self.picker.is_none()
-                && Space::ALL.into_iter().any(|space| {
-                    let slot = self.dock.slot(space);
-                    !slot.folded && slot.active().is_some_and(|view| wanted.contains(&view))
-                })
-        };
-        if showing(&[View::Hardware, View::Context, View::Session]) {
+        if sampling(self.shaded, self.picker.is_some(), &self.dock) {
             let now = Instant::now();
             if self.next_sample.is_none_or(|at| now >= at) {
-                // Merged here rather than inside the monitor, so there is one
-                // place that knows the file holds the runs before this one.
-                let overall = self.totals.plus(&self.state);
-                self.monitor.sample(&self.state, &overall);
+                // The state and nothing else. The totals file used to be merged
+                // in here for the pane that read it; it is still written at the
+                // end of every turn, it just has no reader on screen.
+                self.monitor.sample(&self.state);
                 self.next_sample = Some(now + SAMPLE_EVERY);
                 self.dirty = true;
             }
@@ -1718,6 +1726,43 @@ mod tests {
         // Due: a new one, and a new one is what marks the window dirty.
         let past = first + Duration::from_millis(1);
         assert_eq!(orb_deadline(past, true, Some(first)), Some(past + ORB_EVERY));
+    }
+
+    /// Every pane that reads the monitor holds the sampling clock, the two token
+    /// ones included: they are sampled out of the state rather than read from it
+    /// at draw time, so a pane missing from [`SAMPLED`] would sit on the numbers
+    /// it opened with.
+    #[test]
+    fn the_sampling_clock_runs_for_every_pane_that_reads_the_monitor() {
+        for view in [View::Hardware, View::Context, View::Session] {
+            let mut dock = Dock::new();
+            dock.reveal(view);
+            assert!(sampling(false, false, &dock), "{view:?} is not sampled");
+            // Covered is not on screen: a shaded window is a title strip, and
+            // the picker is a full takeover.
+            assert!(!sampling(true, false, &dock), "{view:?} while shaded");
+            assert!(!sampling(false, true, &dock), "{view:?} behind the picker");
+            // Folded away is not on screen either.
+            let space = Space::ALL
+                .into_iter()
+                .find(|space| dock.slot(*space).active() == Some(view))
+                .expect("the revealed view is showing somewhere");
+            for other in Space::ALL {
+                dock.slot_mut(other).folded = true;
+            }
+            assert!(!sampling(false, false, &dock), "{view:?} folded away");
+            dock.slot_mut(space).folded = false;
+            assert!(sampling(false, false, &dock), "{view:?} unfolded again");
+        }
+        // And a window showing none of them costs nothing.
+        let mut dock = Dock::new();
+        for space in Space::ALL {
+            let slot = dock.slot_mut(space);
+            slot.views = vec![View::Output];
+            slot.show(View::Output);
+            slot.folded = false;
+        }
+        assert!(!sampling(false, false, &dock), "no monitor is on screen");
     }
 
     /// Two clocks, one control flow. Whichever is due first wins and the other

@@ -1242,12 +1242,11 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
         Some(View::Plan) => plan(scene, frame, panel),
         Some(View::Agents) => agents(scene, frame, panel),
         Some(View::Hardware) => gauges(scene, frame, panel, frame.monitor.hardware()),
-        // The monitor's own three lists are still called hardware, session and
-        // overall. Which readings belong in which pane is a separate change from
-        // what the panes are called, so the labels moved here first and the
-        // lists behind them keep the names they had.
+        // The monitor's lists are named for the panes they feed, so a reading in
+        // the wrong pane is a rename away from being obvious rather than two
+        // files away.
         Some(View::Context) => context(scene, frame, panel),
-        Some(View::Session) => gauges(scene, frame, panel, frame.monitor.overall()),
+        Some(View::Session) => gauges(scene, frame, panel, frame.monitor.session()),
         Some(View::Debug) => debug(scene, frame, panel),
         Some(View::Files) => files(scene, frame, panel),
     }
@@ -1598,13 +1597,13 @@ fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>) {
     }
 }
 
-/// This run: what the agent is, where it is working, and what it has spent.
+/// The CONTEXT pane: what the agent is, where it is working, and how full it is.
 ///
 /// The first three rows are what came off the title strip when that was cut
 /// back to the build stamp. They are readings with labels, which is what they
 /// never were up there: the phase, the model and the workspace sat unlabelled
-/// on one line with the token budget, and nothing said which was which.
-/// The CONTEXT pane: which phase, model and workspace, then its readings.
+/// on one line with the token budget, and nothing said which was which. The
+/// readings under them are [`Monitor::context`], named for this pane.
 fn context(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let (skin, state) = (frame.skin, frame.state);
     let content = panel.inset(PAD);
@@ -1659,7 +1658,7 @@ fn context(scene: &mut Scene, frame: &Frame, panel: Panel) {
         return;
     }
     let below = Panel::new(panel.x, panel.y + used, panel.w, panel.h - used);
-    gauges(scene, frame, below, frame.monitor.session());
+    gauges(scene, frame, below, frame.monitor.context());
 }
 
 /// Calls that failed, and what was sent to the one that is open.
@@ -2313,23 +2312,6 @@ mod tests {
             },
         });
         state
-    }
-
-    /// The running totals a monitor is sampled against: enough in them that the
-    /// pane reading them has something to write, and the same every time so a
-    /// test does not depend on the machine's own file.
-    fn sample_totals() -> crate::totals::Totals {
-        crate::totals::Totals {
-            prefilled: 4_200_000,
-            generated: 90_000,
-            cached: 3_100_000,
-            prefill_tokens: 4_000_000,
-            prefill_seconds: 1_600.0,
-            decode_tokens: 90_000,
-            decode_seconds: 3_000.0,
-            prefill_rates: vec![2400.0, 2600.0],
-            decode_rates: vec![29.0, 31.0, 30.0],
-        }
     }
 
     struct Rendered {
@@ -3530,9 +3512,8 @@ mod tests {
     fn no_text_box_is_too_small_to_show_its_text() {
         let state = busy_state();
         let mut monitor = Monitor::new();
-        let totals = sample_totals();
-        monitor.sample(&state, &totals);
-        monitor.sample(&state, &totals);
+        monitor.sample(&state);
+        monitor.sample(&state);
         for (w, h) in [(1400.0, 900.0), (900.0, 520.0), (700.0, 400.0)] {
             for view in View::ALL {
                 let mut dock = Dock::new();
@@ -3577,9 +3558,8 @@ mod tests {
     fn each_view_shows_its_own_content() {
         let state = busy_state();
         let mut monitor = Monitor::new();
-        let totals = sample_totals();
-        monitor.sample(&state, &totals);
-        monitor.sample(&state, &totals);
+        monitor.sample(&state);
+        monitor.sample(&state);
         let seen = |view: View| {
             let mut dock = Dock::new();
             dock.reveal(view);
@@ -3591,17 +3571,21 @@ mod tests {
         assert!(!plan.contains("cargo test --workspace"), "activity leaked");
         assert!(seen(View::Agents).contains("search the web"));
         assert!(seen(View::Files).contains("return a + b"));
-        // The monitors are four different lists now: the machine, this run,
-        // every run, and what failed.
+        // The monitors are three different lists: the machine, how full this run
+        // is, and what it spent getting there. Plus what failed.
         let hardware = seen(View::Hardware);
         assert!(hardware.contains("CPU") || hardware.contains("RAM"), "{hardware}");
         let context = seen(View::Context);
-        assert!(context.contains("TOOL CALLS"), "{context}");
+        assert!(context.contains("TOTAL TOOL CALLS"), "{context}");
+        assert!(context.contains("LAST PREFILL"), "{context}");
         assert!(context.contains("laguna-s21"), "the model belongs here: {context}");
         assert!(!context.contains("CPU"), "hardware leaked into CONTEXT: {context}");
         let session = seen(View::Session);
-        assert!(session.contains("DECODE MID"), "{session}");
+        for wanted in ["PREFILLED", "GENERATED", "CACHED", "PREFILL", "DECODE"] {
+            assert!(session.contains(wanted), "{wanted} is not in {session}");
+        }
         assert!(!session.contains("TOOL CALLS"), "the other pane leaked: {session}");
+        assert!(!session.contains("MEAN"), "the all-time readings are gone: {session}");
         assert!(!hardware.contains("DECODE"), "the reverse: {hardware}");
         let debug = seen(View::Debug);
         assert!(debug.contains("failed calls"), "{debug}");
@@ -3722,9 +3706,8 @@ mod tests {
             },
         });
         let mut monitor = Monitor::new();
-        let totals = sample_totals();
-        monitor.sample(&state, &totals);
-        monitor.sample(&state, &totals);
+        monitor.sample(&state);
+        monitor.sample(&state);
 
         let mut dock = Dock::new();
         dock.reveal(View::Context);
@@ -3820,7 +3803,7 @@ mod tests {
             },
         });
         let mut monitor = Monitor::new();
-        monitor.sample(&state, &sample_totals());
+        monitor.sample(&state);
 
         let mut dock = Dock::new();
         dock.reveal(View::Context);
@@ -3862,7 +3845,7 @@ mod tests {
         // and its hue is nobody else's, so filtering by that colour isolates the
         // one block under test.
         let context = monitor
-            .session()
+            .context()
             .into_iter()
             .find(|gauge| gauge.key == "context")
             .expect("the context reading");
@@ -3936,7 +3919,7 @@ mod tests {
         let calls = scene
             .texts
             .iter()
-            .find(|t| t.runs.iter().any(|r| r.text == "TOOL CALLS"))
+            .find(|t| t.runs.iter().any(|r| r.text == "TOTAL TOOL CALLS"))
             .expect("an unbounded row");
         let row = Panel::new(body.x, calls.at.y, body.w, calls.at.h);
         assert!(
@@ -3968,7 +3951,7 @@ mod tests {
             },
         });
         let mut monitor = Monitor::new();
-        monitor.sample(&state, &sample_totals());
+        monitor.sample(&state);
         let mut dock = Dock::new();
         dock.reveal(View::Context);
 
@@ -4035,9 +4018,8 @@ mod tests {
     fn a_pane_too_narrow_for_a_block_draws_no_block_and_keeps_the_numbers() {
         let state = busy_state();
         let mut monitor = Monitor::new();
-        let totals = sample_totals();
-        monitor.sample(&state, &totals);
-        monitor.sample(&state, &totals);
+        monitor.sample(&state);
+        monitor.sample(&state);
         let mut dock = Dock::new();
         dock.reveal(View::Context);
 
@@ -4059,7 +4041,7 @@ mod tests {
             "a block was drawn in a pane with no room for one"
         );
         let text = text_of(&narrow.scene);
-        for label in ["CONTEXT", "TOOL CALLS", "BEST OUTPUT"] {
+        for label in ["CONTEXT", "TOTAL REQUESTS", "LAST PREFILL"] {
             assert!(text.contains(label), "{label} left the narrow pane: {text}");
         }
         assert!(text.contains("1,816 / 65,536"), "the fill still reads: {text}");
@@ -4071,7 +4053,7 @@ mod tests {
     fn the_session_monitor_carries_what_the_title_strip_lost() {
         let state = busy_state();
         let mut monitor = Monitor::new();
-        monitor.sample(&state, &sample_totals());
+        monitor.sample(&state);
         let mut dock = Dock::new();
         dock.reveal(View::Context);
         let out = render_with(&state, 1400.0, 900.0, &dock, &[], &monitor, None);

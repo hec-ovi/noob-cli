@@ -1,10 +1,16 @@
-//! What the machine, this run and every run are costing.
+//! What the machine and this run are costing.
 //!
 //! Three lists, because they answer three questions. HARDWARE is whether the
-//! machine is keeping up, out of `/sys` and `/proc`. SESSION is what this run is
-//! holding and what it has spent, out of the event stream. OVERALL is every run
-//! there has ever been, out of [`crate::totals`], which is the only reading here
-//! that outlives the window.
+//! machine is keeping up, out of `/sys` and `/proc`. CONTEXT is what this run is
+//! holding right now and what its last request cost. SESSION is what this run
+//! has spent altogether and how fast it moved. The last two both come out of the
+//! event stream, so every number in this module is the window that is open.
+//!
+//! Nothing here reads the all-time totals any more. [`crate::totals`] is still
+//! recorded and still written at the end of every turn, it simply has no pane:
+//! a column of counts from sessions nobody remembers was read as this session's,
+//! which is the confusion it came off for. Those numbers belong in the settings
+//! panel, as a block that says what it is.
 //!
 //! All three are the same [`Gauge`]: a `max` means the value is a proportion and
 //! is drawn as a block of dots, and without one the reading is the number alone.
@@ -72,9 +78,9 @@ const HISTORY: usize = 240;
 
 /// Which slot of the gauge palette each metric wears, by name so a reading is
 /// read rather than counted. Two readings in one pane must never share one, and
-/// a metric that appears in two panes keeps the same one: PREFILLED is the same
-/// blue in the session pane and the overall pane, which is what makes the pair
-/// legible side by side.
+/// a metric that appears in two panes keeps the same one: prefill is blue in
+/// both, so LAST PREFILL in the context pane and PREFILLED in the session pane
+/// read as the same quantity measured twice.
 const HUE_RED: usize = 0;
 const HUE_ORANGE: usize = 1;
 const HUE_YELLOW: usize = 2;
@@ -84,6 +90,10 @@ const HUE_TEAL: usize = 5;
 const HUE_BLUE: usize = 6;
 const HUE_INDIGO: usize = 7;
 const HUE_VIOLET: usize = 8;
+/// Named and unclaimed since BEST OUTPUT came off the context pane. The ten
+/// names are the palette: a slot nobody has named is a slot the next reading
+/// picks by number, which is how two rows end up the same colour.
+#[allow(dead_code)]
 const HUE_PINK: usize = 9;
 
 pub struct Monitor {
@@ -93,8 +103,8 @@ pub struct Monitor {
     /// percentage is over the interval rather than since boot.
     cpu_prev: Option<(u64, u64)>,
     hardware: Vec<Gauge>,
+    context: Vec<Gauge>,
     session: Vec<Gauge>,
-    overall: Vec<Gauge>,
     history: HashMap<&'static str, VecDeque<f32>>,
 }
 
@@ -110,8 +120,8 @@ impl Monitor {
             gpu: find_gpu(),
             cpu_prev: None,
             hardware: Vec::new(),
+            context: Vec::new(),
             session: Vec::new(),
-            overall: Vec::new(),
             history: HashMap::new(),
         }
     }
@@ -121,18 +131,20 @@ impl Monitor {
         self.hardware.clone()
     }
 
-    /// What this run is doing. Separate from the hardware because they are
-    /// different questions: one is whether the machine is keeping up, the other
-    /// is whether the budget is.
-    pub fn session(&self) -> Vec<Gauge> {
-        self.session.clone()
+    /// What the CONTEXT pane shows: how full the window is, how many requests
+    /// and calls it took to get there, and what the last request alone cost.
+    /// Named for the pane it feeds, because it was called `session` while
+    /// feeding CONTEXT and that is a trap for whoever reads it next.
+    pub fn context(&self) -> Vec<Gauge> {
+        self.context.clone()
     }
 
-    /// What every run has done, out of the totals file. Separate from the
-    /// session because a total that resets when the window closes cannot answer
-    /// "is this machine slower than it was last week".
-    pub fn overall(&self) -> Vec<Gauge> {
-        self.overall.clone()
+    /// What the SESSION pane shows: the tokens this run has moved and the rates
+    /// it moved them at. Separate from the context because they are different
+    /// questions, one is how full the window is and the other is what filling it
+    /// cost.
+    pub fn session(&self) -> Vec<Gauge> {
+        self.session.clone()
     }
 
     /// Everything recorded for one key, oldest first. Empty until sampled.
@@ -154,10 +166,11 @@ impl Monitor {
     /// Read every source once. Cheap: six small files, no allocation past the
     /// strings they contain.
     ///
-    /// `overall` is the totals file with this run already added, which the
-    /// window does before it calls here: adding it in two places is how the
-    /// same session gets counted twice.
-    pub fn sample(&mut self, state: &crate::state::State, overall: &crate::totals::Totals) {
+    /// The state is the only argument. It used to take the totals file with this
+    /// run added on top, for a pane that is gone: both token lists are this run
+    /// and nothing else, so there is nothing here to confuse with the numbers in
+    /// [`crate::totals`].
+    pub fn sample(&mut self, state: &crate::state::State) {
         let mut gauges = Vec::new();
 
         if let Some(gpu) = &self.gpu {
@@ -232,16 +245,17 @@ impl Monitor {
             });
         }
 
-        // This run's economy, which is a different question from whether the
-        // machine is keeping up: this is the budget that runs out first.
+        // How full the window is, and what it took to fill it. The one bounded
+        // reading in this pane is the fill itself, which is the reading the pane
+        // is named after.
         //
         // The agent's own reading where it sent one: it moves at every
         // transcript boundary, while usage only reports the request that
         // already went out. Falling back keeps a stream without measurements
         // showing something true rather than nothing.
-        let mut session = Vec::new();
+        let mut context = Vec::new();
         match (state.context, state.usage) {
-            (Some(fill), _) if fill.total > 0 => session.push(Gauge {
+            (Some(fill), _) if fill.total > 0 => context.push(Gauge {
                 key: "context",
                 label: "CONTEXT",
                 value: fill.used as f64,
@@ -249,7 +263,7 @@ impl Monitor {
                 unit: "tok",
                 hue: HUE_GREEN,
             }),
-            (_, Some(usage)) => session.push(Gauge {
+            (_, Some(usage)) => context.push(Gauge {
                 key: "context",
                 label: "CONTEXT",
                 value: usage.prompt as f64,
@@ -259,156 +273,97 @@ impl Monitor {
             }),
             _ => {}
         }
-        // Where compaction triggers, which is the line that actually runs out:
-        // the window is not the budget.
-        if let Some(fill) = state.context.filter(|f| f.compact_at > 0) {
-            session.push(Gauge {
-                key: "compact_at",
-                label: "COMPACTS AT",
-                value: fill.compact_at as f64,
-                max: Some(fill.total.max(1) as f64),
-                unit: "tok",
-                hue: HUE_RED,
-            });
-        }
-        session.push(Gauge {
-            key: "tool_calls",
-            label: "TOOL CALLS",
-            value: state.tool_calls as f64,
-            max: None,
-            unit: "",
-            hue: HUE_VIOLET,
-        });
-        // The longest single answer, which a total cannot tell you: forty
-        // requests of fifty tokens and one of four thousand sum the same as a
-        // steady thousand each.
-        session.push(Gauge {
-            key: "best_output",
-            label: "BEST OUTPUT",
-            value: state.best_generated as f64,
-            max: None,
-            unit: "tok",
-            hue: HUE_PINK,
-        });
-        session.push(Gauge {
-            key: "prefilled",
-            label: "PREFILLED",
-            value: state.prefilled as f64,
-            max: None,
-            unit: "tok",
-            hue: HUE_BLUE,
-        });
-        session.push(Gauge {
-            key: "cached",
-            label: "CACHED",
-            value: state.cached_prefill as f64,
-            max: None,
-            unit: "tok",
-            hue: HUE_TEAL,
-        });
-        session.push(Gauge {
-            key: "generated",
-            label: "GENERATED",
-            value: state.generated as f64,
-            max: None,
-            unit: "tok",
-            hue: HUE_YELLOW,
-        });
-        session.push(Gauge {
+        // How much work went into that fill: every request and every call this
+        // run has made, which is why TOTAL is in the label. The two beneath them
+        // are the last request alone, so a pane of totals still says what one
+        // request currently costs.
+        context.push(Gauge {
             key: "requests",
-            label: "REQUESTS",
+            label: "TOTAL REQUESTS",
             value: state.requests as f64,
             max: None,
             unit: "",
             hue: HUE_ORANGE,
         });
-        // Measured, not reported: how fast this run has actually been going,
-        // which is the reading that says whether something is wrong right now.
-        // The all-time averages next door move too slowly to tell.
-        session.push(Gauge {
-            key: "prefill_rate",
-            label: "PREFILL",
-            value: state.rates.prefill(),
+        context.push(Gauge {
+            key: "tool_calls",
+            label: "TOTAL TOOL CALLS",
+            value: state.tool_calls as f64,
             max: None,
-            unit: "tok/s",
-            hue: HUE_INDIGO,
+            unit: "",
+            hue: HUE_VIOLET,
         });
-        session.push(Gauge {
-            key: "decode_rate",
-            label: "DECODE",
-            value: state.rates.decode(),
+        context.push(Gauge {
+            key: "last_prefill",
+            label: "LAST PREFILL",
+            value: state.last_prefill as f64,
             max: None,
-            unit: "tok/s",
-            hue: HUE_LIME,
+            unit: "tok",
+            hue: HUE_BLUE,
+        });
+        context.push(Gauge {
+            key: "last_generated",
+            label: "LAST GENERATED",
+            value: state.last_generated as f64,
+            max: None,
+            unit: "tok",
+            hue: HUE_YELLOW,
         });
 
-        // Every run there has ever been. The same three counts as the session
-        // above, plus what a request typically costs: an average over every
-        // request ever, and the median beside it, because one cold start with a
-        // full transcript drags an average down for the rest of the day.
-        let overall = vec![
+        // What this run has spent: the three token counts, then the rates they
+        // were moved at. Measured rather than reported, which is what says
+        // whether something is wrong right now.
+        //
+        // These read the same numbers the totals file is written from, out of
+        // the live state instead of the file. That is the whole of item 22: the
+        // pane used to show the file and there was nothing on it to say so.
+        let session = vec![
             Gauge {
-                key: "all_prefilled",
+                key: "prefilled",
                 label: "PREFILLED",
-                value: overall.prefilled as f64,
+                value: state.prefilled as f64,
                 max: None,
                 unit: "tok",
                 hue: HUE_BLUE,
             },
             Gauge {
-                key: "all_generated",
+                key: "generated",
                 label: "GENERATED",
-                value: overall.generated as f64,
+                value: state.generated as f64,
                 max: None,
                 unit: "tok",
                 hue: HUE_YELLOW,
             },
             Gauge {
-                key: "all_cached",
+                key: "cached",
                 label: "CACHED",
-                value: overall.cached as f64,
+                value: state.cached_prefill as f64,
                 max: None,
                 unit: "tok",
                 hue: HUE_TEAL,
             },
             Gauge {
-                key: "decode_mean",
-                label: "DECODE MEAN",
-                value: overall.average_decode(),
+                key: "prefill_rate",
+                label: "PREFILL",
+                value: state.rates.prefill(),
                 max: None,
                 unit: "tok/s",
-                hue: HUE_GREEN,
+                hue: HUE_INDIGO,
             },
             Gauge {
-                key: "decode_median",
-                label: "DECODE MID",
-                value: overall.median_decode(),
+                key: "decode_rate",
+                label: "DECODE",
+                value: state.rates.decode(),
                 max: None,
                 unit: "tok/s",
                 hue: HUE_LIME,
-            },
-            Gauge {
-                key: "prefill_mean",
-                label: "PREFILL MEAN",
-                value: overall.average_prefill(),
-                max: None,
-                unit: "tok/s",
-                hue: HUE_ORANGE,
-            },
-            Gauge {
-                key: "prefill_median",
-                label: "PREFILL MID",
-                value: overall.median_prefill(),
-                max: None,
-                unit: "tok/s",
-                hue: HUE_RED,
             },
         ];
 
         // Bounded readings only. An unbounded one has no proportion to plot, and
         // recording a flat zero for it was noise in the trend of everything
         // else.
-        for gauge in gauges.iter().chain(session.iter()) {
+        for gauge in gauges.iter().chain(context.iter()) {
             let Some(fraction) = gauge.fraction() else {
                 continue;
             };
@@ -420,8 +375,8 @@ impl Monitor {
             series.make_contiguous();
         }
         self.hardware = gauges;
+        self.context = context;
         self.session = session;
-        self.overall = overall;
     }
 }
 
@@ -639,8 +594,8 @@ Buffers:          100000 kB
             gpu: None,
             cpu_prev: None,
             hardware: Vec::new(),
+            context: Vec::new(),
             session: Vec::new(),
-            overall: Vec::new(),
             history: HashMap::new(),
         }
     }
@@ -650,16 +605,15 @@ Buffers:          100000 kB
     fn a_machine_without_a_gpu_still_reports_what_it_has() {
         let mut monitor = bare();
         let state = crate::state::State::new();
-        let totals = crate::totals::Totals::default();
-        monitor.sample(&state, &totals);
-        monitor.sample(&state, &totals);
+        monitor.sample(&state);
+        monitor.sample(&state);
         let hardware: Vec<&str> = monitor.hardware().iter().map(|g| g.key).collect();
-        let session: Vec<&str> = monitor.session().iter().map(|g| g.key).collect();
-        assert!(session.contains(&"tool_calls"), "{session:?}");
+        let context: Vec<&str> = monitor.context().iter().map(|g| g.key).collect();
+        assert!(context.contains(&"tool_calls"), "{context:?}");
         assert!(!hardware.contains(&"gpu"), "{hardware:?}");
         // The lists are separate questions and must not share a row.
-        let overall: Vec<&str> = monitor.overall().iter().map(|g| g.key).collect();
-        for (a, b) in [(&hardware, &session), (&hardware, &overall), (&session, &overall)] {
+        let session: Vec<&str> = monitor.session().iter().map(|g| g.key).collect();
+        for (a, b) in [(&hardware, &context), (&hardware, &session), (&context, &session)] {
             assert!(
                 a.iter().all(|key| !b.contains(key)),
                 "{a:?} and {b:?} overlap"
@@ -671,6 +625,12 @@ Buffers:          100000 kB
 
     /// The three lists are the three questions that were asked for, by name.
     /// A reading in the wrong pane is the complaint this split came from.
+    ///
+    /// This asserted BEST OUTPUT in the context pane and seven all-time readings
+    /// in a third list read out of the totals file. Both are gone: the context
+    /// pane carries the fill and what it cost, the session pane carries this
+    /// run's own spend, and the file has no pane at all until the settings panel
+    /// gets one.
     #[test]
     fn each_pane_carries_the_readings_it_was_asked_for() {
         let mut monitor = bare();
@@ -689,35 +649,32 @@ Buffers:          100000 kB
                 context_total: 65_536,
             },
         });
-        let totals = crate::totals::Totals {
-            prefilled: 5_000,
-            generated: 900,
-            cached: 4_000,
-            decode_tokens: 900,
-            decode_seconds: 30.0,
-            decode_rates: vec![30.0, 31.0],
-            prefill_tokens: 5_000,
-            prefill_seconds: 2.0,
-            prefill_rates: vec![2500.0],
-        };
-        monitor.sample(&state, &totals);
+        state.apply(noob_proto::Event::UsageReport {
+            usage: noob_proto::Usage {
+                prompt: 1_500,
+                cached_prompt: 900,
+                completion: 20,
+                context_total: 65_536,
+            },
+        });
+        monitor.sample(&state);
 
+        let context: Vec<&str> = monitor.context().iter().map(|g| g.key).collect();
+        assert_eq!(
+            context,
+            vec![
+                "context",
+                "requests",
+                "tool_calls",
+                "last_prefill",
+                "last_generated"
+            ]
+        );
         let session: Vec<&str> = monitor.session().iter().map(|g| g.key).collect();
-        for wanted in ["context", "tool_calls", "best_output"] {
-            assert!(session.contains(&wanted), "{wanted} is not in {session:?}");
-        }
-        let overall: Vec<&str> = monitor.overall().iter().map(|g| g.key).collect();
-        for wanted in [
-            "all_prefilled",
-            "all_generated",
-            "all_cached",
-            "decode_mean",
-            "decode_median",
-            "prefill_mean",
-            "prefill_median",
-        ] {
-            assert!(overall.contains(&wanted), "{wanted} is not in {overall:?}");
-        }
+        assert_eq!(
+            session,
+            vec!["prefilled", "generated", "cached", "prefill_rate", "decode_rate"]
+        );
 
         let read = |gauges: Vec<Gauge>, key: &str| {
             gauges
@@ -725,15 +682,66 @@ Buffers:          100000 kB
                 .find(|g| g.key == key)
                 .unwrap_or_else(|| panic!("{key}"))
         };
-        // This run only, out of the events.
-        assert_eq!(read(monitor.session(), "tool_calls").value, 1.0);
-        assert_eq!(read(monitor.session(), "best_output").value, 60.0);
-        assert_eq!(read(monitor.session(), "cached").value, 400.0);
-        // Every run, out of the file, which already has this one added.
-        assert_eq!(read(monitor.overall(), "all_prefilled").value, 5_000.0);
-        assert_eq!(read(monitor.overall(), "all_cached").value, 4_000.0);
-        assert_eq!(read(monitor.overall(), "decode_mean").value, 30.0);
-        assert_eq!(read(monitor.overall(), "decode_median").value, 30.5);
+        // The context pane: this run's totals of work done, and the last request
+        // on its own beneath them.
+        assert_eq!(read(monitor.context(), "requests").value, 2.0);
+        assert_eq!(read(monitor.context(), "tool_calls").value, 1.0);
+        assert_eq!(read(monitor.context(), "last_prefill").value, 600.0);
+        assert_eq!(read(monitor.context(), "last_generated").value, 20.0);
+        // The session pane: the same numbers the totals file is written from,
+        // read out of the live run rather than out of the file.
+        assert_eq!(read(monitor.session(), "prefilled").value, 1_100.0);
+        assert_eq!(read(monitor.session(), "generated").value, 80.0);
+        assert_eq!(read(monitor.session(), "cached").value, 1_300.0);
+        assert_eq!(
+            read(monitor.session(), "prefilled").value,
+            state.prefilled as f64,
+            "the pane and the state have to agree"
+        );
+    }
+
+    /// A pane that reads the file is the bug item 22 reported: OVERALL showed
+    /// prefilled and generated from somewhere unexplained. Nothing in the
+    /// monitor may move when the totals file does.
+    #[test]
+    fn no_pane_reads_the_all_time_totals() {
+        let mut monitor = bare();
+        let mut state = crate::state::State::new();
+        state.apply(noob_proto::Event::UsageReport {
+            usage: noob_proto::Usage {
+                prompt: 900,
+                cached_prompt: 400,
+                completion: 60,
+                context_total: 65_536,
+            },
+        });
+        monitor.sample(&state);
+        // The token lists only: the hardware ones are /sys and are supposed to
+        // move between two samples.
+        let reading = |monitor: &Monitor| -> Vec<Gauge> {
+            monitor.context().into_iter().chain(monitor.session()).collect()
+        };
+        let before = reading(&monitor);
+        // A file with millions in it, still written and still loaded, and the
+        // panes do not know it exists.
+        let file = crate::totals::Totals {
+            prefilled: 4_200_000,
+            generated: 90_000,
+            cached: 3_100_000,
+            ..crate::totals::Totals::default()
+        };
+        assert_eq!(file.plus(&state).prefilled, 4_200_500, "the file still adds");
+        monitor.sample(&state);
+        let after = reading(&monitor);
+        assert_eq!(before, after, "a second sample of the same run moved");
+        for gauge in &after {
+            assert!(
+                gauge.value < 4_200_000.0,
+                "{} is reading the file: {}",
+                gauge.key,
+                gauge.value
+            );
+        }
     }
 
     /// The colour is what says which block belongs to which label, so no two
@@ -763,9 +771,9 @@ Buffers:          100000 kB
                 },
             ],
         });
-        monitor.sample(&state, &crate::totals::Totals::default());
+        monitor.sample(&state);
         let slots = crate::skin::Skin::default().gauges.len();
-        for pane in [monitor.hardware(), monitor.session(), monitor.overall()] {
+        for pane in [monitor.hardware(), monitor.context(), monitor.session()] {
             let mut seen = Vec::new();
             for gauge in &pane {
                 assert!(gauge.hue < slots, "{} names slot {}", gauge.key, gauge.hue);
@@ -781,7 +789,6 @@ Buffers:          100000 kB
     fn history_is_bounded_and_oldest_first() {
         let mut monitor = bare();
         let mut state = crate::state::State::new();
-        let totals = crate::totals::Totals::default();
         for n in 0..HISTORY + 50 {
             state.apply(noob_proto::Event::UsageReport {
                 usage: noob_proto::Usage {
@@ -791,7 +798,7 @@ Buffers:          100000 kB
                     context_total: 10_000,
                 },
             });
-            monitor.sample(&state, &totals);
+            monitor.sample(&state);
         }
         let series = monitor.history("context");
         assert_eq!(series.len(), HISTORY);
