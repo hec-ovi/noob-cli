@@ -29,6 +29,12 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
 - The window buttons are no longer clipped. Their text box was sized to one
   estimated glyph advance, so maximize lost all but the left edge of its frame
   and close all but one arm of its cross.
+- Double clicking the title bar shades the window to the strip and nothing else.
+  It painted a black bar with stray lines across it, because the shade asked the
+  window to become thirty pixels tall while a minimum size of 680 by 380 was
+  still in force: the compositor refused the height, the surface stayed tall, and
+  a full window backdrop was painted over it. The minimum is dropped while
+  shaded and restored when it is not.
 
 ### Added
 
