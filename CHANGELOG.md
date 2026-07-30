@@ -269,8 +269,8 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
   number is the reading and the block only describes it.
 - Token counts in the monitors are grouped in thousands. Seven figures ungrouped
   has to be counted rather than read.
-- The rolling trend behind each gauge is gone with the bars. The samples are
-  still recorded for the graph the hardware pane is getting.
+- The rolling trend behind each gauge is gone with the bars, and so is the ring
+  of samples that fed it. Nothing drew them.
 - The hardware pane shows only its readings. The notes and the GPU capability
   report underneath are gone, which also means a machine without an amdgpu no
   longer says why those rows are missing.
@@ -293,6 +293,16 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
   own thing (the prompt, the picker, a menu) still have all four sides.
 - The fold arrow at the end of each tab strip is gone. Clicking the tab already
   showing still collapses its space.
+
+### Removed
+
+- The ASCII clip player and the converter that fed it. The orb took the idle
+  animation and lives in the title strip, where a 128 by 37 character face has
+  nowhere to go, so `avatar.rs`, the `asciify` crate, the clip it produced and
+  the `./dev.sh avatar` route are all gone. The clip never appeared in a shipped
+  build. The `show_avatar` and `avatar` settings stay retired rather than
+  becoming unknown keys, because those lines are still sitting in people's
+  files.
 
 ### Reverted
 

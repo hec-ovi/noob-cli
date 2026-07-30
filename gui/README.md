@@ -336,6 +336,7 @@ black.
 | `noob-gpu` | adapter, device, surface, what this machine will actually do |
 | `noob-draw` | instanced rectangles and shaped glyphs, and nothing else, on a base layer and a floating one |
 | `no0b` | the window shell, the layout, the panes, the settings panel, the agent link (in `gui/clippy/`, which still carries the old folder name) |
+| `text-geometry` | which visual rows a run of logical lines occupies, and every question that follows from it. A contract-isolated layer under `gui/layers/`, with no dependencies at all, so it tests without a GPU or a font |
 
 A frame has two layers because one instanced pass draws all of a layer's
 rectangles and one text pass draws all of its glyphs after them, so a box pushed
@@ -353,7 +354,7 @@ One lockfile for both would put a `workspace = true` between the two budgets.
 They share exactly one thing, `crates/noob-proto`, by path.
 
 NO0B has its own ceiling, 40 MiB and 400 crates, enforced by
-`./dev.sh gui-check` the same way the CLI's is. It currently uses 13.0 MiB and
+`./dev.sh gui-check` the same way the CLI's is. It currently uses 13.2 MiB and
 147 crates. Most of the size is one asset: the symbol font is embedded rather
 than looked for on the system, because a glyph a machine does not have draws as
 nothing at all. Five of the crates are the clipboard: a copy has to reach the
