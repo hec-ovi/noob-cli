@@ -13,13 +13,24 @@
 //! that grows a row when there is a selection moves every row under it, and the
 //! pointer has to read the whole thing again to find the one it came for.
 //!
-//! The one deliberate exception is the widget list. It is the last row of the
-//! widget menu and it opens under itself, so the rows above it never move, and
-//! the nine rows it carries are only there while it is open. A menu that always
-//! held all nine would be a wall of tab names in front of a Close row.
+//! The one deliberate exception is the widget list, and it is not a row of the
+//! menu at all: the Widgets row stays where it is and the list flies out beside
+//! it, in a box of its own, the way every other desktop menu opens a submenu.
+//! The nine rows it carries are only there while it is open. A menu that always
+//! held all nine would be a wall of tab names in front of a Close row, and one
+//! that opened them downwards would push its own rows around under the pointer.
+//!
+//! The rows are still one list here, top level first and the flyout after it, so
+//! a row is one number wherever it is drawn. Which of the two boxes a row is in
+//! is [`Menu::top`], and where those boxes are is the layout's business.
 
 use crate::dock::{Dock, Space, View};
 use crate::icons;
+
+/// Columns a row reserves at its end for the flyout marker: the mark and the
+/// space in front of it. Reserved in [`Menu::width_chars`] rather than left to
+/// the drawing, or a long label and the marker would be written over each other.
+pub const MARKER_COLUMNS: usize = 2;
 
 /// One thing a menu can do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,12 +45,14 @@ pub enum Item {
     CopySelection,
     /// Take the pane out of the window, via `Dock::hide`.
     Close,
-    /// Open or shut the list of every widget. Carries whether it is open, so
-    /// the row can say which of the two it is about to do.
+    /// Open or shut the list of every widget. Carries whether it is open, which
+    /// the layout reads to know whether to place a flyout. The row itself looks
+    /// the same either way: a submenu marker says the list is over there, not
+    /// which way it is about to go.
     Widgets(bool),
-    /// One widget on that list, and whether it is out of the window. Picking a
-    /// closed one puts it back, picking one that is already in the window shows
-    /// it where it is.
+    /// One widget on that list, and whether it is out of the window. A switch:
+    /// picking a closed one puts it back, picking one that is in the window
+    /// takes it out.
     Widget(View, bool),
 }
 
@@ -65,26 +78,29 @@ impl Item {
     pub fn icon(self) -> Option<char> {
         match self {
             Item::Settings => Some(icons::SETTINGS),
-            // The picker's tree marks, for the same gesture: a plus opens what
-            // is under the row, a minus takes it away again.
-            Item::Widgets(true) => Some(icons::COLLAPSE),
-            Item::Widgets(false) => Some(icons::EXPAND),
-            // In the window, or closed. The mark is the whole of how the list
-            // answers where did that pane go.
+            // A box with a tick in it for a widget that is in the window, an
+            // empty one for a widget that is out. The row is a switch, so it has
+            // to say which way it is set before it is pressed: without the mark
+            // a click on it is a coin flip.
             Item::Widget(_, hidden) => Some(match hidden {
-                true => icons::CLOSE,
-                false => icons::CONFIRM,
+                true => icons::UNCHECKED,
+                false => icons::CHECKED,
             }),
             _ => None,
         }
     }
 
-    /// Columns the label steps in by, so the widget list reads as a list under
-    /// the row that opened it rather than as more rows of the menu.
-    pub fn indent(self) -> usize {
+    /// The glyph at the END of the row, for a row that opens a list beside
+    /// itself. The standard submenu affordance, and the whole of how a row that
+    /// flies out is told apart from a row that acts.
+    ///
+    /// At the end rather than in the gutter in front, which is where the icons
+    /// above go: a mark in the gutter says what this row is, a mark at the end
+    /// says there is more of it out to the side.
+    pub fn marker(self) -> Option<char> {
         match self {
-            Item::Widget(..) => 1,
-            _ => 0,
+            Item::Widgets(_) => Some(icons::SUBMENU),
+            _ => None,
         }
     }
 }
@@ -116,8 +132,9 @@ pub struct Menu {
     /// Every row in it, the top level first and the widget list after it. Shut,
     /// that is the top level alone.
     pub rows: Vec<Row>,
-    /// How many of those rows are the top level. The rest are the list, which
-    /// is the part that scrolls, so the two halves have to be told apart.
+    /// How many of those rows are the top level. The rest are the flyout, which
+    /// is a box of its own and the part that scrolls, so the two halves have to
+    /// be told apart.
     pub top: usize,
     /// Which widget the list starts at, when the window is too short to hold
     /// all of it. Kept here rather than in the layout because it outlives a
@@ -155,9 +172,9 @@ impl Menu {
     /// panel behind it, which read as a broken window rather than an unfinished
     /// one, and is the complaint that built the panel.
     ///
-    /// The Widgets row is last, and shut. Everything above it keeps the place
-    /// it has always had, so the list can grow and shrink without moving a row
-    /// the pointer is already on its way to.
+    /// The Widgets row is last, and shut. It never moves and nothing above it
+    /// moves either: the list it opens is a box beside it rather than more rows
+    /// under it.
     pub fn for_widget(at: (f32, f32), view: View, space: Space, has_selection: bool) -> Menu {
         let rows = vec![
             Row {
@@ -193,12 +210,22 @@ impl Menu {
         self.rows.len() - self.top
     }
 
+    /// The widget the menu was opened over, if it was opened over one. What
+    /// every row but the list acts on, so a caller can ask whether the list just
+    /// took that widget out of the window.
+    pub fn target_view(&self) -> Option<View> {
+        match self.target {
+            Target::Widget(view, _) => Some(view),
+            Target::Input => None,
+        }
+    }
+
     /// Open the widget list, or shut it again.
     ///
     /// Every view is on it, in [`View::ALL`] order so the list is in the same
     /// order every time it opens, each marked with whether it is in the window.
-    /// Nothing on it is greyed: a closed widget comes back and one that is
-    /// already in the window is shown where it is, so every row acts.
+    /// Nothing on it is greyed: every row is a switch and every switch can be
+    /// thrown either way.
     pub fn toggle_widgets(&mut self, dock: &Dock) -> bool {
         let Some(row) = self.rows.get_mut(self.top.saturating_sub(1)) else {
             return false;
@@ -214,6 +241,25 @@ impl Menu {
                 item: Item::Widget(view, dock.is_hidden(view)),
                 enabled: true,
             }));
+        }
+        true
+    }
+
+    /// Read the list's marks off the dock again, keeping the list open and
+    /// keeping where it is scrolled to.
+    ///
+    /// A row of the list is a switch, and a menu that stays open after one is
+    /// thrown would otherwise go on saying the widget is where it was. The rows
+    /// themselves do not move, so the pointer is still over the row it just
+    /// pressed and can press it back.
+    pub fn relist(&mut self, dock: &Dock) -> bool {
+        if self.widgets() == 0 {
+            return false;
+        }
+        for row in &mut self.rows[self.top..] {
+            if let Item::Widget(view, _) = row.item {
+                row.item = Item::Widget(view, dock.is_hidden(view));
+            }
         }
         true
     }
@@ -241,13 +287,31 @@ impl Menu {
             .map(|row| row.item)
     }
 
-    /// The longest label in it, in characters, counting what a row steps in by.
-    /// What the layout sizes the box from, so every row is as wide as the
-    /// widest one.
+    /// The longest label in the menu's own box, in characters, with room kept
+    /// at the end of a row that carries a flyout marker. What the layout sizes
+    /// the box from, so every row is as wide as the widest one.
+    ///
+    /// The flyout is not in this: it is a box of its own, sized by
+    /// [`Menu::list_width_chars`], so opening the list cannot change the width
+    /// of the menu it opened from.
     pub fn width_chars(&self) -> usize {
-        self.rows
-            .iter()
-            .map(|row| row.item.label().chars().count() + row.item.indent())
+        Menu::widest(&self.rows[..self.top.min(self.rows.len())])
+    }
+
+    /// The same for the flyout's box, which is empty while the list is shut.
+    pub fn list_width_chars(&self) -> usize {
+        Menu::widest(&self.rows[self.top.min(self.rows.len())..])
+    }
+
+    fn widest(rows: &[Row]) -> usize {
+        rows.iter()
+            .map(|row| {
+                row.item.label().chars().count()
+                    + match row.item.marker() {
+                        Some(_) => MARKER_COLUMNS,
+                        None => 0,
+                    }
+            })
             .max()
             .unwrap_or(0)
     }
@@ -316,25 +380,58 @@ mod tests {
         assert_eq!(items(&menu), shut, "it shuts back to what it opened as");
     }
 
-    /// The exception to a menu keeping its shape is allowed to grow downwards
-    /// and no other way: nothing above the row that opened the list moves.
+    /// The exception to a menu keeping its shape moves no row at all now: the
+    /// list is a box beside the row rather than more rows under it, so the menu
+    /// it came from is the same menu it was, width included.
     #[test]
-    fn opening_the_list_moves_no_row_above_it() {
+    fn opening_the_list_moves_no_row_of_the_menu_and_does_not_widen_it() {
         let dock = Dock::new();
         let mut menu = Menu::for_widget((10.0, 10.0), View::Files, Space::BottomRight, true);
         let before = items(&menu);
+        let width = menu.width_chars();
         menu.toggle_widgets(&dock);
         assert_eq!(&items(&menu)[..menu.top - 1], &before[..before.len() - 1]);
         assert_eq!(menu.rows[menu.top - 1].item, Item::Widgets(true));
         assert_eq!(menu.pick(0), Some(Item::Settings));
         assert_eq!(menu.pick(2), Some(Item::Close));
-        // And the box does not have to grow either: no view's name is longer
-        // than the Close row, indent included.
+        assert_eq!(menu.width_chars(), width, "the menu's own box did not move");
         assert_eq!(menu.width_chars(), Item::Close.label().chars().count());
+        // The flyout is sized on its own, by the longest tab name on it.
+        let widest = View::ALL
+            .into_iter()
+            .map(|view| view.label().chars().count())
+            .max()
+            .expect("there are views");
+        assert_eq!(menu.list_width_chars(), widest);
+        menu.toggle_widgets(&dock);
+        assert_eq!(menu.list_width_chars(), 0, "shut, there is no flyout");
     }
 
-    /// The list is the answer to where did that pane go, so it says which
-    /// widgets are in the window and which are not, and every row acts.
+    /// The marker is written after the label, so the row has to be wide enough
+    /// for both. A row as wide as its label alone would write the two on top of
+    /// each other.
+    #[test]
+    fn a_row_that_flies_out_keeps_room_at_its_end_for_the_marker() {
+        let menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::Left, false);
+        let widgets = "Widgets".chars().count();
+        assert!(
+            menu.width_chars() >= widgets + MARKER_COLUMNS,
+            "the marker and the label would collide"
+        );
+        // With a label longer than every other row's, the width is that row's.
+        let mut wide = menu.clone();
+        wide.rows.retain(|row| matches!(row.item, Item::Widgets(_)));
+        wide.top = wide.rows.len();
+        assert_eq!(wide.width_chars(), widgets + MARKER_COLUMNS);
+        // A row with no marker keeps no room, or every menu would be two
+        // columns wider than it needs to be.
+        let plain = Menu::for_input((0.0, 0.0), false);
+        assert_eq!(plain.width_chars(), Item::Paste.label().chars().count());
+    }
+
+    /// Every row of the list is a switch, and a switch has to say which way it
+    /// is set before it is pressed: a tick in a box for a widget in the window,
+    /// an empty box for one that is out.
     #[test]
     fn the_list_marks_what_is_closed_and_every_row_of_it_can_be_picked() {
         let dock = Dock::hiding(&[View::Debug, View::Files]);
@@ -351,22 +448,94 @@ mod tests {
             assert_eq!(
                 Item::Widget(view, hidden).icon(),
                 Some(match hidden {
-                    true => icons::CLOSE,
-                    false => icons::CONFIRM,
+                    true => icons::UNCHECKED,
+                    false => icons::CHECKED,
                 })
             );
             assert_eq!(Item::Widget(view, hidden).label(), view.label());
+            assert_eq!(
+                Item::Widget(view, hidden).marker(),
+                None,
+                "a widget row is a switch, not a way further in"
+            );
         }
         assert_eq!(menu.pick(menu.top + View::ALL.len()), None);
     }
 
-    /// The row says which way it is about to go, with the picker tree's marks.
+    /// The row that opens the list carries a submenu marker at its end, open or
+    /// shut, and carries nothing in the gutter in front of it. This asserted
+    /// the opposite: a plus and a minus in the gutter, which is what a row that
+    /// folds a list out underneath itself says, and this row no longer does
+    /// that.
     #[test]
-    fn the_widget_row_carries_a_plus_shut_and_a_minus_open() {
-        assert_eq!(Item::Widgets(false).icon(), Some(icons::EXPAND));
-        assert_eq!(Item::Widgets(true).icon(), Some(icons::COLLAPSE));
-        assert_eq!(Item::Widgets(false).indent(), 0);
-        assert_eq!(Item::Widget(View::Output, false).indent(), 1);
+    fn the_widget_row_carries_a_submenu_marker_at_its_end_and_no_mark_in_front() {
+        for open in [false, true] {
+            assert_eq!(Item::Widgets(open).marker(), Some(icons::SUBMENU));
+            assert_eq!(Item::Widgets(open).icon(), None);
+        }
+        for item in [
+            Item::Copy,
+            Item::Paste,
+            Item::Settings,
+            Item::CopySelection,
+            Item::Close,
+            Item::Widget(View::Output, false),
+        ] {
+            assert_eq!(item.marker(), None, "{item:?} does not fly out");
+        }
+    }
+
+    /// The marks follow the dock while the menu stays open, so a row that was
+    /// just switched says what it did rather than what it used to say. The rows
+    /// keep their places and the list keeps its scroll, so the pointer is still
+    /// over the row it pressed.
+    #[test]
+    fn the_list_reads_its_marks_off_the_dock_again_without_moving_a_row() {
+        let mut dock = Dock::new();
+        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::Left, false);
+        menu.toggle_widgets(&dock);
+        menu.scroll(3, true, 4);
+        let places: Vec<View> = menu.rows[menu.top..]
+            .iter()
+            .map(|row| match row.item {
+                Item::Widget(view, _) => view,
+                other => panic!("{other:?} is not a widget row"),
+            })
+            .collect();
+
+        assert!(dock.hide(View::Debug));
+        assert!(menu.relist(&dock));
+        assert_eq!(menu.first, 3, "the list did not jump back to the top");
+        assert_eq!(
+            menu.rows[menu.top..]
+                .iter()
+                .map(|row| match row.item {
+                    Item::Widget(view, _) => view,
+                    other => panic!("{other:?} is not a widget row"),
+                })
+                .collect::<Vec<_>>(),
+            places,
+            "no row moved"
+        );
+        for (step, view) in View::ALL.into_iter().enumerate() {
+            assert_eq!(
+                menu.pick(menu.top + step),
+                Some(Item::Widget(view, view == View::Debug))
+            );
+        }
+        // Shut, there is nothing to read.
+        menu.toggle_widgets(&dock);
+        assert!(!menu.relist(&dock));
+        assert!(!Menu::for_input((0.0, 0.0), false).relist(&dock));
+    }
+
+    /// Every row but the list acts on the widget the menu was opened over, so
+    /// the menu has to be able to say which one that is.
+    #[test]
+    fn a_menu_names_the_widget_it_was_opened_over() {
+        let menu = Menu::for_widget((0.0, 0.0), View::Agents, Space::TopRight, false);
+        assert_eq!(menu.target_view(), Some(View::Agents));
+        assert_eq!(Menu::for_input((0.0, 0.0), false).target_view(), None);
     }
 
     /// Nine rows do not always fit under a menu opened near the bottom of a

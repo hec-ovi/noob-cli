@@ -237,21 +237,40 @@ fn menu_for(
     }
 }
 
-/// What picking a row of the menu's widget list does.
+/// What picking a row of the menu's widget list does, and what becomes of the
+/// menu afterwards.
+struct Toggled {
+    /// The widget went out of the window rather than coming back into it.
+    hidden: bool,
+    /// The menu can stay open. It cannot when the widget that went out is the
+    /// one the menu was opened over: its Close row and its Copy row would be
+    /// pointed at a pane that is no longer in the window.
+    keep_open: bool,
+}
+
+/// Picking a widget hides it or shows it. The list is a set of switches rather
+/// than a set of destinations: a widget in the window goes out, and one that is
+/// out comes back into the space it opens in by default. Where it used to be is
+/// not remembered, and an arrangement dragged around since it went would have
+/// nowhere to put it back.
 ///
-/// Two cases, because the list holds every widget rather than only the closed
-/// ones. A closed one comes back into the space it opens in by default: where
-/// it used to be is not remembered, and an arrangement dragged around since it
-/// went would have nowhere to put it back. One that is already in the window is
-/// shown where it is, which is the answer to a tab buried in a folded space or
-/// behind five others.
+/// The menu stays open over it, with its marks read off the dock again, so a
+/// second widget can be switched without opening the menu and its list a second
+/// time. The one exception is the menu's own widget going out, which takes the
+/// thing the rest of the menu acts on with it.
 ///
-/// A free function over the dock alone, like [`menu_for`] above it, so the rule
-/// can be tested without a window.
-fn show_view(dock: &mut Dock, view: View) -> bool {
-    match dock.is_hidden(view) {
-        true => dock.unhide(view),
-        false => dock.reveal(view),
+/// A free function over the dock and the menu, like [`menu_for`] above it, so
+/// the rule can be tested without a window.
+fn toggle_view(dock: &mut Dock, menu: &mut Menu, view: View) -> Toggled {
+    let hidden = !dock.is_hidden(view);
+    match hidden {
+        true => dock.hide(view),
+        false => dock.unhide(view),
+    };
+    menu.relist(dock);
+    Toggled {
+        hidden,
+        keep_open: !(hidden && menu.target_view() == Some(view)),
     }
 }
 
@@ -1269,15 +1288,23 @@ impl App {
             // matched rather than caught by a wildcard so adding one is a
             // compile error here instead of a click that silently does nothing.
             (Item::Close, Target::Input) => {}
-            // The one row that does not put the menu away. It opens the list
-            // under itself, and the list is on the menu: closing it would put
-            // away the thing the row was for.
+            // The row that opens the list beside itself, which is the thing the
+            // row is for: closing the menu would take the list with it.
             (Item::Widgets(_), _) => {
                 menu.toggle_widgets(&self.dock);
                 self.menu = Some(menu);
             }
+            // A switch rather than a destination, so the menu stays open over it
+            // and can be switched again. See [`toggle_view`] for the one case
+            // where it cannot.
             (Item::Widget(view, _), _) => {
-                show_view(&mut self.dock, view);
+                let toggled = toggle_view(&mut self.dock, &mut menu, view);
+                if toggled.hidden {
+                    self.forget_selection_in(view);
+                }
+                if toggled.keep_open {
+                    self.menu = Some(menu);
+                }
             }
         }
     }
@@ -1774,7 +1801,7 @@ impl App {
             Some(Hit::Menu | Hit::MenuRow(_))
         ) && let Some(menu) = self.menu.as_mut()
         {
-            let rows = layout.menu_capacity(menu);
+            let rows = layout.menu_capacity();
             let by = ((rows as f32 * pages.abs()).round() as usize).max(1);
             self.dirty |= menu.scroll(by, pages < 0.0, rows);
             return;
@@ -2674,54 +2701,114 @@ mod tests {
         assert_eq!(menu_for(hit, at, &dock, false, None).unwrap().pick(0), None);
     }
 
-    /// The way back in. Closing a widget was one way out with no way home, and
-    /// the list on the same menu is now the way home for every one of them.
+    /// A row of the list is a switch: a widget in the window goes out, and one
+    /// that is out comes back. This asserted the half of that which shipped,
+    /// where a widget already in the window was only revealed, so the list could
+    /// add a widget and never take one away.
     #[test]
-    fn picking_a_closed_widget_puts_it_back_and_an_open_one_is_only_revealed() {
+    fn picking_a_widget_takes_it_out_of_the_window_or_puts_it_back() {
         let mut dock = Dock::new();
-        let menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::Left, false);
+        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::Left, false);
+        menu.toggle_widgets(&dock);
 
-        // Closed, and back: in the window, walked to, in the space it opens in
-        // by default rather than wherever it was before.
-        assert!(dock.hide(View::Debug));
-        assert!(dock.is_hidden(View::Debug));
-        assert!(!dock.walk().contains(&View::Debug));
-        assert!(show_view(&mut dock, View::Debug));
-        assert!(!dock.is_hidden(View::Debug));
-        let home = dock.space_of(View::Debug).expect("it is somewhere");
-        assert_eq!(dock.slot(home).active(), Some(View::Debug), "and showing");
+        // In the window, and out: no tab, no space, nothing walks to it. Dragged
+        // somewhere else first, so where it comes back to says something.
+        assert!(dock.move_view(View::Files, Space::Left));
+        let toggled = toggle_view(&mut dock, &mut menu, View::Files);
+        assert!(toggled.hidden);
+        assert!(dock.is_hidden(View::Files));
+        assert_eq!(dock.space_of(View::Files), None);
+        assert!(!dock.walk().contains(&View::Files));
+        assert!(dock.is_sound(), "{dock:?}");
+
+        // Out, and back: in the window, walked to, in the space it opens in by
+        // default rather than wherever it was before.
+        let toggled = toggle_view(&mut dock, &mut menu, View::Files);
+        assert!(!toggled.hidden);
+        assert!(!dock.is_hidden(View::Files));
+        let home = dock.space_of(View::Files).expect("it is somewhere");
+        assert_eq!(dock.slot(home).active(), Some(View::Files), "and showing");
         assert_eq!(
             home,
             Dock::new()
-                .space_of(View::Debug)
+                .space_of(View::Files)
                 .expect("its default space"),
             "back where it opens rather than where it was"
         );
+        assert_ne!(home, Space::Left, "which is not where it was dragged to");
+        assert!(dock.is_sound(), "{dock:?}");
 
-        // Already in the window: shown where it is, and not moved.
-        let space = dock.space_of(View::Files).expect("FILES is in the window");
-        dock.slot_mut(space).folded = true;
-        let order = dock.slot(space).views.clone();
-        assert!(show_view(&mut dock, View::Files));
-        assert_eq!(dock.space_of(View::Files), Some(space), "it did not move");
-        assert_eq!(dock.slot(space).views, order, "nor did its tab");
-        assert_eq!(dock.slot(space).active(), Some(View::Files));
-        assert!(!dock.slot(space).folded, "and its space is unfolded");
+        // And the marks follow, so the row says which way it will go next.
+        assert_eq!(
+            menu.pick(menu.top + 8),
+            Some(Item::Widget(View::Files, false)),
+            "FILES is the ninth widget and it is back in the window"
+        );
+        toggle_view(&mut dock, &mut menu, View::Files);
+        assert_eq!(
+            menu.pick(menu.top + 8),
+            Some(Item::Widget(View::Files, true))
+        );
+    }
 
-        // Which is what the rows of the list say they will do, before either
-        // one is picked.
-        let mut listed = menu.clone();
-        assert!(dock.hide(View::Agents));
-        listed.toggle_widgets(&dock);
-        assert_eq!(
-            listed.pick(listed.top + 3),
-            Some(Item::Widget(View::Agents, true)),
-            "AGENTS is the fourth widget and it is closed"
-        );
-        assert_eq!(
-            listed.pick(listed.top),
-            Some(Item::Widget(View::Output, false))
-        );
+    /// The menu stays open over the list, so a second widget can be switched
+    /// without opening the menu again. The exception is the widget the menu was
+    /// opened over going out: the rest of its rows act on that widget, and a
+    /// Close row pointed at a pane that is no longer in the window is a row that
+    /// does nothing.
+    #[test]
+    fn the_menu_stays_open_over_the_list_unless_its_own_widget_goes_out() {
+        let mut dock = Dock::new();
+        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::Left, false);
+        menu.toggle_widgets(&dock);
+
+        // Another widget, either way round: the menu stays.
+        assert!(toggle_view(&mut dock, &mut menu, View::Debug).keep_open);
+        assert!(toggle_view(&mut dock, &mut menu, View::Debug).keep_open);
+        // Its own, coming back in, is not its own going out.
+        assert!(dock.hide(View::Plan));
+        menu.relist(&dock);
+        assert!(toggle_view(&mut dock, &mut menu, View::Plan).keep_open);
+        // Its own, going out.
+        assert!(!toggle_view(&mut dock, &mut menu, View::Plan).keep_open);
+        assert!(dock.is_hidden(View::Plan));
+        // The prompt's menu has no widget of its own, so nothing on the list can
+        // take one away from it. It has no list either, but the rule is the
+        // rule wherever it is asked.
+        let mut input = Menu::for_input((0.0, 0.0), false);
+        assert!(toggle_view(&mut dock, &mut input, View::Output).keep_open);
+    }
+
+    /// Switching every widget off empties the window one space at a time, and
+    /// the dock is sound at every step of it, including at the end where there
+    /// is nothing left in any space. Switching them all back on fills it again.
+    #[test]
+    fn switching_every_widget_off_and_back_on_keeps_the_dock_sound() {
+        let mut dock = Dock::new();
+        let mut menu = Menu::for_widget((0.0, 0.0), View::Output, Space::Left, false);
+        menu.toggle_widgets(&dock);
+        for view in View::ALL {
+            assert!(toggle_view(&mut dock, &mut menu, view).hidden);
+            assert!(dock.is_sound(), "after {view:?} went out: {dock:?}");
+            assert!(dock.is_hidden(view));
+        }
+        assert!(dock.walk().is_empty(), "the window is empty");
+        for space in Space::ALL {
+            assert!(dock.slot(space).views.is_empty());
+        }
+        for view in View::ALL {
+            assert!(!toggle_view(&mut dock, &mut menu, view).hidden);
+            assert!(dock.is_sound(), "after {view:?} came back: {dock:?}");
+        }
+        assert_eq!(dock.walk().len(), View::ALL.len());
+        // Every row of the list says the widget is in the window again.
+        for (step, view) in View::ALL.into_iter().enumerate() {
+            assert_eq!(
+                menu.pick(menu.top + step),
+                Some(Item::Widget(view, false)),
+                "{view:?}"
+            );
+        }
     }
 
     /// A settings change turns a pane on or off only when that pane's own setting

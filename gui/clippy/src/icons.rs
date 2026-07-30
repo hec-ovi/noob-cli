@@ -24,6 +24,17 @@ pub const SETTINGS: char = '\u{eb51}';
 pub const TABS_LEFT: char = '\u{eab5}';
 pub const TABS_RIGHT: char = '\u{eab6}';
 
+/// At the right end of a menu row whose list flies out to the side. The same
+/// chevron the tab strip walks with, on purpose: one mark in the window means
+/// there is more of this over here.
+pub const SUBMENU: char = '\u{eab6}';
+
+/// The two states of a row that is a switch rather than a destination: the
+/// widget is in the window, or it is out. Boxed rather than a bare tick, so the
+/// row reads as something that can be turned off as well as on.
+pub const CHECKED: char = '\u{f14a}';
+pub const UNCHECKED: char = '\u{f096}';
+
 /// A file whose type has no mark of its own.
 const FILE: char = '\u{ea7b}';
 /// A folder in the picker's list.
@@ -116,6 +127,9 @@ mod tests {
             SETTINGS,
             TABS_LEFT,
             TABS_RIGHT,
+            SUBMENU,
+            CHECKED,
+            UNCHECKED,
             FILE,
             FOLDER,
             EXPAND,

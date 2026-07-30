@@ -430,8 +430,13 @@ impl Dock {
 
     /// Whether the arrangement still holds: every view in exactly one space,
     /// and every space showing one of its own.
+    ///
+    /// Reachable from the rest of the crate's tests, not only from this
+    /// module's: anything that moves a view around has to leave the dock sound,
+    /// and the one answer to whether it did belongs here rather than written out
+    /// again beside each caller.
     #[cfg(test)]
-    fn is_sound(&self) -> bool {
+    pub(crate) fn is_sound(&self) -> bool {
         View::ALL.into_iter().all(|view| {
             let want = usize::from(!self.hidden.contains(&view));
             Space::ALL
