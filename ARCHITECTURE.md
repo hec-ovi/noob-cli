@@ -37,13 +37,16 @@ One user input can require several inference rounds. Each round streams a provid
 
 ## Workspace layout
 
-The Cargo workspace has three crates:
+The Cargo workspace has four crates:
 
 - `crates/noob`: binary, agent, tools, sessions, skills, MCP, child tasks, configuration, and UI.
 - `crates/noob-provider`: HTTP client, watchdog, endpoint resolution, SSE, wire adapters, and neutral transcript types.
+- `crates/noob-proto`: the command and event frames `noob serve` speaks, serialized by hand so a front end costs one crate rather than six.
 - `crates/noob-testkit`: test-only OpenAI and MCP servers plus wire-contract assertions.
 
 Only `noob-provider` depends on the HTTP client. A crate-graph test enforces that boundary.
+
+`gui/` is excluded from this workspace and keeps its own lockfile. It is NO0B, the GPU front end, and it shares exactly one thing with the CLI: `crates/noob-proto`, by path. Its budgets are its own; see `gui/README.md`.
 
 The builder selects `x86_64-unknown-linux-musl` for amd64 or `aarch64-unknown-linux-musl` for arm64. The runtime image contains Alpine, Bash, Git, CA certificates, Python 3, uv, Node, a pinned `websearch-skill` tool environment, and the static binary. That tool reads a dotenv from its working directory and exports every key in it, so the image sets `WEBSEARCH_ENV_FILE` to `/config/websearch.env`: the agent's working directory is the user's project, and its `.env` is neither a place to configure search from nor a file whose contents belong in the environment of a process that opens sockets.
 
@@ -100,7 +103,7 @@ The system prompt is assembled once in this order:
 4. The SKILL.md resolver index when skills exist.
 5. One line naming configured MCP servers when any exist.
 
-The fixed prompt plus all registered tool schemas must remain below the 1,600-token budget enforced by offline and live tokenizer tests, against a hard limit of 2,000.
+The fixed prompt plus all registered tool schemas must remain below the 1,900-token budget enforced by offline and live tokenizer tests, against a hard limit of 2,000. The offline ceilings are 560 for the head and 1,350 for the tools array, and they count with tiktoken, which no served model here uses: they are a drift alarm rather than the real bill.
 
 Within a stable mode, each provider request is an exact byte-prefix extension of the prior request. The mock server checks serialized prefix bytes and tool-array stability on every turn. Deliberate prefix changes are limited to:
 
@@ -279,8 +282,8 @@ The enforced release budgets are:
 |---|---:|---:|
 | Static release binary | 8 MiB | 4,498,368 bytes |
 | Runtime dependency graph | 45 crates | 41 crates |
-| Fixed prompt plus schemas | 1,600 tokens | Offline and live tokenizer checks |
-| Offline tests | None | 800 passed; 9 live checks and 1 on-demand diagnostic stay opt-in |
+| Fixed prompt plus schemas | 1,900 tokens | 1,874 o200k with all 14 tools registered |
+| Offline tests | None | 958 passed; 9 live checks and 1 on-demand diagnostic stay opt-in |
 
 The required local gates are:
 
@@ -290,5 +293,7 @@ cargo test --workspace --locked
 ./dev.sh test
 ./dev.sh size-check
 ```
+
+The window has its own pair, run from the same root: `./dev.sh gui-test` (its tests, its clippy, and every layer's contract test) and `./dev.sh gui-check` (40 MiB and 400 crates).
 
 Live checks use `./dev.sh smoke`, against `http://localhost:8080/v1` and the model name `llm` by default. The web test additionally requires the `websearch` CLI on PATH and working egress. `NOOB_LIVE_BASE_URL` and `NOOB_LIVE_MODEL` select other live endpoints. Installer tests cover the host wrapper with a fake Docker process; release validation also builds and runs the real image and the standalone websearch CLI.

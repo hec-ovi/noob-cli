@@ -103,7 +103,7 @@ noob --version
 
 `noob serve` is the front-end mode: it reads command frames on stdin and writes
 event frames on stdout, one JSON object per line, versioned by
-`crates/noob-proto`. It is what [CLIppy](gui/README.md) drives. The same frames
+`crates/noob-proto`. It is what [NO0B](gui/README.md) drives. The same frames
 can be tapped from any other surface by pointing `NOOB_EMIT` at a file, which
 writes them beside the session without changing a byte of what you see.
 
@@ -245,7 +245,7 @@ Display variables can be set in the shell or the checkout's root `.env` for Comp
 
 ## Prompt budget
 
-`noob debug prompt --json` prints the exact system prompt and tool schemas the binary sends. The budget test registers all 14 tools, including websearch and both generic MCP tools, plus a skill and an MCP server. That artifact is 1,870 o200k tokens: 557 for the assembled system prompt and 1,313 for tool schemas. The locked ceiling is 1,900 and the hard limit is 2,000.
+`noob debug prompt --json` prints the exact system prompt and tool schemas the binary sends. The budget test registers all 14 tools, including websearch and both generic MCP tools, plus a skill and an MCP server. That artifact is 1,874 o200k tokens: 555 for the assembled system prompt and 1,319 for tool schemas. The locked ceiling is 1,900 and the hard limit is 2,000.
 
 Model-specific chat-template framing is added by the server and is not part of those bytes. llama.cpp caches the prefix, so it is normally prefilled once per slot. Reproduce the noob side with `noob debug prompt --json`; use the server's `/tokenize` endpoint for its framing.
 
@@ -258,12 +258,30 @@ Model-specific chat-template framing is added by the server and is not part of t
 
 Formatting never changes requests, transcripts, sessions, or cache-prefix bytes.
 
+## The window
+
+`gui/` is **NO0B**, a GPU front end for the same agent. It runs `noob serve` in a
+folder you pick and draws the frames that come back: the conversation, every
+tool call, the plan, the sub-agents, the files touched, what the machine is
+doing and what the run has cost. No terminal and no web stack, one wgpu surface
+composited against your desktop.
+
+```bash
+./dev.sh gui                 # opens the folder picker
+./dev.sh gui-install         # ~/.local/bin/no0b, the launcher and the icon
+```
+
+Its own cargo workspace and its own budget, 40 MiB and 400 crates against the
+CLI's 8 MiB and 45, because a GPU stack is several hundred crates and one
+lockfile for both would put a careless `workspace = true` between the two.
+Packaged for Linux. [`gui/README.md`](gui/README.md) is its documentation.
+
 ## Planned
 
 Future work, not built yet, in the order it will be built.
 
-- **Native binaries for macOS, Windows, and Linux.** Today the shipped artifact is a Linux static binary inside the runtime image, and the host command is a launcher that runs it under Docker. A real per-platform binary comes first, because the front end below has nothing to attach to until it exists.
-- **GPU Vulkan front end.** A lightweight Rust binary that renders the UI on the GPU through Vulkan instead of the terminal, in the spirit of Zed. Each surface is a separate, isolated part that talks to the others over schema-validated data rather than shared code: the plan, the multi-agent runner, agent management, and the main window. A dedicated code-stream surface shows each generated file on its own as the model writes it.
+- **Native binaries for macOS, Windows, and Linux.** Today the shipped artifact is a Linux static binary inside the runtime image, and the host command is a launcher that runs it under Docker. Two calls are Linux-only rather than merely Unix-only (`PR_SET_CHILD_SUBREAPER` in the bash tool and `PR_SET_PDEATHSIG` in the sub-agent runner), and the terminal layer is raw termios, so this is one process-supervision abstraction with three implementations rather than a handful of warnings.
+- **Letting the agent run containers.** The sandbox has no `docker` binary and no socket, so a task that needs one has no path at all and burns its round cap discovering that. The decision to make first is which of rootless Docker, Podman, a restricted socket proxy or a nested runtime it gets, because mounting the host socket dissolves the thing the sandbox is for.
 
 What each one actually blocks on, down to the file and line, is in [`docs/NEXT.md`](docs/NEXT.md).
 
