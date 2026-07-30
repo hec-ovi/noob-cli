@@ -31,6 +31,16 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
   different call than the one under the pointer. Every row of a monitor pane is now
   the same height whether it draws a block or not, which is what lets the pane say
   how much of itself is on screen.
+- A tab strip that cannot hold all of its tabs can be walked. Tabs were laid out
+  left to right until one did not fit and the rest were dropped, with nothing
+  saying they were there: the top right space opens with six tabs, and at the
+  window's minimum width of 680 most of them were gone. A strip that overflows
+  now keeps room for a `<` and a `>` at its right end before it decides which
+  tabs fit, and each one steps the strip and the tab it is showing along by one.
+  A strip that fits shows neither and loses no room to them. The offset is
+  clamped against the room the strip actually has on every frame, so a resize, a
+  closed tab or a tab dragged elsewhere cannot leave a space scrolled past its
+  last tab, and the pane on screen always has its own tab in the strip.
 - The dock icon appears as soon as the window opens. The desktop entry asks for
   a startup notification and nothing answered it, so the cursor spun until
   GNOME's own timeout, around fifteen seconds.
