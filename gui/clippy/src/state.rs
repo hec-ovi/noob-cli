@@ -608,6 +608,10 @@ pub struct State {
     pub agents: Vec<AgentRow>,
     pub files: Vec<FileView>,
     pub open_file: usize,
+    /// Which row the file explorer starts on, counted from the top of the list.
+    /// Top-anchored, unlike a pane's scrollback: a list is read from its first
+    /// entry down, and new files arrive at the end without moving the rest.
+    pub file_scroll: usize,
 
     pub usage: Option<Usage>,
     pub prefilled: u64,
@@ -667,6 +671,7 @@ impl State {
             agents: Vec::new(),
             files: Vec::new(),
             open_file: 0,
+            file_scroll: 0,
             usage: None,
             prefilled: 0,
             generated: 0,
@@ -699,11 +704,11 @@ impl State {
     }
 
     /// The file's view, creating it the first time it is mentioned. Opening it
-    /// selects it, which is what makes the tab strip follow the agent without
-    /// anyone clicking.
+    /// selects it, which is what makes the list follow the agent without anyone
+    /// clicking.
     fn file_mut(&mut self, path: &str) -> &mut FileView {
         if let Some(index) = self.files.iter().position(|f| f.path == path) {
-            self.open_file = index;
+            self.show_file(index);
             return &mut self.files[index];
         }
         // Bounded: a session that touches a thousand files must not keep a
@@ -717,7 +722,7 @@ impl State {
             changed: false,
             closed: false,
         });
-        self.open_file = self.files.len() - 1;
+        self.show_file(self.files.len() - 1);
         self.files.last_mut().expect("just pushed")
     }
 
@@ -1015,6 +1020,67 @@ impl State {
             crate::dock::View::Files => self.files.get(self.open_file).map(|file| &file.pane),
             _ => None,
         }
+    }
+
+    /// Show a file, dropping a selection that belonged to the one before it.
+    ///
+    /// A selection holds line numbers and the view it was made in, not the file.
+    /// Left alone, one made in another file would band the same line numbers of
+    /// this one and Ctrl-C would copy text nobody highlighted.
+    pub fn show_file(&mut self, index: usize) -> bool {
+        if index >= self.files.len() || index == self.open_file {
+            return false;
+        }
+        self.open_file = index;
+        if self.selection.map(|s| s.view) == Some(crate::dock::View::Files) {
+            self.selection = None;
+        }
+        true
+    }
+
+    /// Where the explorer's scrollbar sits, or nothing when every file fits.
+    pub fn files_thumb(&self, rows: usize) -> Option<(f32, f32)> {
+        let heights = crate::view::file_heights(self.files.len());
+        let back = text_geometry::scrollback_for(&heights, rows, self.file_scroll);
+        text_geometry::thumb(&heights, rows, back)
+    }
+
+    /// Move the explorer list by `by` rows, down the list when `down`.
+    ///
+    /// Clamped so the last file stays on screen: a list scrolled into empty
+    /// space says nothing about what is in it. Returns whether it moved, so a
+    /// caller only redraws when it did.
+    pub fn scroll_files(&mut self, by: usize, down: bool, rows: usize) -> bool {
+        let most = text_geometry::max_scrollback(&crate::view::file_heights(self.files.len()), rows);
+        let next = match down {
+            true => (self.file_scroll + by).min(most),
+            false => self.file_scroll.saturating_sub(by),
+        };
+        let moved = next != self.file_scroll;
+        self.file_scroll = next;
+        moved
+    }
+
+    /// Bring the row of the open file on screen.
+    ///
+    /// The agent moves this selection by touching a file, not the pointer, so a
+    /// session that touches fifty files would otherwise leave the marked row
+    /// scrolled off with nothing on screen saying which file the diff belongs
+    /// to. Scrolls by the least it takes, so a list already showing the row is
+    /// left where the reader put it.
+    pub fn reveal_open_file(&mut self, rows: usize) -> bool {
+        if rows == 0 || self.files.is_empty() {
+            return false;
+        }
+        let most = text_geometry::max_scrollback(&crate::view::file_heights(self.files.len()), rows);
+        let mut next = self.file_scroll.min(self.open_file);
+        if self.open_file + 1 > next + rows {
+            next = self.open_file + 1 - rows;
+        }
+        let next = next.min(most);
+        let moved = next != self.file_scroll;
+        self.file_scroll = next;
+        moved
     }
 
     /// How much of the context window this session is holding, 0.0 to 1.0.
@@ -1890,10 +1956,10 @@ mod tests {
         );
     }
 
-    /// One tab per file, selected by whatever the agent just touched, so the
-    /// strip follows it without anyone clicking.
+    /// One row per file, selected by whatever the agent just touched, so the
+    /// list follows it without anyone clicking.
     #[test]
-    fn files_get_a_tab_each_and_the_newest_is_selected() {
+    fn files_get_a_row_each_and_the_newest_is_selected() {
         let mut state = State::new();
         state.apply(Event::FileOpen {
             path: "a.py".into(),
@@ -1948,6 +2014,92 @@ mod tests {
             state.open_file < state.files.len(),
             "the selection stays valid"
         );
+    }
+
+    fn with_files(count: usize) -> State {
+        let mut state = State::new();
+        for n in 0..count {
+            state.apply(Event::FileOpen {
+                path: format!("src/f{n}.rs"),
+                lines: 1,
+                call_id: None,
+            });
+        }
+        state
+    }
+
+    /// Showing another file drops a selection made in the one before it. The
+    /// selection holds line numbers and the view it was made in, so it would
+    /// otherwise band the same line numbers of a different file.
+    #[test]
+    fn showing_another_file_drops_the_selection_from_the_last_one() {
+        let mut state = with_files(3);
+        state.selection = Some(crate::select::Selection::new(
+            crate::dock::View::Files,
+            crate::select::Spot::new(1, 0),
+        ));
+        assert!(state.show_file(0), "file 0 was not the one showing");
+        assert_eq!(state.open_file, 0);
+        assert!(state.selection.is_none(), "the old file's selection survived");
+
+        // A selection somewhere else is none of this pane's business.
+        state.selection = Some(crate::select::Selection::new(
+            crate::dock::View::Talk,
+            crate::select::Spot::new(1, 0),
+        ));
+        assert!(state.show_file(2));
+        assert!(state.selection.is_some(), "the transcript's selection was dropped");
+        // Asking for the file already showing, or one that does not exist,
+        // changes nothing at all.
+        assert!(!state.show_file(2));
+        assert!(!state.show_file(99));
+        assert_eq!(state.open_file, 2);
+    }
+
+    /// The list scrolls in both directions and stops at both ends. Scrolling
+    /// past the last file would show empty rows, which says nothing about what
+    /// the agent has touched.
+    #[test]
+    fn the_file_list_scrolls_and_stops_at_both_ends() {
+        let mut state = with_files(20);
+        assert!(!state.scroll_files(3, false, 8), "already at the top");
+        assert_eq!(state.file_scroll, 0);
+        assert!(state.scroll_files(5, true, 8));
+        assert_eq!(state.file_scroll, 5);
+        // Twenty files in an eight row list leaves twelve rows to scroll.
+        assert!(state.scroll_files(99, true, 8));
+        assert_eq!(state.file_scroll, 12);
+        assert!(!state.scroll_files(1, true, 8), "already at the bottom");
+        assert!(state.scroll_files(99, false, 8));
+        assert_eq!(state.file_scroll, 0);
+        // A list that fits has nowhere to go and no thumb to say otherwise.
+        let short = with_files(4);
+        assert!(short.files_thumb(8).is_none());
+        assert!(state.files_thumb(8).is_some(), "twenty files in eight rows");
+    }
+
+    /// The agent moves the selection by touching a file, so a list scrolled
+    /// elsewhere has to come back to it: otherwise the marked row is off screen
+    /// and nothing says which file the diff belongs to.
+    #[test]
+    fn the_list_comes_back_to_the_file_the_agent_touched() {
+        let mut state = with_files(20);
+        state.file_scroll = 0;
+        state.open_file = 15;
+        assert!(state.reveal_open_file(5), "row 15 is not in rows 0 to 4");
+        assert_eq!(state.file_scroll, 11, "scrolled by the least it takes");
+        // Already showing, so it is left where the reader put it.
+        state.open_file = 13;
+        assert!(!state.reveal_open_file(5));
+        assert_eq!(state.file_scroll, 11);
+        // And upwards, when the touched file is above the window.
+        state.open_file = 2;
+        assert!(state.reveal_open_file(5));
+        assert_eq!(state.file_scroll, 2);
+        // A list with nothing in it, and a pane with no room, are both no-ops
+        // rather than a position nothing can be drawn at.
+        assert!(!State::new().reveal_open_file(5));
+        assert!(!state.reveal_open_file(0));
     }
 
     /// A failure says what broke. This is the same failure that used to render

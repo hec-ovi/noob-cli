@@ -45,6 +45,21 @@ pub fn max_scrollback(heights: &[usize], rows: usize) -> usize {
     total_rows(heights).saturating_sub(rows)
 }
 
+/// The scrollback that puts visual row `first_row` at the top of the viewport.
+///
+/// Everything else here counts back from the live end, which is what a
+/// transcript wants: new content arrives at the bottom and zero follows it. A
+/// list wants the opposite anchor, its first row at the top and new entries
+/// appearing below. This is the one conversion between the two, so a caller
+/// holding a top-anchored position never has to do the subtraction itself and
+/// get the clamp wrong.
+///
+/// A `first_row` past the last screenful clamps to the end rather than
+/// scrolling into empty space.
+pub fn scrollback_for(heights: &[usize], rows: usize, first_row: usize) -> usize {
+    max_scrollback(heights, rows).saturating_sub(first_row)
+}
+
 /// Which logical lines to draw, and how much of the first one to hide.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Window {
@@ -253,6 +268,26 @@ mod tests {
         assert_eq!(clamped, window(&h, 2, 4), "asking for more stops at the top");
         assert_eq!(clamped.first, 0);
         assert_eq!(clamped.skip, 0);
+    }
+
+    /// A list is anchored at its top, so the conversion has to put the row it
+    /// is given at the top of the window, and clamp rather than scroll past the
+    /// end when the list has shrunk under it.
+    #[test]
+    fn a_top_anchored_position_becomes_the_scrollback_that_shows_it() {
+        let h = heights([0, 0, 0, 0, 0, 0], 1); // six rows, one each
+        assert_eq!(h, vec![1; 6]);
+        // Four rows on screen, so the top row can be 0, 1 or 2.
+        assert_eq!(scrollback_for(&h, 4, 0), 2, "the top of the list");
+        assert_eq!(window(&h, 4, scrollback_for(&h, 4, 0)).first, 0);
+        assert_eq!(window(&h, 4, scrollback_for(&h, 4, 1)).first, 1);
+        assert_eq!(window(&h, 4, scrollback_for(&h, 4, 2)).first, 2);
+        // Past the end, both agree on the last screenful rather than on nothing.
+        assert_eq!(scrollback_for(&h, 4, 99), 0);
+        assert_eq!(window(&h, 4, scrollback_for(&h, 4, 99)).first, 2);
+        // And a list that fits has one window whatever it is asked for.
+        assert_eq!(scrollback_for(&h, 6, 0), 0);
+        assert_eq!(scrollback_for(&h, 9, 3), 0);
     }
 
     #[test]

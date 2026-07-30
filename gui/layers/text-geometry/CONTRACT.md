@@ -1,6 +1,6 @@
 # text-geometry
 
-contractVersion: 1.0.0
+contractVersion: 1.1.0
 
 ## Purpose
 
@@ -16,6 +16,7 @@ and answer every question a caller has about that mapping.
 | Row request | [`schema/row-request.json`](schema/row-request.json) | `window` came from this layer and was built from the same `heights` and `rows`. |
 | Band request | [`schema/band-request.json`](schema/band-request.json) | Same pairing rule as the row request. `line` is absolute, not relative to the window. |
 | Thumb request | [`schema/thumb-request.json`](schema/thumb-request.json) | `heights` came from this layer. |
+| Scrollback request | [`schema/scrollback-request.json`](schema/scrollback-request.json) | `heights` came from this layer. `firstRow` counts visual rows from the top; past the last screenful is clamped, not refused. |
 
 ## Outputs
 
@@ -26,6 +27,7 @@ and answer every question a caller has about that mapping.
 | Line hit | [`schema/line-hit.json`](schema/line-hit.json) | Null exactly when the row is past the last line. Otherwise the line is inside the window. |
 | Band | [`schema/band.json`](schema/band.json) | Null exactly when the line is not visible. Otherwise `top + height <= rows`. |
 | Thumb | [`schema/thumb.json`](schema/thumb.json) | Null exactly when the content fits. Otherwise `top + size <= 1`. |
+| Scrollback | [`schema/scrollback.json`](schema/scrollback.json) | Never above `max_scrollback`. Feeding it to `window` puts `firstRow` at the top, or the last screenful when `firstRow` is past the end. |
 
 ## Events
 
@@ -58,6 +60,9 @@ dependencies, so it builds and tests without a GPU, a font, or a window.
    never dropped. This is what makes a long paragraph scroll a row at a time.
 5. Nothing here allocates per frame beyond the heights vector, and nothing
    shapes text or measures a font.
+6. A position is bottom-anchored everywhere except in `scrollback_for`, which is
+   the only place a top-anchored row is understood. A caller with a list to
+   scroll converts once through it rather than keeping two conventions.
 
 ## How to modify this blackbox safely
 

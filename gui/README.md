@@ -55,7 +55,7 @@ rest at a lower alpha.
 | SESSION | this run: which phase, model and workspace, context against where compaction triggers, tool calls, the longest single answer, prefill, cache, output, requests, and the measured rates |
 | OVERALL | every run there has ever been: tokens prefilled, generated and served from cache, and the mean and median decode and prefill speed |
 | DEBUG | tool calls that failed, and the arguments that were sent to the one you click |
-| FILES | one tab per file touched, with the diff, a line-number gutter and syntax coloring |
+| FILES | every file touched, listed down the left, with the open one's diff, a line-number gutter and syntax coloring |
 
 The conversation is rendered as Markdown, because the model writes Markdown
 whether or not anything asked it to: headings, bold, bullets and fenced code
@@ -126,6 +126,16 @@ because most of a session is `read`, `ls` and `grep`.
 
 Files show a line-number gutter and a band behind each block header, so a write
 reads as a mark between two stretches of file rather than as part of one.
+
+The file list is a column down the left of the pane, one row per file with its
+type icon, the way an editor's explorer reads. It was a strip of tabs across the
+top, which ran out of room at about six files and dropped the rest; the column
+scrolls instead, and the wheel over it moves the list rather than the file. The
+row of whatever the agent just touched is marked and scrolled to. It is a flat
+set, not a filesystem: these are the files the agent has opened, so there are no
+directory rows and nothing to expand. The column is narrow, so a name that does
+not fit loses its parent directory first and its own tail second, and the list
+never grows past the width that leaves the file beside it readable.
 
 The prompt grows as you type, up to eight lines or whatever `max_input_rows` in
 the settings says. Click anywhere in it to put the caret there, drag across it to

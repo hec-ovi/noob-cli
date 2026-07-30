@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Scrollback",
+  "description": "Rows back from the live end. Zero follows the end, and the largest value it ever takes is max_scrollback, which puts the first row at the top.",
+  "type": "integer",
+  "minimum": 0
+}

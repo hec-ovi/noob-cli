@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Scrollback request",
+  "description": "A top-anchored position to convert into the bottom-anchored scrollback every other operation here speaks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "heights",
+    "rows",
+    "firstRow"
+  ],
+  "properties": {
+    "heights": {
+      "$ref": "heights.json"
+    },
+    "rows": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "firstRow": {
+      "description": "The visual row to put at the top of the viewport, counted from the very top. Past the last screenful is clamped, not refused.",
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

@@ -64,6 +64,8 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
   rule for turning logical lines into rows on screen, which was previously
   written out at eight call sites and disagreed with itself at three. Ships with
   a contract, JSON schemas, fixtures that must be rejected, and its own tests.
+  At 1.1.0 it also converts a top-anchored position, which is what a list wants,
+  into the scrollback everything else there speaks.
 - A build stamp in the title bar. The crate version cannot tell two test builds
   apart, so the commit is stamped in at build time, with a trailing plus when
   the tree has uncommitted changes.
@@ -86,6 +88,12 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
 
 ### Changed
 
+- The file list is a column down the left of the FILES pane, one row per file
+  with its type icon, and the diff beside it. It was a strip of tabs across the
+  top, which ran out of room at about six files and dropped the rest. The column
+  scrolls, the wheel over it moves the list rather than the file, and the row of
+  whatever the agent just touched is marked and scrolled to. It is a flat set,
+  not a filesystem, so there are no directory rows and nothing to expand.
 - A gauge is a block of dots: eight across and five down, in the metric's own
   colour, filling from the bottom, with the number beside it in large text. It
   was ten columns of four small dots in one shared colour, which read as a smear.

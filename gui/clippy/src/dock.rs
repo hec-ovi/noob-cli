@@ -28,7 +28,8 @@ pub enum View {
     Overall,
     /// Tool calls that failed, and what was sent to them.
     Debug,
-    /// The files the agent has touched, with its own inner tab per file.
+    /// The files the agent has touched, listed down the left of the pane with
+    /// the open one's diff beside it.
     Files,
 }
 

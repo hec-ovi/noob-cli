@@ -130,8 +130,8 @@ fn menu_for(
     match hit? {
         Hit::Input => Some(Menu::for_input(at, prompt_selection)),
         Hit::Tab(view, space) => widget(view, space),
-        // A pane and its own inner file tabs are the same widget: the menu acts
-        // on whatever that space is showing.
+        // A pane and the rows of its own file list are the same widget: the menu
+        // acts on whatever that space is showing.
         Hit::Body(space) | Hit::File(_, space) => widget(dock.slot(space).active()?, space),
         Hit::TitleBar | Hit::Close | Hit::Maximize | Hit::Minimize => None,
         // The menu already open. Its own right click is handled before this is
@@ -288,7 +288,10 @@ impl App {
                 .iter()
                 .map(|file| view::short_name(&file.path))
                 .collect(),
+            file_first: self.state.file_scroll,
             column: self.column,
+            pane_size: self.config.pane_font_size,
+            pane_column: self.pane_column,
             input_h: self.input_height(width),
         }
     }
@@ -318,7 +321,10 @@ impl App {
             .hit(self.cursor.x as f32, self.cursor.y as f32)?
             .space()?;
         let view = self.dock.slot(space).active()?;
-        Some((view, layout.placed(space).body))
+        // The box the text is in, not the whole pane: the file view spends its
+        // left column on the explorer, and scrolling it by the wider box moves
+        // more rows than the file shows.
+        Some((view, layout.content(space)))
     }
 
     /// Start the agent. A failure is shown in the window rather than printed to
@@ -376,6 +382,20 @@ impl App {
         if turn_ended {
             self.remember();
         }
+        self.follow_open_file();
+    }
+
+    /// Keep the file the agent just touched on screen in the explorer.
+    ///
+    /// Here rather than in `State`, because how many rows the list can show is a
+    /// question about the window, and the layout is the only thing that knows.
+    fn follow_open_file(&mut self) {
+        let layout = self.layout();
+        if layout.file_list.h < 1.0 {
+            return;
+        }
+        let rows = layout.rows(layout.file_list, self.config.pane_font_size);
+        self.dirty |= self.state.reveal_open_file(rows);
     }
 
     /// Write the running totals: what was carried in, plus this session.
@@ -483,7 +503,7 @@ impl App {
                 self.holding = Some((view, space, self.cursor));
             }
             Hit::File(index, _) => {
-                self.state.open_file = index;
+                self.state.show_file(index);
                 self.dirty = true;
             }
             // The debug pane is a list you click rather than text you select:
@@ -704,9 +724,15 @@ impl App {
         if over != space {
             return None;
         }
-        let body = layout.placed(space).body;
+        // The box the glyphs are in, which is not the whole pane in the file
+        // view: its left column is the explorer.
+        let body = layout.content(space);
         let rows = layout.rows(body, size);
-        let cols = view::cols_of(body, column);
+        // A file row is drawn with its line number in front of the text, so the
+        // column under the pointer is that many columns further along than the
+        // character it is over.
+        let (cols, chrome) = view::text_columns(view, body, column);
+        let at = at.saturating_sub(chrome);
         let Some((line, offset)) = pane.spot_in(rows, cols, row) else {
             // Below the last line, the selection runs to the end of the text
             // rather than to a line that does not exist.
@@ -989,6 +1015,18 @@ impl App {
     /// history.
     fn scroll_hovered(&mut self, pages: f32) {
         let layout = self.layout();
+        // Over the explorer, the wheel moves the list rather than the file. The
+        // pointer is on the thing being scrolled, which is what every file tree
+        // does, and the list is the only way to reach a file that is off it.
+        if layout
+            .file_list
+            .contains(self.cursor.x as f32, self.cursor.y as f32)
+        {
+            let rows = layout.rows(layout.file_list, self.config.pane_font_size);
+            let by = ((rows as f32 * pages.abs()).round() as usize).max(1);
+            self.dirty |= self.state.scroll_files(by, pages < 0.0, rows);
+            return;
+        }
         let Some((view, panel)) = self.under_pointer(&layout) else {
             return;
         };
@@ -996,10 +1034,7 @@ impl App {
         let rows = layout.rows(panel, size).saturating_sub(1).max(1);
         // The file view spends four columns per row on its gutter, so its text
         // wraps in a narrower box than the panel is wide.
-        let cols = match view {
-            View::Files => view::cols_of(panel, column).saturating_sub(4).max(1),
-            _ => view::cols_of(panel, column),
-        };
+        let (cols, _) = view::text_columns(view, panel, column);
         let by = ((rows as f32 * pages.abs()).round() as usize).max(1);
         let open_file = self.state.open_file;
         let pane = match view {
@@ -1044,7 +1079,10 @@ impl App {
                 .iter()
                 .map(|file| view::short_name(&file.path))
                 .collect(),
+            file_first: self.state.file_scroll,
             column: self.column,
+            pane_size: self.config.pane_font_size,
+            pane_column: self.pane_column,
             input_h,
         };
         let layout = Layout::compute(gpu.width(), gpu.height(), &shape);
@@ -1413,7 +1451,10 @@ mod tests {
             dock,
             menu,
             file_labels: Vec::new(),
+            file_first: 0,
             column: COLUMN,
+            pane_size: Config::default().pane_font_size,
+            pane_column: COLUMN,
             input_h: view::input_height(
                 W,
                 COLUMN,

@@ -70,6 +70,27 @@ const MENU_PAD: f32 = 5.0;
 /// has one or not, so labels line up in a column instead of stepping in and out
 /// with whichever rows happen to be marked.
 const MENU_GUTTER: usize = 2;
+/// Columns a row of the file explorer spends before its name: the type icon and
+/// the space after it.
+const ROW_ICON_COLUMNS: usize = 2;
+/// Columns a row spends on the changed mark, when it carries one.
+const ROW_MARK_COLUMNS: usize = 2;
+/// The widest the explorer column gets, however long the names in it are. Past
+/// this the list is spending the pane on directory prefixes nobody is reading.
+const LIST_MAX_COLUMNS: usize = 20;
+/// The narrowest it gets: an icon and enough characters to tell two names apart.
+const LIST_MIN_COLUMNS: usize = 9;
+/// What the file keeps whatever the list wants: the line-number gutter and
+/// enough code beside it to read a line. The file view usually lives in the
+/// right-hand column, which is about 35 columns wide in a window at its minimum
+/// size, so a list sized to its own content alone would leave the thing being
+/// looked at unreadable. At that size this floor wins and the list goes below
+/// [`LIST_MIN_COLUMNS`], because the file is what is being read.
+const DIFF_MIN_COLUMNS: usize = GUTTER + 20;
+/// How wide the mark down the left of the selected row is. A tab's accent runs
+/// along its top edge because a strip is read left to right; a row is entered
+/// from the left, so its accent runs down that edge instead.
+const MARK_W: f32 = 2.0;
 
 /// Something the pointer can land on. Returned by [`Layout::hit`] so every
 /// click is resolved in one place instead of in a chain of `if` in the event
@@ -84,9 +105,9 @@ pub enum Hit {
     Tab(View, Space),
     /// The body of a space: where a dragged tab lands.
     Body(Space),
-    /// One of the file view's inner tabs, and the space it is showing in. The
-    /// space is carried so a tab dropped over the file strip still lands
-    /// somewhere: a drop target is a place on screen, not a widget.
+    /// A row of the file view's explorer list, and the space it is showing in.
+    /// The space is carried so a view dropped on the list still lands somewhere:
+    /// a drop target is a place on screen, not a widget.
     File(usize, Space),
     Input,
     /// A row of the open menu, by position in it. The overlay is hit tested
@@ -143,8 +164,14 @@ pub struct Layout {
 
     /// One per [`Space`], in `Space::ALL` order.
     pub spaces: [Placed; 3],
-    /// The file view's inner tabs, and the space they are drawn in.
-    pub file_tabs: Vec<(usize, Panel)>,
+    /// The file view's explorer column, down the left of its pane. Zero sized
+    /// when the file view is not showing, or when nothing has been touched yet.
+    pub file_list: Panel,
+    /// The rest of that pane, where the open file is drawn.
+    pub file_diff: Panel,
+    /// One panel per visible row of the explorer, with the file it names. Only
+    /// the rows that fit: the list scrolls rather than squeezing.
+    pub file_rows: Vec<(usize, Panel)>,
     pub files_in: Option<Space>,
     pub input: Panel,
 
@@ -163,9 +190,18 @@ pub struct Shape<'a> {
     /// only way a click on a menu row and the row it looks like it landed on
     /// can never come apart.
     pub menu: Option<&'a Menu>,
-    /// One label per file tab, in order.
+    /// One label per file in the explorer, in order.
     pub file_labels: Vec<String>,
+    /// Which row the explorer list starts on, counted from its top. The layout
+    /// turns it into the rows that are actually on screen, so the drawing and
+    /// the hit testing read one answer.
+    pub file_first: usize,
     pub column: f32,
+    /// The size and column width the panes are drawn at. The explorer's rows are
+    /// pane text, so their height and the width of the column they sit in are
+    /// the pane's, not the title bar's.
+    pub pane_size: f32,
+    pub pane_column: f32,
     /// How tall the prompt is. It grows with what has been typed, so it is an
     /// input to the layout rather than a constant.
     pub input_h: f32,
@@ -212,7 +248,9 @@ impl Layout {
                 maximize: buttons[1],
                 close: buttons[2],
                 spaces: [empty_placed(), empty_placed(), empty_placed()],
-                file_tabs: Vec::new(),
+                file_list: nowhere(),
+                file_diff: nowhere(),
+                file_rows: Vec::new(),
                 files_in: None,
                 input: nowhere(),
                 menu,
@@ -291,33 +329,18 @@ impl Layout {
             place(Space::BottomRight, bottom),
         ];
 
-        // The file view's inner tabs live along the top of whichever space is
-        // showing it.
+        // The file view's explorer runs down the left of whichever space is
+        // showing it, with the open file in the room that is left.
         let files_in = shape.dock.space_of(View::Files).filter(|space| {
             shape.dock.slot(*space).active() == Some(View::Files)
                 && !shape.dock.slot(*space).folded
         });
-        let file_tabs = match shape.dock.space_of(View::Files) {
-            Some(space)
-                if shape.dock.slot(space).active() == Some(View::Files)
-                    && !shape.dock.slot(space).folded =>
-            {
-                let body = &spaces[Space::ALL.iter().position(|s| *s == space).unwrap()].body;
-                if body.h > TAB_H * 2.0 {
-                    let bar = Panel::new(body.x, body.y, body.w, TAB_H);
-                    strip_tabs(
-                        bar,
-                        shape.file_labels.iter().map(|l| l.chars().count() + 1),
-                        shape.column,
-                    )
-                    .into_iter()
-                    .enumerate()
-                    .collect()
-                } else {
-                    Vec::new()
-                }
-            }
-            _ => Vec::new(),
+        let (file_list, file_diff, file_rows) = match files_in {
+            Some(space) => place_files(
+                spaces[Space::ALL.iter().position(|s| *s == space).unwrap()].body,
+                shape,
+            ),
+            None => (nowhere(), nowhere(), Vec::new()),
         };
 
         Layout {
@@ -329,7 +352,9 @@ impl Layout {
             maximize: buttons[1],
             close: buttons[2],
             spaces,
-            file_tabs,
+            file_list,
+            file_diff,
+            file_rows,
             files_in,
             input: input.inset(GAP),
             menu,
@@ -380,7 +405,7 @@ impl Layout {
             }
         }
         if let Some(space) = self.files_in {
-            for (index, panel) in &self.file_tabs {
+            for (index, panel) in &self.file_rows {
                 if panel.contains(x, y) {
                     return Some(Hit::File(*index, space));
                 }
@@ -419,6 +444,19 @@ impl Layout {
         Text::rows_for(size, panel.inset(PAD).h)
     }
 
+    /// The box a space's text is drawn in.
+    ///
+    /// The whole body for every view but the file one, which gives its left
+    /// column to the explorer. Selection and hit testing have to ask here
+    /// rather than taking the body, or a click in a file lands a list's width
+    /// away from the character under the pointer.
+    pub fn content(&self, space: Space) -> Panel {
+        match self.files_in == Some(space) && self.file_diff.w >= 1.0 {
+            true => self.file_diff,
+            false => self.placed(space).body,
+        }
+    }
+
     /// Which pane the pointer is over, and which character cell of it.
     ///
     /// Arithmetic rather than a layout query, which is what a monospace grid
@@ -432,7 +470,7 @@ impl Layout {
         }
         let line = Text::line_for(size);
         for space in Space::ALL {
-            let body = self.placed(space).body.inset(PAD);
+            let body = self.content(space).inset(PAD);
             if !body.contains(x, y) {
                 continue;
             }
@@ -483,6 +521,78 @@ fn place_menu(menu: &Menu, column: f32, width: f32, height: f32) -> (Panel, Vec<
         .map(|i| Panel::new(x, y + MENU_PAD + i as f32 * MENU_ROW_H, w, MENU_ROW_H))
         .collect();
     (Panel::new(x, y, w, h), rows)
+}
+
+/// One row per file, as heights the scroll window can be taken from.
+///
+/// The explorer clips a name that does not fit rather than wrapping it, so a row
+/// is always exactly one row. That is what keeps a click from resolving to a
+/// different file than the one under the pointer, the same rule the debug pane
+/// follows. Written as heights, and read through
+/// [`text_geometry`], so the window and the clamp come from the one place that
+/// owns them rather than from arithmetic at two call sites.
+pub fn file_heights(count: usize) -> Vec<usize> {
+    text_geometry::heights((0..count).map(|_| 0), 1)
+}
+
+/// The file view's two columns, and where each visible row of the list is.
+///
+/// The list is as wide as the longest name it holds and no wider, capped twice:
+/// at [`LIST_MAX_COLUMNS`], and at whatever leaves the file [`DIFF_MIN_COLUMNS`]
+/// to be read in. The file is the thing being looked at, so it is the half with
+/// the floor; below the size where even that cannot be met the two split what
+/// there is, because a pane that hid either half would be worse than a cramped
+/// one.
+fn place_files(body: Panel, shape: &Shape) -> (Panel, Panel, Vec<(usize, Panel)>) {
+    if body.w < 1.0 || body.h < 1.0 {
+        return (nowhere(), nowhere(), Vec::new());
+    }
+    // Nothing touched yet: no column, no divider, and the pane says so where the
+    // file would be.
+    if shape.file_labels.is_empty() {
+        return (nowhere(), body, Vec::new());
+    }
+    let column = shape.pane_column.max(1.0);
+    let total = cols_of(body, column);
+    let widest = shape
+        .file_labels
+        .iter()
+        .map(|label| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let want = (widest + ROW_ICON_COLUMNS + ROW_MARK_COLUMNS).clamp(LIST_MIN_COLUMNS, LIST_MAX_COLUMNS);
+    // Two columns cost two sets of margins, so the split itself spends columns
+    // before either half gets a character. Leaving that out is how the file
+    // ended up two columns under its floor at the smallest window size.
+    let split_cost = (PAD * 2.0 / column).ceil() as usize;
+    let cols = match total.checked_sub(DIFF_MIN_COLUMNS + split_cost) {
+        Some(room) if room >= 1 => want.min(room),
+        // Nothing to protect at this size. The two halves split what there is,
+        // rather than one of them disappearing: a file view with no list cannot
+        // be navigated, and a list with no file shows nothing.
+        _ => (total / 2).max(1),
+    };
+    let (list, diff) = body.split_left((cols as f32 * column + PAD * 2.0).min(body.w));
+
+    let line = Text::line_for(shape.pane_size);
+    let content = list.inset(PAD);
+    let rows = Text::rows_for(shape.pane_size, content.h);
+    let heights = file_heights(shape.file_labels.len());
+    let back = text_geometry::scrollback_for(&heights, rows, shape.file_first);
+    let window = text_geometry::window(&heights, rows, back);
+    let panels = (0..window.count)
+        .map(|step| {
+            // The full width of the column, so the whole row answers the click
+            // the way a row of an explorer does, not just the characters of the
+            // name.
+            let index = window.first + step;
+            (
+                index,
+                Panel::new(list.x, content.y + step as f32 * line, list.w, line),
+            )
+        })
+        .collect();
+    (list, diff, panels)
 }
 
 /// Lay tabs left to right at the width their labels need, dropping any that do
@@ -771,30 +881,6 @@ fn tab_block(scene: &mut Scene, skin: &Skin, tab: Panel, active: bool, accent: [
     scene.rect(Panel::new(tab.x, tab.y, (tab.w - cut).max(1.0), ACCENT_H.min(tab.h)).fill(accent));
 }
 
-/// The hairline under the file view's inner tabs, broken where the open one
-/// stands on it.
-///
-/// The outer strips have no floor of their own; the pane's outline is their
-/// line and it follows the cut corner. This strip is inside a pane, with the
-/// file below it and no outline between the two, so it draws its own.
-///
-/// The tab cannot simply be drawn over the line: every fill in this window is
-/// translucent, so a line under one still shows through it, and a line running
-/// across the tab makes it read as a cell in the strip rather than as the front
-/// of what is below it.
-fn strip_floor(scene: &mut Scene, skin: &Skin, strip: Panel, joined: Option<Panel>) {
-    let right = strip.x + strip.w;
-    let (from, to) = match joined {
-        Some(tab) => (tab.x.max(strip.x), (tab.x + tab.w).min(right)),
-        None => (right, right),
-    };
-    for (start, end) in [(strip.x, from), (to, right)] {
-        if end - start > 0.5 {
-            scene.rect(Panel::new(start, strip.y, end - start, strip.h).bottom_edge(skin.edge));
-        }
-    }
-}
-
 fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
     let skin = frame.skin;
     let placed = frame.layout.placed(space);
@@ -840,7 +926,11 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
         if target { skin.edge_focus } else { skin.edge },
     ));
 
-    selection_band(scene, frame, panel, slot.active());
+    // Banded in the box the text is actually in, which is the whole body for
+    // every pane but the file one: the file view spends its left column on the
+    // explorer, and banding the body there put the highlight a list's width off
+    // the glyphs it was meant to cover.
+    selection_band(scene, frame, frame.layout.content(space), slot.active());
 
     match slot.active() {
         None => {}
@@ -1277,65 +1367,24 @@ fn debug(scene: &mut Scene, frame: &Frame, panel: Panel) {
     }
 }
 
+/// The file view: the explorer column, and the open file beside it.
 fn files(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
-    // The inner tab strip, one per file, along the top of this space's body.
-    // No fill, for the same reason the outer strips have none, and here it also
-    // covered the cut the pane had just been given: a square rectangle across
-    // the top of a chamfered pane puts the corner straight back.
-    let strip = Panel::new(panel.x, panel.y, panel.w, TAB_H);
-    let joined = layout
-        .file_tabs
-        .iter()
-        .find(|(index, _)| *index == state.open_file)
-        .map(|(_, tab)| *tab);
-    strip_floor(scene, skin, strip, joined);
-    if layout.file_tabs.is_empty() {
+    if state.files.is_empty() {
         scene.text(Text::rich(
             vec![Run::tinted("no files touched yet", skin.dim)],
-            strip.row(SMALL * 0.6, Text::line_for(SMALL)),
-            SMALL,
+            panel.inset(PAD),
+            frame.pane_size,
             skin.dim,
         ));
+        return;
     }
-    for (index, tab) in &layout.file_tabs {
-        let Some(file) = state.files.get(*index) else {
-            continue;
-        };
-        let active = *index == state.open_file;
-        // The same block as an outer tab, in the file view's own accent: these
-        // are files rather than views, and the strip they are in belongs to it.
-        tab_block(scene, skin, *tab, active, skin.view(View::Files));
-        // A file compaction dropped is still worth reading; it is just no
-        // longer what the agent is holding, and the tab says which.
-        let color = if active && !file.closed {
-            skin.bright
-        } else {
-            skin.dim
-        };
-        let mut runs = vec![
-            // The type mark, so a tab is recognisable before it is read.
-            Run::icon(crate::icons::for_path(&file.path).to_string(), color),
-            Run::tinted(format!(" {}", short_name(&file.path)), color),
-        ];
-        if file.changed {
-            runs.push(Run::tinted(" \u{2022}", skin.plus));
-        }
-        scene.text(Text::rich(
-            runs,
-            tab.row(SMALL * 0.6, Text::line_for(SMALL)),
-            SMALL,
-            color,
-        ));
+    if layout.file_list.w >= 1.0 {
+        explorer(scene, frame, layout.file_list);
     }
 
-    let body = Panel::new(
-        panel.x,
-        panel.y + TAB_H,
-        panel.w,
-        (panel.h - TAB_H).max(1.0),
-    );
-    if body.h < Text::line_for(frame.pane_size) + 2.0 * PAD {
+    let body = layout.file_diff;
+    if body.w < 1.0 || body.h < Text::line_for(frame.pane_size) + 2.0 * PAD {
         return;
     }
     let rows = layout.rows(body, frame.pane_size);
@@ -1350,7 +1399,7 @@ fn files(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let line = Text::line_for(frame.pane_size);
     // Every row carries a four column gutter, so the text wraps in what is
     // left rather than in the full width of the box.
-    let cols = cols_of(body, frame.pane_column).saturating_sub(GUTTER).max(1);
+    let (cols, _) = text_columns(View::Files, body, frame.pane_column);
     let first = file.pane.showing_from(rows, cols);
     let shown = file.pane.visible(rows, cols);
     for (step, entry) in shown.iter().enumerate() {
@@ -1395,6 +1444,62 @@ fn files(scene: &mut Scene, frame: &Frame, panel: Panel) {
     }
     scene.text(Text::rich(runs, content, frame.pane_size, skin.body));
     scrollbar(scene, skin, body, file.pane.thumb(rows, cols));
+}
+
+/// The file list down the left of the pane, one row per file the agent has
+/// touched, the way an editor's explorer reads.
+///
+/// Flat, because the set behind it is flat: these are the files the agent has
+/// opened, not a filesystem. Nothing here groups by directory or expands, and a
+/// row is a file.
+fn explorer(scene: &mut Scene, frame: &Frame, list: Panel) {
+    let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
+    // The one thing between the list and the file. The pane has a single surface
+    // and a single outline, so without this line the two columns read as one.
+    scene.rect(list.right_edge(skin.edge));
+    let line = Text::line_for(frame.pane_size);
+    let cols = cols_of(list, frame.pane_column);
+    for (index, row) in &layout.file_rows {
+        let Some(file) = state.files.get(*index) else {
+            continue;
+        };
+        let open = *index == state.open_file;
+        if open {
+            // A band across the row and a mark down its left edge, not a block
+            // in a colour of its own: the pane is already a surface, and a block
+            // standing on it is what made the old tabs read as buttons.
+            scene.rect(row.fill(skin.strip));
+            scene.rect(Panel::new(row.x, row.y, MARK_W, row.h).fill(skin.view(View::Files)));
+        }
+        // A file compaction dropped is still worth reading; it is just no longer
+        // what the agent is holding, and the row says which.
+        let tint = match (open, file.closed) {
+            (_, true) => skin.dim,
+            (true, false) => skin.bright,
+            (false, false) => skin.body,
+        };
+        let room = cols
+            .saturating_sub(ROW_ICON_COLUMNS + if file.changed { ROW_MARK_COLUMNS } else { 0 })
+            .max(1);
+        let mut runs = vec![
+            // The type mark, so a row is recognisable before it is read.
+            Run::icon(crate::icons::for_path(&file.path).to_string(), tint),
+            Run::tinted(format!(" {}", fit_name(&file.path, room)), tint),
+        ];
+        if file.changed {
+            runs.push(Run::tinted(" \u{2022}", skin.plus));
+        }
+        scene.text(Text::rich(
+            runs,
+            Panel::new(row.x + PAD, row.y, (row.w - 2.0 * PAD).max(1.0), line),
+            frame.pane_size,
+            tint,
+        ));
+    }
+    // The list is a scroll window like any other pane, so it says how much of
+    // itself is on screen the same way.
+    let rows = layout.rows(list, frame.pane_size);
+    scrollbar(scene, skin, list, state.files_thumb(rows));
 }
 
 /// The tab under the pointer while it is being dragged, so the drag has
@@ -1524,6 +1629,21 @@ fn columns_in(width: f32, column: f32) -> usize {
     ((width / column.max(1.0)).floor() as usize).max(1)
 }
 
+/// How a view's text sits in its box: the columns it wraps in, and the columns
+/// of chrome drawn in front of it.
+///
+/// The file view spends four columns on its line-number gutter. The gutter is
+/// drawn as part of each row but is no part of the line, so wrapping has to
+/// happen in what is left and a click has to have it taken off again. Both
+/// numbers come from here, because the wrapping and the hit testing being
+/// derived separately is what put file selection four columns out.
+pub fn text_columns(view: View, panel: Panel, column: f32) -> (usize, usize) {
+    match view {
+        View::Files => (cols_of(panel, column).saturating_sub(GUTTER).max(1), GUTTER),
+        _ => (cols_of(panel, column), 0),
+    }
+}
+
 /// How many characters fit across a panel's content box.
 ///
 /// The one place a pane's width becomes a column count. Wrapping, hit testing
@@ -1571,6 +1691,35 @@ pub fn short_name(path: &str) -> String {
     }
 }
 
+/// A file's label cut to fit `cols` columns of the explorer.
+///
+/// The column is narrow, so a name that does not fit loses its parent directory
+/// first: `src/mod.rs` cut to `src/mo…` says less than `mod.rs` does, and the
+/// parent is only ever there to tell two `mod.rs` apart. If the name itself
+/// still does not fit, its tail goes and an ellipsis says so. The tail rather
+/// than the head because the row already carries a type icon, so the extension
+/// is not what the last characters are needed for.
+pub fn fit_name(path: &str, cols: usize) -> String {
+    let full = short_name(path);
+    if full.chars().count() <= cols {
+        return full;
+    }
+    let base = full.rsplit('/').next().unwrap_or(&full);
+    if base.chars().count() <= cols {
+        return base.to_string();
+    }
+    // One column short, because `clip` spends one on the ellipsis it adds. With
+    // one column there is room for the ellipsis alone, and with none for
+    // nothing: a pane can be dragged to any width and a label that came back
+    // wider than the room it was given would wrap, which would put two rows
+    // where the list has one.
+    match cols {
+        0 => String::new(),
+        1 => String::from("\u{2026}"),
+        _ => clip(base, cols - 1),
+    }
+}
+
 /// A path shortened to its tail, so a deep workspace reads as one line. Drawn by
 /// the session monitor, which is where the workspace reading went when the title
 /// strip was cut back to the build stamp.
@@ -1589,12 +1738,20 @@ mod tests {
     use crate::config::Config;
 
     fn shape<'a>(dock: &'a Dock, files: &[&str]) -> Shape<'a> {
+        scrolled_shape(dock, files, 0)
+    }
+
+    /// The same, with the explorer list scrolled `first` rows down.
+    fn scrolled_shape<'a>(dock: &'a Dock, files: &[&str], first: usize) -> Shape<'a> {
         Shape {
             shaded: false,
             dock,
             menu: None,
             file_labels: files.iter().map(|f| f.to_string()).collect(),
+            file_first: first,
             column: 8.0,
+            pane_size: 13.0,
+            pane_column: 8.0,
             input_h: INPUT_H,
         }
     }
@@ -2048,13 +2205,10 @@ mod tests {
     /// Every tab takes the same cut the panes take, whichever strip it is in.
     #[test]
     fn every_tab_is_cut_the_way_a_pane_is() {
-        // One label, because the state this renders has one file open and a
-        // tab with no file behind it is not drawn.
         let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &["calc.py"]);
         let boxes: Vec<Panel> = Space::ALL
             .iter()
             .flat_map(|space| out.layout.placed(*space).tabs.iter().map(|(_, tab)| *tab))
-            .chain(out.layout.file_tabs.iter().map(|(_, tab)| *tab))
             .collect();
         assert!(boxes.len() >= 8, "only {} tabs on screen", boxes.len());
         for tab in boxes {
@@ -2073,18 +2227,6 @@ mod tests {
             assert_eq!(cut.extra()[1], cut_of(tab), "{:?}", cut.xywh());
             assert_eq!(cut.extra()[2], Rect::TOP_RIGHT as f32, "{:?}", cut.xywh());
         }
-    }
-
-    /// Whether the strip's bottom hairline stops where this tab starts, so the
-    /// block opens onto the pane below it.
-    fn floor_is_broken_under(out: &Rendered, tab: Panel) -> bool {
-        !out.scene.rects.iter().any(|rect| {
-            let [x, y, w, h] = rect.xywh();
-            (h - 1.0).abs() < 0.01
-                && (y - (tab.y + tab.h - 1.0)).abs() < 0.01
-                && x < tab.x + tab.w - 0.5
-                && x + w > tab.x + 0.5
-        })
     }
 
     /// A tab that is not showing is the same tab with less weight: the same
@@ -2124,46 +2266,272 @@ mod tests {
         assert!(checked >= 4, "only {checked} tabs were not showing");
     }
 
-    /// The file view's inner tabs get the same block, in the file view's own
-    /// accent. Two strips styled differently in one window read as two windows.
+    /// A state that has touched every named file, in order, with the last one
+    /// open. The paths are what the agent would have sent, so `short_name` and
+    /// the type icons are exercised rather than bypassed.
+    fn touched(paths: &[&str]) -> State {
+        let mut state = State::new();
+        for path in paths {
+            state.apply(noob_proto::Event::FileEdit {
+                path: (*path).into(),
+                span: noob_proto::Span {
+                    start: 1,
+                    end: 1,
+                    kind: None,
+                    name: None,
+                },
+                before: "was".into(),
+                after: "is".into(),
+                call_id: None,
+            });
+        }
+        state
+    }
+
+    fn labels(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|p| short_name(p)).collect()
+    }
+
+    /// The list runs down the pane, one row per file, not across it. This was a
+    /// horizontal strip of tabs and the direct instruction was "vertical, like
+    /// in visual studio code".
     #[test]
-    fn the_open_file_tab_is_a_block_in_the_file_view_s_accent() {
-        let mut state = busy_state();
-        state.apply(noob_proto::Event::FileEdit {
-            path: "src/main.rs".into(),
-            span: noob_proto::Span {
-                start: 1,
-                end: 1,
-                kind: None,
-                name: None,
-            },
-            before: "fn main() {}".into(),
-            after: "fn main() { go() }".into(),
-            call_id: Some("c5".into()),
-        });
-        let out = render(&state, 1400.0, 900.0, &Dock::new(), &["calc.py", "main.rs"]);
-        assert_eq!(out.layout.file_tabs.len(), 2);
-        for (index, tab) in &out.layout.file_tabs {
-            let active = *index == state.open_file;
+    fn the_file_list_is_a_column_with_one_row_per_file() {
+        let paths = ["src/calc.py", "README.md", "src/main.rs"];
+        let state = touched(&paths);
+        let names = labels(&paths);
+        let out = render(
+            &state,
+            1400.0,
+            900.0,
+            &Dock::new(),
+            &names.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        assert_eq!(out.layout.file_rows.len(), 3);
+        let line = Text::line_for(13.0);
+        let mut last: Option<Panel> = None;
+        for (step, (index, row)) in out.layout.file_rows.iter().enumerate() {
+            assert_eq!(*index, step, "the rows are the files, in order");
+            assert!((row.h - line).abs() < 0.01, "a row is one line tall: {row:?}");
+            if let Some(above) = last {
+                assert!((row.x - above.x).abs() < 0.01, "the rows are a column");
+                assert!(
+                    (row.y - (above.y + line)).abs() < 0.01,
+                    "row {step} does not sit under the one before it"
+                );
+            }
+            last = Some(*row);
+        }
+        // The list is on the left and the file is beside it, not under it.
+        let (list, diff) = (out.layout.file_list, out.layout.file_diff);
+        assert!(list.w > 1.0 && diff.w > 1.0);
+        assert!((list.x + list.w - diff.x).abs() < 0.01, "{list:?} {diff:?}");
+        assert!((list.y - diff.y).abs() < 0.01, "the two columns start level");
+        // Every name is there, and the type icon in front of it.
+        let text = text_of(&out.scene);
+        for name in &names {
+            assert!(text.contains(name.as_str()), "{name} is not in the list: {text}");
+        }
+        for path in paths {
+            let icon = crate::icons::for_path(path).to_string();
+            assert!(text.contains(&icon), "{path} has no type icon");
+        }
+    }
+
+    /// One row is marked, and it is the open file's. A band and an accent down
+    /// the left edge rather than a block in another colour: a block standing on
+    /// the pane's own surface is what made the old tabs read as buttons.
+    #[test]
+    fn the_open_file_s_row_is_the_marked_one() {
+        let paths = ["src/calc.py", "src/main.rs"];
+        let mut state = touched(&paths);
+        state.open_file = 0;
+        let names = labels(&paths);
+        let out = render(
+            &state,
+            1400.0,
+            900.0,
+            &Dock::new(),
+            &names.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        for (index, row) in &out.layout.file_rows {
+            let open = *index == state.open_file;
             assert_eq!(
-                covered(&out, *tab, tab.h, out.skin.tab),
-                active,
-                "file tab {index} is at full weight when it should not be, or the other way round"
+                covered(&out, *row, row.h, out.skin.strip),
+                open,
+                "row {index} and its band disagree about being open"
             );
+            let mark = topped(&out, *row, row.h, out.skin.view(View::Files));
             assert_eq!(
-                covered(&out, *tab, tab.h, out.skin.tab_idle),
-                !active,
-                "file tab {index} is at idle weight when it should not be"
+                mark.is_some(),
+                open,
+                "row {index} and its mark disagree about being open"
             );
+            if let Some(mark) = mark {
+                assert!((mark.xywh()[2] - MARK_W).abs() < 0.01, "{:?}", mark.xywh());
+            }
+            let label = out
+                .scene
+                .texts
+                .iter()
+                .find(|text| row.contains(text.at.x + 1.0, text.at.y + 1.0))
+                .unwrap_or_else(|| panic!("row {index} has no label"));
             assert_eq!(
-                topped(&out, *tab, ACCENT_H, out.skin.view(View::Files)).is_some(),
-                active,
-                "file tab {index} and its accent line disagree about being open"
+                label.color,
+                if open { out.skin.bright } else { out.skin.body },
+                "row {index} is not tinted for being open or not"
             );
-            assert_eq!(
-                floor_is_broken_under(&out, *tab),
-                active,
-                "file tab {index} and the strip's floor disagree about being open"
+        }
+    }
+
+    /// A list longer than the pane shows a screenful, scrolls to the rest, and
+    /// says so with a thumb. The window comes from text-geometry, so the rows
+    /// drawn and the rows a scroll position names cannot disagree.
+    #[test]
+    fn a_list_longer_than_the_pane_scrolls_instead_of_dropping_files() {
+        let paths: Vec<String> = (0..40).map(|n| format!("src/file{n}.rs")).collect();
+        let borrowed: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let mut state = touched(&borrowed);
+        state.open_file = 0;
+        let names = labels(&borrowed);
+        let short: Vec<&str> = names.iter().map(String::as_str).collect();
+
+        let dock = Dock::new();
+        let out = render(&state, 1400.0, 900.0, &dock, &short);
+        let shown = out.layout.file_rows.len();
+        assert!(shown > 4, "only {shown} rows fit");
+        assert!(shown < paths.len(), "all {shown} rows fit, nothing to scroll");
+        assert_eq!(out.layout.file_rows[0].0, 0, "the top of the list");
+
+        // Scrolled down, the same rows carry later files, and none of them are
+        // drawn outside the column.
+        let scrolled = Layout::compute(1400.0, 900.0, &scrolled_shape(&dock, &short, 5));
+        assert_eq!(scrolled.file_rows.len(), shown);
+        assert_eq!(scrolled.file_rows[0].0, 5);
+        for (_, row) in &scrolled.file_rows {
+            assert!(
+                row.y >= scrolled.file_list.y - 0.01
+                    && row.y + row.h <= scrolled.file_list.y + scrolled.file_list.h + 0.01,
+                "{row:?} is outside {:?}",
+                scrolled.file_list
+            );
+        }
+        // Past the end clamps to the last screenful rather than to nothing.
+        let far = Layout::compute(1400.0, 900.0, &scrolled_shape(&dock, &short, 999));
+        assert_eq!(far.file_rows.len(), shown);
+        assert_eq!(far.file_rows.last().unwrap().0, paths.len() - 1);
+
+        // And the list carries a thumb, because it does not all fit.
+        let rows = out.layout.rows(out.layout.file_list, 13.0);
+        assert!(state.files_thumb(rows).is_some(), "no thumb on a long list");
+        assert!(
+            State::new().files_thumb(rows).is_none(),
+            "a thumb with nothing to scroll"
+        );
+    }
+
+    /// The file is the thing being looked at, so it keeps its floor whatever the
+    /// list wants. The pane is narrow: at the smallest window the layout allows,
+    /// the file view lives in the right-hand column.
+    #[test]
+    fn the_file_keeps_room_to_be_read_beside_the_list() {
+        let paths = ["src/averyverylongfilename.rs", "src/other.rs"];
+        let state = touched(&paths);
+        let names = labels(&paths);
+        let short: Vec<&str> = names.iter().map(String::as_str).collect();
+        for (w, h) in [(680.0, 380.0), (900.0, 700.0), (2200.0, 1400.0)] {
+            let out = render(&state, w, h, &Dock::new(), &short);
+            let (list, diff) = (out.layout.file_list, out.layout.file_diff);
+            assert!(list.w > 1.0, "no list at {w}x{h}");
+            assert!(
+                cols_of(diff, 8.0) >= DIFF_MIN_COLUMNS,
+                "the file has {} columns at {w}x{h}, under the {DIFF_MIN_COLUMNS} floor",
+                cols_of(diff, 8.0)
+            );
+            assert!(
+                cols_of(list, 8.0) <= LIST_MAX_COLUMNS,
+                "the list is {} columns wide at {w}x{h}",
+                cols_of(list, 8.0)
+            );
+        }
+    }
+
+    /// Where a character is, in the file view, is measured from the file's own
+    /// box and not from the pane. The list is not text to be selected: a drag
+    /// starting on a row is a drag on the list, and hit testing the whole pane
+    /// would put every click in the file a list's width away from the glyph
+    /// under it.
+    #[test]
+    fn the_file_s_text_is_measured_from_its_own_column() {
+        let paths = ["src/calc.py", "src/main.rs"];
+        let state = touched(&paths);
+        let names = labels(&paths);
+        let out = render(
+            &state,
+            1400.0,
+            900.0,
+            &Dock::new(),
+            &names.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        let space = Space::BottomRight;
+        assert_eq!(out.layout.content(space), out.layout.file_diff);
+        // The other spaces are unchanged: their content is their whole body.
+        assert_eq!(
+            out.layout.content(Space::Left),
+            out.layout.placed(Space::Left).body
+        );
+
+        let diff = out.layout.file_diff.inset(PAD);
+        let (row, at) = (3usize, 6usize);
+        let line = Text::line_for(13.0);
+        let cell = out.layout.cell(
+            diff.x + at as f32 * 8.0,
+            diff.y + row as f32 * line + 2.0,
+            13.0,
+            8.0,
+        );
+        assert_eq!(cell, Some((space, row, at)), "measured from the wrong box");
+
+        // And a point on a row of the list is no cell at all.
+        let (_, first) = out.layout.file_rows[0];
+        assert_eq!(
+            out.layout
+                .cell(first.x + 4.0, first.y + first.h * 0.5, 13.0, 8.0),
+            None
+        );
+    }
+
+    /// The gutter in front of a file's text is chrome, not text. One place says
+    /// how many columns it takes, so the wrapping the file is drawn with and the
+    /// column a click resolves to cannot drift apart, which is what put file
+    /// selection four characters along.
+    #[test]
+    fn a_file_s_line_numbers_are_not_part_of_its_line() {
+        let box_ = Panel::new(0.0, 0.0, 8.0 * 40.0 + 2.0 * PAD, 100.0);
+        assert_eq!(text_columns(View::Files, box_, 8.0), (40 - GUTTER, GUTTER));
+        for view in View::ALL.into_iter().filter(|v| *v != View::Files) {
+            assert_eq!(text_columns(view, box_, 8.0), (40, 0), "{view:?}");
+        }
+        // A box narrower than the gutter still wraps in at least one column.
+        let sliver = Panel::new(0.0, 0.0, 8.0 + 2.0 * PAD, 100.0);
+        assert_eq!(text_columns(View::Files, sliver, 8.0).0, 1);
+    }
+
+    /// A name too long for the column loses its parent directory first and its
+    /// own tail second. The row's type icon already says what the extension
+    /// would, so the front of the name is what carries the identity.
+    #[test]
+    fn a_name_that_does_not_fit_loses_its_directory_then_its_tail() {
+        assert_eq!(fit_name("crates/noob/src/mod.rs", 20), "src/mod.rs");
+        assert_eq!(fit_name("crates/noob/src/mod.rs", 10), "src/mod.rs");
+        assert_eq!(fit_name("crates/noob/src/mod.rs", 9), "mod.rs");
+        assert_eq!(fit_name("src/calc.py", 7), "calc.py");
+        assert_eq!(fit_name("src/averyverylongname.rs", 8), "averyve\u{2026}");
+        for cols in 1..24 {
+            let cut = fit_name("crates/noob/src/somelongmodule.rs", cols);
+            assert!(
+                cut.chars().count() <= cols,
+                "{cut:?} is wider than the {cols} columns it was given"
             );
         }
     }
@@ -2186,9 +2554,9 @@ mod tests {
                 );
             }
         }
-        for (index, panel) in &out.layout.file_tabs {
+        for (index, panel) in &out.layout.file_rows {
             let (x, y) = middle(*panel);
-            let hit = out.layout.hit(x, y).expect("a file tab");
+            let hit = out.layout.hit(x, y).expect("a row of the file list");
             assert_eq!(hit, Hit::File(*index, Space::BottomRight));
             // And it still names a space, so a tab dropped here lands.
             assert_eq!(hit.space(), Some(Space::BottomRight));
@@ -2619,7 +2987,10 @@ mod tests {
                 dock: &dock,
                 menu: None,
                 file_labels: vec![],
+                file_first: 0,
                 column,
+                pane_size: 13.0,
+                pane_column,
                 input_h: INPUT_H,
             };
             let layout = Layout::compute(1400.0, 900.0, &shape);
@@ -2704,7 +3075,10 @@ mod tests {
             dock: &dock,
             menu: None,
             file_labels: vec![],
+            file_first: 0,
             column: 8.0,
+            pane_size: 13.0,
+            pane_column: 8.0,
             input_h: INPUT_H,
         };
         let layout = Layout::compute(1400.0, 900.0, &shape);
@@ -3220,13 +3594,24 @@ mod tests {
         assert_eq!(out.layout.hit(200.0, 10.0), Some(Hit::TitleBar));
     }
 
+    /// A strip drops the tabs it cannot hold rather than squeezing them into
+    /// slivers. This used to be asserted on the file strip, which no longer
+    /// exists: a list too long for its pane scrolls now, and
+    /// `a_list_longer_than_the_pane_scrolls_instead_of_dropping_files` is what
+    /// says so.
     #[test]
     fn tabs_that_do_not_fit_are_dropped_not_squeezed() {
-        let dock = Dock::new();
-        let many: Vec<&str> = vec!["averyverylongfilename.rs"; 30];
-        let out = render(&busy_state(), 900.0, 700.0, &dock, &many);
-        assert!(out.layout.file_tabs.len() < many.len(), "some were dropped");
-        for (_, panel) in &out.layout.file_tabs {
+        let mut dock = Dock::new();
+        // Every view but one in the left space, which is more than its strip can
+        // hold. The one left behind keeps the space split, so the strip is the
+        // width it usually is rather than the whole window.
+        for view in View::ALL.into_iter().filter(|v| *v != View::Files) {
+            dock.move_view(view, Space::Left);
+        }
+        let out = render(&busy_state(), 900.0, 700.0, &dock, &["calc.py"]);
+        let tabs = &out.layout.placed(Space::Left).tabs;
+        assert!(tabs.len() < View::ALL.len(), "every tab fitted");
+        for (_, panel) in tabs {
             assert!(panel.w > 20.0, "no slivers: {panel:?}");
         }
     }
