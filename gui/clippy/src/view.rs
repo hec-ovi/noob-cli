@@ -141,6 +141,12 @@ const TAB_ARROW_COLUMNS: usize = 3;
 /// reads as the hairline every other edge in the window is, and the tab has to
 /// say which view it is holding from further away than that.
 const ACCENT_H: f32 = 2.0;
+/// The border the showing tab carries from where its accent stops: down the cut,
+/// down the right edge and a short run along its foot. Half the accent, so weight
+/// is still the whole difference between the tab that is showing and the rest,
+/// and the border reads as the accent turning the corner rather than as a second
+/// line shouting the same thing.
+const TAB_EDGE_H: f32 = ACCENT_H * 0.5;
 /// How far a scrollbar sits in from the right edge of the pane it belongs to.
 const SCROLL_GAP: f32 = 2.0;
 /// One row of a menu. Taller than a tab: a tab is read, a menu row is aimed at,
@@ -2558,6 +2564,34 @@ fn cut_of(panel: Panel) -> f32 {
     CUT.min(panel.w * 0.5).min(panel.h * 0.5).max(0.0)
 }
 
+/// A line along the cut itself, so the corner is a drawn edge rather than only a
+/// missing one.
+///
+/// [`Rect::stroke`] follows the whole shape and cannot be asked for one side, so
+/// a box that wants its diagonal without its other three sides has to draw the
+/// diagonal itself. A stair of `weight` sized squares stepping one pixel down and
+/// one pixel left, which at the hairline weight every other edge is drawn at is
+/// one pixel per step: the fragment stage measures a square by its narrow axis,
+/// so each step lands at the same coverage as the straight hairlines it meets.
+///
+/// It runs from where the top edge would stop, `(right - cut, top)`, to where the
+/// right edge starts, `(right - weight, top + cut - weight)`, so the two ends
+/// meet whatever else the caller draws.
+fn cut_line(scene: &mut Scene, panel: Panel, rgba: [f32; 4], weight: f32) {
+    let cut = cut_of(panel);
+    if cut < weight {
+        // A box squeezed smaller than the line is meant to be thick lost its
+        // corner to the cap in `cut_of`; there is no diagonal left to draw.
+        return;
+    }
+    let right = panel.x + panel.w;
+    let steps = (cut - weight) as usize;
+    for step in 0..=steps {
+        let at = step as f32;
+        scene.rect(Panel::new(right - cut + at, panel.y + at, weight, weight).fill(rgba));
+    }
+}
+
 /// Its hairline border, as one rectangle. Four of them could not follow the
 /// cut.
 ///
@@ -2575,11 +2609,16 @@ fn panel_edge(panel: Panel, rgba: [f32; 4]) -> Rect {
 /// of the strip being the top of the pane. The other three sides still tell two
 /// panes over a busy desktop apart, so only the top one goes.
 ///
-/// Three thin rectangles rather than the one stroked rect [`panel_edge`] draws,
-/// because a stroke follows the whole shape and cannot leave a side out. The
-/// three that are left are straight lines: the cut is on the top right, which is
-/// the corner the top edge had, and what the remaining right edge has to do about
-/// it is start where the cut stops rather than in a corner that is not there.
+/// Thin rectangles rather than the one stroked rect [`panel_edge`] draws, because
+/// a stroke follows the whole shape and cannot leave a side out. The three that
+/// are left are straight lines, and the cut is on the top right, which is the
+/// corner the top edge had.
+///
+/// The cut is bordered too ([`cut_line`]). Every other chromed box in the window
+/// is stroked all the way round, so a line runs down their diagonal and the pane
+/// was the one box where the corner was a hole in the border instead of a corner.
+/// In the same colour as the other three sides: a pane is one material, and a
+/// corner in a second colour reads as a second thing stuck on it.
 fn pane_edges(scene: &mut Scene, panel: Panel, rgba: [f32; 4]) {
     let cut = cut_of(panel);
     scene.rect(panel.left_edge(rgba));
@@ -2593,6 +2632,7 @@ fn pane_edges(scene: &mut Scene, panel: Panel, rgba: [f32; 4]) {
         )
         .fill(rgba),
     );
+    cut_line(scene, panel, rgba, 1.0);
 }
 
 /// One tab of a strip, before its label goes on.
@@ -2627,6 +2667,38 @@ fn tab_block(scene: &mut Scene, skin: &Skin, tab: Panel, active: bool) {
     scene.rect(
         Panel::new(tab.x, tab.y, (tab.w - cut).max(1.0), ACCENT_H.min(tab.h))
             .fill(skin.tab_accent),
+    );
+    // And picked up again there, at half the weight, so the accent turns the
+    // corner instead of stopping in mid air: down the cut, on down the right
+    // edge, then a short run back along the foot. Half rather than the same
+    // weight because the top of the tab is the reading and the rest of it is
+    // the outline of the reading; at full weight the tab is a boxed label
+    // again, which is what the fills were taken away for.
+    let weight = TAB_EDGE_H.min(tab.h);
+    cut_line(scene, tab, skin.tab_accent, weight);
+    scene.rect(
+        Panel::new(
+            tab.x + tab.w - weight,
+            tab.y + cut,
+            weight,
+            (tab.h - cut).max(0.0),
+        )
+        .fill(skin.tab_accent),
+    );
+    // The last pixels inside the tab, not the first row of the pane: the tab and
+    // its pane are one surface, and a line drawn at the pane's top edge is the
+    // rule under the strip that item 12 took away. As long as the cut reaches,
+    // so the foot and the diagonal are the same length and the border reads as
+    // one turn rather than as two stubs.
+    let foot = cut.min(tab.w);
+    scene.rect(
+        Panel::new(
+            tab.x + tab.w - foot,
+            tab.y + tab.h - weight,
+            foot,
+            weight.min(tab.h),
+        )
+        .fill(skin.tab_accent),
     );
 }
 
@@ -5092,6 +5164,95 @@ mod tests {
         }
     }
 
+    /// The accent turns the corner instead of stopping in mid air: on down the
+    /// cut, down the right edge, and back along the foot, at half its own
+    /// weight. Half is the whole point, so the tab that is showing is still told
+    /// by weight and not by having a border at all.
+    ///
+    /// Every box is read off the tab and the accent rather than off the
+    /// constants, so a layout change moves the assertion with the drawing.
+    #[test]
+    fn the_showing_tab_s_border_follows_the_cut_at_half_the_accent() {
+        let dock = Dock::new();
+        let out = render(&busy_state(), 1400.0, 900.0, &dock, &["a.rs"]);
+        let drawn = |box_: Panel| {
+            out.scene.rects.iter().any(|rect| {
+                let [x, y, w, h] = rect.xywh();
+                (x - box_.x).abs() < 0.01
+                    && (y - box_.y).abs() < 0.01
+                    && (w - box_.w).abs() < 0.01
+                    && (h - box_.h).abs() < 0.01
+                    && rect.rgba() == out.skin.tab_accent
+            })
+        };
+        let mut checked = 0;
+        for space in Space::ALL {
+            let placed = out.layout.placed(space);
+            let Some(active) = dock.slot(space).active() else {
+                continue;
+            };
+            let (_, tab) = placed
+                .tabs
+                .iter()
+                .find(|(view, _)| *view == active)
+                .expect("the showing view has a tab");
+            let accent = topped(&out, *tab, ACCENT_H, out.skin.tab_accent)
+                .unwrap_or_else(|| panic!("{space:?}: {active:?} has no accent line"));
+            // Half the line it continues, whatever that line is thick.
+            let weight = accent.xywh()[3] * 0.5;
+            assert!(
+                (weight - TAB_EDGE_H).abs() < 0.01,
+                "{space:?}: the border is {weight} against an accent of {:?}",
+                accent.xywh()[3]
+            );
+            let cut = cut_of(*tab);
+            let right = tab.x + tab.w;
+            // Picked up exactly where the accent stops, and stepping down to
+            // where the right edge starts.
+            assert!(
+                (accent.xywh()[0] + accent.xywh()[2] - (right - cut)).abs() < 0.01,
+                "{space:?}: the accent ends at {:?}, the cut starts at {}",
+                accent.xywh(),
+                right - cut
+            );
+            for step in 0..=((cut - weight) as usize) {
+                let at = step as f32;
+                assert!(
+                    drawn(Panel::new(right - cut + at, tab.y + at, weight, weight)),
+                    "{space:?}: the cut has no line at step {step}"
+                );
+            }
+            // On down the right edge, from where the cut leaves off to the foot.
+            assert!(
+                drawn(Panel::new(
+                    right - weight,
+                    tab.y + cut,
+                    weight,
+                    tab.h - cut
+                )),
+                "{space:?}: the border does not run down the right edge"
+            );
+            // And back along the foot, as far as the cut reached, on the last
+            // row inside the tab. A row lower is the pane's own top edge, which
+            // is the rule under the strip that item 12 took away.
+            assert!(
+                drawn(Panel::new(
+                    right - cut,
+                    tab.y + tab.h - weight,
+                    cut,
+                    weight
+                )),
+                "{space:?}: the border does not turn along the foot"
+            );
+            assert!(
+                (tab.y + tab.h - placed.body.y).abs() < 0.01,
+                "{space:?}: the tab does not sit on the pane, so its foot is not the seam"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 3, "only {checked} spaces had a showing tab");
+    }
+
     /// One green for every view. The line said which pane you were on and the
     /// hue said which pane it was, which is the label's job, so nine hues on
     /// nine tabs was a harlequin strip answering a question nobody asked.
@@ -5166,6 +5327,12 @@ mod tests {
     /// corner. The strip's floor sat one pixel above the pane and ran the full
     /// width, and the scrollbar started three pixels down the right edge; both
     /// drew into a corner that is not there.
+    ///
+    /// The cut line itself is the one thing allowed to touch it, and it lies just
+    /// inside the corner rather than in it: a hairline drawn on the line clears by
+    /// `cut - 1`, one pixel short of the empty triangle, which is what a border
+    /// following an edge means. Anything thicker than a hairline, and anything
+    /// further in than one pixel, is still in the corner and still fails.
     #[test]
     fn nothing_is_drawn_in_the_corner_the_cut_takes_away() {
         let mut state = busy_state();
@@ -5205,11 +5372,58 @@ mod tests {
                 }
                 let clear = (right - (x + w)) + (y - body.y);
                 assert!(
-                    clear >= cut - 0.01,
+                    clear >= cut - 1.01,
                     "{space:?}: {:?} is {clear}px into a {cut}px cut",
                     rect.xywh()
                 );
             }
+        }
+    }
+
+    /// A pane's cut corner is a drawn edge and not only a missing one. Every
+    /// other chromed box in the window is stroked all the way round, so a line
+    /// already ran down their diagonal; the pane, which cannot be stroked because
+    /// that would paint the top edge back on, had a corner that was a gap in its
+    /// own border.
+    ///
+    /// In the colour the other three sides are drawn in, read off the left edge
+    /// rather than looked up, so a corner in a colour of its own is caught.
+    #[test]
+    fn a_pane_s_cut_corner_is_bordered_like_its_other_sides() {
+        let dock = Dock::new();
+        let out = render(&busy_state(), 1400.0, 900.0, &dock, &["a.rs"]);
+        for space in occupied(&dock) {
+            let panel = out.layout.placed(space).body;
+            let cut = cut_of(panel);
+            let right = panel.x + panel.w;
+            let side = out
+                .scene
+                .rects
+                .iter()
+                .find(|r| r.xywh() == [panel.x, panel.y, 1.0, panel.h])
+                .unwrap_or_else(|| panic!("{space:?}: no left edge to take the colour from"));
+            let hairline = side.xywh()[2];
+            let at = |box_: [f32; 4]| {
+                out.scene
+                    .rects
+                    .iter()
+                    .any(|r| r.xywh() == box_ && r.rgba() == side.rgba())
+            };
+            // From where a top edge would have stopped down to where the right
+            // edge starts, one hairline square per pixel.
+            for step in 0..=((cut - hairline) as usize) {
+                let a = step as f32;
+                assert!(
+                    at([right - cut + a, panel.y + a, hairline, hairline]),
+                    "{space:?}: the cut has no line at step {step}"
+                );
+            }
+            // Which is the row the right edge already starts on, so the two are
+            // one border and not two.
+            assert!(
+                at([right - hairline, panel.y + cut, hairline, panel.h - cut]),
+                "{space:?}: the cut line ends nowhere near the right edge"
+            );
         }
     }
 
@@ -5264,6 +5478,21 @@ mod tests {
                 assert!(
                     topped(&out, *tab, ACCENT_H, out.skin.tab_accent).is_none(),
                     "{view:?} has an accent line and is not showing"
+                );
+                // And nothing of the border that accent turns into either: the
+                // showing tab's cut, right edge and foot are the accent
+                // continued, so a tab wearing them without the accent would be
+                // saying it is showing at half volume.
+                assert!(
+                    !out.scene.rects.iter().any(|rect| {
+                        let [x, y, w, h] = rect.xywh();
+                        rect.rgba() == out.skin.tab_accent
+                            && x >= tab.x - 0.01
+                            && y >= tab.y - 0.01
+                            && x + w <= tab.x + tab.w + 0.01
+                            && y + h <= tab.y + tab.h + 0.01
+                    }),
+                    "{view:?} carries the showing tab's border and is not showing"
                 );
                 let label = out
                     .scene
