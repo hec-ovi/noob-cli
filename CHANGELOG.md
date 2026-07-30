@@ -7,6 +7,31 @@ tags rather than here; this file starts where it was added.
 
 ### Fixed
 
+- Shading gives a strip whatever the compositor does with the request. Double
+  clicking the title bar shades the window, and the first click of that pair was
+  handing the compositor an interactive move: with the pointer near the top of
+  the screen GNOME reads that as a maximize gesture and snaps the window full
+  screen, and a maximized window ignores the resize that shading then asks for.
+  The strip was asked for, the surface stayed the size of the screen, and the
+  title bar was painted across all of it, which is the screenful of one colour a
+  collapsed window showed. Three things changed. A press on the title bar no
+  longer starts a move until the pointer has travelled the five pixels a held tab
+  travels before it counts as a drag, so a double click that stays where it is
+  never reaches the compositor at all. Shading a window that is maximized takes
+  it out of maximized first and unshading puts it back, so a window maximized on
+  purpose still collapses to a strip and still comes back the size it was. And
+  the shaded state is now read back off the surface the window is actually given
+  rather than assumed from what was asked for: a window that comes back
+  maximized, or more than two title bars tall, is not a shaded window, so the
+  state is dropped and the window is drawn as the window rather than filled with
+  the bar colour. That last one is what covers the compositor this cannot know
+  about, because it answers what happened rather than predicting what would.
+  Both halves of the request are read the same way, the resize event and the
+  answer the window gives back on the spot, because on Wayland a refused resize
+  is answered immediately and no event follows it. Read back off a running window
+  on GNOME under Wayland: maximized and then shaded, the window ends 30 pixels
+  tall, and with the un-maximize taken out again it drops the shade on the spot
+  and draws the ordinary window instead of a screen of the bar colour.
 - Every colour in the window is the colour the settings file names. The palette
   went to the shader as it was written, and the surface it is drawn into encodes
   what a shader gives it on the way into the texture, so every fill landed on the
