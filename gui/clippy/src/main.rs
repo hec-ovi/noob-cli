@@ -21,12 +21,6 @@
 //! noob's own; see `config`. `no0b --set <key>=<value>` changes one of them
 //! and exits.
 
-/// The clip player, with nothing drawing it at the moment. Kept compiled and
-/// tested because the format it reads is about to carry an idle animation in
-/// the corner of the window; deleting the parser with the view would mean
-/// writing it again.
-#[allow(dead_code)]
-mod avatar;
 mod config;
 mod dock;
 mod icons;

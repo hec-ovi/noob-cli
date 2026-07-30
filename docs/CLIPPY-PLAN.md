@@ -68,7 +68,7 @@ private `src/`:
 | `session-state` | `state.rs`, `monitor.rs` | metrics, items 6, 7 |
 | `session-link` | `link.rs` + the new socket | items 27, 28, 29 |
 | `settings` | `config.rs`, `skin.rs` | items 11, 19 |
-| `animation` | `avatar.rs` + the orb | items 2, 14 |
+| `animation` | the orb | items 2, 14 |
 
 Plus `docs/INDEX.md` mapping "the thing you want to change" to the one folder to
 open.
@@ -225,13 +225,6 @@ code gets written.
   through the existing SDF, 204 rects for the idle state and 516 for working.
   It does contradict the deliberate no-free-running-render stance in
   `noob-gpu/src/lib.rs:19` unless the idle state freezes. Decision D9.
-- **Idle animation from `docs/asciis`.** 382 frames at 128x37, 24fps, a 15.9
-  second seamless loop of the face. `avatar.rs` already plays exactly this
-  format, and the size gate has 29 MiB free of its 40, so the asset is not a
-  constraint. Keep the ramp characters in the file as the tone index and draw
-  every cell as one dot tinted by its level, which needs no new renderer because
-  per-run color already exists. Watch the cost: text is reshaped from scratch
-  every frame, so ~4,700 tinted cells at 24fps wants buffer caching first.
 - **10. Drop zones with a landing preview.** ~180 lines, after 0.7. With a fixed
   three-slot dock an edge drop has nowhere to create a split, so building it
   first means it degrades to "move to the nearest slot" and gets thrown away.
@@ -286,16 +279,18 @@ code gets written.
   and the config icon, and is dismissed with Escape or its close mark. A second
   OS window would mean a second wgpu surface, its own renderer and its own event
   routing, for the same result.
-- **The orb lives in the corner block, not in a pane.** That is why the CLIPPY
-  view is being deleted rather than repaired: the ASCII clip becomes the idle
-  animation beside the orb, and `avatar.rs` stays as the player for it.
+- **The orb lives in the title strip, not in a pane.** That is why the CLIPPY
+  view was deleted rather than repaired. The orb is the only animation: the
+  ASCII clip is dropped, and with it the player and the converter that fed it.
+  A 128x37 face does not fit the title strip and never appeared in a shipped
+  build.
 - **D1 (item 22): capped 2x2 grid.** Max depth 2, at most 4 leaves, dividers
   drag freely. No arbitrary nesting, so no leaf can collapse below a drawable
   size. Roughly half the code of a general tree.
-- **D9 (item 2): own 66px block at top-left, above the panes.** Idle plays the
-  ASCII face loop, the orb animates only while the agent is working, and the
-  wakeup stops at the end of a turn. Keeps the no-free-running-render rule in
-  `noob-gpu/src/lib.rs:19-24` intact.
+- **D9 (item 2): the orb sits in the title strip, left of the name.** It
+  animates only while the agent is working, and the wakeup stops at the end of a
+  turn. Keeps the no-free-running-render rule in `noob-gpu/src/lib.rs:19-24`
+  intact.
 - **D22 (item 20): top-right corner only, 10px, on every panel** including tabs
   and the input box.
 

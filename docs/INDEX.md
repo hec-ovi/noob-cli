@@ -27,7 +27,6 @@ open only what the right column names.
 | Markdown rendering in the transcript | `gui/clippy/src/markdown.rs` |
 | Syntax colors in the file view | `gui/clippy/src/syntax.rs` |
 | The thinking orb in the title strip: its maths, its two states | `gui/clippy/src/orb.rs`, drawn by `view::title_bar`, clocked in `gui/clippy/src/main.rs` |
-| The ASCII animation and its file format, which nothing draws yet | `gui/clippy/src/avatar.rs`, authored by `gui/asciify/` |
 | Desktop entry, icons, packaging | `gui/clippy/src/packaging.rs`, `gui/data/`, `dev.sh gui-package` |
 
 ## The agent (`crates/`)

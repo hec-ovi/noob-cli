@@ -9,7 +9,7 @@ resolver = "2"
 # `clippy/` is the NO0B window. The package and the binary are both `no0b`; only
 # the folder still carries the old name, because renaming it would move every
 # path in dev.sh, the docs and the layer index and change nothing a user sees.
-members = ["noob-gpu", "noob-draw", "clippy", "asciify", "layers/text-geometry"]
+members = ["noob-gpu", "noob-draw", "clippy", "layers/text-geometry"]
 
 [workspace.package]
 version = "0.7.0"
