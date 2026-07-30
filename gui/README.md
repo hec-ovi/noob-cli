@@ -266,10 +266,9 @@ before you let go, one cell or two. **Drag the gap between two panes** to move t
 divider: the pointer takes a resize shape over it, and where you leave it is
 written back to the settings file. The grid is capped at 2x2, so four cells is
 the most there is and no space can be dragged smaller than a tab strip with
-enough pane under it to read. **Double-click the title bar** to shade the
-window down to that one strip, Winamp style: it keeps showing INFERRING or
-FINISHED with the plan count and how many files changed, so a collapsed window is
-still a status light. Double-click again to bring it back.
+enough pane under it to read. **Double-click the title bar** to maximize the
+window, and again to put it back, the same toggle as the maximize button and as
+every other window on the desktop.
 
 Right click the prompt for Copy and Paste, or a pane or its tab for Settings,
 Copy selection, Close this widget and Widgets. A row with nothing to act on is

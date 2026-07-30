@@ -147,6 +147,7 @@ struct ShadeRequest {
 /// a window, so opening the strip puts it back. Unshading into maximized asks
 /// for no size at all: the compositor owns the size of a maximized window and a
 /// request beside it is a second answer to a question already settled.
+#[allow(dead_code)]
 fn shade_request(
     shaded: bool,
     remembered: Option<PhysicalSize<u32>>,
@@ -233,7 +234,7 @@ fn shade_of(shaded: bool, maximized: bool, settling: bool, height: u32, strip: u
 
 /// Whether a press on the title bar has become a move of the window.
 ///
-/// The title bar both moves the window and shades it, and the compositor's
+/// The title bar both moves the window and maximizes it, and the compositor's
 /// interactive move is the one that cannot be taken back: once `drag_window` is
 /// called the pointer belongs to the compositor, the second click of a double
 /// click never arrives here, and on GNOME a pointer near the top of the screen
@@ -242,6 +243,34 @@ fn shade_of(shaded: bool, maximized: bool, settling: bool, height: u32, strip: u
 /// pointer never reaches the compositor at all.
 fn began_move(pressed: bool, moved: f64) -> bool {
     pressed && moved >= DRAG_SLOP
+}
+
+/// What a press on the title bar turns out to be. See [`title_click`].
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum TitleClick {
+    /// The second click of a pair: put the window in or out of maximized.
+    Maximize,
+    /// A single press. Nothing happens on it; whether it becomes a move of the
+    /// window is decided later by the pointer, in [`App::maybe_move`].
+    ArmMove,
+}
+
+/// What a click on the title bar does.
+///
+/// A double click is the desktop's own maximize toggle, the same thing the
+/// maximize button does, so the bar behaves the way every other window on the
+/// desktop does. It used to collapse the window to its strip; that path is
+/// still in this file and nothing reaches it any more.
+///
+/// A free function because [`App::click`] needs a live window and cannot be
+/// driven in a test, the same reason [`began_move`] and [`shade_of`] are out
+/// here.
+fn title_click(double: bool) -> TitleClick {
+    if double {
+        TitleClick::Maximize
+    } else {
+        TitleClick::ArmMove
+    }
 }
 
 /// When the orb wants its next frame, given the deadline it is already holding.
@@ -1430,9 +1459,27 @@ impl App {
         self.dirty = true;
     }
 
+    /// Put the window in or out of maximized, the state the desktop puts it in.
+    ///
+    /// One place, called by both the maximize button and the double click on
+    /// the bar, so the two cannot drift into meaning different things. The
+    /// compositor answers with a `Resized`, which is what actually redraws the
+    /// window; the flag is set here as well so a request that is refused still
+    /// leaves the window drawing what it is.
+    fn toggle_maximized(&mut self, window: &Window) {
+        window.set_maximized(!window.is_maximized());
+        self.dirty = true;
+    }
+
     /// Collapse the window to its title bar, or restore it. The bar keeps
     /// showing what the agent is doing, so a shaded window is still a status
     /// light rather than a hidden one.
+    ///
+    /// Unreachable, kept whole: the double click that called it is the desktop's
+    /// maximize toggle now, and the shading was buggy enough to take off the
+    /// bar rather than fix in place. Everything it needs is still here and still
+    /// tested, so putting it back is one call.
+    #[allow(dead_code)]
     fn shade(&mut self, window: &Window) {
         self.shaded = !self.shaded;
         if self.shaded {
@@ -1590,23 +1637,24 @@ impl App {
         match hit {
             Hit::Close => event_loop.exit(),
             Hit::Minimize => window.set_minimized(true),
-            Hit::Maximize => window.set_maximized(!window.is_maximized()),
-            Hit::TitleBar => {
-                if double {
+            Hit::Maximize => self.toggle_maximized(window),
+            Hit::TitleBar => match title_click(double) {
+                TitleClick::Maximize => {
                     // The first click of the pair is still holding a move that
                     // never began. It ends here rather than moving the window
-                    // out from under the strip it just became.
+                    // while the compositor is resizing it under the pointer.
                     self.moving = None;
-                    self.shade(window);
-                } else {
+                    self.toggle_maximized(window);
+                }
+                TitleClick::ArmMove => {
                     // Pressed, not moved: what this is gets decided by the
                     // pointer, in `maybe_move`. Handing the compositor a move
                     // now would eat the second click of a double click, and on
                     // GNOME a press near the top of the screen snaps the window
-                    // maximized before that second click can shade it.
+                    // maximized before that second click arrives.
                     self.moving = Some(self.cursor);
                 }
-            }
+            },
             Hit::Tab(view, space) => {
                 // Pressed, not yet clicked: a tab is also a drag handle, so
                 // what this was is only decided when the pointer moves or is
@@ -2939,12 +2987,35 @@ mod tests {
         }
     }
 
+    /// A double click on the title bar maximizes the window, and a single click
+    /// only arms the move.
+    ///
+    /// The double click used to collapse the window to its strip, which was
+    /// buggy, so it does what a double click on a title bar does everywhere
+    /// else on the desktop. The closed set of two is the point: there is no
+    /// shade to return any more, and the single click still does nothing on the
+    /// press itself, because that is what leaves the second click reachable.
+    #[test]
+    fn a_double_click_on_the_title_bar_maximizes_and_a_single_one_only_waits() {
+        assert_eq!(
+            title_click(true),
+            TitleClick::Maximize,
+            "the second click of a pair toggles the maximized state"
+        );
+        assert_eq!(
+            title_click(false),
+            TitleClick::ArmMove,
+            "and one click on its own only arms a move for the pointer to decide"
+        );
+    }
+
     /// The title bar waits before it hands the compositor a move.
     ///
     /// `drag_window` is one way: after it the pointer belongs to the compositor
     /// and the second click of a double click never arrives, so a press that
-    /// began a move immediately could not also be the first half of a shade. The
-    /// same slop a held tab waits for, so a click that wobbled is still a click.
+    /// began a move immediately could not also be the first half of a maximize.
+    /// The same slop a held tab waits for, so a click that wobbled is still a
+    /// click.
     #[test]
     fn the_title_bar_only_moves_the_window_once_the_pointer_has_moved() {
         assert!(!began_move(true, 0.0), "a still pointer is a click");
