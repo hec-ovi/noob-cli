@@ -5,7 +5,36 @@ tags rather than here; this file starts where it was added.
 
 ## Unreleased
 
-All of this is CLIppy, the GPU window. The CLI is unchanged.
+All of this is NO0B, the GPU window, which shipped as CLIppy up to 0.6.0. The
+CLI's behaviour is unchanged; only its version moved.
+
+### Changed, and it renames things
+
+- The window is NO0B. The package, the binary, the desktop entry, the icons, the
+  window title and the three files under `~/.config/noob` all carry the product
+  name: `no0b` on PATH, `io.github.hec_ovi.NO0B.*` on the desktop, and
+  `no0b.conf`, `no0b.recent` and `no0b.totals` beside noob's own settings. A
+  file written under the old name is moved to the new one on the first read, so
+  a tuned palette, the folders you have opened and the all-time totals survive
+  the rename; a file already there under the new name wins and the old one is
+  left alone, and a rename that cannot happen falls back to the defaults rather
+  than refusing to open a window. Installing removes the old launcher, entry and
+  both icons, on install as well as on uninstall, so the menu holds one entry
+  instead of two with the older one starting nothing. The folder is still
+  `gui/clippy` on disk, which moves no path in `dev.sh` or the docs and changes
+  nothing a user sees.
+- Both cargo workspaces are 0.7.0, and the title strip reads its version from
+  the crate. It drew the commit stamp alone, so nothing on screen or in either
+  manifest said which release a build came from.
+- TALK is OUTPUT, the pane that said SESSION says CONTEXT, and the one that said
+  OVERALL says SESSION. Each variant keeps the slot it already had, so no view's
+  accent colour shifted along by one, and `view_talk` and `view_overall` in an
+  older settings file still apply their colour under the current names.
+- A setting a past build wrote and this one dropped is no longer reported as a
+  typo. `show_avatar` and `avatar` were two red lines at startup blaming the
+  user for a change the window made. The retired names are listed by hand, the
+  writer refuses them too, and an unknown key that is not on that list is still
+  reported, so a real typo stays visible.
 
 ### Fixed
 
@@ -121,6 +150,38 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
 
 ### Added
 
+- The thinking orb, in the square at the left end of the title strip, so the
+  strip reads orb, name, version. A port of the `orbits` mode of `thinking-orbs`
+  against its source rather than its look: twelve tilted circles laid out from a
+  deterministic hash, one shared spin and tilt, projected orthographically,
+  sorted far to near and drawn as discs through the rounded rect field the window
+  already has. No shader and no second pipeline, because a disc is a rectangle
+  with its corner radius set to half its width. Two states and no third: while a
+  turn is running it turns, 516 discs a frame; at rest it is the same globe
+  frozen and fainter without its runners, 480, so the corner is never empty and
+  never moves for no reason. Its clock is a 30 frames a second deadline that
+  exists only while the agent is working and is composed with the monitor's
+  sampling deadline rather than replacing it, so a window with nothing happening
+  in it goes back to blocking until you touch it. It is the only animation in
+  the window.
+- A floating layer in the scene. Every rectangle in a frame was drawn in one
+  instanced pass and every glyph in one pass after it, so a rectangle could never
+  cover a glyph: the right click menu's box is a rectangle and the panes behind it
+  are text, and the text won, which made the rows illegible over any pane with
+  writing in it. `Scene::over_rect` and `Scene::over_text` push to a second layer
+  painted after the whole base layer, and everything that floats over the window
+  uses them.
+- A redrawn icon: a console in hollow wire with `>_` inside it, one path of four
+  subpaths whose winding directions are what keep the body open, so whatever the
+  icon sits on shows through it and the top right corner takes the same 45 degree
+  cut every panel takes. The halo is one bounded blur merged under the mark, so a
+  rasterizer with filters off draws the same four subpaths sharp and loses only
+  the light. Its radius reaches further than the mark's margin, so the canvas
+  trims the tails where they are at 7% alpha, which is the price of the brighter
+  glow rather than a bug: the filter region is declared rather than inherited, so
+  the canvas is the only thing that ever clips it. The 16 pixel variant is drawn
+  again on its own grid rather than divided down, because the prompt does not
+  survive the division and renders as a grey wedge.
 - A closed widget can be opened again from the menu that closed it. Closing one
   took it out of the window with nothing anywhere putting it back, so the only
   way home was a restart. The widget menu now ends in a Widgets row that opens a
