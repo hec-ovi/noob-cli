@@ -31,8 +31,19 @@
 //! Folders chosen before are remembered in a small file beside the settings, so
 //! the second launch is one keystroke. A missing file is a first run, not an
 //! error: the window has to open either way.
+//!
+//! The same list shows the sessions the agent has already written, because the
+//! other thing you want on a first open is the conversation you were in an hour
+//! ago. [`Picker::show_sessions`] swaps what the rows are made of and nothing
+//! else: the same box, the same cursor, the same keys, the same scrolling. What
+//! comes back out of [`Picker::confirm`] is a [`Chosen`], a folder and the
+//! session to carry on in it, so the one path that starts an agent starts both
+//! kinds.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use crate::sessions::{Listing, Saved};
 
 /// How many folders the file remembers. Long enough to hold the projects in
 /// rotation, short enough that the list is still one glance.
@@ -119,6 +130,11 @@ pub enum Row {
         /// Whether what is inside it is in the list under it.
         open: bool,
     },
+    /// A session the agent has already written, while the list is showing those
+    /// instead of folders. Carries the whole of what was read off the file, so
+    /// the row can say when it was, where it was and what it was about without
+    /// going back to the disk while it is being drawn.
+    Session(Saved),
     /// Why a folder that was opened could not be read, on its own row under it.
     /// Without it an unreadable folder opens to nothing, which on screen is a
     /// folder that happens to be empty.
@@ -136,7 +152,7 @@ impl Row {
     /// tree sits at the top of it.
     pub fn depth(&self) -> usize {
         match self {
-            Row::Here | Row::Up | Row::Recent(_) => 0,
+            Row::Here | Row::Up | Row::Recent(_) | Row::Session(_) => 0,
             Row::Folder { depth, .. } | Row::Locked { depth, .. } => *depth,
         }
     }
@@ -179,6 +195,29 @@ fn branches(at: &Path, depth: usize, mut names: Vec<String>) -> Vec<Row> {
         .collect()
 }
 
+/// What the picker hands back when a row is confirmed: the folder to start the
+/// agent in, and the session to carry on there when the row was one.
+///
+/// One type for both, so there is one path from a chosen row to a running
+/// agent. A second way in for sessions would be a second place for the folder
+/// to be decided.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Chosen {
+    pub workspace: PathBuf,
+    pub session: Option<String>,
+}
+
+impl Chosen {
+    /// A fresh session in this folder, which is what every row that names a
+    /// folder means.
+    pub fn folder(workspace: PathBuf) -> Chosen {
+        Chosen {
+            workspace,
+            session: None,
+        }
+    }
+}
+
 pub struct Picker {
     folders: Box<dyn Folders>,
     /// The folder being listed.
@@ -198,6 +237,19 @@ pub struct Picker {
     /// Why `at` could not be read, when it could not. Worth saying out loud: an
     /// empty list looks exactly like an empty folder.
     trouble: Option<String>,
+    /// The saved sessions, while the list is showing those instead of the tree.
+    /// `None` is the folder list, which is what the picker opens on.
+    sessions: Option<Vec<Saved>>,
+    /// What time it was when they were read, so a row's age is decided once
+    /// rather than by a clock read while the window is drawing.
+    sessions_at: SystemTime,
+    /// What the session list says about itself: how many there are and how many
+    /// files could not be described.
+    note: Option<String>,
+    /// Why the last press did nothing, when it did nothing. A session whose
+    /// folder has been deleted cannot be resumed anywhere, and a button that
+    /// silently does not work is the worst answer to that.
+    refused: Option<String>,
     filter: String,
     /// The rows as they are now. Built once whenever anything they are made of
     /// changes, so what is drawn, what a click resolves against and what the
@@ -225,6 +277,10 @@ impl Picker {
             recents,
             inside: Vec::new(),
             trouble: None,
+            sessions: None,
+            sessions_at: SystemTime::UNIX_EPOCH,
+            note: None,
+            refused: None,
             filter: String::new(),
             rows: Vec::new(),
             cursor: 0,
@@ -273,6 +329,70 @@ impl Picker {
         self.trouble.as_deref()
     }
 
+    /// Whether the list is showing saved sessions rather than folders.
+    pub fn on_sessions(&self) -> bool {
+        self.sessions.is_some()
+    }
+
+    /// What the session list says about itself, for the line above it.
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
+    }
+
+    /// Why the last press did nothing, for the same line the filter is on.
+    pub fn refused(&self) -> Option<&str> {
+        self.refused.as_deref()
+    }
+
+    /// Show the saved sessions instead of the folders.
+    ///
+    /// The ones belonging to the folder being looked at come first, since that
+    /// is the one you are most likely to be carrying on with; the rest keep the
+    /// order they were read in, which is newest first.
+    pub fn show_sessions(&mut self, listing: Listing) {
+        self.show_sessions_at(listing, SystemTime::now());
+    }
+
+    /// The half of it that knows what time it is, so a test can say.
+    pub fn show_sessions_at(&mut self, listing: Listing, now: SystemTime) {
+        let Listing {
+            mut sessions,
+            skipped,
+        } = listing;
+        let here = self.at.clone();
+        // Stable, so within each group the reading order (newest first) holds.
+        sessions.sort_by_key(|saved| saved.workspace.as_deref() != Some(here.as_path()));
+        self.note = Some(note_for(sessions.len(), skipped.len()));
+        self.refused = None;
+        self.sessions = Some(sessions);
+        self.sessions_at = now;
+        // Typed against the folders, and it would leave most of the sessions
+        // dim for no reason anybody typed.
+        self.filter.clear();
+        self.rebuild();
+        self.cursor = 0;
+        self.first = 0;
+    }
+
+    /// Back to the folders. False when they were already showing, which is what
+    /// makes Escape fall through to closing the window.
+    pub fn show_folders(&mut self) -> bool {
+        if self.sessions.take().is_none() {
+            return false;
+        }
+        self.note = None;
+        self.refused = None;
+        self.filter.clear();
+        self.rebuild();
+        self.cursor = self
+            .rows
+            .iter()
+            .position(|row| *row == Row::Here)
+            .unwrap_or(0);
+        self.first = 0;
+        true
+    }
+
     /// What a row says on screen. The full path for anything naming a folder
     /// somewhere else, a bare name for a folder in the list.
     ///
@@ -286,7 +406,34 @@ impl Picker {
             Row::Recent(path) => path.display().to_string(),
             Row::Folder { name, .. } => name.clone(),
             Row::Locked { why, .. } => why.clone(),
+            Row::Session(saved) => self.session_label(saved),
         }
+    }
+
+    /// What a session row says: when it was, which folder it belongs to, and
+    /// the opening of the first thing that was said in it.
+    ///
+    /// In that order because that is the order they narrow by. The age and the
+    /// folder are short and fixed width-ish, so the message that identifies the
+    /// session starts in about the same column on every row; a long path first
+    /// would push it off the end of every row that has one.
+    fn session_label(&self, saved: &Saved) -> String {
+        let folder = match (&saved.workspace, saved.gone) {
+            (Some(path), true) => format!("{} (gone)", short_folder(path)),
+            (Some(path), false) => short_folder(path),
+            // Written by the CLI rather than by this window, so nothing here
+            // ever noted where it was, and the folder above the list is the one
+            // it would be resumed in.
+            (None, _) => String::from("this folder"),
+        };
+        let said = match saved.opening.is_empty() {
+            true => "nothing was said",
+            false => saved.opening.as_str(),
+        };
+        format!(
+            "{}  {folder}  {said}",
+            crate::sessions::ago(saved.when, self.sessions_at)
+        )
     }
 
     /// The folder a row names, or nothing when there is none (the root has no
@@ -299,6 +446,9 @@ impl Picker {
             Row::Recent(path) => Some(path.clone()),
             Row::Folder { path, .. } => Some(path.clone()),
             Row::Locked { .. } => None,
+            // Whatever was noted when it was started, which for a session the
+            // CLI wrote on its own is nothing at all.
+            Row::Session(saved) => saved.workspace.clone(),
         }
     }
 
@@ -321,6 +471,9 @@ impl Picker {
             Row::Recent(path) => self.hit(&path.display().to_string()),
             Row::Folder { name, .. } => self.hit(name),
             Row::Locked { of, .. } => self.hit(of),
+            // On the whole of what the row says, so a session is reachable by
+            // its folder or by a word from the first thing that was asked.
+            Row::Session(saved) => self.hit(&self.session_label(saved)),
         }
     }
 
@@ -512,30 +665,69 @@ impl Picker {
             Row::Folder { path, .. } => self.go_to(path),
             // A message, not a folder.
             Row::Locked { .. } => false,
+            // There is nothing to walk into: a session is a whole answer
+            // already, and walking would reorder the list under the cursor.
+            Row::Session(_) => false,
         }
     }
 
     /// List the folder above the one being listed.
+    ///
+    /// Nothing at all while the sessions are showing. The list is not the
+    /// folder's, so walking would change the order under the cursor and leave
+    /// the same rows on screen.
     pub fn walk_out(&mut self) -> bool {
+        if self.on_sessions() {
+            return false;
+        }
         let Some(up) = self.at.parent().map(Path::to_path_buf) else {
             return false;
         };
         self.go_to(up)
     }
 
-    /// Confirm the cursor's row: the folder to hand the agent, or nothing.
+    /// Confirm the cursor's row: what to start the agent with, or nothing.
     ///
     /// Nothing means the row was a way through the tree rather than a choice, in
     /// which case it has been walked. `..` reads as "go up" on screen and has to
     /// do that when it is confirmed; returning the parent as the workspace would
     /// open a folder nobody pointed at.
-    pub fn confirm(&mut self) -> Option<PathBuf> {
+    pub fn confirm(&mut self) -> Option<Chosen> {
         let row = self.rows.get(self.cursor).cloned()?;
         if row == Row::Up {
             self.walk_out();
             return None;
         }
-        self.path_of(&row)
+        self.chosen(&row)
+    }
+
+    /// What a row is worth as a choice.
+    ///
+    /// A session is a folder and an id together. One whose folder has been
+    /// deleted since is not a choice at all: `noob serve` is started in that
+    /// directory, and there is no honest guess at another one, so the press is
+    /// refused and the row says why rather than starting an agent somewhere
+    /// nobody named. A session written by the CLI, which this window has no note
+    /// of, resumes in the folder being looked at: that is the folder the row was
+    /// picked from, and the alternative is a session that can never be opened.
+    fn chosen(&mut self, row: &Row) -> Option<Chosen> {
+        let Row::Session(saved) = row else {
+            return self.path_of(row).map(Chosen::folder);
+        };
+        if saved.gone {
+            let gone = saved
+                .workspace
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            self.refused = Some(format!("{gone} is not there any more"));
+            return None;
+        }
+        self.refused = None;
+        Some(Chosen {
+            workspace: saved.workspace.clone().unwrap_or_else(|| self.at.clone()),
+            session: Some(saved.id.clone()),
+        })
     }
 
     /// What a double click on a row does.
@@ -544,14 +736,14 @@ impl Picker {
     /// opens: those are whole answers already. A row that is a step through the
     /// tree is walked into, which is what a double click does in every file
     /// manager.
-    pub fn double(&mut self, index: usize) -> Option<PathBuf> {
+    pub fn double(&mut self, index: usize) -> Option<Chosen> {
         // The row that was clicked, not the row the cursor is on: a click on a
         // row that is no longer there must not open whatever happens to be
         // under the cursor instead.
         let row = self.rows.get(index).cloned()?;
         self.point_at(index);
         match row {
-            Row::Here | Row::Recent(_) => self.path_of(&row),
+            Row::Here | Row::Recent(_) | Row::Session(_) => self.chosen(&row),
             Row::Up | Row::Folder { .. } => {
                 self.walk_in();
                 None
@@ -686,7 +878,10 @@ impl Picker {
             .rows
             .iter()
             .position(|row| {
-                matches!(row, Row::Recent(_) | Row::Folder { .. }) && self.matched(row)
+                matches!(
+                    row,
+                    Row::Recent(_) | Row::Folder { .. } | Row::Session(_)
+                ) && self.matched(row)
             })
             .or_else(|| self.match_from(0, true))
             .unwrap_or(0);
@@ -694,6 +889,14 @@ impl Picker {
     }
 
     fn rebuild(&mut self) {
+        // The sessions are the whole list while they are showing: there is no
+        // folder to stand in and no way out of one, because the rows are not a
+        // place in the tree.
+        if let Some(saved) = &self.sessions {
+            self.rows = saved.iter().cloned().map(Row::Session).collect();
+            self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
+            return;
+        }
         let mut rows = Vec::new();
         if self.at == self.start {
             rows.extend(
@@ -755,6 +958,34 @@ impl Picker {
             return true;
         }
         label.to_lowercase().contains(&self.filter.to_lowercase())
+    }
+}
+
+/// A folder as a session row says it: its own name, which is what tells two
+/// projects apart, and the whole path when it has no name (the root).
+fn short_folder(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// What the line above the session list says: how many there are, and how many
+/// files in the directory could not be described.
+///
+/// The skipped ones are counted out loud. A session that quietly did not appear
+/// reads as a session that was never saved, and these files are written by a
+/// process that can be killed between the write and the newline.
+fn note_for(listed: usize, skipped: usize) -> String {
+    let sessions = match listed {
+        0 => String::from("no saved sessions"),
+        1 => String::from("1 saved session"),
+        _ => format!("{listed} saved sessions"),
+    };
+    match skipped {
+        0 => sessions,
+        1 => format!("{sessions}, 1 file could not be read"),
+        _ => format!("{sessions}, {skipped} files could not be read"),
     }
 }
 
@@ -990,7 +1221,7 @@ mod tests {
         assert_eq!(picker.cursor(), 0);
         assert_eq!(
             picker.confirm(),
-            Some(PathBuf::from("/home/hec/workspace/noob-cli"))
+            Some(Chosen::folder(PathBuf::from("/home/hec/workspace/noob-cli")))
         );
 
         // A folder that has been moved or deleted since is dropped, rather than
@@ -1117,7 +1348,10 @@ mod tests {
         let desktop = before.iter().position(|l| l == "Desktop").unwrap();
         assert!(dimmed(&picker, desktop));
         assert!(picker.point_at(desktop));
-        assert_eq!(picker.confirm(), Some(PathBuf::from("/home/hec/Desktop")));
+        assert_eq!(
+            picker.confirm(),
+            Some(Chosen::folder(PathBuf::from("/home/hec/Desktop")))
+        );
 
         // Case does not matter, and it matches anywhere in the name.
         let mut picker = opened(&["/home/hec/models"]);
@@ -1243,11 +1477,14 @@ mod tests {
         let mut picker = opened(&["/home/hec/models"]);
         assert_eq!(
             picker.double(0),
-            Some(PathBuf::from("/home/hec/models")),
+            Some(Chosen::folder(PathBuf::from("/home/hec/models"))),
             "a remembered folder opens"
         );
         let here = picker.rows().iter().position(|r| *r == Row::Here).unwrap();
-        assert_eq!(picker.double(here), Some(PathBuf::from("/home/hec")));
+        assert_eq!(
+            picker.double(here),
+            Some(Chosen::folder(PathBuf::from("/home/hec")))
+        );
         // A row that is no longer there is not clamped onto its neighbour.
         assert_eq!(picker.double(99), None);
         assert!(!picker.point_at(99));
@@ -1528,5 +1765,246 @@ mod tests {
         assert!(legacy.exists(), "the old file was deleted");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// When the fixture sessions are read, and when they were written. Fixed,
+    /// so the ages the rows say are the same on every run.
+    fn clock() -> SystemTime {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000)
+    }
+
+    fn saved(id: &str, at: Option<&str>, said: &str, ago: u64) -> Saved {
+        Saved {
+            id: String::from(id),
+            when: clock() - std::time::Duration::from_secs(ago),
+            workspace: at.map(PathBuf::from),
+            gone: false,
+            opening: String::from(said),
+        }
+    }
+
+    /// Three sessions and one file that could not be read: one belonging to the
+    /// folder being looked at, one to another folder, one to a folder that has
+    /// since been deleted, and one nothing ever noted a folder for.
+    fn some_sessions() -> Listing {
+        let mut deleted = saved("gone", Some("/home/hec/deleted"), "third", 3 * 86_400);
+        deleted.gone = true;
+        Listing {
+            sessions: vec![
+                saved("elsewhere", Some("/home/hec/workspace"), "second", 7200),
+                deleted,
+                saved("nowhere", None, "fourth", 8 * 86_400),
+                saved("here", Some("/home/hec"), "first", 300),
+            ],
+            skipped: vec![String::from("half: no meta line")],
+        }
+    }
+
+    fn showing(picker: &mut Picker) {
+        picker.show_sessions_at(some_sessions(), clock());
+    }
+
+    /// The same box, the same cursor and the same keys, listing what the agent
+    /// has already written instead of what is on the disk. The sessions for the
+    /// folder being looked at come first, because that is the one you are most
+    /// likely to be carrying on with.
+    #[test]
+    fn the_list_shows_the_saved_sessions_and_the_folder_you_are_on_comes_first() {
+        let mut picker = opened(&["/home/hec/models"]);
+        assert!(!picker.on_sessions());
+        showing(&mut picker);
+        assert!(picker.on_sessions());
+
+        let ids: Vec<String> = picker
+            .rows()
+            .iter()
+            .map(|row| match row {
+                Row::Session(saved) => saved.id.clone(),
+                other => panic!("not a session: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            ["here", "elsewhere", "gone", "nowhere"],
+            "the folder being looked at first, then the order they were read in"
+        );
+        // Nothing else is in the list: the folder you are in and the way out of
+        // it are places in a tree, and these rows are not in one.
+        assert_eq!(picker.rows().len(), 4);
+        assert_eq!(picker.cursor(), 0);
+        assert_eq!(picker.first(), 0);
+
+        // What a row says: how long ago it was, which folder it belongs to and
+        // enough of the first thing that was said to recognise it.
+        assert_eq!(labels(&picker)[0], "5m ago  hec  first");
+        assert_eq!(labels(&picker)[1], "2h ago  workspace  second");
+        assert_eq!(
+            labels(&picker)[2],
+            "3d ago  deleted (gone)  third",
+            "a folder that is not there any more says so on the row"
+        );
+        assert_eq!(
+            labels(&picker)[3],
+            "1w ago  this folder  fourth",
+            "a session the CLI wrote on its own opens in the folder above the list"
+        );
+
+        // And the line above the list says how many there are, including the
+        // file that could not be described.
+        assert_eq!(
+            picker.note(),
+            Some("4 saved sessions, 1 file could not be read")
+        );
+        assert_eq!(picker.refused(), None);
+
+        // Back to the folders, and the second press has nothing left to close,
+        // which is what makes Escape fall through to closing the window.
+        assert!(picker.show_folders());
+        assert!(!picker.on_sessions());
+        assert_eq!(picker.note(), None);
+        assert_eq!(picker.row(picker.cursor()), Some(&Row::Here));
+        assert!(labels(&picker).contains(&String::from("workspace")));
+        assert!(!picker.show_folders());
+    }
+
+    /// Confirming a session hands back the folder and the id together, which is
+    /// what starts `noob serve --resume`.
+    #[test]
+    fn choosing_a_session_carries_its_id_and_the_folder_it_belongs_to() {
+        let mut picker = opened(&[]);
+        showing(&mut picker);
+        assert_eq!(
+            picker.confirm(),
+            Some(Chosen {
+                workspace: PathBuf::from("/home/hec"),
+                session: Some(String::from("here")),
+            })
+        );
+
+        // A double click is the same answer: a session is a whole choice, so
+        // there is nothing to walk into.
+        let mut picker = opened(&[]);
+        showing(&mut picker);
+        assert_eq!(
+            picker.double(1),
+            Some(Chosen {
+                workspace: PathBuf::from("/home/hec/workspace"),
+                session: Some(String::from("elsewhere")),
+            })
+        );
+
+        // One nothing noted a folder for opens in the folder the list was
+        // opened from, which is the folder it was picked in.
+        let mut picker = opened(&[]);
+        showing(&mut picker);
+        assert!(picker.point_at(3));
+        assert_eq!(
+            picker.confirm(),
+            Some(Chosen {
+                workspace: PathBuf::from("/home/hec"),
+                session: Some(String::from("nowhere")),
+            })
+        );
+    }
+
+    /// A session whose folder has been deleted cannot be resumed into thin air:
+    /// the press is refused and the picker says why, rather than starting an
+    /// agent in a directory nobody named.
+    #[test]
+    fn a_session_whose_folder_has_gone_is_refused_out_loud() {
+        let mut picker = opened(&[]);
+        showing(&mut picker);
+        assert!(picker.point_at(2));
+        assert_eq!(picker.confirm(), None);
+        assert_eq!(
+            picker.refused(),
+            Some("/home/hec/deleted is not there any more")
+        );
+        assert_eq!(picker.double(2), None, "and a double click is not a way in");
+
+        // Choosing one that is still there clears it, so the message on screen
+        // is about the press that was just made.
+        assert!(picker.point_at(0));
+        assert!(picker.confirm().is_some());
+        assert_eq!(picker.refused(), None);
+
+        // Leaving the list clears it too: it is about a row that is no longer
+        // on screen.
+        assert!(picker.point_at(2));
+        assert_eq!(picker.confirm(), None);
+        assert!(picker.show_folders());
+        assert_eq!(picker.refused(), None);
+    }
+
+    /// The keys the folder list has, over the session list: typing dims what it
+    /// did not match, the arrows walk the matches, and the two that walk the
+    /// tree do nothing because there is no tree here.
+    #[test]
+    fn the_session_list_takes_the_same_keys_as_the_folder_list() {
+        let mut picker = opened(&[]);
+        showing(&mut picker);
+        let before = labels(&picker);
+
+        assert!(picker.type_text("second"));
+        assert_eq!(labels(&picker), before, "every row is still there");
+        let dim: Vec<usize> = (0..picker.rows().len())
+            .filter(|index| dimmed(&picker, *index))
+            .collect();
+        assert_eq!(dim, vec![0, 2, 3]);
+        assert_eq!(picker.cursor(), 1, "the cursor lands on what was typed for");
+        assert!(!picker.step(true), "and there is no match below it");
+        assert!(!picker.step(false), "or above it");
+
+        // A word from the folder finds it too, since the row says both.
+        assert!(picker.clear_filter());
+        assert!(picker.type_text("deleted"));
+        assert_eq!(picker.cursor(), 2);
+        assert!(picker.clear_filter());
+
+        // The scroll window is the list's, the same as the folders'.
+        assert!(picker.scroll(2, true, 2));
+        assert_eq!((picker.first(), picker.cursor()), (2, 0));
+        assert!(picker.reveal(2));
+        assert_eq!(picker.first(), 0);
+        assert!(picker.thumb(2).is_some());
+
+        // Nothing to walk into and nothing to open: the rows are not places in
+        // a tree, and walking would reorder the list under the cursor.
+        assert!(!picker.walk_in());
+        assert!(!picker.walk_out());
+        assert!(!picker.toggle(0));
+        assert_eq!(picker.row(0).and_then(Row::open), None);
+        assert_eq!(picker.at(), Path::new("/home/hec"));
+
+        // Backspace with nothing typed is the way out of a folder, and there is
+        // no folder here either.
+        assert!(!picker.backspace());
+    }
+
+    /// A directory with nothing in it is a list that says so, not an empty box.
+    #[test]
+    fn no_saved_sessions_at_all_is_a_line_that_says_so() {
+        let mut picker = opened(&[]);
+        picker.show_sessions_at(Listing::default(), clock());
+        assert!(picker.on_sessions());
+        assert!(picker.rows().is_empty());
+        assert_eq!(picker.note(), Some("no saved sessions"));
+        assert_eq!(picker.confirm(), None);
+        assert!(!picker.step(true));
+        assert!(!picker.reveal(8));
+
+        // One is one, and the count of what could not be read is its own
+        // sentence rather than a number nobody can parse.
+        picker.show_sessions_at(
+            Listing {
+                sessions: vec![saved("only", None, "hello", 60)],
+                skipped: vec![String::from("a: no meta line"), String::from("b: no meta line")],
+            },
+            clock(),
+        );
+        assert_eq!(
+            picker.note(),
+            Some("1 saved session, 2 files could not be read")
+        );
     }
 }

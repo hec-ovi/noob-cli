@@ -40,6 +40,7 @@ mod picker;
 mod prompt;
 mod scroll;
 mod select;
+mod sessions;
 mod settings;
 mod skin;
 mod state;
@@ -47,7 +48,7 @@ mod syntax;
 mod totals;
 mod view;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -64,7 +65,7 @@ use dock::{Dock, Space, View};
 use link::{Incoming, Link};
 use menu::{Item, Menu, Target};
 use monitor::Monitor;
-use picker::Picker;
+use picker::{Chosen, Picker};
 use settings::Settings;
 use prompt::Prompt;
 use skin::Skin;
@@ -220,7 +221,11 @@ fn menu_for(
         Hit::Menu | Hit::MenuRow(_) => None,
         // The picker is not a widget: there is no pane to close, no settings
         // behind it, and nothing in it to select.
-        Hit::Picker | Hit::PickerRow(_) | Hit::PickerMark(_) | Hit::PickerOpen => None,
+        Hit::Picker
+        | Hit::PickerRow(_)
+        | Hit::PickerMark(_)
+        | Hit::PickerOpen
+        | Hit::PickerSessions => None,
         // Neither is the settings panel. A Settings row on a menu opened over
         // the settings panel would be a row that opens what is already open,
         // and there is no pane behind it to close.
@@ -520,26 +525,36 @@ impl App {
         Some((view, layout.content(space)))
     }
 
-    /// Start the agent in `workspace`. A failure is shown in the window rather
-    /// than printed to a terminal nobody is watching.
+    /// Start the agent on what was chosen: a folder, and the session to carry on
+    /// in it when the row was a saved one. A failure is shown in the window
+    /// rather than printed to a terminal nobody is watching.
+    ///
+    /// One argument for both, so the id cannot be dropped on the way from the
+    /// row that was pressed to the process that is started. `serve` takes
+    /// `--resume <id>` and replays the transcript itself; nothing here reads it.
     ///
     /// Re-entrant: the picker calls it after the window is already up, so an
     /// agent from an earlier call has to be let go first. Nothing clears the
     /// transcript, because the only way here twice is through the picker before
     /// a turn has been taken and what is in it is the picker's own messages.
-    fn connect(&mut self, workspace: PathBuf) {
+    fn connect(&mut self, chosen: Chosen) {
         if let Some(mut link) = self.link.take() {
             link.shutdown();
         }
         self.trouble = None;
         let program = std::env::var("NOOB_BIN").unwrap_or_else(|_| String::from("noob"));
         let proxy = self.proxy.clone();
-        match Link::spawn(&program, &workspace, None, move || {
-            let _ = proxy.send_event(Wake);
-        }) {
+        match Link::spawn(
+            &program,
+            &chosen.workspace,
+            chosen.session.as_deref(),
+            move || {
+                let _ = proxy.send_event(Wake);
+            },
+        ) {
             Ok(link) => {
                 self.link = Some(link);
-                self.state.workspace = workspace.display().to_string();
+                self.state.workspace = chosen.workspace.display().to_string();
             }
             Err(message) => {
                 self.trouble = Some(message.clone());
@@ -565,20 +580,79 @@ impl App {
         self.dirty = true;
     }
 
-    /// A folder was chosen: remember it and start the agent there.
-    fn choose(&mut self, workspace: PathBuf) {
+    /// A row was chosen: remember its folder and start the agent on it.
+    ///
+    /// A resumed session remembers its folder too. It is a folder you have just
+    /// said you are working in, which is the whole of what the list is for.
+    fn choose(&mut self, chosen: Chosen) {
         self.picker = None;
         if let Some(file) = picker::recents_path() {
             // Read again immediately before writing, rather than reusing what
             // the picker opened with, so a second window that chose a folder in
             // the meantime does not have its entry erased.
-            let list = picker::remember(&picker::load_recents(&file), &workspace);
+            let list = picker::remember(&picker::load_recents(&file), &chosen.workspace);
             // A recents file that cannot be written costs the next launch one
             // keystroke. Not worth a line in a conversation that is about to
             // start.
             let _ = picker::save_recents(&file, &list);
         }
-        self.connect(workspace);
+        self.connect(chosen);
+    }
+
+    /// The button beside Open: the saved sessions, or back to the folders.
+    ///
+    /// The reading happens here rather than in the picker because this is the
+    /// half of the window that is allowed to touch the disk, and it happens on
+    /// the press rather than when the window opens: a machine with a year of
+    /// sessions on it should not pay for the list nobody asked to see.
+    fn toggle_sessions(&mut self) {
+        let showing = self.picker.as_ref().is_some_and(Picker::on_sessions);
+        let listing = (!showing).then(|| self.saved_sessions());
+        if let Some(picker) = self.picker.as_mut() {
+            match listing {
+                Some(listing) => picker.show_sessions(listing),
+                None => {
+                    picker.show_folders();
+                }
+            }
+        }
+        self.dirty = true;
+        self.reveal_picker_cursor();
+    }
+
+    /// Every session on disk, with the folder each one was started in.
+    ///
+    /// Nowhere to read from is an empty list rather than a refusal: that is a
+    /// machine with no home directory, where there are no sessions either.
+    fn saved_sessions(&self) -> sessions::Listing {
+        let index = sessions::index_path()
+            .map(|path| sessions::load_index(&path))
+            .unwrap_or_default();
+        match sessions::dir() {
+            Some(dir) => sessions::read(&dir, &index, &picker::Disk),
+            None => sessions::Listing::default(),
+        }
+    }
+
+    /// Write down which folder a session was started in.
+    ///
+    /// The transcript the agent writes does not record it, so this is the only
+    /// note anywhere that ties the two together, and without it a session in the
+    /// list would have nowhere to be resumed. On the frame that says a session
+    /// has started, which is once per agent.
+    fn remember_session(&self, id: &str, workspace: &str) {
+        let Some(path) = sessions::index_path() else {
+            return;
+        };
+        if id.is_empty() || workspace.is_empty() {
+            return;
+        }
+        // Read again immediately before writing, so a second window that
+        // started a session in the meantime keeps its note.
+        let index = sessions::load_index(&path).plus(id, Path::new(workspace));
+        // A note that cannot be written costs a row in the session list its
+        // folder. Not worth a line in a conversation that is starting.
+        let _ = sessions::save_index(&path, &index);
     }
 
     /// Open the settings panel over the window.
@@ -777,6 +851,13 @@ impl App {
     /// is the whole keyboard rather than a branch inside [`App::key`].
     fn key_in_picker(&mut self, event: &winit::event::KeyEvent, event_loop: &ActiveEventLoop) {
         let rows = self.picker_rows();
+        // The same swap the button beside Open does, before the picker is
+        // borrowed: reading the sessions off the disk is the window's job.
+        if matches!(event.logical_key.as_ref(), Key::Character("r")) && self.modifiers.control_key()
+        {
+            self.toggle_sessions();
+            return;
+        }
         let Some(picker) = self.picker.as_mut() else {
             return;
         };
@@ -799,10 +880,11 @@ impl App {
                 true
             }
             // Nothing has started yet, so there is nothing to cancel and no
-            // pane to fall back to: Escape drops what has been typed, and with
-            // nothing typed it closes the window.
+            // pane to fall back to: Escape drops what has been typed, then the
+            // session list if that is what is showing, and with neither there
+            // it closes the window.
             Key::Named(NamedKey::Escape) => {
-                if !picker.clear_filter() {
+                if !picker.clear_filter() && !picker.show_folders() {
                     event_loop.exit();
                 }
                 true
@@ -818,8 +900,8 @@ impl App {
                 _ => false,
             },
         };
-        if let Some(workspace) = chosen {
-            self.choose(workspace);
+        if let Some(chosen) = chosen {
+            self.choose(chosen);
             return;
         }
         self.reveal_picker_cursor();
@@ -840,9 +922,15 @@ impl App {
         }
     }
 
-    /// A press inside the picker: a row, the mark that opens one, or the button
-    /// that confirms.
+    /// A press inside the picker: a row, the mark that opens one, or one of the
+    /// two buttons.
     fn click_in_picker(&mut self, hit: Hit, double: bool) {
+        // Before the picker is borrowed, because swapping the list reads the
+        // disk and that is the window's job rather than the model's.
+        if hit == Hit::PickerSessions {
+            self.toggle_sessions();
+            return;
+        }
         let mut chosen = None;
         if let Some(picker) = self.picker.as_mut() {
             self.dirty |= match hit {
@@ -864,7 +952,7 @@ impl App {
             };
         }
         match chosen {
-            Some(workspace) => self.choose(workspace),
+            Some(chosen) => self.choose(chosen),
             None => self.reveal_picker_cursor(),
         }
     }
@@ -879,6 +967,11 @@ impl App {
                 Incoming::Frame(event) => {
                     let at = self.epoch.elapsed().as_secs_f64();
                     turn_ended |= matches!(event, noob_proto::Event::TurnEnd { .. });
+                    // The one frame that says which session is running and where
+                    // it is running, which is the note the session list needs.
+                    if let noob_proto::Event::SessionStart { id, workspace, .. } = &event {
+                        self.remember_session(id, workspace);
+                    }
                     self.dirty |= self.state.apply_at(event, Some(at));
                 }
                 Incoming::Diagnostic(line) => {
@@ -1049,9 +1142,13 @@ impl App {
                 self.open_failure_under_pointer(space);
             }
             Hit::Body(space) => self.begin_selection(space),
-            // All three are handled above, while the picker is up, which is the
+            // All four are handled above, while the picker is up, which is the
             // only time any of them can be hit at all.
-            Hit::PickerRow(_) | Hit::PickerMark(_) | Hit::PickerOpen | Hit::Picker => {}
+            Hit::PickerRow(_)
+            | Hit::PickerMark(_)
+            | Hit::PickerOpen
+            | Hit::PickerSessions
+            | Hit::Picker => {}
             // The same for the four the settings panel owns.
             Hit::SettingsRow(_) | Hit::SettingsValue(_) | Hit::SettingsClose | Hit::Settings => {}
             Hit::Input => {
@@ -1899,7 +1996,7 @@ impl ApplicationHandler<Wake> for App {
         // there is nothing to ask. Without one, the picker is the first thing on
         // screen and it calls `connect` itself.
         match self.workspace.take() {
-            Some(workspace) => self.connect(workspace),
+            Some(workspace) => self.connect(Chosen::folder(workspace)),
             None => self.open_picker(),
         }
     }

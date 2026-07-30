@@ -14,6 +14,10 @@ name = "no0b"
 path = "src/main.rs"
 
 [dependencies]
+# The agent's session files are JSONL, and the picker reads the head of one to
+# say what a saved session was about. Already in the graph under `noob-proto`,
+# so naming it here costs no crate.
+serde_json.workspace = true
 noob-proto.workspace = true
 noob-gpu.workspace = true
 noob-draw.workspace = true
@@ -22,8 +26,3 @@ wgpu.workspace = true
 winit.workspace = true
 pollster.workspace = true
 copypasta = "0.10.2"
-
-[dev-dependencies]
-# Test-only: tool arguments arrive as an opaque JSON value, so building one
-# is how a test names what the model asked for.
-serde_json.workspace = true

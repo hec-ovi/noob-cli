@@ -164,3 +164,110 @@ impl Drop for Link {
         let _ = self.child.wait();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    /// A stand-in for the agent: a script that writes down how it was called and
+    /// where it was called from, then exits.
+    ///
+    /// Starting a real `noob serve` here would put a model behind a unit test.
+    /// What is being checked is the one thing this module decides, which is the
+    /// command line the child is given.
+    fn stub(dir: &Path, name: &str, log: &Path) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nfor arg in \"$@\"; do echo \"$arg\" >> {log}; done\npwd >> {log}\n",
+                log = log.display()
+            ),
+        )
+        .expect("a stub agent");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("a runnable stub");
+        path
+    }
+
+    /// The `lines` the stub wrote, once it has run. The child is started and
+    /// reaped by the operating system in its own time, so this waits for the
+    /// whole of what it was going to say rather than reading it half written.
+    fn written(log: &Path, lines: usize) -> Vec<String> {
+        for _ in 0..200 {
+            if let Ok(text) = std::fs::read_to_string(log)
+                && text.lines().count() >= lines
+            {
+                return text.lines().map(str::to_string).collect();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the stub agent never ran: {}", log.display());
+    }
+
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("no0b-link-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        dir
+    }
+
+    /// The session chosen in the picker has to reach the agent, or resuming one
+    /// silently starts a fresh conversation in the right folder, which looks
+    /// exactly like a session whose transcript has been lost.
+    #[test]
+    fn a_chosen_session_reaches_the_agent_as_resume() {
+        let dir = temp("resume");
+        let workspace = dir.join("workspace");
+        std::fs::create_dir_all(&workspace).expect("a workspace");
+        let log = dir.join("called-with");
+        let program = stub(&dir, "resuming-noob", &log);
+
+        let link = Link::spawn(
+            program.to_str().expect("a path"),
+            &workspace,
+            Some("19fb08fb0cf-55ace-0-ee6569bb"),
+            || {},
+        )
+        .expect("the stub starts");
+        assert_eq!(
+            written(&log, 4),
+            [
+                "serve",
+                "--resume",
+                "19fb08fb0cf-55ace-0-ee6569bb",
+                workspace.to_str().expect("a path"),
+            ],
+            "the id and the folder both have to arrive"
+        );
+        drop(link);
+
+        // And with no session chosen the flag is not there at all, rather than
+        // being passed empty.
+        let plain_log = dir.join("called-plain");
+        let plain = stub(&dir, "fresh-noob", &plain_log);
+        let link = Link::spawn(plain.to_str().expect("a path"), &workspace, None, || {})
+            .expect("the stub starts");
+        assert_eq!(
+            written(&plain_log, 2),
+            ["serve", workspace.to_str().expect("a path")]
+        );
+        drop(link);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A program that is not there is a message in the window, not a panic and
+    /// not a window that never opens.
+    #[test]
+    fn an_agent_that_cannot_be_started_says_so() {
+        let dir = temp("missing");
+        let trouble = Link::spawn("no0b-nothing-of-this-name", &dir, None, || {})
+            .err()
+        .expect("there is no such program");
+        assert!(trouble.contains("NOOB_BIN"), "{trouble}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
