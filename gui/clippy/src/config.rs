@@ -13,7 +13,7 @@
 //! so [`ALIASES`] maps the old name onto the current one.
 //!
 //! The colors ship as commented defaults rather than live lines. An explicit
-//! key beats the `theme` it belongs to, so a file that spelled all 35 colors
+//! key beats the `theme` it belongs to, so a file that spelled all 46 colors
 //! out would make every theme but the first one do nothing.
 
 use std::io::Write;
@@ -193,10 +193,10 @@ pub const GAUGE_KEYS: [&str; 10] = [
 /// the window: a pane of eight readings in a single colour reads as one texture,
 /// and which block belongs to which label is then a matter of counting rows.
 ///
-/// Ten slots because that is how many readings the widest pane has (the session
-/// monitor) and every reading in one pane has to differ from every other. A
-/// theme leaves these alone, the way it leaves the tool and view hues alone:
-/// they name the metric.
+/// Ten slots so no pane ever has to repeat one: the widest carries five
+/// readings today (hardware on an AMD card, and both LLM monitors), and nine of
+/// the ten are spoken for. A theme leaves these alone, the way it leaves the
+/// tool and view hues alone: they name the metric.
 const GAUGES: [[u8; 3]; 10] = [
     [0xf0, 0x65, 0x5c], // 1, red
     [0xf5, 0x9a, 0x4f], // 2, orange

@@ -56,8 +56,10 @@ outside your home directory. `install.sh --uninstall` takes it all back out.
 Installing also removes what the old CLIppy name left behind, the launcher, the
 entry and both icons, so the menu holds one entry rather than two with the older
 one starting nothing.
-Not a Flatpak or an AppImage: the binary is static apart from the system's own
-GPU drivers, and those are exactly the thing a bundle cannot ship.
+Not a Flatpak or an AppImage. The binary links the system's C library and loads
+the GPU and display libraries the machine already has, which is exactly the set
+a bundle cannot ship: a Vulkan loader inside the sandbox has to find your
+driver, and your driver is outside it.
 
 The icon is a console drawn as a hollow wire with `>_` inside it: one path of
 four subpaths in one flat colour, on a 128 grid with a module of 8 so every edge
@@ -101,7 +103,7 @@ blocking until you touch it.
 
 | view | carries |
 |---|---|
-| ACTIVITY | every call, one colour and one tag per tool: bash, read, ls, glob, grep, write, edit, web, skill, mcp, agent, plan, plus a running command's output as it arrives |
+| ACTIVITY | every call, one colour and one tag per tool: bash, read, ls, glob, grep, context, write, edit, web, skill, mcp, agent, plan, and one for anything else, plus a running command's output as it arrives |
 | PLAN | the checklist, straight from the plan tool's own arguments |
 | AGENTS | sub-agents: their tool set, their brief, the last thing each one said, and how it ended |
 | HARDWARE | CPU and RAM, plus GPU, VRAM and GTT on an AMD card |
@@ -355,10 +357,10 @@ They share exactly one thing, `crates/noob-proto`, by path.
 
 NO0B has its own ceiling, 40 MiB and 400 crates, enforced by
 `./dev.sh gui-check` the same way the CLI's is. It currently uses 13.2 MiB and
-147 crates. Most of the size is one asset: the symbol font is embedded rather
-than looked for on the system, because a glyph a machine does not have draws as
-nothing at all. Five of the crates are the clipboard: a copy has to reach the
-display server, and Wayland and X11 do not agree on how.
+147 crates. The largest single thing in the binary is the symbol font, 2.4 MiB,
+embedded rather than looked for on the system because a glyph a machine does not
+have draws as nothing at all. Five of the crates are the clipboard: a copy has
+to reach the display server, and Wayland and X11 do not agree on how.
 
 ## Transparency is probed, never assumed
 
@@ -368,10 +370,12 @@ falls back to fully opaque, which looks deliberate rather than broken.
 
 ## What is not here yet
 
-Grid tiling, voice, and real tree-sitter highlighting. The file pane uses a small scanner instead: comments,
-strings, numbers and keywords, chosen by file extension. Real grammars are the
-right answer for a full editor view and are also eight crates and several
-megabytes, which is a trade worth making later and not now.
+Splitting a space in two. The grid is capped at 2x2 and the three spaces stay
+three spaces; what moves is where the dividers sit. Voice is not here either.
+Nor is real tree-sitter highlighting: the file pane uses a small scanner
+instead, comments, strings, numbers and keywords, chosen by file extension.
+Real grammars are the right answer for a full editor view and are also eight
+crates and several megabytes, which is a trade worth making later and not now.
 
 The window will not resize past 2200x1400. Unbounded is not useful: a
 conversation four thousand pixels wide is one long line per paragraph and the

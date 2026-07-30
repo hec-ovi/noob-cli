@@ -3,12 +3,15 @@
 Open one folder, not the repo. Find the thing you want to change on the left and
 open only what the right column names.
 
-## CLIppy, the GPU window (`gui/`)
+## NO0B, the GPU window (`gui/`)
+
+The folder is `gui/clippy` because that was the product's first name. The
+package, the binary and everything a user sees are `no0b`.
 
 | You want to change | Open |
 |---|---|
 | How a line of text becomes rows on screen: wrapping, scroll windows, selection bands, the scrollbar's extent | `gui/layers/text-geometry/CONTRACT.md` |
-| Which panel sits where, tabs, drag and drop, splits | `gui/clippy/src/dock.rs` and the `Layout` half of `gui/clippy/src/view.rs` |
+| Which panel sits where, tabs, drag and drop, where the two dividers sit | `gui/clippy/src/dock.rs` and the `Layout` half of `gui/clippy/src/view.rs` |
 | What a frame looks like: panels, tabs, gauges, the title bar | `gui/clippy/src/view.rs` |
 | Colors, transparency, the palette | `gui/clippy/src/skin.rs`, keys in `gui/clippy/src/config.rs` |
 | Settings file format and its defaults | `gui/clippy/src/config.rs` |
