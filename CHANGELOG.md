@@ -287,7 +287,10 @@ CLI's behaviour is unchanged; only its version moved.
   written out at eight call sites and disagreed with itself at three. Ships with
   a contract, JSON schemas, fixtures that must be rejected, and its own tests.
   At 1.1.0 it also converts a top-anchored position, which is what a list wants,
-  into the scrollback everything else there speaks.
+  into the scrollback everything else there speaks. At 1.2.0 the contract
+  declares the two operations callers were already using without one, the height
+  of a single line and the scrollback bound, so nothing crosses that boundary
+  undeclared.
 - A build stamp in the title bar. The crate version cannot tell two test builds
   apart, so the commit is stamped in at build time, with a trailing plus when
   the tree has uncommitted changes.
