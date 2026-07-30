@@ -744,14 +744,20 @@ Buffers:          100000 kB
         }
     }
 
-    /// Sampling forever must not grow anything. The three lists are replaced on
-    /// every read rather than appended to, so a window left open overnight
-    /// holds one sample, not a night of them.
+    /// Sampling forever must not grow anything. Every list is replaced on each
+    /// read rather than appended to, so a window left open overnight holds one
+    /// sample and not a night of them. There used to be a ring of past readings
+    /// behind these, kept for a graph nothing ever drew.
+    ///
+    /// Only the two token panes are counted. The hardware list is what the
+    /// machine reports, and its CPU row is a difference between two reads of
+    /// `/proc/stat`, so two samples inside one jiffy legitimately produce no CPU
+    /// reading at all.
     #[test]
     fn sampling_forever_holds_one_reading_per_row() {
         let mut monitor = bare();
         let mut state = crate::state::State::new();
-        let mut first = 0;
+        let mut first = Vec::new();
         for n in 0..300 {
             state.apply(noob_proto::Event::UsageReport {
                 usage: noob_proto::Usage {
@@ -762,10 +768,18 @@ Buffers:          100000 kB
                 },
             });
             monitor.sample(&state);
+            let keys: Vec<&str> = monitor
+                .context()
+                .iter()
+                .chain(monitor.session().iter())
+                .map(|gauge| gauge.key)
+                .collect();
             if n == 0 {
-                first = monitor.hardware().len() + monitor.context().len();
+                first = keys;
+            } else {
+                assert_eq!(keys, first, "sample {n} carries a different set of rows");
             }
         }
-        assert_eq!(monitor.hardware().len() + monitor.context().len(), first);
+        assert!(!first.is_empty(), "a sampled monitor has readings");
     }
 }

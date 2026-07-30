@@ -202,6 +202,12 @@ impl Rect {
     /// Corner bits for [`Rect::chamfer`], clockwise from the top left. Held as
     /// a mask rather than four booleans because it travels to the shader as one
     /// float.
+    ///
+    /// Only `TOP_RIGHT` has a caller: the skin cuts one corner. The other three
+    /// are not dead code waiting to be swept, they are the Rust half of a shader
+    /// contract. The fragment stage loops over all four bits, so dropping the
+    /// names would leave a capability nothing can ask for and an `EVERY_CORNER`
+    /// mask covering corners with no name.
     pub const TOP_LEFT: u32 = 1;
     pub const TOP_RIGHT: u32 = 2;
     pub const BOTTOM_RIGHT: u32 = 4;
