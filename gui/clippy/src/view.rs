@@ -2437,15 +2437,20 @@ fn pane_edges(scene: &mut Scene, panel: Panel, rgba: [f32; 4]) {
 /// A tab is not a button. Both states carry the pane's own surface and the same
 /// cut corner the pane has, so the tab reads as the top of the pane; what says
 /// which one is showing is weight. The showing tab is that surface at full
-/// strength with an accent line in the colour of what it holds, the rest are
-/// the same colour at a lower alpha. A filled block over a filled strip is what
-/// made these look like a row of buttons.
+/// strength with an accent line along its top, the rest are the same colour at
+/// a lower alpha. A filled block over a filled strip is what made these look
+/// like a row of buttons.
+///
+/// One green for every view, not a hue each. Nine hues on nine tabs is a
+/// harlequin strip, and it was answering a question nobody asked: which pane
+/// this is is written on it, and all the line has to say is which one you are
+/// looking at.
 ///
 /// `Skin::tab` is exactly `Skin::panel`, and the showing tab sits flush on the
 /// pane, so the two composite to one surface with nothing between them. That is
 /// the other half of losing the line under the strip ([`pane_edges`]): a step in
 /// colour where the line was is the same complaint as the line.
-fn tab_block(scene: &mut Scene, skin: &Skin, tab: Panel, active: bool, accent: [f32; 4]) {
+fn tab_block(scene: &mut Scene, skin: &Skin, tab: Panel, active: bool) {
     let cut = cut_of(tab);
     scene.rect(
         tab.fill(if active { skin.tab } else { skin.tab_idle })
@@ -2456,7 +2461,10 @@ fn tab_block(scene: &mut Scene, skin: &Skin, tab: Panel, active: bool, accent: [
     }
     // Stopped where the cut starts. Run to the full width and the last pixels
     // of the line hang in a corner that is not there any more.
-    scene.rect(Panel::new(tab.x, tab.y, (tab.w - cut).max(1.0), ACCENT_H.min(tab.h)).fill(accent));
+    scene.rect(
+        Panel::new(tab.x, tab.y, (tab.w - cut).max(1.0), ACCENT_H.min(tab.h))
+            .fill(skin.tab_accent),
+    );
 }
 
 /// The two arrows at the right end of a strip that holds more tabs than it can
@@ -2527,7 +2535,7 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
     for (view, panel) in &placed.tabs {
         let active = slot.active() == Some(*view);
         let lifted = frame.drag.is_some_and(|drag| drag.view == *view);
-        tab_block(scene, skin, *panel, active, skin.view(*view));
+        tab_block(scene, skin, *panel, active);
         // Not showing reads as not showing. This was the title tint, as strong
         // as the showing tab's, which left the fill to carry the whole
         // difference and is why the fill had to be so heavy.
@@ -3332,7 +3340,7 @@ fn explorer(scene: &mut Scene, frame: &Frame, list: Panel) {
             // in a colour of its own: the pane is already a surface, and a block
             // standing on it is what made the old tabs read as buttons.
             scene.rect(row.fill(skin.strip));
-            scene.rect(Panel::new(row.x, row.y, MARK_W, row.h).fill(skin.view(View::Files)));
+            scene.rect(Panel::new(row.x, row.y, MARK_W, row.h).fill(skin.tab_accent));
         }
         // A file compaction dropped is still worth reading; it is just no longer
         // what the agent is holding, and the row says which.
@@ -3670,11 +3678,16 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
         match entry {
             // A heading is the only thing on its row, and it gets the whole
             // width: `WHICH PANES OPEN` is longer than a label column.
+            //
+            // In the same green the showing tab's line is drawn in. It was the
+            // ordinary text tint, which is what the settings under it are
+            // written in, so the sections of a sixty row list did not separate
+            // from their contents at a glance.
             SettingRow::Heading(name) => say(
                 scene,
-                vec![Run::tinted(clip(name, cols), skin.title)],
+                vec![Run::tinted(clip(name, cols), skin.good)],
                 Panel::new(text_x, row.y, (row.w - MARK_W - 3.0).max(1.0), line),
-                skin.title,
+                skin.good,
             ),
             SettingRow::Reading { label, value } => {
                 say(
@@ -4614,11 +4627,11 @@ mod tests {
             .copied()
     }
 
-    /// The showing tab is the pane's own surface with the view's accent on top,
+    /// The showing tab is the pane's own surface with the accent line on top,
     /// and it takes the pane's cut corner. It used to be a block in a colour of
     /// its own, standing on a filled strip, which read as a button.
     #[test]
-    fn the_showing_tab_wears_the_pane_s_surface_and_its_view_s_accent() {
+    fn the_showing_tab_wears_the_pane_s_surface_and_the_accent() {
         let dock = Dock::new();
         let out = render(&busy_state(), 1400.0, 900.0, &dock, &["a.rs"]);
         for space in Space::ALL {
@@ -4636,7 +4649,7 @@ mod tests {
                 covered(&out, *tab, tab.h, out.skin.tab),
                 "{space:?}: {active:?} does not carry the pane's surface"
             );
-            let accent = topped(&out, *tab, ACCENT_H, out.skin.view(active))
+            let accent = topped(&out, *tab, ACCENT_H, out.skin.tab_accent)
                 .unwrap_or_else(|| panic!("{space:?}: {active:?} has no accent line"));
             // The accent stops where the cut starts, so no line ends in a
             // corner that is not there.
@@ -4647,8 +4660,55 @@ mod tests {
                 tab.w,
                 cut_of(*tab)
             );
-            // And the accent is the view's own, not one colour for every strip.
-            assert_ne!(out.skin.view(active), out.skin.edge_focus);
+            // And it is not the focus edge, which is the other coloured line a
+            // pane can carry and is the theme's accent rather than the green.
+            assert_ne!(out.skin.tab_accent, out.skin.edge_focus);
+        }
+    }
+
+    /// One green for every view. The line said which pane you were on and the
+    /// hue said which pane it was, which is the label's job, so nine hues on
+    /// nine tabs was a harlequin strip answering a question nobody asked.
+    ///
+    /// Every view is walked rather than a couple of them, and the colour is read
+    /// off the rectangle rather than looked up: a hue coming back for one view
+    /// is exactly what this has to catch.
+    #[test]
+    fn every_view_carries_the_same_accent() {
+        let state = busy_state();
+        let mut seen = Vec::new();
+        for view in View::ALL {
+            let mut dock = Dock::new();
+            assert!(dock.reveal(view), "{view:?} is in no space");
+            let out = render(&state, 1400.0, 900.0, &dock, &["a.rs"]);
+            let tab = Space::ALL
+                .iter()
+                .find_map(|space| {
+                    out.layout
+                        .placed(*space)
+                        .tabs
+                        .iter()
+                        .find(|(shown, _)| *shown == view)
+                        .map(|(_, panel)| *panel)
+                })
+                .unwrap_or_else(|| panic!("{view:?} has no tab on screen"));
+            let line = out
+                .scene
+                .rects
+                .iter()
+                .find(|rect| {
+                    let [x, y, _, h] = rect.xywh();
+                    (x - tab.x).abs() < 0.01
+                        && (y - tab.y).abs() < 0.01
+                        && (h - ACCENT_H).abs() < 0.01
+                })
+                .unwrap_or_else(|| panic!("{view:?} has no accent line"));
+            seen.push((view, line.rgba()));
+        }
+        assert_eq!(seen.len(), View::ALL.len());
+        let skin = Skin::from(&Config::default());
+        for (view, colour) in &seen {
+            assert_eq!(*colour, skin.tab_accent, "{view:?} has an accent of its own");
         }
     }
 
@@ -4776,7 +4836,7 @@ mod tests {
                     "{view:?} is not drawn at the idle weight"
                 );
                 assert!(
-                    topped(&out, *tab, ACCENT_H, out.skin.view(*view)).is_none(),
+                    topped(&out, *tab, ACCENT_H, out.skin.tab_accent).is_none(),
                     "{view:?} has an accent line and is not showing"
                 );
                 let label = out
@@ -4886,7 +4946,7 @@ mod tests {
                 open,
                 "row {index} and its band disagree about being open"
             );
-            let mark = topped(&out, *row, row.h, out.skin.view(View::Files));
+            let mark = topped(&out, *row, row.h, out.skin.tab_accent);
             assert_eq!(
                 mark.is_some(),
                 open,
@@ -9688,6 +9748,43 @@ mod tests {
                 .any(|r| r.rgba() == lit.skin.close_hot && close.contains(r.xywh()[0] + 1.0, r.xywh()[1] + 1.0));
             assert!(hot, "the close mark does not light up at {w}x{h}");
         }
+    }
+
+    /// Every section heading is the same green the showing tab's line is, and
+    /// none of them is the tint the settings under it are written in.
+    ///
+    /// A sixty row list is unreadable if its sections do not separate from their
+    /// contents, and the heading was in the ordinary text tint.
+    #[test]
+    fn the_settings_headings_are_the_accent_green() {
+        let panel = a_settings_panel(&Config::default());
+        let out = render_settings(&panel, 1400.0, 1200.0, None);
+        let mut found = 0;
+        for heading in ["WHAT IT LOOKS LIKE", "WHICH PANES OPEN", "COLOURS"] {
+            let run = out
+                .scene
+                .texts
+                .iter()
+                .flat_map(|text| text.runs.iter())
+                .find(|run| run.text.trim() == heading)
+                .unwrap_or_else(|| panic!("{heading} is not on the panel"));
+            assert_eq!(run.color, Some(out.skin.good), "{heading}");
+            found += 1;
+        }
+        assert_eq!(found, 3);
+        // The same green the tab wears, and not the tint a setting's key is
+        // written in, or the heading is another row of the list.
+        assert_eq!(
+            [
+                out.skin.good[0] as f32 / 255.0,
+                out.skin.good[1] as f32 / 255.0,
+                out.skin.good[2] as f32 / 255.0,
+                1.0
+            ],
+            out.skin.tab_accent
+        );
+        assert_ne!(out.skin.good, out.skin.body);
+        assert_ne!(out.skin.good, out.skin.title);
     }
 
     /// Nothing the panel draws leaves it, at any size. A rectangle outside a

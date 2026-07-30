@@ -55,10 +55,6 @@ pub struct Config {
     /// them. Read by position, so the order is the same as [`TOOL_KEYS`].
     pub tools: [[u8; 3]; 14],
 
-    /// One color per view, in the order [`View`](crate::dock::View) declares
-    /// them. Read by position, so the order is the same as [`VIEW_KEYS`].
-    pub views: [[u8; 3]; 9],
-
     /// The gauge palette: one color per slot, which a monitor reading names for
     /// itself. Read by position, so the order is the same as [`GAUGE_KEYS`].
     pub gauges: [[u8; 3]; 10],
@@ -94,7 +90,6 @@ impl Default for Config {
             panel: [0x00, 0x00, 0x00],
             bar: [0x0e, 0x2e, 0x1e],
             tools: TOOLS,
-            views: VIEWS,
             gauges: GAUGES,
             syntax_comment: [0x56, 0x84, 0x66],
             syntax_string: [0xd6, 0xc4, 0x7a],
@@ -150,36 +145,6 @@ const TOOLS: [[u8; 3]; 14] = [
     [0x7f, 0x7f, 0xf5], // subagent
     [0xce, 0xfa, 0xdb], // plan, the default `bright`
     [0x9a, 0xd6, 0xac], // anything else, the default `text`
-];
-
-/// The key for each view color, in the order `View::ALL` declares the views.
-/// The position here is the position in [`Config::views`].
-pub const VIEW_KEYS: [&str; 9] = [
-    "view_output",
-    "view_activity",
-    "view_plan",
-    "view_agents",
-    "view_hardware",
-    "view_context",
-    "view_session",
-    "view_debug",
-    "view_files",
-];
-
-/// One hue per view. It marks the tab that is showing, so what a space is
-/// holding is answerable from the corner of the eye rather than by reading
-/// seven labels. Spread the way the tool hues are, and a theme leaves them
-/// alone for the same reason: they name the views, not the window.
-const VIEWS: [[u8; 3]; 9] = [
-    [0x73, 0xde, 0x9f], // output
-    [0xf5, 0xc7, 0x5c], // activity
-    [0xc6, 0x82, 0xed], // plan
-    [0x5f, 0xa3, 0xf2], // agents
-    [0x52, 0xe0, 0xe0], // hardware
-    [0xf0, 0x75, 0xc3], // context
-    [0x8f, 0x7f, 0xf5], // session
-    [0xf0, 0x4f, 0x8f], // debug
-    [0xf0, 0x7d, 0x4c], // files
 ];
 
 /// The key for each gauge slot. The position here is the position in
@@ -333,7 +298,6 @@ pub fn keys() -> Vec<&'static str> {
         "show_files",
     ];
     keys.extend(TOOL_KEYS);
-    keys.extend(VIEW_KEYS);
     keys.extend(GAUGE_KEYS);
     keys
 }
@@ -360,10 +324,29 @@ pub fn keys() -> Vec<&'static str> {
 /// * `show_avatar`, `avatar`: the ASCII avatar was a docked view with a tab and
 ///   a clip path of its own. Removing the CLIPPY tab removed the view, and
 ///   nothing has read either key since.
-/// * `view_avatar`: that tab's hue, gone with the tab.
-/// * `view_llm`: the one LLM monitor, since split into three. Its hue lives on
-///   as `view_context`, which was called `view_session` in between.
-pub const RETIRED: [&str; 4] = ["show_avatar", "avatar", "view_avatar", "view_llm"];
+/// * every `view_*`: the tab that is showing carried an accent line in a hue of
+///   its own, nine of them, and nine hues on nine tabs is a harlequin strip. The
+///   line is one green now ([`Skin::tab_accent`](crate::skin::Skin)), so there is
+///   no per-view colour left for any of these to set. `view_avatar` and
+///   `view_llm` were already dead when the views they named went; `view_talk`
+///   and `view_overall` were the two the renames aliased.
+pub const RETIRED: [&str; 15] = [
+    "show_avatar",
+    "avatar",
+    "view_avatar",
+    "view_llm",
+    "view_talk",
+    "view_overall",
+    "view_output",
+    "view_activity",
+    "view_plan",
+    "view_agents",
+    "view_hardware",
+    "view_context",
+    "view_session",
+    "view_debug",
+    "view_files",
+];
 
 /// Names an earlier build wrote that this one reads under a different name.
 /// `(what the file may say, what this build calls it)`.
@@ -374,16 +357,10 @@ pub const RETIRED: [&str; 4] = ["show_avatar", "avatar", "view_avatar", "view_ll
 /// name in one list must not be in the other, and neither may be in [`keys`],
 /// which `an_alias_is_not_a_live_key_and_not_a_retired_one` holds.
 ///
-/// The view colours are read by position, so renaming a view renames its key and
-/// an old file would otherwise lose that colour without saying anything. Only
-/// names that no longer exist are listed: `view_session` is still a live key, it
-/// just names the seventh slot now (the pane that carries the SESSION label)
-/// rather than the sixth, so a file that set it still colours the tab it was
-/// named after.
-const ALIASES: [(&str, &str); 2] = [
-    ("view_talk", "view_output"),
-    ("view_overall", "view_session"),
-];
+/// Empty today. Both entries were view colours, whose keys are all retired now
+/// that the accent is one colour; the machinery stays because the next rename
+/// wants it and because a file written by a build that had it must keep parsing.
+const ALIASES: [(&str, &str); 0] = [];
 
 /// What this build calls a key. An older name comes back as its current one,
 /// anything else comes back unchanged.
@@ -533,12 +510,6 @@ impl Config {
                 _ if name.starts_with("tool_") => {
                     match TOOL_KEYS.iter().position(|known| *known == name) {
                         Some(at) => set(&mut config.tools[at], color(&value)),
-                        None => false,
-                    }
-                }
-                _ if name.starts_with("view_") => {
-                    match VIEW_KEYS.iter().position(|known| *known == name) {
-                        Some(at) => set(&mut config.views[at], color(&value)),
                         None => false,
                     }
                 }
@@ -875,8 +846,8 @@ theme = noob
 # text   = #9ad6ac        # ordinary content
 # dim    = #58966e        # headers, timings, structure
 # bright = #cefadb        # what just happened, and what you typed
-# good   = #74d194        # a call that worked
-# bad    = #e87a6c        # a call that did not
+# good   = #74d194        # a call that worked, and the showing tab's line
+# bad    = #e87a6c        # a call that did not, and a turn in flight
 # panel  = #000000        # panel fill under the text
 # bar    = #0e2e1e        # the title and status bars
 
@@ -896,18 +867,6 @@ theme = noob
 # tool_agent   = #7f7ff5
 # tool_plan    = #cefadb
 # tool_other   = #9ad6ac
-
-# One color per view. It is the line along the top of the tab that is showing,
-# so these name the views rather than the window and a theme leaves them alone.
-# view_output   = #73de9f
-# view_activity = #f5c75c
-# view_plan     = #c682ed
-# view_agents   = #5fa3f2
-# view_hardware = #52e0e0
-# view_context  = #f075c3
-# view_session  = #8f7ff5
-# view_debug    = #f04f8f
-# view_files    = #f07d4c
 
 # The gauge palette, in slot order. Every reading in a monitor names one of
 # these, so a block and its number carry the metric's own colour rather than one
@@ -968,7 +927,7 @@ mod tests {
         for key in keys() {
             assert!(named.contains(&key.to_string()), "{key} is undocumented");
         }
-        assert_eq!(keys().len(), 55, "a new key needs a line in the file");
+        assert_eq!(keys().len(), 46, "a new key needs a line in the file");
     }
 
     /// The commented colors are the noob theme spelled out. A stale hex there
@@ -1133,57 +1092,27 @@ mod tests {
         assert_eq!(canonical("opacity"), "opacity", "and so is anything else");
     }
 
-    /// The rename this build did to the views renamed their colour keys with
-    /// them, and the keys are read by position. A settings file written before it
-    /// still has to land its colours where they were meant to go, or a palette
-    /// somebody tuned quietly reverts.
+    /// A file that still carries a view colour keeps parsing and says nothing.
+    ///
+    /// Nine `view_*` keys coloured the accent line on the showing tab, one hue
+    /// each, and that line is one green now. The keys are retired rather than
+    /// removed: they are sitting in every file that was ever written, and a
+    /// build that called them typos would be blaming the user for a change this
+    /// window made. Both spellings the renames left behind are retired with
+    /// them, since there is no longer a slot for an alias to land in.
     #[test]
-    fn a_view_colour_written_under_the_old_name_still_applies() {
-        let config = Config::parse("view_talk = #010203\nview_overall = #040506\n");
+    fn a_view_colour_in_an_old_file_is_ignored_rather_than_reported() {
+        let text = "view_talk = #010203\nview_overall = #040506\nview_output = #0a0b0c\n\
+                    view_session = #111213\nview_context = #141516\nview_files = #f07d4c\n";
+        let config = Config::parse(text);
         assert!(config.unknown.is_empty(), "{:?}", config.unknown);
-        assert_eq!(config.views[0], [0x01, 0x02, 0x03], "view_talk is view_output");
-        assert_eq!(config.views[6], [0x04, 0x05, 0x06], "view_overall is view_session");
-        // The rest of the palette is untouched by an old name landing.
-        for at in [1, 2, 3, 4, 5, 7, 8] {
-            assert_eq!(config.views[at], Config::default().views[at], "slot {at}");
-        }
+        // And it changed nothing: a retired key is read off the floor.
+        assert_eq!(config, Config::default());
 
-        // Both spellings of a slot, in either order: the later line wins, the
-        // same as two lines with the same name.
-        let current = Config::parse("view_talk = #010203\nview_output = #0a0b0c\n");
-        assert_eq!(current.views[0], [0x0a, 0x0b, 0x0c]);
-        let old_last = Config::parse("view_output = #0a0b0c\nview_talk = #010203\n");
-        assert_eq!(old_last.views[0], [0x01, 0x02, 0x03]);
-
-        // `view_session` was not retired and is not an alias: it is a live key
-        // that names the seventh slot now, which is the pane still labelled
-        // SESSION, and the sixth slot answers to `view_context`.
-        let renamed = Config::parse("view_session = #111213\nview_context = #141516\n");
-        assert!(renamed.unknown.is_empty(), "{:?}", renamed.unknown);
-        assert_eq!(renamed.views[6], [0x11, 0x12, 0x13]);
-        assert_eq!(renamed.views[5], [0x14, 0x15, 0x16]);
-
-        // An alias is not a licence for anything else: a name nobody ever wrote
-        // is still a typo, and so is an old name with an unreadable value.
+        // Retirement is not a licence for anything else that starts the same
+        // way: a name nobody ever wrote is still a typo.
         assert_eq!(Config::parse("view_chatter = #fff").unknown, ["view_chatter"]);
-        assert_eq!(Config::parse("view_talk = chartreuse").unknown, ["view_talk"]);
-    }
-
-    /// The writer accepts an old name and writes the current one, so the value
-    /// lands on the commented default that documents it instead of adding a
-    /// second line for the same slot.
-    #[test]
-    fn the_writer_takes_an_old_name_and_writes_the_new_one() {
-        let scratch = Scratch::new("alias");
-        let conf = scratch.conf();
-        std::fs::write(&conf, DEFAULT_FILE).unwrap();
-        write_setting(&conf, "view_talk", Some("#ff0000")).unwrap();
-        let text = scratch.read();
-        assert!(text.contains("view_output = #ff0000"), "{text}");
-        assert!(!text.contains("view_talk"), "the old name went into the file");
-        assert_eq!(Config::parse(&text).views[0], [0xff, 0x00, 0x00]);
-        // One line for the slot, not one per spelling.
-        assert_eq!(text.matches("view_output").count(), 1, "{text}");
+        assert_eq!(Config::parse("view_weather = #fff").unknown, ["view_weather"]);
     }
 
     /// A known key with an unreadable value keeps the default and is reported,
@@ -1228,22 +1157,6 @@ mod tests {
         }
         // A tool key this build has no slot for is a typo, not a new tool.
         assert_eq!(Config::parse("tool_telepathy = #fff").unknown, ["tool_telepathy"]);
-    }
-
-    #[test]
-    fn every_view_color_reads_from_the_file() {
-        let mut text = String::new();
-        for (at, key) in VIEW_KEYS.iter().enumerate() {
-            text.push_str(&format!("{key} = #00{:02x}00\n", at + 1));
-        }
-        let config = Config::parse(&text);
-        assert!(config.unknown.is_empty(), "{:?}", config.unknown);
-        for (at, key) in VIEW_KEYS.iter().enumerate() {
-            assert_eq!(config.views[at], [0, at as u8 + 1, 0], "{key}");
-        }
-        // The table is read by position, so it has to have one slot per view.
-        assert_eq!(VIEW_KEYS.len(), crate::dock::View::ALL.len());
-        assert_eq!(Config::parse("view_weather = #fff").unknown, ["view_weather"]);
     }
 
     #[test]
@@ -1293,7 +1206,6 @@ mod tests {
             assert!(preset.unknown.is_empty(), "{name}");
             assert_eq!(preset.tools[12], preset.bright, "{name}: plan is prose");
             assert_eq!(preset.tools[13], preset.text, "{name}: the catch-all is prose");
-            assert_eq!(preset.views, VIEWS, "{name}: a view hue names the view");
             assert_eq!(preset.gauges, GAUGES, "{name}: a gauge hue names the metric");
             if name != "noob" {
                 assert_ne!(preset, Config::default(), "{name} is the default twice");

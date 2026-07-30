@@ -178,7 +178,7 @@ const GROUPS: [(&str, &[(&str, Kind)]); 3] = [
 
 /// Every colour in the file, in the order the panel lists them: the tones the
 /// whole window is drawn from, then the five the highlighter uses, then one per
-/// tool, one per view and one per gauge slot.
+/// tool and one per gauge slot.
 ///
 /// Read off a [`Config`] rather than written out, so this is also what names the
 /// theme: a file whose colours are a preset's colours is that preset, whether it
@@ -200,7 +200,6 @@ pub fn colours(config: &Config) -> Vec<(&'static str, [u8; 3])> {
         ("syntax_markup", config.syntax_markup),
     ];
     out.extend(config::TOOL_KEYS.into_iter().zip(config.tools));
-    out.extend(config::VIEW_KEYS.into_iter().zip(config.views));
     out.extend(config::GAUGE_KEYS.into_iter().zip(config.gauges));
     out
 }

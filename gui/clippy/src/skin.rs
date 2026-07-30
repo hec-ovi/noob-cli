@@ -14,7 +14,6 @@
 //! returns the same palette at full opacity, which looks deliberate.
 
 use crate::config::Config;
-use crate::dock::View;
 use crate::state::{Kind, Tone};
 
 #[derive(Clone, Copy)]
@@ -132,10 +131,17 @@ pub struct Skin {
     /// One colour per tool, in the order [`Kind`] declares them.
     pub tools: [[u8; 4]; 14],
 
-    /// One colour per view, in the order [`View`] declares them. A fill rather
-    /// than a text tint: it is drawn as the accent line along the top of the
-    /// tab that is showing.
-    pub views: [[f32; 4]; 9],
+    /// The line along the top of the tab that is showing, and the mark down the
+    /// left of the open row in the file list. One colour for the whole window,
+    /// not one per view.
+    ///
+    /// It was a hue each, nine of them, and nine hues on nine tabs is a
+    /// harlequin strip: what a tab says is its label, and the accent's one job
+    /// is saying which of them you are looking at. Green, and the good colour
+    /// rather than the theme's accent, for the reason the drop target and the
+    /// picked row are green: the accent is whatever the theme is, and a showing
+    /// tab in the amber theme's accent would read as a warning.
+    pub tab_accent: [f32; 4],
 
     /// The gauge palette. A monitor reading names the slot it wants, so a block
     /// and its number carry the metric's own colour instead of one gauge colour
@@ -228,9 +234,7 @@ impl Skin {
             // in, so the two cannot drift.
             tools: config.tools.map(text),
 
-            // Ordered by `View::ALL`, which is the order the config reads them
-            // in, so the two cannot drift.
-            views: config.views.map(|color| rgba(color, 1.0)),
+            tab_accent: rgba(config.good, 1.0),
 
             gauges: config.gauges.map(|color| rgba(color, 1.0)),
             // Faint enough to sit behind the lit dots without reading as one of
@@ -286,13 +290,6 @@ impl Skin {
     pub fn kind(&self, kind: Kind) -> [u8; 4] {
         let at = Kind::ALL.iter().position(|k| *k == kind).unwrap_or(13);
         self.tools[at]
-    }
-
-    /// The accent a view is marked with. Indexed by position in [`View::ALL`],
-    /// the way tools are, so the two tables are read the same way.
-    pub fn view(&self, view: View) -> [f32; 4] {
-        let at = View::ALL.iter().position(|v| *v == view).unwrap_or(0);
-        self.views[at]
     }
 
     /// A reading's hue: the lit dot, the unlit dot, and the number's tint.
@@ -544,21 +541,6 @@ mod tests {
         }
     }
 
-    /// The table is indexed by position, so it has to have one entry for every
-    /// view or a new view silently takes another one's accent.
-    #[test]
-    fn the_palette_has_one_entry_per_view() {
-        let skin = Skin::default();
-        assert_eq!(skin.views.len(), View::ALL.len());
-        assert_eq!(skin.view(View::Output), skin.views[0]);
-        assert_eq!(skin.view(View::Files), skin.views[8]);
-        // The two that swapped labels kept their slots, so neither of them took
-        // the other's accent along with the name.
-        assert_eq!(skin.view(View::Context), skin.views[5]);
-        assert_eq!(skin.view(View::Session), skin.views[6]);
-        assert_eq!(skin.view(View::Debug), skin.views[7]);
-    }
-
     /// A gauge hue is one colour used three ways, and the three have to agree:
     /// a lit dot, a fainter one behind it, and the number beside them.
     #[test]
@@ -621,39 +603,36 @@ mod tests {
         }
     }
 
-    /// An accent nobody can tell from its neighbour's says nothing about which
-    /// view is showing, which is the whole reason the tint exists.
+    /// The accent is the good colour, solid, and it is the same colour whatever
+    /// a theme does to the rest of the window.
+    ///
+    /// Solid because a two pixel line at half weight is a line nobody sees, and
+    /// the good colour because that is the window's yes: the same green the drop
+    /// target and the picked row are, so the three marks that mean "this one"
+    /// are one colour between them.
     #[test]
-    fn every_view_accent_is_visible_and_unlike_the_others() {
-        let skin = Skin::default();
-        let apart = |a: [f32; 4], b: [f32; 4]| {
-            (0..3).map(|i| (a[i] - b[i]).abs() * 255.0).sum::<f32>()
-        };
-        for (i, a) in View::ALL.iter().enumerate() {
-            let color = skin.view(*a);
-            assert_eq!(color[3], 1.0, "{a:?}");
-            assert!(
-                color[0] + color[1] + color[2] > 1.5,
-                "{a:?} is too dark to see against the strip"
-            );
-            for b in &View::ALL[i + 1..] {
-                let distance = apart(color, skin.view(*b));
-                assert!(distance > 60.0, "{a:?} and {b:?} are {distance} apart");
-            }
-        }
-    }
-
-    /// A view hue names the view, so a theme moves the window around it. The
-    /// accents are the one part of the palette a preset leaves alone, along
-    /// with the tool hues.
-    #[test]
-    fn a_theme_leaves_the_view_accents_where_they_are() {
-        let noob = Skin::default();
+    fn the_tab_accent_is_the_good_colour_and_every_theme_has_one() {
         for name in crate::config::THEMES {
-            let skin = Skin::from(&crate::config::theme(name).expect(name));
-            for view in View::ALL {
-                assert_eq!(skin.view(view), noob.view(view), "{name}: {view:?}");
-            }
+            let config = crate::config::theme(name).expect(name);
+            let skin = Skin::from(&config);
+            assert_eq!(skin.tab_accent[3], 1.0, "{name}");
+            assert_eq!(skin.tab_accent, skin.drop_mark, "{name}");
+            assert_eq!(
+                skin.tab_accent,
+                [
+                    config.good[0] as f32 / 255.0,
+                    config.good[1] as f32 / 255.0,
+                    config.good[2] as f32 / 255.0,
+                    1.0
+                ],
+                "{name}"
+            );
+            // Bright enough to see against the surface it is drawn on, which is
+            // the pane's own fill.
+            assert!(
+                skin.tab_accent[0] + skin.tab_accent[1] + skin.tab_accent[2] > 1.5,
+                "{name}: {:?} is too dark to see", skin.tab_accent
+            );
         }
     }
 
