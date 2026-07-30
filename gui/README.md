@@ -43,9 +43,13 @@ The icon is a console drawn as a hollow wire with `>_` inside it: one path of
 four subpaths in one flat colour, on a 128 grid with a module of 8 so every edge
 is a whole pixel at 16, 32, 64 and 128. The body is open rather than filled, so
 the dock shows through it, and the top right corner takes the same 45 degree cut
-every panel in the window takes. The glow is one bounded blur merged under the
-mark and nothing more: it dies inside the margin instead of on the canvas edge,
-and a rasterizer with filters off draws the same four subpaths sharp. The small
+every panel in the window takes. The glow is one blur merged under the mark and
+nothing more, so a rasterizer with filters off draws the same four subpaths
+sharp. Its radius reaches further than the 8 of margin, so the canvas edge trims
+the halo down both sides where it has fallen to 7% alpha. That is the chosen
+price of a brighter glow rather than something to fix. The filter region is
+written out instead of left to the default, so the only thing that ever clips
+the halo is the canvas. The small
 variant is drawn again on a 16 grid rather than scaled onto it, flat and with no
 halo, because at that size a blur is mud and the diagonals land between pixels.
 Its green is darker than the interface accent on purpose: the accent measures

@@ -19,14 +19,29 @@
 
     The glow is decoration and carries nothing. It is one bounded blur merged
     twice under the mark itself, so a rasterizer with no filter support draws
-    the same four subpaths sharp and loses only the halo. A radius of 2 is small
-    on purpose: on a white dock a wide halo reads as a smudge rather than as
-    light, and 3 radii is 6, inside the 8 of margin, so the halo dies before the
-    canvas edge instead of being cut off flat along it.
+    the same four subpaths sharp and loses only the halo.
+
+    The radius is 4 because Hector chose it, against a radius 2 drawn beside it
+    for comparison, with the cost of the bigger one written down in front of
+    him. Do not read the cost as a bug and shrink it back. Three radii is where
+    a gaussian is spent, so this halo wants 12 units of room and the mark keeps
+    8 of margin: the canvas edge cuts the last 4 units of the tails off down the
+    left and the right. Measured in librsvg at 128, the halo is at 7% alpha
+    where the edge takes it, so the seam is a straight line at 7% and not a
+    visible border. Anyone who wants it gone at all has to move the geometry in
+    by a module, which is a different drawing and a smaller one.
+
+    The region is declared rather than defaulted, because the default is a
+    percentage of the bounding box and would move on its own the day the
+    geometry moves. It is the mark's box grown by 16, which is 3 radii and a
+    module of slack, so it runs past the canvas on the left and the right on
+    purpose: the region is never what clips this halo, and the only thing that
+    does is the canvas, which is the cost above and not a second one hiding
+    behind it.
   -->
   <defs>
-    <filter id="glow" filterUnits="userSpaceOnUse" x="0" y="16" width="128" height="96">
-      <feGaussianBlur stdDeviation="2" result="halo"/>
+    <filter id="glow" filterUnits="userSpaceOnUse" x="-8" y="8" width="144" height="112">
+      <feGaussianBlur stdDeviation="4" result="halo"/>
       <feMerge>
         <feMergeNode in="halo"/>
         <feMergeNode in="halo"/>

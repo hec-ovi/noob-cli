@@ -302,11 +302,21 @@ mod tests {
     /// is a solid doubled mark instead of light. It would also put a second set
     /// of coordinates in the file for the first to drift away from.
     ///
-    /// The radius is capped at a third of the margin. Three radii is where a
-    /// gaussian is spent and the mark keeps 8 units of margin, so a radius over
-    /// 8/3 leaves halo on the canvas edge and the edge cuts it off in a straight
-    /// line. It is 2 rather than the 2.66 the arithmetic allows because a wide
-    /// halo on a white dock reads as a smudge rather than as light.
+    /// The radius is 4, by Hector's explicit choice over a radius 2 drawn beside
+    /// it, and the halo is wider than the drawing can hold. Three radii is where
+    /// a gaussian is spent, so this one wants 12 units of room and the mark
+    /// keeps 8 of margin: the canvas edge cuts the last 4 units of the tails off
+    /// down the left and the right. Rendered in librsvg at 128 the halo is at 7%
+    /// alpha where the edge takes it, so what that costs is a straight seam at
+    /// 7% down two sides. It is the chosen price of the brighter glow and not a
+    /// defect, so there is deliberately no cap here to "restore". The radius was
+    /// 2 for exactly one round and he picked the other one twice.
+    ///
+    /// What is worth holding instead is that the halo is only ever clipped by
+    /// the canvas. The region has to be declared and has to be big enough for
+    /// three radii, so a renderer's default region can never quietly become the
+    /// thing cutting the glow, and raising the radius further cannot happen
+    /// without widening the region in the same edit.
     #[test]
     fn the_glow_is_decoration_and_the_mark_survives_it_being_dropped() {
         assert_eq!(ICON.matches("<filter").count(), 1, "{ICON}");
@@ -315,11 +325,10 @@ mod tests {
             .parse()
             .expect("the blur has a radius");
         assert!(radius > 0.0, "a radius of {radius} is no glow at all");
-        assert!(radius * 3.0 <= 8.0, "a radius of {radius} puts halo on the canvas edge");
 
-        // Bounded, and bounded in the drawing's own units. A filter with no
-        // region of its own takes the renderer's default, and the whole point of
-        // writing one down is that the halo cannot reach anywhere by surprise.
+        // Declared, and declared in the drawing's own units. A filter with no
+        // region of its own takes the renderer's default, which is a percentage
+        // of the bounding box and so moves on its own the day the geometry does.
         assert!(ICON.contains(r#"filterUnits="userSpaceOnUse""#), "{ICON}");
         let region = (
             attr(ICON, "<filter", "x").parse::<f64>().expect("a region x"),
@@ -327,11 +336,16 @@ mod tests {
             attr(ICON, "<filter", "width").parse::<f64>().expect("a region width"),
             attr(ICON, "<filter", "height").parse::<f64>().expect("a region height"),
         );
+        // Room for the mark and three radii of halo around all of it. This is
+        // the assertion that couples the two numbers: the region is what says
+        // how far the glow is allowed to reach, so a bigger radius fails here
+        // until whoever raised it widens the region on purpose.
         let (low_x, low_y, high_x, high_y) = box_of(&subpaths(ICON).concat());
-        assert!(region.0 <= low_x - radius * 3.0, "the region cuts the halo off on the left");
-        assert!(region.1 <= low_y - radius * 3.0, "the region cuts the halo off on top");
-        assert!(region.0 + region.2 >= high_x + radius * 3.0, "cut off on the right");
-        assert!(region.1 + region.3 >= high_y + radius * 3.0, "cut off underneath");
+        let reach = radius * 3.0;
+        assert!(region.0 <= low_x - reach, "the region cuts the halo off on the left");
+        assert!(region.1 <= low_y - reach, "the region cuts the halo off on top");
+        assert!(region.0 + region.2 >= high_x + reach, "the region cuts it off on the right");
+        assert!(region.1 + region.3 >= high_y + reach, "the region cuts it off underneath");
 
         // Two of halo and then the mark over them, in that order: the merge is
         // a stack, so the mark being last is what keeps its edge sharp.
