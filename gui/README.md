@@ -233,9 +233,16 @@ black.
 | crate | owns |
 |---|---|
 | `noob-gpu` | adapter, device, surface, what this machine will actually do |
-| `noob-draw` | instanced rectangles and shaped glyphs, and nothing else |
+| `noob-draw` | instanced rectangles and shaped glyphs, and nothing else, on a base layer and a floating one |
 | `no0b` | the window shell, the layout, the panes, the agent link (in `gui/clippy/`, which still carries the old folder name) |
 | `asciify` | GIF to a text animation, run at authoring time only |
+
+A frame has two layers because one instanced pass draws all of a layer's
+rectangles and one text pass draws all of its glyphs after them, so a box pushed
+last still lands under text pushed earlier. The right click menu was drawn under
+the writing in the panes it covered for exactly that reason. `Scene::over_rect`
+and `Scene::over_text` push to the floating layer, painted after the whole base
+layer, and anything that floats over the window uses them.
 
 `gui/data/` holds what the desktop needs: the icon, its small redrawn variant,
 the launcher entry and the installer that places them.

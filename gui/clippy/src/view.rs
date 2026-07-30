@@ -913,6 +913,13 @@ pub fn build(frame: &Frame) -> Scene {
 /// together are the whole of what floating means here. With only one of the two
 /// a menu is either painted under the pane it opened over, or clicked straight
 /// through onto it.
+///
+/// "After everything else" is `Scene::over_rect` and `Scene::over_text`, not
+/// merely being pushed last. Pushed last onto the base layer, the menu's box was
+/// still drawn before every glyph in the window, because the renderer paints a
+/// layer's rectangles in one pass and its glyphs in a later one. The box landed
+/// under the pane text it covered and the rows were illegible over anything with
+/// writing in it. Every rectangle and every run here belongs to the overlay.
 fn overlay(scene: &mut Scene, frame: &Frame) {
     let Some(menu) = frame.menu else {
         return;
@@ -921,14 +928,14 @@ fn overlay(scene: &mut Scene, frame: &Frame) {
     if layout.menu.w < 1.0 {
         return;
     }
-    scene.rect(panel_fill(layout.menu, skin.menu));
-    scene.rect(panel_edge(layout.menu, skin.edge_focus));
+    scene.over_rect(panel_fill(layout.menu, skin.menu));
+    scene.over_rect(panel_edge(layout.menu, skin.edge_focus));
     let line = Text::line_for(SMALL);
     for (index, (row, panel)) in menu.rows.iter().zip(&layout.menu_rows).enumerate() {
         // Only a row that can act lights up. Highlighting a greyed one promises
         // something will happen when the button comes down and it will not.
         if row.enabled && frame.hot == Some(Hit::MenuRow(index)) {
-            scene.rect(panel.fill(skin.hot));
+            scene.over_rect(panel.fill(skin.hot));
         }
         // A row that cannot act says so by weight, the way a tab that is not
         // showing does, rather than by being missing.
@@ -946,7 +953,7 @@ fn overlay(scene: &mut Scene, frame: &Frame) {
             (panel.w - MENU_PAD * 2.0).max(1.0),
             panel.h,
         );
-        scene.text(Text::rich(runs, text.row(0.0, line), SMALL, tint));
+        scene.over_text(Text::rich(runs, text.row(0.0, line), SMALL, tint));
     }
 }
 
@@ -4274,42 +4281,87 @@ mod tests {
         }
     }
 
-    /// The other half of floating: the menu is painted after everything else,
-    /// so nothing in the window can be drawn over it.
+    /// Whether any text in this list has a glyph box overlapping the panel.
+    fn text_over(texts: &[Text], panel: Panel) -> bool {
+        texts.iter().any(|text| {
+            text.at.x < panel.x + panel.w
+                && panel.x < text.at.x + text.at.w
+                && text.at.y < panel.y + panel.h
+                && panel.y < text.at.y + text.at.h
+        })
+    }
+
+    /// The other half of floating: the menu is on the overlay layer, both its
+    /// rectangles and its rows, and nothing of the window is up there with it.
+    ///
+    /// This used to assert that the menu's rectangles came last in the one
+    /// rectangle list, which was true and useless. The renderer paints every
+    /// rectangle of a layer and then every glyph of it, so being last among the
+    /// rectangles still put the menu's box under all of the pane text it covered,
+    /// and the rows were illegible over any pane with writing in it. Only the
+    /// overlay can say "over that text", so that is what is asserted.
     #[test]
-    fn the_menu_is_the_last_thing_painted() {
+    fn the_menu_is_painted_on_the_overlay_layer() {
         let dock = Dock::new();
         let menu = Menu::for_widget((500.0, 400.0), View::Plan, Space::TopRight, false);
         let out = render_menu(&busy_state(), 1400.0, 900.0, &dock, &menu, None);
         let box_ = out.layout.menu;
+
+        // The bug, in the one condition that reproduced it: there is pane text
+        // under the menu. Without this the test would pass over an empty window.
+        assert!(
+            text_over(&out.scene.texts, box_),
+            "nothing is written under the menu, so this proves nothing"
+        );
+
         // Found by where it is, not by what colour it is: at the shipped
         // opacity every solid surface in the palette is already fully opaque,
         // so the menu's fill is the same colour as the prompt's.
-        let first = out
-            .scene
-            .rects
-            .iter()
-            .position(|r| r.xywh() == [box_.x, box_.y, box_.w, box_.h] && r.extra()[3] == 0.0)
-            .expect("the menu has a surface");
-        assert!(first > 0, "the window was painted first");
-        for rect in &out.scene.rects[first..] {
+        let surface = |rects: &[Rect]| {
+            rects
+                .iter()
+                .any(|r| r.xywh() == [box_.x, box_.y, box_.w, box_.h] && r.extra()[3] == 0.0)
+        };
+        assert!(surface(&out.scene.over_rects), "the menu has no surface");
+        assert!(
+            !surface(&out.scene.rects),
+            "the menu's surface is still in the base layer, under every glyph"
+        );
+
+        // Every rectangle and every text on the overlay belongs to the menu, and
+        // nothing of the panes is up there.
+        assert!(!out.scene.over_texts.is_empty(), "the rows are not drawn");
+        for rect in &out.scene.over_rects {
             let [x, y, w, h] = rect.xywh();
             assert!(
                 x >= box_.x - 0.01
                     && y >= box_.y - 0.01
                     && x + w <= box_.x + box_.w + 0.01
                     && y + h <= box_.y + box_.h + 0.01,
-                "{:?} was painted over the menu",
+                "{:?} is on the overlay but is not the menu",
                 rect.xywh()
             );
         }
+        for text in &out.scene.over_texts {
+            assert!(
+                text.at.x >= box_.x - 0.01
+                    && text.at.y >= box_.y - 0.01
+                    && text.at.x + text.at.w <= box_.x + box_.w + 0.01,
+                "{:?} is on the overlay but is not a menu row",
+                text.at
+            );
+        }
+
         // The rows are legible, and a row that cannot act says so by weight.
+        // Read off the overlay: a label still in the base layer would be drawn
+        // under the menu's own box.
         let runs: Vec<(&str, Option<[u8; 4]>)> = out
             .scene
-            .texts
+            .over_texts
             .iter()
             .flat_map(|t| t.runs.iter().map(|r| (r.text.as_str(), r.color)))
             .collect();
+        let base = text_of(&out.scene);
         for (label, tint) in [
             ("Settings", out.skin.dim),
             ("Copy selection", out.skin.dim),
@@ -4318,8 +4370,56 @@ mod tests {
             let run = runs
                 .iter()
                 .find(|(text, _)| text.contains(label))
-                .unwrap_or_else(|| panic!("{label} is not on screen: {runs:?}"));
+                .unwrap_or_else(|| panic!("{label} is not on the overlay: {runs:?}"));
             assert_eq!(run.1, Some(tint), "{label}");
+            assert!(!base.contains(label), "{label} is drawn in the base layer");
+        }
+    }
+
+    /// Shaded, the window is one strip and the menu is still reachable, so it
+    /// still has to be drawn: the shaded path takes an early return and had to
+    /// keep painting the overlay through it.
+    #[test]
+    fn a_menu_over_the_shaded_strip_is_still_drawn() {
+        let dock = Dock::new();
+        let menu = Menu::for_widget((300.0, 10.0), View::Plan, Space::TopRight, false);
+        let mut shape = shape(&dock, &["a.rs"]);
+        shape.shaded = true;
+        shape.menu = Some(&menu);
+        let layout = Layout::compute(1200.0, 800.0, &shape);
+        assert!(layout.shaded);
+        let skin = Skin::from(&Config::default());
+        let state = busy_state();
+        let scene = build(&Frame {
+            state: &state,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &crate::prompt::Prompt::default(),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            drag: None,
+            hot: None,
+            trouble: None,
+            selection: None,
+            menu: Some(&menu),
+            picker: None,
+        });
+        assert!(!scene.over_rects.is_empty(), "the menu box is not drawn");
+        let rows: String = scene
+            .over_texts
+            .iter()
+            .flat_map(|t| t.runs.iter().map(|r| r.text.as_str()))
+            .collect();
+        assert!(rows.contains("Close this widget"), "{rows}");
+        // And the strip itself is still the only thing in the base layer: the
+        // menu hangs below it, on the overlay, over the desktop.
+        for rect in &scene.rects {
+            let [_, y, _, h] = rect.xywh();
+            assert!(y + h <= TITLE_H + 0.01, "{rect:?} reaches past the strip");
         }
     }
 
@@ -4333,7 +4433,7 @@ mod tests {
             let out = render_menu(&busy_state(), 1400.0, 900.0, &dock, &menu, hot);
             let box_ = out.layout.menu;
             out.scene
-                .rects
+                .over_rects
                 .iter()
                 .filter(|r| r.rgba() == out.skin.hot && box_.contains(r.xywh()[0], r.xywh()[1]))
                 .count()

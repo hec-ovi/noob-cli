@@ -14,6 +14,13 @@
 //! the window width while being clipped at the pane width, so it crossed the
 //! divider.
 //!
+//! **A floating thing goes on the overlay layer or it is not floating.** One
+//! instanced pass draws a layer's rectangles and one text pass draws its glyphs
+//! after them, so pushing a box last does not put it over text that was pushed
+//! earlier. [`Scene::over_rect`] and [`Scene::over_text`] are the second layer,
+//! painted after the whole base layer, and they are what a menu, a panel or a
+//! drag preview has to use.
+//!
 //! **A struct shared with a shader is all `vec4`-sized members.** WGSL aligns a
 //! `vec3` to 16 bytes and Rust does not. A `{[f32;4], [f32;4], f32, [f32;3]}`
 //! is 48 bytes here and 64 there, which silently corrupted every rectangle
@@ -23,6 +30,7 @@ use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
 };
+use std::ops::Range;
 
 /// A rectangle in physical pixels. The only way geometry is expressed.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -404,11 +412,32 @@ impl Text {
     }
 }
 
-/// Everything to draw this frame, in painter's order.
+/// Everything to draw this frame, in painter's order, on two layers.
+///
+/// **A rectangle cannot cover a glyph on the same layer, so a floating thing
+/// needs the other one.** [`Renderer::draw`] paints every rectangle of a layer
+/// in one instanced pass and then every glyph of that layer in one text pass,
+/// because that is what makes a window this size one draw call and one text
+/// pass. The cost is that painter's order stops applying between a rectangle and
+/// a glyph: a menu box pushed last still landed under the pane text it covered,
+/// and the menu was unreadable over anything with writing in it.
+///
+/// So the scene has an overlay layer. [`Scene::over_rect`] and
+/// [`Scene::over_text`] push to it, and it is painted after both base passes,
+/// its rectangles first and its glyphs last. Anything that floats over the
+/// window (the right click menu, and whatever else grows one) goes there and
+/// nothing in the base layer can reach it. Within a layer it is still painter's
+/// order, and a rectangle in the overlay still cannot cover a glyph in the
+/// overlay: two things that overlap and both carry text want two layers, and
+/// there are only two.
 #[derive(Default)]
 pub struct Scene {
     pub rects: Vec<Rect>,
     pub texts: Vec<Text>,
+    /// The floating layer's rectangles, painted after all of the above.
+    pub over_rects: Vec<Rect>,
+    /// The floating layer's glyphs, painted after everything else there is.
+    pub over_texts: Vec<Text>,
 }
 
 impl Scene {
@@ -420,6 +449,37 @@ impl Scene {
     pub fn text(&mut self, text: Text) -> &mut Scene {
         self.texts.push(text);
         self
+    }
+
+    /// A rectangle on the floating layer, painted after the whole base layer.
+    pub fn over_rect(&mut self, rect: Rect) -> &mut Scene {
+        self.over_rects.push(rect);
+        self
+    }
+
+    /// Text on the floating layer, painted after everything else in the frame.
+    pub fn over_text(&mut self, text: Text) -> &mut Scene {
+        self.over_texts.push(text);
+        self
+    }
+
+    /// The two instance ranges [`Renderer::draw`] issues, in draw order.
+    ///
+    /// Both layers' rectangles live in one storage buffer, base first and
+    /// overlay directly after it, so there is still one buffer and one bind
+    /// group and the two passes differ only by which instances they name. The
+    /// arithmetic is here, once, because an off by one at the call site silently
+    /// drops the last rectangle of the base layer or draws one of them twice,
+    /// and neither looks like a bug worth chasing.
+    pub fn instances(&self) -> (Range<u32>, Range<u32>) {
+        let base = self.rects.len() as u32;
+        let total = base + self.over_rects.len() as u32;
+        (0..base, base..total)
+    }
+
+    /// How many rectangles the storage buffer has to hold: both layers.
+    pub fn rect_count(&self) -> usize {
+        self.rects.len() + self.over_rects.len()
     }
 }
 
@@ -504,6 +564,23 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Which of the two layers a text pass belongs to. Private: a caller says which
+/// layer by which push it calls, not by naming one of these.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Layer {
+    Base,
+    Over,
+}
+
+impl Layer {
+    fn name(self) -> &'static str {
+        match self {
+            Layer::Base => "base",
+            Layer::Over => "overlay",
+        }
+    }
+}
+
 /// The renderer. One per window, reused for every frame.
 pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
@@ -517,6 +594,12 @@ pub struct Renderer {
     atlas: TextAtlas,
     viewport: Viewport,
     text: TextRenderer,
+    /// The overlay layer's glyphs. A second text renderer over the same atlas
+    /// and the same viewport, which glyphon supports: each renderer owns a
+    /// vertex buffer and `render` only reads the atlas. It exists because the
+    /// overlay's glyphs have to be drawn after the overlay's rectangles, and one
+    /// renderer prepared once can only be drawn once.
+    over_text: TextRenderer,
 }
 
 impl Renderer {
@@ -596,6 +679,8 @@ impl Renderer {
         let viewport = Viewport::new(device, &cache);
         let mut atlas = TextAtlas::new(device, &gpu.queue, &cache, format);
         let text = TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
+        let over_text =
+            TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
 
         Renderer {
             pipeline,
@@ -609,6 +694,7 @@ impl Renderer {
             atlas,
             viewport,
             text,
+            over_text,
         }
     }
 
@@ -635,20 +721,90 @@ impl Renderer {
     }
 
     /// Draw one scene into one acquired frame, and present it.
+    ///
+    /// Four steps, in this order: base rectangles, base glyphs, overlay
+    /// rectangles, overlay glyphs. Both rectangle steps read one storage buffer
+    /// at two instance ranges and both glyph steps share one atlas, so a second
+    /// layer costs one more draw call and one more text pass, not a second
+    /// buffer or a second atlas.
     pub fn draw(&mut self, gpu: &mut noob_gpu::Gpu, scene: &Scene, frame: noob_gpu::Frame) {
         let (w, h) = (gpu.width(), gpu.height());
-        self.ensure_capacity(&gpu.device, scene.rects.len());
+        self.ensure_capacity(&gpu.device, scene.rect_count());
         gpu.queue
             .write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[w, h, 0.0f32, 0.0]));
+        let (base, over) = scene.instances();
         if !scene.rects.is_empty() {
             gpu.queue
                 .write_buffer(&self.storage, 0, bytemuck::cast_slice(&scene.rects));
         }
+        if !scene.over_rects.is_empty() {
+            // Directly after the base layer in the same buffer, which is what
+            // makes the second instance range a range and not a second binding.
+            let after = (scene.rects.len() * std::mem::size_of::<Rect>()) as u64;
+            gpu.queue
+                .write_buffer(&self.storage, after, bytemuck::cast_slice(&scene.over_rects));
+        }
 
         // Buffers must outlive `prepare`, which borrows them through TextArea.
+        let base_buffers = self.shape(&scene.texts);
+        let over_buffers = self.shape(&scene.over_texts);
+
+        self.viewport.update(
+            &gpu.queue,
+            Resolution {
+                width: gpu.config.width,
+                height: gpu.config.height,
+            },
+        );
+        self.prepare_text(gpu, Layer::Base, &scene.texts, &base_buffers);
+        self.prepare_text(gpu, Layer::Over, &scene.over_texts, &over_buffers);
+
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("no0b"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &frame.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // Fully transparent: whatever is behind the window shows
+                        // through anywhere nothing is drawn.
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if !base.is_empty() {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.draw(0..6, base);
+            }
+            let _ = self.text.render(&self.atlas, &self.viewport, &mut pass);
+            // The pipeline and the bind group are set again because the text
+            // pass in between bound its own, and then the overlay's glyphs go
+            // last so nothing at all can be drawn over them.
+            if !over.is_empty() {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.draw(0..6, over);
+            }
+            let _ = self.over_text.render(&self.atlas, &self.viewport, &mut pass);
+        }
+        gpu.queue.submit([encoder.finish()]);
+        gpu.present(frame);
+        self.atlas.trim();
+    }
+
+    /// Shape one layer's text into one buffer per box. Separate from `prepare`
+    /// because the buffers have to outlive the borrow `prepare` takes of them.
+    fn shape(&mut self, texts: &[Text]) -> Vec<Buffer> {
         let mono = Attrs::new().family(Family::Monospace);
-        let buffers: Vec<Buffer> = scene
-            .texts
+        texts
             .iter()
             .map(|item| {
                 let mut buffer = Buffer::new(
@@ -688,19 +844,25 @@ impl Renderer {
                 buffer.shape_until_scroll(&mut self.font_system, false);
                 buffer
             })
-            .collect();
+            .collect()
+    }
 
-        self.viewport.update(
-            &gpu.queue,
-            Resolution {
-                width: gpu.config.width,
-                height: gpu.config.height,
-            },
-        );
-        let areas: Vec<TextArea> = scene
-            .texts
+    /// Prepare one layer's glyphs on that layer's own text renderer.
+    ///
+    /// Both layers fail the same way, on purpose: a frame with missing text is
+    /// better than a dead window, and the atlas recovers on the next frame once
+    /// it has been trimmed. An overlay that panicked the window when the atlas
+    /// filled up would be worse than the bug this layer was added to fix.
+    fn prepare_text(
+        &mut self,
+        gpu: &noob_gpu::Gpu,
+        layer: Layer,
+        texts: &[Text],
+        buffers: &[Buffer],
+    ) {
+        let areas: Vec<TextArea> = texts
             .iter()
-            .zip(&buffers)
+            .zip(buffers)
             .map(|(item, buffer)| TextArea {
                 buffer,
                 left: item.at.x,
@@ -716,7 +878,11 @@ impl Renderer {
                 custom_glyphs: &[],
             })
             .collect();
-        if let Err(e) = self.text.prepare(
+        let renderer = match layer {
+            Layer::Base => &mut self.text,
+            Layer::Over => &mut self.over_text,
+        };
+        if let Err(e) = renderer.prepare(
             &gpu.device,
             &gpu.queue,
             &mut self.font_system,
@@ -725,41 +891,8 @@ impl Renderer {
             areas,
             &mut self.swash,
         ) {
-            // A frame with missing text is better than a dead window; the atlas
-            // recovers on the next frame once it has been trimmed.
-            eprintln!("noob-draw: text prepare failed: {e:?}");
+            eprintln!("noob-draw: {} text prepare failed: {e:?}", layer.name());
         }
-
-        let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("no0b"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &frame.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        // Fully transparent: whatever is behind the window shows
-                        // through anywhere nothing is drawn.
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            if !scene.rects.is_empty() {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &self.bind_group, &[]);
-                pass.draw(0..6, 0..scene.rects.len() as u32);
-            }
-            let _ = self.text.render(&self.atlas, &self.viewport, &mut pass);
-        }
-        gpu.queue.submit([encoder.finish()]);
-        gpu.present(frame);
-        self.atlas.trim();
     }
 
     fn ensure_capacity(&mut self, device: &wgpu::Device, needed: usize) {
@@ -1043,6 +1176,68 @@ mod tests {
             Rect::TOP_LEFT | Rect::TOP_RIGHT | Rect::BOTTOM_RIGHT | Rect::BOTTOM_LEFT,
             Rect::EVERY_CORNER
         );
+    }
+
+    /// The two instance ranges have to cover every rectangle exactly once, with
+    /// no gap and no overlap. An off by one here drops the last rectangle of the
+    /// base layer or draws one of them twice, and both look like a shading
+    /// mistake rather than an arithmetic one.
+    #[test]
+    fn the_instance_ranges_cover_every_rect_exactly_once() {
+        let box_ = |n: usize| (0..n).map(|_| Rect::new(0.0, 0.0, 1.0, 1.0, [1.0; 4]));
+        for (base_n, over_n) in [(0, 0), (1, 0), (0, 1), (1, 1), (7, 3), (256, 1), (3, 300)] {
+            let mut scene = Scene::default();
+            scene.rects.extend(box_(base_n));
+            scene.over_rects.extend(box_(over_n));
+            let (base, over) = scene.instances();
+            assert_eq!(base.start, 0, "the base layer starts at the buffer's head");
+            assert_eq!(base.end, over.start, "a gap or an overlap between the two");
+            assert_eq!(base.len(), base_n, "{base_n}+{over_n}: base range");
+            assert_eq!(over.len(), over_n, "{base_n}+{over_n}: overlay range");
+            assert_eq!(
+                over.end as usize,
+                scene.rect_count(),
+                "the ranges stop short of the last rectangle"
+            );
+            // Every instance index is named once and only once, which is the
+            // property both assertions above are really about.
+            let mut seen = vec![0u8; scene.rect_count()];
+            for i in base.chain(over) {
+                seen[i as usize] += 1;
+            }
+            assert!(
+                seen.iter().all(|count| *count == 1),
+                "{base_n}+{over_n}: {seen:?}"
+            );
+        }
+    }
+
+    /// The capacity the storage buffer is sized to counts both layers. Sized to
+    /// the base layer alone, the overlay's rectangles would be written past the
+    /// end of the buffer and dropped.
+    #[test]
+    fn the_rect_count_is_both_layers() {
+        let mut scene = Scene::default();
+        scene.rect(Rect::new(0.0, 0.0, 1.0, 1.0, [1.0; 4]));
+        scene.over_rect(Rect::new(0.0, 0.0, 1.0, 1.0, [1.0; 4]));
+        scene.over_rect(Rect::new(0.0, 0.0, 1.0, 1.0, [1.0; 4]));
+        assert_eq!(scene.rect_count(), 3);
+        assert_eq!(scene.rects.len(), 1, "the base layer keeps its own list");
+        assert_eq!(scene.over_rects.len(), 2);
+    }
+
+    /// The overlay pushes go to the overlay lists and nowhere else. A push that
+    /// landed in the base layer would put the thing back under every glyph in
+    /// the window, which is the bug this layer exists for.
+    #[test]
+    fn an_overlay_push_stays_out_of_the_base_layer() {
+        let mut scene = Scene::default();
+        let at = Panel::new(0.0, 0.0, 10.0, 10.0);
+        scene.over_rect(at.fill([1.0; 4]));
+        scene.over_text(Text::new("menu", at, 13.0, [255; 4]));
+        assert!(scene.rects.is_empty() && scene.texts.is_empty());
+        assert_eq!(scene.over_rects.len(), 1);
+        assert_eq!(scene.over_texts.len(), 1);
     }
 
     /// A negative size would flip the sign of the distance field and paint the
