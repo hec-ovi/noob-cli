@@ -1465,6 +1465,31 @@ impl Layout {
         None
     }
 
+    /// The character cell of one named pane nearest the pointer, wherever the
+    /// pointer is.
+    ///
+    /// [`Layout::cell`] answers "which pane, which cell" and so has to say
+    /// nothing when the point is outside every text box. Selecting needs the
+    /// other question: the pane is already known (the press picked it, or the
+    /// drag belongs to it) and what is wanted is the cell to run to. Dropping
+    /// the answer there is what made a sweep to the bottom right stop short of
+    /// the last characters, and what made a press in the nine pixel padding
+    /// start no selection at all. So the point is clamped into the box rather
+    /// than refused, and the cell comes back clamped to the box's own grid:
+    /// `rows - 1` down and `cols` across, one past the last character being
+    /// where a caret sits after it.
+    pub fn cell_in(&self, space: Space, x: f32, y: f32, size: f32, column: f32) -> Option<(usize, usize)> {
+        if self.shaded || column <= 0.0 {
+            return None;
+        }
+        let body = self.content(space).inset(PAD);
+        let line = Text::line_for(size);
+        let rows = Text::rows_for(size, body.h);
+        let row = ((y - body.y) / line).floor().max(0.0) as usize;
+        let at = (((x - body.x) / column).round().max(0.0)) as usize;
+        Some((row.min(rows.saturating_sub(1)), at.min(columns_in(body.w, column))))
+    }
+
     /// Where a click in the prompt puts the caret, as a character offset into
     /// the typed text.
     ///
@@ -2800,9 +2825,15 @@ fn output(scene: &mut Scene, frame: &Frame, panel: Panel) {
     }
     // The window may start partway down a wrapped line rather than dropping
     // it, so the shaped buffer is scrolled by the rows that sit above.
+    //
+    // Wrapped by character, not by word: every row count, every scroll window
+    // and every selection column in this pane is `chars / cols` arithmetic, so
+    // the renderer has to break in the same places or the columns drift by one
+    // per blank the word wrap swallowed at a break.
     scene.text(
         Text::rich(runs, panel.inset(PAD), frame.body_size, frame.skin.body)
-            .scrolled(state.output.window(rows, cols).skip as f32),
+            .scrolled(state.output.window(rows, cols).skip as f32)
+            .wrap_at(cols),
     );
     scrollbar(scene, skin, panel, state.output.thumb(rows, cols));
 }
@@ -2818,7 +2849,8 @@ fn activity(scene: &mut Scene, frame: &Frame, panel: Panel) {
     }
     scene.text(
         Text::rich(runs, panel.inset(PAD), frame.pane_size, frame.skin.body)
-            .scrolled(state.activity.window(rows, cols).skip as f32),
+            .scrolled(state.activity.window(rows, cols).skip as f32)
+            .wrap_at(cols),
     );
     scrollbar(scene, skin, panel, state.activity.thumb(rows, cols));
 }
@@ -2942,7 +2974,8 @@ fn list_pane(scene: &mut Scene, frame: &Frame, panel: Panel, view: View, rows: V
     if !runs.is_empty() {
         scene.text(
             Text::rich(runs, panel.inset(PAD), size, frame.skin.body)
-                .scrolled(window.skip as f32),
+                .scrolled(window.skip as f32)
+                .wrap_at(cols),
         );
     }
     scrollbar(scene, frame.skin, panel, scrolls.thumb(view, &heights, fit));
@@ -3435,7 +3468,7 @@ fn files(scene: &mut Scene, frame: &Frame, panel: Panel) {
         }
         runs.push(Run::plain("\n"));
     }
-    scene.text(Text::rich(runs, content, frame.pane_size, skin.body));
+    scene.text(Text::rich(runs, content, frame.pane_size, skin.body).wrap_at(cols_of(body, frame.pane_column)));
     scrollbar(scene, skin, body, file.pane.thumb(rows, cols));
 }
 
@@ -4209,9 +4242,11 @@ fn input_row(scene: &mut Scene, frame: &Frame) {
             frame.body_size,
             skin.bright,
         )
-        // Wrap by glyph, so counting columns lands the caret where the glyph
-        // actually is. Word wrap would put it a word away on every long line.
-        .wrap_anywhere(),
+        // Broken at the same column count the caret is placed by, so counting
+        // columns lands on the glyph that is really there. Word wrap would put
+        // the caret a word away on every long line, and character wrap would
+        // still swallow a blank that fell on the boundary.
+        .wrap_at(columns),
     );
     let at = frame.prompt.caret() + PROMPT_COLUMNS;
     let (row, column) = (at / columns, at % columns);
@@ -6555,6 +6590,120 @@ mod tests {
             .min_by(|a, b| a[1].partial_cmp(&b[1]).unwrap())
             .unwrap();
         assert!((first[0] - (body.x + 6.0 * 8.0)).abs() < 0.01, "{first:?}");
+    }
+
+    /// A pane is drawn in exactly the columns its selection is counted in.
+    ///
+    /// Everything from the pointer to the clipboard is `row * cols + column`
+    /// arithmetic over the stored text, and that is only true if the rows on
+    /// screen really hold `cols` characters each. No shaper wraps that way on
+    /// its own, so the box names its column count and the rows are broken
+    /// before shaping. The panes used to be word wrapped: the blank at each
+    /// break was dropped from the screen, so every row below one began a
+    /// character further along than the arithmetic said and a selection made
+    /// there picked up spaces that were nowhere on screen. It only showed up
+    /// once the window was narrow enough to wrap, which is why resizing looked
+    /// like the trigger.
+    ///
+    /// Prose with blanks, deliberately: every wrapped-pane test in this repo
+    /// used `"x".repeat(n)`, which has no blank to swallow and so wraps the
+    /// same way whatever the mode is. That is why the whole corpus stayed green
+    /// over the bug.
+    #[test]
+    fn a_pane_is_drawn_in_the_columns_its_selection_is_counted_in() {
+        let mut state = busy_state();
+        for text in [
+            "hello worldly people everywhere now and then and again and again \
+             and once more for luck, with blanks all the way along it so the \
+             wrap has plenty of chances to eat one of them on a boundary",
+            "a second line of prose with a good few blanks in it to break on, \
+             long enough that it takes three rows of this pane to show and so \
+             crosses two wrap points on the way down",
+        ] {
+            state.activity.say(text, Tone::Body);
+        }
+
+        let dock = Dock::new();
+        let space = Space::ALL
+            .into_iter()
+            .find(|space| dock.slot(*space).active() == Some(View::Activity))
+            .expect("the activity pane is in the window");
+        let shape = shape(&dock, &["a.rs"]);
+        let layout = Layout::compute(1400.0, 900.0, &shape);
+        let skin = Skin::from(&Config::default());
+        let scene = build(&Frame {
+            state: &state,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &crate::prompt::Prompt::default(),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            clock: 0.0,
+            drag: None,
+            hot: None,
+            trouble: None,
+            selection: None,
+            menu: None,
+            picker: None,
+            settings: None,
+        });
+
+        let panel = layout.placed(space).body;
+        let cols = cols_of(panel, 8.0);
+        let text = scene
+            .texts
+            .iter()
+            .find(|text| text.at == panel.inset(PAD))
+            .expect("the activity pane draws its text");
+        assert_eq!(
+            text.wrap_cols,
+            Some(cols),
+            "the box has to name the column count the pane is measured in"
+        );
+
+        // The rows the renderer will lay out, which is what the reader sees.
+        let laid: String = noob_draw::Run::hard_wrapped(&text.runs, cols)
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect();
+        let drawn: Vec<Vec<char>> = laid.split('\n').map(|row| row.chars().collect()).collect();
+
+        // And the characters the hit test believes each row is showing.
+        let rows = layout.rows(panel, 13.0);
+        let skip = state.activity.window(rows, cols).skip;
+        let mut checked = 0;
+        for row in 0..rows {
+            let Some((line, offset)) = state.activity.spot_in(rows, cols, row) else {
+                break;
+            };
+            let source: Vec<char> = state
+                .activity
+                .line(line)
+                .expect("a row of a line the pane still holds")
+                .text
+                .chars()
+                .skip(offset)
+                .take(cols)
+                .collect();
+            assert_eq!(
+                drawn[row + skip], source,
+                "screen row {row} holds something other than what a selection there would copy"
+            );
+            checked += 1;
+        }
+        assert!(checked > 3, "only {checked} rows were on screen");
+        // And at least one of them really is a continuation of a wrapped line,
+        // or this proved nothing.
+        assert!(
+            (0..rows)
+                .filter_map(|row| state.activity.spot_in(rows, cols, row))
+                .any(|(_, offset)| offset > 0),
+            "nothing wrapped, so the wrap was never exercised"
+        );
     }
 
     /// A selection in a pane that is not on screen must not paint anything.

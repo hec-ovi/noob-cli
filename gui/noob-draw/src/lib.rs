@@ -392,6 +392,42 @@ pub struct Run {
 }
 
 impl Run {
+    /// The same runs with a line break put in every `cols` characters, so the
+    /// shaper has nothing left to wrap.
+    ///
+    /// The count runs across the runs, not within each one: a row of a
+    /// syntax-colored file is a dozen runs and it is still one row. A break
+    /// that a newline already provides is not doubled, and a break is only ever
+    /// inserted in front of a character that exists, so a line of exactly `cols`
+    /// characters stays one row rather than gaining an empty one.
+    pub fn hard_wrapped(runs: &[Run], cols: usize) -> Vec<Run> {
+        if cols == 0 {
+            return runs.to_vec();
+        }
+        let mut column = 0usize;
+        runs.iter()
+            .map(|run| {
+                let mut text = String::with_capacity(run.text.len());
+                for ch in run.text.chars() {
+                    if ch == '\n' {
+                        column = 0;
+                    } else {
+                        if column == cols {
+                            text.push('\n');
+                            column = 0;
+                        }
+                        column += 1;
+                    }
+                    text.push(ch);
+                }
+                Run {
+                    text,
+                    ..run.clone()
+                }
+            })
+            .collect()
+    }
+
     pub fn plain(text: impl Into<String>) -> Run {
         Run {
             text: text.into(),
@@ -434,10 +470,22 @@ pub struct Text {
     /// Lines scrolled off the top. A pane showing the tail of a long stream
     /// sets this to `lines - visible` and pays for the visible rows only.
     pub scroll_lines: f32,
-    /// Wrap at whatever character reaches the edge rather than at a word
-    /// boundary. What a text field needs: a caret placed by counting columns
-    /// only lands where the glyph is if the wrap counts columns too.
-    pub wrap_anywhere: bool,
+    /// Break every row at exactly this many characters, rather than letting the
+    /// shaper decide where a row ends.
+    ///
+    /// What a monospace pane needs. Everything around one of these boxes counts
+    /// characters: the row a line occupies is `chars / cols`, the column a
+    /// pointer is over is `x / column_width`, and the character a caret sits on
+    /// is `row * cols + column`. None of that is true unless the rows really do
+    /// hold `cols` characters each, and no shaper wraps that way on its own:
+    /// word wrap breaks at the last blank that fits, and even character wrap
+    /// lets a blank sitting on the boundary hang over the edge, so the row
+    /// below starts one character further along than the arithmetic says. One
+    /// swallowed blank per break is what put a space nobody could see into a
+    /// copied selection, and it only showed up once the window was narrow
+    /// enough to wrap. The break is inserted here instead, so the row the
+    /// shaper lays out is the row the arithmetic named.
+    pub wrap_cols: Option<usize>,
 }
 
 impl Text {
@@ -453,12 +501,14 @@ impl Text {
             line_height: Text::line_for(size),
             color,
             scroll_lines: 0.0,
-            wrap_anywhere: false,
+            wrap_cols: None,
         }
     }
 
-    pub fn wrap_anywhere(mut self) -> Text {
-        self.wrap_anywhere = true;
+    /// Lay this box out `cols` characters to the row. Ignored when `cols` is
+    /// zero, which is what a box too narrow for one column reports.
+    pub fn wrap_at(mut self, cols: usize) -> Text {
+        self.wrap_cols = (cols > 0).then_some(cols);
         self
     }
 
@@ -907,10 +957,20 @@ impl Renderer {
                 );
                 // Wrap width and clip rectangle from the same content box.
                 buffer.set_size(Some(item.at.w), Some(item.at.h));
-                if item.wrap_anywhere {
-                    buffer.set_wrap(Wrap::Glyph);
-                }
-                match item.runs.as_slice() {
+                // A box that names its column count is broken into rows here,
+                // so there is nothing left for the shaper to wrap and no
+                // chance of it putting a row boundary somewhere the arithmetic
+                // around the box did not.
+                let wrapped;
+                let runs = match item.wrap_cols {
+                    Some(cols) => {
+                        buffer.set_wrap(Wrap::None);
+                        wrapped = Run::hard_wrapped(&item.runs, cols);
+                        wrapped.as_slice()
+                    }
+                    None => item.runs.as_slice(),
+                };
+                match runs {
                     [only] if only.color.is_none() => {
                         buffer.set_text(&only.text, &mono, Shaping::Basic, None);
                     }
@@ -1438,6 +1498,162 @@ mod tests {
         // Dark is where the mistake was loudest: near black, the encode lifts a
         // colour by a factor of four.
         assert!(srgb_to_linear(0.05) < 0.005);
+    }
+
+    /// Width of one monospace column at this size, measured by shaping the way
+    /// [`Renderer::column_width`] does rather than guessed from the size.
+    fn column_of(fonts: &mut FontSystem, size: f32) -> f32 {
+        let mut ruler = Buffer::new(fonts, Metrics::new(size, Text::line_for(size)));
+        ruler.set_size(Some(4096.0), Some(size * 2.0));
+        ruler.set_text(
+            "0000000000",
+            &Attrs::new().family(Family::Monospace),
+            Shaping::Basic,
+            None,
+        );
+        ruler.shape_until_scroll(fonts, false);
+        let column = ruler.layout_runs().next().map_or(0.0, |run| run.line_w) / 10.0;
+        assert!(column > 0.0, "no monospace font to measure a column with");
+        column
+    }
+
+    /// The characters each visual row really ends up holding, laid out the way
+    /// [`Renderer::shape`] lays a box out: `wrap` is what a box with no column
+    /// count gets, and `Some(cols)` is the hard break `Text::wrap_at` asks for.
+    fn rows_on_screen(text: &str, cols: usize, hard: bool, wrap: Wrap) -> Vec<String> {
+        let size = 14.0;
+        let mut fonts = icon_fonts();
+        let column = column_of(&mut fonts, size);
+        let laid = match hard {
+            true => Run::hard_wrapped(&[Run::plain(text)], cols)
+                .swap_remove(0)
+                .text,
+            false => text.to_string(),
+        };
+        let mut buffer = Buffer::new(&mut fonts, Metrics::new(size, Text::line_for(size)));
+        // Half a column of slack, so `cols` glyphs fit and `cols + 1` do not
+        // whichever way the float rounds.
+        buffer.set_size(Some(cols as f32 * column + column * 0.5), Some(4096.0));
+        buffer.set_wrap(if hard { Wrap::None } else { wrap });
+        buffer.set_text(
+            &laid,
+            &Attrs::new().family(Family::Monospace),
+            Shaping::Basic,
+            None,
+        );
+        buffer.shape_until_scroll(&mut fonts, false);
+        buffer
+            .layout_runs()
+            .map(|run| {
+                // Glyph offsets are into the buffer line the run belongs to,
+                // which is one hard-wrapped row here and one whole paragraph
+                // when the shaper is doing the wrapping.
+                run.glyphs
+                    .iter()
+                    .flat_map(|g| run.text[g.start..g.end].chars())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Everything around a pane counts characters: a line takes `chars / cols`
+    /// rows, and the character under a pointer is `row * cols + column`. That
+    /// is only true if a row really holds `cols` characters.
+    ///
+    /// Neither wrap mode the shaper offers does that. Word wrap breaks at the
+    /// last blank that fits, and character wrap still lets a blank sitting on
+    /// the boundary hang over the edge, so the row below starts one character
+    /// late. One swallowed blank per break is the space that turned up in a
+    /// copied selection with nothing on screen to explain it.
+    #[test]
+    fn a_box_that_names_its_columns_holds_exactly_that_many_per_row() {
+        let cols = 20;
+        // The blank at index 20 is the one both shaper modes swallow.
+        let prose = "hello worldly people everywhere now";
+        assert_eq!(prose.chars().count(), 35);
+        assert_eq!(prose.chars().nth(20), Some(' '));
+
+        let hard = rows_on_screen(prose, cols, true, Wrap::None);
+        assert_eq!(
+            hard,
+            vec!["hello worldly people", " everywhere now"],
+            "a named box breaks on the column, blank or not"
+        );
+        // Which is to say: row r holds the characters starting at r * cols.
+        let chars: Vec<char> = prose.chars().collect();
+        for (r, row) in hard.iter().enumerate() {
+            let from = r * cols;
+            let to = (from + cols).min(chars.len());
+            assert_eq!(row.chars().collect::<Vec<char>>(), chars[from..to], "row {r}");
+        }
+
+        // What the two shaper modes do with the same box, and why neither is
+        // enough on its own.
+        let glyph = rows_on_screen(prose, cols, false, Wrap::Glyph);
+        assert_eq!(
+            glyph,
+            vec!["hello worldly people ", "everywhere now"],
+            "character wrap lets the blank on the boundary hang over"
+        );
+        let word = rows_on_screen(prose, cols, false, Wrap::WordOrGlyph);
+        assert_eq!(word, vec!["hello worldly people", "everywhere now"]);
+        assert!(
+            word.concat().chars().count() < prose.chars().count(),
+            "word wrap drops the blank at the break off the screen entirely, \
+             so the row below starts a character further along than the \
+             arithmetic says: {word:?}"
+        );
+    }
+
+    /// The break is put in front of a character that exists, so a line of
+    /// exactly `cols` characters is one row and not one row plus an empty one,
+    /// and a newline that is already there is not doubled. That is what keeps
+    /// the drawn row count equal to `chars / cols` rounded up.
+    #[test]
+    fn a_hard_break_is_only_inserted_where_a_row_really_overflows() {
+        let wrap = |text: &str, cols: usize| {
+            Run::hard_wrapped(&[Run::plain(text)], cols)
+                .swap_remove(0)
+                .text
+        };
+        assert_eq!(wrap("abcde", 5), "abcde", "exactly full is one row");
+        assert_eq!(wrap("abcdef", 5), "abcde
+f");
+        assert_eq!(wrap("abcde
+fg", 5), "abcde
+fg", "no doubled break");
+        assert_eq!(wrap("", 5), "");
+        assert_eq!(wrap("
+
+", 5), "
+
+", "empty lines stay one row each");
+        assert_eq!(wrap("abcdefghijkl", 5), "abcde
+fghij
+kl");
+        assert_eq!(wrap("abcdef", 0), "abcdef", "a box with no columns is left alone");
+    }
+
+    /// The count runs across the runs, not within each one: a syntax-colored
+    /// row is a dozen runs and it is still one row. Counting per run would put
+    /// a break after every token.
+    #[test]
+    fn colored_runs_are_wrapped_as_one_line_not_one_each() {
+        let runs = vec![
+            Run::plain("abc"),
+            Run::tinted("def", [1, 2, 3, 4]),
+            Run::plain("ghi"),
+        ];
+        let out = Run::hard_wrapped(&runs, 4);
+        let text: String = out.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(text, "abcd
+efgh
+i");
+        assert_eq!(
+            out.iter().map(|r| r.color).collect::<Vec<_>>(),
+            vec![None, Some([1, 2, 3, 4]), None],
+            "the colors ride along unchanged"
+        );
     }
 
     /// A negative size would flip the sign of the distance field and paint the

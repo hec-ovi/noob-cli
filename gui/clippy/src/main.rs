@@ -471,6 +471,59 @@ fn pasted(raw: &str) -> String {
         .collect()
 }
 
+/// The whole pixel-to-character path for one pane, free of the window so it
+/// can be driven by a test.
+///
+/// The pane is given rather than looked up, because both callers already know
+/// which one they mean: a press picked it, and a drag belongs to the pane it
+/// began in. That is also why the point is clamped into the box instead of
+/// being refused when it falls outside ([`view::Layout::cell_in`]): a drag that
+/// left the pane keeps running to the nearest cell, which is what puts the last
+/// characters of the bottom line inside reach, and a press in the padding
+/// anchors on the nearest cell instead of throwing the selection away.
+#[allow(clippy::too_many_arguments)]
+fn spot_in_pane(
+    layout: &view::Layout,
+    space: Space,
+    view: View,
+    pane: &state::Pane,
+    x: f32,
+    y: f32,
+    size: f32,
+    column: f32,
+) -> Option<select::Spot> {
+    let (row, at) = layout.cell_in(space, x, y, size, column)?;
+    // The box the glyphs are in, which is not the whole pane in the file
+    // view: its left column is the explorer.
+    let body = layout.content(space);
+    let rows = layout.rows(body, size);
+    // A file row is drawn with its line number in front of the text, so the
+    // column under the pointer is that many columns further along than the
+    // character it is over.
+    let (cols, chrome) = view::text_columns(view, body, column);
+    let at = at.saturating_sub(chrome);
+    let Some((line, offset)) = pane.spot_in(rows, cols, row) else {
+        // Below the last line on screen the selection runs to the end of the
+        // text that is on screen. The end of the whole ring would be wrong
+        // whenever the pane is scrolled back: sweeping to the bottom of a pane
+        // showing older output would silently take everything down to the live
+        // end with it.
+        let window = pane.window(rows, cols);
+        let last = match window.count {
+            0 => pane.last().saturating_sub(1),
+            count => pane.showing_from(rows, cols) + count - 1,
+        };
+        let end = pane.line(last).map_or(0, |l| l.text.chars().count());
+        return Some(select::Spot::new(last, end));
+    };
+    // `offset` is where this visual row starts inside its logical line, so a
+    // click on the second row of a wrapped line lands past the wrap. The
+    // column is not clamped to the line's own length: a drag that ran off the
+    // right of a short line has to reach that line's last character, and
+    // `Selection::text` is what trims the overshoot.
+    Some(select::Spot::new(line, offset + at))
+}
+
 struct App {
     window: Option<Arc<Window>>,
     gpu: Option<noob_gpu::Gpu>,
@@ -1834,30 +1887,16 @@ impl App {
         // Hit testing it with the smaller one put every click a growing number
         // of rows away from the character under the pointer.
         let (size, column) = self.metrics_of(view);
-        let (over, row, at) =
-            layout.cell(self.cursor.x as f32, self.cursor.y as f32, size, column)?;
-        if over != space {
-            return None;
-        }
-        // The box the glyphs are in, which is not the whole pane in the file
-        // view: its left column is the explorer.
-        let body = layout.content(space);
-        let rows = layout.rows(body, size);
-        // A file row is drawn with its line number in front of the text, so the
-        // column under the pointer is that many columns further along than the
-        // character it is over.
-        let (cols, chrome) = view::text_columns(view, body, column);
-        let at = at.saturating_sub(chrome);
-        let Some((line, offset)) = pane.spot_in(rows, cols, row) else {
-            // Below the last line, the selection runs to the end of the text
-            // rather than to a line that does not exist.
-            let last = pane.last().saturating_sub(1);
-            let end = pane.line(last).map_or(0, |l| l.text.chars().count());
-            return Some(select::Spot::new(last, end));
-        };
-        // `offset` is where this visual row starts inside its logical line, so
-        // a click on the second row of a wrapped line lands past the wrap.
-        Some(select::Spot::new(line, offset + at))
+        spot_in_pane(
+            layout,
+            space,
+            view,
+            pane,
+            self.cursor.x as f32,
+            self.cursor.y as f32,
+            size,
+            column,
+        )
     }
 
     /// The font size and column width a view is drawn with. The window-side
@@ -3665,6 +3704,138 @@ mod tests {
         // Off the right hand end stops at the end of the text.
         prompt.drag_to(caret(W - 1.0));
         assert_eq!(prompt.selected().as_deref(), Some("ect me please"));
+    }
+
+    /// A pane of known text, and the pixel-to-character half of a selection in
+    /// it. `Model::spot_at` is a two line wrapper around `spot_in_pane`;
+    /// everything that decides which character is under the pointer is here.
+    fn output_pane(lines: &[&str]) -> (Dock, Layout, Space, state::Pane) {
+        let dock = Dock::new();
+        let layout = laid_out(&dock, None, 0);
+        let space = Space::ALL
+            .into_iter()
+            .find(|space| dock.slot(*space).active() == Some(View::Output))
+            .expect("the conversation is in the window");
+        let mut pane = state::Pane::new(100);
+        for text in lines {
+            pane.push(state::Line::new(*text, state::Tone::Body));
+        }
+        (dock, layout, space, pane)
+    }
+
+    /// The last character of a line and the last character of the buffer are
+    /// both selectable.
+    ///
+    /// The range is half-open at the end, so taking the last character means
+    /// landing the focus on column `len`: the boundary after it, which is half
+    /// a column of pixels short of the right hand edge of the box. Nothing may
+    /// clamp that back to `len - 1`, and nothing may refuse the pixel for being
+    /// past the last glyph.
+    #[test]
+    fn a_drag_can_reach_the_last_character_of_a_line_and_of_the_buffer() {
+        let (_dock, layout, space, pane) = output_pane(&["hello world", "second line"]);
+        // The nine pixel padding the panes are drawn with, and one text row.
+        let inner = layout.content(space).inset(9.0);
+        let line = noob_draw::Text::line_for(SIZE);
+        let at = |row: usize, column: usize| {
+            (
+                inner.x + column as f32 * COLUMN,
+                inner.y + (row as f32 + 0.5) * line,
+            )
+        };
+        let spot = |(x, y): (f32, f32)| {
+            spot_in_pane(&layout, space, View::Output, &pane, x, y, SIZE, COLUMN)
+                .expect("a pane with text has a nearest character everywhere")
+        };
+
+        // The boundary after the final 'd' of the first line.
+        assert_eq!(spot(at(0, 11)), select::Spot::new(0, 11));
+        let mut selection = select::Selection::new(View::Output, spot(at(0, 0)));
+        selection.extend(spot(at(0, 11)));
+        assert_eq!(selection.text(&pane), "hello world");
+
+        // And the last character of the whole buffer, from the start of it.
+        let mut selection = select::Selection::new(View::Output, spot(at(0, 0)));
+        selection.extend(spot(at(1, 11)));
+        assert_eq!(selection.text(&pane), "hello world\nsecond line");
+    }
+
+    /// A drag that leaves the box keeps extending to the nearest cell instead
+    /// of stopping where it was.
+    ///
+    /// Sweeping to the bottom right is how anyone selects to the end of a pane,
+    /// and the pointer is past the text by the time the button comes up. The
+    /// hit test used to answer nothing outside the inset box, so the focus
+    /// froze on the last cell the pointer happened to cross and the sweep took
+    /// everything but the end of it.
+    #[test]
+    fn a_drag_that_leaves_the_pane_keeps_running_to_the_nearest_cell() {
+        let (_dock, layout, space, pane) = output_pane(&["hello world", "second line"]);
+        let body = layout.content(space);
+        let inner = body.inset(9.0);
+        let line = noob_draw::Text::line_for(SIZE);
+        let spot = |x: f32, y: f32| {
+            spot_in_pane(&layout, space, View::Output, &pane, x, y, SIZE, COLUMN)
+                .expect("a drag off the pane still has a nearest character")
+        };
+
+        let start = spot(inner.x, inner.y + line * 0.5);
+        assert_eq!(start, select::Spot::new(0, 0));
+
+        // Off the right hand edge of the window entirely, on the first row.
+        let mut selection = select::Selection::new(View::Output, start);
+        selection.extend(spot(W + 500.0, inner.y + line * 0.5));
+        assert_eq!(
+            selection.text(&pane),
+            "hello world",
+            "a drag off the right takes the rest of the row"
+        );
+
+        // And below the pane, which is the sweep to the end of the text.
+        let mut selection = select::Selection::new(View::Output, start);
+        selection.extend(spot(W + 500.0, body.y + body.h + 400.0));
+        assert_eq!(selection.text(&pane), "hello world\nsecond line");
+
+        // Above and to the left of it, which is the same sweep backwards.
+        let mut selection = select::Selection::new(View::Output, spot(W, body.y + body.h));
+        selection.extend(spot(-200.0, -200.0));
+        assert_eq!(selection.text(&pane), "hello world\nsecond line");
+    }
+
+    /// A press in the pane's padding anchors on the nearest character rather
+    /// than throwing the selection away.
+    ///
+    /// The press lands on `Hit::Body`, which is the whole pane, while the text
+    /// sits in a box nine pixels inside it. A press in that margin used to
+    /// resolve to no character at all, which cleared the selection and left
+    /// `selecting` false, so the drag that followed did nothing whatsoever.
+    #[test]
+    fn a_press_in_the_padding_still_anchors_a_selection() {
+        let (_dock, layout, space, pane) = output_pane(&["hello world", "second line"]);
+        let body = layout.content(space);
+        let spot = |x: f32, y: f32| {
+            spot_in_pane(&layout, space, View::Output, &pane, x, y, SIZE, COLUMN)
+        };
+
+        // The press is inside the pane and outside the text box, on all four
+        // sides of it.
+        for (name, x, y) in [
+            ("left", body.x + 1.0, body.y + 20.0),
+            ("top", body.x + 20.0, body.y + 1.0),
+            ("right", body.x + body.w - 1.0, body.y + 20.0),
+            ("bottom", body.x + 20.0, body.y + body.h - 1.0),
+        ] {
+            assert!(
+                spot(x, y).is_some(),
+                "a press in the {name} padding resolved to no character"
+            );
+        }
+        // The top left corner of the padding anchors on the first character,
+        // which is what a drag from there then extends.
+        assert_eq!(
+            spot(body.x + 1.0, body.y + 1.0),
+            Some(select::Spot::new(0, 0))
+        );
     }
 
     /// The whole pointer path for the debug pane: a pixel inside the pane
