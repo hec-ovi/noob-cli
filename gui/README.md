@@ -52,7 +52,9 @@ rest at a lower alpha.
 | PLAN | the checklist, straight from the plan tool's own arguments |
 | AGENTS | sub-agents: their tool set, their brief, the last thing each one said, and how it ended |
 | HARDWARE | CPU and RAM, plus GPU, VRAM and GTT on an AMD card |
-| LLM | context, where compaction triggers, cache, total and last prefill and output, and the measured prefill and decode rates |
+| SESSION | this run: which phase, model and workspace, context against where compaction triggers, tool calls, the longest single answer, prefill, cache, output, requests, and the measured rates |
+| OVERALL | every run there has ever been: tokens prefilled, generated and served from cache, and the mean and median decode and prefill speed |
+| DEBUG | tool calls that failed, and the arguments that were sent to the one you click |
 | FILES | one tab per file touched, with the diff, a line-number gutter and syntax coloring |
 
 The conversation is rendered as Markdown, because the model writes Markdown
@@ -60,10 +62,17 @@ whether or not anything asked it to: headings, bold, bullets and fenced code
 become formatting instead of showing their marks, and a fenced block is syntax
 colored by the language the fence named.
 
+A reading with a maximum is drawn as a block of dots, eight across and five
+down, in the metric's own colour: one row is 20 percent and one dot is 2.5, and
+the block fills from the bottom. The number sits beside it in large text. A
+reading with no maximum has nothing to be a proportion of, so it is the number
+alone, in the same colour, with no empty track under it. Each metric keeps its
+colour wherever it appears, so PREFILLED is the same blue in SESSION and in
+OVERALL.
+
 HARDWARE reads `/sys/class/drm/card*/device` and `/proc` directly. No vendor
-library, no dependency: a labelled bar against its maximum the way radeontop
-lays it out, with its own history drawn behind it the way btop does. It only
-samples while it is on screen, so an idle window still costs nothing.
+library, no dependency. It only samples while it is on screen, so an idle window
+still costs nothing.
 
 The GPU rows are AMD only, because they come from `gpu_busy_percent` and the
 `mem_info_*` files, which the amdgpu driver exposes and other drivers do not.
@@ -71,13 +80,27 @@ On anything else those rows are simply absent and the pane shows CPU and memory
 alone. Reading an Nvidia card means its own library, which is the dependency
 this deliberately does not have.
 
-LLM is the other question: not whether the machine is keeping up but whether the
-budget is. Context comes from the agent's own estimate rather than from the last
-request, so it moves while a turn is still running, and COMPACTS AT is the line
-that actually runs out. The rates are measured rather than reported. Prefill is from the
-request leaving to the first token arriving, which is what a long transcript
-costs; decode is from the first token to the last, which is what the answer
-costs. Both averaged over the session, because one request is noise.
+SESSION is the other question: not whether the machine is keeping up but whether
+the budget is. Context comes from the agent's own estimate rather than from the
+last request, so it moves while a turn is still running, and COMPACTS AT is the
+line that actually runs out. The rates are measured rather than reported. Prefill
+is from the request leaving to the first token arriving, which is what a long
+transcript costs; decode is from the first token to the last, which is what the
+answer costs.
+
+OVERALL is the same arithmetic over every session, kept in
+`~/.config/noob/clippy.totals` beside the settings and written by rename at the
+end of every turn. It carries a mean and a median: the mean is every request ever,
+and the median is the middle one, which is the reading that survives a cold start
+with a full transcript. That needs the samples themselves, so the file keeps the
+last 512 per-request rates. A missing file is a first run and an unreadable one
+reads as zero; neither stops the window opening.
+
+DEBUG counts the calls that failed and shows what was sent to them. Click a row
+and the arguments of that call open under it. Both halves are already on the
+wire, they were being written into the activity log and then dropped, so this
+needed no protocol change. What it does not show is the schema the tool expected:
+that is on no event at all.
 
 A running command scrolls. `cargo build` used to be one row that said nothing
 for two minutes and then said how it went; its output now arrives line by line
@@ -114,9 +137,10 @@ Drag across the conversation, the activity list or a file to select text, and
 Ctrl-C copies it. Ctrl-C with nothing selected still cancels the turn, which is
 the thing that must never get hard to reach; Ctrl-Shift-C always copies, and
 Escape drops the selection before it touches anything else. Selection is only
-on the panes that are made of lines, because the plan, the agent list and the
-two monitors are lists and readings rather than text, and pretending otherwise
-would mean guessing at a layout that does not exist.
+on the panes that are made of lines, because the plan, the agent list, the three
+monitors and the debug list are lists and readings rather than text, and
+pretending otherwise would mean guessing at a layout that does not exist. A click
+in DEBUG opens a failed call instead of starting a selection.
 
 A selection holds line numbers rather than screen positions, so output arriving
 underneath it does not slide it onto different text mid-drag.
@@ -154,11 +178,12 @@ neighbour rather than leaving a hole.
 `~/.config/noob/clippy.conf`, written with the defaults on first run and
 commented. Opacity, both font sizes, how tall the prompt may grow, which panes
 exist, and the whole palette: the eight base colors, one per tool, one per view,
-and the five the highlighter uses for code. A key it does not
-recognise is reported in the ACTIVITY pane rather than ignored.
+ten gauge slots a monitor reading picks from, and the five the highlighter uses
+for code. A key it does not recognise is reported in the ACTIVITY pane rather
+than ignored.
 
-`theme = noob | amber | ice | plum` sets every color at once. The tool and view
-colors name the thing rather than the window, so a theme leaves them alone. The
+`theme = noob | amber | ice | plum` sets every color at once. The tool, view and
+gauge colors name the thing rather than the window, so a theme leaves them alone. The
 colors ship as commented defaults so the theme has something to set, so
 uncomment one line to keep the theme and override that single color.
 `clippy --set theme=amber` makes the same edit from a terminal without touching

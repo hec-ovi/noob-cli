@@ -48,7 +48,11 @@ pub struct Config {
 
     /// One color per view, in the order [`View`](crate::dock::View) declares
     /// them. Read by position, so the order is the same as [`VIEW_KEYS`].
-    pub views: [[u8; 3]; 7],
+    pub views: [[u8; 3]; 9],
+
+    /// The gauge palette: one color per slot, which a monitor reading names for
+    /// itself. Read by position, so the order is the same as [`GAUGE_KEYS`].
+    pub gauges: [[u8; 3]; 10],
 
     pub syntax_comment: [u8; 3],
     pub syntax_string: [u8; 3],
@@ -80,6 +84,7 @@ impl Default for Config {
             bar: [0x0e, 0x2e, 0x1e],
             tools: TOOLS,
             views: VIEWS,
+            gauges: GAUGES,
             syntax_comment: [0x56, 0x84, 0x66],
             syntax_string: [0xd6, 0xc4, 0x7a],
             syntax_number: [0xb2, 0xce, 0xf0],
@@ -138,13 +143,15 @@ const TOOLS: [[u8; 3]; 14] = [
 
 /// The key for each view color, in the order `View::ALL` declares the views.
 /// The position here is the position in [`Config::views`].
-pub const VIEW_KEYS: [&str; 7] = [
+pub const VIEW_KEYS: [&str; 9] = [
     "view_talk",
     "view_activity",
     "view_plan",
     "view_agents",
     "view_hardware",
-    "view_llm",
+    "view_session",
+    "view_overall",
+    "view_debug",
     "view_files",
 ];
 
@@ -152,14 +159,44 @@ pub const VIEW_KEYS: [&str; 7] = [
 /// holding is answerable from the corner of the eye rather than by reading
 /// seven labels. Spread the way the tool hues are, and a theme leaves them
 /// alone for the same reason: they name the views, not the window.
-const VIEWS: [[u8; 3]; 7] = [
+const VIEWS: [[u8; 3]; 9] = [
     [0x73, 0xde, 0x9f], // talk
     [0xf5, 0xc7, 0x5c], // activity
     [0xc6, 0x82, 0xed], // plan
     [0x5f, 0xa3, 0xf2], // agents
     [0x52, 0xe0, 0xe0], // hardware
-    [0xf0, 0x75, 0xc3], // llm
+    [0xf0, 0x75, 0xc3], // session
+    [0x8f, 0x7f, 0xf5], // overall
+    [0xf0, 0x4f, 0x8f], // debug
     [0xf0, 0x7d, 0x4c], // files
+];
+
+/// The key for each gauge slot. The position here is the position in
+/// [`Config::gauges`], and a reading says which slot it wants.
+pub const GAUGE_KEYS: [&str; 10] = [
+    "gauge_1", "gauge_2", "gauge_3", "gauge_4", "gauge_5", "gauge_6", "gauge_7", "gauge_8",
+    "gauge_9", "gauge_10",
+];
+
+/// The gauge palette. One hue per reading rather than one for every gauge in
+/// the window: a pane of eight readings in a single colour reads as one texture,
+/// and which block belongs to which label is then a matter of counting rows.
+///
+/// Ten slots because that is how many readings the widest pane has (the session
+/// monitor) and every reading in one pane has to differ from every other. A
+/// theme leaves these alone, the way it leaves the tool and view hues alone:
+/// they name the metric.
+const GAUGES: [[u8; 3]; 10] = [
+    [0xf0, 0x65, 0x5c], // 1, red
+    [0xf5, 0x9a, 0x4f], // 2, orange
+    [0xf5, 0xe0, 0x5a], // 3, yellow
+    [0xb9, 0xe0, 0x4f], // 4, lime
+    [0x7c, 0xd8, 0x94], // 5, green
+    [0x4f, 0xd6, 0xc8], // 6, teal
+    [0x5f, 0xa3, 0xf2], // 7, blue
+    [0x8f, 0x8f, 0xf5], // 8, indigo
+    [0xc6, 0x82, 0xed], // 9, violet
+    [0xf0, 0x75, 0xc3], // 10, pink
 ];
 
 fn prose_tools(bright: [u8; 3], text: [u8; 3]) -> [[u8; 3]; 14] {
@@ -273,6 +310,7 @@ pub fn keys() -> Vec<&'static str> {
     ];
     keys.extend(TOOL_KEYS);
     keys.extend(VIEW_KEYS);
+    keys.extend(GAUGE_KEYS);
     keys
 }
 
@@ -356,6 +394,12 @@ impl Config {
                 _ if key.starts_with("view_") => {
                     match VIEW_KEYS.iter().position(|known| *known == key) {
                         Some(at) => set(&mut config.views[at], color(&value)),
+                        None => false,
+                    }
+                }
+                _ if key.starts_with("gauge_") => {
+                    match GAUGE_KEYS.iter().position(|known| *known == key) {
+                        Some(at) => set(&mut config.gauges[at], color(&value)),
                         None => false,
                     }
                 }
@@ -517,6 +561,15 @@ pub fn write_setting(path: &Path, key: &str, value: Option<&str>) -> Result<(), 
     if !next.is_empty() {
         next.push('\n');
     }
+    replace_file(path, &next)
+}
+
+/// Put `text` in the file, by rename, keeping the permissions the old file had.
+///
+/// Extracted from the settings writer because the running totals file has the
+/// same requirement and no business having its own opinion about it: a crash
+/// mid-write must not leave a half-written file where a whole one was.
+pub(crate) fn replace_file(path: &Path, text: &str) -> Result<(), String> {
     if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
@@ -526,9 +579,9 @@ pub fn write_setting(path: &Path, key: &str, value: Option<&str>) -> Result<(), 
         .filter(|metadata| metadata.file_type().is_file())
         .map(|metadata| metadata.permissions());
     let (tmp, mut file) =
-        open_temp(path).map_err(|e| format!("cannot create a temporary settings file: {e}"))?;
+        open_temp(path).map_err(|e| format!("cannot create a temporary file: {e}"))?;
     let replace = (|| -> std::io::Result<()> {
-        file.write_all(next.as_bytes())?;
+        file.write_all(text.as_bytes())?;
         if let Some(permissions) = permissions {
             file.set_permissions(permissions)?;
         }
@@ -543,8 +596,8 @@ pub fn write_setting(path: &Path, key: &str, value: Option<&str>) -> Result<(), 
     Ok(())
 }
 
-/// A private temporary file beside the settings file. `create_new`, so a name
-/// somebody planted first is an error rather than a write through their
+/// A private temporary file beside the file being replaced. `create_new`, so a
+/// name somebody planted first is an error rather than a write through their
 /// symlink.
 fn open_temp(path: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
     static SERIAL: AtomicU64 = AtomicU64::new(1);
@@ -683,8 +736,24 @@ theme = noob
 # view_plan     = #c682ed
 # view_agents   = #5fa3f2
 # view_hardware = #52e0e0
-# view_llm      = #f075c3
+# view_session  = #f075c3
+# view_overall  = #8f7ff5
+# view_debug    = #f04f8f
 # view_files    = #f07d4c
+
+# The gauge palette, in slot order. Every reading in a monitor names one of
+# these, so a block and its number carry the metric's own colour rather than one
+# colour shared by every gauge in the window. A theme leaves them alone.
+# gauge_1  = #f0655c
+# gauge_2  = #f59a4f
+# gauge_3  = #f5e05a
+# gauge_4  = #b9e04f
+# gauge_5  = #7cd894
+# gauge_6  = #4fd6c8
+# gauge_7  = #5fa3f2
+# gauge_8  = #8f8ff5
+# gauge_9  = #c682ed
+# gauge_10 = #f075c3
 
 # Code in a message: the five things the highlighter can name.
 # syntax_comment = #568466
@@ -731,7 +800,7 @@ mod tests {
         for key in keys() {
             assert!(named.contains(&key.to_string()), "{key} is undocumented");
         }
-        assert_eq!(keys().len(), 41, "a new key needs a line in the file");
+        assert_eq!(keys().len(), 53, "a new key needs a line in the file");
     }
 
     /// The commented colors are the noob theme spelled out. A stale hex there
@@ -859,6 +928,22 @@ mod tests {
         assert_eq!(Config::parse("view_weather = #fff").unknown, ["view_weather"]);
     }
 
+    #[test]
+    fn every_gauge_hue_reads_from_the_file() {
+        let mut text = String::new();
+        for (at, key) in GAUGE_KEYS.iter().enumerate() {
+            text.push_str(&format!("{key} = #0000{:02x}\n", at + 1));
+        }
+        let config = Config::parse(&text);
+        assert!(config.unknown.is_empty(), "{:?}", config.unknown);
+        for (at, key) in GAUGE_KEYS.iter().enumerate() {
+            assert_eq!(config.gauges[at], [0, 0, at as u8 + 1], "{key}");
+        }
+        // Read by position, so a slot a reading asks for has to exist.
+        assert_eq!(GAUGE_KEYS.len(), GAUGES.len());
+        assert_eq!(Config::parse("gauge_11 = #fff").unknown, ["gauge_11"]);
+    }
+
     /// The whole point of a preset: one word changes every color, and the one
     /// color you also wrote down is still yours.
     #[test]
@@ -891,6 +976,7 @@ mod tests {
             assert_eq!(preset.tools[12], preset.bright, "{name}: plan is prose");
             assert_eq!(preset.tools[13], preset.text, "{name}: the catch-all is prose");
             assert_eq!(preset.views, VIEWS, "{name}: a view hue names the view");
+            assert_eq!(preset.gauges, GAUGES, "{name}: a gauge hue names the metric");
             if name != "noob" {
                 assert_ne!(preset, Config::default(), "{name} is the default twice");
             }

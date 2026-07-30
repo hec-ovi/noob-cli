@@ -22,8 +22,12 @@ pub enum View {
     Agents,
     /// GPU, CPU, memory: what the machine is doing.
     Hardware,
-    /// Context, tokens and rates: what the session is doing.
-    Llm,
+    /// This run only: what it is holding, what it has asked for, what it cost.
+    Session,
+    /// Every run there has ever been, read from the totals file.
+    Overall,
+    /// Tool calls that failed, and what was sent to them.
+    Debug,
     /// The files the agent has touched, with its own inner tab per file.
     Files,
 }
@@ -33,13 +37,15 @@ impl View {
     /// builds its arrangement from [`Dock::new`] rather than from this, but the
     /// skin reads a view's accent by position here, so the order is part of
     /// what a colour means.
-    pub const ALL: [View; 7] = [
+    pub const ALL: [View; 9] = [
         View::Talk,
         View::Activity,
         View::Plan,
         View::Agents,
         View::Hardware,
-        View::Llm,
+        View::Session,
+        View::Overall,
+        View::Debug,
         View::Files,
     ];
 
@@ -50,7 +56,9 @@ impl View {
             View::Plan => "PLAN",
             View::Agents => "AGENTS",
             View::Hardware => "HARDWARE",
-            View::Llm => "LLM",
+            View::Session => "SESSION",
+            View::Overall => "OVERALL",
+            View::Debug => "DEBUG",
             View::Files => "FILES",
         }
     }
@@ -177,13 +185,17 @@ impl Dock {
                         View::Plan,
                         View::Agents,
                         View::Hardware,
-                        View::Llm,
+                        View::Session,
+                        View::Overall,
                     ],
                     active: 0,
                     folded: false,
                 },
+                // DEBUG opens down here rather than above, where seven tabs
+                // would not fit the strip at the width this window opens at and
+                // the ones past the edge are dropped rather than squeezed.
                 Slot {
-                    views: vec![View::Files],
+                    views: vec![View::Files, View::Debug],
                     active: 0,
                     folded: false,
                 },
@@ -341,19 +353,27 @@ mod tests {
         assert_eq!(dock.walk().len(), View::ALL.len());
     }
 
-    /// The decorative avatar was a view of its own and is not one any more.
-    /// Its tab is the thing this asserts is gone: the palette and the walk are
-    /// both indexed by `View::ALL`, so a leftover variant would keep a tab and
-    /// an accent alive with nothing behind them.
+    /// The decorative avatar was a view of its own and is not one any more, and
+    /// the one LLM monitor is now three. Both are asserted by absence: the
+    /// palette and the walk are indexed by `View::ALL`, so a leftover variant
+    /// would keep a tab and an accent alive with nothing behind them.
     #[test]
-    fn there_are_seven_views_and_none_of_them_is_the_avatar() {
-        assert_eq!(View::ALL.len(), 7);
+    fn there_are_nine_views_and_no_avatar_and_no_single_llm_monitor() {
+        assert_eq!(View::ALL.len(), 9);
         for view in View::ALL {
             assert_ne!(view.label(), "CLIPPY", "{view:?}");
+            assert_ne!(view.label(), "LLM", "{view:?}");
+        }
+        for wanted in [View::Session, View::Overall, View::Debug] {
+            assert!(View::ALL.contains(&wanted), "{wanted:?}");
         }
         let dock = Dock::new();
         assert!(dock.is_sound());
-        assert_eq!(dock.slot(Space::BottomRight).views, vec![View::Files]);
+        assert_eq!(
+            dock.slot(Space::BottomRight).views,
+            vec![View::Files, View::Debug]
+        );
+        assert_eq!(dock.slot(Space::BottomRight).active(), Some(View::Files));
     }
 
     /// The invariant the rest of the window relies on: whatever gets dragged
@@ -367,7 +387,7 @@ mod tests {
             (View::Activity, Space::Left),
             (View::Plan, Space::BottomRight),
             (View::Hardware, Space::Left),
-            (View::Llm, Space::BottomRight),
+            (View::Overall, Space::BottomRight),
             (View::Agents, Space::TopRight),
             (View::Talk, Space::Left),
         ];
@@ -387,7 +407,8 @@ mod tests {
             View::Plan,
             View::Agents,
             View::Hardware,
-            View::Llm,
+            View::Session,
+            View::Overall,
         ] {
             dock.move_view(view, Space::Left);
         }
@@ -416,8 +437,8 @@ mod tests {
     fn removing_the_active_tab_leaves_a_valid_one_showing() {
         let mut dock = Dock::new();
         // Show the last tab, then move it out.
-        dock.slot_mut(Space::TopRight).show(View::Llm);
-        dock.move_view(View::Llm, Space::Left);
+        dock.slot_mut(Space::TopRight).show(View::Overall);
+        dock.move_view(View::Overall, Space::Left);
         let slot = dock.slot(Space::TopRight);
         assert!(slot.active().is_some());
         assert!(slot.views.contains(&slot.active().unwrap()));
@@ -458,13 +479,15 @@ mod tests {
     /// cannot be dragged back in.
     #[test]
     fn a_hidden_view_is_gone_rather_than_folded() {
-        let dock = Dock::hiding(&[View::Files, View::Activity]);
+        // Both of the bottom space's tabs, so that space ends up empty: the
+        // debug pane opens down there beside the files.
+        let dock = Dock::hiding(&[View::Files, View::Debug, View::Activity]);
         assert!(dock.is_sound());
         assert_eq!(dock.space_of(View::Files), None);
         assert_eq!(dock.space_of(View::Activity), None);
-        assert_eq!(dock.walk().len(), View::ALL.len() - 2);
+        assert_eq!(dock.walk().len(), View::ALL.len() - 3);
         assert!(!dock.walk().contains(&View::Files));
-        // The space the files were the only occupant of is empty, not broken.
+        // The space those two were the only occupants of is empty, not broken.
         assert!(dock.slot(Space::BottomRight).is_empty());
         assert_eq!(dock.slot(Space::BottomRight).active(), None);
 
@@ -526,6 +549,7 @@ mod tests {
     fn hiding_the_last_tab_in_a_space_leaves_it_empty_and_usable() {
         let mut dock = Dock::new();
         assert!(dock.hide(View::Files));
+        assert!(dock.hide(View::Debug));
         let slot = dock.slot(Space::BottomRight);
         assert!(slot.is_empty());
         assert_eq!(slot.active(), None);
@@ -559,8 +583,8 @@ mod tests {
     fn revealing_a_view_shows_it_and_unfolds_its_space() {
         let mut dock = Dock::new();
         dock.slot_mut(Space::TopRight).folded = true;
-        assert!(dock.reveal(View::Llm));
-        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Llm));
+        assert!(dock.reveal(View::Overall));
+        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Overall));
         assert!(!dock.slot(Space::TopRight).folded);
     }
 }

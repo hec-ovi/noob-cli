@@ -74,7 +74,19 @@ pub struct Skin {
     /// One colour per view, in the order [`View`] declares them. A fill rather
     /// than a text tint: it is drawn as the accent line along the top of the
     /// tab that is showing.
-    pub views: [[f32; 4]; 7],
+    pub views: [[f32; 4]; 9],
+
+    /// The gauge palette. A monitor reading names the slot it wants, so a block
+    /// and its number carry the metric's own colour instead of one gauge colour
+    /// shared by every reading in the window.
+    ///
+    /// Both a fill and a tint, because a reading is drawn as both: the dots are
+    /// rects and the number beside them is text.
+    pub gauges: [[f32; 4]; 10],
+    /// The same hues as an unlit dot: present, so the block reads as a block at
+    /// a glance even at two percent, and faint, so it does not read as filled.
+    pub gauges_unlit: [[f32; 4]; 10],
+    pub gauge_ink: [[u8; 4]; 10],
 
     pub comment: [u8; 4],
     pub string: [u8; 4],
@@ -149,6 +161,14 @@ impl Skin {
             // in, so the two cannot drift.
             views: config.views.map(|color| rgba(color, 1.0)),
 
+            gauges: config.gauges.map(|color| rgba(color, 1.0)),
+            // Faint enough to sit behind the lit dots without reading as one of
+            // them, and not `gauge_track`: an unlit dot is the metric's own hue
+            // turned down, so the empty part of a block belongs to the same
+            // reading as the full part.
+            gauges_unlit: config.gauges.map(|color| rgba(color, 0.20)),
+            gauge_ink: config.gauges.map(text),
+
             comment: text(config.syntax_comment),
             string: text(config.syntax_string),
             number: text(config.syntax_number),
@@ -202,6 +222,17 @@ impl Skin {
     pub fn view(&self, view: View) -> [f32; 4] {
         let at = View::ALL.iter().position(|v| *v == view).unwrap_or(0);
         self.views[at]
+    }
+
+    /// A reading's hue: the lit dot, the unlit dot, and the number's tint.
+    ///
+    /// Wrapped rather than clamped or panicking. A metric declaring a slot the
+    /// palette does not have is a bug in the table over in `monitor.rs`, and the
+    /// test there catches it; on screen it takes another metric's hue, which is
+    /// a duller window rather than a crashed one.
+    pub fn gauge_slot(&self, slot: usize) -> ([f32; 4], [f32; 4], [u8; 4]) {
+        let at = slot % self.gauges.len();
+        (self.gauges[at], self.gauges_unlit[at], self.gauge_ink[at])
     }
 
     pub fn token(&self, token: crate::syntax::Token) -> Option<[u8; 4]> {
@@ -367,7 +398,71 @@ mod tests {
         let skin = Skin::default();
         assert_eq!(skin.views.len(), View::ALL.len());
         assert_eq!(skin.view(View::Talk), skin.views[0]);
-        assert_eq!(skin.view(View::Files), skin.views[6]);
+        assert_eq!(skin.view(View::Files), skin.views[8]);
+        assert_eq!(skin.view(View::Session), skin.views[5]);
+        assert_eq!(skin.view(View::Debug), skin.views[7]);
+    }
+
+    /// A gauge hue is one colour used three ways, and the three have to agree:
+    /// a lit dot, a fainter one behind it, and the number beside them.
+    #[test]
+    fn a_gauge_slot_is_one_hue_lit_unlit_and_written() {
+        let skin = Skin::default();
+        assert_eq!(skin.gauges.len(), skin.gauges_unlit.len());
+        assert_eq!(skin.gauges.len(), skin.gauge_ink.len());
+        for slot in 0..skin.gauges.len() {
+            let (lit, unlit, ink) = skin.gauge_slot(slot);
+            assert_eq!(lit[3], 1.0, "{slot}");
+            assert_eq!(lit[..3], unlit[..3], "{slot}: the unlit dot changed hue");
+            assert!(unlit[3] > 0.0 && unlit[3] < lit[3], "{slot}: {unlit:?}");
+            assert_eq!(ink[3], 255, "{slot}");
+            let written = [
+                (ink[0] as f32 / 255.0),
+                (ink[1] as f32 / 255.0),
+                (ink[2] as f32 / 255.0),
+            ];
+            for channel in 0..3 {
+                assert!(
+                    (written[channel] - lit[channel]).abs() < 0.01,
+                    "{slot}: the number is not the block's colour"
+                );
+            }
+            // Readable on black, the way every other tint has to be.
+            let sum = ink[0] as u32 + ink[1] as u32 + ink[2] as u32;
+            assert!(sum > 180, "{slot} is too dark to read: {ink:?}");
+        }
+        // A slot past the end takes another metric's hue rather than panicking.
+        assert_eq!(
+            skin.gauge_slot(skin.gauges.len()).0,
+            skin.gauge_slot(0).0
+        );
+    }
+
+    /// Two readings in the same colour say nothing about which is which, which
+    /// is the whole reason the table exists.
+    #[test]
+    fn every_gauge_hue_is_unlike_the_others() {
+        let skin = Skin::default();
+        let apart =
+            |a: [f32; 4], b: [f32; 4]| (0..3).map(|i| (a[i] - b[i]).abs() * 255.0).sum::<f32>();
+        for slot in 0..skin.gauges.len() {
+            for other in slot + 1..skin.gauges.len() {
+                let distance = apart(skin.gauges[slot], skin.gauges[other]);
+                assert!(distance > 60.0, "{slot} and {other} are {distance} apart");
+            }
+        }
+    }
+
+    /// A theme moves the window around the readings, not the readings: a gauge
+    /// hue names its metric, the way a tool hue names its tool.
+    #[test]
+    fn a_theme_leaves_the_gauge_hues_where_they_are() {
+        let noob = Skin::default();
+        for name in crate::config::THEMES {
+            let skin = Skin::from(&crate::config::theme(name).expect(name));
+            assert_eq!(skin.gauges, noob.gauges, "{name}");
+            assert_eq!(skin.gauge_ink, noob.gauge_ink, "{name}");
+        }
     }
 
     /// An accent nobody can tell from its neighbour's says nothing about which

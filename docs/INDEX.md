@@ -16,6 +16,7 @@ open only what the right column names.
 | What a right click offers and what a row does | `gui/clippy/src/menu.rs`, routed in `gui/clippy/src/main.rs` |
 | The conversation and metrics model: what an event does to state | `gui/clippy/src/state.rs` |
 | Which readings the monitors show | `gui/clippy/src/monitor.rs` |
+| Totals that outlive the window, and the file they live in | `gui/clippy/src/totals.rs` |
 | Talking to the agent process | `gui/clippy/src/link.rs` |
 | Drawing primitives: rects, corners, text, anything the shader does | `gui/noob-draw/src/lib.rs` |
 | The GPU device, surface, transparency probing | `gui/noob-gpu/src/lib.rs` |

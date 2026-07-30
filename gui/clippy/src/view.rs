@@ -34,10 +34,20 @@ const SMALL: f32 = 12.0;
 const SCROLL_W: f32 = 4.0;
 const BUTTON_W: f32 = 26.0;
 const LABEL_COLUMNS: usize = 9;
-/// A gauge bar is a grid of dots: ten columns is 0 to 100 percent, so one
-/// column is 10 percent and one of its four dots is 2.5 percent.
-const DOT_COLUMNS: usize = 10;
-const DOT_ROWS: usize = 4;
+/// A gauge is a block of dots: eight across and five down is 0 to 100 percent,
+/// so one row is 20 percent and one dot is 2.5. Squarer than the ten by four bar
+/// it replaced, because the reference asked for a block that reads as a block,
+/// and a row ten dots wide reads as a bar with rows in it.
+const DOT_COLUMNS: usize = 8;
+const DOT_ROWS: usize = 5;
+/// How much larger the number beside a block is than the label. The reference
+/// puts the value in large text next to the block, and it is the thing being
+/// read; the label only says which reading it is.
+const BIG_READING: f32 = 1.5;
+/// The smallest a dot shrinks to when a pane has more readings than room. Below
+/// this the block stops reading as a block, so the rows go instead: a reading
+/// that scrolled off is honest, a smear is not.
+const SMALL_DOT: f32 = 4.0;
 const PROMPT_COLUMNS: usize = 2;
 const INPUT_PAD: f32 = 6.0;
 /// How far the 45 degree cut reaches along each edge of a panel's top-right
@@ -839,7 +849,9 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
         Some(View::Plan) => plan(scene, frame, panel),
         Some(View::Agents) => agents(scene, frame, panel),
         Some(View::Hardware) => gauges(scene, frame, panel, frame.monitor.hardware()),
-        Some(View::Llm) => gauges(scene, frame, panel, frame.monitor.llm()),
+        Some(View::Session) => session(scene, frame, panel),
+        Some(View::Overall) => gauges(scene, frame, panel, frame.monitor.overall()),
+        Some(View::Debug) => debug(scene, frame, panel),
         Some(View::Files) => files(scene, frame, panel),
     }
 }
@@ -1003,20 +1015,22 @@ fn agents(scene: &mut Scene, frame: &Frame, panel: Panel) {
     text_box(scene, frame, panel, frame.pane_size, runs);
 }
 
-/// A label column, a bar, and a reading, laid out as three boxes rather than as
-/// one padded string.
+/// A label column, a block of dots, and the reading, laid out as three boxes
+/// rather than as one padded string.
 ///
 /// One string with the bar's room spelled as spaces was the first attempt, and
 /// the readings landed on top of the bars: the spaces are the pane's column
 /// width and the bar was drawn in the transcript's, which is a different
 /// number. Three boxes at computed positions cannot drift apart.
 ///
-/// The bar reads as [`DOT_COLUMNS`] columns of [`DOT_ROWS`] dots, so a column
-/// is 10% and a dot is 2.5%. Four stacked dots do not fit the half-line track
-/// a solid bar used, so a bounded row is taller than a line of text and its
-/// label and reading are centred against the grid. Unbounded readings keep the
-/// line pitch: they draw no dots, and a tall empty row for them would push the
-/// rows that do have dots off the bottom of the pane.
+/// The block is [`DOT_COLUMNS`] by [`DOT_ROWS`] dots in the metric's own colour,
+/// filling row by row from the bottom, so a row is 20% and a dot is 2.5%. It
+/// replaced ten columns of four small dots in one shared gauge colour, which
+/// read as a smear rather than as a level, and an unbounded reading now draws no
+/// block at all: it used to draw an empty track, so most of a pane was empty
+/// rectangles and the two rows that were filled read as noise. An unbounded row
+/// keeps the line pitch, because a tall empty row would push the rows that do
+/// have blocks off the bottom of the pane.
 fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>) {
     let skin = frame.skin;
     let content = panel.inset(PAD);
@@ -1029,26 +1043,76 @@ fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>) {
             frame,
             panel,
             frame.pane_size,
-            vec![Run::tinted("sampling…", skin.dim)],
+            vec![Run::tinted("sampling\u{2026}", skin.dim)],
         );
         return;
     }
 
-    let label_w = LABEL_COLUMNS as f32 * column;
-    let room = (content.w - label_w - 2.0 * column).max(1.0);
-    let gap = (line * 0.16).round().max(1.0);
-    // The dot is as big as the line height asks for, unless ten of them with
-    // their gaps would not fit the room left beside the label.
-    let dot = (line * 0.28)
+    // As wide as the longest label in this pane, so PREFILL MEAN is not clipped
+    // and a pane of short labels does not pay for one that has none.
+    let label_cols = gauges
+        .iter()
+        .map(|gauge| gauge.label.chars().count())
+        .max()
+        .unwrap_or(LABEL_COLUMNS)
+        .max(LABEL_COLUMNS)
+        + 1;
+    let label_w = label_cols as f32 * column;
+    let gap = (line * 0.12).round().max(1.0);
+    // The number is served first: it gets the room its longest reading needs at
+    // the pane's own size, and the block takes what is left, down to a dot two
+    // pixels across and never more than half. A block that pushed the number off
+    // the pane would be hiding the reading it exists to describe.
+    let widest = gauges
+        .iter()
+        .filter(|gauge| gauge.fraction().is_some())
+        .map(|gauge| gauge.reading().chars().count())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let needed = widest as f32 * column;
+    let free = (content.w - label_w - column).max(1.0);
+    let room = (free - needed).max(0.0).min(free * 0.5);
+    // As chunky as this pane can afford. A dot big enough to read as a block is
+    // the point of the shape, but a pane of thirteen readings cannot spend the
+    // same height per block as one of five, and a block that pushed the last
+    // rows off the bottom would be hiding readings to look better.
+    let mut dot = (line * 0.34)
         .round()
         .min((room / DOT_COLUMNS as f32 - gap).floor())
         .max(2.0);
+    let blocks = gauges
+        .iter()
+        .filter(|gauge| gauge.fraction().is_some())
+        .count() as f32;
+    let plain = gauges.len() as f32 - blocks;
+    let tall = |dot: f32| {
+        let block = dot * DOT_ROWS as f32 + gap * (DOT_ROWS - 1) as f32;
+        blocks * (block + 2.0 * gap) + plain * line
+    };
+    while dot > SMALL_DOT && tall(dot) > content.h {
+        dot -= 1.0;
+    }
     let cell = dot + gap;
-    let bar_w = cell * DOT_COLUMNS as f32;
-    let grid_h = dot * DOT_ROWS as f32 + gap * (DOT_ROWS - 1) as f32;
-    // A bounded row is the grid plus a gap above and below it.
-    let pitch = grid_h + 2.0 * gap;
-    let read_x = content.x + label_w + bar_w + column;
+    let block_w = cell * DOT_COLUMNS as f32;
+    let block_h = dot * DOT_ROWS as f32 + gap * (DOT_ROWS - 1) as f32;
+    // The number beside a block is the thing being read from across the desk, so
+    // it is drawn larger than the label. Only beside a block: a pane of numbers
+    // all at this size would fit four of them.
+    //
+    // Never wider than the room left beside the block, though. `1,048,576 /
+    // 2,097,152` at one and a half times the pane size does not fit a pane
+    // dragged narrow, and a reading clipped halfway through is worse than a
+    // smaller one: it reads as a different number. Floored, not rounded, because
+    // rounding up is what puts the last character over the edge.
+    let beside = (content.w - label_w - block_w - column).max(1.0);
+    let big = (frame.pane_size * BIG_READING)
+        .min(frame.pane_size * beside / needed)
+        .floor()
+        .max(frame.pane_size);
+    let big_line = Text::line_for(big);
+    let pitch = (block_h + 2.0 * gap).max(big_line);
+    let read_x = content.x + label_w + block_w + column;
 
     let mut y = content.y;
     for gauge in &gauges {
@@ -1057,80 +1121,159 @@ fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>) {
         if y + row_h > content.y + content.h {
             break;
         }
-        let text_y = y + ((row_h - line) * 0.5).floor();
+        let (lit, unlit, ink) = skin.gauge_slot(gauge.hue);
         scene.text(Text::rich(
             vec![Run::tinted(gauge.label, skin.dim)],
-            Panel::new(content.x, text_y, label_w.max(1.0), line),
-            frame.pane_size,
-            skin.dim,
-        ));
-        scene.text(Text::rich(
-            vec![Run::tinted(
-                gauge.reading(),
-                if fraction.is_some_and(|f| f > 0.85) {
-                    skin.bad
-                } else {
-                    skin.body
-                },
-            )],
             Panel::new(
-                read_x,
-                text_y,
-                (content.x + content.w - read_x).max(1.0),
+                content.x,
+                y + ((row_h - line) * 0.5).floor(),
+                label_w.max(1.0),
                 line,
             ),
             frame.pane_size,
-            skin.body,
+            skin.dim,
+        ));
+        // The metric's own colour, so the number and its block are one reading.
+        // Nearly full is the one thing worth overriding it for: a block cannot
+        // warn, because a metric whose hue is already red has nowhere to go.
+        let tint = if fraction.is_some_and(|f| f > 0.85) {
+            skin.bad
+        } else {
+            ink
+        };
+        let (size, at_x) = match fraction {
+            Some(_) => (big, read_x),
+            None => (frame.pane_size, content.x + label_w),
+        };
+        let read_line = Text::line_for(size);
+        scene.text(Text::rich(
+            vec![Run::tinted(gauge.reading(), tint)],
+            Panel::new(
+                at_x,
+                y + ((row_h - read_line) * 0.5).floor(),
+                (content.x + content.w - at_x).max(1.0),
+                read_line,
+            ),
+            size,
+            tint,
         ));
 
-        let track = Panel::new(
-            content.x + label_w,
-            y + gap,
-            bar_w,
-            (row_h - 2.0 * gap).max(3.0),
-        );
-        scene.rect(track.fill(skin.gauge_track));
-        // The history first, behind the dots: the past is context, not content.
-        let series = frame.monitor.history(gauge.key);
-        if series.len() > 1 {
-            let step = track.w / series.len() as f32;
-            for (i, point) in series.iter().enumerate() {
-                let height = (track.h * point).max(1.0);
-                scene.rect(
-                    Panel::new(
-                        track.x + i as f32 * step,
-                        track.y + track.h - height,
-                        step.max(1.0),
-                        height,
-                    )
-                    .fill(skin.scroll_thumb),
-                );
-            }
-        }
         if let Some(fraction) = fraction {
-            let tint = if fraction > 0.9 {
-                skin.close_hot
-            } else {
-                skin.gauge
-            };
-            let lit = (fraction * (DOT_COLUMNS * DOT_ROWS) as f32).round() as usize;
-            for index in 0..lit {
-                let (col, level) = (index / DOT_ROWS, index % DOT_ROWS);
-                // Columns fill bottom up, so a part-filled column reads as a
-                // level and not as a hole in the row above it.
+            let filled = (fraction * (DOT_COLUMNS * DOT_ROWS) as f32).round() as usize;
+            let top = y + ((row_h - block_h) * 0.5).floor();
+            for index in 0..DOT_COLUMNS * DOT_ROWS {
+                let (row, col) = (index / DOT_COLUMNS, index % DOT_COLUMNS);
+                // Rows fill from the bottom, so the block reads as a level
+                // rising rather than as a staircase. Every dot is drawn, lit or
+                // not, which is what makes the block read as a block at 2%.
                 scene.rect(
                     Panel::new(
-                        track.x + col as f32 * cell + 0.5 * gap,
-                        track.y + grid_h - (level + 1) as f32 * dot - level as f32 * gap,
+                        content.x + label_w + col as f32 * cell,
+                        top + block_h - (row + 1) as f32 * dot - row as f32 * gap,
                         dot,
                         dot,
                     )
-                    .fill(tint)
+                    .fill(if index < filled { lit } else { unlit })
                     .radius(0.5 * dot),
                 );
             }
         }
         y += row_h;
+    }
+}
+
+/// This run: what the agent is, where it is working, and what it has spent.
+///
+/// The first three rows are what came off the title strip when that was cut
+/// back to the build stamp. They are readings with labels, which is what they
+/// never were up there: the phase, the model and the workspace sat unlabelled
+/// on one line with the token budget, and nothing said which was which.
+fn session(scene: &mut Scene, frame: &Frame, panel: Panel) {
+    let (skin, state) = (frame.skin, frame.state);
+    let content = panel.inset(PAD);
+    let line = Text::line_for(frame.pane_size);
+    let label_w = (LABEL_COLUMNS + 1) as f32 * frame.pane_column;
+    let rows: [(&str, String, [u8; 4]); 3] = [
+        (
+            "PHASE",
+            match state.resumed {
+                true => format!("{} (resumed)", state.phase.word()),
+                false => state.phase.word().to_string(),
+            },
+            if state.phase.busy() {
+                skin.bright
+            } else {
+                skin.body
+            },
+        ),
+        ("MODEL", state.model.clone(), skin.body),
+        ("PATH", short_path(&state.workspace), skin.body),
+    ];
+    for (index, (label, value, tint)) in rows.iter().enumerate() {
+        let y = content.y + index as f32 * line;
+        scene.text(Text::rich(
+            vec![Run::tinted(*label, skin.dim)],
+            Panel::new(content.x, y, label_w.max(1.0), line),
+            frame.pane_size,
+            skin.dim,
+        ));
+        // Clipped, not wrapped: the rows are at fixed heights, so a long model
+        // name that wrapped would have its second row cut off by its own box.
+        let room = cols_of(panel, frame.pane_column).saturating_sub(LABEL_COLUMNS + 2);
+        let text = match value.is_empty() {
+            true => String::from("\u{2014}"),
+            false => clip(value, room.max(1)),
+        };
+        scene.text(Text::rich(
+            vec![Run::tinted(text, *tint)],
+            Panel::new(
+                content.x + label_w,
+                y,
+                (content.w - label_w).max(1.0),
+                line,
+            ),
+            frame.pane_size,
+            *tint,
+        ));
+    }
+    // The readings start under the header, in the room that is left.
+    let used = rows.len() as f32 * line + line * 0.5;
+    if panel.h - used < line {
+        return;
+    }
+    let below = Panel::new(panel.x, panel.y + used, panel.w, panel.h - used);
+    gauges(scene, frame, below, frame.monitor.session());
+}
+
+/// Calls that failed, and what was sent to the one that is open.
+///
+/// One row per line, clipped rather than wrapped. A click is turned into a row
+/// by dividing by the line height, so a row that wrapped onto two would expand a
+/// different failure than the one under the pointer. The rows themselves come
+/// from [`State::debug_rows`], which is also what resolves the click.
+fn debug(scene: &mut Scene, frame: &Frame, panel: Panel) {
+    let (skin, state) = (frame.skin, frame.state);
+    let content = panel.inset(PAD);
+    let line = Text::line_for(frame.pane_size);
+    let cols = cols_of(panel, frame.pane_column);
+    let room = frame.layout.rows(panel, frame.pane_size);
+    // One column short of the pane, because `clip` spends one on the ellipsis it
+    // adds: a row exactly as wide as the pane would come back one wider and
+    // wrap, which is the one thing this pane cannot allow.
+    let room_for = cols.saturating_sub(1).max(1);
+    for (index, row) in state.debug_rows().iter().take(room).enumerate() {
+        let tint = skin.tone(row.tone);
+        scene.text(Text::rich(
+            vec![Run::tinted(clip(&row.text, room_for), tint)],
+            Panel::new(
+                content.x,
+                content.y + index as f32 * line,
+                content.w,
+                line,
+            ),
+            frame.pane_size,
+            tint,
+        ));
     }
 }
 
@@ -1428,12 +1571,9 @@ pub fn short_name(path: &str) -> String {
     }
 }
 
-/// A path shortened to its tail, so a deep workspace reads as one line.
-///
-/// Nothing draws it now that the workspace has come off the title strip. Kept
-/// because the reading is moving into the monitors and it is the rule for how
-/// that path is written, tested here rather than re-guessed there.
-#[allow(dead_code)]
+/// A path shortened to its tail, so a deep workspace reads as one line. Drawn by
+/// the session monitor, which is where the workspace reading went when the title
+/// strip was cut back to the build stamp.
 fn short_path(path: &str) -> String {
     let parts: Vec<&str> = path.rsplit('/').take(2).collect();
     match parts.len() {
@@ -1539,6 +1679,23 @@ mod tests {
         state
     }
 
+    /// The running totals a monitor is sampled against: enough in them that the
+    /// overall pane has something to write, and the same every time so a test
+    /// does not depend on the machine's own file.
+    fn sample_totals() -> crate::totals::Totals {
+        crate::totals::Totals {
+            prefilled: 4_200_000,
+            generated: 90_000,
+            cached: 3_100_000,
+            prefill_tokens: 4_000_000,
+            prefill_seconds: 1_600.0,
+            decode_tokens: 90_000,
+            decode_seconds: 3_000.0,
+            prefill_rates: vec![2400.0, 2600.0],
+            decode_rates: vec![29.0, 31.0, 30.0],
+        }
+    }
+
     struct Rendered {
         scene: Scene,
         layout: Layout,
@@ -1587,11 +1744,14 @@ mod tests {
             .expect("the title strip names the window");
         let line: String = title.runs.iter().map(|run| run.text.as_str()).collect();
         assert!(line.contains(env!("CLIPPY_BUILD")), "{line}");
+        // The budget was a whole line of readings up here. It is a set of
+        // monitor rows now, so what is asserted is that none of its words are.
         for evicted in [
             state.phase.word().to_lowercase(),
             state.model.clone(),
             short_path(&state.workspace),
-            state.budget_line(),
+            String::from("prefilled"),
+            String::from("requests"),
         ] {
             assert!(
                 !line.contains(&evicted),
@@ -2071,7 +2231,7 @@ mod tests {
     #[test]
     fn a_moved_view_is_drawn_in_its_new_space() {
         let mut dock = Dock::new();
-        dock.move_view(View::Llm, Space::Left);
+        dock.move_view(View::Overall, Space::Left);
         let out = render(&busy_state(), 1400.0, 900.0, &dock, &["a.rs"]);
         let left: Vec<View> = out
             .layout
@@ -2080,7 +2240,7 @@ mod tests {
             .iter()
             .map(|(v, _)| *v)
             .collect();
-        assert!(left.contains(&View::Llm), "{left:?}");
+        assert!(left.contains(&View::Overall), "{left:?}");
         assert!(left.contains(&View::Talk), "{left:?}");
         let top: Vec<View> = out
             .layout
@@ -2089,7 +2249,7 @@ mod tests {
             .iter()
             .map(|(v, _)| *v)
             .collect();
-        assert!(!top.contains(&View::Llm), "{top:?}");
+        assert!(!top.contains(&View::Overall), "{top:?}");
     }
 
     /// An emptied space gives its room away rather than leaving a hole.
@@ -2102,7 +2262,8 @@ mod tests {
             View::Plan,
             View::Agents,
             View::Hardware,
-            View::Llm,
+            View::Session,
+            View::Overall,
         ] {
             emptied.move_view(view, Space::BottomRight);
         }
@@ -2293,8 +2454,9 @@ mod tests {
     fn no_text_box_is_too_small_to_show_its_text() {
         let state = busy_state();
         let mut monitor = Monitor::new();
-        monitor.sample(&state);
-        monitor.sample(&state);
+        let totals = sample_totals();
+        monitor.sample(&state, &totals);
+        monitor.sample(&state, &totals);
         for (w, h) in [(1400.0, 900.0), (900.0, 520.0), (700.0, 400.0)] {
             for view in View::ALL {
                 let mut dock = Dock::new();
@@ -2339,8 +2501,9 @@ mod tests {
     fn each_view_shows_its_own_content() {
         let state = busy_state();
         let mut monitor = Monitor::new();
-        monitor.sample(&state);
-        monitor.sample(&state);
+        let totals = sample_totals();
+        monitor.sample(&state, &totals);
+        monitor.sample(&state, &totals);
         let seen = |view: View| {
             let mut dock = Dock::new();
             dock.reveal(view);
@@ -2352,13 +2515,20 @@ mod tests {
         assert!(!plan.contains("cargo test --workspace"), "activity leaked");
         assert!(seen(View::Agents).contains("search the web"));
         assert!(seen(View::Files).contains("return a + b"));
-        // The two monitors are two different lists.
+        // The monitors are four different lists now: the machine, this run,
+        // every run, and what failed.
         let hardware = seen(View::Hardware);
-        let llm = seen(View::Llm);
         assert!(hardware.contains("CPU") || hardware.contains("RAM"), "{hardware}");
-        assert!(llm.contains("TOTAL PRE"), "{llm}");
-        assert!(!llm.contains("CPU"), "hardware leaked into the LLM view: {llm}");
+        let session = seen(View::Session);
+        assert!(session.contains("TOOL CALLS"), "{session}");
+        assert!(session.contains("laguna-s21"), "the model belongs here: {session}");
+        assert!(!session.contains("CPU"), "hardware leaked into SESSION: {session}");
+        let overall = seen(View::Overall);
+        assert!(overall.contains("DECODE MID"), "{overall}");
+        assert!(!overall.contains("TOOL CALLS"), "the session leaked: {overall}");
         assert!(!hardware.contains("DECODE"), "the reverse: {hardware}");
+        let debug = seen(View::Debug);
+        assert!(debug.contains("failed calls"), "{debug}");
     }
 
     /// The conversation and what has been typed are on screen whichever tab is
@@ -2420,11 +2590,11 @@ mod tests {
     /// pane's font while the bar itself was drawn in the transcript's column
     /// width, so the readings landed on top of the bars.
     ///
-    /// The bar is a grid of dots now, so the thing the reading has to clear is
-    /// the track and every dot on it. Found by fill rather than by size: a dot
-    /// is a few pixels square, which no size filter can tell from a hairline.
+    /// The bar is a block of dots now, so the thing the reading has to clear is
+    /// every dot of it. Found by fill rather than by size: a dot is a few pixels
+    /// square, which no size filter can tell from a hairline.
     #[test]
-    fn a_monitor_reading_never_lands_on_its_bar() {
+    fn a_monitor_reading_never_lands_on_its_block() {
         let mut state = State::new();
         state.apply(noob_proto::Event::UsageReport {
             usage: noob_proto::Usage {
@@ -2435,11 +2605,12 @@ mod tests {
             },
         });
         let mut monitor = Monitor::new();
-        monitor.sample(&state);
-        monitor.sample(&state);
+        let totals = sample_totals();
+        monitor.sample(&state, &totals);
+        monitor.sample(&state, &totals);
 
         let mut dock = Dock::new();
-        dock.reveal(View::Llm);
+        dock.reveal(View::Session);
         // Deliberately mismatched: the transcript's columns are wider than the
         // pane's, which is the situation that produced the overlap.
         for (column, pane_column) in [(8.4, 7.8), (7.8, 8.4), (8.0, 8.0)] {
@@ -2467,50 +2638,53 @@ mod tests {
                 drag: None,
                 hot: None,
                 trouble: None,
-            selection: None,
-            menu: None,
+                selection: None,
+                menu: None,
             });
             let body = layout.placed(Space::TopRight).body;
-            let bars: Vec<[f32; 4]> = scene
+            let hues: Vec<[f32; 4]> = skin
+                .gauges
+                .iter()
+                .chain(skin.gauges_unlit.iter())
+                .copied()
+                .collect();
+            let dots: Vec<[f32; 4]> = scene
                 .rects
                 .iter()
-                .filter(|r| {
-                    [skin.gauge_track, skin.gauge, skin.close_hot].contains(&r.rgba())
-                        && body.contains(r.xywh()[0], r.xywh()[1])
-                })
+                .filter(|r| hues.contains(&r.rgba()) && body.contains(r.xywh()[0], r.xywh()[1]))
                 .map(|r| r.xywh())
                 .collect();
-            let dots = bars.iter().filter(|[_, _, w, h]| w == h).count();
-            assert!(dots > 0, "no dots were drawn");
-            let bar_right = bars
-                .iter()
-                .map(|[x, _, w, _]| x + w)
-                .fold(0.0f32, f32::max);
-            assert!(bar_right > body.x, "no bars were drawn");
+            assert!(!dots.is_empty(), "no dots were drawn");
+            for [_, _, w, h] in &dots {
+                assert_eq!(w, h, "a dot is square so its radius rounds it off");
+            }
+            let block_right = dots.iter().map(|[x, _, w, _]| x + w).fold(0.0f32, f32::max);
             let reading = scene
                 .texts
                 .iter()
                 .find(|t| {
                     body.contains(t.at.x, t.at.y)
-                        && t.runs
-                            .iter()
-                            .any(|r| r.text.contains('/') || r.text.contains("tok"))
+                        && t.runs.iter().any(|r| r.text.contains('/'))
                 })
-                .expect("a reading is on screen");
+                .expect("the bounded reading is on screen");
             assert!(
-                reading.at.x >= bar_right,
-                "reading at {} overlaps a bar ending at {bar_right} ({column}/{pane_column})",
+                reading.at.x >= block_right,
+                "reading at {} overlaps a block ending at {block_right} ({column}/{pane_column})",
                 reading.at.x
             );
         }
     }
 
-    /// Ten columns of four dots, so a column is 10% and a dot is 2.5%. 525 of
-    /// 1000 tokens is 52.5%, which is five whole columns and one dot of a
-    /// sixth, and the part-filled column fills from the bottom the way a level
-    /// meter does.
+    /// Eight dots across and five down, so a row is 20% and a dot is 2.5%. 525
+    /// of 1000 tokens is 52.5%, which is two whole rows and five dots of a third,
+    /// filling from the bottom the way a level meter does. Every dot is drawn
+    /// either way, so the block reads as a block rather than as a scatter.
+    ///
+    /// This asserted ten columns of four dots in one shared gauge colour, which
+    /// is the look that was rejected: it read as a smear, and a pane of them with
+    /// an empty track on every unbounded row read as noise.
     #[test]
-    fn a_gauge_is_ten_columns_of_four_dots() {
+    fn a_gauge_is_a_block_of_dots_in_the_metric_s_own_colour() {
         let mut state = State::new();
         state.apply(noob_proto::Event::UsageReport {
             usage: noob_proto::Usage {
@@ -2521,10 +2695,10 @@ mod tests {
             },
         });
         let mut monitor = Monitor::new();
-        monitor.sample(&state);
+        monitor.sample(&state, &sample_totals());
 
         let mut dock = Dock::new();
-        dock.reveal(View::Llm);
+        dock.reveal(View::Session);
         let shape = Shape {
             shaded: false,
             dock: &dock,
@@ -2553,49 +2727,211 @@ mod tests {
             menu: None,
         });
 
-        // CONTEXT is the only bounded reading with anything in it: CACHED is
-        // zero of 525 and every other row is unbounded, so every lit dot in
-        // this pane belongs to the one gauge under test.
+        // CONTEXT is the only bounded reading in this pane with anything in it,
+        // and its hue is nobody else's, so filtering by that colour isolates the
+        // one block under test.
+        let context = monitor
+            .session()
+            .into_iter()
+            .find(|gauge| gauge.key == "context")
+            .expect("the context reading");
+        let (lit, unlit, ink) = skin.gauge_slot(context.hue);
         let body = layout.placed(Space::TopRight).body;
-        let dots: Vec<[f32; 4]> = scene
-            .rects
-            .iter()
-            .filter(|r| r.rgba() == skin.gauge && body.contains(r.xywh()[0], r.xywh()[1]))
-            .map(|r| r.xywh())
-            .collect();
-        assert_eq!(dots.len(), 21, "52.5% is five full columns plus one dot");
-        for [_, _, w, h] in &dots {
-            assert_eq!(w, h, "a dot is drawn square so its radius rounds it off");
-        }
-
-        let mut columns: Vec<f32> = dots.iter().map(|[x, _, _, _]| *x).collect();
-        columns.sort_by(f32::total_cmp);
-        columns.dedup();
-        assert_eq!(columns.len(), 6, "five whole columns and a part-filled one");
-        let height = |x: f32| dots.iter().filter(|[dx, _, _, _]| *dx == x).count();
+        let of = |color: [f32; 4]| -> Vec<[f32; 4]> {
+            scene
+                .rects
+                .iter()
+                .filter(|r| r.rgba() == color && body.contains(r.xywh()[0], r.xywh()[1]))
+                .map(|r| r.xywh())
+                .collect()
+        };
+        let dots = of(lit);
+        assert_eq!(dots.len(), 21, "52.5% of 40 dots");
         assert_eq!(
-            columns.iter().map(|x| height(*x)).collect::<Vec<_>>(),
-            vec![4, 4, 4, 4, 4, 1]
+            of(unlit).len(),
+            DOT_COLUMNS * DOT_ROWS - 21,
+            "the rest of the block is still drawn, faintly"
         );
-        // Evenly pitched, or the grid reads as a random scatter.
-        let pitch = columns[1] - columns[0];
-        for pair in columns.windows(2) {
-            assert!((pair[1] - pair[0] - pitch).abs() < 0.01, "{columns:?}");
+
+        // Rows, not columns: 21 dots is two full rows of eight and five of a
+        // third, and the part-filled row is the top one.
+        let mut rows: Vec<f32> = dots.iter().map(|[_, y, _, _]| *y).collect();
+        rows.sort_by(f32::total_cmp);
+        rows.dedup();
+        assert_eq!(rows.len(), 3);
+        let across = |y: f32| dots.iter().filter(|[_, dy, _, _]| *dy == y).count();
+        assert_eq!(
+            rows.iter().map(|y| across(*y)).collect::<Vec<_>>(),
+            vec![5, DOT_COLUMNS, DOT_COLUMNS],
+            "the part-filled row is at the top"
+        );
+        // Evenly pitched, or the block reads as a random scatter.
+        let pitch = rows[1] - rows[0];
+        for pair in rows.windows(2) {
+            assert!((pair[1] - pair[0] - pitch).abs() < 0.01, "{rows:?}");
         }
 
-        let floor = dots.iter().map(|[_, y, _, _]| *y).fold(f32::MIN, f32::max);
-        let lone = dots
+        // The number is the metric's colour and bigger than the label beside it.
+        let reading = scene
+            .texts
             .iter()
-            .find(|[x, _, _, _]| *x == columns[5])
-            .expect("the part-filled column");
-        assert_eq!(lone[1], floor, "a part-filled column fills from the bottom");
+            .find(|t| t.runs.iter().any(|r| r.text.contains("525 / 1,000")))
+            .expect("the context reading is written out");
+        assert_eq!(reading.runs[0].color, Some(ink));
+        assert!(reading.size > 13.0, "{} is not large text", reading.size);
 
-        // The row had to grow: four stacked dots do not fit a line of text.
-        let top = dots.iter().map(|[_, y, _, _]| *y).fold(f32::MAX, f32::min);
+        // And an unbounded reading draws no block at all: no track, no dots, and
+        // the number where the block would have started.
+        let calls = scene
+            .texts
+            .iter()
+            .find(|t| t.runs.iter().any(|r| r.text == "TOOL CALLS"))
+            .expect("an unbounded row");
+        let row = Panel::new(body.x, calls.at.y, body.w, calls.at.h);
         assert!(
-            floor + dots[0][3] - top > Text::line_for(13.0),
-            "the dot grid is taller than the line pitch it replaced"
+            !scene
+                .rects
+                .iter()
+                .any(|r| row.contains(r.xywh()[0], r.xywh()[1] + 0.5 * r.xywh()[3])),
+            "something was drawn on the row of an unbounded reading"
         );
+    }
+
+    /// A pane dragged narrow shrinks the number rather than running it off the
+    /// edge. A reading clipped halfway through is worse than a smaller one: it
+    /// reads as a different number.
+    #[test]
+    fn a_reading_shrinks_rather_than_running_off_a_narrow_pane() {
+        let mut state = State::new();
+        state.apply(noob_proto::Event::UsageReport {
+            usage: noob_proto::Usage {
+                prompt: 1_048_576,
+                cached_prompt: 0,
+                completion: 0,
+                context_total: 2_097_152,
+            },
+        });
+        let mut monitor = Monitor::new();
+        monitor.sample(&state, &sample_totals());
+        let mut dock = Dock::new();
+        dock.reveal(View::Session);
+
+        let mut sizes = Vec::new();
+        for width in [1600.0, 760.0] {
+            let out = render_with(&state, width, 900.0, &dock, &[], &monitor, None);
+            let reading = out
+                .scene
+                .texts
+                .iter()
+                .find(|t| t.runs.iter().any(|r| r.text.contains("1,048,576 /")))
+                .expect("the context reading is on screen");
+            // The box it was given has to hold it: a monospace column at this
+            // size is the pane's column scaled by the size it is drawn at.
+            let chars = reading
+                .runs
+                .iter()
+                .map(|r| r.text.chars().count())
+                .sum::<usize>() as f32;
+            let column = 8.0 * reading.size / 13.0;
+            assert!(
+                chars * column <= reading.at.w + 0.01,
+                "{width}: {chars} columns of {column} do not fit {}",
+                reading.at.w
+            );
+            assert!(reading.size >= 13.0, "{width}: smaller than the label");
+            sizes.push(reading.size);
+        }
+        assert!(
+            sizes[1] < sizes[0],
+            "the narrow pane drew it just as large: {sizes:?}"
+        );
+    }
+
+    /// The session monitor carries what the title strip lost: which phase, which
+    /// model, which workspace. Labelled, which they never were up there.
+    #[test]
+    fn the_session_monitor_carries_what_the_title_strip_lost() {
+        let state = busy_state();
+        let mut monitor = Monitor::new();
+        monitor.sample(&state, &sample_totals());
+        let mut dock = Dock::new();
+        dock.reveal(View::Session);
+        let out = render_with(&state, 1400.0, 900.0, &dock, &[], &monitor, None);
+        let text = text_of(&out.scene);
+        for wanted in [
+            "PHASE",
+            "MODEL",
+            "PATH",
+            state.model.as_str(),
+            &short_path(&state.workspace),
+            "CONTEXT",
+        ] {
+            assert!(text.contains(wanted), "{wanted:?} is not in the pane: {text}");
+        }
+        // And the reading above the header is a row of its own, not a line of
+        // the title strip: the phase word is drawn in the pane, not up there.
+        let body = out.layout.placed(Space::TopRight).body;
+        assert!(
+            out.scene.texts.iter().any(|t| {
+                body.contains(t.at.x, t.at.y)
+                    && t.runs.iter().any(|r| r.text.contains(state.phase.word()))
+            }),
+            "the phase is not drawn in the session pane"
+        );
+    }
+
+    /// One row per line and one line per row, because a click in this pane is
+    /// turned into a row by dividing by the line height. A row that wrapped
+    /// would open a different failure than the one under the pointer.
+    #[test]
+    fn every_row_of_the_debug_pane_is_one_line_of_it() {
+        let mut state = busy_state();
+        state.apply(noob_proto::Event::ToolStart {
+            call_id: "z".into(),
+            name: "write".into(),
+            brief: "write it".into(),
+            args: serde_json::json!({"path": "x".repeat(400), "content": "y"}),
+        });
+        state.apply(noob_proto::Event::ToolEnd {
+            call_id: "z".into(),
+            summary: "refused".into(),
+            elapsed_ms: 4,
+            error: Some(noob_proto::ToolError {
+                kind: "denied".into(),
+                code: None,
+                message: "outside the workspace".into(),
+                detail: None,
+                remedy: None,
+            }),
+        });
+        state.open_failure = Some(0);
+
+        let mut dock = Dock::new();
+        dock.reveal(View::Debug);
+        let out = render_with(&state, 1400.0, 900.0, &dock, &[], &Monitor::new(), None);
+        let body = out.layout.placed(Space::BottomRight).body;
+        let line = Text::line_for(13.0);
+        let cols = cols_of(body, 8.0);
+        let rows: Vec<&Text> = out
+            .scene
+            .texts
+            .iter()
+            .filter(|t| body.contains(t.at.x, t.at.y))
+            .collect();
+        assert_eq!(rows.len(), state.debug_rows().len());
+        for (index, text) in rows.iter().enumerate() {
+            let written: String = text.runs.iter().map(|r| r.text.as_str()).collect();
+            assert!(
+                written.chars().count() <= cols,
+                "row {index} is {} columns wide in a pane {cols} wide",
+                written.chars().count()
+            );
+            assert_eq!(text.at.h, line, "row {index} is not one line tall");
+        }
+        // The long argument was cut rather than wrapped, and it says so.
+        let shown = text_of(&out.scene);
+        assert!(shown.contains("outside the workspace"), "{shown}");
+        assert!(shown.contains('\u{2026}'), "the long argument was not clipped");
     }
 
     /// A frame that is nothing but a prompt: the strip it landed in, its
@@ -3149,7 +3485,9 @@ mod tests {
     fn an_emptied_space_gives_its_room_away() {
         let full = Layout::compute(1400.0, 900.0, &shape(&Dock::new(), &[]));
         let mut dock = Dock::new();
+        // Both tabs of the bottom space: the debug pane opens beside the files.
         assert!(dock.hide(View::Files));
+        assert!(dock.hide(View::Debug));
         let out = render(&busy_state(), 1400.0, 900.0, &dock, &[]);
 
         assert_eq!(out.layout.placed(Space::BottomRight).body.h, 0.0);
@@ -3178,3 +3516,5 @@ mod tests {
         assert_eq!(out.layout.hit(700.0, 450.0), None);
     }
 }
+
+

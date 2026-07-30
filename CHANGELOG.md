@@ -32,6 +32,22 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
 
 ### Added
 
+- Three monitors where there was one. SESSION is this run: which phase, model and
+  workspace, context against where compaction triggers, tool calls, the longest
+  single answer, prefill, cache, output, requests and the measured rates. OVERALL
+  is every run there has ever been. DEBUG is the calls that failed, and clicking
+  one shows the arguments that were sent to it. What DEBUG cannot show is the
+  schema the tool expected: no event carries one.
+- Running totals that outlive the window, in `~/.config/noob/clippy.totals`
+  beside the settings. Tokens prefilled, generated and served from cache, plus a
+  mean and a median decode and prefill speed. The median needs the samples
+  themselves, so the file keeps the last 512 per-request rates; a mean has
+  already forgotten which requests it was made of. Written by rename at the end
+  of every turn and when the window closes. A missing file is a first run and an
+  unreadable one reads as zero.
+- A gauge palette: ten colour slots, and every monitor reading names the one it
+  wears. A metric keeps its colour across panes, so PREFILLED is the same blue in
+  SESSION and in OVERALL.
 - Right click menus. The prompt offers Copy and Paste; a pane or the tab that
   names it offers Settings, Copy selection and Close this widget. A row with
   nothing to act on is greyed rather than dropped, so the menu is the same shape
@@ -58,8 +74,10 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
 - Cut corners and strokes in the rect shader. Panels carry a ten pixel forty
   five degree cut on their top right corner, and a bordered panel is one
   stroked rectangle instead of four hairlines.
-- The whole palette is settings. All twenty seven colours are config keys, there
-  are four named themes, and the writer preserves the comments in your file.
+- The whole palette is settings. Every colour is a config key: the base tones,
+  one per tool, one per view, ten gauge slots and the five the highlighter uses.
+  There are four named themes, and the writer preserves the comments in your
+  file.
 - Prompt editing: Ctrl+A selects the line, clicking places the caret, and how
   tall the input grows is a setting.
 - One colour per view, with the showing tab carrying an accent line in it.
@@ -68,7 +86,17 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
 
 ### Changed
 
-- Gauges are dot grids rather than solid bars.
+- A gauge is a block of dots: eight across and five down, in the metric's own
+  colour, filling from the bottom, with the number beside it in large text. It
+  was ten columns of four small dots in one shared colour, which read as a smear.
+  A reading with no maximum draws no block at all now: it used to draw an empty
+  track, so most of a pane was empty rectangles and the two rows that were filled
+  read as noise. The block is as chunky as its pane can afford and shrinks before
+  it pushes a reading off the bottom.
+- Token counts in the monitors are grouped in thousands. Seven figures ungrouped
+  has to be counted rather than read.
+- The rolling trend behind each gauge is gone with the bars. The samples are
+  still recorded for the graph the hardware pane is getting.
 - The hardware pane shows only its readings. The notes and the GPU capability
   report underneath are gone, which also means a machine without an amdgpu no
   longer says why those rows are missing.

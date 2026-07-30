@@ -37,6 +37,7 @@ mod select;
 mod skin;
 mod state;
 mod syntax;
+mod totals;
 mod view;
 
 use std::sync::Arc;
@@ -58,6 +59,7 @@ use monitor::Monitor;
 use prompt::Prompt;
 use skin::Skin;
 use state::{State, Tone};
+use totals::Totals;
 use view::{Drag, Hit, Landing, Layout, Shape};
 
 /// The only user event: something arrived, come and look. Deliberately carries
@@ -174,6 +176,14 @@ struct App {
     state: State,
     monitor: Monitor,
     next_sample: Option<Instant>,
+    /// The sessions that came before this one, as loaded. Never the live one:
+    /// the running session is added on top whenever a reading or a write needs
+    /// it, so writing the file twice cannot count this session twice.
+    totals: Totals,
+    totals_path: Option<std::path::PathBuf>,
+    /// Whether a failed write has already been reported. A totals file that
+    /// cannot be written is worth saying once and not once per turn.
+    totals_trouble: bool,
     skin: Skin,
     link: Option<Link>,
     trouble: Option<String>,
@@ -219,6 +229,7 @@ struct App {
 impl App {
     fn new(proxy: EventLoopProxy<Wake>, config: Config) -> App {
         let skin = Skin::from(&config);
+        let totals_path = totals::path();
         // A view the settings turned off has no tab at all. Folding it away
         // would leave a strip saying the name of something you asked not to
         // see, which is not the same thing.
@@ -239,6 +250,9 @@ impl App {
             state: State::new(),
             monitor: Monitor::new(),
             next_sample: None,
+            totals: totals_path.as_deref().map(Totals::load).unwrap_or_default(),
+            totals_path,
+            totals_trouble: false,
             skin,
             link: None,
             trouble: None,
@@ -336,10 +350,12 @@ impl App {
         let Some(link) = self.link.as_mut() else {
             return;
         };
+        let mut turn_ended = false;
         for item in link.drain() {
             match item {
                 Incoming::Frame(event) => {
                     let at = self.epoch.elapsed().as_secs_f64();
+                    turn_ended |= matches!(event, noob_proto::Event::TurnEnd { .. });
                     self.dirty |= self.state.apply_at(event, Some(at));
                 }
                 Incoming::Diagnostic(line) => {
@@ -351,6 +367,31 @@ impl App {
                     self.trouble = Some(reason);
                     self.dirty = true;
                 }
+            }
+        }
+        // The end of a turn is the natural boundary to record at: the numbers
+        // have stopped moving and there are a handful of turns a minute, not a
+        // handful of writes a second. A window killed mid-turn loses that turn,
+        // which is the price of not rewriting the file on every token.
+        if turn_ended {
+            self.remember();
+        }
+    }
+
+    /// Write the running totals: what was carried in, plus this session.
+    fn remember(&mut self) {
+        let Some(path) = self.totals_path.clone() else {
+            return;
+        };
+        if let Err(error) = self.totals.plus(&self.state).save(&path) {
+            // Once. A path that cannot be written will not start working, and a
+            // line per turn about it would bury the conversation it interrupts.
+            if !self.totals_trouble {
+                self.totals_trouble = true;
+                self.state
+                    .talk
+                    .say(format!("cannot keep the running totals: {error}"), Tone::Bad);
+                self.dirty = true;
             }
         }
     }
@@ -444,6 +485,13 @@ impl App {
             Hit::File(index, _) => {
                 self.state.open_file = index;
                 self.dirty = true;
+            }
+            // The debug pane is a list you click rather than text you select:
+            // its rows open to show what was sent to the call that failed, and
+            // there is nothing selectable in it (`State::pane_of` has no
+            // scrollback for it), so a press here would otherwise do nothing.
+            Hit::Body(space) if self.dock.slot(space).active() == Some(View::Debug) => {
+                self.open_failure_under_pointer(space);
             }
             Hit::Body(space) => self.begin_selection(space),
             Hit::Input => {
@@ -604,6 +652,28 @@ impl App {
                 self.dirty = true;
             }
         }
+    }
+
+    /// Open or close the failed call the pointer is on, in the debug pane.
+    ///
+    /// The row comes from the same `Layout::cell` arithmetic the panes are drawn
+    /// with, and which failure that row belongs to comes from
+    /// [`State::debug_rows`], which is the list that was drawn. Neither end
+    /// guesses.
+    fn open_failure_under_pointer(&mut self, space: Space) {
+        let layout = self.layout();
+        let Some((at, row, _)) = layout.cell(
+            self.cursor.x as f32,
+            self.cursor.y as f32,
+            self.config.pane_font_size,
+            self.pane_column,
+        ) else {
+            return;
+        };
+        if at != space {
+            return;
+        }
+        self.dirty |= self.state.toggle_failure(row);
     }
 
     /// Press inside a pane: put the anchor where the pointer is, or clear the
@@ -1227,10 +1297,13 @@ impl ApplicationHandler<Wake> for App {
                     !slot.folded && slot.active().is_some_and(|view| wanted.contains(&view))
                 })
         };
-        if showing(&[View::Hardware, View::Llm]) {
+        if showing(&[View::Hardware, View::Session, View::Overall]) {
             let now = Instant::now();
             if self.next_sample.is_none_or(|at| now >= at) {
-                self.monitor.sample(&self.state);
+                // Merged here rather than inside the monitor, so there is one
+                // place that knows the file holds the runs before this one.
+                let overall = self.totals.plus(&self.state);
+                self.monitor.sample(&self.state, &overall);
                 self.next_sample = Some(now + SAMPLE_EVERY);
                 self.dirty = true;
             }
@@ -1245,6 +1318,9 @@ impl ApplicationHandler<Wake> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Last chance to keep what this session did: everything since the last
+        // turn ended is only in memory until here.
+        self.remember();
         if let Some(link) = self.link.as_mut() {
             link.shutdown();
         }
@@ -1481,6 +1557,71 @@ mod tests {
         // Off the right hand end stops at the end of the text.
         prompt.drag_to(caret(W - 1.0));
         assert_eq!(prompt.selected().as_deref(), Some("ect me please"));
+    }
+
+    /// The whole pointer path for the debug pane: a pixel inside the pane
+    /// becomes a row, and that row becomes the failure whose arguments open.
+    ///
+    /// Both halves are the ones `App::open_failure_under_pointer` calls, driven
+    /// here without a window: `Layout::cell` for the row, `State::debug_rows` for
+    /// which failure that row belongs to.
+    #[test]
+    fn clicking_a_failed_call_opens_the_arguments_that_were_sent() {
+        let mut state = State::new();
+        for (id, name) in [("a", "bash"), ("b", "write")] {
+            state.apply(noob_proto::Event::ToolStart {
+                call_id: id.into(),
+                name: name.into(),
+                brief: format!("{name} something"),
+                args: noob_proto::Value::Object(
+                    [(String::from("which"), noob_proto::Value::String(id.into()))]
+                        .into_iter()
+                        .collect(),
+                ),
+            });
+            state.apply(noob_proto::Event::ToolEnd {
+                call_id: id.into(),
+                summary: "no".into(),
+                elapsed_ms: 1,
+                error: Some(noob_proto::ToolError {
+                    kind: "denied".into(),
+                    code: None,
+                    message: format!("{name} was refused"),
+                    detail: None,
+                    remedy: None,
+                }),
+            });
+        }
+
+        let mut dock = Dock::new();
+        assert!(dock.reveal(View::Debug));
+        let layout = laid_out(&dock, None, 0);
+        let body = layout.placed(Space::BottomRight).body;
+        let pane_size = Config::default().pane_font_size;
+        let line = noob_draw::Text::line_for(pane_size);
+        // The pane draws its rows from the top of its content box, so the second
+        // failure is the third row down.
+        let (x, y) = (body.x + 20.0, body.y + 9.0 + 2.5 * line);
+        let (space, row, _) = layout
+            .cell(x, y, pane_size, COLUMN)
+            .expect("the pointer is over a pane");
+        assert_eq!(space, Space::BottomRight);
+        assert_eq!(row, 2);
+
+        assert!(state.toggle_failure(row));
+        assert_eq!(state.open_failure, Some(1));
+        let rows: Vec<String> = state.debug_rows().into_iter().map(|r| r.text).collect();
+        assert!(
+            rows.iter().any(|text| text.contains("which = b")),
+            "the arguments of the second failure are not shown: {rows:?}"
+        );
+        // A press on the count at the top is not a failure and opens nothing.
+        let (_, row, _) = layout
+            .cell(x, body.y + 9.0, pane_size, COLUMN)
+            .expect("the first row");
+        assert_eq!(row, 0);
+        assert!(!state.toggle_failure(row));
+        assert_eq!(state.open_failure, Some(1), "and it left the open one alone");
     }
 
     /// The prompt is one line and Enter submits it, so a pasted newline cannot
