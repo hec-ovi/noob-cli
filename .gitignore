@@ -7,6 +7,7 @@
 # internal working docs, not published
 /docs/AUDIT-PLAN.md
 /featuresandbugs.md
+/feedback.md
 
 # build caches (docker bind mounts, user-owned)
 /target
