@@ -1861,13 +1861,14 @@ impl ApplicationHandler<Wake> for App {
                     self.dirty = true;
                 }
                 // The pointer shape is the only thing telling a user that an
-                // undecorated window can be resized at all.
+                // undecorated window can be resized at all, and the only thing
+                // saying that a tab let go outside the window is closed.
                 if let Some(window) = &self.window {
-                    let icon = match view::edge(x, y, layout.width, layout.height) {
-                        Some(dir) => resize_cursor(dir),
-                        None => CursorIcon::Default,
-                    };
-                    window.set_cursor(icon);
+                    window.set_cursor(cursor_for(
+                        self.drag.is_some(),
+                        layout.landing(x, y),
+                        view::edge(x, y, layout.width, layout.height),
+                    ));
                 }
                 self.redraw();
             }
@@ -1981,6 +1982,41 @@ impl ApplicationHandler<Wake> for App {
         if let Some(link) = self.link.as_mut() {
             link.shutdown();
         }
+    }
+}
+
+/// What the pointer looks like at a point in the window.
+///
+/// With a tab in the air it says what letting go there would do, and the one
+/// thing it has to say is that a tab dropped outside the window closes that
+/// widget: nothing else out there tells you, because out there is somebody
+/// else's window. `Crosshair` rather than `NoDrop` for it. NoDrop is the slashed
+/// circle every toolkit uses for "this drop will be refused", and the drop is not
+/// refused: it is accepted and it deletes the widget, so the one cursor that
+/// promises nothing will happen is the wrong one. A cross is also what was asked
+/// for.
+///
+/// With nothing in the air it is the resize edges, which are the only thing
+/// telling anyone that an undecorated window can be resized at all. A drag
+/// crossing an edge does not show a resize arrow: what the drag does is the more
+/// urgent of the two answers, and the button is already down so nothing can
+/// start a resize anyway.
+///
+/// Pure so the rule can be tested without a compositor, like [`land`].
+fn cursor_for(
+    dragging: bool,
+    landing: Landing,
+    edge: Option<winit::window::ResizeDirection>,
+) -> CursorIcon {
+    if dragging {
+        return match landing {
+            Landing::Out => CursorIcon::Crosshair,
+            Landing::In(..) | Landing::Nowhere => CursorIcon::Default,
+        };
+    }
+    match edge {
+        Some(dir) => resize_cursor(dir),
+        None => CursorIcon::Default,
     }
 }
 
@@ -2421,6 +2457,67 @@ mod tests {
         );
         // A view that is out stays out until something unhides it.
         assert!(!land(&mut dock, View::Files, Landing::In(Space::Left, None)));
+    }
+
+    /// Item 7: while a tab is being dragged outside the window the pointer says
+    /// the drop will delete it, and nothing else in the window can say that,
+    /// because out there is not the window.
+    #[test]
+    fn a_tab_dragged_out_of_the_window_takes_the_delete_cursor() {
+        use winit::window::ResizeDirection as Dir;
+
+        assert_eq!(
+            cursor_for(true, Landing::Out, None),
+            CursorIcon::Crosshair,
+            "a drag over nothing does not say it deletes"
+        );
+        // Even over a resize edge: the tab in the air is the more urgent answer,
+        // and with the button already down nothing can start a resize.
+        assert_eq!(
+            cursor_for(true, Landing::Out, Some(Dir::SouthEast)),
+            CursorIcon::Crosshair
+        );
+        // Back inside, it is an ordinary pointer again.
+        for landing in [
+            Landing::In(Space::Left, None),
+            Landing::In(Space::TopRight, Some(2)),
+            Landing::Nowhere,
+        ] {
+            assert_eq!(
+                cursor_for(true, landing, Some(Dir::East)),
+                CursorIcon::Default,
+                "{landing:?}"
+            );
+        }
+        // With nothing in the air the edges are what the pointer is for.
+        assert_eq!(
+            cursor_for(false, Landing::Nowhere, Some(Dir::West)),
+            CursorIcon::WResize
+        );
+        assert_eq!(cursor_for(false, Landing::Nowhere, None), CursorIcon::Default);
+        // And a pointer outside the window that is not carrying anything is not
+        // promising to delete something.
+        assert_eq!(cursor_for(false, Landing::Out, None), CursorIcon::Default);
+    }
+
+    /// The landing the cursor is driven from is the layout's own, so the shape
+    /// the pointer takes and the move the release makes come from one answer.
+    #[test]
+    fn the_delete_cursor_comes_from_the_same_landing_the_drop_does() {
+        let dock = Dock::new();
+        let layout = laid_out_at(&dock, None, 0, 1200.0, 800.0);
+        for (x, y) in [(-2.0, 400.0), (1201.0, 400.0), (600.0, 801.0)] {
+            let landing = layout.landing(x, y);
+            assert_eq!(landing, Landing::Out, "at {x},{y}");
+            assert_eq!(cursor_for(true, landing, None), CursorIcon::Crosshair);
+            // And that is the release that closes the widget.
+            let mut dock = Dock::new();
+            assert!(land(&mut dock, View::Plan, landing));
+            assert!(dock.is_hidden(View::Plan));
+        }
+        let inside = layout.landing(600.0, 400.0);
+        assert!(matches!(inside, Landing::In(..)), "{inside:?}");
+        assert_eq!(cursor_for(true, inside, None), CursorIcon::Default);
     }
 
     /// A drop that names a place in a strip reorders the tabs; one that names

@@ -2906,13 +2906,24 @@ fn dragging(scene: &mut Scene, frame: &Frame) {
     let label = drag.view.label();
     let w = (label.chars().count() as f32 + 3.0) * frame.column;
     let ghost = Panel::new(drag.at.0 - w * 0.5, drag.at.1 - TAB_H * 0.5, w, TAB_H);
+    // Out of the window, letting go closes the widget, so the tab in the air says
+    // so: its edge and its label go to the bad colour, and there is no green box
+    // anywhere on screen because there is no space to land in. The pointer says
+    // the same thing (`main`'s `cursor_for`), and neither is enough on its own:
+    // the cursor is 20 pixels of somebody else's theme and the ghost is the thing
+    // being carried.
+    let out = drag.landing == Landing::Out;
+    let (edge, ink) = match out {
+        true => (skin.drop_out, skin.bad),
+        false => (skin.edge_focus, skin.bright),
+    };
     scene.over_rect(ghost.fill(skin.bar));
-    scene.over_rect(ghost.outline(skin.edge_focus, 1.0));
+    scene.over_rect(ghost.outline(edge, 1.0));
     scene.over_text(Text::rich(
-        vec![Run::tinted(label, skin.bright)],
+        vec![Run::tinted(label, ink)],
         ghost.row(SMALL * 0.6, Text::line_for(SMALL)),
         SMALL,
-        skin.bright,
+        ink,
     ));
 }
 
@@ -4362,6 +4373,77 @@ mod tests {
                     && rect.xywh()[1] == placed.body.y),
             "the target pane is still outlined in the focus colour"
         );
+    }
+
+    /// Item 7's other half: the tab in the air over the outside of the window
+    /// says the drop closes it. There is nowhere to land, so there is no green
+    /// box either, and the ghost's edge and label go to the bad colour.
+    #[test]
+    fn a_tab_dragged_off_the_window_is_drawn_in_the_bad_tint() {
+        let dock = Dock::new();
+        let ghost_of = |landing: Landing, at: (f32, f32)| {
+            render_with(
+                &busy_state(),
+                1200.0,
+                800.0,
+                &dock,
+                &[],
+                &Monitor::new(),
+                Some(Drag {
+                    view: View::Plan,
+                    at,
+                    landing,
+                }),
+            )
+        };
+
+        let out = ghost_of(Landing::Out, (1210.0, 400.0));
+        assert!(
+            out.scene
+                .over_rects
+                .iter()
+                .any(|rect| rect.rgba() == out.skin.drop_out),
+            "the ghost is not marked for deletion"
+        );
+        assert!(
+            !out.scene
+                .over_rects
+                .iter()
+                .any(|rect| rect.rgba() == out.skin.drop_target),
+            "a space is boxed as a target for a drop that lands outside"
+        );
+        let label = out
+            .scene
+            .over_texts
+            .iter()
+            .flat_map(|text| text.runs.iter())
+            .find(|run| run.text == View::Plan.label())
+            .expect("the ghost has no label");
+        assert_eq!(label.color, Some(out.skin.bad));
+
+        // Back over a space it is the ordinary ghost again, over a green box.
+        let in_ = ghost_of(Landing::In(Space::Left, None), (400.0, 500.0));
+        assert!(
+            !in_.scene
+                .over_rects
+                .iter()
+                .any(|rect| rect.rgba() == in_.skin.drop_out),
+            "a tab over a space is drawn as if it were being thrown away"
+        );
+        assert!(
+            in_.scene
+                .over_rects
+                .iter()
+                .any(|rect| rect.rgba() == in_.skin.drop_target)
+        );
+        let label = in_
+            .scene
+            .over_texts
+            .iter()
+            .flat_map(|text| text.runs.iter())
+            .find(|run| run.text == View::Plan.label())
+            .expect("the ghost has no label");
+        assert_eq!(label.color, Some(in_.skin.bright));
     }
 
     /// The other half of item 17: which place in the strip the drop would take,

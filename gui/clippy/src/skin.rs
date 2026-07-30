@@ -60,6 +60,11 @@ pub struct Skin {
     /// The caret between the two tabs a drop would land between: the same green
     /// at full strength, because a mark two pixels wide has to be seen.
     pub drop_mark: [f32; 4],
+    /// The edge of the tab in the air while it is outside the window, where
+    /// letting go closes that widget. The bad colour, because that is what the
+    /// window uses for something being lost, and the same colour the label takes
+    /// there ([`Skin::bad`]).
+    pub drop_out: [f32; 4],
     pub input: [f32; 4],
     pub caret: [f32; 4],
     pub gauge: [f32; 4],
@@ -157,6 +162,7 @@ impl Skin {
             edge_focus: rgba(config.accent, 1.0),
             drop_target: rgba(config.good, 0.22),
             drop_mark: rgba(config.good, 1.0),
+            drop_out: rgba(config.bad, 1.0),
             input: rgba(config.panel, (o + 0.12).min(1.0)),
             caret: rgba(config.accent, 1.0),
             gauge: rgba(config.accent, 1.0),
@@ -434,6 +440,20 @@ mod tests {
             // the box's own alpha would not be seen at all.
             assert_eq!(skin.drop_mark[..3], skin.drop_target[..3], "{name}");
             assert_eq!(skin.drop_mark[3], 1.0, "{name}");
+            // And a drop that closes the widget is the other answer, so it cannot
+            // be the same colour as the one that keeps it.
+            let [r, g, b, a] = skin.drop_out;
+            assert!(r > g && r > b, "{name}: the delete tint is not red: {:?}", skin.drop_out);
+            assert_eq!(a, 1.0, "{name}");
+            assert_eq!(
+                skin.drop_out[..3],
+                [
+                    skin.bad[0] as f32 / 255.0,
+                    skin.bad[1] as f32 / 255.0,
+                    skin.bad[2] as f32 / 255.0
+                ],
+                "{name}: the edge and the label are different reds"
+            );
         }
     }
 
