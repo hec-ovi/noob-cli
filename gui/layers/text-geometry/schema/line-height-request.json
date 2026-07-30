@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Line height request",
+  "description": "One logical line, for callers that measure a single line rather than a run of them.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "chars",
+    "cols"
+  ],
+  "properties": {
+    "chars": {
+      "description": "Character count of the line, not bytes.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "cols": {
+      "description": "Width of the box in monospace columns. Zero is legal and means a window mid-resize; the line then reports one row.",
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

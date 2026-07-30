@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Line height",
+  "description": "How many visual rows one logical line occupies. Never zero: an empty line still occupies one row, because a blank line is a paragraph break.",
+  "type": "integer",
+  "minimum": 1
+}

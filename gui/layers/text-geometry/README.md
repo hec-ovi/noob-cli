@@ -37,7 +37,7 @@ cargo test -p text-geometry      # behaviour
 python3 tests/contract.py        # the boundary: fixtures against schema/
 ```
 
-The contract test also asserts that the 8 fixtures under `fixtures/invalid/`
+The contract test also asserts that the 12 fixtures under `fixtures/invalid/`
 are rejected. If one starts passing, the schema has been loosened and the
 boundary is no longer failing closed.
 

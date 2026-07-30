@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Scrollback bound",
+  "description": "The largest scrollback the pane admits, in visual rows. Zero when everything fits, and otherwise the value that puts the first row at the top.",
+  "type": "integer",
+  "minimum": 0
+}

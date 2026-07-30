@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Scrollback bound request",
+  "description": "A pane and its viewport, for the furthest back that pane can scroll.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "heights",
+    "rows"
+  ],
+  "properties": {
+    "heights": {
+      "$ref": "heights.json"
+    },
+    "rows": {
+      "description": "Rows the viewport can show. Zero is legal and means a window mid-resize.",
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

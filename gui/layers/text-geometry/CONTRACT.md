@@ -1,6 +1,6 @@
 # text-geometry
 
-contractVersion: 1.1.0
+contractVersion: 1.2.0
 
 ## Purpose
 
@@ -11,7 +11,9 @@ and answer every question a caller has about that mapping.
 
 | Name | Schema | Preconditions |
 |---|---|---|
+| Line height request | [`schema/line-height-request.json`](schema/line-height-request.json) | `chars` is a character count, not bytes. `cols` may be 0 (a window mid-resize). |
 | Wrap request | [`schema/wrap-request.json`](schema/wrap-request.json) | `lengths` are character counts, not bytes. `cols` may be 0 (a window mid-resize). |
+| Scrollback bound request | [`schema/max-scrollback-request.json`](schema/max-scrollback-request.json) | `heights` came from this layer. `rows` may be 0. |
 | Window request | [`schema/window-request.json`](schema/window-request.json) | `heights` came from this layer. `rows` may be 0. `scrollback` past the top is clamped, not refused. |
 | Row request | [`schema/row-request.json`](schema/row-request.json) | `window` came from this layer and was built from the same `heights` and `rows`. |
 | Band request | [`schema/band-request.json`](schema/band-request.json) | Same pairing rule as the row request. `line` is absolute, not relative to the window. |
@@ -22,7 +24,9 @@ and answer every question a caller has about that mapping.
 
 | Name | Schema | Postconditions |
 |---|---|---|
+| Line height | [`schema/line-height.json`](schema/line-height.json) | At least 1. An empty line still occupies a row. |
 | Heights | [`schema/heights.json`](schema/heights.json) | One entry per input length, same order, every entry at least 1. |
+| Scrollback bound | [`schema/max-scrollback.json`](schema/max-scrollback.json) | 0 when the pane fits its viewport. Otherwise the scrollback that puts the first row at the top, and the value every other scrollback here is clamped against. |
 | Window | [`schema/window.json`](schema/window.json) | The lines it names cover the viewport and overshoot it by less than the height of one line. `first + count <= heights.len()`. |
 | Line hit | [`schema/line-hit.json`](schema/line-hit.json) | Null exactly when the row is past the last line. Otherwise the line is inside the window. |
 | Band | [`schema/band.json`](schema/band.json) | Null exactly when the line is not visible. Otherwise `top + height <= rows`. |

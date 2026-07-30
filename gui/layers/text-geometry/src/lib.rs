@@ -33,7 +33,12 @@ pub fn heights(lengths: impl IntoIterator<Item = usize>, cols: usize) -> Vec<usi
 }
 
 /// Every row the lines occupy together.
-pub fn total_rows(heights: &[usize]) -> usize {
+///
+/// Private: it is not on the contract, because no caller outside this layer
+/// wants a total on its own. What they want is the bound it feeds,
+/// [`max_scrollback`], and a total published beside it is one more number for a
+/// call site to do its own arithmetic on.
+fn total_rows(heights: &[usize]) -> usize {
     heights.iter().sum()
 }
 
