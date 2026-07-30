@@ -131,8 +131,8 @@ case "${1:-}" in
     # staged set cannot drift from what is in the repository.
     #
     # Not a Flatpak or an AppImage: the binary links the system's C library and
-    # loads the GPU and display libraries the machine already has, which are
-    # exactly what a bundle cannot ship.
+    # loads the machine's own GPU and display libraries at runtime, and a driver
+    # is exactly what a bundle cannot ship.
     command=$1
     shift
     version=$(awk -F'"' '/^version/ {print $2; exit}' gui/Cargo.toml)

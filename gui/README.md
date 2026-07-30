@@ -57,9 +57,8 @@ Installing also removes what the old CLIppy name left behind, the launcher, the
 entry and both icons, so the menu holds one entry rather than two with the older
 one starting nothing.
 Not a Flatpak or an AppImage. The binary links the system's C library and loads
-the GPU and display libraries the machine already has, which is exactly the set
-a bundle cannot ship: a Vulkan loader inside the sandbox has to find your
-driver, and your driver is outside it.
+the machine's own GPU and display libraries at runtime, and a driver is exactly
+the thing a bundle cannot ship.
 
 The icon is a console drawn as a hollow wire with `>_` inside it: one path of
 four subpaths in one flat colour, on a 128 grid with a module of 8 so every edge
