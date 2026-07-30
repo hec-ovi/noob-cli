@@ -2479,19 +2479,19 @@ mod tests {
         for n in 0..30 {
             pane.say(format!("x = {n}"), Tone::Body);
         }
-        assert!(pane.fence_before(10, 200).open(), "the block is still open");
+        assert!(pane.fence_before(10, 200).0.is_some(), "the block is still open");
         // The window is the lines at the end; `before` is everything above it,
         // so the closing fence has to be above the window to count as closed.
         pane.say("```", Tone::Body);
         pane.say("back to prose", Tone::Body);
-        assert!(!pane.fence_before(1, 200).open(), "and now it is closed");
-        assert!(pane.fence_before(2, 200).open(), "the window still holds the fence");
+        assert!(pane.fence_before(1, 200).0.is_none(), "and now it is closed");
+        assert!(pane.fence_before(2, 200).0.is_some(), "the window still holds the fence");
         // What the human typed is not the model's Markdown, so it cannot open
         // a block that the model then has to close.
         let mut typed = Pane::new(100);
         typed.say("run ```this```", Tone::Bright);
         typed.say("prose", Tone::Body);
-        assert!(!typed.fence_before(1, 200).open());
+        assert!(typed.fence_before(1, 200).0.is_none());
     }
 
     #[test]

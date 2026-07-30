@@ -20,12 +20,6 @@ use crate::syntax;
 pub struct Fence(pub Option<String>);
 
 impl Fence {
-    /// Whether a block is open here.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn open(&self) -> bool {
-        self.0.is_some()
-    }
-
     /// Toggle on a fence line, returning whether this line was one.
     fn toggle(&mut self, line: &str) -> bool {
         let trimmed = line.trim_start();
@@ -272,10 +266,10 @@ mod tests {
     fn the_fence_state_survives_a_scrolling_window() {
         let above = ["prose", "```rust", "let x = 1;"];
         let fence = fence_after(above.into_iter());
-        assert!(fence.open());
+        assert!(fence.0.is_some());
         assert_eq!(fence.0.as_deref(), Some("rust"));
         let closed = fence_after(["```py", "x=1", "```"].into_iter());
-        assert!(!closed.open());
+        assert!(closed.0.is_none());
     }
 
     /// Prose is full of lone asterisks and stray backticks. A parser that
