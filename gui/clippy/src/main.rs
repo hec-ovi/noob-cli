@@ -208,9 +208,12 @@ fn menu_for(
     match hit? {
         Hit::Input => Some(Menu::for_input(at, prompt_selection)),
         Hit::Tab(view, space) => widget(view, space),
-        // A pane and the rows of its own file list are the same widget: the menu
-        // acts on whatever that space is showing.
-        Hit::Body(space) | Hit::File(_, space) => widget(dock.slot(space).active()?, space),
+        // A pane, the rows of its own file list and the arrows of its own strip
+        // are all the same widget: the menu acts on whatever that space is
+        // showing.
+        Hit::Body(space) | Hit::File(_, space) | Hit::TabsLeft(space) | Hit::TabsRight(space) => {
+            widget(dock.slot(space).active()?, space)
+        }
         Hit::TitleBar | Hit::Close | Hit::Maximize | Hit::Minimize => None,
         // The menu already open. Its own right click is handled before this is
         // reached, and a row is picked with the left button.
@@ -242,6 +245,45 @@ fn pane_changes(was: &Config, now: &Config) -> Vec<(View, bool)> {
     .filter(|(_, was, now)| was != now)
     .map(|(view, _, now)| (view, now))
     .collect()
+}
+
+/// Where a tab strip starts after one of its arrows is clicked.
+///
+/// `showing` is the tab the strip actually starts at this frame, not the number
+/// stored for it: a resize or a closed tab can have clamped the strip since, and
+/// stepping from the stored number would spend clicks catching up with what is on
+/// screen before anything moved. Clamped to the tabs there are for the same
+/// reason the slot clamps: a strip cannot be walked past its last tab.
+///
+/// Pure so the rule can be tested without a window, like [`land`] beside it.
+fn walked(showing: usize, forward: bool, tabs: usize) -> usize {
+    match forward {
+        true => (showing + 1).min(tabs.saturating_sub(1)),
+        false => showing.saturating_sub(1),
+    }
+}
+
+/// One click on one of a strip's arrows: the strip moves by a tab, and the tab it
+/// is showing moves with it. Says whether anything moved.
+///
+/// The showing tab comes along because the layout puts a strip back where the
+/// showing tab is on the frame after it is scrolled away from it (see
+/// `view::strip_tabs`), so an arrow that only scrolled would do nothing at all
+/// while the leftmost tab was the one showing, which is the state the window
+/// opens in.
+///
+/// `showing` is where the strip actually starts this frame, which only the layout
+/// knows. Pure so the rule can be tested without a window, like [`land`] beside
+/// it.
+fn walk_tabs(dock: &mut Dock, space: Space, showing: usize, forward: bool) -> bool {
+    let slot = dock.slot_mut(space);
+    let tabs = slot.views.len();
+    let Some(active) = slot.active_index() else {
+        return false;
+    };
+    let stepped = slot.scroll_tabs(walked(showing, forward, tabs));
+    let showed = slot.show_at(walked(active, forward, tabs));
+    stepped || showed
 }
 
 /// What a released tab does to the arrangement.
@@ -956,6 +998,8 @@ impl App {
                 // released.
                 self.holding = Some((view, space, self.cursor));
             }
+            Hit::TabsLeft(space) => self.walk_strip(space, false),
+            Hit::TabsRight(space) => self.walk_strip(space, true),
             Hit::File(index, _) => {
                 self.state.show_file(index);
                 self.dirty = true;
@@ -986,6 +1030,13 @@ impl App {
             // either can be hit at all.
             Hit::MenuRow(_) | Hit::Menu => {}
         }
+    }
+
+    /// Walk one space's tab strip by one tab, which is what its arrows do. The
+    /// rule is [`walk_tabs`]; this only tells it where the strip is now.
+    fn walk_strip(&mut self, space: Space, forward: bool) {
+        let showing = self.layout().placed(space).first_tab;
+        self.dirty |= walk_tabs(&mut self.dock, space, showing, forward);
     }
 
     /// Where in the typed text the pointer is, for a press or a drag in the
@@ -2089,6 +2140,18 @@ mod tests {
     const SIZE: f32 = 14.0;
 
     fn laid_out<'a>(dock: &'a Dock, menu: Option<&'a Menu>, chars: usize) -> Layout {
+        laid_out_at(dock, menu, chars, W, H)
+    }
+
+    /// The same at a size of its own. The tab strip's arrows only exist on a
+    /// strip too narrow to hold its tabs, and at `W` every tab fits.
+    fn laid_out_at<'a>(
+        dock: &'a Dock,
+        menu: Option<&'a Menu>,
+        chars: usize,
+        w: f32,
+        h: f32,
+    ) -> Layout {
         let shape = Shape {
             shaded: false,
             dock,
@@ -2101,14 +2164,14 @@ mod tests {
             pane_size: Config::default().pane_font_size,
             pane_column: COLUMN,
             input_h: view::input_height(
-                W,
+                w,
                 COLUMN,
                 chars,
                 noob_draw::Text::line_for(SIZE),
                 Config::default().max_input_rows,
             ),
         };
-        Layout::compute(W, H, &shape)
+        Layout::compute(w, h, &shape)
     }
 
     fn middle(panel: noob_draw::Panel) -> (f32, f32) {
@@ -2117,6 +2180,103 @@ mod tests {
 
     fn opened(layout: &Layout, dock: &Dock, at: (f32, f32)) -> Option<Menu> {
         menu_for(layout.hit(at.0, at.1), at, dock, false, None)
+    }
+
+    /// One step of the walk. Rebased on the tab the strip actually starts at, so
+    /// a resize that clamped the strip since does not cost a click before
+    /// anything moves, and stopped at either end rather than wrapping: an arrow
+    /// that came back round would say the strip had more to show when it does
+    /// not.
+    #[test]
+    fn a_strip_walks_one_tab_at_a_time_and_stops_at_both_ends() {
+        assert_eq!(walked(0, true, 6), 1);
+        assert_eq!(walked(3, true, 6), 4);
+        assert_eq!(walked(5, true, 6), 5, "it does not wrap");
+        assert_eq!(walked(9, true, 6), 5, "nor past the end from a stale offset");
+        assert_eq!(walked(3, false, 6), 2);
+        assert_eq!(walked(0, false, 6), 0, "and it does not wrap back");
+        assert_eq!(walked(0, true, 0), 0, "a space with no tabs stays put");
+    }
+
+    /// Item 18, end to end: the six tabs of the top right space in a window at
+    /// its narrowest, walked to the last one and back with the arrows the strip
+    /// grew. Every tab is reachable, the pane on screen always has its own tab in
+    /// the strip, and the walk stops rather than wrapping.
+    #[test]
+    fn the_arrows_walk_a_narrow_strip_to_its_last_tab_and_back() {
+        const NARROW: (f32, f32) = (680.0, 380.0);
+        let mut dock = Dock::new();
+        let views = dock.slot(Space::TopRight).views.clone();
+        let showing = |dock: &Dock| {
+            let layout = laid_out_at(dock, None, 0, NARROW.0, NARROW.1);
+            let placed = layout.placed(Space::TopRight);
+            (
+                placed.first_tab,
+                placed.tabs.iter().map(|(view, _)| *view).collect::<Vec<_>>(),
+            )
+        };
+        let (_, tabs) = showing(&dock);
+        assert!(tabs.len() < views.len(), "every tab fits at 680 pixels");
+
+        // Forward to the end, one click at a time. Each click moves something,
+        // and the showing tab is in the strip on every frame of the way.
+        let mut seen = vec![views[0]];
+        for step in 1..views.len() {
+            let at = laid_out_at(&dock, None, 0, NARROW.0, NARROW.1)
+                .placed(Space::TopRight)
+                .first_tab;
+            assert!(
+                walk_tabs(&mut dock, Space::TopRight, at, true),
+                "click {step} did nothing"
+            );
+            let (first, tabs) = showing(&dock);
+            let active = dock.slot(Space::TopRight).active().unwrap();
+            assert_eq!(active, views[step], "click {step} showed the wrong tab");
+            assert!(tabs.contains(&active), "click {step}: {active:?} not in {tabs:?}");
+            assert!(first + tabs.len() <= views.len());
+            seen.push(active);
+        }
+        assert_eq!(seen, views, "the walk did not reach every tab");
+
+        // At the end it stops rather than wrapping.
+        let at = showing(&dock).0;
+        assert!(!walk_tabs(&mut dock, Space::TopRight, at, true));
+        assert_eq!(
+            dock.slot(Space::TopRight).active(),
+            views.last().copied(),
+            "the walk wrapped round"
+        );
+
+        // And back, which brings the strip back with it.
+        for step in (0..views.len() - 1).rev() {
+            let at = showing(&dock).0;
+            assert!(walk_tabs(&mut dock, Space::TopRight, at, false));
+            let (_, tabs) = showing(&dock);
+            let active = dock.slot(Space::TopRight).active().unwrap();
+            assert_eq!(active, views[step]);
+            assert!(tabs.contains(&active), "{active:?} not in {tabs:?}");
+        }
+        assert_eq!(showing(&dock).0, 0, "the strip did not come back");
+        let at = showing(&dock).0;
+        assert!(!walk_tabs(&mut dock, Space::TopRight, at, false), "it wrapped");
+    }
+
+    /// The arrows belong to the space whose strip they are in, so a right click
+    /// on one opens the menu for that space's widget, the way a click on its
+    /// pane or on one of its file rows does.
+    #[test]
+    fn an_arrow_carries_the_menu_of_the_space_it_is_in() {
+        let dock = Dock::new();
+        let layout = laid_out_at(&dock, None, 0, 680.0, 380.0);
+        let showing = dock.slot(Space::TopRight).active().unwrap();
+        for panel in [
+            layout.placed(Space::TopRight).arrow_left,
+            layout.placed(Space::TopRight).arrow_right,
+        ] {
+            assert!(panel.w >= 1.0, "the strip grew no arrows");
+            let menu = opened(&layout, &dock, middle(panel)).expect("an arrow has a menu");
+            assert_eq!(menu.target, Target::Widget(showing, Space::TopRight));
+        }
     }
 
     /// A right click has to land on the menu for the thing under it, and on no

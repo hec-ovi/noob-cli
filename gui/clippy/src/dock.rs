@@ -100,6 +100,10 @@ pub struct Slot {
     active: usize,
     /// Collapsed to its tab strip.
     pub folded: bool,
+    /// Which of its tabs the strip starts at, when the strip is too narrow to
+    /// hold them all. Kept here rather than in the layout because it outlives a
+    /// frame, and per space because two strips overflow by different amounts.
+    tab_first: usize,
 }
 
 impl Slot {
@@ -107,8 +111,45 @@ impl Slot {
         self.views.get(self.active).copied()
     }
 
+    /// Which tab is showing, by position. The strip scrolls by index, and it has
+    /// to keep the showing tab on screen, so it needs the number rather than the
+    /// view.
+    pub fn active_index(&self) -> Option<usize> {
+        (self.active < self.views.len()).then_some(self.active)
+    }
+
+    /// Where its strip starts. A request: the layout clamps it again against the
+    /// room the strip actually has, which is the only place that knows.
+    pub fn tab_first(&self) -> usize {
+        self.tab_first
+    }
+
+    /// Start the strip at this tab, and say whether that moved it.
+    ///
+    /// Clamped to the tabs there are. A space left scrolled past its last tab
+    /// would show an empty strip, and the arrow that got it there would have
+    /// nothing to walk back to.
+    pub fn scroll_tabs(&mut self, to: usize) -> bool {
+        let to = to.min(self.views.len().saturating_sub(1));
+        let moved = to != self.tab_first;
+        self.tab_first = to;
+        moved
+    }
+
     pub fn is_empty(&self) -> bool {
         self.views.is_empty()
+    }
+
+    /// Show the tab at this position, and say whether that moved it.
+    ///
+    /// What the tab strip's arrows walk with: they count tabs rather than naming
+    /// views, because what they walk is the strip.
+    pub fn show_at(&mut self, at: usize) -> bool {
+        if at >= self.views.len() || at == self.active {
+            return false;
+        }
+        self.active = at;
+        true
     }
 
     /// Show this view, if this space has it.
@@ -139,6 +180,10 @@ impl Slot {
         // Keep showing something: the tab that slid into this one's place, or
         // the last one if this was the end.
         self.active = self.active.min(self.views.len().saturating_sub(1));
+        // And keep the strip on a tab that exists. Closing or dragging away the
+        // tabs at the end of a scrolled strip is the other way a space ends up
+        // scrolled past everything it holds.
+        self.tab_first = self.tab_first.min(self.views.len().saturating_sub(1));
         true
     }
 }
@@ -186,6 +231,7 @@ impl Dock {
                     views: vec![View::Output],
                     active: 0,
                     folded: false,
+                    tab_first: 0,
                 },
                 Slot {
                     views: vec![
@@ -198,14 +244,19 @@ impl Dock {
                     ],
                     active: 0,
                     folded: false,
+                    tab_first: 0,
                 },
-                // DEBUG opens down here rather than above, where seven tabs
-                // would not fit the strip at the width this window opens at and
-                // the ones past the edge are dropped rather than squeezed.
+                // DEBUG opens down here rather than above, where seven tabs are
+                // more than the strip can show at the width this window opens
+                // at. A strip that overflows can be walked with its arrows now,
+                // so nothing up there would be unreachable; six tabs and one
+                // pane apiece is simply easier to read than seven tabs and a
+                // strip you have to scroll to see them.
                 Slot {
                     views: vec![View::Files, View::Debug],
                     active: 0,
                     folded: false,
+                    tab_first: 0,
                 },
             ],
         }
@@ -607,6 +658,77 @@ mod tests {
         assert!(dock.unhide(View::Output));
         assert_eq!(dock.slot(Space::Left).active(), Some(View::Output));
         assert!(dock.is_sound());
+    }
+
+    /// A strip cannot be walked past its last tab. The layout clamps again
+    /// against the room a strip actually has, but a number stored here that is
+    /// past the end of the views is nonsense on its own terms.
+    #[test]
+    fn a_strip_cannot_be_scrolled_past_its_last_tab() {
+        let mut dock = Dock::new();
+        let slot = dock.slot_mut(Space::TopRight);
+        let tabs = slot.views.len();
+        assert_eq!(slot.tab_first(), 0, "it opens at the first tab");
+        assert!(slot.scroll_tabs(2));
+        assert_eq!(slot.tab_first(), 2);
+        assert!(!slot.scroll_tabs(2), "it was already there");
+        assert!(slot.scroll_tabs(99));
+        assert_eq!(slot.tab_first(), tabs - 1);
+        assert!(slot.scroll_tabs(0));
+        assert_eq!(slot.tab_first(), 0);
+        // A space with no tabs has nowhere to scroll to rather than an offset of
+        // its own.
+        let empty = dock.slot_mut(Space::Left);
+        empty.views.clear();
+        assert!(!empty.scroll_tabs(3));
+        assert_eq!(empty.tab_first(), 0);
+    }
+
+    /// Closing or dragging away the tabs a strip was scrolled to pulls it back
+    /// onto a tab that exists. Left where it was, the space would be scrolled
+    /// past everything it holds.
+    #[test]
+    fn closing_a_tab_pulls_the_strip_back_onto_one_that_exists() {
+        let mut dock = Dock::new();
+        let tabs = dock.slot(Space::TopRight).views.len();
+        dock.slot_mut(Space::TopRight).scroll_tabs(tabs - 1);
+        // Closing one tab is one fewer place the strip can start.
+        assert!(dock.hide(View::Session));
+        assert_eq!(dock.slot(Space::TopRight).tab_first(), tabs - 2);
+        // Dragging two more away is two more.
+        assert!(dock.move_view(View::Context, Space::Left));
+        assert!(dock.move_view(View::Hardware, Space::Left));
+        let slot = dock.slot(Space::TopRight);
+        assert!(slot.tab_first() < slot.views.len(), "{:?}", slot);
+        assert_eq!(slot.tab_first(), slot.views.len() - 1);
+        assert!(dock.is_sound());
+        // And emptying it leaves no offset behind.
+        for view in [View::Activity, View::Plan, View::Agents] {
+            assert!(dock.move_view(view, Space::Left));
+        }
+        assert!(dock.slot(Space::TopRight).is_empty());
+        assert_eq!(dock.slot(Space::TopRight).tab_first(), 0);
+    }
+
+    /// The strip's arrows count tabs rather than naming views, because what they
+    /// walk is the strip.
+    #[test]
+    fn a_tab_can_be_shown_by_its_position() {
+        let mut dock = Dock::new();
+        let slot = dock.slot_mut(Space::TopRight);
+        assert_eq!(slot.active_index(), Some(0));
+        assert!(slot.show_at(3));
+        assert_eq!(slot.active_index(), Some(3));
+        assert_eq!(slot.active(), Some(slot.views[3]));
+        assert!(!slot.show_at(3), "it was already showing");
+        assert!(!slot.show_at(99), "there is no tab there");
+        assert_eq!(slot.active_index(), Some(3));
+        // A space with no tabs shows nothing, rather than showing the first of
+        // none.
+        let empty = dock.slot_mut(Space::Left);
+        empty.views.clear();
+        assert_eq!(empty.active_index(), None);
+        assert!(!empty.show_at(0));
     }
 
     #[test]

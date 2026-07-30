@@ -17,6 +17,13 @@ pub const MINIMIZE: char = '\u{eaba}';
 /// The gear on a menu's settings row.
 pub const SETTINGS: char = '\u{eb51}';
 
+/// The two arrows a tab strip grows when it holds more tabs than it has room
+/// for, one step along the strip each. Chevrons rather than triangles: they are
+/// the same weight as the window controls above them, and a filled triangle at
+/// this size reads as a fold marker.
+pub const TABS_LEFT: char = '\u{eab5}';
+pub const TABS_RIGHT: char = '\u{eab6}';
+
 /// A file whose type has no mark of its own.
 pub const FILE: char = '\u{ea7b}';
 /// A folder in the picker's list.
@@ -99,6 +106,8 @@ mod tests {
             MAXIMIZE,
             MINIMIZE,
             SETTINGS,
+            TABS_LEFT,
+            TABS_RIGHT,
             FILE,
             FOLDER,
             FOLDER_OPEN,

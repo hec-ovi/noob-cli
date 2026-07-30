@@ -82,6 +82,12 @@ const INPUT_PAD: f32 = 6.0;
 /// corner. One corner, so the shape reads as a mark rather than as a rounded
 /// box, and always the same corner so two panels side by side still line up.
 const CUT: f32 = 10.0;
+/// Columns each of the two arrows on an overflowing tab strip takes.
+///
+/// Three, which is what a tab spends on padding around its label, so an arrow is
+/// a target about as wide as the narrowest tab could be rather than one glyph
+/// wide. Both come off the strip's right end before any tab is placed.
+const TAB_ARROW_COLUMNS: usize = 3;
 /// The accent line along the top of the tab that is showing. Two pixels: one
 /// reads as the hairline every other edge in the window is, and the tab has to
 /// say which view it is holding from further away than that.
@@ -177,6 +183,11 @@ pub enum Hit {
     Close,
     /// A view's tab, in the space it currently lives in.
     Tab(View, Space),
+    /// The two arrows a strip with more tabs than room grows, at its right end.
+    /// One step along the strip each. In the strip beside the tabs rather than
+    /// on the floating layer, so they are hit tested with them.
+    TabsLeft(Space),
+    TabsRight(Space),
     /// The body of a space: where a dragged tab lands.
     Body(Space),
     /// A row of the file view's explorer list, and the space it is showing in.
@@ -217,6 +228,8 @@ impl Hit {
     pub fn space(self) -> Option<Space> {
         match self {
             Hit::Tab(_, space)
+            | Hit::TabsLeft(space)
+            | Hit::TabsRight(space)
             | Hit::Body(space)
             | Hit::File(_, space) => Some(space),
             _ => None,
@@ -240,7 +253,17 @@ pub enum Landing {
 pub struct Placed {
     pub strip: Panel,
     pub body: Panel,
+    /// The tabs on screen, left to right, each with the view it names. Only the
+    /// ones that fit: a strip too narrow for all of them shows a window of them
+    /// starting at [`Placed::first_tab`], and grows two arrows to walk it.
     pub tabs: Vec<(View, Panel)>,
+    /// Which of the space's tabs `tabs` starts at. Zero unless the strip is
+    /// scrolled, and never past the last tab.
+    pub first_tab: usize,
+    /// The two arrows, in that order along the strip. Both empty when every tab
+    /// fits, which is when the strip loses no room to them.
+    pub arrow_left: Panel,
+    pub arrow_right: Panel,
 }
 
 /// Where everything is this frame. Built from the window size and the dock, so
@@ -338,6 +361,9 @@ fn empty_placed() -> Placed {
         strip: nowhere(),
         body: nowhere(),
         tabs: Vec::new(),
+        first_tab: 0,
+        arrow_left: nowhere(),
+        arrow_right: nowhere(),
     }
 }
 
@@ -507,17 +533,29 @@ impl Layout {
                 return empty_placed();
             }
             let (strip, rest) = area.split_top(TAB_H.min(area.h));
-            let room = strip;
             let slot = shape.dock.slot(space);
-            let tabs = strip_tabs(
-                room,
-                slot.views.iter().map(|v| v.label().chars().count()),
+            let widths: Vec<usize> = slot
+                .views
+                .iter()
+                .map(|v| v.label().chars().count())
+                .collect();
+            let laid = strip_tabs(
+                strip,
+                &widths,
                 shape.column,
-            )
-            .into_iter()
-            .enumerate()
-            .map(|(i, panel)| (slot.views[i], panel))
-            .collect();
+                slot.tab_first(),
+                slot.active_index(),
+            );
+            let tabs = laid
+                .tabs
+                .into_iter()
+                .enumerate()
+                // Counted from the tab the strip starts at, not from the first
+                // tab of the space. Zipping the panels with the views by
+                // position alone is what would label every tab of a scrolled
+                // strip with the wrong view.
+                .map(|(i, panel)| (slot.views[laid.first + i], panel))
+                .collect();
             Placed {
                 strip,
                 body: if slot.folded {
@@ -526,6 +564,9 @@ impl Layout {
                     rest
                 },
                 tabs,
+                first_tab: laid.first,
+                arrow_left: laid.left,
+                arrow_right: laid.right,
             }
         };
 
@@ -656,6 +697,17 @@ impl Layout {
             for (view, panel) in &placed.tabs {
                 if panel.contains(x, y) {
                     return Some(Hit::Tab(*view, space));
+                }
+            }
+            // With the tabs rather than on the floating layer: the arrows stand
+            // in the strip, and a strip that holds all of its tabs has none, so
+            // there is nothing to test for and nothing drawn.
+            for (panel, hit) in [
+                (placed.arrow_left, Hit::TabsLeft(space)),
+                (placed.arrow_right, Hit::TabsRight(space)),
+            ] {
+                if panel.w >= 1.0 && panel.contains(x, y) {
+                    return Some(hit);
                 }
             }
         }
@@ -1000,20 +1052,113 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
     }
 }
 
+/// One strip's tabs, and the arrows for reaching the ones that did not fit.
+struct Strip {
+    /// The tabs on screen, left to right, starting at `first`.
+    tabs: Vec<Panel>,
+    first: usize,
+    /// Both `nowhere()` when every tab fits.
+    left: Panel,
+    right: Panel,
+}
+
 /// Lay tabs left to right at the width their labels need, dropping any that do
 /// not fit rather than squeezing them into unreadable slivers.
-fn strip_tabs(bar: Panel, widths: impl Iterator<Item = usize>, column: f32) -> Vec<Panel> {
-    let mut out = Vec::new();
-    let mut x = bar.x;
-    for chars in widths {
-        let w = (chars as f32 + 3.0) * column;
-        if x + w > bar.x + bar.w {
+///
+/// A strip that cannot hold all of its tabs keeps room for two arrows at its
+/// right end and shows a window of tabs starting at `first`, so nothing is a
+/// sliver and nothing is unreachable either. The room comes off before the window
+/// of tabs is chosen: reserving it afterwards would push one more tab off the
+/// edge, which is the same complaint one tab further along. A strip that fits
+/// them all gets no arrows and loses no room to them.
+///
+/// `first` is a request rather than an instruction, and is answered twice. It is
+/// clamped so the tabs at the end of the strip always fill it, because a space
+/// left scrolled past its last tab (by a resize, or by closing the tabs it was
+/// scrolled to) would show an empty strip. Then it is moved far enough that
+/// `active` is on screen, because the pane below the strip belongs to that tab
+/// and a pane whose own tab is missing cannot be read. Both answers are given
+/// here, on every frame, rather than at each of the several places that can move
+/// a tab or resize a window: a rule that runs every time cannot be forgotten by
+/// the next thing that moves a tab.
+///
+/// That second rule is why the strip's arrows walk the showing tab as well as the
+/// strip ([`crate::main`]'s `walk_tabs`): a scroll that left the showing tab
+/// behind would be undone here, on the same frame.
+fn strip_tabs(
+    bar: Panel,
+    widths: &[usize],
+    column: f32,
+    first: usize,
+    active: Option<usize>,
+) -> Strip {
+    let each: Vec<f32> = widths
+        .iter()
+        .map(|chars| (*chars as f32 + 3.0) * column)
+        .collect();
+    // As many tabs as fit in `room`, starting at `from`.
+    let lay = |from: usize, room: f32| -> Vec<Panel> {
+        let mut out = Vec::new();
+        let mut x = bar.x;
+        for w in each.iter().skip(from) {
+            if x + w > bar.x + room {
+                break;
+            }
+            out.push(Panel::new(x, bar.y, *w, bar.h));
+            x += w;
+        }
+        out
+    };
+    let plain = |room: f32| Strip {
+        tabs: lay(0, room),
+        first: 0,
+        left: nowhere(),
+        right: nowhere(),
+    };
+    let total: f32 = each.iter().sum();
+    if total <= bar.w {
+        return plain(bar.w);
+    }
+    let arrow = TAB_ARROW_COLUMNS as f32 * column;
+    let room = bar.w - arrow * 2.0;
+    // A strip too narrow to hold the arrows and the widest of its tabs both keeps
+    // the tabs: two arrows over an empty strip are a control for reaching
+    // nothing. Measured against the widest rather than the narrowest so that
+    // every offset shows at least one tab, which is what makes the clamp below
+    // enough on its own. The window has no size where this happens: the widest
+    // label is eleven columns and the narrowest strip is over thirty.
+    if each.iter().copied().fold(0.0, f32::max) > room {
+        return plain(bar.w);
+    }
+    // The furthest it can be scrolled: past this the tabs at the end no longer
+    // fill it and the strip is showing gap.
+    let mut furthest = each.len().saturating_sub(1);
+    let mut used = 0.0;
+    for (i, w) in each.iter().enumerate().rev() {
+        used += w;
+        if used > room {
             break;
         }
-        out.push(Panel::new(x, bar.y, w, bar.h));
-        x += w;
+        furthest = i;
     }
-    out
+    let mut at = first.min(furthest);
+    if let Some(active) = active {
+        // Behind the window, the strip starts at the showing tab; ahead of it,
+        // it walks forward until that tab is in view. `max(1)` only guards the
+        // case where a single tab is wider than the whole strip, which would
+        // otherwise never satisfy the loop.
+        at = at.min(active);
+        while active >= at + lay(at, room).len().max(1) {
+            at += 1;
+        }
+    }
+    let x = bar.x + bar.w - arrow * 2.0;
+    Strip {
+        tabs: lay(at, room),
+        first: at,
+        left: Panel::new(x, bar.y, arrow, bar.h),
+        right: Panel::new(x + arrow, bar.y, arrow, bar.h),
+    }
 }
 
 /// Which edge, if any, a point is on. An undecorated window loses the window
@@ -1395,6 +1540,57 @@ fn tab_block(scene: &mut Scene, skin: &Skin, tab: Panel, active: bool, accent: [
     scene.rect(Panel::new(tab.x, tab.y, (tab.w - cut).max(1.0), ACCENT_H.min(tab.h)).fill(accent));
 }
 
+/// The two arrows at the right end of a strip that holds more tabs than it can
+/// show, and nothing at all on one that fits.
+///
+/// Glyphs and no box. The strip itself is not a surface (see [`space_pane`]), and
+/// a filled block at that end of it would sit square over the cut corner of the
+/// pane below, which is the stray corner the strip's own fill was taken away for.
+/// The direction that has nowhere left to go is dimmed instead of hidden, so the
+/// pair does not move under the pointer at either end of the walk.
+fn strip_arrows(scene: &mut Scene, frame: &Frame, space: Space) {
+    let placed = frame.layout.placed(space);
+    if placed.arrow_left.w < 1.0 {
+        return;
+    }
+    let slot = frame.dock.slot(space);
+    // Live while there is another tab that way at all, which is what an arrow
+    // walks to. Not whether the strip itself can still move: at the end of the
+    // strip the last few tabs are all on screen together, and the arrow still
+    // steps the showing tab through them.
+    let at = slot.active_index().unwrap_or(0);
+    let line = Text::line_for(SMALL);
+    for (panel, glyph, live) in [
+        (placed.arrow_left, icons::TABS_LEFT, at > 0),
+        (
+            placed.arrow_right,
+            icons::TABS_RIGHT,
+            at + 1 < slot.views.len(),
+        ),
+    ] {
+        let ink = if live {
+            frame.skin.bright
+        } else {
+            frame.skin.dim
+        };
+        // The box runs to the arrow's right edge rather than being sized to one
+        // guessed advance, the way the window buttons do it: a box exactly one
+        // estimated advance wide clips the glyph in it.
+        let left = ((panel.w - SMALL * 0.6) * 0.5).max(0.0).floor();
+        scene.text(Text::rich(
+            vec![Run::icon(glyph.to_string(), ink)],
+            Panel::new(
+                panel.x + left,
+                panel.y + ((panel.h - line) * 0.5).max(0.0).floor(),
+                panel.w - left,
+                line,
+            ),
+            SMALL,
+            ink,
+        ));
+    }
+}
+
 fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
     let skin = frame.skin;
     let placed = frame.layout.placed(space);
@@ -1431,6 +1627,7 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
             color,
         ));
     }
+    strip_arrows(scene, frame, space);
     if slot.folded || placed.body.h < 2.0 {
         return;
     }
@@ -5440,6 +5637,8 @@ mod tests {
         for space in Space::ALL {
             assert_eq!(layout.placed(space).body.h, 0.0);
             assert!(layout.placed(space).tabs.is_empty());
+            assert_eq!(layout.placed(space).arrow_left.w, 0.0, "{space:?}");
+            assert_eq!(layout.placed(space).arrow_right.w, 0.0, "{space:?}");
         }
         assert_eq!(layout.hit(600.0, 400.0), None);
         assert_eq!(layout.hit(600.0, 10.0), Some(Hit::TitleBar));
@@ -5498,8 +5697,9 @@ mod tests {
     }
 
     /// A strip drops the tabs it cannot hold rather than squeezing them into
-    /// slivers. This used to be asserted on the file strip, which no longer
-    /// exists: a list too long for its pane scrolls now, and
+    /// slivers, and grows the two arrows that reach them. This used to be
+    /// asserted on the file strip, which no longer exists: a list too long for
+    /// its pane scrolls now, and
     /// `a_list_longer_than_the_pane_scrolls_instead_of_dropping_files` is what
     /// says so.
     #[test]
@@ -5512,11 +5712,281 @@ mod tests {
             dock.move_view(view, Space::Left);
         }
         let out = render(&busy_state(), 900.0, 700.0, &dock, &["calc.py"]);
-        let tabs = &out.layout.placed(Space::Left).tabs;
+        let placed = out.layout.placed(Space::Left);
+        let tabs = &placed.tabs;
         assert!(tabs.len() < View::ALL.len(), "every tab fitted");
         for (_, panel) in tabs {
             assert!(panel.w > 20.0, "no slivers: {panel:?}");
         }
+        assert!(
+            placed.arrow_left.w >= 1.0 && placed.arrow_right.w >= 1.0,
+            "the tabs it dropped cannot be reached"
+        );
+    }
+
+    /// A tab strip's widths, in label characters, for driving [`strip_tabs`]
+    /// without a window. Six, the number the top right space opens with.
+    const LABELS: [usize; 6] = [8, 4, 6, 8, 7, 7];
+
+    /// What one of those tabs is drawn at, in pixels, at `COLUMN` 8: three
+    /// columns of padding around the label.
+    fn tab_w(chars: usize) -> f32 {
+        (chars as f32 + 3.0) * 8.0
+    }
+
+    /// A strip that holds all of its tabs shows no arrows and loses no room to
+    /// them, whatever it was asked to scroll to. The offset only means anything
+    /// while there is something off the edge.
+    #[test]
+    fn a_strip_that_fits_has_no_arrows_and_is_never_scrolled() {
+        let total: f32 = LABELS.iter().copied().map(tab_w).sum();
+        let bar = Panel::new(10.0, 30.0, total + 1.0, TAB_H);
+        for asked in [0, 1, 5, 99] {
+            let laid = strip_tabs(bar, &LABELS, 8.0, asked, Some(0));
+            assert_eq!(laid.tabs.len(), LABELS.len(), "asked for {asked}");
+            assert_eq!(laid.first, 0, "asked for {asked}");
+            assert_eq!(laid.left.w, 0.0, "asked for {asked}");
+            assert_eq!(laid.right.w, 0.0, "asked for {asked}");
+        }
+        // One pixel narrower and the last tab is off the edge, which is what the
+        // arrows are for.
+        let tight = Panel::new(10.0, 30.0, total - 1.0, TAB_H);
+        let laid = strip_tabs(tight, &LABELS, 8.0, 0, Some(0));
+        assert!(laid.left.w >= 1.0 && laid.right.w >= 1.0);
+    }
+
+    /// The arrows take their room before the window of tabs is chosen. Taking it
+    /// afterwards would push one more tab off the edge, which is the same
+    /// complaint one tab further along, and the tab at the end would be drawn
+    /// under the arrow that is supposed to reach it.
+    #[test]
+    fn the_arrows_take_their_room_before_the_tabs_are_placed() {
+        let bar = Panel::new(10.0, 30.0, 300.0, TAB_H);
+        let laid = strip_tabs(bar, &LABELS, 8.0, 0, Some(0));
+        assert!(laid.left.w >= 1.0, "300 pixels does not hold six tabs");
+        let last = *laid.tabs.last().expect("some tabs fit");
+        assert!(
+            last.x + last.w <= laid.left.x + 0.01,
+            "the last tab {last:?} runs under the arrow at {:?}",
+            laid.left
+        );
+        // The pair sits at the right end of the strip, in reading order.
+        assert_eq!(laid.left.x + laid.left.w, laid.right.x);
+        assert_eq!(laid.right.x + laid.right.w, bar.x + bar.w);
+        assert_eq!(laid.left.h, bar.h);
+        // And each is a target, not a hairline.
+        assert!(laid.left.w >= 20.0, "{:?}", laid.left);
+    }
+
+    /// The clamp, tested hardest: whatever offset a space carries, and however
+    /// narrow the strip has become since, the strip shows tabs. A space left
+    /// scrolled past its last tab is the empty strip a resize or a closed tab
+    /// would otherwise leave behind.
+    #[test]
+    fn a_strip_is_never_scrolled_past_the_tabs_it_can_show() {
+        for room in [180.0, 200.0, 260.0, 300.0, 420.0, 500.0, 700.0] {
+            let bar = Panel::new(0.0, 0.0, room, TAB_H);
+            for asked in 0..12 {
+                let laid = strip_tabs(bar, &LABELS, 8.0, asked, None);
+                let at = laid.first;
+                assert!(
+                    !laid.tabs.is_empty(),
+                    "{room} pixels, asked for {asked}: an empty strip"
+                );
+                assert!(at <= asked, "{room}, {asked}: walked past what it was asked");
+                assert!(
+                    at + laid.tabs.len() <= LABELS.len(),
+                    "{room}, {asked}: {} tabs from {at} is past the end",
+                    laid.tabs.len()
+                );
+                // Asked for more than there is, it lands where the last tab
+                // shows rather than off the end of the strip.
+                if asked >= LABELS.len() {
+                    assert_eq!(
+                        at + laid.tabs.len(),
+                        LABELS.len(),
+                        "{room}, {asked}: {} tabs from {at} leaves the end unreachable",
+                        laid.tabs.len()
+                    );
+                }
+            }
+        }
+    }
+
+    /// The showing tab is always in its own strip, whatever the space is scrolled
+    /// to. Otherwise the keyboard walk, or a drop into another space, leaves a
+    /// pane on screen whose tab is not.
+    #[test]
+    fn the_showing_tab_is_always_in_its_own_strip() {
+        for room in [180.0, 260.0, 340.0, 500.0] {
+            let bar = Panel::new(0.0, 0.0, room, TAB_H);
+            for active in 0..LABELS.len() {
+                for asked in 0..LABELS.len() + 2 {
+                    let laid = strip_tabs(bar, &LABELS, 8.0, asked, Some(active));
+                    let showing = laid.first..laid.first + laid.tabs.len();
+                    assert!(
+                        showing.contains(&active),
+                        "{room} pixels, tab {active} showing, scrolled to {asked}: \
+                         the strip holds {showing:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Item 18's own report: a space full of tabs, and a window narrowed until
+    /// they will not all fit. Nothing disappears without a way back to it, and
+    /// widening the window again brings every tab back rather than leaving the
+    /// strip where it was scrolled to.
+    #[test]
+    fn narrowing_the_window_puts_the_tabs_behind_arrows_rather_than_losing_them() {
+        let mut dock = Dock::new();
+        let all = dock.slot(Space::TopRight).views.len();
+        let roomy = Layout::compute(1400.0, 900.0, &shape(&dock, &[]));
+        let placed = roomy.placed(Space::TopRight);
+        assert_eq!(placed.tabs.len(), all, "six tabs fit in a wide window");
+        assert_eq!(placed.arrow_left.w, 0.0, "arrows on a strip that fits");
+
+        // At the smallest the window goes, most of them are off the edge.
+        let narrow = Layout::compute(680.0, 380.0, &shape(&dock, &[]));
+        let placed = narrow.placed(Space::TopRight);
+        assert!(placed.tabs.len() < all, "every tab fitted at 680 pixels");
+        assert!(!placed.tabs.is_empty());
+        assert!(placed.arrow_left.w >= 1.0 && placed.arrow_right.w >= 1.0);
+
+        // Walked to the end, the last tab is on screen and the strip is full.
+        let last = *dock.slot(Space::TopRight).views.last().unwrap();
+        dock.slot_mut(Space::TopRight).scroll_tabs(all - 1);
+        dock.slot_mut(Space::TopRight).show(last);
+        let scrolled = Layout::compute(680.0, 380.0, &shape(&dock, &[]));
+        let placed = scrolled.placed(Space::TopRight);
+        assert!(
+            placed.tabs.iter().any(|(view, _)| *view == last),
+            "the last tab is still out of reach: {:?}",
+            placed.tabs
+        );
+        assert_eq!(placed.first_tab + placed.tabs.len(), all);
+
+        // Wide again, with that offset still stored: every tab is back and the
+        // strip is not left scrolled.
+        let roomy = Layout::compute(1400.0, 900.0, &shape(&dock, &[]));
+        let placed = roomy.placed(Space::TopRight);
+        assert_eq!(placed.tabs.len(), all);
+        assert_eq!(placed.first_tab, 0);
+        assert_eq!(placed.arrow_left.w, 0.0);
+    }
+
+    /// Every tab carries its own view's label. The tabs are the laid out panels
+    /// zipped with the space's views, and a scrolled strip starts at the tab it
+    /// is scrolled to, so zipping by position alone would put the wrong label on
+    /// every tab of it.
+    #[test]
+    fn a_scrolled_strip_labels_every_tab_with_its_own_view() {
+        let mut dock = Dock::new();
+        for asked in 0..dock.slot(Space::TopRight).views.len() {
+            dock.slot_mut(Space::TopRight).scroll_tabs(asked);
+            let views = dock.slot(Space::TopRight).views.clone();
+            let layout = Layout::compute(680.0, 380.0, &shape(&dock, &[]));
+            let placed = layout.placed(Space::TopRight);
+            for (step, (view, panel)) in placed.tabs.iter().enumerate() {
+                assert_eq!(
+                    *view,
+                    views[placed.first_tab + step],
+                    "scrolled to {asked}: tab {step} names the wrong view"
+                );
+                // As wide as its own label, and left to right in order.
+                assert!(panel.w >= tab_w(view.label().chars().count()) - 0.01);
+                if step > 0 {
+                    let before = placed.tabs[step - 1].1;
+                    assert!(panel.x >= before.x + before.w - 0.01);
+                }
+            }
+            // A tab that is scrolled out has no panel at all, so nothing can be
+            // dragged by it and nothing indexes past the end.
+            assert!(placed.first_tab + placed.tabs.len() <= views.len());
+        }
+    }
+
+    /// The arrows are hit tested in the strip, beside the tabs, rather than on
+    /// the floating layer. Without their own regions the strip behind them
+    /// answers, and a click on one would land in the pane's body instead.
+    #[test]
+    fn an_arrow_is_hit_tested_in_the_strip_beside_the_tabs() {
+        let dock = Dock::new();
+        let layout = Layout::compute(680.0, 380.0, &shape(&dock, &[]));
+        let placed = layout.placed(Space::TopRight);
+        for (panel, hit) in [
+            (placed.arrow_left, Hit::TabsLeft(Space::TopRight)),
+            (placed.arrow_right, Hit::TabsRight(Space::TopRight)),
+        ] {
+            assert!(panel.w >= 1.0);
+            let (x, y) = middle(panel);
+            assert_eq!(layout.hit(x, y), Some(hit));
+            assert!(placed.strip.contains(x, y), "the arrow is in the strip");
+            // A drop lands in the space the arrow belongs to, the way it does
+            // anywhere else in that strip.
+            assert_eq!(hit.space(), Some(Space::TopRight));
+            assert_eq!(layout.landing(x, y), Landing::In(Space::TopRight));
+        }
+        // A strip that fits has no arrow to hit: the point they would be at is
+        // the space itself.
+        let wide = Layout::compute(1400.0, 900.0, &shape(&dock, &[]));
+        let strip = wide.placed(Space::TopRight).strip;
+        let at = (strip.x + strip.w - 4.0, strip.y + strip.h * 0.5);
+        assert_eq!(wide.hit(at.0, at.1), Some(Hit::Body(Space::TopRight)));
+    }
+
+    /// Both arrows are drawn, as the glyphs the symbol font carries, and the
+    /// direction with nowhere left to go is dimmed rather than taken away.
+    #[test]
+    fn the_arrows_are_drawn_and_the_spent_one_is_dimmed() {
+        let mut dock = Dock::new();
+        let out = render(&busy_state(), 680.0, 380.0, &dock, &[]);
+        let arrows: Vec<&Run> = out
+            .scene
+            .texts
+            .iter()
+            .flat_map(|text| text.runs.iter())
+            .filter(|run| {
+                run.text == icons::TABS_LEFT.to_string()
+                    || run.text == icons::TABS_RIGHT.to_string()
+            })
+            .collect();
+        assert_eq!(arrows.len(), 2, "the pair is not drawn");
+        // The first tab is showing, so there is nothing to the left of it.
+        let left = arrows
+            .iter()
+            .find(|run| run.text == icons::TABS_LEFT.to_string())
+            .unwrap();
+        let right = arrows
+            .iter()
+            .find(|run| run.text == icons::TABS_RIGHT.to_string())
+            .unwrap();
+        assert_eq!(left.color, Some(out.skin.dim), "nothing is off to the left");
+        assert_eq!(right.color, Some(out.skin.bright));
+
+        // Showing the last tab turns the pair round.
+        let last = *dock.slot(Space::TopRight).views.last().unwrap();
+        dock.slot_mut(Space::TopRight).show(last);
+        let out = render(&busy_state(), 680.0, 380.0, &dock, &[]);
+        let tints: Vec<(String, Option<[u8; 4]>)> = out
+            .scene
+            .texts
+            .iter()
+            .flat_map(|text| text.runs.iter())
+            .filter(|run| {
+                run.text == icons::TABS_LEFT.to_string()
+                    || run.text == icons::TABS_RIGHT.to_string()
+            })
+            .map(|run| (run.text.clone(), run.color))
+            .collect();
+        assert_eq!(
+            tints,
+            vec![
+                (icons::TABS_LEFT.to_string(), Some(out.skin.bright)),
+                (icons::TABS_RIGHT.to_string(), Some(out.skin.dim)),
+            ]
+        );
     }
 
     #[test]
@@ -5982,6 +6452,8 @@ mod tests {
         for space in Space::ALL {
             assert!(layout.placed(space).tabs.is_empty(), "{space:?}");
             assert_eq!(layout.placed(space).body.w, 0.0, "{space:?}");
+            assert_eq!(layout.placed(space).arrow_left.w, 0.0, "{space:?}");
+            assert_eq!(layout.placed(space).arrow_right.w, 0.0, "{space:?}");
         }
         assert_eq!(layout.input.w, 0.0, "there is nothing to type at yet");
         assert_eq!(layout.cell(600.0, 400.0, 13.0, 8.0), None);
@@ -6197,6 +6669,8 @@ mod tests {
         for space in Space::ALL {
             assert!(layout.placed(space).tabs.is_empty(), "{space:?}");
             assert_eq!(layout.placed(space).body.w, 0.0, "{space:?}");
+            assert_eq!(layout.placed(space).arrow_left.w, 0.0, "{space:?}");
+            assert_eq!(layout.placed(space).arrow_right.w, 0.0, "{space:?}");
         }
         assert_eq!(layout.input.w, 0.0, "the prompt is behind the panel");
         assert_eq!(layout.cell(600.0, 400.0, 13.0, 8.0), None);
