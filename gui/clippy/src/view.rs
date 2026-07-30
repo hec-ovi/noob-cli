@@ -240,8 +240,13 @@ impl Hit {
 /// Where a dragged tab ends up when the button comes up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Landing {
-    /// Into a space, which moves the view there.
-    In(Space),
+    /// Into a space, which moves the view there. The number is the place it
+    /// takes among that space's tabs, counted against the tabs the space holds
+    /// now, and is only there when the drop was on the tab strip: dropping onto
+    /// a strip says where in the order the tab goes, dropping into the pane
+    /// below says which space and nothing more. Without one, a drop back into
+    /// the space the view is already in is the no-op it always was.
+    In(Space, Option<usize>),
     /// Off the window entirely, which takes the view out of it.
     Out,
     /// Somewhere in the window that is not a space: the title strip, the
@@ -740,10 +745,41 @@ impl Layout {
         if x < 0.0 || y < 0.0 || x > self.width || y > self.height {
             return Landing::Out;
         }
-        match self.hit(x, y).and_then(Hit::space) {
-            Some(space) => Landing::In(space),
-            None => Landing::Nowhere,
+        let Some(space) = self.hit(x, y).and_then(Hit::space) else {
+            return Landing::Nowhere;
+        };
+        // On the strip, the drop names a place among the tabs. In the pane below
+        // it, it names the space only: a tab dragged into the middle of its own
+        // pane and let go has not been put in front of anything, so the order it
+        // was in is the order it keeps.
+        let at = self
+            .placed(space)
+            .strip
+            .contains(x, y)
+            .then(|| self.insertion(space, x));
+        Landing::In(space, at)
+    }
+
+    /// Which place among a space's tabs a drop at this `x` takes.
+    ///
+    /// In front of the tab under the pointer or behind it, depending on which
+    /// half of it the pointer is in, the way every tab strip does it. Counted
+    /// against the space's whole list of tabs rather than the ones on screen, so
+    /// a scrolled strip names the same tab the pointer is over.
+    ///
+    /// Past the last tab on screen is behind it, which is what the empty end of a
+    /// strip and the strip's own arrows resolve to. Here rather than in
+    /// [`crate::dock`] because it is the tab panels that answer it, and the caret
+    /// drawn between two tabs has to come from the same arithmetic as the drop, or
+    /// the mark and the move disagree.
+    pub fn insertion(&self, space: Space, x: f32) -> usize {
+        let placed = self.placed(space);
+        for (step, (_, panel)) in placed.tabs.iter().enumerate() {
+            if x < panel.x + panel.w * 0.5 {
+                return placed.first_tab + step;
+            }
         }
+        placed.first_tab + placed.tabs.len()
     }
 
     /// Rows a panel can show. The header line is content, not scrollback.
@@ -1187,7 +1223,10 @@ pub fn edge(x: f32, y: f32, width: f32, height: f32) -> Option<winit::window::Re
 pub struct Drag {
     pub view: View,
     pub at: (f32, f32),
-    pub onto: Option<Space>,
+    /// What a drop right now would do, taken from [`Layout::landing`]. The same
+    /// answer the release acts on, so the box drawn over the target, the caret
+    /// between two tabs and the move that happens cannot disagree.
+    pub landing: Landing,
 }
 
 pub struct Frame<'a> {
@@ -1601,7 +1640,10 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
 
     // A space being dragged onto is lit along the three edges it has, so a drop
     // target is a place rather than a guess.
-    let target = frame.drag.is_some_and(|drag| drag.onto == Some(space));
+    let target = matches!(
+        frame.drag.map(|drag| drag.landing),
+        Some(Landing::In(onto, _)) if onto == space
+    );
     // The strip itself is not drawn. It is the window, not a toolbar, and the
     // tabs standing in it are the only thing up here. Its fill and the hairline
     // along its foot were both square, so they ran past the cut corner of the
@@ -4159,7 +4201,7 @@ mod tests {
             Some(Drag {
                 view: View::Activity,
                 at: (400.0, 500.0),
-                onto: Some(Space::Left),
+                landing: Landing::In(Space::Left, None),
             }),
         );
         assert!(
@@ -5907,6 +5949,76 @@ mod tests {
         }
     }
 
+    /// Item 23's arithmetic: which place in a strip a drop takes. The left half
+    /// of a tab is in front of it, the right half is behind it, and past the last
+    /// tab is behind the lot.
+    #[test]
+    fn a_drop_lands_in_front_of_the_tab_its_left_half_is_under() {
+        let dock = Dock::new();
+        let layout = Layout::compute(1400.0, 900.0, &shape(&dock, &[]));
+        let placed = layout.placed(Space::TopRight);
+        let tabs = dock.slot(Space::TopRight).views.len();
+        assert_eq!(placed.tabs.len(), tabs, "the whole strip is on screen");
+        assert_eq!(placed.first_tab, 0);
+
+        for (step, (_, panel)) in placed.tabs.iter().enumerate() {
+            assert_eq!(
+                layout.insertion(Space::TopRight, panel.x + 1.0),
+                step,
+                "the left edge of tab {step}"
+            );
+            assert_eq!(
+                layout.insertion(Space::TopRight, panel.x + panel.w - 1.0),
+                step + 1,
+                "the right edge of tab {step}"
+            );
+        }
+        // In front of the first tab, and past the end of them all.
+        assert_eq!(layout.insertion(Space::TopRight, placed.strip.x - 20.0), 0);
+        assert_eq!(
+            layout.insertion(Space::TopRight, placed.strip.x + placed.strip.w),
+            tabs
+        );
+        // A space with no tabs has one place: the start.
+        let mut empty = Dock::new();
+        for view in [View::Files, View::Debug] {
+            assert!(empty.hide(view));
+        }
+        let layout = Layout::compute(1400.0, 900.0, &shape(&empty, &[]));
+        assert_eq!(layout.insertion(Space::BottomRight, 500.0), 0);
+    }
+
+    /// A scrolled strip names the tab the pointer is over, not the tab that many
+    /// places from the left of the strip. Counting the panels alone is what would
+    /// drop a tab five places from where it was let go.
+    #[test]
+    fn a_scrolled_strip_names_the_place_the_pointer_is_over() {
+        let mut dock = Dock::new();
+        let all = dock.slot(Space::TopRight).views.len();
+        for asked in 0..all {
+            dock.slot_mut(Space::TopRight).scroll_tabs(asked);
+            let layout = Layout::compute(680.0, 380.0, &shape(&dock, &[]));
+            let placed = layout.placed(Space::TopRight);
+            assert!(!placed.tabs.is_empty());
+            for (step, (_, panel)) in placed.tabs.iter().enumerate() {
+                let at = layout.insertion(Space::TopRight, panel.x + 1.0);
+                assert_eq!(
+                    at,
+                    placed.first_tab + step,
+                    "scrolled to {asked}: tab {step} names the wrong place"
+                );
+                // And the place it names is a place in the space's own tabs.
+                assert!(at <= all, "scrolled to {asked}: {at} is past the end");
+            }
+            let end = layout.insertion(
+                Space::TopRight,
+                placed.strip.x + placed.strip.w,
+            );
+            assert_eq!(end, placed.first_tab + placed.tabs.len());
+            assert!(end <= all);
+        }
+    }
+
     /// The arrows are hit tested in the strip, beside the tabs, rather than on
     /// the floating layer. Without their own regions the strip behind them
     /// answers, and a click on one would land in the pane's body instead.
@@ -5926,7 +6038,16 @@ mod tests {
             // A drop lands in the space the arrow belongs to, the way it does
             // anywhere else in that strip.
             assert_eq!(hit.space(), Some(Space::TopRight));
-            assert_eq!(layout.landing(x, y), Landing::In(Space::TopRight));
+            // In the strip, so the drop names a place among the tabs: behind the
+            // last one on screen, which is what the arrows stand in front of.
+            let placed = layout.placed(Space::TopRight);
+            assert_eq!(
+                layout.landing(x, y),
+                Landing::In(
+                    Space::TopRight,
+                    Some(placed.first_tab + placed.tabs.len())
+                )
+            );
         }
         // A strip that fits has no arrow to hit: the point they would be at is
         // the space itself.
@@ -6349,10 +6470,13 @@ mod tests {
         ] {
             assert_eq!(layout.landing(x, y), Landing::Out, "at {x},{y}");
         }
+        // The body of a pane names the space and no place in its strip.
         let (x, y) = middle(layout.placed(Space::Left).body);
-        assert_eq!(layout.landing(x, y), Landing::In(Space::Left));
+        assert_eq!(layout.landing(x, y), Landing::In(Space::Left, None));
+        // A tab does name a place: the middle of the first tab is its right half,
+        // so a drop there goes behind it.
         let (x, y) = middle(layout.placed(Space::TopRight).tabs[0].1);
-        assert_eq!(layout.landing(x, y), Landing::In(Space::TopRight));
+        assert_eq!(layout.landing(x, y), Landing::In(Space::TopRight, Some(1)));
         // Inside the window but on nothing that holds panes.
         assert_eq!(layout.landing(400.0, 10.0), Landing::Nowhere);
     }

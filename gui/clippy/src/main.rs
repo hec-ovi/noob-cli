@@ -288,12 +288,15 @@ fn walk_tabs(dock: &mut Dock, space: Space, showing: usize, forward: bool) -> bo
 
 /// What a released tab does to the arrangement.
 ///
-/// Off the window closes the widget. Pure so the rule can be tested without a
-/// compositor, and so the one place a drop changes the dock is the one place a
-/// test drives.
+/// A drop on a tab strip names a place among that space's tabs, so it reorders
+/// them; one in the body of a pane names the space alone and puts the tab at the
+/// end of it. Off the window closes the widget. Pure so the rule can be tested
+/// without a compositor, and so the one place a drop changes the dock is the one
+/// place a test drives.
 fn land(dock: &mut Dock, view: View, landing: Landing) -> bool {
     match landing {
-        Landing::In(space) => dock.move_view(view, space),
+        Landing::In(space, Some(at)) => dock.place_view(view, space, at),
+        Landing::In(space, None) => dock.move_view(view, space),
         Landing::Out => dock.hide(view),
         Landing::Nowhere => false,
     }
@@ -1400,9 +1403,9 @@ impl App {
         self.drag = Some(Drag {
             view,
             at: (self.cursor.x as f32, self.cursor.y as f32),
-            onto: layout
-                .hit(self.cursor.x as f32, self.cursor.y as f32)
-                .and_then(Hit::space),
+            // The same question the release asks, asked on every move: what the
+            // frame draws as the target is what a drop would actually do.
+            landing: layout.landing(self.cursor.x as f32, self.cursor.y as f32),
         });
         self.dirty = true;
     }
@@ -2401,7 +2404,7 @@ mod tests {
     #[test]
     fn a_tab_dropped_off_the_window_is_closed_rather_than_moved() {
         let mut dock = Dock::new();
-        assert!(land(&mut dock, View::Files, Landing::In(Space::Left)));
+        assert!(land(&mut dock, View::Files, Landing::In(Space::Left, None)));
         assert_eq!(dock.space_of(View::Files), Some(Space::Left));
 
         let before = dock.clone();
@@ -2417,7 +2420,38 @@ mod tests {
             "and throwing it out twice is not two hidden entries"
         );
         // A view that is out stays out until something unhides it.
-        assert!(!land(&mut dock, View::Files, Landing::In(Space::Left)));
+        assert!(!land(&mut dock, View::Files, Landing::In(Space::Left, None)));
+    }
+
+    /// A drop that names a place in a strip reorders the tabs; one that names
+    /// only a space puts the tab at the end of that space, the way it always did.
+    #[test]
+    fn a_drop_that_names_a_place_in_the_strip_reorders_the_tabs() {
+        let mut dock = Dock::new();
+        let order = |dock: &Dock| dock.slot(Space::TopRight).views.clone();
+        assert_eq!(order(&dock)[0], View::Activity);
+
+        // In front of the first tab of the space it is already in.
+        assert!(land(&mut dock, View::Session, Landing::In(Space::TopRight, Some(0))));
+        assert_eq!(order(&dock)[0], View::Session);
+        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Session));
+
+        // The same drop again is where it already is, so nothing happens.
+        let before = dock.clone();
+        assert!(!land(&mut dock, View::Session, Landing::In(Space::TopRight, Some(0))));
+        assert_eq!(dock, before);
+        assert!(!land(&mut dock, View::Session, Landing::In(Space::TopRight, Some(1))));
+        assert_eq!(dock, before, "behind itself is also where it is");
+
+        // From another space, into a named place rather than onto the end.
+        assert!(land(&mut dock, View::Output, Landing::In(Space::TopRight, Some(2))));
+        assert_eq!(order(&dock)[2], View::Output);
+        // And with no place named, onto the end.
+        assert!(land(&mut dock, View::Output, Landing::In(Space::BottomRight, None)));
+        assert_eq!(
+            dock.slot(Space::BottomRight).views.last(),
+            Some(&View::Output)
+        );
     }
 
     /// The whole pointer path for a selection in the prompt: two pixel

@@ -12,6 +12,10 @@
 //! space, always. A move takes it out of where it was before it puts it
 //! anywhere, and a space that ends up empty gives its room to its neighbour
 //! rather than becoming a hole.
+//!
+//! Tabs also have an order, and a drop can name a place in it: dropping a tab in
+//! front of another puts it there ([`Dock::place_view`]), in the space it is
+//! already in or in a different one.
 
 /// One of the things that can occupy a tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -279,18 +283,64 @@ impl Dock {
 
     /// Move a view into a space, at the end of its tabs, and show it there.
     ///
-    /// Dropping a view back where it already is is a no-op rather than a
-    /// reorder: a drag that ends where it started should change nothing.
+    /// Dropping a view back into the space it already lives in without naming a
+    /// position is a no-op rather than a reorder: a drag that ends where it
+    /// started should change nothing. [`Dock::place_view`] is the one that names
+    /// a position, and it is what a drop onto a tab strip uses.
     pub fn move_view(&mut self, view: View, to: Space) -> bool {
-        if self.hidden.contains(&view) || self.space_of(view) == Some(to) {
+        if self.space_of(view) == Some(to) {
             return false;
+        }
+        let end = self.slot(to).views.len();
+        self.place_view(view, to, end)
+    }
+
+    /// Move a view into a space at a given place among its tabs, and show it
+    /// there.
+    ///
+    /// `at` counts the tabs the target space holds now, before the move, so `0`
+    /// is in front of its first tab and `views.len()` is after its last. Past
+    /// the end is the end. This is what dropping a tab in front of another one
+    /// does, and it works in the space the view is already in as well as in a
+    /// different one.
+    ///
+    /// A drop that names the place the view is already in changes nothing, which
+    /// is either half of its own tab: both `at == was` (in front of itself) and
+    /// `at == was + 1` (behind itself) leave the strip exactly as it was,
+    /// including which tab was showing.
+    ///
+    /// The view is taken out of wherever it was and put into `to` inside this one
+    /// call, so no caller can observe it in two spaces or in none.
+    pub fn place_view(&mut self, view: View, to: Space, at: usize) -> bool {
+        if self.hidden.contains(&view) {
+            return false;
+        }
+        if self.space_of(view) == Some(to) {
+            let slot = self.slot_mut(to);
+            let Some(was) = slot.views.iter().position(|v| *v == view) else {
+                return false;
+            };
+            if at == was || at == was + 1 {
+                return false;
+            }
+            slot.views.remove(was);
+            // An insertion point beyond the tab that was just taken out has slid
+            // one place along with every tab after it. Without this, dragging a
+            // tab to the right always lands it one tab short of where it was
+            // dropped.
+            let at = (if at > was { at - 1 } else { at }).min(slot.views.len());
+            slot.views.insert(at, view);
+            slot.active = at;
+            slot.folded = false;
+            return true;
         }
         for space in Space::ALL {
             self.slot_mut(space).remove(view);
         }
         let slot = self.slot_mut(to);
-        slot.views.push(view);
-        slot.active = slot.views.len() - 1;
+        let at = at.min(slot.views.len());
+        slot.views.insert(at, view);
+        slot.active = at;
         slot.folded = false;
         true
     }
@@ -510,6 +560,150 @@ mod tests {
         let before = dock.clone();
         assert!(!dock.move_view(View::Agents, Space::TopRight));
         assert_eq!(dock, before);
+        // Naming its own place is the same answer: either half of its own tab is
+        // where it already is, so nothing moves and nothing else starts showing.
+        let was = dock
+            .slot(Space::TopRight)
+            .views
+            .iter()
+            .position(|v| *v == View::Agents)
+            .unwrap();
+        for at in [was, was + 1] {
+            assert!(!dock.place_view(View::Agents, Space::TopRight, at), "{at}");
+            assert_eq!(dock, before, "{at}");
+        }
+    }
+
+    /// Item 23: a tab dropped in front of another takes that place in the strip,
+    /// in either direction, and the tab that was dragged is the one showing.
+    #[test]
+    fn a_tab_dropped_in_front_of_another_takes_its_place() {
+        let mut dock = Dock::new();
+        let order = |dock: &Dock| dock.slot(Space::TopRight).views.clone();
+        let start = order(&dock);
+        assert_eq!(start[0], View::Activity);
+        assert_eq!(start[4], View::Context);
+
+        // Backwards: the fifth tab in front of the first.
+        assert!(dock.place_view(View::Context, Space::TopRight, 0));
+        assert!(dock.is_sound());
+        assert_eq!(
+            order(&dock),
+            vec![
+                View::Context,
+                View::Activity,
+                View::Plan,
+                View::Agents,
+                View::Hardware,
+                View::Session,
+            ]
+        );
+        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Context));
+
+        // Forwards: the same tab back in behind the fourth. The insertion point
+        // counts the tabs as they are before the move, so 4 means "in front of
+        // whatever is fourth now", which is HARDWARE.
+        assert!(dock.place_view(View::Context, Space::TopRight, 4));
+        assert!(dock.is_sound());
+        assert_eq!(
+            order(&dock),
+            vec![
+                View::Activity,
+                View::Plan,
+                View::Agents,
+                View::Context,
+                View::Hardware,
+                View::Session,
+            ]
+        );
+        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Context));
+
+        // And onto the end of its own strip.
+        let end = order(&dock).len();
+        assert!(dock.place_view(View::Activity, Space::TopRight, end));
+        assert_eq!(order(&dock).last(), Some(&View::Activity));
+        assert!(dock.is_sound());
+    }
+
+    /// The same in a different space: a tab dropped between two tabs of another
+    /// space lands between them rather than at the end of them.
+    #[test]
+    fn a_tab_dropped_into_another_space_lands_where_it_was_dropped() {
+        let mut dock = Dock::new();
+        assert!(dock.place_view(View::Output, Space::TopRight, 2));
+        assert!(dock.is_sound());
+        assert_eq!(
+            dock.slot(Space::TopRight).views,
+            vec![
+                View::Activity,
+                View::Plan,
+                View::Output,
+                View::Agents,
+                View::Hardware,
+                View::Context,
+                View::Session,
+            ]
+        );
+        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Output));
+        assert_eq!(dock.space_of(View::Output), Some(Space::TopRight));
+        // Its old space is empty rather than still holding it.
+        assert!(dock.slot(Space::Left).is_empty());
+
+        // A place past the end is the end, not a panic and not a hole.
+        assert!(dock.place_view(View::Output, Space::BottomRight, 99));
+        assert!(dock.is_sound());
+        assert_eq!(
+            dock.slot(Space::BottomRight).views,
+            vec![View::Files, View::Debug, View::Output]
+        );
+        // An empty space takes a drop at any place at all.
+        assert!(dock.place_view(View::Output, Space::Left, 7));
+        assert_eq!(dock.slot(Space::Left).views, vec![View::Output]);
+        assert!(dock.is_sound());
+    }
+
+    /// The invariant again, driven by the reorder rather than by the plain move:
+    /// whatever place a drop names, every view is still in exactly one space.
+    #[test]
+    fn every_reorder_leaves_every_view_in_exactly_one_space() {
+        let mut dock = Dock::new();
+        let drops = [
+            (View::Session, Space::TopRight, 0),
+            (View::Session, Space::TopRight, 6),
+            (View::Files, Space::TopRight, 3),
+            (View::Output, Space::BottomRight, 0),
+            (View::Debug, Space::Left, 0),
+            (View::Debug, Space::Left, 2),
+            (View::Plan, Space::BottomRight, 99),
+            (View::Activity, Space::TopRight, 1),
+        ];
+        for (view, to, at) in drops {
+            dock.place_view(view, to, at);
+            assert!(dock.is_sound(), "after {view:?} into {to:?} at {at}: {dock:?}");
+            assert_eq!(dock.space_of(view), Some(to), "{view:?}");
+            assert_eq!(dock.walk().len(), View::ALL.len());
+        }
+        // A view the settings turned off cannot be dropped in by naming a place
+        // either.
+        assert!(dock.hide(View::Plan));
+        assert!(!dock.place_view(View::Plan, Space::Left, 0));
+        assert_eq!(dock.space_of(View::Plan), None);
+        assert!(dock.is_sound());
+    }
+
+    /// A reorder inside one space leaves the strip's own scroll offset pointing
+    /// at a tab that exists: the tabs are the same tabs, so nothing may be
+    /// dragged past the end of them.
+    #[test]
+    fn reordering_leaves_the_strip_on_a_tab_that_exists() {
+        let mut dock = Dock::new();
+        let tabs = dock.slot(Space::TopRight).views.len();
+        dock.slot_mut(Space::TopRight).scroll_tabs(tabs - 1);
+        assert!(dock.place_view(View::Session, Space::TopRight, 0));
+        let slot = dock.slot(Space::TopRight);
+        assert_eq!(slot.views.len(), tabs, "a reorder is not a removal");
+        assert!(slot.tab_first() < slot.views.len(), "{slot:?}");
+        assert!(dock.is_sound());
     }
 
     /// Taking the showing tab away must leave its neighbour showing, not an
