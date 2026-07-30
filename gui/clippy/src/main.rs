@@ -236,6 +236,24 @@ fn menu_for(
     }
 }
 
+/// What picking a row of the menu's widget list does.
+///
+/// Two cases, because the list holds every widget rather than only the closed
+/// ones. A closed one comes back into the space it opens in by default: where
+/// it used to be is not remembered, and an arrangement dragged around since it
+/// went would have nowhere to put it back. One that is already in the window is
+/// shown where it is, which is the answer to a tab buried in a folded space or
+/// behind five others.
+///
+/// A free function over the dock alone, like [`menu_for`] above it, so the rule
+/// can be tested without a window.
+fn show_view(dock: &mut Dock, view: View) -> bool {
+    match dock.is_hidden(view) {
+        true => dock.unhide(view),
+        false => dock.reveal(view),
+    }
+}
+
 /// Which views a settings change turns on or off.
 ///
 /// Only the ones whose own setting moved. Applying both flags on every change
@@ -1229,7 +1247,7 @@ impl App {
     /// A greyed row still closes it: leaving a menu open under a pointer that
     /// has already committed to a row reads as a click that missed the window.
     fn pick(&mut self, index: usize) {
-        let Some(menu) = self.menu.take() else {
+        let Some(mut menu) = self.menu.take() else {
             return;
         };
         self.dirty = true;
@@ -1250,21 +1268,32 @@ impl App {
             // matched rather than caught by a wildcard so adding one is a
             // compile error here instead of a click that silently does nothing.
             (Item::Close, Target::Input) => {}
+            // The one row that does not put the menu away. It opens the list
+            // under itself, and the list is on the menu: closing it would put
+            // away the thing the row was for.
+            (Item::Widgets(_), _) => {
+                menu.toggle_widgets(&self.dock);
+                self.menu = Some(menu);
+            }
+            (Item::Widget(view, _), _) => {
+                show_view(&mut self.dock, view);
+            }
         }
     }
 
     /// Take a widget out of the window.
     ///
-    /// One way for now: nothing inside the window puts it back, and the way
-    /// back is the orb launcher, which does not exist yet. The arrangement
-    /// survives it because a space with no tabs gives its room to its
-    /// neighbour rather than leaving a hole; see `Layout::compute`.
+    /// The way back is the widget list on the same menu, and the two settings
+    /// that carry a pane of their own. The arrangement survives a close because
+    /// a space with no tabs gives its room to its neighbour rather than leaving
+    /// a hole; see `Layout::compute`.
     fn close_view(&mut self, view: View) {
         if self.dock.hide(view) {
             self.forget_selection_in(view);
             self.dirty = true;
         }
     }
+
 
     /// Drop a selection that belonged to a pane which is no longer on screen.
     /// Left behind it would still be what Ctrl-C copied, with nothing drawn
@@ -1736,6 +1765,19 @@ impl App {
     /// history.
     fn scroll_hovered(&mut self, pages: f32) {
         let layout = self.layout();
+        // A menu floats above the window, so while the pointer is on one the
+        // wheel moves its widget list rather than the pane the menu covers.
+        // First, for the same reason the menu is hit tested first.
+        if matches!(
+            layout.hit(self.cursor.x as f32, self.cursor.y as f32),
+            Some(Hit::Menu | Hit::MenuRow(_))
+        ) && let Some(menu) = self.menu.as_mut()
+        {
+            let rows = layout.menu_capacity(menu);
+            let by = ((rows as f32 * pages.abs()).round() as usize).max(1);
+            self.dirty |= menu.scroll(by, pages < 0.0, rows);
+            return;
+        }
         // The picker is the only thing on screen while it is up, so the wheel is
         // its list wherever the pointer happens to be. The cursor stays where it
         // was: the wheel moves what you are looking at, not what you have picked.
@@ -2573,7 +2615,7 @@ mod tests {
         // than opening a menu for what it covers.
         let menu = Menu::for_widget((500.0, 400.0), View::Plan, Space::TopRight, false);
         let over = laid_out(&dock, Some(&menu), 0);
-        let at = middle(over.menu_rows[0]);
+        let at = middle(over.menu_rows[0].1);
         assert!(opened(&over, &dock, at).is_none());
     }
 
@@ -2606,6 +2648,56 @@ mod tests {
             Some(Item::Copy)
         );
         assert_eq!(menu_for(hit, at, &dock, false, None).unwrap().pick(0), None);
+    }
+
+    /// The way back in. Closing a widget was one way out with no way home, and
+    /// the list on the same menu is now the way home for every one of them.
+    #[test]
+    fn picking_a_closed_widget_puts_it_back_and_an_open_one_is_only_revealed() {
+        let mut dock = Dock::new();
+        let menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::Left, false);
+
+        // Closed, and back: in the window, walked to, in the space it opens in
+        // by default rather than wherever it was before.
+        assert!(dock.hide(View::Debug));
+        assert!(dock.is_hidden(View::Debug));
+        assert!(!dock.walk().contains(&View::Debug));
+        assert!(show_view(&mut dock, View::Debug));
+        assert!(!dock.is_hidden(View::Debug));
+        let home = dock.space_of(View::Debug).expect("it is somewhere");
+        assert_eq!(dock.slot(home).active(), Some(View::Debug), "and showing");
+        assert_eq!(
+            home,
+            Dock::new()
+                .space_of(View::Debug)
+                .expect("its default space"),
+            "back where it opens rather than where it was"
+        );
+
+        // Already in the window: shown where it is, and not moved.
+        let space = dock.space_of(View::Files).expect("FILES is in the window");
+        dock.slot_mut(space).folded = true;
+        let order = dock.slot(space).views.clone();
+        assert!(show_view(&mut dock, View::Files));
+        assert_eq!(dock.space_of(View::Files), Some(space), "it did not move");
+        assert_eq!(dock.slot(space).views, order, "nor did its tab");
+        assert_eq!(dock.slot(space).active(), Some(View::Files));
+        assert!(!dock.slot(space).folded, "and its space is unfolded");
+
+        // Which is what the rows of the list say they will do, before either
+        // one is picked.
+        let mut listed = menu.clone();
+        assert!(dock.hide(View::Agents));
+        listed.toggle_widgets(&dock);
+        assert_eq!(
+            listed.pick(listed.top + 3),
+            Some(Item::Widget(View::Agents, true)),
+            "AGENTS is the fourth widget and it is closed"
+        );
+        assert_eq!(
+            listed.pick(listed.top),
+            Some(Item::Widget(View::Output, false))
+        );
     }
 
     /// A settings change turns a pane on or off only when that pane's own setting

@@ -484,10 +484,15 @@ pub struct Layout {
     pub settings_values: Vec<(usize, Panel)>,
     pub settings_close: Panel,
 
-    /// The floating layer. The open menu's box, and one panel per row, both
-    /// empty when no menu is open. Drawn last and hit tested first.
+    /// The floating layer. The open menu's box, and one panel per row on
+    /// screen, both empty when no menu is open. Drawn last and hit tested
+    /// first.
+    ///
+    /// Each row carries its place in the menu, the way the picker's and the
+    /// settings panel's rows do, because the widget list at the foot of the
+    /// menu scrolls: the third panel down is not always the third row.
     pub menu: Panel,
-    pub menu_rows: Vec<Panel>,
+    pub menu_rows: Vec<(usize, Panel)>,
 }
 
 /// What the layout needs beyond the window size.
@@ -856,9 +861,9 @@ impl Layout {
         // click even when a window button, a tab or a pane is under it; without
         // this the menu would be drawn over things it could be clicked through
         // onto, which is worse than having no menu.
-        for (index, row) in self.menu_rows.iter().enumerate() {
+        for (index, row) in &self.menu_rows {
             if row.contains(x, y) {
-                return Some(Hit::MenuRow(index));
+                return Some(Hit::MenuRow(*index));
             }
         }
         if self.menu.w >= 1.0 && self.menu.contains(x, y) {
@@ -1087,6 +1092,16 @@ impl Layout {
         Text::rows_for(size, self.settings_list.h)
     }
 
+    /// How many of the menu's widget list are on screen, for the wheel. Read
+    /// off the rows the layout actually placed, so the scroll is bounded by
+    /// what is drawn rather than by an arithmetic of its own.
+    pub fn menu_capacity(&self, menu: &Menu) -> usize {
+        self.menu_rows
+            .iter()
+            .filter(|(index, _)| *index >= menu.top)
+            .count()
+    }
+
     /// The box a space's text is drawn in.
     ///
     /// The whole body for every view but the file one, which gives its left
@@ -1148,20 +1163,43 @@ impl Layout {
     }
 }
 
-/// Where an open menu's box is, and where each of its rows is inside it.
+/// Where an open menu's box is, and where each of its rows on screen is inside
+/// it.
 ///
 /// Clamped into the window. A menu opened near the right edge or a row from the
 /// bottom would otherwise hang off the surface, and the part that hangs off is
 /// not merely invisible: no pointer can reach it, so the rows down there cannot
 /// be picked at all.
-fn place_menu(menu: &Menu, column: f32, width: f32, height: f32) -> (Panel, Vec<Panel>) {
+///
+/// The widget list gets the same treatment carried one step further. Clamping
+/// is enough while the menu is shorter than the window, and a menu with nine
+/// widget rows open in a short window is not, so the box takes as many rows as
+/// there is room for and the list scrolls through the rest. The top level rows
+/// are kept whatever happens: they are the ones the menu was opened for.
+fn place_menu(menu: &Menu, column: f32, width: f32, height: f32) -> (Panel, Vec<(usize, Panel)>) {
     let column = column.max(1.0);
     let w = (menu.width_chars() + MENU_GUTTER) as f32 * column + MENU_PAD * 2.0;
-    let h = menu.rows.len() as f32 * MENU_ROW_H + MENU_PAD * 2.0;
+    let room = (((height - MENU_PAD * 2.0) / MENU_ROW_H).floor() as usize).max(1);
+    let shown = menu.rows.len().min(room);
+    // What is left for the list once the top level has had its rows, and where
+    // in the list that window starts. Clamped here rather than in the menu, so
+    // a wheel that ran past the end does not leave the box half empty.
+    let visible = shown.saturating_sub(menu.top);
+    let first = menu.first.min(menu.widgets().saturating_sub(visible));
+    let h = shown as f32 * MENU_ROW_H + MENU_PAD * 2.0;
     let x = menu.at.0.min(width - w).max(0.0);
     let y = menu.at.1.min(height - h).max(0.0);
-    let rows = (0..menu.rows.len())
-        .map(|i| Panel::new(x, y + MENU_PAD + i as f32 * MENU_ROW_H, w, MENU_ROW_H))
+    let rows = (0..shown)
+        .map(|step| {
+            let index = match step < menu.top {
+                true => step,
+                false => menu.top + first + (step - menu.top),
+            };
+            (
+                index,
+                Panel::new(x, y + MENU_PAD + step as f32 * MENU_ROW_H, w, MENU_ROW_H),
+            )
+        })
         .collect();
     (Panel::new(x, y, w, h), rows)
 }
@@ -1778,7 +1816,11 @@ fn overlay(scene: &mut Scene, frame: &Frame) {
     scene.over_rect(panel_fill(layout.menu, skin.menu));
     scene.over_rect(panel_edge(layout.menu, skin.edge_focus));
     let line = Text::line_for(SMALL);
-    for (index, (row, panel)) in menu.rows.iter().zip(&layout.menu_rows).enumerate() {
+    for (index, panel) in &layout.menu_rows {
+        let Some(row) = menu.rows.get(*index) else {
+            continue;
+        };
+        let (index, panel) = (*index, *panel);
         // Only a row that can act lights up. Highlighting a greyed one promises
         // something will happen when the button comes down and it will not.
         if row.enabled && frame.hot == Some(Hit::MenuRow(index)) {
@@ -1793,7 +1835,13 @@ fn overlay(scene: &mut Scene, frame: &Frame) {
             // The gutter is spent either way, so the labels line up.
             None => runs.push(Run::tinted(" ", tint)),
         }
-        runs.push(Run::tinted(format!(" {}", row.item.label()), tint));
+        // The space after the mark, plus whatever the row steps in by: a widget
+        // row sits under the row that listed it rather than beside it.
+        let lead = " ".repeat(1 + row.item.indent());
+        runs.push(Run::tinted(
+            format!("{lead}{}", row.item.label()),
+            tint,
+        ));
         let text = Panel::new(
             panel.x + MENU_PAD,
             panel.y,
@@ -7230,9 +7278,9 @@ mod tests {
             Some(Hit::Menu),
             "the pointer that opened it is on the menu's own margin"
         );
-        for (index, row) in layout.menu_rows.iter().enumerate() {
+        for (index, row) in &layout.menu_rows {
             let (x, y) = middle(*row);
-            assert_eq!(layout.hit(x, y), Some(Hit::MenuRow(index)));
+            assert_eq!(layout.hit(x, y), Some(Hit::MenuRow(*index)));
         }
         // And over a window button, which is hit tested before everything else
         // in the window.
@@ -7257,7 +7305,7 @@ mod tests {
             layout
                 .menu_rows
                 .iter()
-                .map(|row| {
+                .map(|(_, row)| {
                     let (x, y) = middle(*row);
                     match layout.hit(x, y) {
                         Some(Hit::MenuRow(index)) => menu.pick(index),
@@ -7271,16 +7319,38 @@ mod tests {
             vec![
                 Some(Item::Settings),
                 Some(Item::CopySelection),
-                Some(Item::Close)
+                Some(Item::Close),
+                Some(Item::Widgets(false)),
             ]
         );
         // The copy row is the greyed one now that the settings panel exists, and
         // it keeps its place: the rows either side of it act as before.
         assert_eq!(
             picked(&Menu::for_widget(at, View::Plan, Space::TopRight, false)),
-            vec![Some(Item::Settings), None, Some(Item::Close)],
+            vec![
+                Some(Item::Settings),
+                None,
+                Some(Item::Close),
+                Some(Item::Widgets(false)),
+            ],
             "a row with nothing to copy is drawn and refuses to act"
         );
+        // And with the list open, every row of it resolves to the widget drawn
+        // there, top level rows included.
+        let mut open = Menu::for_widget(at, View::Plan, Space::TopRight, false);
+        open.toggle_widgets(&dock);
+        let mut want = vec![
+            Some(Item::Settings),
+            None,
+            Some(Item::Close),
+            Some(Item::Widgets(true)),
+        ];
+        want.extend(
+            View::ALL
+                .into_iter()
+                .map(|view| Some(Item::Widget(view, false))),
+        );
+        assert_eq!(picked(&open), want);
     }
 
     /// A menu opened in the corner has to stay on the surface. The part that
@@ -7298,10 +7368,114 @@ mod tests {
             assert!(box_.x + box_.w <= w + 0.01, "{at:?}: {box_:?}");
             assert!(box_.y + box_.h <= h + 0.01, "{at:?}: {box_:?}");
             assert_eq!(layout.menu_rows.len(), menu.rows.len());
-            for (index, row) in layout.menu_rows.iter().enumerate() {
+            for (index, row) in &layout.menu_rows {
                 let (x, y) = middle(*row);
-                assert_eq!(layout.hit(x, y), Some(Hit::MenuRow(index)), "{at:?}");
+                assert_eq!(layout.hit(x, y), Some(Hit::MenuRow(*index)), "{at:?}");
             }
+        }
+    }
+
+    /// The widget list has the same problem the menu has, one step further on:
+    /// nine more rows opened near the bottom of a short window would hang off
+    /// the surface, and a row down there cannot be picked at all.
+    #[test]
+    fn the_widget_list_is_clamped_into_the_window_and_scrolls_when_it_cannot_fit() {
+        let dock = Dock::new();
+        let (w, h) = (900.0, 600.0);
+        let mut menu = Menu::for_widget((w - 2.0, h - 2.0), View::Plan, Space::Left, false);
+        menu.toggle_widgets(&dock);
+        let layout = with_menu(&dock, &menu, w, h);
+        let box_ = layout.menu;
+        assert!(box_.y >= 0.0 && box_.y + box_.h <= h + 0.01, "{box_:?}");
+        assert_eq!(
+            layout.menu_rows.len(),
+            menu.rows.len(),
+            "the whole list fits in a window this tall, so all of it is placed"
+        );
+        for (index, row) in &layout.menu_rows {
+            let (x, y) = middle(*row);
+            assert_eq!(layout.hit(x, y), Some(Hit::MenuRow(*index)));
+        }
+
+        // A window too short for thirteen rows keeps the top level and gives
+        // what is left to the list, which then has to move to reach the rest.
+        let short = 220.0;
+        let layout = with_menu(&dock, &menu, w, short);
+        let placed: Vec<usize> = layout.menu_rows.iter().map(|(index, _)| *index).collect();
+        assert!(
+            placed.len() < menu.rows.len(),
+            "this window is not short enough to prove anything"
+        );
+        assert_eq!(&placed[..menu.top], &[0, 1, 2, 3], "the top level is kept");
+        assert!(layout.menu.y >= 0.0);
+        assert!(layout.menu.y + layout.menu.h <= short + 0.01);
+        let capacity = layout.menu_capacity(&menu);
+        assert_eq!(capacity, placed.len() - menu.top);
+
+        // Scrolled to the end, the last widget is on screen and the first is
+        // not, and no row has left the window.
+        menu.scroll(View::ALL.len(), true, capacity);
+        let layout = with_menu(&dock, &menu, w, short);
+        let placed: Vec<usize> = layout.menu_rows.iter().map(|(index, _)| *index).collect();
+        assert_eq!(&placed[..menu.top], &[0, 1, 2, 3]);
+        assert_eq!(
+            placed.last().copied(),
+            Some(menu.top + View::ALL.len() - 1),
+            "the last widget is reachable"
+        );
+        for (index, row) in &layout.menu_rows {
+            let (x, y) = middle(*row);
+            assert!(row.y >= 0.0 && row.y + row.h <= short + 0.01, "{row:?}");
+            assert_eq!(layout.hit(x, y), Some(Hit::MenuRow(*index)));
+            if *index >= menu.top {
+                assert!(
+                    matches!(menu.pick(*index), Some(crate::menu::Item::Widget(..))),
+                    "row {index} is on screen and does nothing"
+                );
+            }
+        }
+    }
+
+    /// The list is part of the menu, so it is painted where the menu is: on the
+    /// floating layer, above the pane text it covers. In the base layer it
+    /// would be nine tab names drawn under the menu's own box.
+    #[test]
+    fn the_widget_list_is_drawn_on_the_floating_layer() {
+        let dock = Dock::hiding(&[View::Debug]);
+        let mut menu = Menu::for_widget((400.0, 200.0), View::Plan, Space::Left, false);
+        menu.toggle_widgets(&dock);
+        let out = render_menu(&busy_state(), 1400.0, 900.0, &dock, &menu, None);
+        let box_ = out.layout.menu;
+        let runs: Vec<String> = out
+            .scene
+            .over_texts
+            .iter()
+            .flat_map(|t| t.runs.iter().map(|r| r.text.clone()))
+            .collect();
+        for view in View::ALL {
+            assert!(
+                runs.iter().any(|text| text.contains(view.label())),
+                "{} is not on the overlay: {runs:?}",
+                view.label()
+            );
+        }
+        // Marked in the gutter: a check for the eight in the window, the close
+        // mark for the one that is not.
+        let marks = runs.iter().filter(|text| *text == &icons::CLOSE.to_string());
+        assert_eq!(marks.count(), 1, "only DEBUG is closed");
+        assert_eq!(
+            runs.iter()
+                .filter(|text| *text == &icons::CONFIRM.to_string())
+                .count(),
+            View::ALL.len() - 1
+        );
+        // And all of it inside the menu's own box, like every other row.
+        for text in &out.scene.over_texts {
+            assert!(
+                text.at.y >= box_.y - 0.01 && text.at.y + text.at.h <= box_.y + box_.h + 0.01,
+                "{:?} is outside the menu",
+                text.at
+            );
         }
     }
 
