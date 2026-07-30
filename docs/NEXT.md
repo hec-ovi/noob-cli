@@ -127,7 +127,7 @@ The design in the old `README.md` plan that did not ship: one isolated surface
 per concern (plan, multi-agent runner, agent management, main window) each
 talking to the others over schema-validated data, plus a dedicated code-stream
 surface showing each generated file as it is written. What shipped is one window
-with nine views in three spaces, and one contract-isolated layer,
+with nine views on a capped 2x2 grid, and one contract-isolated layer,
 `gui/layers/text-geometry`. `docs/CLIPPY-PLAN.md` lists which module becomes
 which layer next.
 

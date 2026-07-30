@@ -24,6 +24,31 @@ tags rather than here; this file starts where it was added.
   went out is the widget the menu was opened over, because the rest of its rows
   act on that widget.
 
+### Added
+
+- A drop is read off the grid, and a pane can take one cell or two. The window
+  was three fixed spaces, one of them a full height column on the left that
+  nothing could change, and a drop could only ever name one of the three. It is
+  a 2x2 grid now: four cells, and with the pointer inside one the drop takes that
+  cell, while on or near the line between two it takes both and the pane spans
+  the pair. The green box says which of the two it would be before the button
+  comes up, because it is the room the pane would actually have: the move is made
+  on a copy of the arrangement and the box is the cells that copy gives it. That
+  is how the conversation's full height column comes to exist by dragging rather
+  than by being written into the code, and how it stops spanning, which is a drop
+  into the cell under it. A pane spans because the cell beside it is empty rather
+  than because it is marked as spanning, so the rule that an empty space gives
+  its room to its neighbour is the same rule that draws every span, and there is
+  no second state to keep in step. Merging a pair puts the tabs of both into one
+  strip, in the order they were already in with the dropped tab last and showing.
+  The window still opens exactly as it did, with the conversation down the left
+  over both of its cells, the monitors above right and the files below them, and
+  a drop on a tab strip still names a place among that strip's tabs rather than a
+  cell. Both dividers still drag and still remember where they were left in
+  `left_width` and `top_height`: there is one vertical line and one horizontal
+  line across the whole grid, so the four cells line up rather than each column
+  being cut at a height of its own, and no third setting appears in the file.
+
 ## 0.7.0 - 2026-07-30
 
 All of this is NO0B, the GPU window, which shipped as CLIppy up to 0.6.0. The

@@ -83,9 +83,13 @@ works perfectly and just wears a grey square forever.
 
 ## What is where
 
-Three spaces: a wide one on the left and two stacked on the right. Every view is
-a tab in one of them, and **dragging its tab onto another space moves it there**.
-A space you empty gives its room to its neighbour. Each view has a colour of its
+A 2x2 grid: four cells, two dividers, nothing nested deeper. Every view is a tab
+in one cell, and **dragging its tab into a cell moves it there**; **dropping it on
+the line between two cells** merges the pair and gives its pane both, which is how
+a pane comes to span a whole column or a whole row. A cell you empty gives its
+room to its neighbour, so the window opens as one conversation down the left
+(both cells of that column, because the one under it is empty) with the monitors
+above right and the files below them. Each view has a colour of its
 own, drawn as a line along the top of the tab showing it, so which view a space
 is holding is answerable without reading the labels. A tab strip has no surface
 of its own; the tabs carry the pane's, the showing one at full strength and the
@@ -248,11 +252,14 @@ does the same, Ctrl-C cancels, Ctrl-Q quits.
 
 Mouse: drag the title bar to move, drag an edge to resize, click a tab to switch
 to it, and click the tab already showing to fold that space away. **Drag a tab
-into another space** to move it there, or **drag it off the window** to close that
-widget. **Drag the gap between two panes** to move the divider: the pointer takes
-a resize shape over it, and where you leave it is written back to the settings
-file. The grid is capped at 2x2, so the three spaces stay three spaces and no
-space can be dragged smaller than a tab strip with enough pane under it to read. **Double-click the title bar** to shade the
+into a cell** to move it there, **onto the line between two cells** to give its pane
+both of them, onto a tab strip to put it at that place in the strip, or **off the
+window** to close that widget. A green box says which room the drop would take
+before you let go, one cell or two. **Drag the gap between two panes** to move the
+divider: the pointer takes a resize shape over it, and where you leave it is
+written back to the settings file. The grid is capped at 2x2, so four cells is
+the most there is and no space can be dragged smaller than a tab strip with
+enough pane under it to read. **Double-click the title bar** to shade the
 window down to that one strip, Winamp style: it keeps showing THINKING, WORKING
 or FINISHED with the plan count and how many files changed, so a collapsed
 window is still a status light. Double-click again to bring it back.
@@ -373,8 +380,9 @@ falls back to fully opaque, which looks deliberate rather than broken.
 
 ## What is not here yet
 
-Splitting a space in two. The grid is capped at 2x2 and the three spaces stay
-three spaces; what moves is where the dividers sit. Voice is not here either.
+Nesting a pane inside a pane. The grid is capped at 2x2: four cells is the most
+there is, and what a drop moves is which cells a pane covers. Voice is not here
+either.
 Nor is real tree-sitter highlighting: the file pane uses a small scanner
 instead, comments, strings, numbers and keywords, chosen by file extension.
 Real grammars are the right answer for a full editor view and are also eight
