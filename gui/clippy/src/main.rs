@@ -120,6 +120,13 @@ const MIN_SIZE: LogicalSize<f64> = LogicalSize::new(680.0, 380.0);
 ///
 /// Shaded there is no minimum at all. `MIN_SIZE` is taller than the strip, and
 /// a window that keeps its minimum while shaded simply does not shrink.
+///
+/// The height asked for is `view::strip_height`, in physical pixels, which is
+/// the one number the strip is drawn from. Physical because that is the space
+/// the layout works in: `Layout::compute` is handed the surface configuration,
+/// which is `Window::inner_size` verbatim, and nothing on the way applies a
+/// scale factor. A logical request would come back multiplied by that factor,
+/// and the strip would be drawn across the top of a surface twice its height.
 fn shade_request(
     shaded: bool,
     remembered: Option<PhysicalSize<u32>>,
@@ -127,7 +134,7 @@ fn shade_request(
     match (shaded, remembered) {
         (true, Some(was)) => (
             None,
-            Some(PhysicalSize::new(was.width, view::TITLE_H as u32)),
+            Some(PhysicalSize::new(was.width, view::strip_height() as u32)),
         ),
         (true, None) => (None, None),
         (false, was) => (Some(MIN_SIZE), was),
@@ -2332,11 +2339,34 @@ mod tests {
 
         let (min, size) = shade_request(true, Some(open));
         assert_eq!(min, None, "a minimum taller than the strip refuses it");
-        assert_eq!(size, Some(PhysicalSize::new(1180, view::TITLE_H as u32)));
+        assert_eq!(size, Some(PhysicalSize::new(1180, view::strip_height() as u32)));
 
         let (min, size) = shade_request(false, Some(open));
         assert_eq!(min, Some(MIN_SIZE));
         assert_eq!(size, Some(open), "and it goes back to the size it was");
+    }
+
+    /// The height shading asks for is the height the strip is laid out at, in
+    /// the space the layout works in.
+    ///
+    /// Two things are being pinned. The number: it comes from the strip itself,
+    /// so a request can never be short of what the strip has to draw, and it is
+    /// whole pixels because a window is asked in whole pixels. And the space:
+    /// physical, because `Layout::compute` is handed the surface configuration
+    /// `noob-gpu` reports and nothing between winit and it applies a scale
+    /// factor. Sent as a logical size instead, the request comes back multiplied
+    /// by the scale factor and the strip is painted across the top of a surface
+    /// twice its height. `view::strip_height` is asserted against what the strip
+    /// writes over in `view`, where the text size lives.
+    #[test]
+    fn the_shade_request_is_the_strip_the_layout_draws() {
+        let asked = shade_request(true, Some(PhysicalSize::new(1180, 760)))
+            .1
+            .expect("shading asks for a size");
+        let strip = view::strip_height();
+        assert_eq!(asked.height as f32, strip, "the request is not the strip");
+        assert_eq!(strip, strip.ceil(), "a window is asked in whole pixels");
+        assert_eq!(asked.width, 1180, "shading keeps the width it had");
     }
 
     /// The animation clock exists while a turn is running and at no other time.

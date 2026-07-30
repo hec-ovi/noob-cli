@@ -46,6 +46,38 @@ const BUTTON_W: f32 = 26.0;
 /// square it is handed, so this is the only number that decides how big it is.
 pub const ORB_W: f32 = TITLE_H;
 const LABEL_COLUMNS: usize = 9;
+
+/// How tall a window has to be to be a title strip and nothing else.
+///
+/// What shading asks the window for, in the space the layout works in. That
+/// space is physical pixels: [`Layout::compute`] is handed the surface
+/// configuration `noob-gpu` reports, which is `Window::inner_size` verbatim, and
+/// nothing between winit and here applies a scale factor. So the number a window
+/// is asked for is this number, not this number through a conversion.
+///
+/// [`TITLE_H`] and never less than the line the strip writes, because a strip
+/// too short to draw its own name is not a strip. Whole pixels, rounded up: a
+/// window is asked for in integers and a request half a pixel short would come
+/// back half a pixel short.
+pub fn strip_height() -> f32 {
+    TITLE_H.max(Text::line_for(SMALL)).ceil()
+}
+
+/// The box the title strip writes one line into, given the strip it actually
+/// has.
+///
+/// Every run in the strip goes through here, so none of them can be written
+/// outside the surface. glyphon clips a run to the surface as well as to the box
+/// it was given, so a 17 pixel line centred in a 30 pixel box is drawn nowhere
+/// at all once the surface comes back 12 pixels tall: the strip kept its bar and
+/// lost the name, the version, the build stamp and all three window buttons,
+/// which is every glyph it has. A strip shorter than a line keeps its line at
+/// the top and gives it every pixel there is instead, because the writing is
+/// what a strip is for and is the last thing that should go.
+fn strip_row(panel: Panel) -> Panel {
+    panel.row(0.0, Text::line_for(SMALL))
+}
+
 /// A gauge is a block of dots: twenty across and four down is 0 to 100 percent,
 /// so one row is 25 percent and one dot is 1.25.
 ///
@@ -556,10 +588,14 @@ impl Layout {
     pub fn compute(width: f32, height: f32, shape: &Shape) -> Layout {
         let whole = Panel::new(0.0, 0.0, width, height);
         let (title, rest) = whole.split_top(TITLE_H.min(height));
+        // As tall as the strip turned out to be, not as tall as a strip usually
+        // is. A button box that reaches past the surface is a button whose mark
+        // is written where nothing is drawn, and a hit region over a row of
+        // pixels the window does not have.
         let buttons = [
-            Panel::new(width - BUTTON_W * 3.0, 0.0, BUTTON_W, TITLE_H),
-            Panel::new(width - BUTTON_W * 2.0, 0.0, BUTTON_W, TITLE_H),
-            Panel::new(width - BUTTON_W, 0.0, BUTTON_W, TITLE_H),
+            Panel::new(width - BUTTON_W * 3.0, title.y, BUTTON_W, title.h),
+            Panel::new(width - BUTTON_W * 2.0, title.y, BUTTON_W, title.h),
+            Panel::new(width - BUTTON_W, title.y, BUTTON_W, title.h),
         ];
         // Placed before the shape is decided, because the overlay is above the
         // window in both shapes: a menu that survived a double click on the
@@ -1906,7 +1942,6 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
     // first version asked for were not on this machine and a missing glyph
     // draws as nothing. The symbol font ships in the binary now, so they are
     // the same marks every other window on the desktop uses.
-    let line = Text::line_for(SMALL);
     for (panel, hit, tint, glyph, quiet) in [
         (layout.minimize, Hit::Minimize, skin.hot, crate::icons::MINIMIZE, true),
         (layout.maximize, Hit::Maximize, skin.hot, crate::icons::MAXIMIZE, true),
@@ -1928,17 +1963,20 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
         // these: the maximize mark lost all but its left edge and close all but
         // one arm of its cross.
         let left = ((panel.w - SMALL * 0.6) * 0.5).max(0.0).floor();
-        scene.text(Text::rich(
-            vec![Run::icon(glyph.to_string(), ink)],
-            Panel::new(
-                panel.x + left,
-                panel.y + ((panel.h - line) * 0.5).max(0.0).floor(),
-                panel.w - left,
-                line,
-            ),
-            SMALL,
-            ink,
-        ));
+        let row = strip_row(panel);
+        scene.text(
+            Text::rich(
+                vec![Run::icon(glyph.to_string(), ink)],
+                Panel::new(row.x + left, row.y, (row.w - left).max(1.0), row.h),
+                SMALL,
+                ink,
+            )
+            // The mark's own line box, capped at the room the row turned out to
+            // have. Left at a full line in a shorter row, the glyph is laid out
+            // below the box and clipped away: the whole mark lost to keep the
+            // two pixels of air under it.
+            .line_height(row.h),
+        );
     }
 
     // The name, then the marker, and nothing else at full strength. It read
@@ -1965,12 +2003,8 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
         // worth knowing while there is nowhere else to read it.
         runs.push(Run::tinted(format!("   {}", state.headline()), skin.good));
     }
-    scene.text(Text::rich(
-        runs,
-        Panel::new(ORB_W, 0.0, room, TITLE_H).row(0.0, Text::line_for(SMALL)),
-        SMALL,
-        skin.title,
-    ));
+    let row = strip_row(Panel::new(ORB_W, layout.title.y, room, layout.title.h));
+    scene.text(Text::rich(runs, row, SMALL, skin.title).line_height(row.h));
 }
 
 /// The body of a panel: the fill, cut corner and all.
@@ -6661,6 +6695,94 @@ mod tests {
             picker: None,
             settings: None,
         })
+    }
+
+    /// The height shading asks a window for is the height the strip needs, and
+    /// it is a whole number of pixels because that is how a window is asked.
+    #[test]
+    fn the_strip_height_holds_the_line_the_strip_writes() {
+        let line = Text::line_for(SMALL);
+        assert!(
+            strip_height() >= line,
+            "a {} pixel strip cannot draw a {line} pixel line",
+            strip_height()
+        );
+        assert_eq!(strip_height(), strip_height().ceil());
+        // The layout gives a surface of that height a strip of exactly it, so
+        // the number asked for and the number drawn are one number.
+        let dock = Dock::new();
+        let mut shape = shape(&dock, &[]);
+        shape.shaded = true;
+        let layout = Layout::compute(900.0, strip_height(), &shape);
+        assert_eq!(layout.title.h, strip_height());
+    }
+
+    /// The regression this round was opened on: double clicking the title bar
+    /// shaded the window and the strip lost every glyph it had, keeping only its
+    /// green bar.
+    ///
+    /// The strip laid its writing out against [`TITLE_H`] whatever surface it
+    /// was given: a 17 pixel line centred in 30, at y 6 to 23. glyphon clips a
+    /// run to the surface as well as to the box it was handed, so a surface that
+    /// came back under 23 pixels tall cut the line off from the bottom and one
+    /// under about 10 drew none of it at all, while the bar rectangle still
+    /// filled the surface because a rectangle is clamped rather than dropped.
+    /// The name, the version, the build stamp and all three window buttons went
+    /// together, which is every glyph a shaded window has.
+    ///
+    /// So this asserts the two halves that matter, at every height down to two
+    /// pixels. Present: the name, the version and each of the three button
+    /// codepoints are in the scene. And drawable: each of their boxes is inside
+    /// the surface and as tall as the surface can give it, up to a whole line. A
+    /// run present in the scene inside a box the window has no pixels for is
+    /// exactly the bug, and a test that only asked whether the text was there
+    /// would have passed straight through it.
+    #[test]
+    fn the_shaded_strip_writes_inside_the_surface_it_was_given() {
+        let skin = Skin::from(&Config::default());
+        let state = busy_state();
+        let line = Text::line_for(SMALL);
+        for height in [strip_height(), 24.0, 20.0, line, 12.0, 8.0, 2.0] {
+            let scene = shaded_scene(&state, 900.0, height, &skin);
+            let written = text_of(&scene);
+            for wanted in [
+                "NO0B",
+                VERSION,
+                &crate::icons::MINIMIZE.to_string(),
+                &crate::icons::MAXIMIZE.to_string(),
+                &crate::icons::CLOSE.to_string(),
+            ] {
+                assert!(written.contains(wanted), "{height}: the strip lost {wanted:?}");
+            }
+            // Every glyph in a shaded window belongs to the strip, so the rest
+            // of this holds for the whole scene.
+            assert_eq!(scene.texts.len(), 4, "{height}: the strip is four runs");
+            for text in &scene.texts {
+                let written: String = text.runs.iter().map(|run| run.text.as_str()).collect();
+                assert!(
+                    text.at.y >= 0.0 && text.at.y + text.at.h <= height + 0.01,
+                    "{height}: {written:?} is written at {:?}, outside the surface",
+                    text.at
+                );
+                assert_eq!(
+                    text.at.h,
+                    line.min(height),
+                    "{height}: {written:?} was given {} of the {} the surface had",
+                    text.at.h,
+                    line.min(height)
+                );
+                // A box one line tall with a taller line box inside it is the
+                // same loss one step down: the glyphs are laid out below the box
+                // and clipped away.
+                assert!(
+                    text.line_height <= text.at.h + 0.01,
+                    "{height}: {written:?} has a {} line in a {} box",
+                    text.line_height,
+                    text.at.h
+                );
+                assert!(text.at.w >= 1.0, "{height}: {written:?} has no width");
+            }
+        }
     }
 
     /// Item 19: shading collapsed the window to black rather than green unless
