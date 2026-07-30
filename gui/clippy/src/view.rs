@@ -110,6 +110,22 @@ const CONTEXT_HEAD: usize = 3;
 /// with no block is honest; a smear is not.
 const SMALL_DOT: f32 = 4.0;
 const PROMPT_COLUMNS: usize = 2;
+/// The three dots that stand in for the prompt's marker while a turn runs: how
+/// big one is, the gap between two of them, and how far the raised one rises,
+/// all in pixels.
+///
+/// They fit inside [`PROMPT_COLUMNS`], which at the default 8 pixel column is 16
+/// across: three threes and two gaps is thirteen, with a pixel and a half either
+/// side. Fitting them in the slot the marker already had is what keeps the
+/// caret, the selection band, the prompt's height and the click inverse out of
+/// this: all four only ever add [`PROMPT_COLUMNS`].
+const PROMPT_DOT: f32 = 3.0;
+const PROMPT_DOT_GAP: f32 = 2.0;
+const PROMPT_DOT_LIFT: f32 = 3.0;
+/// How long one dot holds the top, in seconds. The redraw while a turn runs is
+/// 30 frames a second, so this is about five frames a dot: slow enough to read
+/// as a wave rather than as a flicker.
+const PROMPT_DOT_STEP: f32 = 0.18;
 const INPUT_PAD: f32 = 6.0;
 /// How far the 45 degree cut reaches along each edge of a panel's top-right
 /// corner. One corner, so the shape reads as a mark rather than as a rounded
@@ -4231,11 +4247,16 @@ fn input_row(scene: &mut Scene, frame: &Frame) {
             at = stop;
         }
     }
-    let marker = if state.phase.busy() { "\u{2026}" } else { "\u{203a}" };
+    // The marker slot, two columns of it. At rest it is the prompt's chevron and
+    // a space. While a turn runs it is two blanks, and the three dots that used
+    // to be an ellipsis glyph are drawn into it below as rectangles: one shaped
+    // box has one baseline, so a glyph cannot be lifted off it on its own.
+    let busy = state.phase.busy();
+    let marker = if busy { "  " } else { "\u{203a} " };
     scene.text(
         Text::rich(
             vec![
-                Run::tinted(format!("{marker} "), skin.dim),
+                Run::tinted(marker.to_string(), skin.dim),
                 Run::tinted(frame.prompt.text(), skin.bright),
             ],
             box_,
@@ -4248,6 +4269,25 @@ fn input_row(scene: &mut Scene, frame: &Frame) {
         // still swallow a blank that fell on the boundary.
         .wrap_at(columns),
     );
+    // The dots, on the first row of the box, in the marker's own two columns.
+    // Round, because they stand in for three round glyphs and because the orb in
+    // the strip is round for exactly as long as they are on screen. Pushed
+    // before the caret so the caret is still the last thin rectangle in the row,
+    // which is how the tests find it.
+    if busy {
+        let span = 3.0 * PROMPT_DOT + 2.0 * PROMPT_DOT_GAP;
+        let slack = (PROMPT_COLUMNS as f32 * frame.column - span).max(0.0) * 0.5;
+        let rest = box_.y + (line - PROMPT_DOT) * 0.5;
+        for (index, lift) in prompt_wave(frame.clock, busy).into_iter().enumerate() {
+            let dot = Panel::new(
+                box_.x + slack + index as f32 * (PROMPT_DOT + PROMPT_DOT_GAP),
+                rest - lift,
+                PROMPT_DOT,
+                PROMPT_DOT,
+            );
+            scene.rect(dot.fill(skin.caret).radius(PROMPT_DOT * 0.5));
+        }
+    }
     let at = frame.prompt.caret() + PROMPT_COLUMNS;
     let (row, column) = (at / columns, at % columns);
     let caret = Panel::new(
@@ -4259,6 +4299,25 @@ fn input_row(scene: &mut Scene, frame: &Frame) {
     if caret.y + caret.h <= box_.y + box_.h + 0.5 {
         scene.rect(caret.fill(skin.caret));
     }
+}
+
+/// How far each of the prompt's three dots is off its rest line, in pixels.
+///
+/// The wave as asked for: one dot up while the other two are down, then the next
+/// one, and around again. Stepped rather than a sine, because three dots
+/// bouncing smoothly read as a wobble and three dots taking turns read as a
+/// wave.
+///
+/// Level whenever nothing is running, and that is not a nicety: the window holds
+/// a redraw deadline only while a turn does, so a lift that moved at rest would
+/// be a frame that never arrives and a dot stuck wherever the last redraw left
+/// it.
+fn prompt_wave(clock: f32, busy: bool) -> [f32; 3] {
+    let mut lift = [0.0; 3];
+    if busy {
+        lift[(clock.max(0.0) / PROMPT_DOT_STEP) as usize % 3] = PROMPT_DOT_LIFT;
+    }
+    lift
 }
 
 
@@ -4589,18 +4648,21 @@ mod tests {
         }
     }
 
-    /// Every disc of the orb in a scene.
+    /// Every dot of the orb in a scene.
     ///
-    /// A rectangle in the title strip with a corner radius is one: nothing else
-    /// up there is round, and the only other rounded rectangles in the window are
-    /// the gauge dots, which are in panes below the strip.
+    /// A rectangle a few pixels across inside the title strip is one. It used to
+    /// be "a rectangle in the strip with a corner radius", which stopped finding
+    /// the resting orb the day its dots became squares; size is what both states
+    /// share. Nothing else drawn up there is small: the strip's own fill and the
+    /// context gauge run the width of the window, and a window button is thirty
+    /// pixels wide.
     fn discs_of(scene: &Scene) -> Vec<&Rect> {
         scene
             .rects
             .iter()
             .filter(|rect| {
-                let [_, y, _, h] = rect.xywh();
-                rect.extra()[0] > 0.0 && y + h <= TITLE_H
+                let [_, y, w, h] = rect.xywh();
+                w <= 4.0 && y + h <= TITLE_H
             })
             .collect()
     }
@@ -7707,19 +7769,30 @@ mod tests {
     }
 
     /// A frame that is nothing but a prompt: the strip it landed in, its
-    /// layout, and the scene, at the default 14pt body size.
+    /// layout, and the scene, at the default 14pt body size. Idle, with the
+    /// clock at zero.
     fn render_prompt(
         prompt: &crate::prompt::Prompt,
         max_rows: usize,
     ) -> (Panel, Layout, Scene) {
-        let state = State::new();
+        render_prompt_at(prompt, max_rows, &State::new(), 0.0)
+    }
+
+    /// The same with the window's state and the moment on its clock given, which
+    /// is what the marker slot is drawn from.
+    fn render_prompt_at(
+        prompt: &crate::prompt::Prompt,
+        max_rows: usize,
+        state: &State,
+        clock: f32,
+    ) -> (Panel, Layout, Scene) {
         let dock = Dock::new();
         let skin = Skin::from(&Config::default());
         let mut shape = shape(&dock, &[]);
         shape.input_h = input_height(1200.0, 8.0, prompt.len(), Text::line_for(14.0), max_rows);
         let layout = Layout::compute(1200.0, 800.0, &shape);
         let scene = build(&Frame {
-            state: &state,
+            state,
             monitor: &Monitor::new(),
             dock: &dock,
             skin: &skin,
@@ -7729,7 +7802,7 @@ mod tests {
             pane_column: 8.0,
             body_size: 14.0,
             pane_size: 13.0,
-            clock: 0.0,
+            clock,
             drag: None,
             hot: None,
             trouble: None,
@@ -7875,6 +7948,99 @@ mod tests {
         // Nothing selected is nothing banded.
         let (_, _, plain) = render_prompt(&typed_prompt("hello", 5), 8);
         assert!(!plain.rects.iter().any(|r| r.rgba() == skin.select));
+    }
+
+    /// The wave the three dots run while a turn does: one of them up, the other
+    /// two down, then the next one, and around again. One dot is up at any
+    /// moment, never two and never none, and the one that is up is the next one
+    /// along each step of the clock.
+    #[test]
+    fn one_prompt_dot_is_up_at_a_time_and_it_is_the_next_one_each_step() {
+        let seen: Vec<[f32; 3]> = (0..7)
+            .map(|step| prompt_wave(step as f32 * PROMPT_DOT_STEP + PROMPT_DOT_STEP * 0.5, true))
+            .collect();
+        let up = |lift: &[f32; 3]| lift.iter().position(|l| *l > 0.0).expect("a dot is up");
+        assert_eq!(
+            seen.iter().map(up).collect::<Vec<usize>>(),
+            vec![0, 1, 2, 0, 1, 2, 0],
+            "{seen:?}"
+        );
+        for lift in &seen {
+            assert_eq!(lift.iter().filter(|l| **l > 0.0).count(), 1, "{lift:?}");
+            assert_eq!(lift[up(lift)], PROMPT_DOT_LIFT);
+        }
+        // A step is held, not crossed: the same dot is up right through it.
+        assert_eq!(prompt_wave(0.0, true), prompt_wave(PROMPT_DOT_STEP * 0.9, true));
+
+        // And nothing moves while nothing is running. The window holds no redraw
+        // deadline at rest, so a lift that depended on the clock there would be a
+        // dot frozen wherever the last frame left it.
+        for clock in [0.0, 0.09, 0.4, 6.5, 900.0] {
+            assert_eq!(prompt_wave(clock, false), [0.0; 3], "at {clock}s");
+        }
+    }
+
+    /// The row itself: while a turn runs the marker is three dots in its own two
+    /// columns and they move with the clock; at rest it is the chevron and no
+    /// dots at all.
+    #[test]
+    fn the_prompt_marker_is_three_moving_dots_while_a_turn_runs() {
+        let skin = Skin::from(&Config::default());
+        let prompt = typed_prompt("hello", 5);
+        let dots = |scene: &Scene| -> Vec<[f32; 4]> {
+            scene
+                .rects
+                .iter()
+                .filter(|r| {
+                    let [_, _, w, h] = r.xywh();
+                    r.rgba() == skin.caret && w == PROMPT_DOT && h == PROMPT_DOT
+                })
+                .map(|r| r.xywh())
+                .collect()
+        };
+        let first_run = |scene: &Scene| -> String {
+            scene
+                .texts
+                .iter()
+                .find(|text| text.runs.iter().any(|run| run.text == "hello"))
+                .expect("the prompt is drawn")
+                .runs[0]
+                .text
+                .clone()
+        };
+
+        let (strip, _, resting) = render_prompt_at(&prompt, 8, &State::new(), 0.0);
+        assert!(dots(&resting).is_empty(), "the resting prompt drew dots");
+        assert_eq!(first_run(&resting), "\u{203a} ", "the resting marker");
+
+        let busy = busy_state();
+        let (_, _, scene) = render_prompt_at(&prompt, 8, &busy, 0.0);
+        let drawn = dots(&scene);
+        assert_eq!(drawn.len(), 3, "{drawn:?}");
+        // Two blank columns where the ellipsis was, so every other piece of
+        // arithmetic in the row still counts the same two.
+        assert_eq!(first_run(&scene), "  ", "the working marker");
+        let line = Text::line_for(14.0);
+        let box_ = input_box(strip, line);
+        let slot = PROMPT_COLUMNS as f32 * 8.0;
+        for dot in &drawn {
+            assert!(dot[0] >= box_.x, "{dot:?} is left of the box");
+            assert!(dot[0] + dot[2] <= box_.x + slot, "{dot:?} is past the marker's columns");
+            assert!(dot[1] >= box_.y, "{dot:?} is above the first row");
+            assert!(dot[1] + dot[3] <= box_.y + line, "{dot:?} is below the first row");
+        }
+        // In a row, left to right, and the first one is the one that is up.
+        assert!(drawn[0][0] < drawn[1][0] && drawn[1][0] < drawn[2][0], "{drawn:?}");
+        assert!(drawn[0][1] < drawn[1][1], "the first dot is not raised: {drawn:?}");
+        assert_eq!(drawn[1][1], drawn[2][1], "the other two are not level: {drawn:?}");
+
+        // A step later it is the next dot's turn, and the row is a different
+        // picture, which is the whole of the animation.
+        let (_, _, later) = render_prompt_at(&prompt, 8, &busy, PROMPT_DOT_STEP * 1.5);
+        let after = dots(&later);
+        assert_ne!(drawn, after, "the dots did not move");
+        assert!(after[1][1] < after[0][1], "the second dot is not raised: {after:?}");
+        assert_eq!(after[0][1], after[2][1], "the other two are not level: {after:?}");
     }
 
     /// Two dark panels side by side over a busy desktop read as one region

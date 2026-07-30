@@ -99,12 +99,17 @@ The title strip reads the orb, then NO0B, then the version and commit this build
 was cut from. The orb is the one animated thing in the window, and it is two
 objects rather than one: while a turn is running it is twelve tilted rings of
 dots around one centre with three runners chasing each ring, 516 discs a frame,
-and at rest it is a dotted globe, 204 dots on a lattice of latitude and
+and at rest it is a dotted globe, 112 square dots on a lattice of latitude and
 longitude. Both are ported from `thinking-orbs` and neither needs a shader,
-because a disc is a rectangle with its corner radius set to half its width. Its
-clock is a 30 frames a second deadline that exists only while the agent is
-working; the resting globe reads no clock at all, so a window with nothing
-happening in it goes back to blocking until you touch it.
+because a dot is one rectangle through the same rounded-rect distance field
+every panel is drawn with: corner radius at half the width for a disc, none at
+all for a square. Its clock is a 30 frames a second deadline that exists only
+while the agent is working; the resting globe reads no clock at all, so a window
+with nothing happening in it goes back to blocking until you touch it.
+
+While a turn runs, the prompt's marker is three dots taking turns rising, one up
+and two down, on the same deadline. At rest it is the chevron again and nothing
+moves.
 
 | view | carries |
 |---|---|

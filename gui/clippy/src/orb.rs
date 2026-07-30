@@ -2,23 +2,22 @@
 //!
 //! A port of two modes of `thinking-orbs` (MIT), following `docs/ORB-SPEC.md`,
 //! which was written off that source rather than guessed. Both are lists of
-//! dots projected orthographically, sorted far to near and drawn as discs.
-//! Depth is carried by how big a dot is and how much weight its colour has,
-//! never by blur.
+//! dots projected orthographically and sorted far to near. Depth is carried by
+//! how big a dot is and how much weight its colour has, never by blur.
 //!
-//! It needs no shader and no second pipeline. A disc is a rectangle with its
-//! corner radius set to half its width, through the rounded-rect distance field
-//! the window already draws every panel with, and painter's order is the order
-//! rectangles are pushed.
+//! It needs no shader and no second pipeline. A dot is one rectangle through the
+//! rounded-rect distance field the window already draws every panel with: with
+//! the corner radius at half the width it is a disc, and with no corner radius at
+//! all it is a square. Painter's order is the order rectangles are pushed.
 //!
 //! Two states, and no third, and they are two different objects. While a turn is
 //! running it is `orbits`: twelve tilted circles of path dots sharing one spin,
-//! with three runners chasing each circle. At rest it is `globe`: one sphere of
-//! dots on a latitude and longitude lattice, drawn once and never again. The
-//! resting state used to be the orbits frame frozen at zero, which is twelve
-//! ellipses standing still and reads as scattered dots rather than as an object;
-//! a lattice closes a silhouette, so the corner holds a ball while nothing is
-//! running.
+//! with three runners chasing each circle, drawn as discs. At rest it is `globe`:
+//! one sphere of dots on a latitude and longitude lattice, drawn as squares, once
+//! and never again. The resting state used to be the orbits frame frozen at zero,
+//! which is twelve ellipses standing still and reads as scattered dots rather
+//! than as an object; a lattice closes a silhouette, so the corner holds a ball
+//! while nothing is running.
 //!
 //! The maths is here and the drawing is in [`crate::view`], so a frame can be
 //! asserted without a GPU: [`discs`] is a pure function of the block it is given,
@@ -66,9 +65,17 @@ const PART_INK_DEPTH: f32 = 0.22;
 /// The reference's base profile is 17 and 44, and its 64 point preset scales
 /// both by the square root of 0.42 so that the total count scales by 0.42.
 /// These are that already worked out, the way [`GHOSTS`] is the orbits profile
-/// at its own preset of 1.
-const LAT_RINGS: usize = 11;
-const LON_DENSITY: f32 = 29.0;
+/// at its own preset of 1, and then thinned once more by the same rule: the
+/// square root of 0.55, taking 11 and 29 to 8 and 22.
+///
+/// The thinning is the resting dots being squares. A square of side 2r sits
+/// heavier than a disc of radius r, and at the strip's real size a dot is under
+/// a pixel and a half across, so 204 of them closed into a field rather than
+/// reading as separate marks. Fewer dots is the gap between them: the cosine
+/// rule below keeps the spacing along a ring equal to the spacing between rings,
+/// so one multiplier widens both at once.
+const LAT_RINGS: usize = 8;
+const LON_DENSITY: f32 = 22.0;
 
 /// A lattice dot's radius at the back of the sphere and how much it gains coming
 /// forward, before scaling. The reference's 0.6 and 1.7 at its 64 point preset's
@@ -326,11 +333,19 @@ fn lattice(rs: f32, sphere: f32, centre: (f32, f32)) -> Vec<Dot> {
     out
 }
 
-/// The frame to draw, as discs, in painter's order.
+/// The frame to draw, in painter's order.
 ///
 /// `block` is the square the title strip keeps for it, `seconds` is the clock,
-/// and `working` is whether there is a turn to animate. Every disc lands inside
+/// and `working` is whether there is a turn to animate. Every dot lands inside
 /// `block`, so the caller does not have to clip.
+///
+/// Shape is the one thing the two states are drawn with differently, and it is
+/// decided here rather than in the maths: a turning dot is a disc, corner radius
+/// at half its width, and a resting dot is a square, no corner radius at all.
+/// Both are the same rectangle through the same distance field. The turning orb
+/// is round because it is moving and a moving square strobes at this size; the
+/// resting one is square because it is one still frame, where a hard mark reads
+/// as a mark instead of as a smudge.
 ///
 /// The ink is mirrored and tinted here rather than in the maths: the reference is
 /// greyscale on paper, where 0 is the darkest mark, and this is a dark window, so
@@ -349,11 +364,12 @@ pub fn discs(block: Panel, seconds: f32, working: bool, skin: &Skin) -> Vec<Rect
             let radius = dot.radius.max(R_MIN);
             let weight = (1.0 - dot.ink).clamp(0.0, 1.0);
             let fill = [r * weight, g * weight, b * weight, alpha];
-            Some(
-                Panel::new(dot.x - radius, dot.y - radius, radius * 2.0, radius * 2.0)
-                    .fill(fill)
-                    .radius(radius),
-            )
+            let mark = Panel::new(dot.x - radius, dot.y - radius, radius * 2.0, radius * 2.0)
+                .fill(fill);
+            Some(match working {
+                true => mark.radius(radius),
+                false => mark,
+            })
         })
         .collect()
 }
@@ -418,9 +434,10 @@ mod tests {
         }
     }
 
-    /// Neither floor may be crossed by anything that reaches the screen: a disc
+    /// Neither floor may be crossed by anything that reaches the screen: a dot
     /// under a third of a pixel is not a dot, and one under two percent alpha is
-    /// not a colour.
+    /// not a colour. And each state is drawn in its own shape: the turning orb is
+    /// discs, the resting one is squares.
     #[test]
     fn nothing_drawn_is_fainter_or_smaller_than_the_floor() {
         let skin = skin();
@@ -429,11 +446,16 @@ mod tests {
                 for disc in discs(block(), seconds, working, &skin) {
                     let [_, _, w, h] = disc.xywh();
                     assert!(w / 2.0 >= R_MIN - 1e-6, "radius {}", w / 2.0);
-                    assert!((w - h).abs() < 1e-6, "a disc is square: {w}x{h}");
+                    assert!((w - h).abs() < 1e-6, "a dot's box is square: {w}x{h}");
                     assert!(disc.rgba()[3] >= ALPHA_FLOOR, "alpha {}", disc.rgba()[3]);
-                    // A disc, not a box: the corner radius is half its width, or
-                    // the orb is 500 tiny squares.
-                    assert!((disc.extra()[0] - w / 2.0).abs() < 1e-6, "{:?}", disc.extra());
+                    // Turning: a disc, not a box, or the animation is 500 tiny
+                    // squares. Resting: a box, not a disc, and the corner radius
+                    // is the whole of what says so.
+                    let corner = disc.extra()[0];
+                    match working {
+                        true => assert!((corner - w / 2.0).abs() < 1e-6, "{:?}", disc.extra()),
+                        false => assert_eq!(corner, 0.0, "{:?}", disc.extra()),
+                    }
                 }
             }
         }
@@ -479,7 +501,7 @@ mod tests {
 
     /// Both profiles' own numbers, pinned. Working is twelve circles of forty
     /// path dots with three runners each, so 516 discs a frame; resting is the
-    /// lattice, which is 204 and has nothing to do with the circles.
+    /// lattice, which is 112 squares and has nothing to do with the circles.
     ///
     /// It also says what the rectangle buffer has to hold. It grows by powers of
     /// two from 256, so 516 discs plus a window's worth of panels takes it to
@@ -500,7 +522,64 @@ mod tests {
             })
             .sum();
         assert_eq!(resting.len(), rings);
-        assert_eq!(resting.len(), 204);
+        assert_eq!(resting.len(), 112);
+    }
+
+    /// The resting lattice was thinned and turned square; the turning orb is the
+    /// frame it always was, to the last decimal.
+    ///
+    /// Pinned against numbers taken off the build before that change rather than
+    /// off this one: the count, the sum of every field of every disc, and three
+    /// discs read out in full. The two states share a projection and a scale, so
+    /// a constant edited one line too far up the file lands here.
+    #[test]
+    fn the_turning_orb_is_the_frame_it_was_before_the_resting_one_changed() {
+        let (skin, block) = (skin(), block());
+        // seconds, the sum, and the first, middle and last disc's box.
+        for (seconds, sum, first, middle, last) in [
+            (
+                0.0f32,
+                16483.265885,
+                [11.871071, 14.018538, 0.6, 0.6],
+                [19.127548, 8.214276, 0.6, 0.6],
+                [17.528929, 15.381463, 0.6, 0.6],
+            ),
+            (
+                1.0,
+                16483.265906,
+                [10.02061, 12.531108, 0.6, 0.6],
+                [10.681802, 25.64781, 1.0023558, 1.0023558],
+                [19.379395, 16.868889, 0.6, 0.6],
+            ),
+            (
+                7.25,
+                16483.265895,
+                [15.969178, 14.995388, 0.6, 0.6],
+                [5.6036844, 21.626549, 0.6, 0.6],
+                [13.430822, 14.404611, 0.6, 0.6],
+            ),
+        ] {
+            let frame = discs(block, seconds, true, &skin);
+            assert_eq!(frame.len(), 516, "at {seconds}s");
+            let total: f64 = frame
+                .iter()
+                .flat_map(|rect| {
+                    let (xywh, rgba, extra) = (rect.xywh(), rect.rgba(), rect.extra());
+                    xywh.into_iter()
+                        .chain(rgba)
+                        .chain(extra)
+                        .collect::<Vec<f32>>()
+                })
+                .map(f64::from)
+                .sum();
+            assert!((total - sum).abs() < 1e-4, "at {seconds}s the sum is {total}");
+            for (index, want) in [(0usize, first), (257, middle), (515, last)] {
+                let got = frame[index].xywh();
+                for (a, b) in got.iter().zip(&want) {
+                    assert!((a - b).abs() < 1e-5, "at {seconds}s disc {index} is {got:?}");
+                }
+            }
+        }
     }
 
     /// At rest it is one frame with no clock in it, so two moments an hour apart

@@ -7,11 +7,11 @@ approximating it.
 
 ## Why it needs no shader
 
-Every frame is a list of z-sorted discs. NO0B already draws a clean
+Every frame is a list of z-sorted dots. NO0B already draws a clean
 antialiased disc with `Panel::fill(rgba).radius(w / 2)` through the existing
-rounded-rect SDF, and painter's order is just the order rects are pushed. So the
-whole animation is arithmetic that emits rects: no second pipeline, no WGSL, no
-texture.
+rounded-rect SDF, and the same rect with no corner radius is a hard square. So
+the whole animation is arithmetic that emits rects: no second pipeline, no WGSL,
+no texture. The working state is drawn as discs and the idle state as squares.
 
 At 64px the `working` state emits **516 discs** per frame (12 orbits, each 40
 ghost dots plus 3 particles). That is well inside the rect buffer, which grows
@@ -44,6 +44,12 @@ becomes 0.69 and `rDepth` 1.7 becomes 1.955. The `speed`, `scanMul` and `dimBase
 of that preset belong to the scan and are not ported. The 20 point preset was
 tried at the strip's real 30px and is sparser (54 dots to 204); the denser one
 reads as an object sooner, which is the whole point of the mode.
+
+The idle dots are squares here rather than discs, and a square of side 2r sits
+heavier than a disc of radius r, so the lattice is thinned once more by the same
+rule: the square root of 0.55, taking 11 and 29 to 8 and 22, and 204 dots to 112.
+The gap between the dots is what that buys. The working state is untouched by it:
+the two modes share no counts.
 
 ## Base profile (orbits)
 
@@ -149,11 +155,12 @@ ink    = 0.62 - 0.54 * depth
 ```
 
 A ring's dot count follows the cosine of its latitude, so spacing along a ring
-matches spacing between rings and the poles come out as one dot each. At 30px
-that is 204 dots.
+matches spacing between rings and the poles come out as one dot each. With
+`latRings` 8 and `lonDensity` 22, at 30px that is 112 dots.
 
 Then sort every dot by `z` ascending (far to near) and draw in that order,
-skipping any with alpha below 0.02 and clamping radius to at least `rMin`.
+skipping any with alpha below 0.02 and clamping radius to at least `rMin`. The
+globe's dots are drawn square (no corner radius) and the orbits' round.
 
 ## Ink, and what it means here
 
@@ -171,8 +178,8 @@ end of the title strip. That square is `view::ORB_W`, which is the strip's heigh
 strip reads `[orb] NO0B \u{25b8} version` left to right. `radiusScale(size, pow)`
 is passed that real size rather than a 64px result scaled down.
 
-At 30px the working state is 516 discs a frame and the resting state 204, which
-the rectangle buffer holds by growing once to 1024.
+At 30px the working state is 516 discs a frame and the resting state 112 squares,
+which the rectangle buffer holds by growing once to 1024.
 
 **It must not free-run.** `noob-gpu` records that a previous version rendered
 static text at 3,500 fps and spent a third of the graphics pipe doing it. So

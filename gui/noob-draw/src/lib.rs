@@ -1605,6 +1605,47 @@ mod tests {
         );
     }
 
+    /// Blanks at the very start of a box keep their columns.
+    ///
+    /// The window's prompt spends its first two columns on a marker, and while a
+    /// turn runs that marker is two blanks with three animated rectangles drawn
+    /// over them. Everything else in that row (the caret, the selection band, the
+    /// click inverse) adds those two columns as arithmetic, so if the shaper
+    /// swallowed the blanks the text would sit two columns left of where the
+    /// caret is put. It does not: leading blanks are shaped like any other glyph.
+    #[test]
+    fn blanks_at_the_start_of_a_box_hold_their_columns() {
+        let size = 14.0;
+        let mut fonts = icon_fonts();
+        let column = column_of(&mut fonts, size);
+        let start_of = |fonts: &mut FontSystem, text: &str| -> f32 {
+            let mut buffer = Buffer::new(fonts, Metrics::new(size, Text::line_for(size)));
+            buffer.set_size(Some(40.0 * column), Some(4096.0));
+            buffer.set_wrap(Wrap::None);
+            buffer.set_text(
+                text,
+                &Attrs::new().family(Family::Monospace),
+                Shaping::Basic,
+                None,
+            );
+            buffer.shape_until_scroll(fonts, false);
+            let run = buffer.layout_runs().next().expect("a row");
+            run.glyphs
+                .iter()
+                .find(|glyph| run.text[glyph.start..glyph.end].starts_with('h'))
+                .expect("the text is in the row")
+                .x
+        };
+        let bare = start_of(&mut fonts, "hello");
+        let marked = start_of(&mut fonts, "  hello");
+        assert!(
+            (marked - bare - 2.0 * column).abs() < 0.5,
+            "two blanks moved the text {} pixels, not {}",
+            marked - bare,
+            2.0 * column
+        );
+    }
+
     /// The break is put in front of a character that exists, so a line of
     /// exactly `cols` characters is one row and not one row plus an empty one,
     /// and a newline that is already there is not doubled. That is what keeps
