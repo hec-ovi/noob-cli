@@ -45,19 +45,31 @@ const BUTTON_W: f32 = 26.0;
 /// square it is handed, so this is the only number that decides how big it is.
 pub const ORB_W: f32 = TITLE_H;
 const LABEL_COLUMNS: usize = 9;
-/// A gauge is a block of dots: eight across and five down is 0 to 100 percent,
-/// so one row is 20 percent and one dot is 2.5. Squarer than the ten by four bar
-/// it replaced, because the reference asked for a block that reads as a block,
-/// and a row ten dots wide reads as a bar with rows in it.
-const DOT_COLUMNS: usize = 8;
-const DOT_ROWS: usize = 5;
-/// How much larger the number beside a block is than the label. The reference
-/// puts the value in large text next to the block, and it is the thing being
-/// read; the label only says which reading it is.
-const BIG_READING: f32 = 1.5;
-/// The smallest a dot shrinks to when a pane has more readings than room. Below
-/// this the block stops reading as a block, so the rows go instead: a reading
-/// that scrolled off is honest, a smear is not.
+/// A gauge is a block of dots: twenty across and four down is 0 to 100 percent,
+/// so one row is 25 percent and one dot is 1.25.
+///
+/// Wide and short, which is the shape the panes were asked for. Eight by five
+/// was the shape before and it stood the hardware pane on end: six readings each
+/// five rows tall is a column of stacks, tall and narrow, in a pane that has
+/// width to spare and no height. Twenty dots to a row also puts a usable
+/// resolution on one row, a dot being a percent and a quarter, so a reading
+/// climbing under load moves dot by dot instead of in fifths of a row.
+const DOT_COLUMNS: usize = 20;
+const DOT_ROWS: usize = 4;
+/// How much larger the number beside a block is than the label. One: the same
+/// size as every other glyph in the window.
+///
+/// It was one and a half, and at that size the readings were the loudest thing on
+/// screen, which is not what a monitor is for. The metric's own tint is what says
+/// a number is the thing being read. The arithmetic that caps it against the room
+/// beside the block is kept, so raising this again cannot put a reading over the
+/// edge of a narrow pane.
+const BIG_READING: f32 = 1.0;
+/// The smallest a dot shrinks to, across or down, when a pane has more readings
+/// than room. Below this the block stops reading as a block, so it is not drawn:
+/// too tall for its rows and they scroll off, too narrow for its columns and the
+/// pane draws numbers alone. A reading that scrolled off is honest and a number
+/// with no block is honest; a smear is not.
 const SMALL_DOT: f32 = 4.0;
 const PROMPT_COLUMNS: usize = 2;
 const INPUT_PAD: f32 = 6.0;
@@ -1410,13 +1422,20 @@ fn agents(scene: &mut Scene, frame: &Frame, panel: Panel) {
 /// number. Three boxes at computed positions cannot drift apart.
 ///
 /// The block is [`DOT_COLUMNS`] by [`DOT_ROWS`] dots in the metric's own colour,
-/// filling row by row from the bottom, so a row is 20% and a dot is 2.5%. It
-/// replaced ten columns of four small dots in one shared gauge colour, which
-/// read as a smear rather than as a level, and an unbounded reading now draws no
-/// block at all: it used to draw an empty track, so most of a pane was empty
+/// filling row by row from the bottom, so a row is 25% and a dot is 1.25%. Wide
+/// and short on purpose: see the constants. An unbounded reading draws no block
+/// at all, where it used to draw an empty track, so most of a pane was empty
 /// rectangles and the two rows that were filled read as noise. An unbounded row
 /// keeps the line pitch, because a tall empty row would push the rows that do
 /// have blocks off the bottom of the pane.
+///
+/// Twenty columns is a lot of width to ask a pane for, so the number is served
+/// first and the block takes what is left. What is left can be nothing: a pane
+/// dragged narrow enough that a dot would be under [`SMALL_DOT`] across draws no
+/// blocks at all and every row becomes a label and a number, which is a row this
+/// function already draws. That is the whole of the narrow case, and it is why
+/// the readings themselves are never clipped or shrunk: a block is only ever
+/// drawn in room the reading did not need.
 fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>) {
     let skin = frame.skin;
     let content = panel.inset(PAD);
@@ -1463,10 +1482,12 @@ fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>) {
     // the point of the shape, but a pane of thirteen readings cannot spend the
     // same height per block as one of five, and a block that pushed the last
     // rows off the bottom would be hiding readings to look better.
+    //
+    // Not clamped up to anything: a pane with no room for a legible dot is meant
+    // to come out of here under [`SMALL_DOT`], which is what says no block.
     let mut dot = (line * 0.34)
         .round()
-        .min((room / DOT_COLUMNS as f32 - gap).floor())
-        .max(2.0);
+        .min((room / DOT_COLUMNS as f32 - gap).floor());
     let blocks = gauges
         .iter()
         .filter(|gauge| gauge.fraction().is_some())
@@ -1479,18 +1500,25 @@ fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>) {
     while dot > SMALL_DOT && tall(dot) > content.h {
         dot -= 1.0;
     }
+    // Whether this pane draws blocks at all. Either the dot is legible or the
+    // pane is too narrow (or too short, since the loop above stops at the same
+    // floor) to draw one, and then every reading is a number beside its label.
+    let blocked = dot >= SMALL_DOT;
     let cell = dot + gap;
-    let block_w = cell * DOT_COLUMNS as f32;
-    let block_h = dot * DOT_ROWS as f32 + gap * (DOT_ROWS - 1) as f32;
-    // The number beside a block is the thing being read from across the desk, so
-    // it is drawn larger than the label. Only beside a block: a pane of numbers
-    // all at this size would fit four of them.
-    //
-    // Never wider than the room left beside the block, though. `1,048,576 /
-    // 2,097,152` at one and a half times the pane size does not fit a pane
-    // dragged narrow, and a reading clipped halfway through is worse than a
-    // smaller one: it reads as a different number. Floored, not rounded, because
-    // rounding up is what puts the last character over the edge.
+    let (block_w, block_h) = match blocked {
+        true => (
+            cell * DOT_COLUMNS as f32,
+            dot * DOT_ROWS as f32 + gap * (DOT_ROWS - 1) as f32,
+        ),
+        false => (0.0, 0.0),
+    };
+    // The size of the number beside a block, which at [`BIG_READING`] of one is
+    // the pane's own size and nothing else in this arithmetic bites. It is kept
+    // because it is what makes a larger reading safe: capped at the room left
+    // beside the block, so `1,048,576 / 2,097,152` in a pane dragged narrow comes
+    // out smaller rather than clipped halfway through, which reads as a different
+    // number. Floored, not rounded, because rounding up is what puts the last
+    // character over the edge.
     let beside = (content.w - label_w - block_w - column).max(1.0);
     let big = (frame.pane_size * BIG_READING)
         .min(frame.pane_size * beside / needed)
@@ -1502,7 +1530,9 @@ fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, gauges: Vec<Gauge>) {
 
     let mut y = content.y;
     for gauge in &gauges {
-        let fraction = gauge.fraction();
+        // No block in a pane with no room for one, so the row is the label and
+        // the number, exactly as an unbounded reading is drawn.
+        let fraction = gauge.fraction().filter(|_| blocked);
         let row_h = if fraction.is_some() { pitch } else { line };
         if y + row_h > content.y + content.h {
             break;
@@ -3768,14 +3798,16 @@ mod tests {
         }
     }
 
-    /// Eight dots across and five down, so a row is 20% and a dot is 2.5%. 525
-    /// of 1000 tokens is 52.5%, which is two whole rows and five dots of a third,
+    /// Twenty dots across and four down, so a row is 25% and a dot is 1.25%. 525
+    /// of 1000 tokens is 52.5%, which is two whole rows and two dots of a third,
     /// filling from the bottom the way a level meter does. Every dot is drawn
     /// either way, so the block reads as a block rather than as a scatter.
     ///
-    /// This asserted ten columns of four dots in one shared gauge colour, which
-    /// is the look that was rejected: it read as a smear, and a pane of them with
-    /// an empty track on every unbounded row read as noise.
+    /// This asserted eight across and five down, and before that ten columns of
+    /// four in one shared gauge colour. The shape is the width and height of the
+    /// block: five rows of eight stood the panes on end, which is what item 13
+    /// reported, and the same forty dots wide and short is the same reading in a
+    /// shape a pane has room for.
     #[test]
     fn a_gauge_is_a_block_of_dots_in_the_metric_s_own_colour() {
         let mut state = State::new();
@@ -3845,14 +3877,15 @@ mod tests {
                 .collect()
         };
         let dots = of(lit);
-        assert_eq!(dots.len(), 21, "52.5% of 40 dots");
+        assert_eq!((DOT_COLUMNS, DOT_ROWS), (20, 4), "the shape item 13 asked for");
+        assert_eq!(dots.len(), 42, "52.5% of 80 dots");
         assert_eq!(
             of(unlit).len(),
-            DOT_COLUMNS * DOT_ROWS - 21,
+            DOT_COLUMNS * DOT_ROWS - 42,
             "the rest of the block is still drawn, faintly"
         );
 
-        // Rows, not columns: 21 dots is two full rows of eight and five of a
+        // Rows, not columns: 42 dots is two full rows of twenty and two of a
         // third, and the part-filled row is the top one.
         let mut rows: Vec<f32> = dots.iter().map(|[_, y, _, _]| *y).collect();
         rows.sort_by(f32::total_cmp);
@@ -3861,7 +3894,7 @@ mod tests {
         let across = |y: f32| dots.iter().filter(|[_, dy, _, _]| *dy == y).count();
         assert_eq!(
             rows.iter().map(|y| across(*y)).collect::<Vec<_>>(),
-            vec![5, DOT_COLUMNS, DOT_COLUMNS],
+            vec![2, DOT_COLUMNS, DOT_COLUMNS],
             "the part-filled row is at the top"
         );
         // Evenly pitched, or the block reads as a random scatter.
@@ -3870,14 +3903,33 @@ mod tests {
             assert!((pair[1] - pair[0] - pitch).abs() < 0.01, "{rows:?}");
         }
 
-        // The number is the metric's colour and bigger than the label beside it.
+        // Wider than it is tall, which is the whole of the shape complaint: the
+        // block used to be a stack.
+        let left = dots.iter().map(|[x, _, _, _]| *x).fold(f32::MAX, f32::min);
+        let right = dots.iter().map(|[x, _, w, _]| x + w).fold(0.0f32, f32::max);
+        let top = rows[0];
+        let foot = of(lit)
+            .iter()
+            .chain(of(unlit).iter())
+            .map(|[_, y, _, h]| y + h)
+            .fold(0.0f32, f32::max);
+        assert!(
+            right - left > 2.0 * (foot - top),
+            "the block is {} by {}",
+            right - left,
+            foot - top
+        );
+
+        // The number is the metric's colour and the pane's own size. It was one
+        // and a half times the pane size, which read as the loudest thing in the
+        // window; the tint is what says it is the reading.
         let reading = scene
             .texts
             .iter()
             .find(|t| t.runs.iter().any(|r| r.text.contains("525 / 1,000")))
             .expect("the context reading is written out");
         assert_eq!(reading.runs[0].color, Some(ink));
-        assert!(reading.size > 13.0, "{} is not large text", reading.size);
+        assert_eq!(reading.size, 13.0, "the reading is not the pane size");
 
         // And an unbounded reading draws no block at all: no track, no dots, and
         // the number where the block would have started.
@@ -3896,11 +3948,16 @@ mod tests {
         );
     }
 
-    /// A pane dragged narrow shrinks the number rather than running it off the
-    /// edge. A reading clipped halfway through is worse than a smaller one: it
-    /// reads as a different number.
+    /// The reading is never squeezed: it is the pane's own size at every width,
+    /// and it always fits the box it was given. What gives instead is the block,
+    /// which is drawn in the room the reading did not need.
+    ///
+    /// This asserted that a narrow pane drew the number smaller, which was the
+    /// answer while the number was one and a half times the pane size and could
+    /// afford to lose the difference. At the pane size there is nothing to give
+    /// back, so twenty columns of dots go instead.
     #[test]
-    fn a_reading_shrinks_rather_than_running_off_a_narrow_pane() {
+    fn the_reading_keeps_its_size_and_the_block_gives_way() {
         let mut state = State::new();
         state.apply(noob_proto::Event::UsageReport {
             usage: noob_proto::Usage {
@@ -3915,7 +3972,7 @@ mod tests {
         let mut dock = Dock::new();
         dock.reveal(View::Context);
 
-        let mut sizes = Vec::new();
+        let mut blocks = Vec::new();
         for width in [1600.0, 760.0] {
             let out = render_with(&state, width, 900.0, &dock, &[], &monitor, None);
             let reading = out
@@ -3937,13 +3994,75 @@ mod tests {
                 "{width}: {chars} columns of {column} do not fit {}",
                 reading.at.w
             );
-            assert!(reading.size >= 13.0, "{width}: smaller than the label");
-            sizes.push(reading.size);
+            assert_eq!(reading.size, 13.0, "{width}: not the pane size");
+            blocks.push(dots_in(&out, Space::TopRight).len());
         }
-        assert!(
-            sizes[1] < sizes[0],
-            "the narrow pane drew it just as large: {sizes:?}"
+        assert_eq!(blocks[0], DOT_COLUMNS * DOT_ROWS, "a whole block fits at 1600");
+        assert_eq!(
+            blocks[1], 0,
+            "the narrow pane drew {} dots rather than none",
+            blocks[1]
         );
+    }
+
+    /// Every dot drawn in one space, lit or unlit, found by fill: a dot is a few
+    /// pixels square, which no size filter can tell from a hairline.
+    fn dots_in(out: &Rendered, space: Space) -> Vec<[f32; 4]> {
+        let body = out.layout.placed(space).body;
+        let hues: Vec<[f32; 4]> = out
+            .skin
+            .gauges
+            .iter()
+            .chain(out.skin.gauges_unlit.iter())
+            .copied()
+            .collect();
+        out.scene
+            .rects
+            .iter()
+            .filter(|r| hues.contains(&r.rgba()) && body.contains(r.xywh()[0], r.xywh()[1]))
+            .map(|r| r.xywh())
+            .collect()
+    }
+
+    /// A pane with no room for a legible block draws none of it, and says so by
+    /// drawing the reading where an unbounded one goes. The alternative is twenty
+    /// dots two pixels wide, which is a texture rather than a level, in the room
+    /// the number needed to be read at all.
+    ///
+    /// Every reading is still on the pane either way. Losing the block is not
+    /// losing the number.
+    #[test]
+    fn a_pane_too_narrow_for_a_block_draws_no_block_and_keeps_the_numbers() {
+        let state = busy_state();
+        let mut monitor = Monitor::new();
+        let totals = sample_totals();
+        monitor.sample(&state, &totals);
+        monitor.sample(&state, &totals);
+        let mut dock = Dock::new();
+        dock.reveal(View::Context);
+
+        // Wide enough for a block, and narrow enough that a dot would be under
+        // SMALL_DOT across. 680 is the window's own minimum size.
+        let wide = render_with(&state, 1400.0, 900.0, &dock, &[], &monitor, None);
+        assert_eq!(
+            dots_in(&wide, Space::TopRight).len(),
+            DOT_COLUMNS * DOT_ROWS,
+            "one whole block at 1400"
+        );
+        for [_, _, w, _] in dots_in(&wide, Space::TopRight) {
+            assert!(w >= SMALL_DOT, "a {w} pixel dot is a smear");
+        }
+
+        let narrow = render_with(&state, 680.0, 500.0, &dock, &[], &monitor, None);
+        assert!(
+            dots_in(&narrow, Space::TopRight).is_empty(),
+            "a block was drawn in a pane with no room for one"
+        );
+        let text = text_of(&narrow.scene);
+        for label in ["CONTEXT", "TOOL CALLS", "BEST OUTPUT"] {
+            assert!(text.contains(label), "{label} left the narrow pane: {text}");
+        }
+        assert!(text.contains("1,816 / 65,536"), "the fill still reads: {text}");
     }
 
     /// The session monitor carries what the title strip lost: which phase, which
