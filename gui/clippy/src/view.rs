@@ -3741,20 +3741,27 @@ mod tests {
         }
     }
 
+    /// Every view, at every size, since a pane that scrolls draws a scrollbar and
+    /// a bar in a pane two pixels tall is the sort of rectangle that ends up
+    /// hanging outside the window.
     #[test]
     fn every_rectangle_is_inside_the_surface() {
-        let state = busy_state();
-        let dock = Dock::new();
-        for (w, h) in [(1400.0, 900.0), (320.0, 240.0)] {
-            let out = render(&state, w, h, &dock, &["a.rs"]);
-            assert!(!out.scene.rects.is_empty());
-            for rect in &out.scene.rects {
-                let [x, y, rw, rh] = rect.xywh();
-                assert!(x >= 0.0 && y >= 0.0, "{rect:?} at {w}x{h}");
-                assert!(
-                    x + rw <= w + 0.01 && y + rh <= h + 0.01,
-                    "{rect:?} at {w}x{h}"
-                );
+        let state = crowded_state();
+        let monitor = sampled(&state);
+        for (w, h) in [(1400.0, 900.0), (700.0, 400.0), (320.0, 240.0)] {
+            for view in View::ALL {
+                let mut dock = Dock::new();
+                dock.reveal(view);
+                let out = render_with(&state, w, h, &dock, &["a.rs"], &monitor, None);
+                assert!(!out.scene.rects.is_empty());
+                for rect in &out.scene.rects {
+                    let [x, y, rw, rh] = rect.xywh();
+                    assert!(x >= 0.0 && y >= 0.0, "{view:?} {rect:?} at {w}x{h}");
+                    assert!(
+                        x + rw <= w + 0.01 && y + rh <= h + 0.01,
+                        "{view:?} {rect:?} at {w}x{h}"
+                    );
+                }
             }
         }
     }
