@@ -3,7 +3,7 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
-## Unreleased
+## 0.7.0 - 2026-07-30
 
 All of this is NO0B, the GPU window, which shipped as CLIppy up to 0.6.0. The
 CLI's behaviour is unchanged; only its version moved.
