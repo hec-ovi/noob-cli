@@ -28,10 +28,18 @@ pub const TABS_RIGHT: char = '\u{eab6}';
 pub const FILE: char = '\u{ea7b}';
 /// A folder in the picker's list.
 pub const FOLDER: char = '\u{e5ff}';
+/// The mark in front of a folder in the picker's tree: a plus to put what is
+/// inside it into the list under it, a minus to take it away again. Boxed rather
+/// than bare, because the mark is a hit region of its own and a plus with an
+/// edge round it reads as something you press.
+pub const EXPAND: char = '\u{f0fe}';
+pub const COLLAPSE: char = '\u{f146}';
 /// The folder the picker is listing, which is also the one it would open.
 pub const FOLDER_OPEN: char = '\u{eaf7}';
 /// The way out of it.
 pub const UP: char = '\u{eaa1}';
+/// On the row saying why a folder in the tree could not be read.
+pub const LOCKED: char = '\u{f023}';
 /// A folder opened in an earlier session.
 pub const RECENT: char = '\u{ea82}';
 /// In front of what has been typed to narrow a list.
@@ -110,8 +118,11 @@ mod tests {
             TABS_RIGHT,
             FILE,
             FOLDER,
+            EXPAND,
+            COLLAPSE,
             FOLDER_OPEN,
             UP,
+            LOCKED,
             RECENT,
             FILTER,
             CONFIRM,

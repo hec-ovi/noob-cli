@@ -74,6 +74,25 @@ pub struct Skin {
     /// The band behind selected text. Drawn under the glyphs, so it has to be
     /// dark enough that green text still reads on top of it.
     pub select: [f32; 4],
+    /// The band behind the row the folder picker is on.
+    ///
+    /// The one place in the window that breaks "dark under green": the row you
+    /// are about to open is filled solid with the good colour and written in the
+    /// darkest ink the palette has. It used to be the quiet band the file
+    /// explorer marks its open row with, which on a list of forty folders said
+    /// almost nothing about which one Enter would take.
+    ///
+    /// Green rather than the accent, for the same reason the drop target is:
+    /// the accent is whatever the theme is, and a picked row in the amber
+    /// theme's accent would read as a warning.
+    ///
+    /// Derived rather than given a settings key of its own, the way `menu` and
+    /// `drop_target` are. It is one row in one dialog.
+    pub picked: [f32; 4],
+    /// The ink on that band. The panel colour, which is the darkest thing the
+    /// palette has, rather than a flat black: a theme whose panel is not near
+    /// black would then be writing in a colour that is in no palette at all.
+    pub picked_ink: [u8; 4],
     /// A window button under the pointer.
     pub hot: [f32; 4],
     /// The one surface in the window that is a button you press rather than a
@@ -186,6 +205,10 @@ impl Skin {
             // Dim rather than accent: the band sits under the text, and a
             // bright one takes the reading surface away from what it selects.
             select: rgba(config.dim, 0.45),
+            // Solid, not scaled by the opacity setting: a band you can see the
+            // desktop through is the band this replaced.
+            picked: rgba(config.good, 1.0),
+            picked_ink: text(config.panel),
             hot: rgba(config.accent, 0.30),
             button: rgba(config.accent, 0.22),
             button_hot: rgba(config.accent, 0.50),
@@ -470,6 +493,54 @@ mod tests {
                 ],
                 "{name}: the edge and the label are different reds"
             );
+        }
+    }
+
+    /// Item 4 asked for the picked row to be green with black text on it, and
+    /// both halves are palette rules: green in every theme, and "black" meaning
+    /// the darkest colour the theme actually has rather than a flat zero, so a
+    /// palette built on something other than near black still writes in one of
+    /// its own colours.
+    #[test]
+    fn the_picked_row_is_green_with_the_palette_s_darkest_ink_on_it() {
+        let luminance = |c: [f32; 4]| c[0] * 0.2 + c[1] * 0.7 + c[2] * 0.1;
+        for name in crate::config::THEMES {
+            let config = crate::config::theme(name).expect(name);
+            let skin = Skin::from(&config);
+            let [r, g, b, a] = skin.picked;
+            assert!(g > r && g > b, "{name}: the picked row is not green: {:?}", skin.picked);
+            assert_eq!(a, 1.0, "{name}: a band you can see the list through");
+            assert_eq!(
+                skin.picked[..3],
+                skin.drop_target[..3],
+                "{name}: two greens for two yeses"
+            );
+
+            // The ink is the palette's own darkest colour, the panel, and it is
+            // written rather than derived from it, so a theme cannot end up
+            // writing in a colour that is nowhere in it.
+            assert_eq!(
+                skin.picked_ink,
+                [config.panel[0], config.panel[1], config.panel[2], 255],
+                "{name}"
+            );
+            let ink = luminance([
+                skin.picked_ink[0] as f32 / 255.0,
+                skin.picked_ink[1] as f32 / 255.0,
+                skin.picked_ink[2] as f32 / 255.0,
+                1.0,
+            ]);
+            // Dark on light, which is the one place in the window that is the
+            // other way up from every other pair in it.
+            assert!(
+                luminance(skin.picked) - ink > 0.5,
+                "{name}: {ink} ink on a {} band",
+                luminance(skin.picked)
+            );
+            // And not the tint an unpicked row is written in, or the band would
+            // be the only thing saying which row it is.
+            assert_ne!(skin.picked_ink, skin.body, "{name}");
+            assert_ne!(skin.picked_ink, skin.bright, "{name}");
         }
     }
 

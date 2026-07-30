@@ -220,7 +220,7 @@ fn menu_for(
         Hit::Menu | Hit::MenuRow(_) => None,
         // The picker is not a widget: there is no pane to close, no settings
         // behind it, and nothing in it to select.
-        Hit::Picker | Hit::PickerRow(_) | Hit::PickerOpen => None,
+        Hit::Picker | Hit::PickerRow(_) | Hit::PickerMark(_) | Hit::PickerOpen => None,
         // Neither is the settings panel. A Settings row on a menu opened over
         // the settings panel would be a row that opens what is already open,
         // and there is no pane behind it to close.
@@ -840,11 +840,17 @@ impl App {
         }
     }
 
-    /// A press inside the picker: a row, or the button that confirms.
+    /// A press inside the picker: a row, the mark that opens one, or the button
+    /// that confirms.
     fn click_in_picker(&mut self, hit: Hit, double: bool) {
         let mut chosen = None;
         if let Some(picker) = self.picker.as_mut() {
             self.dirty |= match hit {
+                // The mark before the row, and it does not move the cursor: the
+                // press that opens a folder is a press that asks what is in it,
+                // and answering by also selecting it would make every look a
+                // choice.
+                Hit::PickerMark(index) => picker.toggle(index),
                 Hit::PickerRow(index) if double => {
                     chosen = picker.double(index);
                     true
@@ -1045,7 +1051,7 @@ impl App {
             Hit::Body(space) => self.begin_selection(space),
             // All three are handled above, while the picker is up, which is the
             // only time any of them can be hit at all.
-            Hit::PickerRow(_) | Hit::PickerOpen | Hit::Picker => {}
+            Hit::PickerRow(_) | Hit::PickerMark(_) | Hit::PickerOpen | Hit::Picker => {}
             // The same for the four the settings panel owns.
             Hit::SettingsRow(_) | Hit::SettingsValue(_) | Hit::SettingsClose | Hit::Settings => {}
             Hit::Input => {
@@ -1939,6 +1945,7 @@ impl ApplicationHandler<Wake> for App {
                         | Hit::Minimize
                         | Hit::MenuRow(_)
                         | Hit::PickerOpen
+                        | Hit::PickerMark(_)
                         | Hit::SettingsClose
                         | Hit::SettingsValue(_)),
                     ) => Some(hit),

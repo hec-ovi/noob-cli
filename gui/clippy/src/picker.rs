@@ -6,6 +6,16 @@
 //! that opens instead: what is listed, where the cursor is, walking in and out
 //! of folders, and the filter that marks what you typed for.
 //!
+//! The list is a tree rather than one directory. A folder carries a mark you
+//! press to put what is inside it into the list under it, one step further in,
+//! and press again to take it away. [`Picker::inside`] holds that tree already
+//! flattened, in the order it is read, so opening a folder is an insert after it
+//! and shutting one is a drain of everything deeper that follows: no recursion,
+//! and one index means the same thing to the drawing, the click and the cursor.
+//! Walking in with the keyboard still lists a folder on its own, which is the
+//! fast way down a deep tree and the way to start the list again once one has
+//! grown long.
+//!
 //! Typing does not take rows away. Every folder stays in the list and the ones
 //! the filter did not match are drawn dim, so the list you were reading is still
 //! the list in front of you rather than three rows where forty were. [`Picker::matched`]
@@ -95,8 +105,78 @@ pub enum Row {
     Up,
     /// A folder chosen in an earlier session, by full path.
     Recent(PathBuf),
-    /// A folder inside the one being listed, by name.
-    Folder(String),
+    /// A folder in the tree under the one being listed.
+    Folder {
+        /// What the row says: the name alone, however deep it sits.
+        name: String,
+        /// Where it is, in full. Not the folder being listed joined to the
+        /// name any more: a folder two levels into an opened tree is several
+        /// names below it.
+        path: PathBuf,
+        /// How far in it sits. Zero is directly inside the folder being
+        /// listed.
+        depth: usize,
+        /// Whether what is inside it is in the list under it.
+        open: bool,
+    },
+    /// Why a folder that was opened could not be read, on its own row under it.
+    /// Without it an unreadable folder opens to nothing, which on screen is a
+    /// folder that happens to be empty.
+    Locked {
+        /// The name of the folder it belongs to, so the message dims with that
+        /// folder rather than staying bright among rows the filter passed over.
+        of: String,
+        depth: usize,
+        why: String,
+    },
+}
+
+impl Row {
+    /// How far into the tree the row sits. Everything that is not part of the
+    /// tree sits at the top of it.
+    pub fn depth(&self) -> usize {
+        match self {
+            Row::Here | Row::Up | Row::Recent(_) => 0,
+            Row::Folder { depth, .. } | Row::Locked { depth, .. } => *depth,
+        }
+    }
+
+    /// Whether the row carries a mark to open and shut it, and which way that
+    /// mark points. Nothing at all for a row that is not a folder in the tree:
+    /// the folder being listed, the way out and a folder remembered from an
+    /// earlier session are not branches of it.
+    pub fn open(&self) -> Option<bool> {
+        match self {
+            Row::Folder { open, .. } => Some(*open),
+            _ => None,
+        }
+    }
+
+    /// The folder this row is, for the rows that are one.
+    fn path(&self) -> Option<&Path> {
+        match self {
+            Row::Folder { path, .. } => Some(path),
+            _ => None,
+        }
+    }
+}
+
+/// The folders inside `at` as rows one step deeper than it, sorted and shut.
+///
+/// A free function rather than a method: opening a folder reads the disk
+/// through [`Folders`] first and builds the rows after, so this must not want
+/// the picker borrowed while that is happening.
+fn branches(at: &Path, depth: usize, mut names: Vec<String>) -> Vec<Row> {
+    names.sort_by_key(|name| name.to_lowercase());
+    names
+        .into_iter()
+        .map(|name| Row::Folder {
+            path: at.join(&name),
+            name,
+            depth,
+            open: false,
+        })
+        .collect()
 }
 
 pub struct Picker {
@@ -109,8 +189,12 @@ pub struct Picker {
     /// one of them.
     start: PathBuf,
     recents: Vec<PathBuf>,
-    /// Every folder inside `at`, sorted, before the filter.
-    inside: Vec<String>,
+    /// The tree under `at`, flattened into the order it is read, before the
+    /// filter. Only [`Row::Folder`] and [`Row::Locked`] live here: the folder
+    /// being listed and the way out of it are put in front of it when the rows
+    /// are built, because they are how the list is walked rather than part of
+    /// what it holds.
+    inside: Vec<Row>,
     /// Why `at` could not be read, when it could not. Worth saying out loud: an
     /// empty list looks exactly like an empty folder.
     trouble: Option<String>,
@@ -200,18 +284,21 @@ impl Picker {
             Row::Here => String::from("this folder"),
             Row::Up => String::from(".."),
             Row::Recent(path) => path.display().to_string(),
-            Row::Folder(name) => name.clone(),
+            Row::Folder { name, .. } => name.clone(),
+            Row::Locked { why, .. } => why.clone(),
         }
     }
 
     /// The folder a row names, or nothing when there is none (the root has no
-    /// parent, so it has no way out).
+    /// parent, so it has no way out, and a row saying why a folder could not be
+    /// read is a message rather than somewhere to go).
     pub fn path_of(&self, row: &Row) -> Option<PathBuf> {
         match row {
             Row::Here => Some(self.at.clone()),
             Row::Up => self.at.parent().map(Path::to_path_buf),
             Row::Recent(path) => Some(path.clone()),
-            Row::Folder(name) => Some(self.at.join(name)),
+            Row::Folder { path, .. } => Some(path.clone()),
+            Row::Locked { .. } => None,
         }
     }
 
@@ -225,12 +312,15 @@ impl Picker {
     /// are how the list is walked rather than entries in it, and a filter that
     /// took the keyboard's way out of the folder away would leave "wor" with no
     /// route back to anywhere. Everything else is matched on its label: a
-    /// remembered folder on its whole path, a folder in the list on its name.
+    /// remembered folder on its whole path, a folder in the list on its name,
+    /// and the message under an unreadable folder on that folder's name, so the
+    /// two dim together.
     pub fn matched(&self, row: &Row) -> bool {
         match row {
             Row::Here | Row::Up => true,
             Row::Recent(path) => self.hit(&path.display().to_string()),
-            Row::Folder(name) => self.hit(name),
+            Row::Folder { name, .. } => self.hit(name),
+            Row::Locked { of, .. } => self.hit(of),
         }
     }
 
@@ -322,6 +412,93 @@ impl Picker {
         true
     }
 
+    /// Open or shut the folder on the row at `index`, in place.
+    ///
+    /// What the mark in front of a folder does, and the whole of the tree: the
+    /// rows underneath change and the folder being listed does not. Walking in
+    /// is the other gesture, and it lists that folder on its own instead.
+    ///
+    /// The cursor is put back on the row it was on however many rows appeared or
+    /// disappeared above it. Shutting a folder that held the cursor somewhere
+    /// inside it leaves it on that folder: the row it was on is not on screen
+    /// any more, and a cursor left at the same index would be pointing at a
+    /// folder nobody chose.
+    pub fn toggle(&mut self, index: usize) -> bool {
+        let Some(row) = self.rows.get(index).cloned() else {
+            return false;
+        };
+        let (Some(path), Some(open)) = (row.path().map(Path::to_path_buf), row.open()) else {
+            return false;
+        };
+        let Some(at) = self.inside.iter().position(|row| row.path() == Some(&path)) else {
+            return false;
+        };
+        let held = self.rows.get(self.cursor).cloned();
+        match open {
+            true => self.shut(at),
+            false => self.opened(at),
+        }
+        self.rebuild();
+        // The same row if it is still on screen, and the folder that was just
+        // shut if it is not, which is where its children went.
+        self.cursor = held
+            .and_then(|row| self.rows.iter().position(|other| *other == row))
+            .or_else(|| {
+                self.rows
+                    .iter()
+                    .position(|other| other.path() == Some(&path))
+            })
+            .unwrap_or(0)
+            .min(self.rows.len().saturating_sub(1));
+        true
+    }
+
+    /// Put what is inside the folder at `at` into the tree under it.
+    ///
+    /// Through [`Folders`] like every other listing, so a folder that cannot be
+    /// read says so on a row of its own rather than opening to nothing.
+    fn opened(&mut self, at: usize) {
+        let Some(Row::Folder { path, depth, .. }) = self.inside.get(at).cloned() else {
+            return;
+        };
+        let kids = match self.folders.list(&path) {
+            Ok(names) => branches(&path, depth + 1, names),
+            Err(why) => vec![Row::Locked {
+                of: path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                depth: depth + 1,
+                why,
+            }],
+        };
+        if let Some(Row::Folder { open, .. }) = self.inside.get_mut(at) {
+            *open = true;
+        }
+        self.inside.splice(at + 1..at + 1, kids);
+    }
+
+    /// Take the whole of the folder at `at` back out of the tree.
+    ///
+    /// Everything deeper that follows it, which in a flattened tree is exactly
+    /// its descendants and nothing else: the next row at its own depth or
+    /// shallower is the end of it.
+    fn shut(&mut self, at: usize) {
+        let Some(depth) = self.inside.get(at).map(Row::depth) else {
+            return;
+        };
+        if let Some(Row::Folder { open, .. }) = self.inside.get_mut(at) {
+            *open = false;
+        }
+        let end = self.inside[at + 1..]
+            .iter()
+            .position(|row| row.depth() <= depth)
+            .map(|step| at + 1 + step)
+            .unwrap_or(self.inside.len());
+        self.inside.drain(at + 1..end);
+    }
+
     /// List what is inside the cursor's row.
     pub fn walk_in(&mut self) -> bool {
         let Some(row) = self.rows.get(self.cursor).cloned() else {
@@ -332,10 +509,9 @@ impl Picker {
             Row::Here => false,
             Row::Up => self.walk_out(),
             Row::Recent(path) => self.go_to(path),
-            Row::Folder(name) => {
-                let at = self.at.join(name);
-                self.go_to(at)
-            }
+            Row::Folder { path, .. } => self.go_to(path),
+            // A message, not a folder.
+            Row::Locked { .. } => false,
         }
     }
 
@@ -376,10 +552,11 @@ impl Picker {
         self.point_at(index);
         match row {
             Row::Here | Row::Recent(_) => self.path_of(&row),
-            Row::Up | Row::Folder(_) => {
+            Row::Up | Row::Folder { .. } => {
                 self.walk_in();
                 None
             }
+            Row::Locked { .. } => None,
         }
     }
 
@@ -476,10 +653,10 @@ impl Picker {
     /// so choosing it is the likely next keystroke, and the row above and below
     /// are one step away either way.
     fn relist(&mut self) {
-        match self.folders.list(&self.at) {
-            Ok(mut names) => {
-                names.sort_by_key(|name| name.to_lowercase());
-                self.inside = names;
+        let at = self.at.clone();
+        match self.folders.list(&at) {
+            Ok(names) => {
+                self.inside = branches(&at, 0, names);
                 self.trouble = None;
             }
             Err(why) => {
@@ -508,7 +685,9 @@ impl Picker {
         self.cursor = self
             .rows
             .iter()
-            .position(|row| matches!(row, Row::Recent(_) | Row::Folder(_)) && self.matched(row))
+            .position(|row| {
+                matches!(row, Row::Recent(_) | Row::Folder { .. }) && self.matched(row)
+            })
             .or_else(|| self.match_from(0, true))
             .unwrap_or(0);
         self.first = 0;
@@ -532,13 +711,25 @@ impl Picker {
         if self.at.parent().is_some() {
             rows.push(Row::Up);
         }
-        rows.extend(
-            self.inside
-                .iter()
-                .filter(|name| self.listed(name))
-                .cloned()
-                .map(Row::Folder),
-        );
+        // The tree, with a folder that is not listed taking everything it holds
+        // out with it: a child left behind when its parent has gone is a row
+        // indented under nothing.
+        let mut buried: Option<usize> = None;
+        for row in &self.inside {
+            if let Some(depth) = buried {
+                if row.depth() > depth {
+                    continue;
+                }
+                buried = None;
+            }
+            if let Row::Folder { name, depth, .. } = row
+                && !self.listed(name)
+            {
+                buried = Some(*depth);
+                continue;
+            }
+            rows.push(row.clone());
+        }
         self.rows = rows;
         self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
     }
@@ -684,6 +875,7 @@ mod tests {
             ("/home/hec/workspace", &["noob-cli", "anna"]),
             ("/home/hec/workspace/noob-cli", &["gui", "crates"]),
             ("/home/hec/models", &[]),
+            ("/home/hec/.cache", &["thumbs"]),
             ("/home", &["hec"]),
             ("/", &["home", "tmp"]),
         ])
@@ -707,6 +899,44 @@ mod tests {
             .rows()
             .iter()
             .map(|row| picker.label(row))
+            .collect()
+    }
+
+    /// What the cursor is on, by what its row says. A folder in the list says
+    /// its own name, one remembered from an earlier session says its whole
+    /// path, and the two ways through the tree say "this folder" and "..", so
+    /// the label answers which row it is as well as which folder.
+    fn on(picker: &Picker) -> String {
+        picker
+            .row(picker.cursor())
+            .map(|row| picker.label(row))
+            .unwrap_or_default()
+    }
+
+    /// The row that says this, by position. How a test points at a folder
+    /// without spelling out the whole row.
+    fn at(picker: &Picker, label: &str) -> usize {
+        labels(picker)
+            .iter()
+            .position(|said| said == label)
+            .unwrap_or_else(|| panic!("no row says {label:?}: {:?}", labels(picker)))
+    }
+
+    /// The list as it reads on screen: two spaces per step into the tree, then
+    /// the mark the row carries (`+` to open it, `-` to shut it, nothing for a
+    /// row that is not a folder), then what it says.
+    fn tree(picker: &Picker) -> Vec<String> {
+        picker
+            .rows()
+            .iter()
+            .map(|row| {
+                let mark = match row.open() {
+                    Some(true) => '-',
+                    Some(false) => '+',
+                    None => ' ',
+                };
+                format!("{}{mark} {}", "  ".repeat(row.depth()), picker.label(row))
+            })
             .collect()
     }
 
@@ -735,7 +965,7 @@ mod tests {
         );
         assert_eq!(picker.path_of(&Row::Up), Some(PathBuf::from("/home")));
         assert_eq!(
-            picker.path_of(&Row::Folder(String::from("workspace"))),
+            picker.path_of(picker.row(at(&picker, "workspace")).unwrap()),
             Some(PathBuf::from("/home/hec/workspace"))
         );
         // With nothing remembered, the cursor is on the folder being listed, so
@@ -774,7 +1004,7 @@ mod tests {
         // And they are offered where the picker opened, not everywhere: walked
         // somewhere else, the list is that folder's own contents.
         let mut picker = opened(&["/home/hec/models"]);
-        picker.point_at(labels(&picker).iter().position(|l| l == "workspace").unwrap());
+        picker.point_at(at(&picker, "workspace"));
         assert!(picker.walk_in());
         assert!(
             !picker
@@ -791,7 +1021,7 @@ mod tests {
     #[test]
     fn walking_in_and_out_lists_what_is_there() {
         let mut picker = opened(&[]);
-        let workspace = labels(&picker).iter().position(|l| l == "workspace").unwrap();
+        let workspace = at(&picker, "workspace");
         picker.point_at(workspace);
         assert!(picker.walk_in());
         assert_eq!(picker.at(), Path::new("/home/hec/workspace"));
@@ -857,8 +1087,8 @@ mod tests {
             "the folder being listed and the way out of it are never dim"
         );
         assert_eq!(
-            picker.row(picker.cursor()),
-            Some(&Row::Folder(String::from("workspace"))),
+            on(&picker),
+            "workspace",
             "Enter after typing has to open what was typed"
         );
 
@@ -867,10 +1097,7 @@ mod tests {
         assert!(picker.step(false));
         assert_eq!(picker.row(picker.cursor()), Some(&Row::Up));
         assert!(picker.step(true));
-        assert_eq!(
-            picker.row(picker.cursor()),
-            Some(&Row::Folder(String::from("workspace")))
-        );
+        assert_eq!(on(&picker), "workspace");
         assert!(!picker.step(true), "and there is no match below it");
         assert!(picker.jump(false));
         assert_eq!(
@@ -879,10 +1106,7 @@ mod tests {
             "the top of the list is the first match, not the first row"
         );
         assert!(picker.jump(true));
-        assert_eq!(
-            picker.row(picker.cursor()),
-            Some(&Row::Folder(String::from("workspace")))
-        );
+        assert_eq!(on(&picker), "workspace");
         // A screenful lands on a match too, rather than on whatever row is that
         // many down.
         assert!(picker.page(3, false));
@@ -898,10 +1122,7 @@ mod tests {
         // Case does not matter, and it matches anywhere in the name.
         let mut picker = opened(&["/home/hec/models"]);
         assert!(picker.type_text("KSP"));
-        assert_eq!(
-            picker.row(picker.cursor()),
-            Some(&Row::Folder(String::from("workspace")))
-        );
+        assert_eq!(on(&picker), "workspace");
 
         // A remembered folder is matched on its whole path, so a project is
         // reachable by a word from any part of it.
@@ -930,10 +1151,7 @@ mod tests {
         assert!(!labels(&picker).contains(&String::from(".cache")));
         assert!(picker.type_text(".ca"));
         assert!(labels(&picker).contains(&String::from(".cache")));
-        assert_eq!(
-            picker.row(picker.cursor()),
-            Some(&Row::Folder(String::from(".cache")))
-        );
+        assert_eq!(on(&picker), ".cache");
 
         // Backspace takes it back a character at a time, and with nothing typed
         // it is the way out of the folder.
@@ -1018,7 +1236,7 @@ mod tests {
         // A double click walks into a folder in the list, and opens one that was
         // already a whole answer.
         let mut picker = opened(&["/home/hec/models"]);
-        let workspace = labels(&picker).iter().position(|l| l == "workspace").unwrap();
+        let workspace = at(&picker, "workspace");
         assert_eq!(picker.double(workspace), None);
         assert_eq!(picker.at(), Path::new("/home/hec/workspace"));
 
@@ -1045,11 +1263,7 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(picker.trouble(), None);
-        let locked = picker
-            .rows()
-            .iter()
-            .position(|row| *row == Row::Folder(String::from("locked")))
-            .unwrap();
+        let locked = at(&picker, "locked");
         picker.point_at(locked);
         assert!(picker.walk_in());
         assert_eq!(picker.trouble(), Some("permission denied"));
@@ -1057,6 +1271,191 @@ mod tests {
         assert_eq!(labels(&picker), vec!["this folder", ".."]);
         assert!(picker.walk_out());
         assert_eq!(picker.trouble(), None);
+
+        // Opened in place rather than walked into, it says the same thing on a
+        // row of its own under it. Without that row an unreadable folder opens
+        // to nothing, and on screen nothing is a folder that is empty.
+        let locked = at(&picker, "locked");
+        assert!(picker.toggle(locked));
+        assert_eq!(
+            tree(&picker),
+            ["  this folder", "  ..", "- locked", "    permission denied"]
+        );
+
+        // The message is a message: there is nowhere to go from it, and it
+        // carries no mark of its own because there is nothing to open.
+        let why = at(&picker, "permission denied");
+        assert_eq!(picker.row(why).and_then(Row::open), None);
+        assert_eq!(picker.path_of(picker.row(why).unwrap()), None);
+        assert!(picker.point_at(why));
+        assert_eq!(picker.confirm(), None);
+        assert_eq!(picker.at(), Path::new("/tree"), "and nothing was walked");
+        assert!(!picker.walk_in());
+        assert_eq!(picker.double(why), None);
+
+        // Shutting the folder takes its message with it, and the cursor that
+        // was standing on that message lands on the folder it belonged to.
+        assert!(picker.toggle(locked));
+        assert_eq!(tree(&picker), ["  this folder", "  ..", "+ locked"]);
+        assert_eq!(on(&picker), "locked");
+    }
+
+    /// A folder opens where it stands, one step further in, and shuts again
+    /// taking the whole of itself with it and nothing else.
+    #[test]
+    fn a_folder_opens_under_itself_and_shuts_back_up() {
+        let mut picker = opened(&[]);
+        let flat = [
+            "  this folder",
+            "  ..",
+            "+ Desktop",
+            "+ models",
+            "+ Pictures",
+            "+ workspace",
+        ];
+        assert_eq!(tree(&picker), flat);
+
+        // What is inside it goes under it, one step in, in the same order it
+        // would be listed in on its own.
+        let workspace = at(&picker, "workspace");
+        assert!(picker.toggle(workspace));
+        assert_eq!(
+            tree(&picker),
+            [
+                "  this folder",
+                "  ..",
+                "+ Desktop",
+                "+ models",
+                "+ Pictures",
+                "- workspace",
+                "  + anna",
+                "  + noob-cli",
+            ]
+        );
+        // And the folder being listed did not change: this is a tree, not a
+        // walk. The rows above it did not move either.
+        assert_eq!(picker.at(), Path::new("/home/hec"));
+        assert_eq!(tree(&picker)[..5], flat[..5]);
+
+        // A second level, whose rows carry the whole path rather than a name
+        // joined to the folder being listed.
+        let noob = at(&picker, "noob-cli");
+        assert!(picker.toggle(noob));
+        assert_eq!(
+            tree(&picker)[6..],
+            [
+                "  + anna",
+                "  - noob-cli",
+                "    + crates",
+                "    + gui",
+            ]
+        );
+        let gui = at(&picker, "gui");
+        assert_eq!(
+            picker.path_of(picker.row(gui).unwrap()),
+            Some(PathBuf::from("/home/hec/workspace/noob-cli/gui"))
+        );
+
+        // Shutting the top of it takes both levels and stops there: the rows
+        // above and below the folder are exactly the ones that were there.
+        assert!(picker.toggle(workspace));
+        assert_eq!(tree(&picker), flat);
+
+        // A folder with nothing in it opens to nothing, and says so by having
+        // no rows under it rather than by refusing to open.
+        let models = at(&picker, "models");
+        assert!(picker.toggle(models));
+        assert_eq!(picker.row(models).and_then(Row::open), Some(true));
+        assert_eq!(tree(&picker).len(), flat.len());
+        assert!(picker.toggle(models));
+
+        // Walking still lists a folder on its own, from any depth, and the tree
+        // starts again from there.
+        picker.toggle(workspace);
+        picker.toggle(at(&picker, "noob-cli"));
+        assert!(picker.point_at(at(&picker, "noob-cli")));
+        assert!(picker.walk_in());
+        assert_eq!(picker.at(), Path::new("/home/hec/workspace/noob-cli"));
+        assert_eq!(
+            tree(&picker),
+            ["  this folder", "  ..", "+ crates", "+ gui"],
+            "the tree is the new folder's own, at the top of it"
+        );
+        assert!(picker.walk_out());
+        assert_eq!(picker.at(), Path::new("/home/hec/workspace"));
+        assert_eq!(tree(&picker), ["  this folder", "  ..", "+ anna", "+ noob-cli"]);
+
+        // A row that is not a folder in the tree has no mark, and pressing
+        // where one would be does nothing rather than opening the wrong row.
+        for label in ["this folder", ".."] {
+            let index = at(&picker, label);
+            assert_eq!(picker.row(index).and_then(Row::open), None, "{label}");
+            assert!(!picker.toggle(index), "{label}");
+        }
+        assert!(!picker.toggle(99));
+    }
+
+    /// The bug a tree is most likely to have: shutting a folder that held the
+    /// cursor somewhere inside it has to leave the cursor on a real row, and
+    /// opening one above the cursor must not slide the cursor onto its
+    /// neighbour.
+    #[test]
+    fn the_cursor_lands_somewhere_real_when_a_folder_shuts_under_it() {
+        let mut picker = opened(&[]);
+        let workspace = at(&picker, "workspace");
+        picker.toggle(workspace);
+        picker.toggle(at(&picker, "noob-cli"));
+        let gui = at(&picker, "gui");
+        assert!(picker.point_at(gui));
+        assert_eq!(on(&picker), "gui");
+
+        // Two levels above it, shut. The row the cursor was on is not in the
+        // list any more, so it lands on the folder that swallowed it.
+        assert!(picker.toggle(workspace));
+        assert_eq!(on(&picker), "workspace");
+        assert_eq!(picker.cursor(), workspace);
+        assert!(picker.cursor() < picker.rows().len());
+
+        // A folder opening above the cursor moves every row under it down, and
+        // the cursor goes with the row it was on rather than staying at its
+        // index and reading as a different folder.
+        let desktop = at(&picker, "Desktop");
+        assert_eq!(picker.cursor(), at(&picker, "workspace"));
+        assert!(picker.toggle(desktop), "Desktop cannot be read, so it says so");
+        assert_eq!(on(&picker), "workspace");
+        assert_eq!(picker.cursor(), workspace + 1);
+        assert!(picker.toggle(desktop));
+        assert_eq!(picker.cursor(), workspace, "and back again when it shuts");
+
+        // The folder under the cursor opening keeps the cursor on it, mark and
+        // all, so the next keystroke still acts on the folder that was pressed.
+        assert!(picker.toggle(picker.cursor()));
+        assert_eq!(on(&picker), "workspace");
+        assert_eq!(picker.row(picker.cursor()).and_then(Row::open), Some(true));
+    }
+
+    /// A hidden folder that was opened takes what is inside it out of the list
+    /// with it. A child left behind when its parent has gone is a row indented
+    /// under nothing.
+    #[test]
+    fn a_folder_the_list_drops_takes_its_own_rows_with_it() {
+        let mut picker = opened(&[]);
+        assert!(picker.type_text(".ca"));
+        let cache = at(&picker, ".cache");
+        assert!(picker.toggle(cache));
+        assert!(tree(&picker).contains(&String::from("  + thumbs")));
+
+        assert!(picker.clear_filter());
+        assert!(!labels(&picker).contains(&String::from(".cache")));
+        assert!(
+            !labels(&picker).contains(&String::from("thumbs")),
+            "{:?}",
+            tree(&picker)
+        );
+        // And it is still open underneath, so bringing it back brings back what
+        // was showing rather than a folder that has to be opened again.
+        assert!(picker.type_text(".ca"));
+        assert!(tree(&picker).contains(&String::from("  + thumbs")));
     }
 
     /// Newest first, no duplicates, capped, and readable back.

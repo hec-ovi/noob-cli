@@ -183,6 +183,26 @@ const SETTING_VALUE_COLUMNS: usize = 28;
 /// listing, and what has been typed.
 const PICKER_HEAD_ROWS: f32 = 3.0;
 
+/// How far in from the left edge of a picker row its first mark sits.
+///
+/// A pane's row runs to its own edge because the band behind it is the width of
+/// the pane. The picker's band is green and solid, so it needs an edge of its
+/// own rather than starting under the glyph.
+const PICKER_ROW_PAD: f32 = 5.0;
+
+/// Columns a picker row spends on the mark that opens and shuts it, the mark
+/// included and a space after it, and columns a step further into the tree costs.
+///
+/// Every row reserves the mark's column whether it has a mark or not, so the
+/// folder glyphs line up in one column down the list instead of the ones with a
+/// plus in front of them standing out of the ones without.
+const PICKER_MARK_COLUMNS: usize = 2;
+const PICKER_INDENT_COLUMNS: usize = 2;
+/// The columns a row keeps for what it says, however deep it sits. Past this the
+/// indent stops growing: a name at depth twelve pushed off the right of the box
+/// is a row that says nothing.
+const PICKER_LABEL_COLUMNS: usize = 12;
+
 /// What the picker says on its button, and the whole of what it says.
 ///
 /// It used to spell out the folder that would be opened, which made the button
@@ -283,6 +303,11 @@ pub enum Hit {
     Menu,
     /// A row of the folder picker, by position in its list.
     PickerRow(usize),
+    /// The mark in front of a folder on that row, which puts what is inside it
+    /// into the list under it. Its own region inside the row and tested before
+    /// it: pressing the mark opens the folder, pressing the row selects it, and
+    /// one region for both would make every press do both things.
+    PickerMark(usize),
     /// The button that confirms the row the cursor is on, which is how the
     /// mouse chooses a folder without a keyboard.
     PickerOpen,
@@ -422,11 +447,13 @@ pub struct Layout {
     /// True while the folder picker is up, which is a shape of its own: there is
     /// no arrangement of panes and no prompt, because there is no agent yet.
     pub picking: bool,
-    /// Its box, its list, one panel per visible row of that list, and the button
-    /// that confirms. All empty when it is not up.
+    /// Its box, its list, one panel per visible row of that list, the mark that
+    /// opens and shuts each row that is a folder, and the button that confirms.
+    /// All empty when it is not up.
     pub picker: Panel,
     pub picker_list: Panel,
     pub picker_rows: Vec<(usize, Panel)>,
+    pub picker_marks: Vec<(usize, Panel)>,
     pub picker_open: Panel,
 
     /// True while the settings panel is up, which is the third shape of its own:
@@ -545,6 +572,7 @@ impl Layout {
                 picker: nowhere(),
                 picker_list: nowhere(),
                 picker_rows: Vec::new(),
+                picker_marks: Vec::new(),
                 picker_open: nowhere(),
                 in_settings: false,
                 settings: nowhere(),
@@ -562,7 +590,7 @@ impl Layout {
         // stale hit region left behind here would let a click reach a pane that
         // has no agent behind it.
         if let Some(picker) = shape.picker {
-            let (box_, list, rows, open) = place_picker(rest.inset(GAP), shape, picker);
+            let places = place_picker(rest.inset(GAP), shape, picker);
             return Layout {
                 width,
                 height,
@@ -580,10 +608,11 @@ impl Layout {
                 files_in: None,
                 input: nowhere(),
                 picking: true,
-                picker: box_,
-                picker_list: list,
-                picker_rows: rows,
-                picker_open: open,
+                picker: places.box_,
+                picker_list: places.list,
+                picker_rows: places.rows,
+                picker_marks: places.marks,
+                picker_open: places.open,
                 in_settings: false,
                 settings: nowhere(),
                 settings_list: nowhere(),
@@ -622,6 +651,7 @@ impl Layout {
                 picker: nowhere(),
                 picker_list: nowhere(),
                 picker_rows: Vec::new(),
+                picker_marks: Vec::new(),
                 picker_open: nowhere(),
                 in_settings: true,
                 settings: places.box_,
@@ -783,6 +813,7 @@ impl Layout {
             picker: nowhere(),
             picker_list: nowhere(),
             picker_rows: Vec::new(),
+            picker_marks: Vec::new(),
             picker_open: nowhere(),
             in_settings: false,
             settings: nowhere(),
@@ -832,6 +863,13 @@ impl Layout {
         // Nothing else exists while the picker is up, so this answers for the
         // whole window below the title strip.
         if self.picking {
+            // The mark before the row it sits in, because it sits inside it.
+            // The other way round the mark could never be pressed.
+            for (index, panel) in &self.picker_marks {
+                if panel.contains(x, y) {
+                    return Some(Hit::PickerMark(*index));
+                }
+            }
             for (index, panel) in &self.picker_rows {
                 if panel.contains(x, y) {
                     return Some(Hit::PickerRow(*index));
@@ -1178,7 +1216,37 @@ fn place_files(body: Panel, shape: &Shape) -> (Panel, Panel, Vec<(usize, Panel)>
     (list, diff, panels)
 }
 
-/// The folder picker's box, its list, the rows on screen and its button.
+/// Where the picker's pieces are. A struct rather than a tuple, the way the
+/// settings panel's are: five panels in a row is a call site nobody can read.
+struct PickerPlaces {
+    box_: Panel,
+    list: Panel,
+    rows: Vec<(usize, Panel)>,
+    marks: Vec<(usize, Panel)>,
+    open: Panel,
+}
+
+/// How far in from the left of a picker row its mark sits, and how wide that
+/// mark is, for a row at this depth in the tree.
+///
+/// One answer, so the region a press is tested against and the glyph that is
+/// drawn cannot end up in two places. The indent stops growing once the label
+/// is down to [`PICKER_LABEL_COLUMNS`]: a deep tree in a narrow box would
+/// otherwise push its names off the right of the list.
+fn picker_indent(depth: usize, column: f32, cols: usize) -> (f32, f32) {
+    let column = column.max(1.0);
+    let room = cols
+        .saturating_sub(PICKER_LABEL_COLUMNS + PICKER_MARK_COLUMNS + ROW_ICON_COLUMNS + 1)
+        / PICKER_INDENT_COLUMNS.max(1);
+    let steps = depth.min(room);
+    (
+        PICKER_ROW_PAD + (steps * PICKER_INDENT_COLUMNS) as f32 * column,
+        PICKER_MARK_COLUMNS as f32 * column,
+    )
+}
+
+/// The folder picker's box, its list, the rows on screen, the mark that opens
+/// and shuts each of them, and its button.
 ///
 /// Centred in `area` and no wider than [`PICKER_COLUMNS`], because the thing
 /// being read is a column of folder names: stretched across a 2200 pixel window
@@ -1192,9 +1260,15 @@ fn place_files(body: Panel, shape: &Shape) -> (Panel, Panel, Vec<(usize, Panel)>
 /// different number of entries used to resize and recentre the whole dialog
 /// under the pointer, so every row moved out from under the click that was about
 /// to happen.
-fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> (Panel, Panel, Vec<(usize, Panel)>, Panel) {
+fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> PickerPlaces {
     if area.w < 1.0 || area.h < 1.0 {
-        return (nowhere(), nowhere(), Vec::new(), nowhere());
+        return PickerPlaces {
+            box_: nowhere(),
+            list: nowhere(),
+            rows: Vec::new(),
+            marks: Vec::new(),
+            open: nowhere(),
+        };
     }
     let column = shape.pane_column.max(1.0);
     let line = Text::line_for(shape.pane_size);
@@ -1223,7 +1297,7 @@ fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> (Panel, Panel, V
     let heights = picker.heights();
     let back = text_geometry::scrollback_for(&heights, rows_fit, picker.first());
     let window = text_geometry::window(&heights, rows_fit, back);
-    let rows = (0..window.count)
+    let rows: Vec<(usize, Panel)> = (0..window.count)
         .map(|step| {
             // The full width of the list, so the whole row answers the click the
             // way a row of a file manager does, not just the characters of the
@@ -1233,6 +1307,19 @@ fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> (Panel, Panel, V
                 index,
                 Panel::new(list.x, list.y + step as f32 * line, list.w, line),
             )
+        })
+        .collect();
+    // A mark only where there is a folder to open: the folder being listed, the
+    // way out of it, a folder remembered from an earlier session and the message
+    // under a folder that could not be read are not branches of the tree.
+    let cols = cols_of(list, column);
+    let marks = rows
+        .iter()
+        .filter_map(|(index, row)| {
+            let entry = picker.row(*index)?;
+            entry.open()?;
+            let (indent, wide) = picker_indent(entry.depth(), column, cols);
+            Some((*index, Panel::new(row.x + indent, row.y, wide, row.h)))
         })
         .collect();
     // Exactly as wide as what it says, and what it says is one fixed word: the
@@ -1248,7 +1335,13 @@ fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> (Panel, Panel, V
         open_w,
         open_h,
     );
-    (box_, list, rows, open)
+    PickerPlaces {
+        box_,
+        list,
+        rows,
+        marks,
+        open,
+    }
 }
 
 /// The settings panel's box, its list, the rows on screen, the value at the end
@@ -2844,46 +2937,68 @@ fn folder_picker(scene: &mut Scene, frame: &Frame) {
         tint,
     );
 
+    let list_cols = cols_of(layout.picker_list, frame.pane_column);
     for (index, row) in &layout.picker_rows {
         let Some(entry) = picker.row(*index) else {
             continue;
         };
         let on = *index == picker.cursor();
         if on {
-            // The band and the mark the file explorer marks its open row with,
-            // rather than a block in a colour of its own: one language for "this
-            // is the row you are on" in the whole window.
-            scene.rect(row.fill(skin.strip));
-            scene.rect(Panel::new(row.x, row.y, MARK_W, row.h).fill(skin.edge_focus));
+            // Filled solid in the good colour, and written over in the darkest
+            // ink the palette has. The quiet band the file explorer marks its
+            // open row with was not enough here: the picker is a list of forty
+            // folders where the only question is which one Enter opens.
+            scene.rect(row.fill(skin.picked));
         }
         // Typing dims what it did not match instead of taking it away, so the
         // list you were reading is still the list in front of you. The answer
         // comes from the model, which is the same answer the arrow keys walk by:
         // a row cannot be dim here and bright to the keyboard.
-        let tint = match (on, picker.matched(entry)) {
-            (true, _) => skin.bright,
-            (false, true) => skin.body,
-            (false, false) => skin.dim,
+        let tint = match (on, picker.matched(entry), entry) {
+            (true, _, _) => skin.picked_ink,
+            (false, false, _) => skin.dim,
+            (false, true, PickerRow::Locked { .. }) => skin.bad,
+            (false, true, _) => skin.body,
         };
         let icon = match entry {
             PickerRow::Here => icons::FOLDER_OPEN,
             PickerRow::Up => icons::UP,
             PickerRow::Recent(_) => icons::RECENT,
-            PickerRow::Folder(_) => icons::FOLDER,
+            PickerRow::Folder { .. } => icons::FOLDER,
+            PickerRow::Locked { .. } => icons::LOCKED,
         };
-        let room = cols.saturating_sub(ROW_ICON_COLUMNS + 1).max(1);
+        // The mark that opens and shuts the folder, where the layout put it, so
+        // the glyph is inside the region that answers for pressing it.
+        let (indent, wide) = picker_indent(entry.depth(), frame.pane_column, list_cols);
+        if let Some(open) = entry.open() {
+            let mark = match open {
+                true => icons::COLLAPSE,
+                false => icons::EXPAND,
+            };
+            let hot = frame.hot == Some(Hit::PickerMark(*index));
+            let ink = match (on, hot) {
+                (true, _) => skin.picked_ink,
+                (false, true) => skin.bright,
+                (false, false) => tint,
+            };
+            say(
+                scene,
+                vec![Run::icon(mark.to_string(), ink)],
+                Panel::new(row.x + indent, row.y, wide, line),
+                ink,
+            );
+        }
+        let start = indent + wide;
+        let room = cols
+            .saturating_sub(ROW_ICON_COLUMNS + 1 + (start / frame.pane_column.max(1.0)) as usize)
+            .max(1);
         say(
             scene,
             vec![
                 Run::icon(icon.to_string(), tint),
                 Run::tinted(format!(" {}", clip(&picker.label(entry), room)), tint),
             ],
-            Panel::new(
-                row.x + MARK_W + 3.0,
-                row.y,
-                (row.w - MARK_W - 3.0).max(1.0),
-                line,
-            ),
+            Panel::new(row.x + start, row.y, (row.w - start).max(1.0), line),
             tint,
         );
     }
@@ -7377,6 +7492,15 @@ mod tests {
         }
     }
 
+    /// What the picker's row at `index` says, which is the folder's name for a
+    /// row that is one.
+    fn said(picker: &Picker, index: usize) -> String {
+        picker
+            .row(index)
+            .map(|row| picker.label(row))
+            .unwrap_or_default()
+    }
+
     fn a_picker(inside: &[&str], recents: &[&str]) -> Picker {
         Picker::open(
             Box::new(crate::picker::Fixed(
@@ -7450,32 +7574,36 @@ mod tests {
             assert!(text.contains(wanted), "{wanted:?} is not on screen: {text}");
         }
 
-        // The row the cursor is on is banded and marked, the same way the file
-        // explorer marks the file it is showing.
+        // The row the cursor is on is a filled green band with the dark ink
+        // written over it. Item 4: the quiet band the file explorer marks its
+        // open row with said almost nothing here.
         let (index, cursor_row) = layout.picker_rows[0];
         assert_eq!(index, picker.cursor());
         assert!(
-            covered(&out, cursor_row, cursor_row.h, out.skin.strip),
+            covered(&out, cursor_row, cursor_row.h, out.skin.picked),
             "the cursor's row has no band"
-        );
-        assert!(
-            out.scene.rects.iter().any(|rect| {
-                let [x, y, w, _] = rect.xywh();
-                (x - cursor_row.x).abs() < 0.01
-                    && (y - cursor_row.y).abs() < 0.01
-                    && (w - MARK_W).abs() < 0.01
-                    && rect.rgba() == out.skin.edge_focus
-            }),
-            "the cursor's row has no mark down its edge"
         );
         // And no other row is banded, or every row would read as the one.
         let banded = out
             .scene
             .rects
             .iter()
-            .filter(|rect| rect.rgba() == out.skin.strip)
+            .filter(|rect| rect.rgba() == out.skin.picked)
             .count();
         assert_eq!(banded, 1, "more than one row is banded");
+        // Everything written on that band is the dark ink. Green text on a
+        // green band is the one thing the whole palette is built to avoid.
+        let ink: Vec<Option<[u8; 4]>> = out
+            .scene
+            .texts
+            .iter()
+            .filter(|text| (text.at.y - cursor_row.y).abs() < 0.01)
+            .flat_map(|text| text.runs.iter().map(|run| run.color))
+            .collect();
+        assert!(!ink.is_empty(), "the row on the band says nothing");
+        for tint in ink {
+            assert_eq!(tint, Some(out.skin.picked_ink), "not the dark ink");
+        }
 
         // Nothing hangs off the surface.
         for rect in &out.scene.rects {
@@ -7660,12 +7788,10 @@ mod tests {
         assert_eq!(tint_of(&after, "gui"), vec![Some(after.skin.dim)]);
         assert_eq!(tint_of(&after, "docs"), vec![Some(after.skin.dim)]);
         assert_eq!(tint_of(&before, "gui"), vec![Some(before.skin.body)]);
-        // The match is where the cursor went, so it is the bright row.
-        assert_eq!(
-            picker.row(picker.cursor()),
-            Some(&PickerRow::Folder(String::from("crates")))
-        );
-        assert_eq!(tint_of(&after, "crates"), vec![Some(after.skin.bright)]);
+        // The match is where the cursor went, so it is the row on the band, and
+        // what is written on a green band is the dark ink.
+        assert_eq!(said(&picker, picker.cursor()), "crates");
+        assert_eq!(tint_of(&after, "crates"), vec![Some(after.skin.picked_ink)]);
 
         // One rule: the arrows walk the matches, and a click still lands on a
         // dim row, so what the pointer can reach is a superset of what the
@@ -7674,13 +7800,121 @@ mod tests {
             .layout
             .picker_rows
             .iter()
-            .find(|(index, _)| picker.row(*index) == Some(&PickerRow::Folder(String::from("gui"))))
+            .find(|(index, _)| said(&picker, *index) == "gui")
             .copied()
             .expect("the dim row is still placed");
         let (x, y) = middle(dim.1);
         assert_eq!(after.layout.hit(x, y), Some(Hit::PickerRow(dim.0)));
         assert!(picker.point_at(dim.0), "a click on a dim row selects it");
         assert_eq!(picker.confirm(), Some(std::path::PathBuf::from("/home/hec/gui")));
+    }
+
+    /// Item 4: the mark in front of a folder is a region of its own inside the
+    /// row, pressing it opens the folder where it stands, and what comes out is
+    /// drawn one step further in than the folder it came from.
+    #[test]
+    fn the_mark_in_front_of_a_folder_is_its_own_target() {
+        let mut picker = a_picker(&["gui", "crates"], &["/home/hec/workspace"]);
+        let out = render_picker(&picker, 1205.0, 791.0, None);
+
+        // A mark only where there is a folder to open. The remembered folder,
+        // the folder being listed and the way out of it are how the list is
+        // walked rather than branches of the tree.
+        let marked: Vec<String> = out
+            .layout
+            .picker_marks
+            .iter()
+            .map(|(index, _)| said(&picker, *index))
+            .collect();
+        assert_eq!(marked, ["crates", "gui"]);
+
+        // Each one sits inside its own row, and the row still answers for the
+        // rest of itself: the press that opens a folder and the press that
+        // selects it are different presses.
+        for (index, mark) in &out.layout.picker_marks {
+            let row = out
+                .layout
+                .picker_rows
+                .iter()
+                .find(|(at, _)| at == index)
+                .map(|(_, row)| *row)
+                .expect("a mark with no row under it");
+            assert!(mark.w > 1.0 && (mark.h - row.h).abs() < 0.01, "{mark:?}");
+            assert!(
+                mark.x >= row.x && mark.x + mark.w <= row.x + row.w,
+                "the mark is outside its row: {mark:?} in {row:?}"
+            );
+            let (x, y) = middle(*mark);
+            assert_eq!(out.layout.hit(x, y), Some(Hit::PickerMark(*index)));
+            assert_eq!(
+                out.layout.hit(mark.x + mark.w + 2.0, y),
+                Some(Hit::PickerRow(*index)),
+                "the row beside the mark stopped answering"
+            );
+        }
+        // It lights up under the pointer, so it reads as something to press.
+        let (index, mark) = out.layout.picker_marks[0];
+        let warm = render_picker(&picker, 1205.0, 791.0, Some(Hit::PickerMark(index)));
+        let lit = |out: &Rendered, at: Panel| -> Vec<Option<[u8; 4]>> {
+            out.scene
+                .texts
+                .iter()
+                .filter(|text| (text.at.x - at.x).abs() < 0.01 && (text.at.y - at.y).abs() < 0.01)
+                .flat_map(|text| text.runs.iter().map(|run| run.color))
+                .collect()
+        };
+        assert_eq!(lit(&warm, mark), vec![Some(warm.skin.bright)]);
+        assert_eq!(lit(&out, mark), vec![Some(out.skin.body)]);
+
+        // Pressing it puts what is inside the folder in the list under it, at a
+        // deeper indent, and the mark turns over.
+        assert!(picker.toggle(index));
+        let after = render_picker(&picker, 1205.0, 791.0, None);
+        let deeper = after
+            .layout
+            .picker_marks
+            .iter()
+            .find(|(at, _)| picker.row(*at).map(PickerRow::depth) == Some(1))
+            .copied()
+            .expect("nothing came out of the folder");
+        assert!(
+            deeper.1.x > mark.x,
+            "a child is not drawn further in than its parent: {:?} then {:?}",
+            mark,
+            deeper.1
+        );
+        let glyph = |out: &Rendered, at: Panel| -> String {
+            out.scene
+                .texts
+                .iter()
+                .filter(|text| (text.at.x - at.x).abs() < 0.01 && (text.at.y - at.y).abs() < 0.01)
+                .flat_map(|text| text.runs.iter().map(|run| run.text.as_str()))
+                .collect()
+        };
+        assert_eq!(glyph(&out, mark), icons::EXPAND.to_string());
+        let (_, reopened) = after
+            .layout
+            .picker_marks
+            .iter()
+            .find(|(at, _)| *at == index)
+            .copied()
+            .expect("the folder that was opened lost its mark");
+        assert_eq!(glyph(&after, reopened), icons::COLLAPSE.to_string());
+
+        // And the name beside it is still drawn inside the box, however deep it
+        // sits: the indent stops before it pushes a row off the right.
+        for (index, row) in &after.layout.picker_rows {
+            let said = said(&picker, *index);
+            assert!(
+                after
+                    .scene
+                    .texts
+                    .iter()
+                    .any(|text| text.runs.iter().any(|run| run.text.trim() == said)),
+                "{said:?} is not drawn"
+            );
+            assert!(row.x + row.w <= after.layout.picker_list.x + after.layout.picker_list.w + 0.01);
+        }
     }
 
     /// A folder with more subfolders than the box has rows scrolls. The rows
