@@ -755,6 +755,78 @@ mod tests {
         }
     }
 
+    /// Every ink stands off the surface it is written on, by the measure a
+    /// contrast checker uses rather than by adding the channels up.
+    ///
+    /// This became a claim worth making when the colours started arriving on
+    /// the screen as they were written. Until then a fill was drawn lighter
+    /// than the settings file asked for, so the pane and the bar under the text
+    /// were not the colours this reads, and neither was the answer. 3:1 is the
+    /// floor WCAG puts under large text and under anything that is not text at
+    /// all; the ink here is a 13 to 14 pixel monospace face, so this says the
+    /// palette is not unreadable rather than that it is comfortable.
+    #[test]
+    fn every_ink_stands_off_the_surface_it_is_written_on() {
+        use crate::syntax::Token;
+        let linear = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let relative = |c: [u8; 3]| {
+            0.2126 * linear(c[0]) + 0.7152 * linear(c[1]) + 0.0722 * linear(c[2])
+        };
+        let contrast = |ink: [u8; 4], under: [u8; 3]| {
+            let (a, b) = (relative([ink[0], ink[1], ink[2]]), relative(under));
+            (a.max(b) + 0.05) / (a.min(b) + 0.05)
+        };
+        for name in crate::config::THEMES {
+            let config = crate::config::theme(name).expect(name);
+            let skin = Skin::from(&config);
+
+            let mut inks: Vec<(String, [u8; 4])> = [
+                Tone::Dim,
+                Tone::Body,
+                Tone::Bright,
+                Tone::Good,
+                Tone::Bad,
+                Tone::Minus,
+                Tone::Plus,
+            ]
+            .into_iter()
+            .chain(Kind::ALL.into_iter().map(Tone::Call))
+            .map(|tone| (format!("{tone:?}"), skin.tone(tone)))
+            .collect();
+            for token in [
+                Token::Comment,
+                Token::Str,
+                Token::Number,
+                Token::Keyword,
+                Token::Markup,
+            ] {
+                inks.push((format!("{token:?}"), skin.token(token).expect(name)));
+            }
+            for slot in 0..skin.gauge_ink.len() {
+                inks.push((format!("gauge {slot}"), skin.gauge_ink[slot]));
+            }
+            for (what, ink) in &inks {
+                let ratio = contrast(*ink, config.panel);
+                assert!(ratio >= 3.0, "{name}: {what} is {ratio:.2}:1 on the pane");
+            }
+            // The bar is the one other surface with writing on it: the window's
+            // name in the text tint, the version and the buttons in the dim
+            // one. It is the lightest surface in the window, so it is where an
+            // ink runs out of room first.
+            for (what, ink) in [("the title", skin.title), ("the version", skin.dim)] {
+                let ratio = contrast(ink, config.bar);
+                assert!(ratio >= 3.0, "{name}: {what} is {ratio:.2}:1 on the bar");
+            }
+        }
+    }
+
     #[test]
     fn plain_syntax_has_no_color_of_its_own() {
         assert!(Skin::default().token(crate::syntax::Token::Plain).is_none());

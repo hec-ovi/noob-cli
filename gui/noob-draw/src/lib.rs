@@ -25,10 +25,22 @@
 //! `vec3` to 16 bytes and Rust does not. A `{[f32;4], [f32;4], f32, [f32;3]}`
 //! is 48 bytes here and 64 there, which silently corrupted every rectangle
 //! after the first. [`Rect`] is three `[f32; 4]`s and the shader agrees.
+//!
+//! **A colour in the settings file is the colour on the screen.** A palette is
+//! written the way a colour picker writes one, in sRGB, and the surface this
+//! draws into is usually an sRGB one, which encodes whatever a shader wrote on
+//! its way into the texture. A colour handed straight to the shader therefore
+//! arrives lighter than it was asked for: the bar, `#0e2e1e`, was read back off
+//! the window as `#427660`. [`srgb_to_linear`] undoes that encode before the
+//! colour reaches the shader, and [`text_color_mode`] tells glyphon to do the
+//! same to a glyph's colour in its own shader. Both read one fact, whether the
+//! surface format is an sRGB one, so rectangles and text of the same configured
+//! colour cannot come out different shades. Glyphs were already right and
+//! rectangles were not, which is exactly the drift the single flag prevents.
 
 use glyphon::{
-    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
-    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
+    Attrs, Buffer, Cache, Color, ColorMode, Family, FontSystem, Metrics, Resolution, Shaping,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
 };
 use std::ops::Range;
 
@@ -262,6 +274,62 @@ impl Rect {
     /// reason again: a test asserts the shape of a rectangle without a GPU.
     pub fn extra(&self) -> [f32; 4] {
         self.extra
+    }
+
+    /// The same rectangle with its fill in the space the surface writes.
+    ///
+    /// An sRGB surface encodes what the shader gives it, so the fill goes in as
+    /// the linear value that encodes back to the colour that was asked for. A
+    /// surface that encodes nothing takes the colour as it is. Alpha is a
+    /// coverage rather than a colour and is never converted, on either path.
+    pub fn for_surface(mut self, srgb: bool) -> Rect {
+        if srgb {
+            for channel in &mut self.rgba[..3] {
+                *channel = srgb_to_linear(*channel);
+            }
+        }
+        self
+    }
+}
+
+/// One channel of an sRGB colour as the linear value behind it.
+///
+/// The formula the sRGB standard writes, and character for character the one in
+/// glyphon's own shader, so a glyph and a rectangle of the same colour are
+/// converted by the same curve rather than by two that nearly agree.
+pub fn srgb_to_linear(channel: f32) -> f32 {
+    if channel <= 0.04045 {
+        channel / 12.92
+    } else {
+        ((channel + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// The encode an sRGB surface applies on the way into the texture: the inverse
+/// of [`srgb_to_linear`].
+///
+/// Nothing in the draw path calls this. It is here so a test can put a palette
+/// colour through both halves and say what the screen ends up showing, which is
+/// the only claim about colour worth making.
+pub fn linear_to_srgb(channel: f32) -> f32 {
+    if channel <= 0.003_130_8 {
+        channel * 12.92
+    } else {
+        1.055 * channel.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// Which way glyphon converts a glyph's colour, from the same fact
+/// [`Rect::for_surface`] reads.
+///
+/// `Accurate` is glyphon's sRGB to linear conversion, which is what an sRGB
+/// surface needs and what its default already was. `Web` passes the colour
+/// through untouched, which is what a surface that encodes nothing needs.
+pub fn text_color_mode(srgb: bool) -> ColorMode {
+    if srgb {
+        ColorMode::Accurate
+    } else {
+        ColorMode::Web
     }
 }
 
@@ -593,6 +661,14 @@ pub struct Renderer {
     bind_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     capacity: usize,
+    /// Whether the surface encodes what is written to it. The one fact both
+    /// colour paths read: it picks the conversion for a rectangle's fill and
+    /// the [`ColorMode`] the glyph atlas was built with.
+    srgb: bool,
+    /// Both layers' rectangles, in the space the surface writes, reused every
+    /// frame. Held here rather than built fresh so converting a colour costs no
+    /// allocation per frame.
+    written: Vec<Rect>,
     font_system: FontSystem,
     swash: SwashCache,
     atlas: TextAtlas,
@@ -681,7 +757,14 @@ impl Renderer {
 
         let cache = Cache::new(device);
         let viewport = Viewport::new(device, &cache);
-        let mut atlas = TextAtlas::new(device, &gpu.queue, &cache, format);
+        let srgb = format.is_srgb();
+        let mut atlas = TextAtlas::with_color_mode(
+            device,
+            &gpu.queue,
+            &cache,
+            format,
+            text_color_mode(srgb),
+        );
         let text = TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
         let over_text =
             TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
@@ -693,6 +776,8 @@ impl Renderer {
             bind_layout,
             bind_group,
             capacity,
+            srgb,
+            written: Vec::new(),
             font_system: icon_fonts(),
             swash: SwashCache::new(),
             atlas,
@@ -737,16 +822,21 @@ impl Renderer {
         gpu.queue
             .write_buffer(&self.uniform, 0, bytemuck::cast_slice(&[w, h, 0.0f32, 0.0]));
         let (base, over) = scene.instances();
-        if !scene.rects.is_empty() {
+        // The overlay's rectangles go directly after the base layer's, which is
+        // what makes the second instance range a range and not a second
+        // binding, and every fill lands in the space the surface writes on the
+        // way past.
+        self.written.clear();
+        self.written.extend(
+            scene
+                .rects
+                .iter()
+                .chain(&scene.over_rects)
+                .map(|rect| rect.for_surface(self.srgb)),
+        );
+        if !self.written.is_empty() {
             gpu.queue
-                .write_buffer(&self.storage, 0, bytemuck::cast_slice(&scene.rects));
-        }
-        if !scene.over_rects.is_empty() {
-            // Directly after the base layer in the same buffer, which is what
-            // makes the second instance range a range and not a second binding.
-            let after = (scene.rects.len() * std::mem::size_of::<Rect>()) as u64;
-            gpu.queue
-                .write_buffer(&self.storage, after, bytemuck::cast_slice(&scene.over_rects));
+                .write_buffer(&self.storage, 0, bytemuck::cast_slice(&self.written));
         }
 
         // Buffers must outlive `prepare`, which borrows them through TextArea.
@@ -1241,6 +1331,113 @@ mod tests {
         assert!(scene.rects.is_empty() && scene.texts.is_empty());
         assert_eq!(scene.over_rects.len(), 1);
         assert_eq!(scene.over_texts.len(), 1);
+    }
+
+    /// What the surface stores for one channel of a rectangle's fill: the
+    /// shader writes what [`Rect::for_surface`] handed it, and an sRGB surface
+    /// encodes that on the way into the texture.
+    fn rect_on_screen(channel: u8, srgb: bool) -> u8 {
+        let fill = [channel as f32 / 255.0, 0.0, 0.0, 1.0];
+        let written = Rect::new(0.0, 0.0, 1.0, 1.0, fill).for_surface(srgb).rgba()[0];
+        let stored = if srgb { linear_to_srgb(written) } else { written };
+        (stored * 255.0).round() as u8
+    }
+
+    /// The same for a glyph, standing in for glyphon's own vertex shader: it
+    /// converts the colour in `Accurate` and passes it through in `Web`, and
+    /// the surface then does whatever it does to both alike.
+    fn glyph_on_screen(channel: u8, srgb: bool) -> u8 {
+        let colour = channel as f32 / 255.0;
+        let written = match text_color_mode(srgb) {
+            ColorMode::Accurate => srgb_to_linear(colour),
+            ColorMode::Web => colour,
+        };
+        let stored = if srgb { linear_to_srgb(written) } else { written };
+        (stored * 255.0).round() as u8
+    }
+
+    /// The rule the whole palette rests on, said without a GPU: a colour in the
+    /// settings file is the colour on the screen. Every channel value, both
+    /// paths, and both kinds of surface.
+    #[test]
+    fn a_colour_in_the_settings_file_is_the_colour_on_the_screen() {
+        for srgb in [true, false] {
+            for channel in 0..=255u8 {
+                assert_eq!(
+                    rect_on_screen(channel, srgb),
+                    channel,
+                    "a rectangle of {channel} on an srgb={srgb} surface"
+                );
+                assert_eq!(
+                    glyph_on_screen(channel, srgb),
+                    channel,
+                    "a glyph of {channel} on an srgb={srgb} surface"
+                );
+            }
+        }
+    }
+
+    /// And the two paths land on the same shade, which is the part that was
+    /// wrong: glyphs were converted and rectangles were not, so text and a fill
+    /// of one configured colour were two colours on the screen.
+    #[test]
+    fn a_rectangle_and_a_glyph_of_one_colour_are_one_shade() {
+        for srgb in [true, false] {
+            for channel in 0..=255u8 {
+                assert_eq!(
+                    rect_on_screen(channel, srgb),
+                    glyph_on_screen(channel, srgb),
+                    "{channel} on an srgb={srgb} surface"
+                );
+            }
+        }
+        // Both take their instruction from the one fact about the surface, so
+        // there is nowhere for a future format change to move one and not the
+        // other.
+        assert_eq!(text_color_mode(true), ColorMode::Accurate);
+        assert_eq!(text_color_mode(false), ColorMode::Web);
+        let fill = [0.5, 0.25, 0.75, 0.6];
+        let plain = Rect::new(0.0, 0.0, 1.0, 1.0, fill);
+        assert_eq!(plain.for_surface(false).rgba(), fill, "nothing to undo");
+        assert_ne!(plain.for_surface(true).rgba(), fill, "an encode to undo");
+        assert_eq!(
+            plain.for_surface(true).rgba()[3],
+            fill[3],
+            "alpha is a coverage, not a colour"
+        );
+    }
+
+    /// The measurement this was found by, kept as the test. The bar is
+    /// `#0e2e1e` in the settings file and the window showed `#427660`: that
+    /// colour put through the sRGB encode one more time than it should have
+    /// been, which is why a shaded window read as bright green.
+    #[test]
+    fn the_bar_is_the_shade_the_settings_file_asks_for() {
+        let asked = [0x0eu8, 0x2e, 0x1e];
+        let showed = [0x42u8, 0x76, 0x60];
+        for (channel, was) in asked.into_iter().zip(showed) {
+            let unconverted = (linear_to_srgb(channel as f32 / 255.0) * 255.0).round() as u8;
+            assert_eq!(unconverted, was, "the shade the window used to show");
+            assert_eq!(rect_on_screen(channel, true), channel, "and shows now");
+        }
+    }
+
+    /// The two curves are each other's inverse across the whole range,
+    /// including the straight piece at the bottom where the two formulas meet.
+    #[test]
+    fn the_two_conversions_undo_each_other() {
+        assert_eq!(srgb_to_linear(0.0), 0.0);
+        assert_eq!(srgb_to_linear(1.0), 1.0);
+        assert_eq!(linear_to_srgb(0.0), 0.0);
+        assert!((linear_to_srgb(1.0) - 1.0).abs() < 1e-6);
+        for step in 0..=1000 {
+            let colour = step as f32 / 1000.0;
+            let round = linear_to_srgb(srgb_to_linear(colour));
+            assert!((round - colour).abs() < 1e-5, "{colour} came back {round}");
+        }
+        // Dark is where the mistake was loudest: near black, the encode lifts a
+        // colour by a factor of four.
+        assert!(srgb_to_linear(0.05) < 0.005);
     }
 
     /// A negative size would flip the sign of the distance field and paint the

@@ -130,14 +130,7 @@ impl Gpu {
         let surface_caps = surface.get_capabilities(&adapter);
         let alpha_mode = pick_alpha(&surface_caps.alpha_modes);
         let present_mode = pick_present(&surface_caps.present_modes);
-        // An sRGB surface so colors written as ordinary values land where they
-        // are expected; the first non-sRGB format otherwise.
-        let format = surface_caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(surface_caps.formats[0]);
+        let format = pick_format(&surface_caps.formats);
 
         let size = window.inner_size();
         let config = wgpu::SurfaceConfiguration {
@@ -246,6 +239,23 @@ fn pick_alpha(modes: &[wgpu::CompositeAlphaMode]) -> wgpu::CompositeAlphaMode {
     modes.first().copied().unwrap_or(wgpu::CompositeAlphaMode::Auto)
 }
 
+/// An sRGB surface when the surface offers one, whatever it offers first
+/// otherwise.
+///
+/// An sRGB format encodes what a shader writes on the way into the texture,
+/// which is the correct place for that to happen and is what makes blending
+/// physically right. It is not free, though: a colour that goes to the shader
+/// unconverted comes out of that encode lighter than it was asked for, and the
+/// window shipped that way. The rule and the conversion both live in
+/// `noob-draw`, which asks this format whether it is an sRGB one.
+fn pick_format(formats: &[wgpu::TextureFormat]) -> wgpu::TextureFormat {
+    formats
+        .iter()
+        .copied()
+        .find(|f| f.is_srgb())
+        .unwrap_or(formats[0])
+}
+
 /// Mailbox when it exists: a burst of agent output must not queue frames behind
 /// the compositor. Fifo is guaranteed present and is the honest fallback.
 fn pick_present(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
@@ -303,6 +313,24 @@ mod tests {
     fn an_empty_capability_list_does_not_panic() {
         assert_eq!(pick_alpha(&[]), Alpha::Auto);
         assert_eq!(pick_present(&[]), Present::Fifo);
+    }
+
+    /// Which format is chosen decides whether a colour is encoded on its way
+    /// into the texture, and `noob-draw` converts or does not convert on the
+    /// answer. A surface with both kinds must land on the sRGB one, because
+    /// that is the case the draw layer's conversion is written against and the
+    /// case every machine this has run on reports.
+    #[test]
+    fn an_srgb_surface_is_chosen_when_the_surface_offers_one() {
+        use wgpu::TextureFormat as Format;
+        let chosen = pick_format(&[Format::Bgra8Unorm, Format::Bgra8UnormSrgb]);
+        assert_eq!(chosen, Format::Bgra8UnormSrgb);
+        assert!(chosen.is_srgb());
+        // And a surface with no sRGB format at all still gets a usable one,
+        // which the draw layer then writes to without converting.
+        let plain = pick_format(&[Format::Bgra8Unorm, Format::Rgba8Unorm]);
+        assert_eq!(plain, Format::Bgra8Unorm);
+        assert!(!plain.is_srgb());
     }
 
     #[test]

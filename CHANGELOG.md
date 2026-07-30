@@ -7,6 +7,26 @@ tags rather than here; this file starts where it was added.
 
 ### Fixed
 
+- Every colour in the window is the colour the settings file names. The palette
+  went to the shader as it was written, and the surface it is drawn into encodes
+  what a shader gives it on the way into the texture, so every fill landed on the
+  screen lighter than it was set: the bar is `#0e2e1e` in the file and the window
+  showed `#427660`, which is why a shaded window read as bright green rather than
+  as the near black strip it asks for. Text was never wrong, because glyphon
+  converts a glyph's colour in its own shader, so a fill and a line of writing of
+  one configured colour were two different colours on the screen. Both paths now
+  convert, from the same one fact about the surface, so they cannot come apart
+  again. Read back off the window, the bar, the pane and the prompt are the hex
+  the file names to the digit. The four presets move with it, and by a long way:
+  amber's pane was `#382e22` and is `#0a0704`, ice's was `#0d2638` and is
+  `#01050a`, plum's was `#2a1c38` and is `#06030a`. Nothing became harder to
+  read, because the ink is unchanged and every surface under it is darker: the
+  version beside the window's name went from 1.5:1 against the title bar to
+  4.2:1, and the lowest any writing in any preset now measures is 3.5:1. What did
+  get fainter is the chrome drawn at low weight over those surfaces, the pane
+  edges, the scroll track, the unlit half of a gauge and the band behind selected
+  text: they were being lifted by the same mistake and are now as faint as their
+  weight says. No preset was retuned to suit the new output.
 - The widget list is a submenu, and picking a widget switches it. Three things
   were wrong with the list that shipped. It opened downwards into the menu's own
   column, which is an accordion rather than a submenu: the Widgets row now stays
