@@ -7,7 +7,7 @@ approximating it.
 
 ## Why it needs no shader
 
-Every frame is a list of z-sorted discs. CLIppy already draws a clean
+Every frame is a list of z-sorted discs. NO0B already draws a clean
 antialiased disc with `Panel::fill(rgba).radius(w / 2)` through the existing
 rounded-rect SDF, and painter's order is just the order rects are pushed. So the
 whole animation is arithmetic that emits rects: no second pipeline, no WGSL, no
@@ -19,9 +19,11 @@ by powers of two from 256.
 
 ## The state we need
 
-`STATE_TO_MODE` maps `working` to the `orbits` mode. The idle state is not the
-library's `searching` globe: it is the ASCII face loop in `docs/asciis`, per the
-later decision, rendered as tinted dots. So only `orbits` is ported.
+`STATE_TO_MODE` maps `working` to the `orbits` mode, and that is the only mode
+ported. There are two states and no third: `orbits` running while the agent is
+working, and the same `orbits` frozen at `t = 0` and fainter, without its
+particles, when it is not. The ASCII face loop that was going to fill the idle
+state is dropped (decision 3).
 
 Preset at size 64: `speed 1.885`, `count 1`, `size 1`, so the base profile is
 used unscaled.
@@ -103,29 +105,35 @@ skipping any with alpha below 0.02 and clamping radius to at least `rMin`.
 ## Ink, and what it means here
 
 The reference is greyscale on paper: `ink` is 0 for darkest, and on a dark
-substrate it is mirrored to `1 - ink` so near dots read bright. CLIppy is a dark
+substrate it is mirrored to `1 - ink` so near dots read bright. NO0B is a dark
 window, so mirror it, and map the resulting value through the theme's accent
 rather than to grey. Near particles land bright, far ghost paths recede. Depth
 is carried by radius and weight only, never by blur.
 
 ## Where it lives and when it runs
 
-A 66px block at the window's top left, above the panes: 64 plus a one pixel
-margin each side. Idle plays the ASCII face loop; the orb replaces it while the
-agent is working, with a transition between the two.
+`gui/clippy/src/orb.rs`, drawn by `view::title_bar` into the square at the left
+end of the title strip. That square is `view::ORB_W`, which is the strip's height,
+30px, not the 66px block first sketched: the strip's text starts after it, so the
+strip reads `[orb] NO0B \u{25b8} version` left to right. `radiusScale(size, pow)`
+is passed that real size rather than a 64px result scaled down.
+
+At 30px the working state is 516 discs a frame and the resting state 480, which
+the rectangle buffer holds by growing once to 1024.
 
 **It must not free-run.** `noob-gpu` records that a previous version rendered
-static text at 3,500 fps and spent a third of the graphics pipe doing it. Follow
-the avatar's precedent: extend `about_to_wait` with a `WaitUntil` deadline that
-exists only while the orb is visible and animating, and stops at the end of a
-turn. Never `ControlFlow::Poll`.
+static text at 3,500 fps and spent a third of the graphics pipe doing it. So
+`about_to_wait` holds a `WaitUntil` deadline (`orb_deadline`, 30 frames a second)
+that exists only while `State::phase.busy()`, and it is composed with the
+monitor's sampling deadline by `soonest` rather than replacing it. Never
+`ControlFlow::Poll`.
 
-The clock is `App::epoch`, already sampled as elapsed milliseconds for the
-avatar. `t` in the formulas above is seconds multiplied by the preset speed of
-1.885.
+The clock is `App::epoch`, passed into the scene as `Frame::clock` in seconds
+rather than read inside it, so the same clock builds the same frame twice. `t` in
+the formulas above is that multiplied by the preset speed of 1.885.
 
 ## Cost to watch
 
 Text is re-shaped from scratch every frame. The orb itself is only rects, so it
-is cheap, but anything that puts animated *text* on screen at the same rate (the
-ASCII idle loop is roughly 4,700 tinted cells) wants buffer caching first.
+is cheap, but anything that puts animated *text* on screen at the same rate wants
+buffer caching first.

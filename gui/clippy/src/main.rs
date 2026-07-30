@@ -34,6 +34,7 @@ mod link;
 mod markdown;
 mod menu;
 mod monitor;
+mod orb;
 mod packaging;
 mod picker;
 mod prompt;
@@ -80,6 +81,11 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// redraw-on-change rule; the rule is kept by not sampling when nobody looks.
 const SAMPLE_EVERY: Duration = Duration::from_millis(500);
 
+/// How often the orb gets a new frame while a turn is running. Thirty a second
+/// is enough for an orbit to read as motion and it costs 516 rectangles a frame,
+/// which is one draw call.
+const ORB_EVERY: Duration = Duration::from_millis(33);
+
 /// How far the pointer has to move with a tab held before it counts as a drag
 /// rather than a click that wobbled.
 const DRAG_SLOP: f64 = 5.0;
@@ -108,6 +114,38 @@ fn shade_request(
         (true, None) => (None, None),
         (false, was) => (Some(MIN_SIZE), was),
     }
+}
+
+/// When the orb wants its next frame, given the deadline it is already holding.
+///
+/// `None` is the point of this function: the clock exists only while there is a
+/// turn to animate and disappears the moment the turn ends. An earlier version of
+/// this window free-ran at 3,500 frames a second drawing text that was not
+/// changing and spent a third of the graphics pipe on it, which is what
+/// `noob-gpu` warns about and why nothing here ever asks for `ControlFlow::Poll`.
+///
+/// Pure so the rule can be tested without a window: an animation deadline is not
+/// something to find out about by watching a fan.
+fn orb_deadline(now: Instant, busy: bool, pending: Option<Instant>) -> Option<Instant> {
+    if !busy {
+        return None;
+    }
+    match pending {
+        // Still waiting on the frame that was asked for.
+        Some(at) if now < at => Some(at),
+        _ => Some(now + ORB_EVERY),
+    }
+}
+
+/// The one moment the event loop waits until, out of every clock the window
+/// holds.
+///
+/// Composed rather than assigned. Two clocks that each set the control flow
+/// leave whichever ran last in charge, and the other one either wakes late or
+/// never wakes at all, which is a monitor that stops sampling as soon as
+/// something animates.
+fn soonest(deadlines: [Option<Instant>; 2]) -> Option<Instant> {
+    deadlines.into_iter().flatten().min()
 }
 
 /// The folder named on the command line, if one was.
@@ -196,6 +234,12 @@ struct App {
     state: State,
     monitor: Monitor,
     next_sample: Option<Instant>,
+    /// When the orb wants its next frame, and `None` whenever it is still.
+    ///
+    /// The one animation clock in the window. It exists only while a turn is
+    /// running, which is what keeps a window nobody is talking to at zero frames
+    /// a second. See [`orb_deadline`].
+    next_orb: Option<Instant>,
     /// The sessions that came before this one, as loaded. Never the live one:
     /// the running session is added on top whenever a reading or a write needs
     /// it, so writing the file twice cannot count this session twice.
@@ -277,6 +321,7 @@ impl App {
             state: State::new(),
             monitor: Monitor::new(),
             next_sample: None,
+            next_orb: None,
             totals: totals_path.as_deref().map(Totals::load).unwrap_or_default(),
             totals_path,
             totals_trouble: false,
@@ -1289,6 +1334,9 @@ impl App {
             // would be drawn somewhere other than where they are hit tested.
             menu: self.menu.as_ref(),
             picker: self.picker.as_ref(),
+            // The orb's clock. Read here rather than inside the scene, so a
+            // frame stays a function of what it is handed.
+            clock: self.epoch.elapsed().as_secs_f32(),
         });
         renderer.draw(gpu, &scene, frame);
         self.dirty = false;
@@ -1524,10 +1572,10 @@ impl ApplicationHandler<Wake> for App {
     /// an interface showing static text should cost nothing, and polling is how
     /// a UI silently eats a GPU.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // The monitor is the one thing that changes without an event, so it is
-        // the one thing that gets a clock, and only while it is on screen.
-        // Everything else redraws because something happened, which is what
-        // keeps an idle window free.
+        // Two things change without an event, and each one holds a clock only
+        // while it is the case: the monitor while a monitor is on screen, and the
+        // orb while a turn is running. Everything else redraws because something
+        // happened, which is what keeps an idle window free.
         let showing = |wanted: &[View]| {
             !self.shaded
                 && self.picker.is_none()
@@ -1549,8 +1597,16 @@ impl ApplicationHandler<Wake> for App {
         } else {
             self.next_sample = None;
         }
+        // The orb. A deadline that was not there before is a frame that is due
+        // now, so it is also what marks the window dirty; the same one coming
+        // back means the frame is still waiting and nothing is redrawn.
+        let next = orb_deadline(Instant::now(), self.state.phase.busy(), self.next_orb);
+        self.dirty |= next.is_some() && next != self.next_orb;
+        self.next_orb = next;
         self.redraw();
-        event_loop.set_control_flow(match self.next_sample {
+        // Both clocks, never one of them: the earlier deadline wins and the other
+        // is still there when it comes round.
+        event_loop.set_control_flow(match soonest([self.next_sample, self.next_orb]) {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
         });
@@ -1639,6 +1695,44 @@ mod tests {
         let (min, size) = shade_request(false, Some(open));
         assert_eq!(min, Some(MIN_SIZE));
         assert_eq!(size, Some(open), "and it goes back to the size it was");
+    }
+
+    /// The animation clock exists while a turn is running and at no other time.
+    /// A deadline that outlives the turn is a window animating with nothing to
+    /// animate, which is the 3,500 frames a second `noob-gpu` warns about.
+    #[test]
+    fn the_orb_clock_exists_only_while_a_turn_is_running() {
+        let now = Instant::now();
+        assert_eq!(orb_deadline(now, false, None), None, "nothing running, no clock");
+        assert_eq!(
+            orb_deadline(now, false, Some(now + ORB_EVERY)),
+            None,
+            "the turn ending drops the deadline it was holding"
+        );
+
+        let first = orb_deadline(now, true, None).expect("a running turn animates");
+        assert_eq!(first, now + ORB_EVERY);
+        // Asked for and not due yet: the same deadline, so nothing is redrawn in
+        // between however many events arrive.
+        assert_eq!(orb_deadline(now, true, Some(first)), Some(first));
+        // Due: a new one, and a new one is what marks the window dirty.
+        let past = first + Duration::from_millis(1);
+        assert_eq!(orb_deadline(past, true, Some(first)), Some(past + ORB_EVERY));
+    }
+
+    /// Two clocks, one control flow. Whichever is due first wins and the other
+    /// keeps its deadline: assigning instead of composing is how the monitor
+    /// stops sampling as soon as the orb starts turning.
+    #[test]
+    fn the_monitor_and_the_orb_compose_into_one_deadline() {
+        let now = Instant::now();
+        let (sample, orb) = (now + SAMPLE_EVERY, now + ORB_EVERY);
+        assert!(ORB_EVERY < SAMPLE_EVERY, "the orb is the faster clock");
+        assert_eq!(soonest([Some(sample), Some(orb)]), Some(orb));
+        assert_eq!(soonest([Some(orb), Some(sample)]), Some(orb));
+        assert_eq!(soonest([None, Some(sample)]), Some(sample));
+        assert_eq!(soonest([Some(orb), None]), Some(orb));
+        assert_eq!(soonest([None, None]), None, "an idle window blocks");
     }
 
     const W: f32 = 1400.0;

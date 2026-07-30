@@ -37,12 +37,12 @@ const GUTTER: usize = 4;
 const SMALL: f32 = 12.0;
 const SCROLL_W: f32 = 4.0;
 const BUTTON_W: f32 = 26.0;
-/// The square kept clear at the left end of the title strip, where the orb goes.
+/// The square at the left end of the title strip that the orb is drawn in.
 ///
-/// The orb is the one animated thing in the window and it is not built yet. The
-/// strip's text starts after this, so drawing the orb later adds it to an empty
-/// slot rather than pushing the name along, and the strip reads
-/// `[orb] NO0B \u{25b8} version` from the first frame it ever draws.
+/// The strip's text starts after this, so the orb sits in a slot of its own
+/// instead of over the name, and the strip reads
+/// `[orb] NO0B \u{25b8} version` left to right. The orb sizes itself to whatever
+/// square it is handed, so this is the only number that decides how big it is.
 pub const ORB_W: f32 = TITLE_H;
 const LABEL_COLUMNS: usize = 9;
 /// A gauge is a block of dots: eight across and five down is 0 to 100 percent,
@@ -855,6 +855,12 @@ pub struct Frame<'a> {
     pub menu: Option<&'a Menu>,
     /// The folder picker, while it is up. The same one, for the same reason.
     pub picker: Option<&'a Picker>,
+    /// Seconds since the window opened, which is the orb's clock.
+    ///
+    /// Passed in rather than read here. A frame is a function of what it is
+    /// given, so the same clock builds the same scene twice, which is the only
+    /// way an animation is testable without a screen.
+    pub clock: f32,
 }
 
 impl Frame<'_> {
@@ -969,6 +975,22 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
     let used = state.context_fraction();
     if used > 0.0 {
         scene.rect(Panel::new(0.0, gauge.y, layout.width * used, 2.0).fill(skin.gauge));
+    }
+
+    // The orb, in the square the strip keeps for it: turning while there is a
+    // turn to animate, one frozen dimmer frame otherwise. The base layer is
+    // enough for it, unlike the menu, because [`ORB_W`] is reserved and no glyph
+    // in the window starts inside it, so there is nothing here for a disc to be
+    // painted under. It also costs a draw call fewer that way, and there are
+    // 516 of these a frame.
+    let block = Panel::new(
+        layout.title.x,
+        layout.title.y,
+        ORB_W.min(layout.title.w),
+        layout.title.h,
+    );
+    for disc in crate::orb::discs(block, frame.clock, state.phase.busy(), skin) {
+        scene.rect(disc);
     }
 
     // These were three hand-drawn rectangles, because the Unicode glyphs the
@@ -2251,16 +2273,20 @@ mod tests {
         );
     }
 
-    /// What item 21 asked for, read left to right: the orb's slot, the name, the
+    /// What item 21 asked for, read left to right: the orb, the name, the
     /// marker, the version.
     ///
-    /// The orb itself belongs to the animation work and is not here yet, so what
-    /// is asserted about it is that its room is empty: no text starts inside the
-    /// leftmost [`ORB_W`] of the strip, which is what makes adding it later a
-    /// draw rather than a relayout.
+    /// Both halves of that. The orb is drawn, as discs inside the leftmost
+    /// [`ORB_W`] of the strip, and no text starts inside that square, so the two
+    /// share the strip instead of overlapping.
     #[test]
     fn the_title_strip_reads_orb_then_name_then_marker_then_version() {
         let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &[]);
+        assert!(
+            discs_of(&out.scene).len() > 100,
+            "the orb is not drawn: {} discs",
+            discs_of(&out.scene).len()
+        );
         let title = out
             .scene
             .texts
@@ -2284,6 +2310,131 @@ mod tests {
                 text.runs.iter().map(|run| run.text.as_str()).collect::<String>()
             );
         }
+    }
+
+    /// Every disc of the orb in a scene.
+    ///
+    /// A rectangle in the title strip with a corner radius is one: nothing else
+    /// up there is round, and the only other rounded rectangles in the window are
+    /// the gauge dots, which are in panes below the strip.
+    fn discs_of(scene: &Scene) -> Vec<&Rect> {
+        scene
+            .rects
+            .iter()
+            .filter(|rect| {
+                let [_, y, _, h] = rect.xywh();
+                rect.extra()[0] > 0.0 && y + h <= TITLE_H
+            })
+            .collect()
+    }
+
+    /// One frame at a given moment on the orb's clock.
+    ///
+    /// Its own helper rather than another argument to [`render_with`], which is
+    /// already at the argument count clippy allows.
+    fn render_at(state: &State, clock: f32) -> Rendered {
+        let dock = Dock::new();
+        let shape = shape(&dock, &[]);
+        let layout = Layout::compute(1400.0, 900.0, &shape);
+        let skin = Skin::from(&Config::default());
+        let scene = build(&Frame {
+            state,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &crate::prompt::Prompt::default(),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            clock,
+            drag: None,
+            hot: None,
+            trouble: None,
+            selection: None,
+            menu: None,
+            picker: None,
+        });
+        Rendered {
+            scene,
+            layout,
+            skin,
+        }
+    }
+
+    /// The orb is in the strip in both states, and it stays in its own square.
+    /// A disc outside it would be the animation drawing over the window's name.
+    #[test]
+    fn the_orb_is_in_the_strip_and_stays_in_its_square() {
+        for (state, name) in [(busy_state(), "working"), (State::new(), "resting")] {
+            let out = render_at(&state, 4.0);
+            let discs = discs_of(&out.scene);
+            assert!(discs.len() > 100, "{name}: {} discs", discs.len());
+            for disc in discs {
+                let [x, y, w, h] = disc.xywh();
+                assert!(x >= 0.0 && x + w <= ORB_W + 0.01, "{name}: {disc:?} left the square");
+                assert!(y >= 0.0 && y + h <= TITLE_H + 0.01, "{name}: {disc:?} left the strip");
+            }
+        }
+    }
+
+    /// The two states, as the window sees them. Working animates and carries more
+    /// discs, because the runners are only there while there is a turn to run;
+    /// resting is one frozen frame, so the clock cannot change it.
+    #[test]
+    fn the_orb_animates_while_a_turn_runs_and_is_frozen_otherwise() {
+        let boxes = |out: &Rendered| -> Vec<[f32; 4]> {
+            discs_of(&out.scene).iter().map(|disc| disc.xywh()).collect()
+        };
+
+        let busy = busy_state();
+        let first = boxes(&render_at(&busy, 0.0));
+        let later = boxes(&render_at(&busy, 0.4));
+        assert_ne!(first, later, "the orb does not move while a turn runs");
+
+        let quiet = State::new();
+        assert_eq!(
+            boxes(&render_at(&quiet, 0.0)),
+            boxes(&render_at(&quiet, 90.0)),
+            "the resting orb moved, so the window would never stop redrawing"
+        );
+        assert!(
+            boxes(&render_at(&quiet, 0.0)).len() < first.len(),
+            "resting draws as much as working"
+        );
+    }
+
+    /// Shaded, the strip is the whole window, so the orb is the only thing in it
+    /// besides the headline. It is drawn there too: the strip is the same strip.
+    #[test]
+    fn the_shaded_strip_keeps_the_orb() {
+        let state = busy_state();
+        let dock = Dock::new();
+        let mut shape = shape(&dock, &[]);
+        shape.shaded = true;
+        let layout = Layout::compute(1180.0, TITLE_H, &shape);
+        let skin = Skin::from(&Config::default());
+        let scene = build(&Frame {
+            state: &state,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &crate::prompt::Prompt::default(),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            clock: 2.0,
+            drag: None,
+            hot: None,
+            trouble: None,
+            selection: None,
+            menu: None,
+            picker: None,
+        });
+        assert!(discs_of(&scene).len() > 100, "{} discs", discs_of(&scene).len());
     }
 
     /// The reading after the name starts with the version the crate carries.
@@ -2478,6 +2629,7 @@ mod tests {
             pane_column: 8.0,
             body_size: 14.0,
             pane_size: 13.0,
+            clock: 0.0,
             drag,
             hot: None,
             trouble: None,
@@ -3191,6 +3343,7 @@ mod tests {
             pane_column: 8.0,
             body_size: 14.0,
             pane_size: 13.0,
+            clock: 0.0,
             drag: None,
             hot: None,
             trouble: None,
@@ -3267,6 +3420,7 @@ mod tests {
             pane_column: 8.0,
             body_size: 14.0,
             pane_size: 13.0,
+            clock: 0.0,
             drag: None,
             hot: None,
             trouble: None,
@@ -3510,6 +3664,7 @@ mod tests {
                 pane_column,
                 body_size: 14.0,
                 pane_size: 13.0,
+                clock: 0.0,
                 drag: None,
                 hot: None,
                 trouble: None,
@@ -3600,6 +3755,7 @@ mod tests {
             pane_column: 8.0,
             body_size: 14.0,
             pane_size: 13.0,
+            clock: 0.0,
             drag: None,
             hot: None,
             trouble: None,
@@ -3838,6 +3994,7 @@ mod tests {
             pane_column: 8.0,
             body_size: 14.0,
             pane_size: 13.0,
+            clock: 0.0,
             drag: None,
             hot: None,
             trouble: None,
@@ -4067,6 +4224,7 @@ mod tests {
             pane_column: 8.0,
             body_size: 14.0,
             pane_size: 13.0,
+            clock: 0.0,
             drag: None,
             hot: None,
             trouble: None,
@@ -4178,6 +4336,7 @@ mod tests {
             pane_column: 8.0,
             body_size: 14.0,
             pane_size: 13.0,
+            clock: 0.0,
             drag: None,
             hot,
             trouble: None,
@@ -4401,6 +4560,7 @@ mod tests {
             pane_column: 8.0,
             body_size: 14.0,
             pane_size: 13.0,
+            clock: 0.0,
             drag: None,
             hot: None,
             trouble: None,
@@ -4524,6 +4684,7 @@ mod tests {
             pane_column: 8.0,
             body_size: 14.0,
             pane_size: 13.0,
+            clock: 0.0,
             drag: None,
             hot,
             trouble: None,

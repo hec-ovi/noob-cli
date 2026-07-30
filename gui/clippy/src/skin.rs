@@ -58,6 +58,15 @@ pub struct Skin {
     /// A window button under the pointer.
     pub hot: [f32; 4],
     pub close_hot: [f32; 4],
+    /// The orb's ink at full weight.
+    ///
+    /// The animation is greyscale on paper in the drawing it was ported from,
+    /// where the darkest mark is the nearest dot. This window is dark, so a
+    /// dot's weight is that mirrored, and this is the colour the weight is
+    /// spent on: the accent, so the corner belongs to the theme rather than
+    /// being a grey sphere in a green window. Derived, not a settings key: a
+    /// second accent for one 30 pixel square is a setting nobody would find.
+    pub orb: [f32; 4],
 
     pub title: [u8; 4],
     pub dim: [u8; 4],
@@ -143,6 +152,7 @@ impl Skin {
             select: rgba(config.dim, 0.45),
             hot: rgba(config.accent, 0.30),
             close_hot: rgba(config.bad, 0.55),
+            orb: rgba(config.accent, 1.0),
 
             title: text(config.text),
             dim: text(config.dim),

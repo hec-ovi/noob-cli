@@ -60,6 +60,15 @@ is holding is answerable without reading the labels. A tab strip has no surface
 of its own; the tabs carry the pane's, the showing one at full strength and the
 rest at a lower alpha.
 
+The title strip reads the orb, then NO0B, then the version and commit this build
+was cut from. The orb is the one animated thing in the window: twelve tilted
+rings of dots around one centre, ported from `thinking-orbs`, turning while a
+turn is running and frozen a shade fainter when nothing is. It is 516 discs a
+frame and no shader, because a disc is a rectangle with its corner radius set to
+half its width. Its clock is a 30 frames a second deadline that exists only while
+the agent is working, so a window with nothing happening in it goes back to
+blocking until you touch it.
+
 | view | carries |
 |---|---|
 | ACTIVITY | every call, one colour and one tag per tool: bash, read, ls, glob, grep, write, edit, web, skill, mcp, agent, plan, plus a running command's output as it arrives |
