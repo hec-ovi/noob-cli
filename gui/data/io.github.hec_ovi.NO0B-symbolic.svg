@@ -1,11 +1,22 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
   <!--
-    The same mark redrawn on a 16 grid rather than scaled down to it, so every
-    edge lands on a pixel: wire 2, counter 6, arch radii 6 and 3, foot 3 tall.
-    A scaled copy puts edges on halves and renders as grey rows.
+    The same console redrawn on a 16 grid rather than scaled onto it.
+
+    The outer frame divides by 8 exactly, because the module does, so it keeps
+    the big drawing's proportions: 14 by 10, wire 1, cut reach 3. The three
+    shapes inside it do not survive the division. The hole's mitred inner cut
+    and the chevron's arms both land at 1/sqrt2 of a pixel, which renders as a
+    grey row rather than as a line, so the hole takes a square inner corner
+    instead (the cut then pinches the wire to 0.71 rather than fattening it to
+    1.41) and the chevron is redrawn with arms twice as wide and a taller reach.
+    The prompt ends up proportionally larger than the big drawing's, which is
+    the trade every small size makes: keep the proportions and lose the detail,
+    or keep the detail and let it grow.
+
+    No glow and no open body games at this size. A blur across 16 pixels is mud.
 
     Monochrome and filled with the symbolic placeholder grey, which the desktop
     replaces with whatever colour the surface needs.
   -->
-  <path fill="#bebebe" d="M2 14 L2 8 A6 6 0 0 1 14 8 L14 12 L8 12 L8 9 L11 9 L11 8 A3 3 0 0 0 5 8 L5 14 Z"/>
+  <path fill="#bebebe" d="M 1 3 L 12 3 L 15 6 L 15 13 L 1 13 Z M 2 4 L 2 12 L 14 12 L 14 4 Z M 3 5 L 5 5 L 8 8 L 5 11 L 3 11 L 6 8 Z M 9 10 L 13 10 L 13 11 L 9 11 Z"/>
 </svg>

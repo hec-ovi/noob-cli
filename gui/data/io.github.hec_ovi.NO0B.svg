@@ -1,16 +1,38 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
   <!--
-    NO0B. An arch on two legs is an n, and a shape that goes up, turns and
-    comes back down is the agent loop.
+    NO0B. A console drawn as a hollow wire with the prompt inside it. The body
+    is open, so whatever the icon sits on shows through it, and the top right
+    corner carries the same 45 degree cut every panel in the window carries.
 
-    One closed path, one flat fill, drawn on a 128 grid with a module of 8, so
-    every coordinate is a whole pixel at 16, 32, 64 and 128. Constant wire 24,
-    two radii (48 outer, 24 inner), no diagonal anywhere, legs of unequal
-    length, one inward foot.
+    One path of four subpaths on a 128 grid with a module of 8, so every edge is
+    a whole pixel at 16, 32, 64 and 128. Wire 8, cut reach 24. The hole winds
+    the other way from the frame around it, so the nonzero rule opens it, and
+    the two glyphs wind with the frame, so they add. Every diagonal in the
+    drawing is 8/sqrt2 = 5.66 wide against the straight wire's 8, which reads as
+    a lighter corner rather than a heavier one; the module has no number in
+    between, and 11.3 is the only other one it offers.
 
     #1f9d5b rather than the interface accent #7cd894: the accent is tuned for
     black panels and measures 1.73:1 on white, which vanishes in a light dock.
-    This clears 3:1 on both grounds, so the mark needs no plate behind it.
+    This is 3.48:1 on white and 6.03:1 on black, so the mark needs no plate
+    behind it on either.
+
+    The glow is decoration and carries nothing. It is one bounded blur merged
+    twice under the mark itself, so a rasterizer with no filter support draws
+    the same four subpaths sharp and loses only the halo. A radius of 2 is small
+    on purpose: on a white dock a wide halo reads as a smudge rather than as
+    light, and 3 radii is 6, inside the 8 of margin, so the halo dies before the
+    canvas edge instead of being cut off flat along it.
   -->
-  <path fill="#1f9d5b" d="M16 112 L16 64 A48 48 0 0 1 112 64 L112 96 L64 96 L64 72 L88 72 L88 64 A24 24 0 0 0 40 64 L40 112 Z"/>
+  <defs>
+    <filter id="glow" filterUnits="userSpaceOnUse" x="0" y="16" width="128" height="96">
+      <feGaussianBlur stdDeviation="2" result="halo"/>
+      <feMerge>
+        <feMergeNode in="halo"/>
+        <feMergeNode in="halo"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <path fill="#1f9d5b" filter="url(#glow)" d="M 8 24 L 96 24 L 120 48 L 120 104 L 8 104 Z M 16 32 L 16 96 L 112 96 L 112 48 L 96 32 Z M 32 48 L 40 48 L 56 64 L 40 80 L 32 80 L 48 64 Z M 64 72 L 96 72 L 96 80 L 64 80 Z"/>
 </svg>

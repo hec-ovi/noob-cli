@@ -39,16 +39,22 @@ one starting nothing.
 Not a Flatpak or an AppImage: the binary is static apart from the system's own
 GPU drivers, and those are exactly the thing a bundle cannot ship.
 
-The icon is one closed path in one flat colour, drawn on a 128 grid with a
-module of 8 so every edge is a whole pixel at 16, 32, 64 and 128, with a second
-drawing at 16 rather than a scaled copy of the first. Its green is darker than
-the interface accent on purpose: the accent measures 1.73:1 against white and
-vanishes in a light dock, while the icon clears 3:1 on both grounds and so needs
-no plate behind it. On Wayland a window cannot set its own icon at all, so the
-launcher file and the icon file are the entire mechanism, and their names have
-to match the name the window announces. A test asserts all three agree, because
-when they stop agreeing the window still works perfectly and just wears a grey
-square forever.
+The icon is a console drawn as a hollow wire with `>_` inside it: one path of
+four subpaths in one flat colour, on a 128 grid with a module of 8 so every edge
+is a whole pixel at 16, 32, 64 and 128. The body is open rather than filled, so
+the dock shows through it, and the top right corner takes the same 45 degree cut
+every panel in the window takes. The glow is one bounded blur merged under the
+mark and nothing more: it dies inside the margin instead of on the canvas edge,
+and a rasterizer with filters off draws the same four subpaths sharp. The small
+variant is drawn again on a 16 grid rather than scaled onto it, flat and with no
+halo, because at that size a blur is mud and the diagonals land between pixels.
+Its green is darker than the interface accent on purpose: the accent measures
+1.73:1 against white and vanishes in a light dock, while the icon is 3.48:1 on
+white and 6.03:1 on black and so needs no plate behind it. On Wayland a window
+cannot set its own icon at all, so the launcher file and the icon file are the
+entire mechanism, and their names have to match the name the window announces. A
+test asserts all three agree, because when they stop agreeing the window still
+works perfectly and just wears a grey square forever.
 
 ## What is where
 

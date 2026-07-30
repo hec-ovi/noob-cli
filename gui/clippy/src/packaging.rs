@@ -264,21 +264,120 @@ mod tests {
         }
     }
 
-    /// One flat fill and one path. Not a style rule: a gradient or a second
-    /// colour is what stops a mark reading at 16 pixels, and a stroke is what
-    /// puts its edges on half pixels.
+    /// One path in one flat fill, and a console you can see through.
+    ///
+    /// Four subpaths rather than one, because the mark is a hollow wire now: the
+    /// frame, the hole that opens it, the chevron and the bar. Under the nonzero
+    /// fill rule the direction a subpath was drawn in is the only thing that
+    /// says hole or solid, so a subpath written the wrong way round fills the
+    /// console in and nothing anywhere reports it. That is what the signs are:
+    /// the hole runs against the frame, and both glyphs run with it.
+    ///
+    /// The rest is what it always was. A gradient or a second colour is what
+    /// stops a mark reading at 16 pixels, and a stroke is what puts its edges
+    /// on half pixels.
     #[test]
-    fn the_icon_is_one_filled_path() {
+    fn the_icon_is_one_path_and_the_console_is_hollow() {
         assert_eq!(ICON.matches("<path").count(), 1, "{ICON}");
         assert_eq!(ICON.matches("fill=").count(), 1);
         assert!(!ICON.contains("stroke"), "strokes do not scale cleanly");
         assert!(!ICON.contains("Gradient"), "a gradient carries no information here");
         assert!(ICON.contains(r#"viewBox="0 0 128 128""#), "{ICON}");
+
+        let drawn = subpaths(ICON);
+        assert_eq!(drawn.len(), 4, "frame, hole, chevron and bar: {}", path_of(ICON));
+        let areas: Vec<f64> = drawn.iter().map(|points| twice_area(points)).collect();
+        let winding: Vec<f64> = areas.iter().map(|a| a.signum()).collect();
+        assert_eq!(winding, [1.0, -1.0, 1.0, 1.0], "the console is filled in: {areas:?}");
+    }
+
+    /// The glow is decoration, and the mark has to be whole without it.
+    ///
+    /// Not every consumer of an icon rasterizes with filters on, so the halo is
+    /// one blur merged twice *under* the source graphic, inside one filter. The
+    /// source graphic is the path itself, so a renderer that drops the filter
+    /// draws the same four subpaths sharp and loses the halo and nothing else.
+    /// The other way to get a glow is a second translucent copy of the path
+    /// behind the first, and it fails exactly there: filters off, and the copy
+    /// is a solid doubled mark instead of light. It would also put a second set
+    /// of coordinates in the file for the first to drift away from.
+    ///
+    /// The radius is capped at a third of the margin. Three radii is where a
+    /// gaussian is spent and the mark keeps 8 units of margin, so a radius over
+    /// 8/3 leaves halo on the canvas edge and the edge cuts it off in a straight
+    /// line. It is 2 rather than the 2.66 the arithmetic allows because a wide
+    /// halo on a white dock reads as a smudge rather than as light.
+    #[test]
+    fn the_glow_is_decoration_and_the_mark_survives_it_being_dropped() {
+        assert_eq!(ICON.matches("<filter").count(), 1, "{ICON}");
+        assert_eq!(ICON.matches("<feGaussianBlur").count(), 1, "{ICON}");
+        let radius: f64 = attr(ICON, "<feGaussianBlur", "stdDeviation")
+            .parse()
+            .expect("the blur has a radius");
+        assert!(radius > 0.0, "a radius of {radius} is no glow at all");
+        assert!(radius * 3.0 <= 8.0, "a radius of {radius} puts halo on the canvas edge");
+
+        // Bounded, and bounded in the drawing's own units. A filter with no
+        // region of its own takes the renderer's default, and the whole point of
+        // writing one down is that the halo cannot reach anywhere by surprise.
+        assert!(ICON.contains(r#"filterUnits="userSpaceOnUse""#), "{ICON}");
+        let region = (
+            attr(ICON, "<filter", "x").parse::<f64>().expect("a region x"),
+            attr(ICON, "<filter", "y").parse::<f64>().expect("a region y"),
+            attr(ICON, "<filter", "width").parse::<f64>().expect("a region width"),
+            attr(ICON, "<filter", "height").parse::<f64>().expect("a region height"),
+        );
+        let (low_x, low_y, high_x, high_y) = box_of(&subpaths(ICON).concat());
+        assert!(region.0 <= low_x - radius * 3.0, "the region cuts the halo off on the left");
+        assert!(region.1 <= low_y - radius * 3.0, "the region cuts the halo off on top");
+        assert!(region.0 + region.2 >= high_x + radius * 3.0, "cut off on the right");
+        assert!(region.1 + region.3 >= high_y + radius * 3.0, "cut off underneath");
+
+        // Two of halo and then the mark over them, in that order: the merge is
+        // a stack, so the mark being last is what keeps its edge sharp.
+        assert_eq!(ICON.matches("<feMergeNode").count(), 3, "{ICON}");
+        let top = ICON.split("<feMergeNode").last().expect("a last merge node");
+        assert!(top.contains("SourceGraphic"), "the halo is merged over the mark");
+        // And nothing is faded. The halo gets its weight from being merged
+        // twice, not from an opacity that would also take the mark down with it.
+        assert!(!ICON.contains("opacity"), "{ICON}");
+
+        // The proof rather than the argument: one reference to the filter, and
+        // with it taken out the file still carries the whole drawing.
+        assert_eq!(ICON.matches(r#"filter="url("#).count(), 1, "{ICON}");
+        let id = attr(ICON, "<filter", "id");
+        let plain = ICON.replace(&format!(" filter=\"url(#{id})\""), "");
+        assert!(!plain.contains(r#"filter="url("#), "{plain}");
+        assert_eq!(path_of(&plain), path_of(ICON), "stripping the filter moved the geometry");
+        assert_eq!(subpaths(&plain).len(), 4, "{plain}");
+        assert_eq!(plain.matches("fill=").count(), 1, "{plain}");
+    }
+
+    /// The prompt sits inside the console with a module of clearance.
+    ///
+    /// A glyph grown out to the wire welds itself to the frame, and the mark
+    /// stops being a console with writing in it and becomes a filled box with a
+    /// notch. It is the first thing an edit to the two glyphs breaks and it is
+    /// invisible above 32 pixels.
+    #[test]
+    fn the_prompt_sits_inside_the_console() {
+        let drawn = subpaths(ICON);
+        let (hole_x, hole_y, hole_far_x, hole_far_y) = box_of(&drawn[1]);
+        for glyph in &drawn[2..] {
+            let (x, y, far_x, far_y) = box_of(glyph);
+            assert!(x >= hole_x + 8.0 && far_x <= hole_far_x - 8.0, "{x} to {far_x} across");
+            assert!(y >= hole_y + 8.0 && far_y <= hole_far_y - 8.0, "{y} to {far_y} down");
+        }
     }
 
     /// Every coordinate is a whole pixel at 16, 32, 64 and 128, which is what
     /// a module of 8 on a 128 canvas buys. One coordinate off the module and
     /// that edge renders as two grey rows at the small sizes.
+    ///
+    /// The blur radius is not a coordinate and is not measured here. It is
+    /// capped in [`tests::the_glow_is_decoration_and_the_mark_survives_it_being_dropped`]
+    /// instead, against the margin rather than against the module, because what
+    /// a halo has to fit inside is the canvas and not the pixel grid.
     #[test]
     fn every_coordinate_lands_on_the_module() {
         for value in path_numbers(ICON) {
@@ -383,6 +482,68 @@ mod tests {
             }
         }
         out
+    }
+
+    /// The path split into the closed subpaths it is made of, each one the
+    /// points it visits in the order it visits them. Only `M`, `L` and `Z`: the
+    /// drawing has no curve in it, and a helper that pretended to handle one
+    /// would be measuring a control point as if it were a corner.
+    fn subpaths(svg: &str) -> Vec<Vec<(f64, f64)>> {
+        let mut out: Vec<Vec<(f64, f64)>> = Vec::new();
+        for (command, params) in commands(svg) {
+            let points = params.chunks(2).map(|pair| (pair[0], pair[1]));
+            match command {
+                'M' => out.push(points.collect()),
+                'L' => out.last_mut().expect("a line before any move").extend(points),
+                'Z' => {}
+                other => panic!("the icon is drawn with M, L and Z, not {other}"),
+            }
+        }
+        out
+    }
+
+    /// Twice the signed area of a closed subpath, which is the shoelace sum.
+    ///
+    /// Only the sign is read: it is the direction the subpath was drawn in, and
+    /// under the nonzero fill rule that is the whole difference between a hole
+    /// and a solid.
+    fn twice_area(points: &[(f64, f64)]) -> f64 {
+        points
+            .iter()
+            .zip(points.iter().cycle().skip(1))
+            .map(|((x, y), (next_x, next_y))| x * next_y - next_x * y)
+            .sum()
+    }
+
+    /// The box a set of points sits in, as near corner then far corner.
+    fn box_of(points: &[(f64, f64)]) -> (f64, f64, f64, f64) {
+        points.iter().fold(
+            (f64::MAX, f64::MAX, f64::MIN, f64::MIN),
+            |(low_x, low_y, high_x, high_y), (x, y)| {
+                (low_x.min(*x), low_y.min(*y), high_x.max(*x), high_y.max(*y))
+            },
+        )
+    }
+
+    /// One attribute of the element that opens with `tag`.
+    ///
+    /// The leading space matters: `x` would otherwise match inside a longer
+    /// attribute name, and `width` is on the `<svg>` element as well as on the
+    /// filter, so the element has to be found before the attribute is.
+    fn attr(svg: &str, tag: &str, name: &str) -> String {
+        let element = svg
+            .split(tag)
+            .nth(1)
+            .unwrap_or_else(|| panic!("there is no {tag} in {svg}"))
+            .split('>')
+            .next()
+            .expect("an element ends somewhere");
+        element
+            .split(&format!(" {name}=\""))
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or_else(|| panic!("{tag} has no {name}: {element}"))
+            .to_string()
     }
 
     /// Only the points the path passes through, for measuring the silhouette.
