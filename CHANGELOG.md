@@ -121,6 +121,25 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
 
 ### Added
 
+- The first thing the window shows can now open a session that already exists.
+  The picker opened on folders alone, so every launch started a fresh
+  conversation and the only way back into an old one was the CLI. A Sessions
+  button beside Open swaps the list for the sessions the agent has written,
+  read out of `<config>/sessions` on the press rather than at launch, and the
+  same box, cursor, keys, filter and scrolling drive both lists. A row says how
+  long ago the session was, which folder it belongs to and the opening of the
+  first thing that was said in it, and choosing one starts the agent with
+  `--resume <id>` in that folder. Sessions for the folder being looked at come
+  first. Only the head of each file is read (64 KiB), so a transcript that has
+  been running all afternoon costs the same as a short one, and a file that is
+  truncated mid-line or is not a session at all is one row missing with the
+  count said above the list rather than a list that refuses to draw. The
+  transcript format does not record which folder a session happened in, so the
+  window keeps its own note in `no0b.sessions` beside the settings, written when
+  the agent reports a session has started; a session written by the CLI on its
+  own has no note and resumes in the folder above the list, and one whose folder
+  has since been deleted is drawn as unopenable and says so when it is pressed
+  rather than starting an agent in a directory that is not there.
 - The dividers between the panes can be dragged. The left column took 0.54 of
   the width and the top right space 0.46 of the right column's height, both
   written into the layout as literals, so the only thing that could be

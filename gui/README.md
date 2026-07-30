@@ -29,6 +29,19 @@ the list, so the second launch is Enter. They live in
 `~/.config/noob/no0b.recent`, one path per line, newest first; delete a line
 to forget it and delete the file to forget them all.
 
+The Sessions button beside Open, or Ctrl-R, lists the conversations the agent
+has already saved, in the same box with the same keys, and the button then says
+Folders to go back (so does Esc). A row says how long ago it was, the folder it belongs to
+and the start of the first thing you asked in it; Enter carries it on, which is
+`noob serve --resume <id>` in that folder. The ones belonging to the folder you
+are looking at come first. Transcripts do not record which folder they happened
+in, so the window keeps that note itself in `~/.config/noob/no0b.sessions`, one
+`<id> <folder>` per line: a session started from a terminal has no note, and
+opens in the folder written above the list. One whose folder has been deleted
+cannot be opened at all and says so instead of starting the agent somewhere you
+did not choose. A session file that was cut short (killed mid-write) is skipped
+and counted beside the heading rather than taking the list down with it.
+
 `NOOB_BIN` names the agent binary when it is not `noob` on PATH.
 
 ## Installing
