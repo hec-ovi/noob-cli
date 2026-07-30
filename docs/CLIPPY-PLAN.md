@@ -1,4 +1,9 @@
-# CLIppy plan
+# The window's plan
+
+Written when the product was called CLIppy. It is NO0B from 0.7.0, and the
+entries below are left in the words they landed in: this file is the record of
+what shipped when, not a description of the current window. For that, read
+`gui/README.md`.
 
 ## Landed
 
@@ -23,26 +28,43 @@ reasoning behind each one, not as a to-do list.
 | 31 | The CLIPPY animation tab is gone; that animation becomes the corner orb. |
 | 11 (the window's own settings) | The settings panel: a full screen takeover listing every key `no0b.conf` carries, changed with the arrow keys or a click on the value, written through the comment-preserving writer and read back so the window restyles without a restart. The palette is swatches rather than fields, because nothing can take the keyboard focus yet. The all-time totals from `no0b.totals` are the block above the settings. What is still outstanding on 11 is the half that is a CLI feature set: skills, MCP state and sessions have no producer in `crates/`, and the secrets rows contradict the documented stance in `crates/noob/src/config/mod.rs:16`. |
 
+| 15 | The folder picker: a tree, one fixed box, typing dims what it did not match instead of removing it, an Open button, and the folders opened before at the top. It also lists the sessions already on disk and carries one on, which it does by reading `<config>/sessions` itself and starting the agent with `--resume`; `SessionList` and `SessionOpen` still have no producer, so item 29 is untouched by it. |
+| 22 | The capped 2x2 grid. The three spaces stay three spaces and the two dividers drag, clamped against what a space needs to be read, and where they were left goes into the settings file as `left_width` and `top_height`. |
+| 10 | A drop target that says where a tab would land: a translucent green box over the target space and a caret in the gap the tab would go into, both on the floating layer. Dragging in front of another tab reorders the strip; dragging off the window says the drop closes the widget. |
+| 2, 14 | The thinking orb in the title strip, 516 discs a frame working and 480 frozen at rest, on a deadline that exists only while a turn is running. |
+
+The rest of the 0.7.0 round came from `review.md`, which is Hector's own list
+from using the window and is numbered separately from the table above. What it
+asked for and got: the product renamed to NO0B, with the desktop entry, the
+icons and the three config files migrated; every pane scrolling inside its own
+box; a gauge as four rows of twenty dots; a tab strip too narrow for its tabs
+growing arrows to walk them; no line under a tab strip; a settings panel with the
+all-time totals above it; both monitor panes reading this run rather than the
+totals file; and the right click menu carrying a list of every widget, so a
+closed one can be reopened.
+
 Reverted on purpose: markdown tables were box-drawn and then given sideways
 scrolling, and both were rolled back as a detour. Tables pass through as
 written.
 
-Still queued, in order: **22** (the capped 2x2 split grid), then **10**, **23**,
-**21**, **27**, **28**, **29**, **5**, and the CLI half of **11**.
+Still queued, in order: **23**, **21**, **27**, **28**, **29**, **5**, and the
+CLI half of **11**.
 
 
-Every item in `featuresandbugs.md`, graded against the code as it actually is.
-Effort figures come from reading the files, not from estimating by feel.
+Everything from here down was written before any of the above landed: it is
+`featuresandbugs.md` graded against the tree as it stood then, with effort
+figures from reading the files rather than estimating by feel. Line numbers and
+file sizes in it are from that reading and have moved since.
 
 Every load-bearing claim below was checked against the source: the missing
 right-button path, the unread activation token, the free `extra` slots, the
 `sandbox_label` that never reaches the wire, the absent tool schemas, and the
 running-sum rates that make a median impossible. No claim failed verification.
 
-Two numbers worth holding: `gui/` is 9,660 lines (about 100k tokens), and the
-whole repo is near 700k because the CLI in `crates/` is 56k lines. Almost
-everything below lands in `gui/`, and the two halves talk only through the event
-enum in `noob-proto`, so this work never requires holding the CLI in your head.
+Two numbers worth holding, remeasured at 0.7.0: `gui/` is 28,069 lines of Rust
+and the CLI in `crates/` is 56,274. Almost everything below lands in `gui/`, and
+the two halves talk only through the event enum in `noob-proto`, so this work
+never requires holding the CLI in your head.
 
 ## Phase 0: structural, do these first
 

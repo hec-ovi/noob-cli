@@ -2,11 +2,15 @@
 
 Written for someone picking this up cold. Everything here was checked against
 the tree it describes; where a claim rests on a specific line, the line is
-named. Three things remain on the roadmap. The first two are ordered: native
-binaries for the three desktop platforms, then the GPU front end, which cannot
-start before it because there is no per-platform binary for a window to sit in
-front of yet. The third, letting the agent run containers, is independent of
-both and can be picked up at any time.
+named, and the lines were re-read at 0.7.0.
+
+Two things remain on the roadmap, and neither blocks the other: native binaries
+for the three desktop platforms, and letting the agent run containers.
+
+The GPU front end is built. It shipped as NO0B at 0.7.0 and is task 2 below,
+kept for the design record. It did not wait for native binaries after all: it
+runs `noob serve` as a subprocess, so the Docker launcher was enough to build
+against on Linux. What native binaries still buy it is macOS and Windows.
 
 ## Where the project actually is
 
@@ -30,16 +34,16 @@ The goal is a binary a person downloads and runs, on all three, with no Docker.
 ### What has to change, in the order the compiler will force
 
 **The tree has almost no platform gating.** The only `#[cfg(unix)]` in the whole
-workspace is in `crates/noob/src/config/mod.rs` (four sites, around lines 11,
-170, 485, 516). Everything else assumes Unix unconditionally. So the work is not
+workspace is in `crates/noob/src/config/mod.rs` (four sites, at lines 11,
+171, 487 and 518). Everything else assumes Unix unconditionally. So the work is not
 "fix a few warnings", it is "decide, per subsystem, what the Windows path is".
 
 **Two calls are Linux-only, not merely Unix-only.** These will fail on macOS as
 well as Windows, so they are the first thing to look at:
 
-- `crates/noob/src/tools/bash.rs:524` uses `prctl(PR_SET_CHILD_SUBREAPER)` so
+- `crates/noob/src/tools/bash.rs:331` uses `prctl(PR_SET_CHILD_SUBREAPER)` so
   orphaned grandchildren of a shell command reparent here and can be reaped.
-- `crates/noob/src/subagent/mod.rs:376` uses `prctl(PR_SET_PDEATHSIG, SIGTERM)`
+- `crates/noob/src/subagent/mod.rs:391` uses `prctl(PR_SET_PDEATHSIG, SIGTERM)`
   so a detached sub-agent dies with its parent instead of outliving it.
 
 Neither exists on macOS. The usual macOS substitute is a process group per job
@@ -50,19 +54,19 @@ closes. Treat "kill the whole process tree, reliably, when we go away" as one
 capability with three implementations, not as three unrelated fixes.
 
 **The terminal layer is raw termios.** `crates/noob/src/ui/prompt.rs` holds 24
-`libc` calls: `tcgetattr`/`tcsetattr` for raw mode (around lines 1007 and 1092),
+`libc` calls: `tcgetattr`/`tcsetattr` for raw mode (lines 994, 1007 and 1092),
 `read` on `STDIN_FILENO`, and `ioctl(TIOCGWINSZ)` for the terminal size (lines
 542 and 557). Windows needs the console API or a crate over it. Decide early
 whether to introduce a dependency here, because `dev.sh size-check` enforces a
 45-crate runtime graph and an 8 MiB binary, and a terminal crate is not free.
 
 **Signals.** `crates/noob/src/main.rs` installs `sigaction` handlers for SIGINT
-(line 1461 and nearby) and blocks signals with `pthread_sigmask` (line 1486);
+(line 1665, and SIGWINCH at 1686) and blocks signals with `pthread_sigmask` (line 1690);
 `crates/noob/src/ui/dock.rs:379` unblocks in the dock thread; SIGWINCH drives
 resize. Windows has no signals in this sense. Ctrl-C is a console control
 handler, and there is no SIGWINCH, so resize has to come from console events.
 
-**The sandbox story changes meaning.** `crates/noob/src/tools/guard.rs:46`
+**The sandbox story changes meaning.** `crates/noob/src/tools/guard.rs:48`
 defines two modes: `Container`, where tools run unrestricted because the
 container is the boundary, and `Workspace`, where write and edit refuse paths
 outside the workspace. A native binary has no container, so `Workspace` becomes
@@ -87,67 +91,52 @@ not after.
 4. Only then work out distribution (per-platform archives, checksums). Note the
    repository rule: do not add or edit anything under `.github/workflows`.
 
-## Task 2: the GPU Vulkan front end
+## Task 2: the GPU front end. Built, at 0.7.0
 
-The plan in `README.md` is a separate Rust binary rendering the UI through
-Vulkan, with each surface (plan, multi-agent runner, agent management, main
-window, code stream) isolated and talking over schema-validated data rather than
-shared code.
+Kept because the reasoning is worth not relearning, not because there is work
+here.
 
-**It does not need a library target.** An earlier assumption in this project was
-that `crates/noob` had to grow a `lib.rs` and make its modules public first.
-That is the wrong shape and contradicts the design above. noob already emits a
-machine-readable stream, so the front end runs `noob` as a subprocess and reads
-it.
+It shipped as NO0B: `gui/`, its own cargo workspace, `no0b` on PATH,
+`./dev.sh gui` to run it and `./dev.sh gui-install` to install it. Its budgets
+are 40 MiB and 400 crates against the CLI's 8 MiB and 45, gated by
+`./dev.sh gui-check`, and it currently uses 13.2 MiB and 147 crates.
+`gui/README.md` is what a user reads.
 
-### What exists to build against, verified by running it
+**It did not need a library target**, which was the standing assumption before
+it started: `crates/noob` was going to grow a `lib.rs` and make its modules
+public. It runs `noob serve` as a subprocess instead and reads frames off its
+stdout, so the two halves share no code and either can be replaced whole.
 
-`noob exec -p "<prompt>" --json` writes one JSON object per line to stdout.
-These are real lines from a run against the live server:
+**The stream was pinned down before the window was opened**, which was the
+recorded first step and turned out to be the right one. `crates/noob-proto` is
+the contract: newline-delimited JSON, `Event` outward and `Command` inward,
+every frame carrying `VERSION`, an `Unknown` variant on both enums so a newer
+agent degrades to missing features rather than a dead stream, and one `call_id`
+from a tool's start to its end. Serialization is written out by hand because
+`derive(Serialize)` is five crates against a 45-crate cap.
 
-```json
-{"args":{"path":"/tmp/.../note.txt"},"name":"read","t":"tool"}
-{"err":false,"id":"XpNVcDsI7xqjW9tevvflynQxrhJkeb4w","t":"result"}
-{"d":"The","t":"text"}
-{"t":"done","usage":{"cached_prompt":1334,"completion":2,"prompt":1832}}
-```
+The three gaps recorded here before it was built are all closed by that crate:
+a `tool` event with no id, only four event kinds reaching stdout, and nothing
+versioned or schema-backed.
 
-Emitted from `crates/noob/src/ui/mod.rs`: `text` at line 581, `tool` at 672,
-`result` at 722, `done` at 1078.
+`noob exec -p "<prompt>" --json` still writes the older, looser four-kind
+stream, which is the scripting surface and is unversioned on purpose. A front
+end uses `serve`.
 
-The session log is a second, durable stream, one JSON object per line under
-`<config>/sessions/<id>.jsonl`, documented at the top of
-`crates/noob/src/session/mod.rs`: `meta`, `item` (one transcript item), `reset`
-(compaction replaced the transcript), and `usage` (one request's cost, as
-computed prefill and generated tokens).
-
-### Known gaps in that stream, before you design against it
-
-- **A `tool` event carries no id, but its `result` does.** Pairing a call with
-  its result from stdout alone is positional. A front end that wants to show one
-  panel per running tool needs the id on both.
-- **Only four event kinds reach stdout.** Reasoning deltas, notes, and errors go
-  to stderr in this mode, so a front end reading stdout only will silently miss
-  them.
-- **Nothing is versioned or schema-backed.** There is no schema file and no
-  version field on the stream. The repository's stated architecture is
-  contract-isolated layers connected by versioned JSON Schema, and this stream
-  does not meet that bar yet.
-
-### First step
-
-Do not open a window first. Pin the event stream down as a contract: write the
-schema, add the missing ids, decide what belongs on stdout, version it, and put
-a test on it. That is one self-contained commit, it is useful on its own for
-anyone scripting noob, and it is the thing the front end will be built on top
-of. A GUI written against today's unversioned stream will encode its accidents.
+The design in the old `README.md` plan that did not ship: one isolated surface
+per concern (plan, multi-agent runner, agent management, main window) each
+talking to the others over schema-validated data, plus a dedicated code-stream
+surface showing each generated file as it is written. What shipped is one window
+with nine views in three spaces, and one contract-isolated layer,
+`gui/layers/text-geometry`. `docs/CLIPPY-PLAN.md` lists which module becomes
+which layer next.
 
 ## Task 3: let the agent run containers
 
 The sandbox has no `docker` binary and no socket, so an agent asked to start
 anything containerized has no path at all. It does not fail cleanly either: it
 tries pip, then a public instance, then a source install, and burns the
-fifty-round cap (`TURN_CAP`, `crates/noob/src/agent/mod.rs:28`) before saying so.
+fifty-round cap (`TURN_CAP`, `crates/noob/src/agent/mod.rs:32`) before saying so.
 Web search was the case that surfaced this, and it got a targeted fix upstream
 (`websearch searxng up` installs SearXNG as a plain process instead), but the
 general gap is still there for databases, message queues, and anything else the
@@ -180,12 +169,13 @@ exists.
 
 ## Constraints that are not obvious from the code
 
-- **The fixed prompt has a hard ceiling of 2,000 tokens** and currently measures
-  1,938 against the qwen tokenizer, with both shipped skills, MCP configured,
-  and all thirteen tools registered. That leaves room for about one more short
-  skill index line. `crates/noob/tests/budget.rs` guards this with lower
-  ceilings measured through a different tokenizer, so it will not catch a real
-  overrun on its own. Measure the real thing with
+- **The fixed prompt has a hard ceiling of 2,000 tokens** and measured 1,938
+  against the qwen tokenizer on 2026-07-28, with both shipped skills, MCP
+  configured, and all fourteen tools registered. That leaves room for about one
+  more short skill index line. `crates/noob/tests/budget.rs` guards this with
+  ceilings measured through tiktoken, which no served model here uses, so it
+  will not catch a real overrun on its own: the same artifact is 1,874 o200k
+  tokens against a 1,900 ceiling. Measure the real thing with
   `noob debug prompt --json` and the server's `/tokenize` endpoint.
 - **Never cap model output.** No `max_tokens` and no word or sentence limits in
   prompts. `crates/noob/tests/budget.rs` enforces both.
