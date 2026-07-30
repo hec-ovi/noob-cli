@@ -41,6 +41,27 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
   clamped against the room the strip actually has on every frame, so a resize, a
   closed tab or a tab dragged elsewhere cannot leave a space scrolled past its
   last tab, and the pane on screen always has its own tab in the strip.
+- Dragging a tab in front of another one reorders the tabs. A move always pushed
+  the tab onto the end of the target space and did nothing at all when that space
+  was the one it was already in, so there was no way to change the order of a
+  strip in either direction. A drop on a strip now names a place among its tabs,
+  in front of the tab under the pointer or behind it depending on which half of it
+  the pointer is in, and the tab lands there whether it came from that space or
+  another. A drop in the body of a pane still names the space alone and lands at
+  the end of it, so a drag that ends where it started changes nothing, including
+  which tab was showing.
+- A drag says where it would land. The only feedback was a hairline along the
+  target pane's edges, and once the pane lost its top edge that outline no longer
+  closed around anything. The space a drop would land in now takes a translucent
+  green box over its tab strip and its pane, with a caret standing in the gap
+  between the two tabs the tab would go between. Both are painted on the floating
+  layer, along with the tab following the pointer, so they read over the pane
+  instead of under its text.
+- Dragging a tab outside the window says that letting go closes it. The drop
+  already closed the widget and nothing announced it. The pointer becomes a
+  crosshair while a drag is outside the surface, and the tab in the air is drawn
+  in the bad colour with no target boxed anywhere, because there is nowhere out
+  there to land.
 - The dock icon appears as soon as the window opens. The desktop entry asks for
   a startup notification and nothing answered it, so the cursor spun until
   GNOME's own timeout, around fifteen seconds.
