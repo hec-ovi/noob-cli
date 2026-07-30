@@ -114,6 +114,25 @@ const PICKER_MAX_ROWS: usize = 24;
 /// from the left, so its accent runs down that edge instead.
 const MARK_W: f32 = 2.0;
 
+/// The version this build was cut from, and the version the title strip reads.
+///
+/// It comes from the crate rather than from a string typed into the strip, so
+/// the window cannot claim a release the package does not carry. The two cargo
+/// workspaces, the CLI and this window, set the same number and ship as one
+/// release.
+pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The commit the build came from, as ` abc1234`, with a `+` when the tree had
+/// uncommitted changes, and nothing at all when there was no repository to ask.
+///
+/// `build.rs` stamps [`VERSION`] and the commit into one string. The strip takes
+/// the version from the crate, so what is left to take from the stamp is the
+/// part after it. A version alone cannot tell two test builds of the same
+/// release apart, which is what the commit is for.
+fn build_commit() -> &'static str {
+    env!("CLIPPY_BUILD").strip_prefix(VERSION).unwrap_or("")
+}
+
 /// Something the pointer can land on. Returned by [`Layout::hit`] so every
 /// click is resolved in one place instead of in a chain of `if` in the event
 /// handler.
@@ -979,12 +998,12 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
     let room = (layout.width - BUTTON_W * 3.0 - 12.0).max(1.0);
     let mut runs = vec![
         Run::tinted("NO0B \u{25b8} CLIppy", skin.bright),
-        // Which build this is. Stamped by build.rs from the commit, because a
-        // crate version cannot tell two test builds apart. At the text tint,
-        // not the dim one: dim is the faintest thing the palette has and two
-        // builds side by side could not be told apart, which is the one job
-        // this reading has.
-        Run::tinted(format!(" {}", env!("CLIPPY_BUILD")), skin.title),
+        // Which build this is: the version the crate carries, then the commit
+        // build.rs stamped after it, because a version cannot tell two test
+        // builds of the same release apart. At the text tint, not the dim one:
+        // dim is the faintest thing the palette has and two builds side by side
+        // could not be told apart, which is the one job this reading has.
+        Run::tinted(format!(" {VERSION}{}", build_commit()), skin.title),
     ];
     // Open, the strip says which build this is and nothing more. The phase, the
     // model, the workspace and the token budget were readings squeezed into a
@@ -2203,6 +2222,62 @@ mod tests {
             env!("CLIPPY_BUILD").starts_with(env!("CARGO_PKG_VERSION")),
             "the stamp has to start with the version, got {:?}",
             env!("CLIPPY_BUILD")
+        );
+    }
+
+    /// The reading after the name starts with the version the crate carries.
+    ///
+    /// The first question about a build is which release it is, and a commit
+    /// cannot answer it. What the strip draws is taken from the crate, not typed
+    /// in beside it, so the window cannot show a version the package does not
+    /// have.
+    #[test]
+    fn the_title_bar_reads_the_crate_version() {
+        let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &[]);
+        let title = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| text.runs.iter().any(|run| run.text.contains("NO0B")))
+            .expect("the title strip names the window");
+        let reading = title
+            .runs
+            .iter()
+            .find(|run| run.text.trim().starts_with(VERSION))
+            .unwrap_or_else(|| {
+                let line: String = title.runs.iter().map(|run| run.text.as_str()).collect();
+                panic!("the strip does not read the version {VERSION:?}: {line}")
+            });
+        assert_eq!(
+            reading.text.trim().split(' ').next(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "the version on screen is not the crate's: {:?}",
+            reading.text
+        );
+        assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
+        // The commit follows the version rather than repeating it.
+        assert!(!build_commit().contains(VERSION), "{:?}", build_commit());
+    }
+
+    /// The CLI and the window are separate cargo workspaces with separate
+    /// lockfiles and they ship as one release, so their versions move together.
+    /// A version that moves in one workspace only is the same defect as a
+    /// version that does not move at all.
+    #[test]
+    fn both_workspaces_carry_the_same_version() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
+        // A source tarball of the window alone has no CLI beside it, and it
+        // still has to build and test.
+        let Ok(manifest) = std::fs::read_to_string(&root) else {
+            return;
+        };
+        let line = manifest
+            .lines()
+            .find(|line| line.starts_with("version = "))
+            .expect("the CLI workspace sets a version");
+        assert!(
+            line.contains(&format!("\"{VERSION}\"")),
+            "the CLI workspace is on {line:?} and the window on {VERSION:?}"
         );
     }
 
