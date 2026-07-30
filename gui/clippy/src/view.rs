@@ -153,6 +153,12 @@ const PICKER_MAX_ROWS: usize = 24;
 /// from the left, so its accent runs down that edge instead.
 const MARK_W: f32 = 2.0;
 
+/// How wide the caret standing in the gap a dragged tab would drop into is.
+///
+/// Three, one more than every hairline in the window, because it is the one mark
+/// that has to be read while something else is moving.
+const CARET_W: f32 = 3.0;
+
 /// The version this build was cut from, and the version the title strip reads.
 ///
 /// It comes from the crate rather than from a string typed into the strip, so
@@ -782,6 +788,28 @@ impl Layout {
         placed.first_tab + placed.tabs.len()
     }
 
+    /// Where the gap between two tabs is, for the place a drop would take.
+    ///
+    /// The left edge of the tab that would be pushed along, or the right edge of
+    /// the last tab on screen when the drop is behind all of them. Clamped into
+    /// the strip so a caret at either end is drawn on the strip rather than off
+    /// the side of it.
+    pub fn insertion_gap(&self, space: Space, at: usize) -> f32 {
+        let placed = self.placed(space);
+        // A place in front of the first tab on screen is that tab's own edge: a
+        // scrolled strip has tabs off its left end, and the caret cannot be drawn
+        // where they are.
+        let step = at.saturating_sub(placed.first_tab);
+        let gap = match placed.tabs.get(step) {
+            Some((_, panel)) => panel.x,
+            None => match placed.tabs.last() {
+                Some((_, panel)) => panel.x + panel.w,
+                None => placed.strip.x,
+            },
+        };
+        gap.clamp(placed.strip.x, placed.strip.x + placed.strip.w)
+    }
+
     /// Rows a panel can show. The header line is content, not scrollback.
     pub fn rows(&self, panel: Panel, size: f32) -> usize {
         Text::rows_for(size, panel.inset(PAD).h)
@@ -1321,9 +1349,59 @@ pub fn build(frame: &Frame) -> Scene {
         space_pane(&mut scene, frame, space);
     }
     input_row(&mut scene, frame);
+    // All three on the floating layer, in the order they stack: the box over the
+    // target space, the caret in the gap the tab would go into, then the tab
+    // itself under the pointer, over both.
+    drop_target(&mut scene, frame);
     dragging(&mut scene, frame);
     overlay(&mut scene, frame);
     scene
+}
+
+/// What a drop would do, drawn over the space it would do it to: a translucent
+/// green box over the whole space, and a caret in the gap between the two tabs
+/// the tab would land between.
+///
+/// On the floating layer, so it covers the pane rather than being painted under
+/// the pane's own text the way a base-layer rectangle is (see [`overlay`]). A
+/// wash under the glyphs is exactly the feedback item 17 said it could not see.
+///
+/// The box is the strip and the body together, because the space is what the drop
+/// lands in and its tabs are part of it. Folded, the body is zero tall and the
+/// box is the strip, which is all there is of that space to point at.
+///
+/// The caret is only drawn for a drop that names a place, which is a drop on a
+/// tab strip. In the body of a pane there is no gap being aimed at: the tab goes
+/// to the end of the space, and a caret standing between two tabs would promise
+/// a position the drop does not name.
+fn drop_target(scene: &mut Scene, frame: &Frame) {
+    let Some(drag) = frame.drag else {
+        return;
+    };
+    let Landing::In(space, at) = drag.landing else {
+        return;
+    };
+    let (skin, layout) = (frame.skin, frame.layout);
+    let placed = layout.placed(space);
+    if placed.strip.w < 1.0 {
+        return;
+    }
+    let box_ = Panel::new(
+        placed.strip.x,
+        placed.strip.y,
+        placed.strip.w,
+        placed.strip.h + placed.body.h,
+    );
+    // The same cut corner every panel in the window has, so the box lies on the
+    // pane instead of squaring off its top right corner.
+    scene.over_rect(box_.fill(skin.drop_target).chamfer(cut_of(box_), Rect::TOP_RIGHT));
+    let Some(at) = at else {
+        return;
+    };
+    let x = layout
+        .insertion_gap(space, at)
+        .min(placed.strip.x + placed.strip.w - CARET_W);
+    scene.over_rect(Panel::new(x, placed.strip.y, CARET_W, placed.strip.h).fill(skin.drop_mark));
 }
 
 /// The floating layer, and the last thing painted.
@@ -1638,12 +1716,6 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
         return;
     }
 
-    // A space being dragged onto is lit along the three edges it has, so a drop
-    // target is a place rather than a guess.
-    let target = matches!(
-        frame.drag.map(|drag| drag.landing),
-        Some(Landing::In(onto, _)) if onto == space
-    );
     // The strip itself is not drawn. It is the window, not a toolbar, and the
     // tabs standing in it are the only thing up here. Its fill and the hairline
     // along its foot were both square, so they ran past the cut corner of the
@@ -1678,11 +1750,13 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
     // Three sides, not four. The missing one is the top, which was the line under
     // the tabs; see [`pane_edges`]. The fill still carries the cut, so the corner
     // is unchanged.
-    pane_edges(
-        scene,
-        panel,
-        if target { skin.edge_focus } else { skin.edge },
-    );
+    //
+    // The same three edges whether or not a drop would land here. A space being
+    // dragged onto used to be lit in `edge_focus` instead, and once the top edge
+    // went the lit outline no longer closed around the pane, so it read as a
+    // pane with a coloured left side rather than as a target. What says a drop
+    // lands here now is a box over the whole space; see [`drop_target`].
+    pane_edges(scene, panel, skin.edge);
 
     // Banded in the box the text is actually in, which is the whole body for
     // every pane but the file one: the file view spends its left column on the
@@ -2819,6 +2893,11 @@ fn swatch(rgb: [u8; 3]) -> [f32; 4] {
 
 /// The tab under the pointer while it is being dragged, so the drag has
 /// something following it and the drop has somewhere to be aimed.
+///
+/// On the floating layer, like the box under it: a tab in the air is the most
+/// floating thing there is, and in the base layer its own box was painted before
+/// every glyph in the window, so it slid under the text of whatever pane it
+/// crossed.
 fn dragging(scene: &mut Scene, frame: &Frame) {
     let Some(drag) = frame.drag else {
         return;
@@ -2827,9 +2906,9 @@ fn dragging(scene: &mut Scene, frame: &Frame) {
     let label = drag.view.label();
     let w = (label.chars().count() as f32 + 3.0) * frame.column;
     let ghost = Panel::new(drag.at.0 - w * 0.5, drag.at.1 - TAB_H * 0.5, w, TAB_H);
-    scene.rect(ghost.fill(skin.bar));
-    scene.rect(ghost.outline(skin.edge_focus, 1.0));
-    scene.text(Text::rich(
+    scene.over_rect(ghost.fill(skin.bar));
+    scene.over_rect(ghost.outline(skin.edge_focus, 1.0));
+    scene.over_text(Text::rich(
         vec![Run::tinted(label, skin.bright)],
         ghost.row(SMALL * 0.6, Text::line_for(SMALL)),
         SMALL,
@@ -4185,12 +4264,19 @@ mod tests {
         assert!(top.body.w > 1000.0, "{:?}", top.body);
     }
 
-    /// A drag has to be visible, and its target has to be named, or a drop is
-    /// a guess.
+    /// Item 17: a drag puts a full green transparent box over the space the drop
+    /// would land in, and the tab follows the pointer. Both on the floating
+    /// layer, or the feedback is painted under the pane's own text, which is the
+    /// version that could not be seen.
     #[test]
-    fn a_dragged_tab_follows_the_pointer_and_lights_its_target() {
+    fn a_dragged_tab_boxes_its_target_space_in_green_on_the_overlay() {
         let dock = Dock::new();
         let plain = render(&busy_state(), 1200.0, 800.0, &dock, &["a.rs"]);
+        assert!(
+            plain.scene.over_rects.is_empty(),
+            "something floats over a window with nothing being dragged"
+        );
+
         let dragging = render_with(
             &busy_state(),
             1200.0,
@@ -4204,28 +4290,181 @@ mod tests {
                 landing: Landing::In(Space::Left, None),
             }),
         );
+        // The box covers the whole space: its tab strip and its pane.
+        let placed = dragging.layout.placed(Space::Left);
+        let want = [
+            placed.strip.x,
+            placed.strip.y,
+            placed.strip.w,
+            placed.strip.h + placed.body.h,
+        ];
+        let box_ = dragging
+            .scene
+            .over_rects
+            .iter()
+            .find(|rect| rect.rgba() == dragging.skin.drop_target)
+            .expect("no green box over the target space");
+        assert_eq!(box_.xywh(), want, "the box is not the space");
         assert!(
-            dragging.scene.rects.len() > plain.scene.rects.len(),
-            "the ghost is drawn"
+            box_.rgba()[3] < dragging.skin.panel[3],
+            "the box is more solid than the pane it covers: {:?}",
+            box_.rgba()
         );
-        // The ghost is where the pointer is.
+        // Nothing of it in the base layer, where the pane's glyphs would be
+        // painted over it.
+        assert!(
+            !dragging
+                .scene
+                .rects
+                .iter()
+                .any(|rect| rect.rgba() == dragging.skin.drop_target),
+            "the box is in the base layer, under the pane's text"
+        );
+        // There is pane text under it, or this proves nothing.
+        assert!(
+            text_over(&dragging.scene.texts, Panel::new(want[0], want[1], want[2], want[3])),
+            "nothing is written under the box"
+        );
+
+        // The tab itself follows the pointer, over the box.
         let ghost = dragging
             .scene
-            .rects
+            .over_rects
             .iter()
             .map(|r| r.xywh())
             .find(|[x, y, w, h]| {
                 *x < 400.0 && *x + *w > 400.0 && *y < 500.0 && *y + *h > 500.0 && *h <= TAB_H + 1.0
             });
         assert!(ghost.is_some(), "no ghost under the pointer");
-        // The target space is outlined in the focus colour.
-        let target = dragging.layout.placed(Space::Left).body;
-        let lit = dragging.scene.rects.iter().any(|r| {
-            let [x, y, w, h] = r.xywh();
-            (w <= 1.5 || h <= 1.5) && x >= target.x - 0.5 && y >= target.y - 0.5
-        });
-        assert!(lit, "the target is not outlined");
-        let _ = dragging.skin;
+
+        // And the space that is not being dropped on is not boxed.
+        for space in [Space::TopRight, Space::BottomRight] {
+            let placed = dragging.layout.placed(space);
+            assert!(
+                !dragging.scene.over_rects.iter().any(|rect| {
+                    let [x, y, ..] = rect.xywh();
+                    rect.rgba() == dragging.skin.drop_target
+                        && (x - placed.strip.x).abs() < 0.01
+                        && (y - placed.strip.y).abs() < 0.01
+                }),
+                "{space:?} is boxed too"
+            );
+        }
+        // The pane's own edges are the ordinary ones. The lit outline this
+        // replaced could not close around a pane with no top edge.
+        assert!(
+            !dragging
+                .scene
+                .rects
+                .iter()
+                .any(|rect| rect.rgba() == dragging.skin.edge_focus
+                    && rect.xywh()[0] == placed.body.x
+                    && rect.xywh()[1] == placed.body.y),
+            "the target pane is still outlined in the focus colour"
+        );
+    }
+
+    /// The other half of item 17: which place in the strip the drop would take,
+    /// as a caret standing in that gap. A drop that names no place draws none.
+    #[test]
+    fn a_drop_that_names_a_place_draws_a_caret_in_that_gap() {
+        let dock = Dock::new();
+        let layout = Layout::compute(1200.0, 800.0, &shape(&dock, &[]));
+        let tabs = layout.placed(Space::TopRight).tabs.clone();
+        assert!(tabs.len() > 2);
+
+        for (step, (_, tab)) in tabs.iter().enumerate() {
+            // A pointer on the left half of a tab lands in front of it, so the
+            // caret stands on that tab's own left edge.
+            let x = tab.x + 1.0;
+            let at = layout.insertion(Space::TopRight, x);
+            assert_eq!(at, step);
+            let out = render_with(
+                &busy_state(),
+                1200.0,
+                800.0,
+                &dock,
+                &[],
+                &Monitor::new(),
+                Some(Drag {
+                    view: View::Files,
+                    at: (x, tab.y + tab.h * 0.5),
+                    landing: Landing::In(Space::TopRight, Some(at)),
+                }),
+            );
+            let caret = out
+                .scene
+                .over_rects
+                .iter()
+                .map(|rect| (rect.xywh(), rect.rgba()))
+                .find(|(_, rgba)| *rgba == out.skin.drop_mark)
+                .unwrap_or_else(|| panic!("no caret for a drop in front of tab {step}"));
+            let ([cx, cy, cw, ch], _) = caret;
+            assert!((cx - tab.x).abs() < 0.01, "tab {step}: the caret is at {cx}, not {}", tab.x);
+            assert_eq!(cy, tab.y, "tab {step}: the caret is not in the strip");
+            assert_eq!(ch, tab.h, "tab {step}");
+            assert!(cw > 1.0 && cw < 6.0, "tab {step}: a caret {cw} wide");
+        }
+
+        // Behind the last tab: on its right edge, and still inside the strip.
+        let placed = layout.placed(Space::TopRight);
+        let end = placed.first_tab + placed.tabs.len();
+        let last = placed.tabs.last().expect("tabs").1;
+        let out = render_with(
+            &busy_state(),
+            1200.0,
+            800.0,
+            &dock,
+            &[],
+            &Monitor::new(),
+            Some(Drag {
+                view: View::Files,
+                at: (last.x + last.w, last.y),
+                landing: Landing::In(Space::TopRight, Some(end)),
+            }),
+        );
+        let caret = out
+            .scene
+            .over_rects
+            .iter()
+            .find(|rect| rect.rgba() == out.skin.drop_mark)
+            .expect("no caret behind the last tab")
+            .xywh();
+        assert!((caret[0] - (last.x + last.w)).abs() < 0.01, "{caret:?}");
+        assert!(
+            caret[0] + caret[2] <= placed.strip.x + placed.strip.w + 0.01,
+            "the caret hangs off the strip: {caret:?}"
+        );
+
+        // A drop in the body of a pane names a space and no place in its strip,
+        // so there is a box and no caret: the tab goes to the end.
+        let out = render_with(
+            &busy_state(),
+            1200.0,
+            800.0,
+            &dock,
+            &[],
+            &Monitor::new(),
+            Some(Drag {
+                view: View::Files,
+                at: middle(placed.body),
+                landing: Landing::In(Space::TopRight, None),
+            }),
+        );
+        assert!(
+            out.scene
+                .over_rects
+                .iter()
+                .any(|rect| rect.rgba() == out.skin.drop_target),
+            "the target is not boxed"
+        );
+        assert!(
+            !out.scene
+                .over_rects
+                .iter()
+                .any(|rect| rect.rgba() == out.skin.drop_mark),
+            "a caret promises a place the drop does not name"
+        );
     }
 
     /// The band has to land on the text it selects. This is the geometry that

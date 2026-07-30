@@ -46,6 +46,20 @@ pub struct Skin {
     pub menu: [f32; 4],
     pub edge: [f32; 4],
     pub edge_focus: [f32; 4],
+    /// The box over the space a dragged tab would land in.
+    ///
+    /// Green because it means yes, and green rather than the accent because the
+    /// accent is whatever the theme is: a drop target in the amber theme's accent
+    /// would read as a warning. Translucent, and low enough that the pane under it
+    /// still reads: a solid box hides the thing being aimed at, which is the pane
+    /// you are trying to drop onto.
+    ///
+    /// Derived rather than given a settings key of its own, the way `menu` is.
+    /// It is on screen only while a tab is in the air.
+    pub drop_target: [f32; 4],
+    /// The caret between the two tabs a drop would land between: the same green
+    /// at full strength, because a mark two pixels wide has to be seen.
+    pub drop_mark: [f32; 4],
     pub input: [f32; 4],
     pub caret: [f32; 4],
     pub gauge: [f32; 4],
@@ -141,6 +155,8 @@ impl Skin {
             menu: rgba(config.panel, (o + 0.42).min(1.0)),
             edge: rgba(config.dim, 0.65),
             edge_focus: rgba(config.accent, 1.0),
+            drop_target: rgba(config.good, 0.22),
+            drop_mark: rgba(config.good, 1.0),
             input: rgba(config.panel, (o + 0.12).min(1.0)),
             caret: rgba(config.accent, 1.0),
             gauge: rgba(config.accent, 1.0),
@@ -398,6 +414,26 @@ mod tests {
                 skin.tab
             );
             assert!(skin.tab_idle[3] > 0.0, "{name}: and is still drawn");
+        }
+    }
+
+    /// Item 17 asked for a green transparent box over the drop target, and both
+    /// halves of that are palette rules: green in every theme, and see-through
+    /// enough that the pane it covers can still be read.
+    #[test]
+    fn the_drop_target_is_green_and_the_pane_reads_through_it() {
+        for name in crate::config::THEMES {
+            let skin = Skin::from(&crate::config::theme(name).expect(name));
+            let [r, g, b, a] = skin.drop_target;
+            assert!(g > r && g > b, "{name}: the drop target is not green: {:?}", skin.drop_target);
+            assert!(a > 0.0 && a < 0.4, "{name}: alpha {a} is not see-through");
+            // The pane is the more solid of the two, or the box hides what it is
+            // pointing at.
+            assert!(a < skin.panel[3], "{name}: {a} over the pane's {}", skin.panel[3]);
+            // The caret is the same green, all the way up: a mark this narrow at
+            // the box's own alpha would not be seen at all.
+            assert_eq!(skin.drop_mark[..3], skin.drop_target[..3], "{name}");
+            assert_eq!(skin.drop_mark[3], 1.0, "{name}");
         }
     }
 
