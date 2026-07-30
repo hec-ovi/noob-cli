@@ -23,6 +23,7 @@ use crate::icons;
 use crate::menu::Menu;
 use crate::monitor::{Gauge, Monitor};
 use crate::picker::{Picker, Row as PickerRow};
+use crate::settings::{Kind, Row as SettingRow, Settings};
 use crate::skin::Skin;
 use crate::state::{State, TodoState, Tone};
 
@@ -119,6 +120,15 @@ const DIFF_MIN_COLUMNS: usize = GUTTER + 20;
 /// the rest of it empty.
 const PICKER_COLUMNS: usize = 64;
 
+/// Columns the settings panel keeps at the right of a row for its value.
+///
+/// Wide enough for the longest value on the panel, which is a rate reading like
+/// `312 mean, 340 median tok/s`, and no wider: past that the label and the value
+/// it belongs to are at opposite ends of the window with nothing between them.
+/// A path is longer than this and is clipped, which is what the panel is for
+/// rather than what it says.
+const SETTING_VALUE_COLUMNS: usize = 28;
+
 /// The rows the picker spends above its list: the heading, the folder it is
 /// listing, and what has been typed.
 const PICKER_HEAD_ROWS: f32 = 3.0;
@@ -189,6 +199,17 @@ pub enum Hit {
     /// The picker's box, away from any row. Swallowed, so a press on its margin
     /// does not read as a press on the window behind it.
     Picker,
+    /// A row of the settings panel, by position in its list. Puts the cursor
+    /// there and nothing else: a click anywhere on a row that also changed the
+    /// setting would change one every time the pointer missed the value.
+    SettingsRow(usize),
+    /// The value at the end of that row, which is the control. Clicking it is
+    /// the same nudge the right arrow is.
+    SettingsValue(usize),
+    /// The mark that closes the panel, for a pointer with no Escape key handy.
+    SettingsClose,
+    /// The panel's box, away from any row. Swallowed, like the picker's.
+    Settings,
 }
 
 impl Hit {
@@ -257,6 +278,19 @@ pub struct Layout {
     pub picker_rows: Vec<(usize, Panel)>,
     pub picker_open: Panel,
 
+    /// True while the settings panel is up, which is the third shape of its own:
+    /// the panes and the prompt are still there behind it, and the panel covers
+    /// the lot, because it is a takeover rather than a window over a window.
+    pub in_settings: bool,
+    /// Its box, its list, one panel per visible row, the value at the end of
+    /// each of those rows, and the mark that closes it. All empty when it is
+    /// not up.
+    pub settings: Panel,
+    pub settings_list: Panel,
+    pub settings_rows: Vec<(usize, Panel)>,
+    pub settings_values: Vec<(usize, Panel)>,
+    pub settings_close: Panel,
+
     /// The floating layer. The open menu's box, and one panel per row, both
     /// empty when no menu is open. Drawn last and hit tested first.
     pub menu: Panel,
@@ -275,6 +309,9 @@ pub struct Shape<'a> {
     /// The folder picker, while it is up. Part of the shape because the picker
     /// replaces the whole window: with it up there are no panes and no prompt.
     pub picker: Option<&'a Picker>,
+    /// The settings panel, while it is up, for the same reason: it covers the
+    /// panes, so where its rows are is where every hit region in the window is.
+    pub settings: Option<&'a Settings>,
     /// One label per file in the explorer, in order.
     pub file_labels: Vec<String>,
     /// Which row the explorer list starts on, counted from its top. The layout
@@ -343,6 +380,12 @@ impl Layout {
                 picker_list: nowhere(),
                 picker_rows: Vec::new(),
                 picker_open: nowhere(),
+                in_settings: false,
+                settings: nowhere(),
+                settings_list: nowhere(),
+                settings_rows: Vec::new(),
+                settings_values: Vec::new(),
+                settings_close: nowhere(),
                 menu,
                 menu_rows,
             };
@@ -373,6 +416,49 @@ impl Layout {
                 picker_list: list,
                 picker_rows: rows,
                 picker_open: open,
+                in_settings: false,
+                settings: nowhere(),
+                settings_list: nowhere(),
+                settings_rows: Vec::new(),
+                settings_values: Vec::new(),
+                settings_close: nowhere(),
+                menu,
+                menu_rows,
+            };
+        }
+
+        // The settings panel takes the whole surface under the title strip, and
+        // every pane region collapses the way it does for the picker. A takeover
+        // rather than a box over the panes: half a window of live panes behind a
+        // list of settings is two scroll regions over each other, and a click
+        // that missed the panel would land in a transcript nobody can see.
+        if let Some(panel) = shape.settings {
+            let places = place_settings(rest.inset(GAP), shape, panel);
+            return Layout {
+                width,
+                height,
+                shaded: false,
+                title,
+                minimize: buttons[0],
+                maximize: buttons[1],
+                close: buttons[2],
+                spaces: [empty_placed(), empty_placed(), empty_placed()],
+                file_list: nowhere(),
+                file_diff: nowhere(),
+                file_rows: Vec::new(),
+                files_in: None,
+                input: nowhere(),
+                picking: false,
+                picker: nowhere(),
+                picker_list: nowhere(),
+                picker_rows: Vec::new(),
+                picker_open: nowhere(),
+                in_settings: true,
+                settings: places.box_,
+                settings_list: places.list,
+                settings_rows: places.rows,
+                settings_values: places.values,
+                settings_close: places.close,
                 menu,
                 menu_rows,
             };
@@ -482,6 +568,12 @@ impl Layout {
             picker_list: nowhere(),
             picker_rows: Vec::new(),
             picker_open: nowhere(),
+            in_settings: false,
+            settings: nowhere(),
+            settings_list: nowhere(),
+            settings_rows: Vec::new(),
+            settings_values: Vec::new(),
+            settings_close: nowhere(),
             menu,
             menu_rows,
         }
@@ -534,6 +626,28 @@ impl Layout {
             }
             if self.picker.w >= 1.0 && self.picker.contains(x, y) {
                 return Some(Hit::Picker);
+            }
+            return None;
+        }
+        // The same for the settings panel: it covers the panes, so nothing
+        // underneath it can answer for a point inside it.
+        if self.in_settings {
+            if self.settings_close.w >= 1.0 && self.settings_close.contains(x, y) {
+                return Some(Hit::SettingsClose);
+            }
+            // The value before the row it sits in, because it sits inside it.
+            for (index, panel) in &self.settings_values {
+                if panel.contains(x, y) {
+                    return Some(Hit::SettingsValue(*index));
+                }
+            }
+            for (index, panel) in &self.settings_rows {
+                if panel.contains(x, y) {
+                    return Some(Hit::SettingsRow(*index));
+                }
+            }
+            if self.settings.w >= 1.0 && self.settings.contains(x, y) {
+                return Some(Hit::Settings);
             }
             return None;
         }
@@ -590,6 +704,11 @@ impl Layout {
     /// lose a row and put the cursor's own row off screen at the bottom.
     pub fn picker_capacity(&self, size: f32) -> usize {
         Text::rows_for(size, self.picker_list.h)
+    }
+
+    /// How many rows the settings panel's list can show, on the same terms.
+    pub fn settings_capacity(&self, size: f32) -> usize {
+        Text::rows_for(size, self.settings_list.h)
     }
 
     /// The box a space's text is drawn in.
@@ -799,6 +918,88 @@ fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> (Panel, Panel, V
     (box_, list, rows, open)
 }
 
+/// The settings panel's box, its list, the rows on screen, the value at the end
+/// of each of those rows, and the mark that closes it.
+///
+/// The whole area rather than a centred box: this is a takeover, and a list of
+/// sixty rows in a box the size of the picker's would be six rows of content and
+/// a lot of margin. The value column is a fixed number of columns in from the
+/// right so every value lines up in one column, which is what makes a screen of
+/// settings scannable rather than a wall of words.
+/// Where the settings panel's pieces are. A struct rather than a tuple: five
+/// panels in a row is a call site nobody can read, and two of them are lists.
+struct SettingsPlaces {
+    box_: Panel,
+    list: Panel,
+    rows: Vec<(usize, Panel)>,
+    values: Vec<(usize, Panel)>,
+    close: Panel,
+}
+
+/// What the value column takes, capped so a narrow window keeps a label: past
+/// half the row the values are what gets clipped, since a row whose label is gone
+/// says nothing at all.
+///
+/// Asked by the placement and by the drawing, so a value is drawn exactly where
+/// the click that changes it is tested for.
+fn settings_value_w(list_w: f32, column: f32) -> f32 {
+    (SETTING_VALUE_COLUMNS as f32 * column).min((list_w * 0.5).floor())
+}
+
+fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlaces {
+    if area.w < 1.0 || area.h < 1.0 {
+        return SettingsPlaces {
+            box_: nowhere(),
+            list: nowhere(),
+            rows: Vec::new(),
+            values: Vec::new(),
+            close: nowhere(),
+        };
+    }
+    let column = shape.pane_column.max(1.0);
+    let line = Text::line_for(shape.pane_size);
+    let content = area.inset(PAD);
+    // The heading, and the footer that says what the keys do.
+    let head = line;
+    let foot = line;
+    let list = Panel::new(
+        content.x,
+        content.y + head + GAP,
+        content.w,
+        (content.h - head - foot - GAP * 2.0).max(0.0),
+    );
+    let rows_fit = Text::rows_for(shape.pane_size, list.h);
+    let heights = panel.heights();
+    let back = text_geometry::scrollback_for(&heights, rows_fit, panel.first());
+    let window = text_geometry::window(&heights, rows_fit, back);
+    let value_w = settings_value_w(list.w, column);
+    let mut rows = Vec::new();
+    let mut values = Vec::new();
+    for step in 0..window.count {
+        let index = window.first + step;
+        let row = Panel::new(list.x, list.y + step as f32 * line, list.w, line);
+        rows.push((index, row));
+        // Only a row that carries a control gets one. A heading or a reading
+        // with a click region over its value would answer a press with nothing.
+        if matches!(panel.row(index), Some(SettingRow::Setting { kind, .. }) if kind.changes()) {
+            values.push((
+                index,
+                Panel::new(row.x + row.w - value_w, row.y, value_w, row.h),
+            ));
+        }
+    }
+    // Top right, one cut's reach in from the corner the cut takes away, so the
+    // mark is not drawn in the triangle that is not there.
+    let close = Panel::new(content.x + content.w - CUT - line, content.y, line, line);
+    SettingsPlaces {
+        box_: area,
+        list,
+        rows,
+        values,
+        close,
+    }
+}
+
 /// Lay tabs left to right at the width their labels need, dropping any that do
 /// not fit rather than squeezing them into unreadable slivers.
 fn strip_tabs(bar: Panel, widths: impl Iterator<Item = usize>, column: f32) -> Vec<Panel> {
@@ -871,6 +1072,9 @@ pub struct Frame<'a> {
     pub menu: Option<&'a Menu>,
     /// The folder picker, while it is up. The same one, for the same reason.
     pub picker: Option<&'a Picker>,
+    /// The settings panel, while it is up. The same one the layout was computed
+    /// from, or a row would be drawn somewhere other than where it is clicked.
+    pub settings: Option<&'a Settings>,
     /// Seconds since the window opened, which is the orb's clock.
     ///
     /// Passed in rather than read here. A frame is a function of what it is
@@ -918,6 +1122,14 @@ pub fn build(frame: &Frame) -> Scene {
     // nothing to type at.
     if layout.picking {
         folder_picker(&mut scene, frame);
+        return scene;
+    }
+
+    // The settings panel covers the panes and the prompt, so nothing under it is
+    // drawn: a pane painted behind a panel that fills the surface is a pane
+    // nobody sees, redrawn on every keystroke.
+    if layout.in_settings {
+        settings_panel(&mut scene, frame);
         return scene;
     }
 
@@ -2185,6 +2397,187 @@ fn folder_picker(scene: &mut Scene, frame: &Frame) {
     );
 }
 
+/// The settings panel: the whole surface under the title strip while it is up.
+///
+/// Two columns. The label on the left says what a setting is called in the file,
+/// so the panel doubles as the documentation for editing that file by hand, and
+/// the value sits in one column down the right where it can be scanned. Nothing
+/// here is a form widget: a value is text, and what makes it a control is that
+/// the arrow keys and a click on it change it.
+fn settings_panel(scene: &mut Scene, frame: &Frame) {
+    let Some(panel) = frame.settings else {
+        return;
+    };
+    let (skin, layout) = (frame.skin, frame.layout);
+    let box_ = layout.settings;
+    if box_.w < 1.0 || box_.h < 1.0 {
+        return;
+    }
+    scene.rect(panel_fill(box_, skin.panel));
+    scene.rect(panel_edge(box_, skin.edge_focus));
+
+    let size = frame.pane_size;
+    let line = Text::line_for(size);
+    let column = frame.pane_column.max(1.0);
+    let content = box_.inset(PAD);
+    let cols = cols_of(content, column);
+    let say = |scene: &mut Scene, runs: Vec<Run>, at: Panel, tint: [u8; 4]| {
+        scene.text(Text::rich(runs, at, size, tint));
+    };
+
+    // The heading, and the file it is a view of. The path is a reading further
+    // down as well, where it can be read in full; this is the one line at the
+    // top saying that the panel and the file are the same thing.
+    say(
+        scene,
+        vec![
+            Run::icon(icons::SETTINGS.to_string(), skin.bright),
+            Run::tinted(" SETTINGS", skin.bright),
+        ],
+        Panel::new(content.x, content.y, content.w, line),
+        skin.bright,
+    );
+
+    let close = layout.settings_close;
+    if close.w >= 1.0 {
+        if frame.hot == Some(Hit::SettingsClose) {
+            scene.rect(close.fill(skin.close_hot));
+        }
+        say(
+            scene,
+            vec![Run::icon(icons::CLOSE.to_string(), skin.bright)],
+            close,
+            skin.bright,
+        );
+    }
+
+    let list = layout.settings_list;
+    let value_w = settings_value_w(list.w, column);
+    let label_cols = cols_of(list, column).saturating_sub(SETTING_VALUE_COLUMNS + 1);
+    for (index, row) in &layout.settings_rows {
+        let Some(entry) = panel.row(*index) else {
+            continue;
+        };
+        let on = *index == panel.cursor();
+        if on {
+            // The band and the mark every list in this window marks its current
+            // row with, rather than a colour of its own.
+            scene.rect(row.fill(skin.strip));
+            scene.rect(Panel::new(row.x, row.y, MARK_W, row.h).fill(skin.edge_focus));
+        }
+        let text_x = row.x + MARK_W + 3.0;
+        let label_room = Panel::new(text_x, row.y, (row.w - value_w - MARK_W - 3.0).max(1.0), line);
+        let value_at = Panel::new(row.x + row.w - value_w, row.y, value_w, line);
+        match entry {
+            // A heading is the only thing on its row, and it gets the whole
+            // width: `WHICH PANES OPEN` is longer than a label column.
+            SettingRow::Heading(name) => say(
+                scene,
+                vec![Run::tinted(clip(name, cols), skin.title)],
+                Panel::new(text_x, row.y, (row.w - MARK_W - 3.0).max(1.0), line),
+                skin.title,
+            ),
+            SettingRow::Reading { label, value } => {
+                say(
+                    scene,
+                    vec![Run::tinted(clip(label, label_cols), skin.dim)],
+                    label_room,
+                    skin.dim,
+                );
+                say(
+                    scene,
+                    vec![Run::tinted(
+                        clip(value, SETTING_VALUE_COLUMNS),
+                        skin.body,
+                    )],
+                    value_at,
+                    skin.body,
+                );
+            }
+            SettingRow::Setting { key, value, kind } => {
+                let tint = if on { skin.bright } else { skin.body };
+                say(
+                    scene,
+                    vec![Run::tinted(clip(key, label_cols), tint)],
+                    label_room,
+                    tint,
+                );
+                match kind {
+                    // A colour is drawn as itself. A hex string is not a colour
+                    // to anyone reading a palette, and this is the panel where
+                    // the palette is read.
+                    Kind::Colour(rgb) => {
+                        let side = (line * 0.6).floor().max(2.0);
+                        let up = ((line - side) * 0.5).floor();
+                        scene.rect(
+                            Panel::new(value_at.x, value_at.y + up, side, side).fill(swatch(*rgb)),
+                        );
+                        say(
+                            scene,
+                            vec![Run::tinted(clip(value, SETTING_VALUE_COLUMNS), skin.dim)],
+                            Panel::new(
+                                value_at.x + side + column,
+                                value_at.y,
+                                (value_at.w - side - column).max(1.0),
+                                line,
+                            ),
+                            skin.dim,
+                        );
+                    }
+                    // The value of a setting that can change is drawn as the
+                    // control it is: accent tinted, and lit under the pointer
+                    // the way a window button is.
+                    _ => {
+                        if frame.hot == Some(Hit::SettingsValue(*index)) {
+                            scene.rect(value_at.fill(skin.hot));
+                        }
+                        say(
+                            scene,
+                            vec![Run::tinted(
+                                clip(value, SETTING_VALUE_COLUMNS),
+                                skin.bright,
+                            )],
+                            value_at,
+                            skin.bright,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    scrollbar(
+        scene,
+        skin,
+        layout.settings,
+        panel.thumb(layout.settings_capacity(size)),
+    );
+
+    // What the keys do to the row under the cursor, or why the last change did
+    // not land. A panel that writes a file has to say when the file refused.
+    let (foot, tint) = match panel.trouble() {
+        Some(why) => (clip(why, cols), skin.bad),
+        None => (clip(panel.hint(), cols), skin.dim),
+    };
+    say(
+        scene,
+        vec![Run::tinted(foot, tint)],
+        Panel::new(content.x, content.y + content.h - line, content.w, line),
+        tint,
+    );
+}
+
+/// A colour from the settings file as the renderer wants it. Fully opaque: the
+/// swatch is the colour itself, and the panel's own fill is what carries the
+/// window's transparency.
+fn swatch(rgb: [u8; 3]) -> [f32; 4] {
+    [
+        rgb[0] as f32 / 255.0,
+        rgb[1] as f32 / 255.0,
+        rgb[2] as f32 / 255.0,
+        1.0,
+    ]
+}
+
 /// The tab under the pointer while it is being dragged, so the drag has
 /// something following it and the drop has somewhere to be aimed.
 fn dragging(scene: &mut Scene, frame: &Frame) {
@@ -2431,6 +2824,7 @@ mod tests {
             dock,
             menu: None,
             picker: None,
+            settings: None,
             file_labels: files.iter().map(|f| f.to_string()).collect(),
             file_first: first,
             column: 8.0,
@@ -2635,6 +3029,7 @@ mod tests {
             selection: None,
             menu: None,
             picker: None,
+            settings: None,
         });
         Rendered {
             scene,
@@ -2713,6 +3108,7 @@ mod tests {
             selection: None,
             menu: None,
             picker: None,
+            settings: None,
         });
         assert!(discs_of(&scene).len() > 100, "{} discs", discs_of(&scene).len());
     }
@@ -2916,6 +3312,7 @@ mod tests {
             selection: None,
             menu: None,
             picker: None,
+            settings: None,
         });
         Rendered {
             scene,
@@ -3630,6 +4027,7 @@ mod tests {
             selection: Some(selection),
             menu: None,
             picker: None,
+            settings: None,
         });
 
         let body = layout.placed(Space::Left).body.inset(PAD);
@@ -3707,6 +4105,7 @@ mod tests {
             selection: Some(selection),
             menu: None,
             picker: None,
+            settings: None,
         });
         assert!(!scene.rects.iter().any(|r| r.rgba() == skin.select));
     }
@@ -3932,6 +4331,7 @@ mod tests {
                 dock: &dock,
                 menu: None,
                 picker: None,
+            settings: None,
                 file_labels: vec![],
                 file_first: 0,
                 column,
@@ -3959,6 +4359,7 @@ mod tests {
                 selection: None,
                 menu: None,
                 picker: None,
+            settings: None,
             });
             let body = layout.placed(Space::TopRight).body;
             let hues: Vec<[f32; 4]> = skin
@@ -4025,6 +4426,7 @@ mod tests {
             dock: &dock,
             menu: None,
             picker: None,
+            settings: None,
             file_labels: vec![],
             file_first: 0,
             column: 8.0,
@@ -4052,6 +4454,7 @@ mod tests {
             selection: None,
             menu: None,
             picker: None,
+            settings: None,
         });
 
         // CONTEXT is the only bounded reading in this pane with anything in it,
@@ -4444,6 +4847,7 @@ mod tests {
             selection: None,
             menu: None,
             picker: None,
+            settings: None,
         };
         let (heights, rows) = scroll_extent(&frame, view, layout.placed(space).body)
             .expect("the view reports an extent");
@@ -4640,6 +5044,7 @@ mod tests {
             selection: None,
             menu: None,
             picker: None,
+            settings: None,
         });
         (layout.input, layout, scene)
     }
@@ -4942,6 +5347,7 @@ mod tests {
             selection: None,
             menu: None,
             picker: None,
+            settings: None,
         })
     }
 
@@ -5173,6 +5579,7 @@ mod tests {
             selection: None,
             menu: Some(menu),
             picker: None,
+            settings: None,
         });
         Rendered {
             scene,
@@ -5228,23 +5635,35 @@ mod tests {
     fn the_row_under_the_pointer_is_the_row_that_acts() {
         use crate::menu::Item;
         let dock = Dock::new();
-        let menu = Menu::for_widget((600.0, 400.0), View::Plan, Space::TopRight, true);
-        let layout = with_menu(&dock, &menu, 1400.0, 900.0);
-        let picked: Vec<Option<Item>> = layout
-            .menu_rows
-            .iter()
-            .map(|row| {
-                let (x, y) = middle(*row);
-                match layout.hit(x, y) {
-                    Some(Hit::MenuRow(index)) => menu.pick(index),
-                    other => panic!("{other:?} is not a row"),
-                }
-            })
-            .collect();
+        let at = (600.0, 400.0);
+        let picked = |menu: &Menu| -> Vec<Option<Item>> {
+            let layout = with_menu(&dock, menu, 1400.0, 900.0);
+            layout
+                .menu_rows
+                .iter()
+                .map(|row| {
+                    let (x, y) = middle(*row);
+                    match layout.hit(x, y) {
+                        Some(Hit::MenuRow(index)) => menu.pick(index),
+                        other => panic!("{other:?} is not a row"),
+                    }
+                })
+                .collect()
+        };
         assert_eq!(
-            picked,
-            vec![None, Some(Item::CopySelection), Some(Item::Close)],
-            "settings is drawn and refuses to act"
+            picked(&Menu::for_widget(at, View::Plan, Space::TopRight, true)),
+            vec![
+                Some(Item::Settings),
+                Some(Item::CopySelection),
+                Some(Item::Close)
+            ]
+        );
+        // The copy row is the greyed one now that the settings panel exists, and
+        // it keeps its place: the rows either side of it act as before.
+        assert_eq!(
+            picked(&Menu::for_widget(at, View::Plan, Space::TopRight, false)),
+            vec![Some(Item::Settings), None, Some(Item::Close)],
+            "a row with nothing to copy is drawn and refuses to act"
         );
     }
 
@@ -5352,7 +5771,7 @@ mod tests {
             .collect();
         let base = text_of(&out.scene);
         for (label, tint) in [
-            ("Settings", out.skin.dim),
+            ("Settings", out.skin.bright),
             ("Copy selection", out.skin.dim),
             ("Close this widget", out.skin.bright),
         ] {
@@ -5397,6 +5816,7 @@ mod tests {
             selection: None,
             menu: Some(&menu),
             picker: None,
+            settings: None,
         });
         assert!(!scene.over_rects.is_empty(), "the menu box is not drawn");
         let rows: String = scene
@@ -5426,6 +5846,7 @@ mod tests {
     #[test]
     fn a_greyed_row_does_not_light_up_under_the_pointer() {
         let dock = Dock::new();
+        // No selection, so the copy row is the one that cannot act.
         let menu = Menu::for_widget((500.0, 400.0), View::Plan, Space::TopRight, false);
         let lit = |hot: Option<Hit>| {
             let out = render_menu(&busy_state(), 1400.0, 900.0, &dock, &menu, hot);
@@ -5436,8 +5857,9 @@ mod tests {
                 .filter(|r| r.rgba() == out.skin.hot && box_.contains(r.xywh()[0], r.xywh()[1]))
                 .count()
         };
-        assert_eq!(lit(Some(Hit::MenuRow(0))), 0, "settings is disabled");
-        assert_eq!(lit(Some(Hit::MenuRow(2))), 1, "close is not");
+        assert_eq!(lit(Some(Hit::MenuRow(1))), 0, "copy has nothing to copy");
+        assert_eq!(lit(Some(Hit::MenuRow(0))), 1, "settings opens the panel");
+        assert_eq!(lit(Some(Hit::MenuRow(2))), 1, "close acts");
         assert_eq!(lit(None), 0);
     }
 
@@ -5529,6 +5951,7 @@ mod tests {
             selection: None,
             menu: None,
             picker: Some(picker),
+            settings: None,
         });
         Rendered {
             scene,
@@ -5716,5 +6139,276 @@ mod tests {
             assert!(x >= -0.01 && y >= -0.01 && x + w <= 680.01 && y + h <= 380.01);
         }
     }
-}
 
+    /// The window with the settings panel up, laid out and drawn off one shape,
+    /// which is what makes a row land where it is drawn.
+    fn render_settings(panel: &Settings, w: f32, h: f32, hot: Option<Hit>) -> Rendered {
+        let dock = Dock::new();
+        let state = busy_state();
+        let mut shape = shape(&dock, &["a.rs"]);
+        shape.settings = Some(panel);
+        let layout = Layout::compute(w, h, &shape);
+        let skin = Skin::from(&Config::default());
+        let scene = build(&Frame {
+            state: &state,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &crate::prompt::Prompt::default(),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            clock: 0.0,
+            drag: None,
+            hot,
+            trouble: None,
+            selection: None,
+            menu: None,
+            picker: None,
+            settings: Some(panel),
+        });
+        Rendered {
+            scene,
+            layout,
+            skin,
+        }
+    }
+
+    fn a_settings_panel(config: &Config) -> Settings {
+        Settings::open(
+            config,
+            &crate::totals::Totals::default(),
+            Some(std::path::Path::new("/home/hec/.config/noob/no0b.conf")),
+        )
+    }
+
+    /// The panel is a takeover: while it is up there are no panes, no tabs and
+    /// no prompt, and it answers for every point under the title strip. The
+    /// strip itself still works, so the window can be moved and closed from it.
+    #[test]
+    fn the_settings_panel_takes_the_whole_window() {
+        let panel = a_settings_panel(&Config::default());
+        let out = render_settings(&panel, 1205.0, 791.0, None);
+        let layout = &out.layout;
+        assert!(layout.in_settings);
+        assert!(!layout.picking, "the two takeovers are different shapes");
+        for space in Space::ALL {
+            assert!(layout.placed(space).tabs.is_empty(), "{space:?}");
+            assert_eq!(layout.placed(space).body.w, 0.0, "{space:?}");
+        }
+        assert_eq!(layout.input.w, 0.0, "the prompt is behind the panel");
+        assert_eq!(layout.cell(600.0, 400.0, 13.0, 8.0), None);
+
+        // The whole surface under the strip, rather than a box in the middle of
+        // it: sixty rows in a picker-sized box is six rows and a lot of margin.
+        let box_ = layout.settings;
+        assert!(box_.y >= TITLE_H, "it starts below the strip: {box_:?}");
+        assert!(box_.y + box_.h <= 791.0 && box_.x + box_.w <= 1205.0, "{box_:?}");
+        assert!(box_.w >= 1205.0 - 4.0 * GAP, "not a takeover: {box_:?}");
+        assert!(box_.h >= 791.0 - TITLE_H - 4.0 * GAP, "not a takeover: {box_:?}");
+
+        assert_eq!(
+            layout.hit(box_.x + 1.0, box_.y + box_.h - 1.0),
+            Some(Hit::Settings),
+            "its own margin swallows a press rather than passing it on"
+        );
+        assert_eq!(layout.hit(400.0, 8.0), Some(Hit::TitleBar));
+        let (x, y) = middle(layout.close);
+        assert_eq!(layout.hit(x, y), Some(Hit::Close));
+    }
+
+    /// Every row is hit where it is drawn, the value at the end of a row that
+    /// can change is its own region, and a row that cannot change has none.
+    #[test]
+    fn every_settings_row_lands_where_it_is_drawn() {
+        let panel = a_settings_panel(&Config::default());
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let layout = &out.layout;
+        assert!(!layout.settings_rows.is_empty());
+        for (index, row) in &layout.settings_rows {
+            assert!(
+                layout.settings_list.contains(row.x + 1.0, row.y + 1.0),
+                "row {index} is outside the list: {row:?}"
+            );
+            // The left of the row, which is the label, puts the cursor there.
+            assert_eq!(
+                layout.hit(row.x + 2.0, row.y + row.h * 0.5),
+                Some(Hit::SettingsRow(*index))
+            );
+            let control = matches!(
+                panel.row(*index),
+                Some(crate::settings::Row::Setting { kind, .. }) if kind.changes()
+            );
+            let value = layout
+                .settings_values
+                .iter()
+                .find(|(at, _)| at == index)
+                .map(|(_, panel)| *panel);
+            match (control, value) {
+                (true, Some(value)) => {
+                    let (x, y) = middle(value);
+                    assert_eq!(layout.hit(x, y), Some(Hit::SettingsValue(*index)));
+                    assert!(row.contains(x, y), "the value is outside its row");
+                }
+                // A heading, a reading or a colour: the whole row is the row,
+                // and a press on its right hand end changes nothing.
+                (false, None) => assert_eq!(
+                    layout.hit(row.x + row.w - 2.0, row.y + row.h * 0.5),
+                    Some(Hit::SettingsRow(*index))
+                ),
+                other => panic!("row {index} carries {other:?}"),
+            }
+        }
+        // The values are one column, which is what makes a screen of settings
+        // scannable rather than a wall of words.
+        let lefts: Vec<f32> = layout.settings_values.iter().map(|(_, p)| p.x).collect();
+        assert!(
+            lefts.windows(2).all(|pair| (pair[0] - pair[1]).abs() < 0.01),
+            "{lefts:?}"
+        );
+    }
+
+    /// The mark that closes it is reachable, and clear of the corner the panel's
+    /// own cut takes away.
+    #[test]
+    fn the_close_mark_clears_the_cut_corner() {
+        let panel = a_settings_panel(&Config::default());
+        for (w, h) in [(1400.0, 900.0), (700.0, 460.0), (2200.0, 1400.0)] {
+            let out = render_settings(&panel, w, h, None);
+            let layout = &out.layout;
+            let (close, box_) = (layout.settings_close, layout.settings);
+            let (x, y) = middle(close);
+            assert_eq!(layout.hit(x, y), Some(Hit::SettingsClose), "{w}x{h}");
+            assert!(
+                close.x + close.w <= box_.x + box_.w - cut_of(box_),
+                "the mark is drawn in the cut: {close:?} in {box_:?}"
+            );
+            // And it lights up under the pointer, so it reads as something to
+            // press rather than as a decoration.
+            let lit = render_settings(&panel, w, h, Some(Hit::SettingsClose));
+            let hot = lit
+                .scene
+                .rects
+                .iter()
+                .any(|r| r.rgba() == lit.skin.close_hot && close.contains(r.xywh()[0] + 1.0, r.xywh()[1] + 1.0));
+            assert!(hot, "the close mark does not light up at {w}x{h}");
+        }
+    }
+
+    /// Nothing the panel draws leaves it, at any size. A rectangle outside a
+    /// takeover is a rectangle over the desktop.
+    #[test]
+    fn nothing_the_settings_panel_draws_escapes_it() {
+        let panel = a_settings_panel(&Config::default());
+        for (w, h) in [(1400.0, 900.0), (680.0, 380.0), (2200.0, 1400.0)] {
+            let out = render_settings(&panel, w, h, Some(Hit::SettingsValue(7)));
+            let box_ = out.layout.settings;
+            let inside = |x: f32, y: f32, rw: f32, rh: f32| {
+                x >= box_.x - 0.01
+                    && y >= box_.y - 0.01
+                    && x + rw <= box_.x + box_.w + 0.01
+                    && y + rh <= box_.y + box_.h + 0.01
+            };
+            for rect in &out.scene.rects {
+                let [x, y, rw, rh] = rect.xywh();
+                // The backdrop and the title strip are the window's, not the
+                // panel's; everything else here belongs to the panel.
+                let backdrop = rw >= w - 0.01 && rh >= h - 0.01;
+                assert!(
+                    backdrop || y + rh <= TITLE_H + 0.01 || inside(x, y, rw, rh),
+                    "{rect:?} escapes the panel at {w}x{h}"
+                );
+            }
+            for text in &out.scene.texts {
+                let at = text.at;
+                assert!(
+                    at.y + at.h <= TITLE_H + 0.01 || inside(at.x, at.y, at.w, at.h),
+                    "{at:?} escapes the panel at {w}x{h}"
+                );
+            }
+            assert!(out.scene.over_rects.is_empty(), "nothing floats over a takeover");
+        }
+    }
+
+    /// What the panel says: its own heading, the all-time block, the keys of the
+    /// settings it can change, and the palette drawn as itself.
+    #[test]
+    fn the_panel_says_what_it_is_and_draws_the_palette() {
+        let config = Config::parse("accent = #123456");
+        let panel = a_settings_panel(&config);
+        let out = render_settings(&panel, 1400.0, 1200.0, None);
+        let text = text_of(&out.scene);
+        for wanted in [
+            "SETTINGS",
+            "ALL TIME",
+            "prefilled",
+            "theme",
+            "opacity",
+            "show_files",
+            "COLOURS",
+            "accent",
+            "#123456",
+        ] {
+            assert!(text.contains(wanted), "{wanted:?} is not on the panel: {text}");
+        }
+
+        // The colour is drawn as a swatch of itself, not only as a hex string.
+        let wanted = [0x12 as f32 / 255.0, 0x34 as f32 / 255.0, 0x56 as f32 / 255.0, 1.0];
+        assert!(
+            out.scene.rects.iter().any(|rect| rect.rgba() == wanted),
+            "no swatch in the accent's own colour"
+        );
+
+        // The row the cursor is on carries the band and the mark every list in
+        // this window marks its current row with.
+        let row = out
+            .layout
+            .settings_rows
+            .iter()
+            .find(|(index, _)| *index == panel.cursor())
+            .map(|(_, row)| *row)
+            .expect("the cursor's row is on screen");
+        assert!(
+            out.scene
+                .rects
+                .iter()
+                .any(|rect| rect.rgba() == out.skin.strip && rect.xywh() == [row.x, row.y, row.w, row.h]),
+            "the cursor's row has no band"
+        );
+        assert!(
+            out.scene
+                .rects
+                .iter()
+                .any(|rect| rect.rgba() == out.skin.edge_focus
+                    && rect.xywh() == [row.x, row.y, MARK_W, row.h]),
+            "the cursor's row has no mark"
+        );
+    }
+
+    /// The footer says what the keys will do to the row under the cursor, and
+    /// says a refused write instead when there is one. A panel that writes a
+    /// file has to say when the file said no.
+    #[test]
+    fn the_footer_carries_the_keys_and_then_the_trouble() {
+        let config = Config::default();
+        let mut panel = a_settings_panel(&config);
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        assert!(text_of(&out.scene).contains(panel.hint()), "{}", panel.hint());
+
+        panel.say_trouble(String::from("cannot write it"));
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let text = text_of(&out.scene);
+        assert!(text.contains("cannot write it"), "{text}");
+        assert!(!text.contains(panel.hint()), "the trouble and the keys share a row");
+        let said = out
+            .scene
+            .texts
+            .iter()
+            .flat_map(|t| t.runs.iter())
+            .find(|run| run.text.contains("cannot write it"))
+            .expect("the trouble is drawn");
+        assert_eq!(said.color, Some(out.skin.bad), "trouble is not marked as trouble");
+    }
+}

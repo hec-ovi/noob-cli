@@ -40,6 +40,7 @@ mod picker;
 mod prompt;
 mod scroll;
 mod select;
+mod settings;
 mod skin;
 mod state;
 mod syntax;
@@ -64,6 +65,7 @@ use link::{Incoming, Link};
 use menu::{Item, Menu, Target};
 use monitor::Monitor;
 use picker::Picker;
+use settings::Settings;
 use prompt::Prompt;
 use skin::Skin;
 use state::{State, Tone};
@@ -89,9 +91,13 @@ const SAMPLED: [View; 3] = [View::Hardware, View::Context, View::Session];
 
 /// Whether the sampling clock should be running: one of [`SAMPLED`] is the
 /// showing view of an unfolded space, and nothing is covering the window.
-fn sampling(shaded: bool, picking: bool, dock: &Dock) -> bool {
+///
+/// `covered` is either takeover, the folder picker or the settings panel. Both
+/// draw over every pane, so a monitor behind one is not on screen and the clock
+/// that reads the kernel for it has nothing to feed.
+fn sampling(shaded: bool, covered: bool, dock: &Dock) -> bool {
     !shaded
-        && !picking
+        && !covered
         && Space::ALL.into_iter().any(|space| {
             let slot = dock.slot(space);
             !slot.folded && slot.active().is_some_and(|view| SAMPLED.contains(&view))
@@ -212,7 +218,30 @@ fn menu_for(
         // The picker is not a widget: there is no pane to close, no settings
         // behind it, and nothing in it to select.
         Hit::Picker | Hit::PickerRow(_) | Hit::PickerOpen => None,
+        // Neither is the settings panel. A Settings row on a menu opened over
+        // the settings panel would be a row that opens what is already open,
+        // and there is no pane behind it to close.
+        Hit::Settings | Hit::SettingsRow(_) | Hit::SettingsValue(_) | Hit::SettingsClose => None,
     }
+}
+
+/// Which views a settings change turns on or off.
+///
+/// Only the ones whose own setting moved. Applying both flags on every change
+/// would put back a widget that was closed by hand, since closing one does not
+/// write anything to the file: turn the font size up once and ACTIVITY comes
+/// back, which is not what either action asked for.
+///
+/// Pure so the rule can be tested without a window, like [`land`] beside it.
+fn pane_changes(was: &Config, now: &Config) -> Vec<(View, bool)> {
+    [
+        (View::Activity, was.show_activity, now.show_activity),
+        (View::Files, was.show_files, now.show_files),
+    ]
+    .into_iter()
+    .filter(|(_, was, now)| was != now)
+    .map(|(view, _, now)| (view, now))
+    .collect()
 }
 
 /// What a released tab does to the arrangement.
@@ -275,6 +304,11 @@ struct App {
     /// The folder picker, while it is up. Nothing else in the window is live
     /// while it is: there is no agent until it closes.
     picker: Option<Picker>,
+    /// The settings panel, while it is up. A takeover, so while it is here the
+    /// keyboard and the pointer belong to it and the panes are not drawn; the
+    /// agent behind it keeps running, and what it says arrives when the panel
+    /// closes.
+    settings: Option<Settings>,
 
     prompt: Prompt,
     dock: Dock,
@@ -347,6 +381,7 @@ impl App {
             trouble: None,
             workspace,
             picker: None,
+            settings: None,
             prompt: Prompt::default(),
             menu: None,
             holding: None,
@@ -374,6 +409,7 @@ impl App {
             dock: &self.dock,
             menu: self.menu.as_ref(),
             picker: self.picker.as_ref(),
+            settings: self.settings.as_ref(),
             file_labels: self
                 .state
                 .files
@@ -478,6 +514,194 @@ impl App {
             let _ = picker::save_recents(&file, &list);
         }
         self.connect(workspace);
+    }
+
+    /// Open the settings panel over the window.
+    ///
+    /// The all-time totals go on it with this session already added in. The file
+    /// on disk holds the sessions that came before, and adding the live one here
+    /// is the same sum `remember` writes, so the panel and the next write agree.
+    fn open_settings(&mut self) {
+        let totals = self.totals.plus(&self.state);
+        self.settings = Some(Settings::open(
+            &self.config,
+            &totals,
+            self.settings_path().as_deref(),
+        ));
+        self.dirty = true;
+    }
+
+    /// Where the settings file is, or nothing when there is no home directory to
+    /// put one in. The panel says so rather than failing at the first change.
+    fn settings_path(&self) -> Option<std::path::PathBuf> {
+        config::path()
+    }
+
+    /// Put the panel away. The panes come back exactly as they were: nothing
+    /// about the window is held on the panel, only the file is.
+    fn close_settings(&mut self) {
+        if self.settings.take().is_some() {
+            self.dirty = true;
+        }
+    }
+
+    /// Keys while the settings panel is up. It is a takeover, so this answers for
+    /// the whole keyboard: nothing here falls through to the prompt.
+    fn key_in_settings(&mut self, event: &winit::event::KeyEvent, event_loop: &ActiveEventLoop) {
+        // The one key that means the same thing everywhere in this window. Every
+        // other key here belongs to the panel, so without this arm the panel
+        // would be a surface Ctrl-Q could not be pressed on.
+        if self.modifiers.control_key() {
+            if matches!(event.logical_key.as_ref(), Key::Character("q")) {
+                event_loop.exit();
+            }
+            return;
+        }
+        let rows = self.settings_rows();
+        let Some(panel) = self.settings.as_mut() else {
+            return;
+        };
+        let mut nudge = None;
+        match event.logical_key.as_ref() {
+            Key::Named(NamedKey::Escape) => {
+                self.close_settings();
+                return;
+            }
+            Key::Named(NamedKey::ArrowUp) => self.dirty |= panel.step(false),
+            Key::Named(NamedKey::ArrowDown) => self.dirty |= panel.step(true),
+            Key::Named(NamedKey::PageUp) => self.dirty |= panel.page(rows, false),
+            Key::Named(NamedKey::PageDown) => self.dirty |= panel.page(rows, true),
+            Key::Named(NamedKey::Home) => self.dirty |= panel.jump(false),
+            Key::Named(NamedKey::End) => self.dirty |= panel.jump(true),
+            Key::Named(NamedKey::ArrowLeft) => nudge = Some(false),
+            // Enter and the right arrow are the same nudge. A flag has two
+            // states, so both of them read as "the other one" on a flag, and a
+            // preset list needs the pair to walk both ways.
+            Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Enter) => nudge = Some(true),
+            Key::Named(NamedKey::Tab) => self.dirty |= panel.step(!self.modifiers.shift_key()),
+            _ => {}
+        }
+        if let Some(forward) = nudge {
+            self.change_setting(forward);
+        }
+        self.reveal_settings_cursor();
+    }
+
+    /// A press inside the panel: a row, the value on it, or the mark that closes.
+    fn click_in_settings(&mut self, hit: Hit) {
+        match hit {
+            Hit::SettingsClose => self.close_settings(),
+            Hit::SettingsRow(index) => {
+                if let Some(panel) = self.settings.as_mut() {
+                    self.dirty |= panel.point_at(index);
+                }
+            }
+            // The value is the control, so clicking it does what the right arrow
+            // does, on the row it is on rather than on the row the cursor was
+            // left on.
+            Hit::SettingsValue(index) => {
+                if let Some(panel) = self.settings.as_mut() {
+                    self.dirty |= panel.point_at(index);
+                }
+                self.change_setting(true);
+            }
+            // The panel's own margin. Swallowed: it covers the window, so a
+            // press here has nothing behind it to reach.
+            _ => {}
+        }
+        self.reveal_settings_cursor();
+    }
+
+    /// Nudge the row under the cursor, write it, and take the file's answer.
+    ///
+    /// The file is the source of truth all the way through: the change is written
+    /// with the settings writer, the whole file is read back, and the window is
+    /// restyled from that. So the panel, the window and the next launch cannot
+    /// disagree about what a setting is, and a value the parser clamps shows up
+    /// clamped rather than as what was asked for.
+    fn change_setting(&mut self, forward: bool) {
+        let Some(change) = self.settings.as_ref().and_then(|panel| panel.change(forward)) else {
+            return;
+        };
+        let Some(path) = self.settings_path() else {
+            if let Some(panel) = self.settings.as_mut() {
+                panel.say_trouble(String::from("there is no home directory to write settings in"));
+            }
+            self.dirty = true;
+            return;
+        };
+        match settings::commit(&path, &change) {
+            Ok(config) => {
+                self.adopt(config);
+                let totals = self.totals.plus(&self.state);
+                if let Some(panel) = self.settings.as_mut() {
+                    panel.refresh(&self.config, &totals);
+                }
+            }
+            // Said on the panel rather than in the activity pane, which is
+            // behind the takeover and cannot be read from here.
+            Err(why) => {
+                if let Some(panel) = self.settings.as_mut() {
+                    panel.say_trouble(why);
+                }
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Take a settings file the panel just wrote and apply all of it.
+    ///
+    /// Everything the window reads out of the config is rebuilt here, because a
+    /// setting that only takes effect on the next launch reads as a setting that
+    /// does nothing: the palette, the two font sizes (which are column widths in
+    /// the renderer, not just text sizes) and the two views that can be turned
+    /// off.
+    fn adopt(&mut self, config: Config) {
+        let panes = pane_changes(&self.config, &config);
+        self.config = config;
+        self.restyle();
+        for (view, wanted) in panes {
+            match wanted {
+                true => {
+                    self.dock.unhide(view);
+                }
+                false => {
+                    if self.dock.hide(view) {
+                        self.forget_selection_in(view);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The skin and the column widths, from the config as it now is.
+    ///
+    /// A surface that refused alpha keeps its opaque palette: the setting is
+    /// still written and still read, and it is the surface that cannot honour it.
+    fn restyle(&mut self) {
+        self.skin = Skin::from(&self.config);
+        if self.gpu.as_ref().is_some_and(|gpu| !gpu.caps.transparent) {
+            self.skin = self.skin.opaque();
+        }
+        if let Some(renderer) = self.renderer.as_mut() {
+            self.column = renderer.column_width(self.config.font_size);
+            self.pane_column = renderer.column_width(self.config.pane_font_size);
+        }
+        self.dirty = true;
+    }
+
+    /// How many rows the panel's list can show right now.
+    fn settings_rows(&self) -> usize {
+        self.layout().settings_capacity(self.config.pane_font_size)
+    }
+
+    /// Bring the cursor on screen, measured against the layout the panel is
+    /// drawn in rather than against the panel alone.
+    fn reveal_settings_cursor(&mut self) {
+        let rows = self.settings_rows();
+        if let Some(panel) = self.settings.as_mut() {
+            self.dirty |= panel.reveal(rows);
+        }
     }
 
     /// Keys while the picker is up. Nothing else in the window is live, so this
@@ -703,13 +927,16 @@ impl App {
             if last == hit && now.duration_since(at) < DOUBLE_CLICK);
         self.last_click = Some((hit, now));
 
-        if self.picker.is_some() {
-            // The title bar is still the title bar while the picker is up: the
-            // window can be moved, shaded and closed before a folder is chosen.
-            if !matches!(hit, Hit::TitleBar | Hit::Close | Hit::Maximize | Hit::Minimize) {
-                self.click_in_picker(hit, double);
-                return;
-            }
+        // The title bar is still the title bar under either takeover: the window
+        // can be moved, shaded and closed while one is up.
+        let chrome = matches!(hit, Hit::TitleBar | Hit::Close | Hit::Maximize | Hit::Minimize);
+        if self.picker.is_some() && !chrome {
+            self.click_in_picker(hit, double);
+            return;
+        }
+        if self.settings.is_some() && !chrome {
+            self.click_in_settings(hit);
+            return;
         }
 
         match hit {
@@ -744,6 +971,8 @@ impl App {
             // All three are handled above, while the picker is up, which is the
             // only time any of them can be hit at all.
             Hit::PickerRow(_) | Hit::PickerOpen | Hit::Picker => {}
+            // The same for the four the settings panel owns.
+            Hit::SettingsRow(_) | Hit::SettingsValue(_) | Hit::SettingsClose | Hit::Settings => {}
             Hit::Input => {
                 // A press, not a placement: the anchor stays here so motion
                 // with the button still down selects the span between the two.
@@ -827,10 +1056,7 @@ impl App {
                 self.copy_prompt();
             }
             (Item::Paste, _) => self.paste(),
-            // There is no settings panel to open yet, so the row ships disabled
-            // and `pick` never returns it. The arm is here so the day the panel
-            // exists is one line rather than a hunt.
-            (Item::Settings, _) => {}
+            (Item::Settings, _) => self.open_settings(),
             (Item::CopySelection, _) => {
                 self.copy_selection();
             }
@@ -1149,6 +1375,10 @@ impl App {
             self.key_in_picker(&event, event_loop);
             return;
         }
+        if self.settings.is_some() {
+            self.key_in_settings(&event, event_loop);
+            return;
+        }
         let ctrl = self.modifiers.control_key();
         match event.logical_key.as_ref() {
             Key::Named(NamedKey::Enter) => self.submit(),
@@ -1274,6 +1504,16 @@ impl App {
             }
             return;
         }
+        // And the same for the settings panel, which is the only thing on screen
+        // while it is up.
+        if self.settings.is_some() {
+            let rows = layout.settings_capacity(self.config.pane_font_size);
+            let by = ((rows as f32 * pages.abs()).round() as usize).max(1);
+            if let Some(panel) = self.settings.as_mut() {
+                self.dirty |= panel.scroll(by, pages < 0.0, rows);
+            }
+            return;
+        }
         // Over the explorer, the wheel moves the list rather than the file. The
         // pointer is on the thing being scrolled, which is what every file tree
         // does, and the list is the only way to reach a file that is off it.
@@ -1360,6 +1600,7 @@ impl App {
             // drawn somewhere other than where they are hit tested.
             menu: self.menu.as_ref(),
             picker: self.picker.as_ref(),
+            settings: self.settings.as_ref(),
             // The orb's clock. Read here rather than inside the scene, so a
             // frame stays a function of what it is handed.
             clock: self.epoch.elapsed().as_secs_f32(),
@@ -1555,7 +1796,9 @@ impl ApplicationHandler<Wake> for App {
                         | Hit::Maximize
                         | Hit::Minimize
                         | Hit::MenuRow(_)
-                        | Hit::PickerOpen),
+                        | Hit::PickerOpen
+                        | Hit::SettingsClose
+                        | Hit::SettingsValue(_)),
                     ) => Some(hit),
                     _ => None,
                 };
@@ -1648,7 +1891,8 @@ impl ApplicationHandler<Wake> for App {
         // while it is the case: the monitor while a monitor is on screen, and the
         // orb while a turn is running. Everything else redraws because something
         // happened, which is what keeps an idle window free.
-        if sampling(self.shaded, self.picker.is_some(), &self.dock) {
+        let covered = self.picker.is_some() || self.settings.is_some();
+        if sampling(self.shaded, covered, &self.dock) {
             let now = Instant::now();
             if self.next_sample.is_none_or(|at| now >= at) {
                 // The state and nothing else. The totals file used to be merged
@@ -1795,9 +2039,12 @@ mod tests {
             dock.reveal(view);
             assert!(sampling(false, false, &dock), "{view:?} is not sampled");
             // Covered is not on screen: a shaded window is a title strip, and
-            // the picker is a full takeover.
+            // the picker and the settings panel are full takeovers.
             assert!(!sampling(true, false, &dock), "{view:?} while shaded");
-            assert!(!sampling(false, true, &dock), "{view:?} behind the picker");
+            assert!(
+                !sampling(false, true, &dock),
+                "{view:?} behind a takeover"
+            );
             // Folded away is not on screen either.
             let space = Space::ALL
                 .into_iter()
@@ -1847,6 +2094,7 @@ mod tests {
             dock,
             menu,
             picker: None,
+            settings: None,
             file_labels: Vec::new(),
             file_first: 0,
             column: COLUMN,
@@ -1898,6 +2146,20 @@ mod tests {
         for at in [middle(layout.close), (400.0, 8.0)] {
             assert!(opened(&layout, &dock, at).is_none(), "at {at:?}");
         }
+        // Nor is anything in the settings panel: it covers the panes, so there
+        // is no widget under a right click, and a Settings row there would open
+        // what is already open.
+        for hit in [
+            Hit::Settings,
+            Hit::SettingsRow(3),
+            Hit::SettingsValue(3),
+            Hit::SettingsClose,
+        ] {
+            assert!(
+                menu_for(Some(hit), (600.0, 400.0), &dock, true, Some(View::Output)).is_none(),
+                "{hit:?}"
+            );
+        }
         // And the open menu itself: the second right click puts it away rather
         // than opening a menu for what it covers.
         let menu = Menu::for_widget((500.0, 400.0), View::Plan, Space::TopRight, false);
@@ -1935,6 +2197,43 @@ mod tests {
             Some(Item::Copy)
         );
         assert_eq!(menu_for(hit, at, &dock, false, None).unwrap().pick(0), None);
+    }
+
+    /// A settings change turns a pane on or off only when that pane's own setting
+    /// moved, so an unrelated edit cannot put back a widget that was closed by
+    /// hand. Closing one writes nothing to the file, so the file still says the
+    /// pane is on and every change would resurrect it.
+    #[test]
+    fn only_the_pane_setting_that_moved_turns_a_pane_on_or_off() {
+        let on = Config::default();
+        assert!(on.show_activity && on.show_files);
+
+        // A change to something else moves neither.
+        let bigger = Config::parse("font_size = 20");
+        assert_eq!(pane_changes(&on, &bigger), Vec::new());
+
+        // And one that does moves only its own.
+        let off = Config::parse("show_activity = off");
+        assert_eq!(pane_changes(&on, &off), vec![(View::Activity, false)]);
+        assert_eq!(pane_changes(&off, &on), vec![(View::Activity, true)]);
+        let neither = Config::parse("show_activity = off\nshow_files = off");
+        assert_eq!(
+            pane_changes(&on, &neither),
+            vec![(View::Activity, false), (View::Files, false)]
+        );
+
+        // The dock does what the answer says, both ways round.
+        let mut dock = Dock::new();
+        for (view, wanted) in pane_changes(&on, &neither) {
+            assert!(!wanted);
+            assert!(dock.hide(view));
+        }
+        assert!(dock.is_hidden(View::Activity) && dock.is_hidden(View::Files));
+        for (view, wanted) in pane_changes(&neither, &on) {
+            assert!(wanted);
+            assert!(dock.unhide(view));
+        }
+        assert!(!dock.is_hidden(View::Activity) && !dock.is_hidden(View::Files));
     }
 
     /// Dropped on a space a tab moves; dropped off the window it is closed, the
@@ -2201,6 +2500,7 @@ mod tests {
             selection: None,
             menu: None,
             picker: None,
+            settings: None,
             clock: 0.0,
         };
         let panel = layout.placed(Space::TopRight).body;

@@ -54,6 +54,20 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
 
 ### Added
 
+- The settings panel, opened from the Settings row of any pane's right click
+  menu. It takes the whole window under the title strip: arrows move, left and
+  right change the row the cursor is on, Enter flips a switch, the wheel scrolls,
+  and Esc closes it. That row had been greyed since it was added, with no panel
+  behind it, which reads as a broken window rather than an unfinished one.
+  Every key the file understands is on the panel, as the key and the value the
+  file spells, so it doubles as the reference for editing that file by hand. A
+  change goes through the same comment-preserving writer `no0b --set` uses and
+  the whole file is then read back, so the palette, both font sizes and the two
+  panes that can be turned off all change without a restart, and a row cannot
+  show a value the next launch will not read. The palette is swatches to read
+  rather than fields to edit, since nothing in the window can take the keyboard
+  focus yet, and the `theme` row repaints the window in a preset. The all-time totals sit
+  above the settings, with this session added in.
 - A folder picker, drawn with the same rectangles as the rest of the window.
   Launched from the dock with no argument, CLIppy called `current_dir()`, which
   under a desktop launcher is your home directory, and handed the agent that
@@ -77,16 +91,15 @@ All of this is CLIppy, the GPU window. The CLI is unchanged.
   already forgotten which requests it was made of. Written by rename at the end
   of every turn and when the window closes. A missing file is a first run and an
   unreadable one reads as zero. No pane shows them: a column of counts from
-  sessions nobody remembers reads as this session's, so they are held for the
-  settings panel, where a block can say what they are.
+  sessions nobody remembers reads as this session's, so they are on the settings
+  panel instead, under a heading that says ALL TIME.
 - A gauge palette: ten colour slots, and every monitor reading names the one it
   wears. A metric keeps its colour across panes, so prefill is the same blue in
   CONTEXT's LAST PREFILL as in SESSION's PREFILLED.
 - Right click menus. The prompt offers Copy and Paste; a pane or the tab that
   names it offers Settings, Copy selection and Close this widget. A row with
   nothing to act on is greyed rather than dropped, so the menu is the same shape
-  every time it opens and the row you were aiming for has not moved. Settings is
-  greyed everywhere until there is a panel behind it. A menu is a floating layer,
+  every time it opens and the row you were aiming for has not moved. A menu is a floating layer,
   drawn after everything else and hit tested before it, so a click that lands on
   one cannot reach what it covers.
 - Closing a widget, from that menu or by dragging its tab off the window. A space

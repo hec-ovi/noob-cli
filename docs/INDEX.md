@@ -12,6 +12,7 @@ open only what the right column names.
 | What a frame looks like: panels, tabs, gauges, the title bar | `gui/clippy/src/view.rs` |
 | Colors, transparency, the palette | `gui/clippy/src/skin.rs`, keys in `gui/clippy/src/config.rs` |
 | Settings file format and its defaults | `gui/clippy/src/config.rs` |
+| What the settings panel lists, and what changing a row writes | `gui/clippy/src/settings.rs`, drawn by `view::settings_panel`, routed in `gui/clippy/src/main.rs` |
 | Mouse, keyboard, selection gestures, the window lifecycle | `gui/clippy/src/main.rs` |
 | What a right click offers and what a row does | `gui/clippy/src/menu.rs`, routed in `gui/clippy/src/main.rs` |
 | Choosing the folder the agent works in, and the folders CLIppy remembers | `gui/clippy/src/picker.rs`, drawn by `view::folder_picker`, routed in `gui/clippy/src/main.rs` |

@@ -267,11 +267,10 @@ impl Dock {
     /// time ago would come back into an arrangement that has since been dragged
     /// around it, and the default is the one place that is always still there.
     ///
-    /// Nothing in the window calls this yet: closing a widget is one way for
-    /// now, and the way back is the orb launcher. Kept and tested rather than
-    /// left for later, because hiding without a matching unhide is what makes
-    /// the invariant untestable in both directions.
-    #[allow(dead_code)]
+    /// The caller is the settings panel: turning `show_activity` or `show_files`
+    /// back on puts that view back while the window is running, rather than on
+    /// the next launch. Closing a widget is still one way out, and the way back
+    /// for the other seven is the orb launcher.
     pub fn unhide(&mut self, view: View) -> bool {
         let Some(at) = self.hidden.iter().position(|v| *v == view) else {
             return false;
@@ -287,8 +286,7 @@ impl Dock {
     /// Where a view lives before anything has been dragged. Read off the full
     /// arrangement rather than written out again, so the two cannot drift.
     ///
-    /// Reached only through [`Dock::unhide`], so it waits on the same caller.
-    #[allow(dead_code)]
+    /// Reached only through [`Dock::unhide`].
     fn home_of(view: View) -> Space {
         let full = Dock::full();
         Space::ALL

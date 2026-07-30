@@ -21,14 +21,14 @@ reasoning behind each one, not as a to-do list.
 | 6 | The LLM monitor is three: SESSION, OVERALL and DEBUG. OVERALL persists in `clippy.totals`, and the median comes from a stored ring of per-request rates. |
 | 7 | The debug pane: failed calls counted, and clicking one shows the arguments that were sent. The expected schema is not there, because no event carries one. |
 | 31 | The CLIPPY animation tab is gone; that animation becomes the corner orb. |
+| 11 (the window's own settings) | The settings panel: a full screen takeover listing every key `no0b.conf` carries, changed with the arrow keys or a click on the value, written through the comment-preserving writer and read back so the window restyles without a restart. The palette is swatches rather than fields, because nothing can take the keyboard focus yet. The all-time totals from `no0b.totals` are the block above the settings. What is still outstanding on 11 is the half that is a CLI feature set: skills, MCP state and sessions have no producer in `crates/`, and the secrets rows contradict the documented stance in `crates/noob/src/config/mod.rs:16`. |
 
 Reverted on purpose: markdown tables were box-drawn and then given sideways
 scrolling, and both were rolled back as a detour. Tables pass through as
 written.
 
 Still queued, in order: **22** (the capped 2x2 split grid), then **10**, **23**,
-**21**, **2**/**14** (orb and the ASCII idle loop), **15**, **27**, **28**,
-**29**, **5**, **11**.
+**21**, **27**, **28**, **29**, **5**, and the CLI half of **11**.
 
 
 Every item in `featuresandbugs.md`, graded against the code as it actually is.

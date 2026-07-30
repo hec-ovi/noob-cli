@@ -23,8 +23,7 @@ pub enum Item {
     Copy,
     /// Put the clipboard into the prompt.
     Paste,
-    /// Where the settings panel will go. There is no panel yet, so every menu
-    /// carrying this row carries it disabled; see [`Menu::for_widget`].
+    /// Open the settings panel, which takes over the whole window.
     Settings,
     /// Copy what is selected in the pane the menu opened over.
     CopySelection,
@@ -106,9 +105,9 @@ impl Menu {
 
     /// A pane's menu.
     ///
-    /// Settings is always disabled. There is no settings panel to open yet, and
-    /// a row that opens nothing is worse than one that says out loud it cannot:
-    /// the first reads as a broken window, the second as an unfinished one.
+    /// Settings opens the panel. It shipped greyed for as long as there was no
+    /// panel behind it, which read as a broken window rather than an unfinished
+    /// one, and is the complaint that built the panel.
     pub fn for_widget(at: (f32, f32), view: View, space: Space, has_selection: bool) -> Menu {
         Menu {
             at,
@@ -116,7 +115,7 @@ impl Menu {
             rows: vec![
                 Row {
                     item: Item::Settings,
-                    enabled: false,
+                    enabled: true,
                 },
                 Row {
                     item: Item::CopySelection,
@@ -210,15 +209,18 @@ mod tests {
         }
     }
 
-    /// Settings is drawn and refuses to act, in every menu that has it, because
-    /// there is nothing behind it yet.
+    /// Settings acts now, in every menu that has it, and carries its mark.
+    ///
+    /// This asserted the opposite: the row was greyed for as long as there was
+    /// nothing behind it. There is a panel behind it now (`crate::settings`), so
+    /// the row that reported it as broken is the row that opens it.
     #[test]
-    fn settings_is_always_disabled_and_carries_an_icon() {
+    fn settings_opens_the_panel_and_carries_an_icon() {
         for has_selection in [false, true] {
             let menu = Menu::for_widget((0.0, 0.0), View::Files, Space::BottomRight, has_selection);
             assert_eq!(menu.rows[0].item, Item::Settings);
-            assert!(!menu.rows[0].enabled);
-            assert_eq!(menu.pick(0), None);
+            assert!(menu.rows[0].enabled);
+            assert_eq!(menu.pick(0), Some(Item::Settings));
         }
         assert_eq!(Item::Settings.icon(), Some(icons::SETTINGS));
         assert_eq!(Item::Close.icon(), None);

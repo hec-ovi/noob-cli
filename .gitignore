@@ -8,6 +8,7 @@
 /docs/AUDIT-PLAN.md
 /featuresandbugs.md
 /feedback.md
+/review.md
 
 # build caches (docker bind mounts, user-owned)
 /target

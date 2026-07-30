@@ -141,7 +141,8 @@ that survives a cold start with a full transcript. That needs the samples
 themselves, so the file keeps the last 512 per-request rates. A missing file is a
 first run and an unreadable one reads as zero; neither stops the window opening.
 They had a pane and it showed those counts with nothing on it to say they were
-not this session, which is why it went. They are for the settings panel.
+not this session, which is why it went. They are on the settings panel now, under
+a heading that says ALL TIME, with this session already added in.
 
 DEBUG counts the calls that failed and shows what was sent to them. Click a row
 and the arguments of that call open under it. Both halves are already on the
@@ -234,12 +235,37 @@ window is still a status light. Double-click again to bring it back.
 Right click the prompt for Copy and Paste, or a pane or its tab for Settings,
 Copy selection and Close this widget. A row with nothing to act on is greyed
 rather than absent, so the menu is the same shape every time and the row you were
-aiming for has not moved. Settings is greyed everywhere: there is no settings
-panel behind it yet. Closing a widget is one way for now, and the way back is the
-launcher that is still to come; a space left with no tabs gives its room to its
-neighbour rather than leaving a hole.
+aiming for has not moved. Closing a widget is one way out for now, and the way
+back is the launcher that is still to come; a space left with no tabs gives its
+room to its neighbour rather than leaving a hole.
 
 ## Settings
+
+**Settings opens the panel**, from a right click on any pane or tab. It takes the
+whole window under the title strip: arrows move, left and right change the row the
+cursor is on, Enter flips a switch, the wheel scrolls, and Esc puts it away. The
+panes are exactly where they were when it closes, and the agent keeps working
+behind it.
+
+Every key in the file is on it. Each row is the key as the file spells it and the
+value as the file spells it, so the panel doubles as the reference for editing the
+file by hand. A change is written straight away through the same writer
+`no0b --set` uses, so the comments stay, and then the whole file is read back and
+the window is restyled from it: the palette, both font sizes and the two panes
+that can be turned off all move without a restart. That read-back is also why a
+row cannot show a value the file will not carry, since what you see is what the
+next launch reads.
+
+The palette is on the panel as swatches to read rather than fields to edit, with
+the path of the file at the bottom of the list. Changing a colour means typing a
+hex value, and nothing in this window can take the keyboard focus yet. `theme`
+is one row away and repaints the window in a preset; a file carrying a palette
+that is not one of the four exactly reads as `custom`, which is what one
+hand-tuned colour over a preset makes it.
+
+Above the settings the panel carries the all-time totals: tokens prefilled,
+generated and served from cache, and a mean and a median prefill and decode speed
+across every request this machine has ever run.
 
 `~/.config/noob/no0b.conf`, written with the defaults on first run and
 commented. Opacity, both font sizes, how tall the prompt may grow, which panes
@@ -248,8 +274,10 @@ ten gauge slots a monitor reading picks from, and the five the highlighter uses
 for code. A key it does not recognise is reported in the ACTIVITY pane rather
 than ignored.
 
-`theme = noob | amber | ice | plum` sets every color at once. The tool, view and
-gauge colors name the thing rather than the window, so a theme leaves them alone. The
+`theme = noob | amber | ice | plum` sets the eight base tones, the five code
+colors and the two tool colors that are prose rather than a tool. The rest of the
+tool, view and gauge colors name the thing rather than the window, so a theme
+leaves them alone. The
 colors ship as commented defaults so the theme has something to set, so
 uncomment one line to keep the theme and override that single color.
 `no0b --set theme=amber` makes the same edit from a terminal without touching
@@ -276,7 +304,7 @@ black.
 |---|---|
 | `noob-gpu` | adapter, device, surface, what this machine will actually do |
 | `noob-draw` | instanced rectangles and shaped glyphs, and nothing else, on a base layer and a floating one |
-| `no0b` | the window shell, the layout, the panes, the agent link (in `gui/clippy/`, which still carries the old folder name) |
+| `no0b` | the window shell, the layout, the panes, the settings panel, the agent link (in `gui/clippy/`, which still carries the old folder name) |
 | `asciify` | GIF to a text animation, run at authoring time only |
 
 A frame has two layers because one instanced pass draws all of a layer's
