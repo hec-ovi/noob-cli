@@ -3645,16 +3645,23 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
         skin.bright,
     );
 
+    // The mark and nothing under it. It stood on a filled block while the
+    // pointer was on it, which is a button, and the panel is a takeover with no
+    // other button on it: the mark is on the panel's own surface the way the
+    // heading beside it is. What answers the pointer is the mark itself, in the
+    // bad colour, because closing is the one thing here that throws work away
+    // and it is the same colour the window uses for that everywhere else.
     let close = layout.settings_close;
     if close.w >= 1.0 {
-        if frame.hot == Some(Hit::SettingsClose) {
-            scene.rect(close.fill(skin.close_hot));
-        }
+        let ink = match frame.hot == Some(Hit::SettingsClose) {
+            true => skin.bad,
+            false => skin.bright,
+        };
         say(
             scene,
-            vec![Run::icon(icons::CLOSE.to_string(), skin.bright)],
+            vec![Run::icon(icons::CLOSE.to_string(), ink)],
             close,
-            skin.bright,
+            ink,
         );
     }
 
@@ -9738,15 +9745,48 @@ mod tests {
                 close.x + close.w <= box_.x + box_.w - cut_of(box_),
                 "the mark is drawn in the cut: {close:?} in {box_:?}"
             );
-            // And it lights up under the pointer, so it reads as something to
-            // press rather than as a decoration.
-            let lit = render_settings(&panel, w, h, Some(Hit::SettingsClose));
-            let hot = lit
-                .scene
-                .rects
-                .iter()
-                .any(|r| r.rgba() == lit.skin.close_hot && close.contains(r.xywh()[0] + 1.0, r.xywh()[1] + 1.0));
-            assert!(hot, "the close mark does not light up at {w}x{h}");
+            // The mark stands on the panel, not on a block of its own: nothing
+            // smaller than the panel is drawn behind it, whether or not the
+            // pointer is on it.
+            let mark = |hot: Option<Hit>| {
+                let out = render_settings(&panel, w, h, hot);
+                let close = out.layout.settings_close;
+                let box_ = out.layout.settings;
+                for rect in &out.scene.rects {
+                    let [rx, ry, rw, rh] = rect.xywh();
+                    let overlaps = rx < close.x + close.w
+                        && rx + rw > close.x
+                        && ry < close.y + close.h
+                        && ry + rh > close.y;
+                    // The panel's own surface and outline are the surface the
+                    // mark is written on; anything smaller is a block.
+                    let panel_itself = rw >= box_.w - 0.01 && rh >= box_.h - 0.01;
+                    assert!(
+                        !overlaps || panel_itself,
+                        "{rect:?} is a block behind the close mark at {w}x{h}, hot {hot:?}"
+                    );
+                }
+                // In the panel's own mark, not the window's: the title strip
+                // draws the same glyph and is on screen behind a takeover.
+                out.scene
+                    .texts
+                    .iter()
+                    .filter(|text| close.contains(text.at.x + 1.0, text.at.y + 1.0))
+                    .flat_map(|text| text.runs.iter())
+                    .find(|run| run.icon && run.text == icons::CLOSE.to_string())
+                    .and_then(|run| run.color)
+                    .unwrap_or_else(|| panic!("no close mark at {w}x{h}"))
+            };
+            // What answers the pointer is the mark, in the colour this window
+            // uses for losing something. A close with no answer at all would be
+            // worse than the block it replaced.
+            assert_eq!(mark(None), out.skin.bright, "{w}x{h}");
+            assert_eq!(
+                mark(Some(Hit::SettingsClose)),
+                out.skin.bad,
+                "the close mark does not answer the pointer at {w}x{h}"
+            );
+            assert_ne!(out.skin.bright, out.skin.bad);
         }
     }
 
