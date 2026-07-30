@@ -100,7 +100,7 @@ pub const CUSTOM: &str = "custom";
 /// `every_key_in_the_file_is_on_the_panel` fails if a key ends up in neither
 /// list, which is what stops a setting being added to the file and forgotten
 /// here.
-const GROUPS: [(&str, &[(&str, Kind)]); 2] = [
+const GROUPS: [(&str, &[(&str, Kind)]); 3] = [
     (
         "WHAT IT LOOKS LIKE",
         &[
@@ -146,6 +146,33 @@ const GROUPS: [(&str, &[(&str, Kind)]); 2] = [
     (
         "WHICH PANES OPEN",
         &[("show_activity", Kind::Flag), ("show_files", Kind::Flag)],
+    ),
+    (
+        // The same two numbers the dividers write when they are dragged. Here
+        // as well because a pointer is not the only way anyone works, and
+        // because a value that only a drag can reach is a value nobody can read
+        // off the window.
+        "WHERE THE DIVIDERS SIT",
+        &[
+            (
+                "left_width",
+                Kind::Number {
+                    step: 0.05,
+                    low: config::SPLIT_LOW,
+                    high: config::SPLIT_HIGH,
+                    places: 2,
+                },
+            ),
+            (
+                "top_height",
+                Kind::Number {
+                    step: 0.05,
+                    low: config::SPLIT_LOW,
+                    high: config::SPLIT_HIGH,
+                    places: 2,
+                },
+            ),
+        ],
     ),
 ];
 
@@ -531,6 +558,8 @@ fn value_of(config: &Config, key: &str, kind: Kind) -> String {
                 "opacity" => config.opacity,
                 "font_size" => config.font_size,
                 "pane_font_size" => config.pane_font_size,
+                "left_width" => config.left_width,
+                "top_height" => config.top_height,
                 // Unreachable through GROUPS, and a number is the honest answer
                 // for a row that says it is one.
                 _ => 0.0,
@@ -695,9 +724,10 @@ mod tests {
         }
         up.reverse();
         assert_eq!(down, up, "walking back up visits other rows");
-        // Seven changeable settings, and the walk ends on the last of them
-        // rather than in the colours below it.
-        assert_eq!(down.len(), 7, "{down:?}");
+        // Nine changeable settings, and the walk ends on the last of them
+        // rather than in the colours below it. Seven before the two dividers
+        // were given rows of their own.
+        assert_eq!(down.len(), 9, "{down:?}");
         assert!(!panel.step(false), "the top of the list is a stop");
     }
 
@@ -867,7 +897,14 @@ mod tests {
         let mut config = Config::load_from(&path);
         let mut panel = Settings::open(&config, &Totals::default(), Some(&path));
 
-        for key in ["opacity", "font_size", "pane_font_size", "max_input_rows"] {
+        for key in [
+            "opacity",
+            "font_size",
+            "pane_font_size",
+            "max_input_rows",
+            "left_width",
+            "top_height",
+        ] {
             for forward in [false, true] {
                 put_cursor(&mut panel, key);
                 // Walk to the end of the range, which is where a bound that

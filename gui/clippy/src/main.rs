@@ -225,6 +225,9 @@ fn menu_for(
         // the settings panel would be a row that opens what is already open,
         // and there is no pane behind it to close.
         Hit::Settings | Hit::SettingsRow(_) | Hit::SettingsValue(_) | Hit::SettingsClose => None,
+        // A divider is the gap between two widgets and belongs to neither of
+        // them, so there is no one widget for a menu opened here to act on.
+        Hit::ColumnDivider | Hit::RowDivider => None,
     }
 }
 
@@ -364,6 +367,18 @@ struct App {
     /// A tab that has been pressed, and whether the pointer has moved far
     /// enough since to call it a drag rather than a click.
     holding: Option<(View, Space, PhysicalPosition<f64>)>,
+    /// The divider the button came down on, while it is being dragged. The same
+    /// press, motion, release cycle the tabs use, and only one of the two can be
+    /// running at a time because a press lands on exactly one thing.
+    ///
+    /// Only ever [`Hit::ColumnDivider`] or [`Hit::RowDivider`].
+    sizing: Option<Hit>,
+    /// Where the two dividers are, as fractions: how much of the width the left
+    /// column takes, and how much of the right column's height the top space
+    /// takes. Read out of the settings file at launch and written back when a
+    /// drag ends.
+    left_width: f32,
+    top_height: f32,
     /// True while the button is down inside a pane, so pointer motion extends
     /// the selection instead of merely moving the cursor.
     selecting: bool,
@@ -409,6 +424,8 @@ impl App {
         }
         App {
             dock: Dock::hiding(&hidden),
+            left_width: config.left_width,
+            top_height: config.top_height,
             window: None,
             gpu: None,
             renderer: None,
@@ -430,6 +447,7 @@ impl App {
             prompt: Prompt::default(),
             menu: None,
             holding: None,
+            sizing: None,
             selecting: false,
             prompt_selecting: false,
             clipboard: None,
@@ -466,6 +484,8 @@ impl App {
             pane_size: self.config.pane_font_size,
             pane_column: self.pane_column,
             input_h: self.input_height(width),
+            left_width: self.left_width,
+            top_height: self.top_height,
         }
     }
 
@@ -704,6 +724,10 @@ impl App {
     fn adopt(&mut self, config: Config) {
         let panes = pane_changes(&self.config, &config);
         self.config = config;
+        // A ratio changed on the panel is a divider moved, so the window takes
+        // it the way it takes a colour: the file is what both of them read.
+        self.left_width = self.config.left_width;
+        self.top_height = self.config.top_height;
         self.restyle();
         for (view, wanted) in panes {
             match wanted {
@@ -1003,6 +1027,10 @@ impl App {
             }
             Hit::TabsLeft(space) => self.walk_strip(space, false),
             Hit::TabsRight(space) => self.walk_strip(space, true),
+            // Pressed, not clicked, the way a tab is: what a divider does
+            // happens while the pointer moves, and letting go of one that never
+            // moved has to leave the window exactly as it found it.
+            Hit::ColumnDivider | Hit::RowDivider => self.sizing = Some(hit),
             Hit::File(index, _) => {
                 self.state.show_file(index);
                 self.dirty = true;
@@ -1364,6 +1392,13 @@ impl App {
     fn release(&mut self) {
         self.selecting = false;
         self.prompt_selecting = false;
+        // Here rather than on every motion event: a drag across the window is
+        // hundreds of events, and rewriting the settings file at each one is
+        // hundreds of rename-over-the-file writes for one decision.
+        if let Some(grip) = self.sizing.take() {
+            self.remember_divider(grip);
+            return;
+        }
         let layout = self.layout();
         if let Some(drag) = self.drag.take() {
             let landing = layout.landing(self.cursor.x as f32, self.cursor.y as f32);
@@ -1387,6 +1422,57 @@ impl App {
             }
             self.dirty = true;
         }
+    }
+
+    /// Move the divider under the button to where the pointer is now.
+    ///
+    /// No slop to get past first, unlike a held tab: a divider has no second
+    /// meaning that a small movement could be mistaken for, and a press that
+    /// never moves writes the ratio it already had.
+    fn drag_divider(&mut self) {
+        let Some(grip) = self.sizing else {
+            return;
+        };
+        let layout = self.layout();
+        let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
+        let (slot, next) = match grip {
+            Hit::RowDivider => (&mut self.top_height, layout.row_ratio_at(y)),
+            _ => (&mut self.left_width, layout.column_ratio_at(x)),
+        };
+        if (*slot - next).abs() < f32::EPSILON {
+            return;
+        }
+        *slot = next;
+        self.dirty = true;
+    }
+
+    /// Write where a divider was left into the settings file.
+    ///
+    /// Through the same writer every other setting goes through, so the comments
+    /// in the file survive a drag. A file that cannot be written is said once, in
+    /// the activity pane, rather than silently losing the arrangement.
+    fn remember_divider(&mut self, grip: Hit) {
+        let (key, ratio) = match grip {
+            Hit::RowDivider => ("top_height", self.top_height),
+            _ => ("left_width", self.left_width),
+        };
+        let Some(path) = config::path() else {
+            return;
+        };
+        // Three places is finer than a pixel on any window this can be dragged
+        // in, so what is written and what is on screen are the same arrangement.
+        let value = format!("{ratio:.3}");
+        match config::write_setting(&path, key, Some(&value)) {
+            Ok(()) => match key {
+                "top_height" => self.config.top_height = ratio,
+                _ => self.config.left_width = ratio,
+            },
+            Err(why) => self
+                .state
+                .activity
+                .say(format!("cannot save the layout: {why}"), state::Tone::Bad),
+        }
+        self.dirty = true;
     }
 
     /// Promote a held tab to a drag once the pointer has moved far enough that
@@ -1835,6 +1921,7 @@ impl ApplicationHandler<Wake> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = position;
                 self.maybe_drag();
+                self.drag_divider();
                 if self.selecting {
                     self.extend_selection();
                 }
@@ -1844,7 +1931,8 @@ impl ApplicationHandler<Wake> for App {
                 }
                 let (x, y) = (position.x as f32, position.y as f32);
                 let layout = self.layout();
-                let hot = match layout.hit(x, y) {
+                let under = layout.hit(x, y);
+                let hot = match under {
                     Some(
                         hit @ (Hit::Close
                         | Hit::Maximize
@@ -1868,6 +1956,10 @@ impl ApplicationHandler<Wake> for App {
                         self.drag.is_some(),
                         layout.landing(x, y),
                         view::edge(x, y, layout.width, layout.height),
+                        // The divider being dragged, if there is one, before
+                        // whatever the pointer is over: a drag that ran off the
+                        // divider is still that drag.
+                        self.sizing.or(under),
                     ));
                 }
                 self.redraw();
@@ -1996,23 +2088,35 @@ impl ApplicationHandler<Wake> for App {
 /// promises nothing will happen is the wrong one. A cross is also what was asked
 /// for.
 ///
-/// With nothing in the air it is the resize edges, which are the only thing
-/// telling anyone that an undecorated window can be resized at all. A drag
-/// crossing an edge does not show a resize arrow: what the drag does is the more
-/// urgent of the two answers, and the button is already down so nothing can
-/// start a resize anyway.
+/// With nothing in the air it is the divider under the pointer and then the
+/// resize edges, which are the only thing telling anyone that an undecorated
+/// window can be resized at all. A drag crossing an edge does not show a resize
+/// arrow: what the drag does is the more urgent of the two answers, and the
+/// button is already down so nothing can start a resize anyway.
+///
+/// A divider is nothing but the gap between two panes, so this is the only thing
+/// that says one can be moved at all. It wins against an edge, which is the same
+/// rule the other way round: a divider drag that wandered onto the border is
+/// still a divider drag, and the two cannot overlap otherwise (the border is the
+/// outside six pixels, and both dividers stand inside the panes).
 ///
 /// Pure so the rule can be tested without a compositor, like [`land`].
 fn cursor_for(
     dragging: bool,
     landing: Landing,
     edge: Option<winit::window::ResizeDirection>,
+    over: Option<Hit>,
 ) -> CursorIcon {
     if dragging {
         return match landing {
             Landing::Out => CursorIcon::Crosshair,
             Landing::In(..) | Landing::Nowhere => CursorIcon::Default,
         };
+    }
+    match over {
+        Some(Hit::ColumnDivider) => return CursorIcon::ColResize,
+        Some(Hit::RowDivider) => return CursorIcon::RowResize,
+        _ => {}
     }
     match edge {
         Some(dir) => resize_cursor(dir),
@@ -2209,6 +2313,8 @@ mod tests {
                 noob_draw::Text::line_for(SIZE),
                 Config::default().max_input_rows,
             ),
+            left_width: Config::default().left_width,
+            top_height: Config::default().top_height,
         };
         Layout::compute(w, h, &shape)
     }
@@ -2467,14 +2573,14 @@ mod tests {
         use winit::window::ResizeDirection as Dir;
 
         assert_eq!(
-            cursor_for(true, Landing::Out, None),
+            cursor_for(true, Landing::Out, None, None),
             CursorIcon::Crosshair,
             "a drag over nothing does not say it deletes"
         );
         // Even over a resize edge: the tab in the air is the more urgent answer,
         // and with the button already down nothing can start a resize.
         assert_eq!(
-            cursor_for(true, Landing::Out, Some(Dir::SouthEast)),
+            cursor_for(true, Landing::Out, Some(Dir::SouthEast), None),
             CursorIcon::Crosshair
         );
         // Back inside, it is an ordinary pointer again.
@@ -2484,20 +2590,69 @@ mod tests {
             Landing::Nowhere,
         ] {
             assert_eq!(
-                cursor_for(true, landing, Some(Dir::East)),
+                cursor_for(true, landing, Some(Dir::East), None),
                 CursorIcon::Default,
                 "{landing:?}"
             );
         }
         // With nothing in the air the edges are what the pointer is for.
         assert_eq!(
-            cursor_for(false, Landing::Nowhere, Some(Dir::West)),
+            cursor_for(false, Landing::Nowhere, Some(Dir::West), None),
             CursorIcon::WResize
         );
-        assert_eq!(cursor_for(false, Landing::Nowhere, None), CursorIcon::Default);
+        assert_eq!(cursor_for(false, Landing::Nowhere, None, None), CursorIcon::Default);
         // And a pointer outside the window that is not carrying anything is not
         // promising to delete something.
-        assert_eq!(cursor_for(false, Landing::Out, None), CursorIcon::Default);
+        assert_eq!(cursor_for(false, Landing::Out, None, None), CursorIcon::Default);
+    }
+
+    /// Item 16: the pointer is the only thing that says a divider can be moved
+    /// at all, since a divider is nothing but the gap between two panes. It says
+    /// so over the band, on the axis that divider moves in, and it keeps saying
+    /// it while a drag of one wanders over the window's own resize border.
+    #[test]
+    fn the_pointer_says_a_divider_can_be_dragged() {
+        use winit::window::ResizeDirection as Dir;
+
+        let dock = Dock::new();
+        let layout = laid_out_at(&dock, None, 0, 1200.0, 800.0);
+        let column = layout.column_divider.band;
+        let row = layout.row_divider.band;
+        let at = |panel: noob_draw::Panel| {
+            let (x, y) = middle(panel);
+            layout.hit(x, y)
+        };
+        assert_eq!(at(column), Some(Hit::ColumnDivider));
+        assert_eq!(at(row), Some(Hit::RowDivider));
+        assert_eq!(
+            cursor_for(false, Landing::Nowhere, None, at(column)),
+            CursorIcon::ColResize
+        );
+        assert_eq!(
+            cursor_for(false, Landing::Nowhere, None, at(row)),
+            CursorIcon::RowResize
+        );
+        // A drag that ran onto the border is still that drag.
+        assert_eq!(
+            cursor_for(false, Landing::Nowhere, Some(Dir::West), Some(Hit::ColumnDivider)),
+            CursorIcon::ColResize
+        );
+        // Off the band it is the ordinary pointer again, and the border still
+        // answers where there is no divider.
+        assert_eq!(
+            cursor_for(false, Landing::Nowhere, None, Some(Hit::Body(Space::Left))),
+            CursorIcon::Default
+        );
+        assert_eq!(
+            cursor_for(false, Landing::Nowhere, Some(Dir::South), Some(Hit::Body(Space::Left))),
+            CursorIcon::SResize
+        );
+        // And a tab in the air outranks both: what the drop will do is the more
+        // urgent answer, and the button is already down.
+        assert_eq!(
+            cursor_for(true, Landing::Out, None, Some(Hit::ColumnDivider)),
+            CursorIcon::Crosshair
+        );
     }
 
     /// The landing the cursor is driven from is the layout's own, so the shape
@@ -2509,7 +2664,7 @@ mod tests {
         for (x, y) in [(-2.0, 400.0), (1201.0, 400.0), (600.0, 801.0)] {
             let landing = layout.landing(x, y);
             assert_eq!(landing, Landing::Out, "at {x},{y}");
-            assert_eq!(cursor_for(true, landing, None), CursorIcon::Crosshair);
+            assert_eq!(cursor_for(true, landing, None, None), CursorIcon::Crosshair);
             // And that is the release that closes the widget.
             let mut dock = Dock::new();
             assert!(land(&mut dock, View::Plan, landing));
@@ -2517,7 +2672,7 @@ mod tests {
         }
         let inside = layout.landing(600.0, 400.0);
         assert!(matches!(inside, Landing::In(..)), "{inside:?}");
-        assert_eq!(cursor_for(true, inside, None), CursorIcon::Default);
+        assert_eq!(cursor_for(true, inside, None, None), CursorIcon::Default);
     }
 
     /// A drop that names a place in a strip reorders the tabs; one that names

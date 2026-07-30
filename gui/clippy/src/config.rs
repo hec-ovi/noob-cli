@@ -32,6 +32,12 @@ pub struct Config {
     pub pane_font_size: f32,
     /// The tallest the prompt grows before it scrolls inside itself, in rows.
     pub max_input_rows: usize,
+    /// How much of the window's width the left column takes, and how much of
+    /// the right column's height the top space takes. Where the two dividers
+    /// were left, so the arrangement survives a restart the way every other
+    /// preference in this window does.
+    pub left_width: f32,
+    pub top_height: f32,
 
     pub accent: [u8; 3],
     pub text: [u8; 3],
@@ -77,6 +83,8 @@ impl Default for Config {
             font_size: 14.0,
             pane_font_size: 13.0,
             max_input_rows: 8,
+            left_width: crate::view::LEFT_WIDTH,
+            top_height: crate::view::TOP_HEIGHT,
             accent: [0x7c, 0xd8, 0x94],
             text: [0x9a, 0xd6, 0xac],
             dim: [0x58, 0x96, 0x6e],
@@ -212,6 +220,17 @@ fn prose_tools(bright: [u8; 3], text: [u8; 3]) -> [[u8; 3]; 14] {
 /// The palettes `theme = <name>` accepts.
 pub const THEMES: [&str; 4] = ["noob", "amber", "ice", "plum"];
 
+/// How far from the middle either divider can be put by hand, as a fraction.
+///
+/// The layout clamps again, against the window it actually has, because a space
+/// has a floor in pixels rather than in fractions and a 15% column is plenty on
+/// a wide screen and unreadable on a small one. These two only keep the file's
+/// own numbers inside what any window could use, and they are also what the
+/// settings panel offers, so the panel cannot show a value the file would pull
+/// back.
+pub const SPLIT_LOW: f32 = 0.15;
+pub const SPLIT_HIGH: f32 = 0.85;
+
 /// A named palette, as a whole `Config`. Resolved before the rest of the file
 /// is read, so an explicit key still wins over the theme that set it.
 ///
@@ -294,6 +313,8 @@ pub fn keys() -> Vec<&'static str> {
         "font_size",
         "pane_font_size",
         "max_input_rows",
+        "left_width",
+        "top_height",
         "theme",
         "accent",
         "text",
@@ -487,6 +508,14 @@ impl Config {
                 "max_input_rows" => set(
                     &mut config.max_input_rows,
                     value.parse::<usize>().ok().map(|rows| rows.clamp(1, 24)),
+                ),
+                "left_width" => set(
+                    &mut config.left_width,
+                    number(&value).map(|n| n.clamp(SPLIT_LOW, SPLIT_HIGH)),
+                ),
+                "top_height" => set(
+                    &mut config.top_height,
+                    number(&value).map(|n| n.clamp(SPLIT_LOW, SPLIT_HIGH)),
                 ),
                 "accent" => set(&mut config.accent, color(&value)),
                 "text" => set(&mut config.text, color(&value)),
@@ -771,10 +800,14 @@ pub fn set_request(args: &[String]) -> Option<Result<(&str, &str), String>> {
 
 fn number(value: &str) -> Option<f32> {
     // A percentage reads more naturally for opacity than a fraction does.
-    match value.strip_suffix('%') {
+    let parsed = match value.strip_suffix('%') {
         Some(percent) => percent.trim().parse::<f32>().ok().map(|n| n / 100.0),
         None => value.parse().ok(),
-    }
+    };
+    // `nan` and `inf` parse. Clamping does not tame either of them, and a NaN
+    // that reaches the layout takes a rectangle with it, so they are refused
+    // here and reported like any other value the parser cannot use.
+    parsed.filter(|n: &f32| n.is_finite())
 }
 
 fn boolean(value: &str) -> Option<bool> {
@@ -824,6 +857,14 @@ pane_font_size = 13     # the activity, plan, agents and file panes
 # How tall the prompt is allowed to grow, in rows. Past this it scrolls inside
 # itself rather than taking more of the conversation.
 max_input_rows = 8
+
+# Where the two dividers sit. The first is how much of the width the left column
+# takes, the second how much of the right column's height the top space takes.
+# Dragging a divider writes them back here, so the arrangement survives a
+# restart. A space is never dragged below the room it needs to be read, whatever
+# these say.
+left_width = 0.54
+top_height = 0.46
 
 # The whole palette, by name: noob, amber, ice, plum.
 theme = noob
@@ -927,7 +968,7 @@ mod tests {
         for key in keys() {
             assert!(named.contains(&key.to_string()), "{key} is undocumented");
         }
-        assert_eq!(keys().len(), 53, "a new key needs a line in the file");
+        assert_eq!(keys().len(), 55, "a new key needs a line in the file");
     }
 
     /// The commented colors are the noob theme spelled out. A stale hex there
@@ -984,6 +1025,41 @@ mod tests {
         assert_eq!(Config::parse("opacity = 0").opacity, 0.05);
         assert_eq!(Config::parse("opacity = 900%").opacity, 1.0);
         assert_eq!(Config::parse("font_size = 2").font_size, 8.0);
+    }
+
+    /// Item 16: where the dividers were left survives a restart. The value a
+    /// finished drag writes is the value the next launch lays the window out
+    /// with, and a number nobody could use is pulled back rather than obeyed.
+    #[test]
+    fn the_divider_ratios_are_clamped_and_come_back_out_of_the_file() {
+        assert_eq!(Config::default().left_width, crate::view::LEFT_WIDTH);
+        assert_eq!(Config::default().top_height, crate::view::TOP_HEIGHT);
+
+        let config = Config::parse("left_width = 0.72\ntop_height = 30%\n");
+        assert_eq!(config.left_width, 0.72);
+        assert_eq!(config.top_height, 0.3);
+        assert!(config.unknown.is_empty(), "{:?}", config.unknown);
+
+        // A whole column of nothing, or none at all, is not an arrangement.
+        assert_eq!(Config::parse("left_width = 0").left_width, SPLIT_LOW);
+        assert_eq!(Config::parse("left_width = 4").left_width, SPLIT_HIGH);
+        assert_eq!(Config::parse("top_height = -1").top_height, SPLIT_LOW);
+        // `nan` parses as a number and poisons every rectangle it reaches.
+        let mad = Config::parse("top_height = nan\nleft_width = inf\n");
+        assert_eq!(mad.top_height, Config::default().top_height);
+        assert_eq!(mad.left_width, Config::default().left_width);
+        assert_eq!(mad.unknown, ["top_height", "left_width"]);
+
+        // Through the writer and back, which is the round trip a drag makes.
+        let scratch = Scratch::new("dividers");
+        let _ = Config::load_from(&scratch.conf());
+        write_setting(&scratch.conf(), "left_width", Some("0.317")).unwrap();
+        write_setting(&scratch.conf(), "top_height", Some("0.628")).unwrap();
+        let after = Config::load_from(&scratch.conf());
+        assert_eq!(after.left_width, 0.317);
+        assert_eq!(after.top_height, 0.628);
+        // And the file the drag wrote through still documents itself.
+        assert!(scratch.read().contains("# Where the two dividers sit"), "{}", scratch.read());
     }
 
     /// A typo must be visible. Silently ignoring it is how a setting someone
