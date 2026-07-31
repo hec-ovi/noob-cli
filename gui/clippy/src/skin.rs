@@ -48,7 +48,7 @@ pub struct Skin {
     /// The box over the space a dragged tab would land in.
     ///
     /// Green because it means yes, and green rather than the accent because the
-    /// accent is whatever the theme is: a drop target in the amber theme's accent
+    /// accent is whatever the theme is: a drop target in the noob-red theme's accent
     /// would read as a warning. Translucent, and low enough that the pane under it
     /// still reads: a solid box hides the thing being aimed at, which is the pane
     /// you are trying to drop onto.
@@ -82,7 +82,7 @@ pub struct Skin {
     /// almost nothing about which one Enter would take.
     ///
     /// Green rather than the accent, for the same reason the drop target is:
-    /// the accent is whatever the theme is, and a picked row in the amber
+    /// the accent is whatever the theme is, and a picked row in the noob-red
     /// theme's accent would read as a warning.
     ///
     /// Derived rather than given a settings key of its own, the way `menu` and
@@ -154,7 +154,7 @@ pub struct Skin {
     /// is saying which of them you are looking at. Green, and the good colour
     /// rather than the theme's accent, for the reason the drop target and the
     /// picked row are green: the accent is whatever the theme is, and a showing
-    /// tab in the amber theme's accent would read as a warning.
+    /// tab in the noob-red theme's accent would read as a warning.
     pub tab_accent: [f32; 4],
 
     /// The gauge palette. A monitor reading names the slot it wants, so a block

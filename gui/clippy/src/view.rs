@@ -5252,7 +5252,7 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     let armed = panel.arming() == Some(*index);
                     scene.rect(panel_fill(*box_, skin.input));
                     if frame.hot == Some(Hit::SettingsRemove(*index)) {
-                        scene.rect(box_.fill(skin.hot));
+                        scene.rect(panel_fill(*box_, skin.hot));
                     }
                     scene.rect(panel_edge(
                         *box_,
@@ -5323,7 +5323,7 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 // which was which was to press one.
                 scene.rect(panel_fill(value_at, skin.input));
                 if frame.hot == Some(Hit::SettingsValue(*index, *side)) {
-                    scene.rect(value_at.fill(skin.hot));
+                    scene.rect(panel_fill(value_at, skin.hot));
                 }
                 scene.rect(panel_edge(
                     value_at,
@@ -5428,7 +5428,7 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     _ => {
                         scene.rect(panel_fill(value_at, skin.input));
                         if frame.hot == Some(Hit::SettingsValue(*index, *side)) {
-                            scene.rect(value_at.fill(skin.hot));
+                            scene.rect(panel_fill(value_at, skin.hot));
                         }
                         scene.rect(panel_edge(
                             value_at,
@@ -5573,7 +5573,7 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     };
                     scene.rect(panel_fill(*box_, skin.input));
                     if frame.hot == Some(Hit::SettingsToggle(*index)) {
-                        scene.rect(box_.fill(skin.hot));
+                        scene.rect(panel_fill(*box_, skin.hot));
                     }
                     scene.rect(panel_edge(
                         *box_,
@@ -5611,7 +5611,7 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     let armed = panel.arming() == Some(*index);
                     scene.rect(panel_fill(*box_, skin.input));
                     if frame.hot == Some(Hit::SettingsRemove(*index)) {
-                        scene.rect(box_.fill(skin.hot));
+                        scene.rect(panel_fill(*box_, skin.hot));
                     }
                     scene.rect(panel_edge(
                         *box_,
@@ -6104,21 +6104,18 @@ fn cols_of(panel: Panel, column: f32) -> usize {
     columns_in(panel.inset(PAD).w, column)
 }
 
-/// How tall the prompt has to be to hold `chars` characters.
+/// How tall the prompt is: the rows it was set to, whatever is in it.
 ///
-/// Grows a line at a time up to `max_rows`, then scrolls inside itself. A
-/// prompt that grows without limit eventually eats the conversation it is
-/// about, and how much of the window that is worth is a matter of taste, which
-/// is why the ceiling is a setting.
-pub fn input_height(width: f32, column: f32, chars: usize, line: f32, max_rows: usize) -> f32 {
-    let inner = (width - 2.0 * GAP - 2.0 * PAD).max(column);
-    let columns = columns_in(inner, column);
-    let rows = (chars + PROMPT_COLUMNS + 1)
-        .div_ceil(columns)
-        .clamp(1, max_rows.max(1));
+/// It used to be the rows it took to hold what had been typed, climbing to
+/// `rows` a line at a time, and that is what this stopped doing. A box that
+/// grows moves the conversation above it on the character that wraps a line and
+/// is a different size every time you look at it; the setting is a height, so
+/// three rows is three rows empty and three rows full. Past that the text
+/// scrolls inside the box, which is what [`prompt_skip`] is for.
+pub fn input_height(rows: usize, line: f32) -> f32 {
     // The strip, not the box inside it: the layout insets this by `GAP` before
     // the prompt gets it, and forgetting that cost the last row of a full one.
-    (rows as f32 * line + 2.0 * INPUT_PAD + 2.0 * GAP).max(INPUT_H)
+    (rows.max(1) as f32 * line + 2.0 * INPUT_PAD + 2.0 * GAP).max(INPUT_H)
 }
 
 fn clip(text: &str, chars: usize) -> String {
@@ -10454,25 +10451,22 @@ mod tests {
     /// A frame that is nothing but a prompt: the strip it landed in, its
     /// layout, and the scene, at the default 14pt body size. Idle, with the
     /// clock at zero.
-    fn render_prompt(
-        prompt: &crate::prompt::Prompt,
-        max_rows: usize,
-    ) -> (Panel, Layout, Scene) {
-        render_prompt_at(prompt, max_rows, &State::new(), 0.0)
+    fn render_prompt(prompt: &crate::prompt::Prompt, rows: usize) -> (Panel, Layout, Scene) {
+        render_prompt_at(prompt, rows, &State::new(), 0.0)
     }
 
     /// The same with the window's state and the moment on its clock given, which
     /// is what the marker slot is drawn from.
     fn render_prompt_at(
         prompt: &crate::prompt::Prompt,
-        max_rows: usize,
+        rows: usize,
         state: &State,
         clock: f32,
     ) -> (Panel, Layout, Scene) {
         let dock = Dock::new();
         let skin = Skin::from(&Config::default());
         let mut shape = shape(&dock, &[]);
-        shape.input_h = input_height(1200.0, 8.0, prompt.len(), Text::line_for(14.0), max_rows);
+        shape.input_h = input_height(rows, Text::line_for(14.0));
         let layout = Layout::compute(1200.0, 800.0, &shape);
         let scene = build(&Frame {
             state,
@@ -10497,17 +10491,27 @@ mod tests {
         (layout.input, layout, scene)
     }
 
-    /// The prompt grows with what has been typed, and the caret follows the
-    /// wrap rather than running off the end of the first line.
+    /// The prompt is the height it was set to whatever is in it, and the caret
+    /// follows the wrap rather than running off the end of the first line.
+    ///
+    /// It used to grow a row at a time as characters arrived, and this test
+    /// asserted that it did. Hector asked for the opposite: the box is the rows
+    /// he chose whether he has typed anything or not, so what was `many.h >
+    /// one.h` is now the two being equal. The caret half of it is unchanged.
     #[test]
-    fn the_prompt_grows_and_the_caret_stays_inside_it() {
+    fn the_prompt_is_the_height_it_was_set_to_and_the_caret_stays_inside_it() {
         let line = Text::line_for(14.0);
         let short = typed_prompt("short", 5);
         let long = typed_prompt(&"x".repeat(600), 600);
         let (one, ..) = render_prompt(&short, 8);
         let (many, _, scene) = render_prompt(&long, 8);
-        assert!(many.h > one.h, "the prompt grew: {} then {}", one.h, many.h);
-        assert!(many.h <= 8.0 * line + 30.0, "and stopped growing: {}", many.h);
+        assert!(
+            (many.h - one.h).abs() < 0.01,
+            "the prompt moved: {} then {}",
+            one.h,
+            many.h
+        );
+        assert!((many.h - (8.0 * line + 2.0 * INPUT_PAD)).abs() < 0.01, "{}", many.h);
         let caret = scene
             .rects
             .iter()
@@ -10521,12 +10525,16 @@ mod tests {
         assert!(caret[1] > many.y, "and it is not still on the first row");
     }
 
-    /// How tall it is allowed to get is a setting, not a constant. Two rows
-    /// and twenty rows are both a window somebody wants.
+    /// How tall it is is a setting, not a constant. Two rows and twenty rows
+    /// are both a window somebody wants, and it is that many rows empty.
+    ///
+    /// The last assertion here said the opposite until this build: twenty rows
+    /// with nothing typed into them was one row of prompt. That is the growing
+    /// this item took out, so it is inverted rather than dropped.
     #[test]
-    fn the_prompt_stops_growing_at_the_configured_row_count() {
+    fn the_prompt_is_the_configured_row_count_empty_or_full() {
         let line = Text::line_for(14.0);
-        // More than twenty rows of it, so the ceiling is what stops it.
+        // More than twenty rows of it, so the setting is what holds it.
         let long = typed_prompt(&"x".repeat(3000), 3000);
         let (two, ..) = render_prompt(&long, 2);
         let (twenty, ..) = render_prompt(&long, 20);
@@ -10538,9 +10546,17 @@ mod tests {
             "{}",
             twenty.h
         );
-        // A ceiling nobody typed up to still leaves the prompt one row.
-        let (empty, ..) = render_prompt(&crate::prompt::Prompt::default(), 20);
-        assert!((empty.h - (line + 2.0 * INPUT_PAD)).abs() < 0.01, "{}", empty.h);
+        // And nothing typed at all is the same box, not a box one row tall.
+        for rows in [2usize, 20] {
+            let (empty, ..) = render_prompt(&crate::prompt::Prompt::default(), rows);
+            let (full, ..) = render_prompt(&long, rows);
+            assert!(
+                (empty.h - (rows as f32 * line + 2.0 * INPUT_PAD)).abs() < 0.01,
+                "{rows} rows of empty prompt is {}",
+                empty.h
+            );
+            assert!((empty.h - full.h).abs() < 0.01, "{rows}: {} {}", empty.h, full.h);
+        }
     }
 
     /// A click lands on the character it is over, on any row of a wrapped
@@ -15641,6 +15657,94 @@ mod tests {
             x > at.x && x + w <= at.x + at.w,
             "the caret is on the border: {caret:?} in {at:?}"
         );
+    }
+
+    /// The cut corner belongs to the control, not to the pointer.
+    ///
+    /// The fill and the outline of every one of these boxes carried the
+    /// diagonal and the fill drawn over them under the pointer did not, so the
+    /// theme button squared its corner off the moment the pointer arrived and
+    /// painted into the cut its own outline draws. Every box drawn that way had
+    /// it: the theme and the flags, the endpoint field, a skill's on/off, its
+    /// uninstall, and a session's delete.
+    #[test]
+    fn a_control_under_the_pointer_keeps_its_cut_corner() {
+        // Every kind of control the panel has, in the section that carries it.
+        let sections = [
+            crate::settings::APPEARANCE,
+            crate::settings::AGENT,
+            crate::settings::SKILLS,
+            crate::settings::SESSIONS,
+        ];
+        let (mut values, mut toggles, mut removes) = (0, 0, 0);
+        for section in sections {
+            let panel = a_panel_on(&Config::default(), section);
+            let plain = render_settings(&panel, 1400.0, 900.0, None);
+            let controls: Vec<(Panel, Hit)> = plain
+                .layout
+                .settings_values
+                .iter()
+                .map(|(index, side, at)| (*at, Hit::SettingsValue(*index, *side)))
+                .chain(
+                    plain
+                        .layout
+                        .settings_toggles
+                        .iter()
+                        .map(|(index, at)| (*at, Hit::SettingsToggle(*index))),
+                )
+                .chain(
+                    plain
+                        .layout
+                        .settings_removes
+                        .iter()
+                        .map(|(index, at)| (*at, Hit::SettingsRemove(*index))),
+                )
+                .collect();
+            assert!(!controls.is_empty(), "{section} has no control on it");
+            for (at, hit) in controls {
+                let out = render_settings(&panel, 1400.0, 900.0, Some(hit));
+                let over = |rect: &&noob_draw::Rect| {
+                    let [x, y, w, h] = rect.xywh();
+                    (x - at.x).abs() < 0.01
+                        && (y - at.y).abs() < 0.01
+                        && (w - at.w).abs() < 0.01
+                        && (h - at.h).abs() < 0.01
+                };
+                let base = out
+                    .scene
+                    .rects
+                    .iter()
+                    .find(|rect| over(rect) && rect.rgba() == out.skin.input)
+                    .unwrap_or_else(|| panic!("{section}: {hit:?} has no box under it"));
+                let lit = out
+                    .scene
+                    .rects
+                    .iter()
+                    .find(|rect| over(rect) && rect.rgba() == out.skin.hot)
+                    .unwrap_or_else(|| panic!("{section}: {hit:?} does not light up"));
+                assert!(
+                    lit.extra()[1] > 0.0,
+                    "{section}: {hit:?} lights up as a square: {lit:?}"
+                );
+                assert_eq!(
+                    lit.extra()[1..3],
+                    base.extra()[1..3],
+                    "{section}: {hit:?} is not the shape of the box under it"
+                );
+                assert_eq!(
+                    (lit.extra()[2] as u32) & noob_draw::Rect::TOP_RIGHT,
+                    noob_draw::Rect::TOP_RIGHT,
+                    "{section}: {hit:?} cuts a corner other than the top right"
+                );
+                match hit {
+                    Hit::SettingsValue(..) => values += 1,
+                    Hit::SettingsToggle(_) => toggles += 1,
+                    _ => removes += 1,
+                }
+            }
+        }
+        // One of each kind at the least, or the pass proves it about one box.
+        assert!(values > 0 && toggles > 0 && removes > 0, "{values} {toggles} {removes}");
     }
 
     /// Nothing the panel draws leaves it, at any size. A rectangle outside a

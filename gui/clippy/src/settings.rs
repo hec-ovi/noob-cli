@@ -2887,22 +2887,26 @@ mod tests {
         let config = Config::default();
         let mut forward = over(&config);
         put_cursor(&mut forward, "theme");
-        assert_eq!(forward.change(true).expect("a choice").value, "amber");
+        assert_eq!(forward.change(true).expect("a choice").value, "noob-cool");
         assert_eq!(
             forward.change(false).expect("a choice").value,
-            "plum",
+            "noob-red",
             "back from the first preset is the last one"
         );
 
+        // A name an older build wrote is a palette the panel can name, since it
+        // loads as one of the three rather than as a palette of its own.
+        assert_eq!(theme_name(&Config::parse("theme = plum")), "noob-cool");
+
         // One explicit colour over a preset is not that preset any more, and
         // saying so is the point: the row is read off the colours in hand.
-        let tuned = Config::parse("theme = ice\naccent = #ff0000");
+        let tuned = Config::parse("theme = noob-cool\naccent = #ff0000");
         assert_eq!(theme_name(&tuned), CUSTOM);
         let mut panel = over(&tuned);
         put_cursor(&mut panel, "theme");
         assert_eq!(value(&panel, "theme"), CUSTOM);
-        assert_eq!(panel.change(true).expect("a choice").value, "noob");
-        assert_eq!(panel.change(false).expect("a choice").value, "plum");
+        assert_eq!(panel.change(true).expect("a choice").value, "noob-matrix");
+        assert_eq!(panel.change(false).expect("a choice").value, "noob-red");
     }
 
     /// A number steps by its own step, stops at both ends, and is written the
@@ -2931,6 +2935,14 @@ mod tests {
         assert_eq!(value(&panel, "opacity"), "0.05");
         assert_eq!(panel.change(false), None, "0.05 is the parser's floor");
         assert_eq!(panel.change(true).expect("a number").value, "0.10");
+
+        // And the value the window opens at is one of the steps: 88% was
+        // between two of them, so the first arrow key left it for good.
+        let mut panel = over(&Config::default());
+        put_cursor(&mut panel, "opacity");
+        assert_eq!(value(&panel, "opacity"), "0.90");
+        assert_eq!(panel.change(true).expect("a number").value, "0.95");
+        assert_eq!(panel.change(false).expect("a number").value, "0.85");
     }
 
     /// A slider is the same setting the arrow keys are: a position along the

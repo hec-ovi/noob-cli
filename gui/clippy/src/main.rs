@@ -911,7 +911,6 @@ impl App {
     }
 
     fn shape(&self) -> Shape<'_> {
-        let width = self.gpu.as_ref().map_or(1.0, |gpu| gpu.width());
         Shape {
             shaded: self.shaded,
             dock: &self.dock,
@@ -928,7 +927,7 @@ impl App {
             column: self.column,
             pane_size: self.config.pane_font_size,
             pane_column: self.pane_column,
-            input_h: self.input_height(width),
+            input_h: self.input_height(),
             left_width: self.left_width,
             top_height: self.top_height,
             settings_rail: self.settings_rail,
@@ -936,14 +935,12 @@ impl App {
         }
     }
 
-    /// How tall the prompt strip is for what has been typed so far.
-    fn input_height(&self, width: f32) -> f32 {
+    /// How tall the prompt strip is. The rows the settings ask for, whether or
+    /// not anything has been typed into them.
+    fn input_height(&self) -> f32 {
         view::input_height(
-            width,
-            self.column,
-            self.prompt.len(),
-            noob_draw::Text::line_for(self.config.font_size),
             self.config.prompt_rows,
+            noob_draw::Text::line_for(self.config.font_size),
         )
     }
 
@@ -3527,7 +3524,7 @@ fn resize_cursor(dir: winit::window::ResizeDirection) -> CursorIcon {
 }
 
 fn main() {
-    // `no0b --set theme=amber` edits the settings file and exits. Not an
+    // `no0b --set theme=noob-red` edits the settings file and exits. Not an
     // editor: it is a terminal one-liner for the same file, and the only
     // caller of the writer.
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -3841,19 +3838,13 @@ mod tests {
     const COLUMN: f32 = 8.0;
     const SIZE: f32 = 14.0;
 
-    fn laid_out<'a>(dock: &'a Dock, menu: Option<&'a Menu>, chars: usize) -> Layout {
-        laid_out_at(dock, menu, chars, W, H)
+    fn laid_out<'a>(dock: &'a Dock, menu: Option<&'a Menu>) -> Layout {
+        laid_out_at(dock, menu, W, H)
     }
 
     /// The same at a size of its own. The tab strip's arrows only exist on a
     /// strip too narrow to hold its tabs, and at `W` every tab fits.
-    fn laid_out_at<'a>(
-        dock: &'a Dock,
-        menu: Option<&'a Menu>,
-        chars: usize,
-        w: f32,
-        h: f32,
-    ) -> Layout {
+    fn laid_out_at<'a>(dock: &'a Dock, menu: Option<&'a Menu>, w: f32, h: f32) -> Layout {
         let shape = Shape {
             shaded: false,
             dock,
@@ -3866,11 +3857,8 @@ mod tests {
             pane_size: Config::default().pane_font_size,
             pane_column: COLUMN,
             input_h: view::input_height(
-                w,
-                COLUMN,
-                chars,
-                noob_draw::Text::line_for(SIZE),
                 Config::default().prompt_rows,
+                noob_draw::Text::line_for(SIZE),
             ),
             left_width: [Config::default().left_width; 2],
             top_height: [Config::default().top_height; 2],
@@ -3914,7 +3902,7 @@ mod tests {
         let mut dock = Dock::new();
         let views = dock.slot(Space::TopRight).views.clone();
         let showing = |dock: &Dock| {
-            let layout = laid_out_at(dock, None, 0, NARROW.0, NARROW.1);
+            let layout = laid_out_at(dock, None, NARROW.0, NARROW.1);
             let placed = layout.placed(Space::TopRight);
             (
                 placed.first_tab,
@@ -3928,7 +3916,7 @@ mod tests {
         // and the showing tab is in the strip on every frame of the way.
         let mut seen = vec![views[0]];
         for step in 1..views.len() {
-            let at = laid_out_at(&dock, None, 0, NARROW.0, NARROW.1)
+            let at = laid_out_at(&dock, None, NARROW.0, NARROW.1)
                 .placed(Space::TopRight)
                 .first_tab;
             assert!(
@@ -3973,7 +3961,7 @@ mod tests {
     #[test]
     fn an_arrow_carries_the_menu_of_the_space_it_is_in() {
         let dock = Dock::new();
-        let layout = laid_out_at(&dock, None, 0, 680.0, 380.0);
+        let layout = laid_out_at(&dock, None, 680.0, 380.0);
         let showing = dock.slot(Space::TopRight).active().unwrap();
         for panel in [
             layout.placed(Space::TopRight).arrow_left,
@@ -3990,7 +3978,7 @@ mod tests {
     #[test]
     fn a_right_click_opens_the_menu_for_what_is_under_it() {
         let dock = Dock::new();
-        let layout = laid_out(&dock, None, 0);
+        let layout = laid_out(&dock, None);
 
         let menu = opened(&layout, &dock, middle(layout.input)).expect("the prompt has a menu");
         assert_eq!(menu.target, Target::Input);
@@ -4029,7 +4017,7 @@ mod tests {
         // And the open menu itself: the second right click puts it away rather
         // than opening a menu for what it covers.
         let menu = Menu::for_widget((500.0, 400.0), View::Plan, Space::TopRight, false);
-        let over = laid_out(&dock, Some(&menu), 0);
+        let over = laid_out(&dock, Some(&menu));
         let at = middle(over.menu_rows[0].1);
         assert!(opened(&over, &dock, at).is_none());
     }
@@ -4392,7 +4380,7 @@ mod tests {
     #[test]
     fn the_copy_row_reads_the_selection_of_its_own_pane() {
         let dock = Dock::new();
-        let layout = laid_out(&dock, None, 0);
+        let layout = laid_out(&dock, None);
         let (view, tab) = layout.placed(Space::TopRight).tabs[0];
         let at = middle(tab);
         let hit = layout.hit(at.0, at.1);
@@ -4638,7 +4626,7 @@ mod tests {
         use winit::window::ResizeDirection as Dir;
 
         let dock = Dock::new();
-        let layout = laid_out_at(&dock, None, 0, 1200.0, 800.0);
+        let layout = laid_out_at(&dock, None, 1200.0, 800.0);
         let column = layout.column_divider[0].band;
         // The right column's line: it is the half of the grid the window opens
         // with split, and each half now carries a line of its own.
@@ -4798,13 +4786,7 @@ mod tests {
             column: COLUMN,
             pane_size: config.pane_font_size,
             pane_column: COLUMN,
-            input_h: view::input_height(
-                W,
-                COLUMN,
-                0,
-                noob_draw::Text::line_for(SIZE),
-                config.prompt_rows,
-            ),
+            input_h: view::input_height(config.prompt_rows, noob_draw::Text::line_for(SIZE)),
             left_width: [config.left_width, config.left_width_bottom],
             top_height: [config.top_height, config.top_height_right],
             settings_rail: config.settings_rail,
@@ -4876,7 +4858,7 @@ mod tests {
     #[test]
     fn the_delete_cursor_comes_from_the_same_landing_the_drop_does() {
         let dock = Dock::new();
-        let layout = laid_out_at(&dock, None, 0, 1200.0, 800.0);
+        let layout = laid_out_at(&dock, None, 1200.0, 800.0);
         for (x, y) in [(-2.0, 400.0), (1201.0, 400.0), (600.0, 801.0)] {
             let landing = layout.landing(x, y);
             assert_eq!(landing, Landing::Out, "at {x},{y}");
@@ -4933,10 +4915,10 @@ mod tests {
         const AT: (f32, f32) = (1400.0, 900.0);
         let mut dock = Dock::new();
         let cell = |dock: &Dock, space: Space| {
-            laid_out_at(dock, None, 0, AT.0, AT.1).grid[space.index()]
+            laid_out_at(dock, None, AT.0, AT.1).grid[space.index()]
         };
         let drop_at = |dock: &mut Dock, view: View, (x, y): (f32, f32)| {
-            let landing = laid_out_at(dock, None, 0, AT.0, AT.1).landing(x, y);
+            let landing = laid_out_at(dock, None, AT.0, AT.1).landing(x, y);
             let moved = land(dock, view, landing);
             assert!(dock.is_sound(), "{landing:?}: {dock:?}");
             (landing, moved)
@@ -4957,7 +4939,7 @@ mod tests {
             "the pane covers the pair"
         );
         // Which is what the layout draws: one pane down the whole column.
-        let layout = laid_out_at(&dock, None, 0, AT.0, AT.1);
+        let layout = laid_out_at(&dock, None, AT.0, AT.1);
         let placed = layout.placed(Space::TopRight);
         let (over, under) = (
             layout.grid[Space::TopRight.index()],
@@ -4982,7 +4964,7 @@ mod tests {
             Some(Space::BottomRight),
             "two panes, one cell each"
         );
-        let layout = laid_out_at(&dock, None, 0, AT.0, AT.1);
+        let layout = laid_out_at(&dock, None, AT.0, AT.1);
         assert!(
             layout.placed(Space::TopRight).body.y + layout.placed(Space::TopRight).body.h
                 < layout.placed(Space::BottomRight).strip.y,
@@ -4998,7 +4980,7 @@ mod tests {
         let dock = Dock::new();
         let mut prompt = Prompt::default();
         prompt.insert("select me please");
-        let layout = laid_out(&dock, None, prompt.len());
+        let layout = laid_out(&dock, None);
         let y = layout.input.y + layout.input.h * 0.5;
         let chars = prompt.len();
         let caret = |x: f32| layout.input_caret(x, y, SIZE, COLUMN, chars, 0);
@@ -5055,7 +5037,7 @@ mod tests {
             .into_iter()
             .find(|space| dock.slot(*space).active() == Some(View::Activity))
             .expect("the activity list is in the window");
-        let layout = laid_out(&dock, None, 0);
+        let layout = laid_out(&dock, None);
         let size = Config::default().pane_font_size;
         let inner = layout.content(space).inset(9.0);
         let line = noob_draw::Text::line_for(size);
@@ -5129,11 +5111,8 @@ mod tests {
             pane_size: Config::default().pane_font_size,
             pane_column: COLUMN,
             input_h: view::input_height(
-                W,
-                COLUMN,
-                0,
-                noob_draw::Text::line_for(SIZE),
                 Config::default().prompt_rows,
+                noob_draw::Text::line_for(SIZE),
             ),
             left_width: [Config::default().left_width; 2],
             top_height: [Config::default().top_height; 2],
@@ -5148,7 +5127,7 @@ mod tests {
     /// everything that decides which character is under the pointer is here.
     fn output_pane(lines: &[&str]) -> (Dock, Layout, Space, state::Pane) {
         let dock = Dock::new();
-        let layout = laid_out(&dock, None, 0);
+        let layout = laid_out(&dock, None);
         let space = Space::ALL
             .into_iter()
             .find(|space| dock.slot(*space).active() == Some(View::Output))
@@ -5287,7 +5266,7 @@ mod tests {
     #[test]
     fn a_click_on_a_row_that_continues_a_file_line_lands_on_the_character_under_it() {
         let dock = Dock::new();
-        let layout = laid_out(&dock, None, 0);
+        let layout = laid_out(&dock, None);
         let space = Space::ALL
             .into_iter()
             .find(|space| dock.slot(*space).active() == Some(View::Files))
@@ -5385,7 +5364,7 @@ mod tests {
 
         let skin = Skin::from(&Config::default());
         let dock = Dock::new();
-        let layout = laid_out(&dock, None, 0);
+        let layout = laid_out(&dock, None);
         let prompt = Prompt::default();
         let frame = view::Frame {
             state: &state,

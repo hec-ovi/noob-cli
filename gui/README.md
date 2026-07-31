@@ -291,12 +291,14 @@ directory rows and nothing to expand. The column is narrow, so a name that does
 not fit loses its parent directory first and its own tail second, and the list
 never grows past the width that leaves the file beside it readable.
 
-The prompt is one line and grows as you type, up to whatever `prompt_rows` in
-the settings says (one by default, so it stays a line until you ask for more).
-The key was called `max_input_rows` and the window never read it, so that name
-is retired: a file that still carries it opens at one row and says nothing.
-Past that it scrolls inside itself: the row the caret is on is the row you see,
-and typing off the bottom of it brings the text up rather than hiding it.
+The prompt is as tall as `prompt_rows` in the settings says and stays there,
+typed into or not (one by default, so it is a line until you ask for more). It
+used to climb to that number a row at a time as you typed, which moved the
+conversation every time a line wrapped. The key was called `max_input_rows` and
+the window never read it, so that name is retired: a file that still carries it
+opens at one row and says nothing. A message longer than the box scrolls inside
+it: the row the caret is on is the row you see, and typing off the bottom of it
+brings the text up rather than hiding it.
 Click anywhere in it to put the caret there, drag across it to
 select a span, Ctrl-A selects the whole line, and typing or backspace over a
 selection replaces it. Ctrl-V pastes; a pasted newline becomes a space, because
@@ -506,7 +508,8 @@ nothing on the panel to type them into. Each row is the
 key as the file spells it and the value as the file spells it, so the panel
 doubles as the reference for editing the file by hand, and anything that can be
 changed is drawn as a box with an outline round it: if it has an edge, it takes a
-press or a keystroke. A change is written straight away through
+press or a keystroke. The box lights up under the pointer and keeps its cut
+corner while it is lit, the way every other surface in the window does. A change is written straight away through
 the same writer `no0b --set` uses, so the comments stay, and then the whole file
 is read back and the window is restyled from it: the palette and both font sizes
 move without a restart. That read-back is
@@ -514,7 +517,7 @@ also why a row cannot show a value the file will not carry, since what you see i
 what the next launch reads.
 
 A setting with a range is a slider: opacity, both font sizes and how tall the
-prompt may grow. Press the track and drag it, with the value beside it
+prompt is. Press the track and drag it, with the value beside it
 and the arrow keys still nudging it one step. The window takes the value while
 you drag: the opacity you are dragging to is the only thing that tells you where
 to stop. The file is written when the button comes up rather than on every motion
@@ -529,25 +532,30 @@ Pressing a swatch says which key in the file writes it, on the line at the foot 
 the panel; they are swatches to read rather than fields to edit, since changing
 one means typing a hex value and the one field this window has is the endpoint. `theme` is a few rows up and
 repaints the window in a preset; a file carrying a palette that is not one of the
-four exactly reads as `custom`, which is what one hand-tuned colour over a preset
-makes it.
+three exactly reads as `custom`, which is what one hand-tuned colour over a
+preset makes it.
 
 `~/.config/noob/no0b.conf`, written with the defaults on first run and
-commented. Opacity, both font sizes, how tall the prompt may grow, where the
+commented. Opacity, both font sizes, how tall the prompt is, where the
 dividers sit, how wide the settings rail is, which panes exist, and the whole palette: the eight base colors, one per tool,
 ten gauge slots a monitor reading picks from, and the five the highlighter uses
 for code. A key it does not recognise is reported in the ACTIVITY pane rather
 than ignored, and a key an older build wrote and this one dropped, such as any of
 the `view_*` colours, is read off the floor without a word.
 
-`theme = noob | amber | ice | plum` sets the eight base tones, the five code
-colors and the two tool colors that are prose rather than a tool. The rest of the
-tool and gauge colors name the thing rather than the window, so a theme leaves
-them alone. The
-colors ship as commented defaults so the theme has something to set, so
-uncomment one line to keep the theme and override that single color.
-`no0b --set theme=amber` makes the same edit from a terminal without touching
-the comments.
+`theme = noob-matrix | noob-cool | noob-red` sets the eight base tones, the five
+code colors and the two tool colors that are prose rather than a tool.
+noob-matrix is the green the window has always been, noob-cool is cyan over a
+blue-black panel, noob-red is warm over a deep maroon bar. The yes marks stay
+green in all three: the drop target, the picked row and the showing tab's line
+are one colour between them, and a red window whose green went would have lost
+that. The rest of the tool and gauge colors name the thing rather than the
+window, so a theme leaves them alone. The colors ship as commented defaults so
+the theme has something to set, so uncomment one line to keep the theme and
+override that single color. `no0b --set theme=noob-red` makes the same edit from
+a terminal without touching the comments. The names were `noob`, `amber`, `ice`
+and `plum` up to 0.7.1; a file still carrying one of those opens on the closest
+of the three rather than being told it is a typo.
 
 The window shipped as CLIppy up to 0.6.0 and wrote `clippy.conf` and
 `clippy.recent`. The first run under the new name moves each of those to
@@ -555,7 +563,7 @@ The window shipped as CLIppy up to 0.6.0 and wrote `clippy.conf` and
 A file that already exists under the new name wins and the old one is left
 alone.
 
-Opacity defaults to 88%. Lower it to see more of your desktop through the
+Opacity defaults to 90%. Lower it to see more of your desktop through the
 reading surface; below about 60% a busy wallpaper starts competing with the
 text, which is a taste call rather than a bug.
 

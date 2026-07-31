@@ -30,18 +30,21 @@ pub struct Config {
     pub opacity: f32,
     pub font_size: f32,
     pub pane_font_size: f32,
-    /// How tall the prompt is, in rows.
+    /// How tall the prompt is, in rows. Exactly that many, empty or full.
     ///
     /// One by default: the prompt is one line of the window until you say
     /// otherwise, and a longer prompt scrolls inside that line rather than
     /// pushing the conversation up as you type.
     ///
+    /// A height rather than a ceiling. The strip used to climb to this number a
+    /// row at a time as characters arrived, which moved the conversation every
+    /// time a line wrapped and put the box at a different size every time you
+    /// looked at it. Three rows means three rows.
+    ///
     /// Named `max_input_rows` until this build, which is where the confusion
-    /// came from: it reads as a ceiling the prompt is allowed to reach, and it
-    /// is the height the strip is drawn at once there is enough typed to fill
-    /// it. The old name is retired rather than aliased, because the number
-    /// beside it was never a choice anybody made: the key did nothing at all
-    /// while it was being written into everybody's file.
+    /// came from: it read as a ceiling and the window never obeyed it at all.
+    /// The old name is retired rather than aliased, because the number beside it
+    /// was never a choice anybody made.
     pub prompt_rows: usize,
     /// Where the dividers were left, so the arrangement survives a restart the
     /// way every other preference in this window does.
@@ -97,7 +100,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Config {
         Config {
-            opacity: 0.88,
+            opacity: 0.90,
             font_size: 14.0,
             pane_font_size: 13.0,
             prompt_rows: 1,
@@ -207,8 +210,25 @@ fn prose_tools(bright: [u8; 3], text: [u8; 3]) -> [[u8; 3]; 14] {
     tools
 }
 
-/// The palettes `theme = <name>` accepts.
-pub const THEMES: [&str; 4] = ["noob", "amber", "ice", "plum"];
+/// The palettes `theme = <name>` accepts. Three, all of them noob: the window
+/// is one thing in three colours rather than a swatch book.
+pub const THEMES: [&str; 3] = ["noob-matrix", "noob-cool", "noob-red"];
+
+/// Theme names an earlier build wrote, and the standard theme each one is read
+/// as now. Same reasoning as [`RETIRED`]: a name in somebody's file was valid
+/// when it was written, and answering it with "not a theme" blames them for a
+/// rename this window made.
+///
+/// `noob` is the green the window has always been, which is `noob-matrix`
+/// unchanged. `amber` is the warm one, so it lands on `noob-red`; `ice` and
+/// `plum` are both cold, so they land on `noob-cool`. None of them is offered on
+/// the panel any more: they load, and the row then names the palette in hand.
+pub const RETIRED_THEMES: [(&str, &str); 4] = [
+    ("noob", "noob-matrix"),
+    ("amber", "noob-red"),
+    ("ice", "noob-cool"),
+    ("plum", "noob-cool"),
+];
 
 /// How far from the middle either divider can be put by hand, as a fraction.
 ///
@@ -239,65 +259,64 @@ pub const RAIL_HIGH: f32 = 0.5;
 /// why the skin tests run these invariants over all of them.
 pub fn theme(name: &str) -> Option<Config> {
     let base = Config::default();
-    Some(match name.trim().to_ascii_lowercase().as_str() {
-        "noob" => base,
-        "amber" => {
-            let (bright, text) = ([0xff, 0xe9, 0xc4], [0xe2, 0xc4, 0x95]);
+    let asked = name.trim().to_ascii_lowercase();
+    // An older build's name first, so a file nobody has opened since the rename
+    // still gets a palette instead of an unknown-key report.
+    let name = RETIRED_THEMES
+        .iter()
+        .find(|(was, _)| *was == asked)
+        .map_or(asked.as_str(), |(_, now)| *now);
+    Some(match name {
+        // The window's own green, and the defaults verbatim. A window that
+        // opens on nothing at all is this one.
+        "noob-matrix" => base,
+        // The same window at night: cyan where matrix is green, over a panel
+        // with just enough blue in it to be a colour rather than black. `good`
+        // stays green because it is the window's yes and reads as one on a cold
+        // palette; the cyan next to it is the accent, which is a different job.
+        "noob-cool" => {
+            let (bright, text) = ([0xdf, 0xf2, 0xff], [0xa6, 0xc8, 0xe8]);
             Config {
-                accent: [0xf0, 0xb4, 0x5a],
+                accent: [0x5c, 0xc8, 0xf5],
                 text,
-                dim: [0x96, 0x78, 0x4a],
+                dim: [0x62, 0x8a, 0xa8],
                 bright,
-                good: [0xb6, 0xd0, 0x7a],
-                bad: [0xef, 0x7a, 0x63],
-                panel: [0x0a, 0x07, 0x04],
-                bar: [0x33, 0x22, 0x0e],
+                good: [0x62, 0xd8, 0xa0],
+                bad: [0xf0, 0x74, 0x84],
+                panel: [0x02, 0x05, 0x0b],
+                bar: [0x0f, 0x24, 0x3c],
                 tools: prose_tools(bright, text),
-                syntax_comment: [0x8a, 0x70, 0x48],
-                syntax_string: [0xdc, 0xc0, 0x7e],
-                syntax_number: [0xa8, 0xc8, 0xe8],
-                syntax_keyword: [0xf2, 0x8f, 0x4b],
-                syntax_markup: [0xd9, 0xa0, 0xd0],
+                syntax_comment: [0x5c, 0x82, 0x9c],
+                syntax_string: [0x8f, 0xd8, 0xd0],
+                syntax_number: [0xb8, 0xbe, 0xf5],
+                syntax_keyword: [0x8f, 0xbc, 0xff],
+                syntax_markup: [0xd4, 0xa8, 0xf0],
                 ..base
             }
         }
-        "ice" => {
-            let (bright, text) = ([0xdd, 0xf3, 0xff], [0xa8, 0xcc, 0xdf]);
+        // Red as the window's colour, not as its alarm. The tones are warm and
+        // the bar is a deep maroon, while `bad` stays the one thing louder than
+        // the palette around it: a hot orange-red, so a failed call is still
+        // the brightest thing in a red window. `good` is green here too, for
+        // the same reason it is everywhere: the drop target, the picked row and
+        // the showing tab's line are one colour between them.
+        "noob-red" => {
+            let (bright, text) = ([0xff, 0xdf, 0xd6], [0xe6, 0xae, 0xa6]);
             Config {
-                accent: [0x62, 0xc8, 0xf0],
+                accent: [0xf2, 0x5c, 0x50],
                 text,
-                dim: [0x5d, 0x7f, 0x96],
+                dim: [0xa8, 0x6a, 0x64],
                 bright,
-                good: [0x6a, 0xd0, 0xa8],
-                bad: [0xf0, 0x74, 0x8c],
-                panel: [0x01, 0x05, 0x0a],
-                bar: [0x10, 0x28, 0x3a],
+                good: [0x8f, 0xd8, 0x7a],
+                bad: [0xff, 0x8f, 0x5e],
+                panel: [0x0a, 0x03, 0x03],
+                bar: [0x36, 0x11, 0x10],
                 tools: prose_tools(bright, text),
-                syntax_comment: [0x4f, 0x7a, 0x8c],
-                syntax_string: [0x9f, 0xd8, 0xc0],
-                syntax_number: [0xc0, 0xb8, 0xf0],
-                syntax_keyword: [0x9a, 0xb8, 0xff],
-                syntax_markup: [0xd5, 0xa8, 0xe8],
-                ..base
-            }
-        }
-        "plum" => {
-            let (bright, text) = ([0xf2, 0xe2, 0xff], [0xcf, 0xb8, 0xe0]);
-            Config {
-                accent: [0xc5, 0x8c, 0xf0],
-                text,
-                dim: [0x86, 0x68, 0x9c],
-                bright,
-                good: [0x86, 0xd8, 0xa0],
-                bad: [0xf0, 0x70, 0x8c],
-                panel: [0x06, 0x03, 0x0a],
-                bar: [0x2a, 0x14, 0x40],
-                tools: prose_tools(bright, text),
-                syntax_comment: [0x7a, 0x5c, 0x8e],
-                syntax_string: [0xe0, 0xb0, 0xd8],
-                syntax_number: [0xa8, 0xc0, 0xf0],
-                syntax_keyword: [0xb0, 0xa0, 0xff],
-                syntax_markup: [0xf0, 0xc0, 0x80],
+                syntax_comment: [0x9a, 0x68, 0x64],
+                syntax_string: [0xe8, 0xc0, 0x86],
+                syntax_number: [0xc8, 0xb4, 0xf0],
+                syntax_keyword: [0xff, 0x9a, 0x92],
+                syntax_markup: [0xf0, 0xc8, 0x70],
                 ..base
             }
         }
@@ -896,15 +915,16 @@ const DEFAULT_FILE: &str = "\
 # The panels are drawn dark under green text, so lowering this shows more of
 # your desktop through the reading surface. Below about 60% a busy wallpaper
 # starts competing with the text; that is a taste call, not a bug.
-opacity = 88%
+opacity = 90%
 
 font_size = 14          # the conversation
 pane_font_size = 13     # the activity, plan, agents and file panes
 
-# How tall the prompt is, in rows. One line of the window, and a longer message
-# scrolls inside it rather than taking room from the conversation; the row the
-# caret is on is the row you see. Raise it if you would rather see more of what
-# you are typing at once.
+# How tall the prompt is, in rows. Exactly this many, typed into or not: the box
+# is the size you set rather than one that moves every time a line wraps. A
+# longer message scrolls inside it rather than taking room from the
+# conversation, and the row the caret is on is the row you see. Raise it if you
+# would rather see more of what you are typing at once.
 prompt_rows = 1
 
 # Where the dividers sit, as fractions. One line runs the whole way across the
@@ -925,10 +945,12 @@ top_height_right = 0.46
 # and the settings beside it writes it back here.
 settings_rail = 0.10
 
-# The whole palette, by name: noob, amber, ice, plum.
-theme = noob
+# The whole palette, by name: noob-matrix, noob-cool, noob-red. An older file
+# saying noob, amber, ice or plum still opens; each one reads as the closest of
+# the three.
+theme = noob-matrix
 
-# Every color the theme sets, #rrggbb, written out here as the noob theme.
+# Every color the theme sets, #rrggbb, written out here as the noob-matrix theme.
 # Uncomment a line to keep the theme and override that one color.
 # accent = #7cd894        # focus edges, the caret, the context gauge
 # text   = #9ad6ac        # ordinary content
@@ -1437,39 +1459,76 @@ mod tests {
     /// color you also wrote down is still yours.
     #[test]
     fn a_theme_sets_the_palette_and_an_explicit_key_still_wins() {
-        let amber = Config::parse("theme = amber");
-        assert!(amber.unknown.is_empty(), "{:?}", amber.unknown);
-        assert_eq!(amber, theme("amber").unwrap());
-        assert_ne!(amber.accent, Config::default().accent);
-        assert_ne!(amber.syntax_keyword, Config::default().syntax_keyword);
+        let red = Config::parse("theme = noob-red");
+        assert!(red.unknown.is_empty(), "{:?}", red.unknown);
+        assert_eq!(red, theme("noob-red").unwrap());
+        assert_ne!(red.accent, Config::default().accent);
+        assert_ne!(red.syntax_keyword, Config::default().syntax_keyword);
 
         // Either order, because the theme is resolved before the file is read.
         for text in [
-            "theme = amber\naccent = #ff0000",
-            "accent = #ff0000\ntheme = amber",
+            "theme = noob-red\naccent = #ff0000",
+            "accent = #ff0000\ntheme = noob-red",
         ] {
             let config = Config::parse(text);
             assert_eq!(config.accent, [0xff, 0x00, 0x00], "{text}");
-            assert_eq!(config.text, theme("amber").unwrap().text, "{text}");
+            assert_eq!(config.text, theme("noob-red").unwrap().text, "{text}");
         }
     }
 
-    /// `theme = noob` is what the shipped file says, so it has to be exactly
-    /// the defaults or a fresh install is not the design.
+    /// `theme = noob-matrix` is what the shipped file says, so it has to be
+    /// exactly the defaults or a fresh install is not the design.
     #[test]
-    fn the_noob_theme_is_the_default_and_the_others_are_not() {
-        assert_eq!(theme("noob"), Some(Config::default()));
+    fn the_matrix_theme_is_the_default_and_the_others_are_not() {
+        assert_eq!(theme("noob-matrix"), Some(Config::default()));
         for name in THEMES {
             let preset = theme(name).expect(name);
             assert!(preset.unknown.is_empty(), "{name}");
             assert_eq!(preset.tools[12], preset.bright, "{name}: plan is prose");
             assert_eq!(preset.tools[13], preset.text, "{name}: the catch-all is prose");
             assert_eq!(preset.gauges, GAUGES, "{name}: a gauge hue names the metric");
-            if name != "noob" {
+            // Every preset opens at the opacity the defaults do, since each one
+            // is the defaults with the colours changed.
+            assert_eq!(preset.opacity, 0.90, "{name}");
+            if name != "noob-matrix" {
                 assert_ne!(preset, Config::default(), "{name} is the default twice");
             }
         }
         assert_eq!(theme("chartreuse"), None);
+        assert_eq!(THEMES.len(), 3, "three standard themes, all of them noob");
+    }
+
+    /// A theme name an older build wrote still opens a window. The names went
+    /// when the palettes were cut to three; a settings file is read for years,
+    /// so each one is read as the closest of the three rather than reported as
+    /// a typo and dropped for the defaults.
+    #[test]
+    fn a_theme_name_an_older_build_wrote_still_loads() {
+        for (was, now) in RETIRED_THEMES {
+            let config = Config::parse(&format!("theme = {was}"));
+            assert!(config.unknown.is_empty(), "{was}: {:?}", config.unknown);
+            assert_eq!(config, theme(now).expect(now), "{was} is not {now}");
+        }
+        // And the panel then names the palette in hand, which is one of three.
+        assert_eq!(theme("noob"), Some(Config::default()));
+        assert!(!THEMES.contains(&"noob"), "the old name is not offered");
+    }
+
+    /// The window opens at 90% solid, in the struct and in the file it ships,
+    /// and every preset opens there too since each one is the defaults with the
+    /// colours changed.
+    ///
+    /// It was 88%, which is not a value the panel's own slider can reach: the
+    /// opacity track moves in twentieths, so the first press of an arrow key
+    /// left 88 behind and nothing could get back to it.
+    #[test]
+    fn the_window_opens_at_ninety_percent_solid() {
+        assert_eq!(Config::default().opacity, 0.90);
+        assert_eq!(Config::parse(DEFAULT_FILE).opacity, 0.90);
+        assert_eq!(Config::parse("opacity = 90%").opacity, 0.90);
+        for name in THEMES {
+            assert_eq!(theme(name).expect(name).opacity, 0.90, "{name}");
+        }
     }
 
     /// A name this build does not have keeps the defaults and is reported, so
@@ -1527,15 +1586,15 @@ mod tests {
     #[test]
     fn settings_written_under_the_old_name_move_to_the_new_one() {
         let scratch = Scratch::new("adopt");
-        std::fs::write(scratch.legacy(), "opacity = 40%\ntheme = amber\n").unwrap();
+        std::fs::write(scratch.legacy(), "opacity = 40%\ntheme = noob-red\n").unwrap();
 
         let config = Config::load_from(&scratch.conf());
 
         assert_eq!(config.opacity, 0.4);
-        assert_eq!(config.accent, theme("amber").unwrap().accent);
+        assert_eq!(config.accent, theme("noob-red").unwrap().accent);
         // The file is under the new name, with what was in it, and the old name
         // is gone rather than left to be read by nothing.
-        assert_eq!(scratch.read(), "opacity = 40%\ntheme = amber\n");
+        assert_eq!(scratch.read(), "opacity = 40%\ntheme = noob-red\n");
         assert!(!scratch.legacy().exists(), "the old file is still there");
     }
 
@@ -1602,7 +1661,7 @@ mod tests {
 
         let after = scratch.read();
         assert!(after.contains("opacity = 40%"), "{after}");
-        assert!(!after.contains("opacity = 88%"), "{after}");
+        assert!(!after.contains("opacity = 90%"), "{after}");
         // Every comment line survived, including the one on the edited line.
         for line in DEFAULT_FILE.lines().filter(|line| line.starts_with('#')) {
             assert!(after.contains(line), "lost {line:?}");
@@ -1635,13 +1694,13 @@ mod tests {
     fn a_new_key_is_appended_once_however_often_it_is_written() {
         let scratch = Scratch::new("append");
         std::fs::write(scratch.conf(), "# only a comment\n").unwrap();
-        write_setting(&scratch.conf(), "theme", Some("ice")).unwrap();
-        write_setting(&scratch.conf(), "theme", Some("plum")).unwrap();
+        write_setting(&scratch.conf(), "theme", Some("noob-cool")).unwrap();
+        write_setting(&scratch.conf(), "theme", Some("noob-red")).unwrap();
 
         let after = scratch.read();
         assert_eq!(after.matches("theme = ").count(), 1, "{after}");
         assert!(after.starts_with("# only a comment\n"), "{after}");
-        assert_eq!(Config::parse(&after).accent, theme("plum").unwrap().accent);
+        assert_eq!(Config::parse(&after).accent, theme("noob-red").unwrap().accent);
     }
 
     /// A file that already carries the same key twice is left with one live
@@ -1683,7 +1742,10 @@ mod tests {
         assert!(write_setting(&conf, "theme", Some("two words")).is_err());
         assert!(write_setting(&conf, "accent", Some("#ff0000\nbad = #fff")).is_err());
         let theme_error = write_setting(&conf, "theme", Some("tangerine")).unwrap_err();
-        assert!(theme_error.contains("noob, amber, ice, plum"), "{theme_error}");
+        assert!(
+            theme_error.contains("noob-matrix, noob-cool, noob-red"),
+            "{theme_error}"
+        );
         assert!(!conf.exists(), "a refused write created a file");
     }
 
@@ -1717,8 +1779,8 @@ mod tests {
         assert_eq!(set_request(&args(&[])), None, "an ordinary launch");
         assert_eq!(set_request(&args(&["/home/me/code"])), None);
         assert_eq!(
-            set_request(&args(&["--set", "theme=amber"])),
-            Some(Ok(("theme", "amber")))
+            set_request(&args(&["--set", "theme=noob-red"])),
+            Some(Ok(("theme", "noob-red")))
         );
         assert!(set_request(&args(&["--set"])).is_some_and(|r| r.is_err()));
         assert!(set_request(&args(&["--set", "theme"])).is_some_and(|r| r.is_err()));
