@@ -414,6 +414,21 @@ takes a resize shape over it, neither side goes narrower than the longest sectio
 name, and where you leave it is written to `settings_rail` in the settings file,
 so the panel opens that way next time.
 
+The panel is laid out on one scale. Four gaps and five text sizes, all derived
+from the pane text size, live in `gui/clippy/src/design.rs`, and `gui/DESIGN.md`
+says in words what each of them is for. A group of settings is a card: a
+bordered box with its title in a header, one divider under it, its fields inside
+with room on all four sides, and its buttons in a footer at the bottom of the
+box whatever the body's height. A field is its label above a value, never beside
+it, and a value that can be typed into carries the box that says so while a
+reading does not. There is no hairline under a row any more: space and the
+card's own border say where one group ends, which is what a line between every
+two things on screen never did. Cards are full width and stack, and it is a
+card's contents that answer a narrow window: two fields go side by side while
+both keep their columns and stack when they cannot. SKILLS and MCP are the
+sections built this way so far; AGENT, SESSIONS and APPEARANCE are still the
+flat rows they were.
+
 Four of the sections are the agent's own files rather than the window's. AGENT
 opens on a form of two columns, two rows tall: the endpoint and the file the CLI
 reads down the left, the two numbers that decide what the agent gets down the
@@ -489,8 +504,9 @@ from each `SKILL.md`'s front matter and by the directory name when it has none.
 Under the description is the repository the skill records, or, since nothing the
 CLI writes down records where an installed skill came from, the directory it was
 found in. The column beside the list is that skill's own `SKILL.md`, rendered
-the way the transcript renders what the model writes. Every row carries a toggle
-and an uninstall.
+the way the transcript renders what the model writes. Each skill is a card: the
+name in the header, the description in the body, the repository under it, and a
+toggle and an uninstall in the footer.
 The toggle really turns the skill off: there is no enabled flag anywhere in the
 CLI, so off means the directory is moved to `~/.config/noob/skills.off`, which is
 none of the four places the agent looks, and on moves it back. Nothing is
@@ -500,13 +516,14 @@ the footer names what is about to go, the second one does it, and anything else
 at all puts it back. It will only ever delete a directory sitting directly inside
 those two, never a link and never a path that walks out of them.
 
-MCP names both files the CLI merges, `<config>/mcp.json` and
-`<workspace>/.noob/mcp.json`, and says `none configured` when neither is there
-rather than showing an empty list that reads as broken; a malformed one is a line
-saying so, and the servers from the file that did parse are still listed. Each
-server is a row with its URL or command line under the name, the file it came
-from under that, and its entry out of that file beside it, and the same toggle
-and uninstall a skill has. Off moves the
+MCP opens on a card naming both files the CLI merges, `<config>/mcp.json` and
+`<workspace>/.noob/mcp.json`, side by side while there is room for both and
+stacked when there is not, and says `none configured` under them when neither is
+there rather than showing an empty list that reads as broken; a malformed one is
+a line saying so, and the servers from the file that did parse are still listed.
+Each server is a card of its own with its URL or command line in the body, the
+file it came from under that, its entry out of that file beside it, and the same
+toggle and uninstall a skill has. Off moves the
 entry into a `disabled` object in the same file, which the CLI's loader does not
 read, and on moves it back. Uninstall takes the entry out of the file for good,
 out of whichever of the two objects it is in, and takes the same two presses:
@@ -520,7 +537,7 @@ rather than overwriting it with what it could parse.
 
 The fifth is the window's own settings file: APPEARANCE. It is the sizes and the
 theme, then the palette, each group of colours under a heading of its own drawn
-larger than the rows under it, with a hairline between every row. Two things the
+larger than the rows under it. Two things the
 file carries are deliberately not rows: which panes are open, which is the right
 click menu's list, and where the four dividers and the settings rail sit, which
 is set by dragging the lines. Both are still written and read the same way, so a

@@ -24,6 +24,7 @@ use crate::icons;
 use crate::menu::{MARKER_COLUMNS, Menu};
 use crate::monitor::{Gauge, Monitor};
 use crate::picker::{Picker, Row as PickerRow};
+use crate::design;
 use crate::settings::{Row as SettingRow, Settings, Side};
 use crate::skin::Skin;
 use crate::state::{State, TodoState, Tone};
@@ -2588,6 +2589,222 @@ fn settings_session_lines(scene: &mut Scene, cells: &[Panel], row: Panel, edge: 
     }
 }
 
+/// The box a card is drawn in, inside the row it stands in.
+///
+/// The row is the card and the [`design::APART`] under it: two cards never
+/// touch, and the space between them belongs to the one above so the row height
+/// the model counted is the room the layout has.
+fn settings_card(row: Panel, line: f32) -> Panel {
+    Panel::new(row.x, row.y, row.w, (row.h - design::apart(line)).max(1.0))
+}
+
+/// Where a card's header, its divider, its body and its footer sit.
+///
+/// Asked by the placement and by the drawing, the way [`settings_control`] is,
+/// so a button is drawn exactly where the press on it is tested for.
+struct CardParts {
+    /// The box the title is written in, at the card title size.
+    title: Panel,
+    /// The hairline under the title, the full width of the card. The one
+    /// divider a card gets.
+    rule: Panel,
+    /// The fields, with [`design::ROOM`] inside the border on every side.
+    body: Panel,
+    /// The strip the buttons stand in: at the bottom of the card, whatever the
+    /// body's height. Empty on a card with no actions.
+    footer: Panel,
+}
+
+fn settings_card_parts(
+    card: Panel,
+    line: f32,
+    size: f32,
+    column: f32,
+    cols: usize,
+    footer: bool,
+) -> CardParts {
+    let room = design::room(line);
+    // Never taller than the band the model claimed for it: a title that
+    // overran its own header would push the divider onto the first field.
+    let title_h = Text::line_for(design::card_title_size(size)).min(design::TITLE_LINES * line);
+    let head = room + design::TITLE_LINES * line + room;
+    // The body's width in columns is what a description wraps in and what the
+    // model counted the card's height with, so it is taken in columns and not
+    // in pixels. Held to what is really inside the border, which it is under at
+    // every size the panel is used at.
+    let body_w = (design::card_cols(cols) as f32 * column).min((card.w - room * 2.0).max(1.0));
+    let foot_h = match footer {
+        true => (design::BUTTON_LINES + design::ROOM) * line,
+        false => 0.0,
+    };
+    let body_y = card.y + head + room;
+    CardParts {
+        title: Panel::new(card.x + room, card.y + room, body_w, title_h),
+        rule: Panel::new(card.x, (card.y + head).floor(), card.w, 1.0),
+        body: Panel::new(
+            card.x + room,
+            body_y,
+            body_w,
+            (card.y + card.h - room - foot_h - body_y).max(0.0),
+        ),
+        footer: match footer {
+            true => Panel::new(
+                card.x + room,
+                card.y + card.h - room - design::BUTTON_LINES * line,
+                body_w,
+                design::BUTTON_LINES * line,
+            ),
+            false => nowhere(),
+        },
+    }
+}
+
+/// Where each field of a card sits inside its body: one band per row of them,
+/// [`design::STEP`] between the bands and between two fields side by side.
+fn settings_card_slots(body: Panel, line: f32, fields: usize, across: usize) -> Vec<Panel> {
+    let across = across.max(1);
+    let step = design::step(line);
+    let wide = ((body.w - step * (across - 1) as f32) / across as f32).max(1.0);
+    let tall = design::field_lines(false) * line;
+    (0..fields)
+        .map(|at| {
+            Panel::new(
+                body.x + (at % across) as f32 * (wide + step),
+                body.y + (at / across) as f32 * (tall + step),
+                wide,
+                tall,
+            )
+        })
+        .collect()
+}
+
+/// Where a field's label and its value sit inside the slot the card gave it:
+/// the label on the first line, the input [`design::TIGHT`] under it.
+///
+/// Never side by side. A label and a value on one line read as one sentence,
+/// which is what made every value on this panel look like part of its own key.
+fn settings_field_boxes(slot: Panel, line: f32) -> (Panel, Panel) {
+    (
+        Panel::new(slot.x, slot.y, slot.w, line),
+        Panel::new(slot.x, slot.y + line + design::tight(line), slot.w, line),
+    )
+}
+
+/// The three kinds of button on this window, and no others.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ButtonKind {
+    /// The action the card exists for: filled in the accent.
+    Primary,
+    /// Anything reversible: outlined in the ordinary edge.
+    Secondary,
+    /// Anything that loses work: outlined in the colour this window uses for
+    /// exactly that.
+    Danger,
+}
+
+/// One button, drawn where it was placed.
+///
+///
+/// The fill, the outline and the hover all come from the kind, so two buttons of
+/// one kind cannot end up looking like two different things. Every one of them
+/// carries the window's corner cut, the way every other surface does.
+#[allow(clippy::too_many_arguments)]
+fn settings_button(
+    scene: &mut Scene,
+    box_: Panel,
+    kind: ButtonKind,
+    runs: Vec<Run>,
+    tint: [u8; 4],
+    hot: bool,
+    skin: &Skin,
+    size: f32,
+) {
+    if box_.w < 1.0 || box_.h < 1.0 {
+        return;
+    }
+    match kind {
+        ButtonKind::Primary => {
+            scene.rect(panel_fill(
+                box_,
+                match hot {
+                    true => skin.button_hot,
+                    false => skin.button,
+                },
+            ));
+        }
+        ButtonKind::Secondary => {
+            scene.rect(panel_fill(box_, skin.input));
+            if hot {
+                scene.rect(panel_fill(box_, skin.hot));
+            }
+            scene.rect(panel_edge(box_, skin.edge));
+        }
+        ButtonKind::Danger => {
+            if hot {
+                scene.rect(panel_fill(box_, skin.hot));
+            }
+            scene.rect(panel_edge(box_, skin.close_hot));
+        }
+    }
+    scene.text(Text::rich(
+        runs,
+        Panel::new(
+            box_.x + INPUT_PAD,
+            box_.y,
+            (box_.w - INPUT_PAD * 2.0).max(1.0),
+            box_.h,
+        ),
+        size,
+        tint,
+    ));
+}
+
+/// The box, the title bar and the one divider every card carries.
+///
+/// The border goes to the focus colour with the mark down its edge while the
+/// keys are on the card. That is what a full row band said on a row one line
+/// tall; over a box nine lines tall a band is a highlight nobody can read
+/// through.
+#[allow(clippy::too_many_arguments)]
+fn settings_card_shell(
+    scene: &mut Scene,
+    card: Panel,
+    parts: &CardParts,
+    title: &str,
+    tint: [u8; 4],
+    on: bool,
+    skin: &Skin,
+    size: f32,
+    column: f32,
+) {
+    scene.rect(panel_edge(
+        card,
+        match on {
+            true => skin.edge_focus,
+            false => skin.edge,
+        },
+    ));
+    if on {
+        scene.rect(Panel::new(card.x, card.y, MARK_W, card.h).fill(skin.edge_focus));
+    }
+    if parts.title.w >= 1.0 {
+        let big = design::card_title_size(size);
+        let big_column = design::column_for(column, size, design::CARD_TITLE);
+        scene.text(Text::rich(
+            vec![Run::tinted(
+                clip(title, columns_in(parts.title.w, big_column).saturating_sub(1)),
+                tint,
+            )],
+            parts.title,
+            big,
+            tint,
+        ));
+    }
+    if parts.rule.w >= 1.0 && parts.rule.y + 1.0 <= card.y + card.h {
+        scene.rect(parts.rule.fill(skin.edge));
+    }
+}
+
 /// Where a row's control sits: one column in from the label, the width a value
 /// needs and no more.
 ///
@@ -2713,14 +2930,6 @@ const SETTING_TRACK_VALUE_COLUMNS: usize = 8;
 const SETTING_TOGGLE_COLUMNS: usize = 5;
 const SETTING_REMOVE_COLUMNS: usize = 13;
 
-/// How far in from the right edge of the entry list the controls stop.
-///
-/// They were pinned to the edge itself, which is a gap short of the hairline
-/// down the document column: the uninstall ended three pixels from another
-/// column's border and read as a button that had been cut off. A gap of its own
-/// puts the same air on the right of the row that the list has on its left.
-const SETTING_ENTRY_INSET: f32 = GAP;
-
 /// How many characters an entry's text wraps in: the list's own width, less the
 /// mark down the edge of a row and the air after it.
 ///
@@ -2766,8 +2975,10 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
     let column = shape.pane_column.max(1.0);
     let line = Text::line_for(shape.pane_size);
     let content = area.inset(PAD);
-    // The heading, and the footer that says what the keys do.
-    let head = line;
+    // The heading, and the footer that says what the keys do. The heading is
+    // the one thing on the panel drawn in the panel title role, so the strip it
+    // takes is that role's own line rather than a line of body text.
+    let head = Text::line_for(design::panel_title_size(shape.pane_size));
     let foot = line;
     let body = Panel::new(
         content.x,
@@ -2911,24 +3122,74 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
                     removes.push((index, Panel::new(trash.x, row.y, trash.w, line)));
                 }
             }
+            // An entry is a card: its buttons stand in the footer, at the
+            // bottom of the card whatever its description wrapped to. They used
+            // to be pinned to the right of the row's first line, beside the
+            // name, which put every button on the panel at a different height
+            // and left them fighting the text for the same pixels. Nothing at
+            // all in a footer too narrow to hold them, since a button drawn over
+            // another one is a press nobody can aim.
             SettingRow::Entry(entry) => {
+                let parts = settings_card_parts(
+                    settings_card(row, line),
+                    line,
+                    shape.pane_size,
+                    column,
+                    entry_cols,
+                    true,
+                );
                 let remove_w = match entry.removable {
                     true => SETTING_REMOVE_COLUMNS as f32 * column,
                     false => 0.0,
                 };
                 let toggle_w = SETTING_TOGGLE_COLUMNS as f32 * column;
                 let gap = match entry.removable {
-                    true => column,
+                    true => design::step(line),
                     false => 0.0,
                 };
-                let x = row.x + row.w - SETTING_ENTRY_INSET - remove_w - gap - toggle_w;
-                if x > row.x + MARK_W + 3.0 + column * 8.0 {
-                    toggles.push((index, Panel::new(x, row.y, toggle_w, line)));
+                let foot = parts.footer;
+                let x = foot.x + foot.w - remove_w - gap - toggle_w;
+                // Nothing at all when the card was cut off by the bottom of the
+                // list and has no footer left inside itself: a button placed
+                // above its own card is a press that answers for the card over
+                // it.
+                let card = settings_card(row, line);
+                let inside = foot.y >= card.y && foot.y + foot.h <= card.y + card.h + 0.01;
+                if foot.w >= 1.0 && x >= foot.x && inside {
+                    toggles.push((index, Panel::new(x, foot.y, toggle_w, foot.h)));
                     if entry.removable {
                         removes.push((
                             index,
-                            Panel::new(x + toggle_w + gap, row.y, remove_w, line),
+                            Panel::new(x + toggle_w + gap, foot.y, remove_w, foot.h),
                         ));
+                    }
+                }
+            }
+            // A card's own fields. Only one that can be typed into gets a
+            // region, keyed by its slot the way the two halves of a form row
+            // are: a reading with a press region over it would answer a press
+            // with nothing. Two slots, because a hit carries a [`Side`] and a
+            // side is one of two; a card with more than two fields that can be
+            // changed is a card that needs the hit to carry its slot.
+            SettingRow::Card(card) => {
+                let parts = settings_card_parts(
+                    settings_card(row, line),
+                    line,
+                    shape.pane_size,
+                    column,
+                    entry_cols,
+                    false,
+                );
+                let across = design::across(card.fields.len(), design::card_cols(entry_cols));
+                let slots = settings_card_slots(parts.body, line, card.fields.len(), across);
+                for (at, slot) in slots.iter().enumerate() {
+                    let side = match at {
+                        0 => Side::Left,
+                        1 => Side::Right,
+                        _ => continue,
+                    };
+                    if card.fields[at].editable {
+                        values.push((index, side, settings_field_boxes(*slot, line).1));
                     }
                 }
             }
@@ -5132,17 +5393,25 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
     // SESSIONS the two are not the same thing: SETTINGS SESSIONS over a rail
     // already marked SESSIONS said the panel twice and the list under it not at
     // all. `Settings::title` is where that mapping lives.
+    //
+    // In the panel title role, which is the largest text in the window: a
+    // heading the same size as the settings under it is not a heading, and
+    // "which panel am I on" was the first thing that could not be answered at a
+    // glance.
     let here = panel.title();
-    say(
-        scene,
+    let title_size = design::panel_title_size(size);
+    let title_line = Text::line_for(title_size);
+    let title_cols = columns_in(content.w, design::column_for(column, size, design::PANEL_TITLE));
+    scene.text(Text::rich(
         vec![
             Run::icon(icons::SETTINGS.to_string(), skin.bright),
             Run::tinted(" SETTINGS ", skin.bright),
-            Run::tinted(clip(here, cols.saturating_sub(11)), skin.good),
+            Run::tinted(clip(here, title_cols.saturating_sub(11)), skin.good),
         ],
-        Panel::new(content.x, content.y, content.w, line),
+        Panel::new(content.x, content.y, content.w, title_line),
+        title_size,
         skin.bright,
-    );
+    ));
 
     // The mark and nothing under it. It stood on a filled block while the
     // pointer was on it, which is a button, and the panel is a takeover with no
@@ -5208,7 +5477,10 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
         scene.rect(Panel::new(list.x - (GAP * 0.5).floor(), list.y, 1.0, list.h).fill(skin.edge));
     }
 
-    let last_drawn = layout.settings_rows.last().map(|(index, _, _)| *index);
+    // The width a card's body has, in columns, which is what the model counted
+    // every card's height in. Read off the list the cards are drawn in, the same
+    // way the placement reads it.
+    let list_cols = settings_entry_cols(list.w, column);
     for (index, side, row) in &layout.settings_rows {
         let Some(whole_row) = panel.row(*index) else {
             continue;
@@ -5226,8 +5498,12 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
         // text: a filled strip fourteen lines tall over a page of prose is a
         // highlight nobody can read through, and the mark down its edge says the
         // same thing.
+        let carded = matches!(entry, SettingRow::Card(_) | SettingRow::Entry(_));
         if on {
-            if !matches!(entry, SettingRow::Paper(_)) {
+            // A card says the keys are on it with its own border and the mark
+            // down its edge, drawn by the card itself. A band nine lines tall
+            // over a box is a highlight nobody can read through.
+            if !matches!(entry, SettingRow::Paper(_)) && !carded {
                 // A list being picked from carries the solid band the folder
                 // picker's own session list carries; a form being read carries
                 // the quiet strip, which is enough to say which row the keys
@@ -5243,7 +5519,9 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 };
                 scene.rect(row.fill(band));
             }
-            scene.rect(Panel::new(row.x, row.y, MARK_W, row.h).fill(skin.edge_focus));
+            if !carded {
+                scene.rect(Panel::new(row.x, row.y, MARK_W, row.h).fill(skin.edge_focus));
+            }
         }
         // The row naming the columns of the table stands on a band of its own.
         // Column rules and a hairline under it were the whole of it, which drew
@@ -5259,17 +5537,13 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
         if paired && *side == Side::Right && row.h >= 2.0 {
             scene.rect(Panel::new(row.x, row.y + 2.0, 1.0, (row.h - 4.0).max(1.0)).fill(skin.edge));
         }
-        // A hairline under every row but the last one on screen. A settings
-        // panel is a form, and a form with nothing between its rows is one block
-        // of text where a key belongs to whichever value it happens to be beside.
-        // Not under the last: a line along the bottom of the list reads as the
-        // edge of a box that is not there. Not under a heading either: the line
-        // above a heading is what separates one group from the last, and a
-        // second one under it would cut the heading off from its own group.
-        let ruled = !matches!(entry, SettingRow::Heading(_));
-        if ruled && last_drawn != Some(*index) && row.h >= 2.0 {
-            scene.rect(Panel::new(row.x, row.y + row.h - 1.0, row.w, 1.0).fill(skin.edge));
-        }
+        // There is no hairline under a row. There was one under every row on
+        // the panel, which is a line between every two things on screen and
+        // therefore a line that says nothing about which of them belong
+        // together. Grouping and space say that instead: a card has a border,
+        // its fields have [`design::STEP`] between them, and two cards have
+        // [`design::APART`]. The only dividers left on the panel are the one
+        // under a card's title and the one under a table's column names.
         let text_x = row.x + MARK_W + 3.0;
         let whole = Panel::new(text_x, row.y, (row.w - MARK_W - 3.0).max(1.0), line);
         // One column short of what the box holds, so the mark saying a line was
@@ -5631,120 +5905,102 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     );
                 }
             }
-            // One skill or one server: what it is called, what is under it, and
-            // the two controls at the right. A row that is off is drawn in the
-            // quiet tint the whole way across, so a list of skills says which
-            // ones the agent will actually load without anything having to be
-            // read.
+            // One skill or one server, as a card of its own: its name in the
+            // header, what it is for and where it is in the body, and its two
+            // buttons in the footer. It was three bare lines with the buttons
+            // pinned beside the name, which is the shape the whole panel is
+            // being taken out of. A card that is off is drawn in the quiet tint
+            // the whole way through, so a list says which of them the agent will
+            // actually load without anything having to be read.
             SettingRow::Entry(entry) => {
-                // Under the solid band the row wears when the cursor is on it,
-                // the ink is the band's own, the way a picked session's is.
-                let tint = match (entry.on, on) {
-                    (_, true) => skin.picked_ink,
-                    (true, false) => skin.body,
+                let at = settings_card(*row, line);
+                let parts = settings_card_parts(at, line, size, column, list_cols, true);
+                let title_tint = match (entry.on, on) {
+                    (_, true) => skin.bright,
+                    (true, false) => skin.good,
                     (false, false) => skin.dim,
                 };
-                // The name stops a column short of the controls: a name drawn
-                // under the toggle is a name whose end nobody can read. Only the
-                // name: the description and the path have lines of their own
-                // now and run the whole width of the row under the buttons.
-                let controls = layout
-                    .settings_toggles
-                    .iter()
-                    .chain(layout.settings_removes.iter())
-                    .filter(|(at, _)| at == index)
-                    .map(|(_, at)| at.x)
-                    .fold(f32::INFINITY, f32::min);
-                let name_w = match controls.is_finite() {
-                    true => (controls - column - text_x).max(1.0),
-                    false => whole.w,
-                };
-                say(
+                settings_card_shell(
                     scene,
-                    vec![Run::tinted(
-                        clip(&entry.name, columns_in(name_w, column).saturating_sub(1)),
-                        tint,
-                    )],
-                    Panel::new(text_x, row.y, name_w, line),
-                    tint,
+                    at,
+                    &parts,
+                    &entry.name,
+                    title_tint,
+                    on,
+                    skin,
+                    size,
+                    column,
                 );
-                // What it is for, in the ordinary tone, and where it is, in the
-                // quiet one: three things on lines of their own rather than a
-                // name with its description glued to the end of it and cut by
-                // whatever the buttons left over.
-                let about = match (on, entry.on) {
-                    (true, _) => skin.picked_ink,
-                    (false, true) => skin.body,
-                    // Turned off, and the whole row says so rather than only its
-                    // name: what is off is not what the eye should land on.
-                    (false, false) => skin.dim,
-                };
-                let under = match on {
-                    true => skin.picked_ink,
+                let about_tint = match entry.on {
+                    true => skin.body,
                     false => skin.dim,
                 };
-                // The description wraps onto as many rows as it needs, and the
-                // row was made that tall by the model, which counted them with
-                // the same rule the renderer breaks the box with. It used to be
-                // one line ending in an ellipsis, which is a sentence cut off at
-                // the width of the column with the rest of it unreadable.
-                let about_cols = settings_entry_cols(row.w, column);
+                // The description wraps onto as many rows as it needs, in the
+                // columns the model counted its height in: one number, so the
+                // rows counted, the room left and the rows drawn are the same
+                // rows.
+                let about_cols = design::card_cols(list_cols);
                 let about_rows = crate::settings::about_rows(&entry.about, about_cols);
                 let about_at = Panel::new(
-                    text_x,
-                    row.y + line,
-                    whole.w,
-                    (about_rows as f32 * line).min((row.h - line).max(0.0)),
+                    parts.body.x,
+                    parts.body.y,
+                    parts.body.w,
+                    (about_rows as f32 * line).min(parts.body.h.max(0.0)),
                 );
                 if !entry.about.is_empty() && about_at.h >= line {
                     scene.text(
                         Text::rich(
-                            vec![Run::tinted(entry.about.clone(), about)],
+                            vec![Run::tinted(entry.about.clone(), about_tint)],
                             about_at,
                             size,
-                            about,
+                            about_tint,
                         )
                         .wrap_at(about_cols),
                     );
                 }
-                // Under the last row of it, wherever that landed. Still clipped
-                // rather than wrapped: a path is one thing to read and a second
-                // row of it says nothing the first did not.
+                // Where it came from, in the hint role: a repository or a path
+                // is the quietest of the three things a row of a list carries,
+                // and drawing it at the size of the description made all three
+                // of them one run of text.
+                let small = design::hint_size(size);
+                let small_column = design::column_for(column, size, design::HINT);
                 let under_at = Panel::new(
-                    text_x,
-                    row.y + (about_rows as f32 + 1.0) * line,
-                    whole.w,
-                    line,
+                    parts.body.x,
+                    parts.body.y + about_rows as f32 * line + design::tight(line),
+                    parts.body.w,
+                    Text::line_for(small).min(line),
                 );
-                if !entry.under.is_empty() && under_at.y + line <= row.y + row.h {
-                    say(
-                        scene,
-                        vec![Run::tinted(clip(&entry.under, whole_cols), under)],
+                if !entry.under.is_empty() && under_at.y + under_at.h <= at.y + at.h {
+                    scene.text(Text::rich(
+                        vec![Run::tinted(
+                            clip(
+                                &entry.under,
+                                columns_in(under_at.w, small_column).saturating_sub(1),
+                            ),
+                            skin.dim,
+                        )],
                         under_at,
-                        under,
-                    );
+                        small,
+                        skin.dim,
+                    ));
                 }
+                // The toggle: filled while it is on, because a fill is what says
+                // a thing is live, and outlined while it is off.
                 for (at, box_) in &layout.settings_toggles {
                     if at != index {
                         continue;
                     }
                     let ink = match entry.on {
-                        true => skin.good,
+                        true => skin.bright,
                         false => skin.dim,
                     };
-                    scene.rect(panel_fill(*box_, skin.input));
-                    if frame.hot == Some(Hit::SettingsToggle(*index)) {
-                        scene.rect(panel_fill(*box_, skin.hot));
-                    }
-                    scene.rect(panel_edge(
-                        *box_,
-                        match on {
-                            true => skin.edge_focus,
-                            false => skin.edge,
-                        },
-                    ));
-                    say(
+                    settings_button(
                         scene,
+                        *box_,
+                        match entry.on {
+                            true => ButtonKind::Primary,
+                            false => ButtonKind::Secondary,
+                        },
                         vec![Run::tinted(
                             match entry.on {
                                 true => "on",
@@ -5752,37 +6008,25 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                             },
                             ink,
                         )],
-                        Panel::new(
-                            box_.x + INPUT_PAD,
-                            box_.y,
-                            (box_.w - INPUT_PAD * 2.0).max(1.0),
-                            box_.h,
-                        ),
                         ink,
+                        frame.hot == Some(Hit::SettingsToggle(*index)),
+                        skin,
+                        size,
                     );
                 }
                 // In the colour this window uses for everything that throws
-                // work away, which is what a delete is.
+                // work away, which is what a delete is. Pressed once, it says so
+                // and waits for the second press; the footer says what would go
+                // with it.
                 for (at, box_) in &layout.settings_removes {
                     if at != index {
                         continue;
                     }
-                    // Pressed once, it says so and waits for the second press.
-                    // The footer says what would go with it.
                     let armed = panel.arming() == Some(*index);
-                    scene.rect(panel_fill(*box_, skin.input));
-                    if frame.hot == Some(Hit::SettingsRemove(*index)) {
-                        scene.rect(panel_fill(*box_, skin.hot));
-                    }
-                    scene.rect(panel_edge(
-                        *box_,
-                        match armed {
-                            true => skin.close_hot,
-                            false => skin.edge,
-                        },
-                    ));
-                    say(
+                    settings_button(
                         scene,
+                        *box_,
+                        ButtonKind::Danger,
                         vec![Run::tinted(
                             match armed {
                                 true => "sure?",
@@ -5790,14 +6034,102 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                             },
                             skin.bad,
                         )],
-                        Panel::new(
-                            box_.x + INPUT_PAD,
-                            box_.y,
-                            (box_.w - INPUT_PAD * 2.0).max(1.0),
-                            box_.h,
-                        ),
                         skin.bad,
+                        frame.hot == Some(Hit::SettingsRemove(*index)),
+                        skin,
+                        size,
                     );
+                }
+            }
+            // A group of settings in a box of its own: the title bar, the one
+            // divider, and the fields under it. Two fields across while the card
+            // is wide enough for both to keep their columns and one across when
+            // it is not, which is the whole of what this panel does about a
+            // narrow window.
+            SettingRow::Card(card) => {
+                let at = settings_card(*row, line);
+                let parts = settings_card_parts(at, line, size, column, list_cols, false);
+                settings_card_shell(
+                    scene,
+                    at,
+                    &parts,
+                    &card.title,
+                    skin.good,
+                    on,
+                    skin,
+                    size,
+                    column,
+                );
+                let across = design::across(card.fields.len(), design::card_cols(list_cols));
+                let slots = settings_card_slots(parts.body, line, card.fields.len(), across);
+                let mut under = parts.body.y;
+                for (field, slot) in card.fields.iter().zip(&slots) {
+                    if slot.y + slot.h > parts.body.y + parts.body.h + 0.01 {
+                        continue;
+                    }
+                    under = under.max(slot.y + slot.h);
+                    let (label_at, input_at) = settings_field_boxes(*slot, line);
+                    scene.text(Text::rich(
+                        vec![Run::tinted(
+                            clip(
+                                &field.label,
+                                columns_in(label_at.w, column).saturating_sub(1),
+                            ),
+                            skin.dim,
+                        )],
+                        label_at,
+                        design::label_size(size),
+                        skin.dim,
+                    ));
+                    // The border is the whole of what says a value can be typed
+                    // into. A reading is the same shape without one, so the two
+                    // are told apart without pressing either.
+                    let room = match field.editable {
+                        true => {
+                            scene.rect(panel_fill(input_at, skin.input));
+                            scene.rect(panel_edge(input_at, skin.edge));
+                            Panel::new(
+                                input_at.x + INPUT_PAD,
+                                input_at.y,
+                                (input_at.w - INPUT_PAD * 2.0).max(1.0),
+                                input_at.h,
+                            )
+                        }
+                        false => input_at,
+                    };
+                    scene.text(Text::rich(
+                        vec![Run::tinted(
+                            clip(&field.value, columns_in(room.w, column)),
+                            skin.bright,
+                        )],
+                        room,
+                        design::value_size(size),
+                        skin.bright,
+                    ));
+                }
+                if let Some(hint) = &card.hint {
+                    let small = design::hint_size(size);
+                    let small_column = design::column_for(column, size, design::HINT);
+                    let hint_at = Panel::new(
+                        parts.body.x,
+                        under + design::step(line),
+                        parts.body.w,
+                        Text::line_for(small).min(line),
+                    );
+                    if hint_at.y + hint_at.h <= at.y + at.h {
+                        scene.text(Text::rich(
+                            vec![Run::tinted(
+                                clip(
+                                    hint,
+                                    columns_in(hint_at.w, small_column).saturating_sub(1),
+                                ),
+                                skin.dim,
+                            )],
+                            hint_at,
+                            small,
+                            skin.dim,
+                        ));
+                    }
                 }
             }
             // A block of text under a title of its own: what the agent is really
@@ -15273,31 +15605,93 @@ mod tests {
         (index, row)
     }
 
-    /// An entry is a table row, not a sentence: the name on its own line, the
-    /// description under it and the path under that, each in its own place. The
-    /// name and the description used to share one line, with the description cut
-    /// off wherever the buttons at the end of the row began.
+    /// The one card row of a rendered panel, and where it is.
+    fn the_card_row(out: &Rendered, panel: &Settings) -> (usize, Panel) {
+        let (index, _, row) = *out
+            .layout
+            .settings_rows
+            .iter()
+            .find(|(index, _, _)| matches!(panel.row(*index), Some(crate::settings::Row::Card(_))))
+            .expect("a card row");
+        (index, row)
+    }
+
+    /// Where the card drawn in a row has its title, its divider, its body and
+    /// its footer, worked out through the same two functions the placement and
+    /// the drawing go through.
+    fn the_card(out: &Rendered, row: Panel, footer: bool) -> (Panel, CardParts) {
+        let line = Text::line_for(PANE_TEXT.0);
+        let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
+        let card = settings_card(row, line);
+        let parts = settings_card_parts(card, line, PANE_TEXT.0, PANE_TEXT.1, cols, footer);
+        (card, parts)
+    }
+
+    /// An entry is a card: its name in the header, what it is for in the body,
+    /// where it came from under that, and its buttons in the footer.
+    ///
+    /// The name and the description used to share one line, with the
+    /// description cut off wherever the buttons at the end of the row began.
+    /// Then they were three bare lines with the buttons still beside the name.
+    /// Now the three strings are three roles in three places and the buttons
+    /// have a strip of their own.
     #[test]
-    fn an_entry_puts_its_name_its_description_and_its_path_on_three_lines() {
+    fn an_entry_is_a_card_with_its_name_its_words_and_its_path_in_it() {
         let panel = a_wordy_skills_panel();
         let out = render_settings(&panel, 1400.0, 900.0, None);
-        let line = Text::line_for(13.0);
+        let line = Text::line_for(PANE_TEXT.0);
         let (index, row) = the_entry_row(&out, &panel);
+        let (card, parts) = the_card(&out, row, true);
         assert!(
-            row.h >= line * 3.0 - 0.01,
-            "three lines of room: {row:?} at {line}"
-        );
-        let text_x = row.x + MARK_W + 3.0;
-        assert_eq!(line_of(&out, text_x, row.y), "coding");
-        assert_eq!(line_of(&out, text_x, row.y + line), A_LONG_ABOUT);
-        assert_eq!(
-            line_of(&out, text_x, row.y + line * 2.0),
-            "https://github.com/someone/coding"
+            card.h <= row.h - design::apart(line) + 0.01,
+            "the card fills the space between itself and the next one"
         );
 
-        // The description is written whole. It runs the width of the row, under
-        // the buttons rather than up against them: beside the name there is not
-        // room for it, which is exactly what used to end it in an ellipsis.
+        // The name in the header, at the card title size rather than the size
+        // everything under it is drawn at.
+        let title = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| (text.at.y - parts.title.y).abs() < 0.51)
+            .expect("the title");
+        assert_eq!(
+            title.runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+            "coding"
+        );
+        assert_eq!(title.size, design::card_title_size(PANE_TEXT.0));
+        assert!(title.size > PANE_TEXT.0, "the title is not bigger than a value");
+
+        // What it is for, in the body, at the value size.
+        assert_eq!(line_of(&out, parts.body.x, parts.body.y), A_LONG_ABOUT);
+        // And where it came from under it, in the hint size: the quietest of
+        // the three, and the one that used to look exactly like the other two.
+        let wrapped = crate::settings::about_rows(
+            A_LONG_ABOUT,
+            design::card_cols(out.layout.settings_entry_columns(PANE_TEXT.1)),
+        );
+        let under = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| {
+                (text.at.x - parts.body.x).abs() < 0.51
+                    && (text.at.y
+                        - (parts.body.y + wrapped as f32 * line + design::tight(line)))
+                    .abs()
+                        < 0.51
+            })
+            .expect("the path");
+        assert_eq!(
+            under.runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+            "https://github.com/someone/coding"
+        );
+        assert_eq!(under.size, design::hint_size(PANE_TEXT.0));
+        assert!(under.size < PANE_TEXT.0, "the path is not quieter than the words");
+
+        // The buttons are in the footer, at the bottom of the card, and the
+        // description runs the full width of the body under them rather than
+        // stopping where they begin.
         let toggle = out
             .layout
             .settings_toggles
@@ -15305,29 +15699,105 @@ mod tests {
             .find(|(at, _)| *at == index)
             .map(|(_, at)| *at)
             .expect("a toggle");
-        let beside_the_name = ((toggle.x - 8.0 - text_x) / 8.0).floor() as usize;
+        assert!(toggle.y >= parts.body.y + parts.body.h - 0.01, "{toggle:?}");
+        let beside_the_name = ((toggle.x - 8.0 - parts.body.x) / 8.0).floor() as usize;
         assert!(
             A_LONG_ABOUT.chars().count() > beside_the_name,
-            "the description would have fitted beside the name, so this proves nothing"
+            "the description would have fitted beside the buttons, so this proves nothing"
         );
-        // And every line of it stays in the left column: nothing an entry says
-        // is drawn over the document beside it.
-        for step in 0..3 {
-            let at = out
-                .scene
-                .texts
-                .iter()
-                .find(|text| {
-                    (text.at.x - text_x).abs() < 0.51
-                        && (text.at.y - (row.y + step as f32 * line)).abs() < 0.51
-                })
-                .map(|text| text.at)
-                .expect("a line of the entry");
+        // And nothing an entry says is drawn over the document beside it.
+        for text in out.scene.texts.iter().filter(|text| {
+            (text.at.x - parts.body.x).abs() < 0.51 && text.at.y >= card.y && text.at.y <= card.y + card.h
+        }) {
             assert!(
-                at.x + at.w <= out.layout.settings_doc.x + 0.01,
-                "line {step} runs into the document: {at:?}"
+                text.at.x + text.at.w <= out.layout.settings_doc.x + 0.01,
+                "a line of the entry runs into the document: {:?}",
+                text.at
             );
         }
+    }
+
+    /// The footer's buttons are inside the card, at the bottom of it, and in the
+    /// three kinds this window has and no others.
+    ///
+    /// "buttons, default bottom always, they are messy": they were pinned to the
+    /// right of whichever line of a row they happened to belong to, so no two of
+    /// them were at the same height and each one sat wherever its own row left
+    /// space.
+    #[test]
+    fn the_buttons_of_a_card_stand_in_its_footer() {
+        let panel = a_wordy_skills_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let line = Text::line_for(PANE_TEXT.0);
+        let (index, row) = the_entry_row(&out, &panel);
+        let (card, parts) = the_card(&out, row, true);
+        let toggle = out
+            .layout
+            .settings_toggles
+            .iter()
+            .find(|(at, _)| *at == index)
+            .map(|(_, at)| *at)
+            .expect("a toggle");
+        let remove = out
+            .layout
+            .settings_removes
+            .iter()
+            .find(|(at, _)| *at == index)
+            .map(|(_, at)| *at)
+            .expect("an uninstall");
+        for (name, at) in [("the toggle", toggle), ("the uninstall", remove)] {
+            assert!(
+                at.y >= parts.footer.y - 0.01 && at.y + at.h <= card.y + card.h - 0.01,
+                "{name} is not in the footer: {at:?} against {:?}",
+                parts.footer
+            );
+            assert!(
+                at.y + at.h >= parts.body.y + parts.body.h - 0.01,
+                "{name} is not under the body: {at:?}"
+            );
+            assert!(
+                at.x >= card.x && at.x + at.w <= card.x + card.w + 0.01,
+                "{name} is outside the card: {at:?} in {card:?}"
+            );
+            // And pressed where it is drawn.
+            let (x, y) = middle(at);
+            assert!(card.contains(x, y), "{name} is drawn off its own card");
+        }
+        assert!(
+            toggle.x + toggle.w <= remove.x,
+            "the two buttons overlap: {toggle:?} and {remove:?}"
+        );
+        // Room under the last line of the body, so the buttons are not standing
+        // on the words.
+        assert!(
+            parts.footer.y >= parts.body.y + parts.body.h + design::room(line) - 0.01,
+            "the footer sits on the body: {:?} under {:?}",
+            parts.footer,
+            parts.body
+        );
+
+        // The primary is filled, the danger is outlined in the bad colour, and
+        // neither of them is the other.
+        let over = |at: Panel, rgba: [f32; 4]| {
+            out.scene.rects.iter().any(|rect| {
+                let [x, y, w, h] = rect.xywh();
+                rect.rgba() == rgba
+                    && (x - at.x).abs() < 0.01
+                    && (y - at.y).abs() < 0.01
+                    && (w - at.w).abs() < 0.01
+                    && (h - at.h).abs() < 0.01
+            })
+        };
+        assert!(
+            over(toggle, out.skin.button),
+            "the skill is on, so its toggle is the filled button"
+        );
+        assert!(
+            over(remove, out.skin.close_hot),
+            "the uninstall is not outlined in the colour this window loses work in"
+        );
+        assert!(!over(remove, out.skin.button), "the uninstall is filled like a primary");
+        assert!(text_of(&out.scene).contains("uninstall"));
     }
 
     /// A description several times the width of the entry column. Giving it a
@@ -15377,32 +15847,33 @@ mod tests {
             .collect()
     }
 
-    /// A description too long for the column wraps onto as many rows as it
-    /// needs and the row grows to hold them.
+    /// A description too long for the card wraps onto as many rows as it needs
+    /// and the card grows to hold them.
     ///
     /// Moving it off the name's line stopped the buttons cutting it; the column
     /// itself was still cutting it, so a skill whose description ran past the
     /// width of the list ended in three dots with the rest unreadable. It is
     /// broken by the rule the panes and the document column use, in the columns
-    /// the model counted its height in.
+    /// the model counted its height in, which are the card's own and not the
+    /// list's.
     #[test]
     fn a_long_description_wraps_instead_of_ending_in_an_ellipsis() {
         let panel = a_wrapping_skills_panel();
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let line = Text::line_for(PANE_TEXT.0);
-        let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
+        let cols = design::card_cols(out.layout.settings_entry_columns(PANE_TEXT.1));
         assert!(
             A_WRAPPING_ABOUT.chars().count() > cols,
             "the description fits in {cols} columns, so this proves nothing"
         );
         let (_, row) = the_entry_rows(&out, &panel)[0];
-        let text_x = row.x + MARK_W + 3.0;
+        let (_, parts) = the_card(&out, row, true);
         let drawn = out
             .scene
             .texts
             .iter()
             .find(|text| {
-                (text.at.x - text_x).abs() < 0.51 && (text.at.y - (row.y + line)).abs() < 0.51
+                (text.at.x - parts.body.x).abs() < 0.51 && (text.at.y - parts.body.y).abs() < 0.51
             })
             .expect("the description");
         let said: String = drawn.runs.iter().map(|run| run.text.as_str()).collect();
@@ -15413,8 +15884,8 @@ mod tests {
             Some(cols),
             "it wraps in the columns its height was counted in"
         );
-        // As many rows as it wrapped to, and the row is the name, those rows and
-        // the path underneath.
+        // As many rows as it wrapped to, and the card is that body, its header
+        // and its footer.
         let wrapped = crate::settings::about_rows(A_WRAPPING_ABOUT, cols);
         assert!(wrapped > 1, "{wrapped} rows in {cols} columns");
         assert!(
@@ -15424,37 +15895,62 @@ mod tests {
             drawn.at
         );
         assert!(
-            row.h >= (wrapped as f32 + 2.0) * line - 0.01,
-            "the row did not grow: {row:?} at {line}"
+            parts.body.h >= (wrapped as f32 + 1.0) * line - 0.01,
+            "the body did not grow: {:?} at {line}",
+            parts.body
+        );
+        assert_eq!(
+            row.h,
+            crate::design::card_row_lines(
+                crate::settings::entry_body_lines(
+                    match panel.row(the_entry_rows(&out, &panel)[0].0) {
+                        Some(crate::settings::Row::Entry(entry)) => entry,
+                        other => panic!("{other:?}"),
+                    },
+                    out.layout.settings_entry_columns(PANE_TEXT.1)
+                ),
+                true
+            ) as f32
+                * line,
+            "the row is not the height the model counted"
         );
     }
 
-    /// And the entry under it starts below those rows rather than over them.
+    /// And the card under it starts below those rows rather than over them.
     #[test]
     fn the_entry_under_a_wrapped_one_is_drawn_below_its_rows() {
         let panel = a_wrapping_skills_panel();
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let line = Text::line_for(PANE_TEXT.0);
-        let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
+        let cols = design::card_cols(out.layout.settings_entry_columns(PANE_TEXT.1));
         let wrapped = crate::settings::about_rows(A_WRAPPING_ABOUT, cols);
         let rows = the_entry_rows(&out, &panel);
-        assert_eq!(rows.len(), 2, "two skills are two rows");
+        assert_eq!(rows.len(), 2, "two skills are two cards");
         let ((_, first), (_, second)) = (rows[0], rows[1]);
         assert!(
             second.y >= first.y + first.h - 0.01,
             "the rows overlap: {first:?} then {second:?}"
         );
-        let text_x = first.x + MARK_W + 3.0;
+        let (first_card, first_parts) = the_card(&out, first, true);
+        let (_, second_parts) = the_card(&out, second, true);
         // The path sits under the last row of the description, not on top of it.
         assert_eq!(
-            line_of(&out, text_x, first.y + (wrapped as f32 + 1.0) * line),
+            line_of(
+                &out,
+                first_parts.body.x,
+                first_parts.body.y + wrapped as f32 * line + design::tight(line)
+            ),
             "https://github.com/someone/coding"
         );
-        // And the next name is under that.
-        assert_eq!(line_of(&out, text_x, second.y), "web-search");
+        // And the next name is under the whole of the first card, with the
+        // space between two cards left between them.
+        assert_eq!(
+            line_of(&out, second_parts.title.x, second_parts.title.y),
+            "web-search"
+        );
         assert!(
-            second.y >= first.y + (wrapped as f32 + 2.0) * line - 0.01,
-            "the second entry is drawn over the first: {second:?}"
+            second.y >= first_card.y + first_card.h + design::apart(line) - 1.01,
+            "the second card is drawn over the first: {second:?} under {first_card:?}"
         );
     }
 
@@ -15510,9 +16006,11 @@ mod tests {
             .find(|(at, _)| *at == index)
             .map(|(_, at)| *at)
             .expect("an uninstall");
+        let (card, _) = the_card(&out, row, true);
         assert!(
-            remove.x + remove.w <= row.x + row.w - SETTING_ENTRY_INSET + 0.01,
-            "the uninstall is against the edge of the column: {remove:?} in {row:?}"
+            remove.x + remove.w
+                <= card.x + card.w - design::room(Text::line_for(PANE_TEXT.0)) + 0.01,
+            "the uninstall is against the edge of the card: {remove:?} in {card:?}"
         );
         assert!(
             remove.x + remove.w <= out.layout.settings_doc.x,
@@ -15530,31 +16028,41 @@ mod tests {
         assert!(text_of(&out.scene).contains(word));
     }
 
-    /// The entry the cursor is on wears the solid band the folder picker's list
-    /// wears, across the whole row. It wore the panel's own colour at a tenth
-    /// more alpha, which over a dark desktop is not a band at all.
+    /// The card the cursor is on carries the focus colour on its own border and
+    /// the mark down its edge.
+    ///
+    /// It used to wear a solid band across the row. A row was one line tall then;
+    /// a card is nine, and a filled block that tall is a highlight nobody can
+    /// read through. The border says the same thing and leaves the words alone.
     #[test]
-    fn the_entry_under_the_cursor_wears_a_band() {
+    fn the_entry_under_the_cursor_is_the_card_with_the_focus_border() {
         let panel = a_wordy_skills_panel();
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let (index, row) = the_entry_row(&out, &panel);
+        let (card, _) = the_card(&out, row, true);
         assert_eq!(panel.cursor(), index, "the section opens on its first entry");
         assert!(
-            covered(&out, row, row.h, out.skin.picked),
-            "no band across the row: {row:?}"
+            covered(&out, card, card.h, out.skin.edge_focus),
+            "the card is not outlined in the focus colour: {card:?}"
         );
-        assert_ne!(out.skin.picked, out.skin.strip);
-        // And the words on it are the band's own ink rather than the tint they
-        // wear off it, which is what makes them readable on top of it.
-        let name = out
-            .scene
-            .texts
-            .iter()
-            .filter(|text| (text.at.y - row.y).abs() < 0.51)
-            .flat_map(|text| text.runs.iter())
-            .find(|run| run.text == "coding")
-            .expect("the name");
-        assert_eq!(name.color, Some(out.skin.picked_ink));
+        assert!(
+            covered(&out, Panel::new(card.x, card.y, MARK_W, card.h), card.h, out.skin.edge_focus),
+            "no mark down the edge of the card the keys are on"
+        );
+        assert!(
+            !covered(&out, row, row.h, out.skin.picked),
+            "the band across the whole card is back"
+        );
+        // And the card that is not under the cursor keeps the quiet border, so
+        // the two are told apart.
+        let panel = a_wrapping_skills_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let rows = the_entry_rows(&out, &panel);
+        let (quiet, _) = the_card(&out, rows[1].1, true);
+        assert!(
+            covered(&out, quiet, quiet.h, out.skin.edge),
+            "the card the keys are not on is outlined in the focus colour too"
+        );
     }
 
     /// The column beside the list is a titled, outlined block of text, and the
@@ -16242,6 +16750,318 @@ mod tests {
         }
     }
 
+    /// A card is drawn in exactly the room the model counted for it, and
+    /// everything it draws is inside itself.
+    ///
+    /// This is the invariant the whole panel stands on: the model measures rows
+    /// in whole lines and the layout draws them in pixels, so a card measured at
+    /// one height and drawn at another puts every press below it on another
+    /// card.
+    #[test]
+    fn a_card_measures_the_height_it_draws() {
+        let panel = a_panel_on(&Config::default(), crate::settings::MCP);
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let line = Text::line_for(PANE_TEXT.0);
+        let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
+        let (index, row) = the_card_row(&out, &panel);
+        let card = match panel.row(index) {
+            Some(crate::settings::Row::Card(card)) => card,
+            other => panic!("row {index} is {other:?}"),
+        };
+        let counted = crate::settings::lines(
+            panel.row(index).expect("the row"),
+            cols,
+        );
+        assert_eq!(
+            counted,
+            design::card_row_lines(crate::settings::card_body_lines(card, cols), false)
+        );
+        assert!(
+            (row.h - counted as f32 * line).abs() < 0.01,
+            "the row is {row:?} and the model counted {counted} lines of {line}"
+        );
+
+        // The card itself, and the space under it that keeps two cards apart.
+        let (box_, parts) = the_card(&out, row, false);
+        assert!(
+            (row.h - box_.h - design::apart(line)).abs() < 0.01,
+            "the space under the card is not APART: {box_:?} in {row:?}"
+        );
+        // Its body sits ROOM inside the border on every side, and its last
+        // field and its hint are inside it.
+        assert!(parts.body.x >= box_.x + design::room(line) - 0.01);
+        assert!(parts.body.y >= parts.rule.y + design::room(line) - 0.01);
+        assert!(parts.body.y + parts.body.h <= box_.y + box_.h - design::room(line) + 0.01);
+        for text in out.scene.texts.iter().filter(|text| {
+            text.at.y >= box_.y - 0.01 && text.at.y < box_.y + box_.h && text.at.x >= box_.x
+        }) {
+            assert!(
+                text.at.y + text.at.h <= box_.y + box_.h + 0.01,
+                "a line of the card is drawn out of the bottom of it: {:?} in {box_:?}",
+                text.at
+            );
+            assert!(
+                text.at.x + text.at.w <= box_.x + box_.w + 0.01,
+                "a line of the card runs out of its right edge: {:?}",
+                text.at
+            );
+        }
+        // And the press at the very bottom of the row is still that row, which
+        // is what a card measured short takes away.
+        let (x, _) = middle(row);
+        assert_eq!(
+            out.layout.hit(x, row.y + row.h - 1.0),
+            Some(Hit::SettingsRow(index, crate::settings::Side::Left))
+        );
+    }
+
+    /// A field is a label with its value under it, never beside it, and the
+    /// press inside a card lands on what is under the pointer rather than on
+    /// whatever row happens to be nearest.
+    ///
+    /// "all text looks the same name, description, repo": a label and a value on
+    /// one line read as one sentence, and every value on the panel looked like
+    /// part of its own key.
+    #[test]
+    fn a_field_is_its_label_over_its_value_and_a_press_in_a_card_lands_in_it() {
+        let panel = a_panel_on(&Config::default(), crate::settings::MCP);
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let line = Text::line_for(PANE_TEXT.0);
+        let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
+        let (index, row) = the_card_row(&out, &panel);
+        let card = match panel.row(index) {
+            Some(crate::settings::Row::Card(card)) => card,
+            other => panic!("row {index} is {other:?}"),
+        };
+        let (_, parts) = the_card(&out, row, false);
+        let across = design::across(card.fields.len(), design::card_cols(cols));
+        let slots = settings_card_slots(parts.body, line, card.fields.len(), across);
+        for (field, slot) in card.fields.iter().zip(&slots) {
+            let (label_at, input_at) = settings_field_boxes(*slot, line);
+            assert_eq!(
+                line_of(&out, label_at.x, label_at.y),
+                field.label,
+                "the label is not on its own line"
+            );
+            assert!(
+                input_at.y >= label_at.y + label_at.h - 0.01,
+                "the value is beside its label rather than under it"
+            );
+            assert!(
+                (input_at.y - label_at.y - line - design::tight(line)).abs() < 0.01,
+                "the gap between a label and its value is not TIGHT"
+            );
+            assert_eq!(
+                line_of(&out, input_at.x, input_at.y),
+                field.value,
+                "the value is not under its own label"
+            );
+            // A reading has no border and no fill, which is the whole of what
+            // says it cannot be typed into. It has no press region either: a
+            // region over a reading answers a press with nothing.
+            assert!(!field.editable);
+            for rgba in [out.skin.input, out.skin.edge] {
+                assert!(
+                    !covered(&out, input_at, input_at.h, rgba),
+                    "a reading is drawn as a box that can be typed into"
+                );
+            }
+            let (x, y) = middle(input_at);
+            assert_eq!(
+                out.layout.hit(x, y),
+                Some(Hit::SettingsRow(index, crate::settings::Side::Left)),
+                "a press inside the card answers for another row"
+            );
+        }
+        assert!(
+            !out.layout
+                .settings_values
+                .iter()
+                .any(|(at, _, _)| *at == index),
+            "a card of readings claims press regions it cannot answer"
+        );
+
+        // And the field that can be typed into is the same shape with the box
+        // round it, in the section that has one.
+        let out = render_settings(
+            &a_panel_on(&Config::default(), crate::settings::AGENT),
+            1400.0,
+            900.0,
+            None,
+        );
+        let (index, side, at) = *out
+            .layout
+            .settings_values
+            .first()
+            .expect("a value that can be changed");
+        let (x, y) = middle(at);
+        assert_eq!(out.layout.hit(x, y), Some(Hit::SettingsValue(index, side)));
+        assert!(covered(&out, at, at.h, out.skin.input), "no box round it");
+    }
+
+    /// The two fields of a card go side by side while the card is wide enough
+    /// for both to keep their columns, and stack when it is not.
+    ///
+    /// "aware flexible design on resize as well". Cards stay full width and it
+    /// is their contents that answer a narrow window, so nothing is ever laid
+    /// out for one width.
+    #[test]
+    fn a_card_puts_two_fields_across_until_it_is_too_narrow_for_both() {
+        let panel = a_panel_on(&Config::default(), crate::settings::MCP);
+        let line = Text::line_for(PANE_TEXT.0);
+        let flip = design::reflow_columns();
+
+        let wide = render_settings(&panel, 1400.0, 900.0, None);
+        let (index, wide_row) = the_card_row(&wide, &panel);
+        let wide_cols = wide.layout.settings_entry_columns(PANE_TEXT.1);
+        assert!(wide_cols >= flip, "{wide_cols} columns is not wide enough");
+
+        let narrow = render_settings(&panel, 470.0, 900.0, None);
+        let (_, narrow_row) = the_card_row(&narrow, &panel);
+        let narrow_cols = narrow.layout.settings_entry_columns(PANE_TEXT.1);
+        assert!(narrow_cols < flip, "{narrow_cols} columns is still wide");
+
+        let card = match panel.row(index) {
+            Some(crate::settings::Row::Card(card)) => card,
+            other => panic!("row {index} is {other:?}"),
+        };
+        assert_eq!(card.fields.len(), 2, "the card has two fields to reflow");
+        let places = |out: &Rendered, row: Panel, cols: usize| -> Vec<Panel> {
+            let (_, parts) = the_card(out, row, false);
+            let across = design::across(card.fields.len(), design::card_cols(cols));
+            settings_card_slots(parts.body, line, card.fields.len(), across)
+        };
+        let side_by_side = places(&wide, wide_row, wide_cols);
+        assert_eq!(side_by_side[0].y, side_by_side[1].y, "not on one band");
+        assert!(
+            side_by_side[1].x >= side_by_side[0].x + side_by_side[0].w,
+            "the two fields overlap: {side_by_side:?}"
+        );
+        let stacked = places(&narrow, narrow_row, narrow_cols);
+        assert_eq!(stacked[0].x, stacked[1].x, "not in one column");
+        assert!(
+            stacked[1].y >= stacked[0].y + stacked[0].h,
+            "the two fields overlap: {stacked:?}"
+        );
+
+        // Both labels are really drawn where the reflow put them, and the card
+        // grew by the band it gained: the model counted the same flip the layout
+        // drew, or every press under the card would be a row out.
+        for (out, slots) in [(&wide, &side_by_side), (&narrow, &stacked)] {
+            for (field, slot) in card.fields.iter().zip(slots) {
+                assert_eq!(line_of(out, slot.x, slot.y), field.label);
+            }
+        }
+        assert!(
+            narrow_row.h > wide_row.h,
+            "the stacked card is not taller: {narrow_row:?} against {wide_row:?}"
+        );
+    }
+
+    /// The panel's own title is drawn in the panel title role and a card's title
+    /// in the smaller one under it, so what you are looking at and what group it
+    /// is in are two different sizes.
+    ///
+    /// "title totally unclear on each panel section increase font size on each".
+    /// Everything on the panel was one size, so nothing on it was a heading.
+    #[test]
+    fn the_panel_title_is_larger_than_a_card_title_which_is_larger_than_a_value() {
+        let panel = a_panel_on(&Config::default(), crate::settings::MCP);
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let size = PANE_TEXT.0;
+        let title = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| text.runs.iter().any(|run| run.text.contains("SETTINGS")))
+            .expect("the panel says what it is");
+        assert_eq!(title.size, design::panel_title_size(size));
+
+        let (_, row) = the_card_row(&out, &panel);
+        let (_, parts) = the_card(&out, row, false);
+        let card_title = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| (text.at.y - parts.title.y).abs() < 0.51)
+            .expect("the card says what it holds");
+        assert_eq!(card_title.size, design::card_title_size(size));
+        assert!(
+            card_title
+                .runs
+                .iter()
+                .any(|run| run.text.contains("WHERE SERVERS")),
+            "{:?}",
+            card_title.runs
+        );
+        assert!(title.size > card_title.size, "the two headings are one size");
+        assert!(card_title.size > size, "a card title is the size of its fields");
+
+        // And the whole scale really is on screen: the hint under the fields is
+        // smaller than the value over it.
+        let hint = out
+            .scene
+            .texts
+            .iter()
+            .filter(|text| text.at.y > parts.body.y)
+            .map(|text| text.size)
+            .fold(f32::INFINITY, f32::min);
+        assert_eq!(hint, design::hint_size(size));
+        assert!(hint < size, "a hint is not quieter than a value");
+    }
+
+    /// Every button a card carries stays inside its own card, at every size the
+    /// panel is used at.
+    ///
+    /// The pane text goes to forty points and the window goes down to nothing,
+    /// and a card cut off by the bottom of the list has less room than it asked
+    /// for. A button drawn above its own card would be a press that answers for
+    /// the card over it.
+    #[test]
+    fn a_card_keeps_its_buttons_inside_itself_at_every_size() {
+        for (w, h) in [(1400.0, 900.0), (700.0, 420.0), (420.0, 260.0), (300.0, 180.0)] {
+            for font in [PANE_TEXT, BIGGEST_TEXT] {
+                for section in [crate::settings::SKILLS, crate::settings::MCP] {
+                    let mut panel = a_wrapping_skills_panel();
+                    let at = panel
+                        .section_names()
+                        .iter()
+                        .position(|name| *name == section)
+                        .expect("a section");
+                    panel.choose(at);
+                    let out = render_settings_at_font(&panel, w, h, font);
+                    let line = Text::line_for(font.0);
+                    for (index, box_) in out
+                        .layout
+                        .settings_toggles
+                        .iter()
+                        .chain(out.layout.settings_removes.iter())
+                    {
+                        let row = out
+                            .layout
+                            .settings_rows
+                            .iter()
+                            .find(|(at, _, _)| at == index)
+                            .map(|(_, _, row)| *row)
+                            .expect("the row the button stands in");
+                        let card = settings_card(row, line);
+                        assert!(
+                            box_.y >= card.y - 0.01
+                                && box_.y + box_.h <= card.y + card.h + 0.01
+                                && box_.x >= card.x - 0.01
+                                && box_.x + box_.w <= card.x + card.w + 0.01,
+                            "{section} at {w}x{h}, {font:?}: {box_:?} is outside {card:?}"
+                        );
+                        assert!(
+                            out.layout.settings_list.contains(box_.x + 1.0, box_.y + 1.0),
+                            "{section} at {w}x{h}, {font:?}: {box_:?} is outside the list"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Every group heading inside a section is the same green the showing tab's
     /// line is, is drawn larger than the settings under it, and is given the room
     /// for that by the row it was laid out in.
@@ -16315,40 +17135,92 @@ mod tests {
         assert_ne!(out.skin.good, out.skin.title);
     }
 
-    /// Every row but the last one on screen has a hairline under it, so a row
-    /// reads as its own thing rather than as one more line of a block of text.
+    /// No row has a hairline under it any more, and a card carries a border
+    /// and exactly one divider instead.
+    ///
+    /// There was a line under every row on the panel. A line between every two
+    /// things on screen says nothing about which of them belong together, which
+    /// is the whole of "lines everywhere, unclear what each thing is". Grouping
+    /// and space say it now: a card is a bordered box, its fields have space
+    /// between them, and two cards have more.
     #[test]
-    fn a_settings_row_is_ruled_off_from_the_one_under_it() {
-        let panel = a_panel_on(&Config::default(), crate::settings::APPEARANCE);
-        let out = render_settings(&panel, 1400.0, 900.0, None);
+    fn no_row_is_ruled_off_and_a_card_is_bordered_instead() {
+        let out = render_settings(
+            &a_panel_on(&Config::default(), crate::settings::APPEARANCE),
+            1400.0,
+            900.0,
+            None,
+        );
         let rows = &out.layout.settings_rows;
-        assert!(rows.len() > 3, "not enough rows to rule off: {}", rows.len());
-        let rule = |row: &Panel| {
-            out.scene.rects.iter().any(|rect| {
+        assert!(rows.len() > 3, "not enough rows to prove it: {}", rows.len());
+        for (index, _, row) in rows {
+            let ruled = out.scene.rects.iter().any(|rect| {
                 let [x, y, w, h] = rect.xywh();
                 rect.rgba() == out.skin.edge
                     && h <= 1.01
                     && (x - row.x).abs() < 0.01
                     && (w - row.w).abs() < 0.01
                     && (y - (row.y + row.h - 1.0)).abs() < 0.01
-            })
-        };
-        let mut ruled = 0;
-        for (index, _, row) in &rows[..rows.len() - 1] {
-            // A heading keeps the group under it: the line above it is what
-            // separates that group from the one before.
-            if matches!(panel.row(*index), Some(crate::settings::Row::Heading(_))) {
-                assert!(!rule(row), "the heading on row {index} is cut off from its group");
-                continue;
-            }
-            assert!(rule(row), "row {index} runs into the one under it");
-            ruled += 1;
+            });
+            assert!(!ruled, "row {index} still has a hairline under it");
         }
-        assert!(ruled > 3, "hardly anything is ruled off: {ruled}");
-        // Not under the last one: a line along the bottom of the list reads as
-        // the edge of a box that is not there.
-        let (_, _, last) = rows.last().expect("a last row");
-        assert!(!rule(last), "the list is closed off at the bottom");
+
+        // And the container that replaced it: the card's own border, cut on the
+        // same corner every surface in this window is cut on, with the one
+        // divider under its title and nothing else drawn between its fields.
+        let panel = a_panel_on(&Config::default(), crate::settings::MCP);
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let (_, row) = the_card_row(&out, &panel);
+        let (card, parts) = the_card(&out, row, false);
+        let border = out
+            .scene
+            .rects
+            .iter()
+            .find(|rect| {
+                let [x, y, w, h] = rect.xywh();
+                rect.rgba() == out.skin.edge
+                    && (x - card.x).abs() < 0.01
+                    && (y - card.y).abs() < 0.01
+                    && (w - card.w).abs() < 0.01
+                    && (h - card.h).abs() < 0.01
+            })
+            .expect("the card has no border");
+        assert!(border.extra()[1] > 0.0, "the border is filled, not stroked");
+        assert_eq!(
+            (border.extra()[2] as u32) & noob_draw::Rect::TOP_RIGHT,
+            noob_draw::Rect::TOP_RIGHT,
+            "the card is not cut on the window's own corner"
+        );
+        let hairlines: Vec<[f32; 4]> = out
+            .scene
+            .rects
+            .iter()
+            .filter(|rect| {
+                let [x, y, w, h] = rect.xywh();
+                rect.rgba() == out.skin.edge
+                    && h <= 1.01
+                    && w > card.w * 0.5
+                    && x >= card.x - 0.01
+                    && y >= card.y
+                    && y <= card.y + card.h
+            })
+            .map(|rect| rect.xywh())
+            .collect();
+        assert_eq!(
+            hairlines.len(),
+            1,
+            "a card gets one divider and no more: {hairlines:?}"
+        );
+        assert!(
+            (hairlines[0][1] - parts.rule.y).abs() < 1.01,
+            "the divider is not under the title: {:?} against {:?}",
+            hairlines[0],
+            parts.rule
+        );
+        // Under the title and above the first field, which is what makes it a
+        // header rather than a line through the card.
+        assert!(parts.rule.y > parts.title.y + parts.title.h - 0.01);
+        assert!(parts.rule.y < parts.body.y);
     }
 
     /// Anything that can be typed into or pressed to change is drawn as a box
@@ -16474,17 +17346,34 @@ mod tests {
                         && (w - at.w).abs() < 0.01
                         && (h - at.h).abs() < 0.01
                 };
-                let base = out
+                // A control is a box of some kind: the input fill a field and
+                // a value wear, the accent a primary button is filled with, or
+                // the outline a secondary and a danger button carry.
+                let boxed = [
+                    out.skin.input,
+                    out.skin.button,
+                    out.skin.edge,
+                    out.skin.close_hot,
+                ];
+                // Off the cold render: a primary button under the pointer is
+                // drawn in the hot accent instead of its own, so its idle fill
+                // is only there while nothing is over it.
+                let base = plain
                     .scene
                     .rects
                     .iter()
-                    .find(|rect| over(rect) && rect.rgba() == out.skin.input)
+                    .find(|rect| over(rect) && boxed.contains(&rect.rgba()))
                     .unwrap_or_else(|| panic!("{section}: {hit:?} has no box under it"));
+                // And each kind lights with its own hot colour: a filled button
+                // in the brighter accent, everything else in the window's own.
                 let lit = out
                     .scene
                     .rects
                     .iter()
-                    .find(|rect| over(rect) && rect.rgba() == out.skin.hot)
+                    .find(|rect| {
+                        over(rect)
+                            && (rect.rgba() == out.skin.hot || rect.rgba() == out.skin.button_hot)
+                    })
                     .unwrap_or_else(|| panic!("{section}: {hit:?} does not light up"));
                 assert!(
                     lit.extra()[1] > 0.0,

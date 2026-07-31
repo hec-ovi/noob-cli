@@ -11,17 +11,21 @@ reader cannot tell a group title from a field label from a value when all three
 are the same size. Structure comes from grouping and space. Lines are the last
 resort, not the first.
 
+The arithmetic is in `clippy/src/design.rs`; this file is what it means.
+
 ## Space
 
-Four tokens, and nothing in between them. They are multiples of the same unit so
-things line up without anybody measuring.
+Four tokens, and nothing in between them. Each one is a fraction of one line of
+pane text, so raising the pane size scales the panel instead of leaving the text
+to overrun its boxes. The pixel column is what they come to at the size the
+window opens at.
 
-| Token | Pixels | Used for |
-|---|---|---|
-| `TIGHT` | 4 | Between a label and the thing it labels |
-| `STEP` | 8 | Between fields inside a card |
-| `ROOM` | 14 | A card's inner padding, on all four sides |
-| `APART` | 20 | Between one card and the next |
+| Token | Of a line | Pixels | Used for |
+|---|---|---|---|
+| `TIGHT` | 0.2 | 4 | Between a label and the thing it labels |
+| `STEP` | 0.4 | 8 | Between fields inside a card |
+| `ROOM` | 0.7 | 14 | A card's inner padding, on all four sides |
+| `APART` | 1.0 | 20 | Between one card and the next |
 
 A card's body never touches its border: `ROOM` on every side, including under the
 header and above the footer. Two cards never touch: `APART` between them.
@@ -46,12 +50,21 @@ Two things follow, and both have already cost a day when they were ignored:
   them, and a row measured at one height and drawn at another puts every click
   below it on the wrong row.
 - Anything that lines text up with a rectangle uses the column width of that
-  text's own size. Two sizes, two column widths.
+  text's own size. Two sizes, two column widths. Only the pane size's advance is
+  really measured, so the other roles get theirs scaled from it
+  (`design::column_for`): good enough to clip a line with, and never to be
+  measured against something that is pressed.
 
 ## A card
 
 Every group of related settings is a card. A card is the only grouping device on
 a panel; there are no bare rows outside one.
+
+**A card is one row of the panel.** The scroll window counts rows and places them
+by a running height, so a box that spanned several rows could not be counted. It
+follows that a list whose rows carry actions is a stack of cards, one card per
+row, rather than one card with a list inside it: that is what a skill and a
+server are.
 
 ```
 +-- CARD TITLE ----------------------------+   <- header: title, then a divider
@@ -78,6 +91,9 @@ a panel; there are no bare rows outside one.
   footer and no divider above where one would be.
 - **No hairline between fields.** Space separates them. The card's border is what
   says where the group ends.
+- **Focus**: the card the keys are on carries `skin.edge_focus` on its own border
+  and the mark down its left edge. Not a band: a filled block nine lines tall is
+  a highlight nobody can read through.
 
 ## A field
 
@@ -99,26 +115,33 @@ Three kinds, and no others.
 
 | Kind | Fill | Border | Ink | For |
 |---|---|---|---|---|
-| Primary | `skin.accent` | none | panel | The action the card exists for |
-| Secondary | none | `skin.edge` | text | Cancel, and anything reversible |
-| Danger | none | `skin.bad` | bad | Delete, uninstall, anything that loses data |
+| Primary | `skin.button` | none | bright | The action the card exists for |
+| Secondary | `skin.input` | `skin.edge` | text | Cancel, and anything reversible |
+| Danger | none | `skin.close_hot` | `skin.bad` | Delete, uninstall, anything that loses data |
 
-Buttons carry the same corner cut as everything else, and they light on hover.
-A destructive button asks before it acts: the first press arms it and it says so,
-the second press does the thing.
+Buttons carry the same corner cut as everything else, and they light on hover:
+a primary in `skin.button_hot`, the other two in `skin.hot`. A destructive button
+asks before it acts: the first press arms it and it says so, the second press
+does the thing.
+
+A toggle is drawn as a primary while it is on and a secondary while it is off.
+The fill is what says the thing is live, and the two words it holds are the same
+width, so pressing it does not resize the thing that was just pressed.
 
 ## Text roles inside a list
 
 A row in a list (a skill, a server, a saved conversation) carries several strings
 and they must not look alike. The three roles:
 
-- **Name**: value size, bright. What you are looking for when you scan.
+- **Name**: the card's own title, in the card title role. What you are looking
+  for when you scan.
 - **Description**: value size, text tone, wrapped, never cut with an ellipsis.
 - **Origin** (a path, a repository, an address): hint size, dim.
 
-The row the cursor is on carries a full row band in `skin.picked` with its ink in
-`skin.picked_ink`. A band, not a tint on the text: a tint is invisible next to
-fourteen other tints.
+Where the list is a stack of cards, the row the cursor is on is the card wearing
+the focus border. A table that is really a table (the saved conversations) keeps
+the full row band in `skin.picked` with its ink in `skin.picked_ink`: a band, not
+a tint on the text, because a tint is invisible next to fourteen other tints.
 
 ## Scrolling
 
@@ -150,3 +173,7 @@ The panel was a flat list of full width rows at one text size, separated by a
 hairline under every row, with buttons wherever the row happened to put them and
 values on the same line as their labels. If you are changing a section and it
 still looks like that, the section has not been done yet.
+
+SKILLS and MCP are built this way. AGENT, SESSIONS and APPEARANCE are not yet:
+their rows are the old flat ones, without the hairline, and they are what the
+next passes convert.

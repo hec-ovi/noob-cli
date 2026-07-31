@@ -344,6 +344,59 @@ pub enum Row {
     /// file, and the prompt it is a layer of. The one row that is more than a
     /// line or two of text.
     Paper(Paper),
+    /// A group of related settings inside a box of its own: a title bar, a
+    /// divider, and the fields under it.
+    ///
+    /// The grouping device the panel had none of. Everything was a full width
+    /// row at one text size with a hairline under it, so a group title, a field
+    /// label and a value all read alike and nothing said where one group ended.
+    ///
+    /// One card is one row, the way [`Row::Pair`] is one row, because the
+    /// scroll window counts rows and a card that spanned several of them could
+    /// not be counted. Never nested: a card holds fields, not cards.
+    Card(Card),
+}
+
+/// A group of related settings, drawn in a box of its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Card {
+    /// What the group is, in the title bar. Upper case, the way the rail's
+    /// names are.
+    pub title: String,
+    /// The fields in its body, in the order they are read. Two across when the
+    /// card is wide enough for both to keep their columns, one across when it
+    /// is not ([`crate::design::across`]).
+    pub fields: Vec<CardField>,
+    /// The sentence under the body: what the fields above it mean, or why
+    /// there is nothing in them. Nothing at all when the fields say it
+    /// themselves, rather than a row of prose padding out every card.
+    pub hint: Option<String>,
+}
+
+/// One field of a card: its name, what it holds, and whether it can be typed
+/// into.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CardField {
+    /// The name, on its own line above the value. Never beside it: a label and
+    /// a value on one line read as one sentence, which is what made every value
+    /// on this panel look like part of its label.
+    pub label: String,
+    pub value: String,
+    /// Whether the value is typed into rather than read out. A reading is drawn
+    /// in the same shape with no border and no fill, so what can be typed into
+    /// is obvious without pressing anything.
+    pub editable: bool,
+}
+
+impl CardField {
+    /// A field that is read out rather than set.
+    pub fn reading(label: &str, value: String) -> CardField {
+        CardField {
+            label: String::from(label),
+            value,
+            editable: false,
+        }
+    }
 }
 
 /// A block of text on the panel, with a title over it.
@@ -520,11 +573,16 @@ pub fn lines(row: &Row, cols: usize) -> usize {
     match row {
         // A heading is drawn larger, which is two lines of the ordinary text.
         Row::Heading(_) => 2,
-        // A name, what it is for, and where it is. The middle one wraps, so an
-        // entry is as tall as its description needs: it was three rows whatever
-        // the description said, and a description longer than the column ended
-        // in an ellipsis with the rest of it unreadable.
-        Row::Entry(entry) => 2 + about_rows(&entry.about, cols),
+        // A card: its header, its body, the room around the body and the space
+        // under the card itself, all counted by the one function the layout
+        // places it with.
+        Row::Card(card) => crate::design::card_row_lines(card_body_lines(card, cols), false),
+        // One card per entry: the name in the header, what it is for and where
+        // it is in the body, and its two buttons in the footer. The description
+        // wraps, so an entry is as tall as its description needs: it was three
+        // rows whatever the description said, and a description longer than the
+        // column ended in an ellipsis with the rest of it unreadable.
+        Row::Entry(entry) => crate::design::card_row_lines(entry_body_lines(entry, cols), true),
         // As tall as the taller half, so the two columns of a form sit on the
         // same lines and the rows under them do not move when one half changes.
         Row::Pair(left, right) => lines(left, cols).max(lines(right, cols)),
@@ -532,6 +590,35 @@ pub fn lines(row: &Row, cols: usize) -> usize {
         Row::Paper(_) => PAPER_LINES + 2,
         _ => 1,
     }
+}
+
+/// How tall a card's body is, in lines, inside a list `cols` wide.
+///
+/// The fields, in as many bands as the width leaves room for, with [`STEP`] of
+/// [`crate::design`] between one band and the next, and the hint under the last
+/// of them. Read by [`lines`] and by `view::place_settings` through the same
+/// tokens, which is what keeps the counted height and the drawn one the same.
+///
+/// [`STEP`]: crate::design::STEP
+pub fn card_body_lines(card: &Card, cols: usize) -> f32 {
+    let cols = crate::design::card_cols(cols);
+    let across = crate::design::across(card.fields.len(), cols);
+    let bands = card.fields.len().div_ceil(across.max(1)).max(1);
+    let tall = bands as f32 * crate::design::field_lines(false)
+        + crate::design::STEP * bands.saturating_sub(1) as f32;
+    match card.hint.is_some() {
+        true => tall + crate::design::STEP + crate::design::TEXT_LINES,
+        false => tall,
+    }
+}
+
+/// How tall an entry's card body is, in lines: what it is for, wrapped in the
+/// card's own columns, and where it is on the line under that.
+pub fn entry_body_lines(entry: &Entry, cols: usize) -> f32 {
+    let wrapped = about_rows(&entry.about, crate::design::card_cols(cols));
+    wrapped as f32 * crate::design::TEXT_LINES
+        + crate::design::TIGHT
+        + crate::design::TEXT_LINES
 }
 
 /// How many rows an entry's description takes in a column `cols` wide.
@@ -1279,22 +1366,20 @@ impl Settings {
     /// CLI writes records where a skill came from, the directory it was found
     /// in instead.
     fn skill_rows(&self) -> Vec<Row> {
-        let mut rows = vec![Row::Reading {
-            label: String::from("skills"),
-            value: match &self.agent.skills_at {
-                Some(path) => path.display().to_string(),
-                None => String::from("nowhere: no config directory"),
-            },
-        }];
-        if self.agent.skills.is_empty() {
-            rows.push(note(
-                "none installed: a skill is a directory here with a SKILL.md in it",
-            ));
-        } else {
-            rows.push(note(
-                "turning one off moves its directory beside the skills directory, where the agent does not look; uninstall deletes it",
-            ));
-        }
+        let mut rows = vec![Row::Card(Card {
+            title: String::from("WHERE SKILLS ARE INSTALLED"),
+            fields: vec![CardField::reading(
+                "skills",
+                match &self.agent.skills_at {
+                    Some(path) => path.display().to_string(),
+                    None => String::from("nowhere: no config directory"),
+                },
+            )],
+            hint: Some(String::from(match self.agent.skills.is_empty() {
+                true => "none installed: a skill is a directory here with a SKILL.md in it",
+                false => "turning one off moves its directory beside the skills directory, where the agent does not look; uninstall deletes it",
+            })),
+        })];
         for skill in &self.agent.skills {
             rows.push(Row::Entry(Entry {
                 name: skill.name.clone(),
@@ -1322,29 +1407,38 @@ impl Settings {
     /// underneath, and that server's entry out of its own file beside them.
     fn mcp_rows(&self) -> Vec<Row> {
         let mcp = &self.agent.mcp;
-        let mut rows = vec![Row::Reading {
-            label: String::from("global"),
-            value: match &mcp.global {
-                Some(path) => path.display().to_string(),
-                None => String::from("nowhere: no config directory"),
-            },
-        }];
-        rows.push(Row::Reading {
-            label: String::from("project"),
-            value: match &mcp.project {
-                Some(path) => path.display().to_string(),
-                None => String::from("nowhere until a folder is open"),
-            },
-        });
+        // The two files, as one card of two fields. They go side by side while
+        // the panel is wide enough for both to keep their columns and stack
+        // when it is not, which is the whole of what the panel does about a
+        // narrow window: cards are full width, their contents reflow.
+        //
         // Said in full rather than shown as an empty list, which reads as a
         // panel that failed to load one.
-        if !mcp.any_file {
-            rows.push(note(
-                "none configured: neither file exists. put a server in either one and the next session loads it",
-            ));
-        } else if mcp.servers.is_empty() && mcp.trouble.is_empty() {
-            rows.push(note("none configured: the files carry no servers"));
-        }
+        let hint = match (mcp.any_file, mcp.servers.is_empty() && mcp.trouble.is_empty()) {
+            (false, _) => "none configured: neither file exists. put a server in either one and the next session loads it",
+            (true, true) => "none configured: the files carry no servers",
+            (true, false) => "the project file wins for a server named in both; turning one off moves its entry to a key the CLI does not read, and uninstall takes the entry out of the file",
+        };
+        let mut rows = vec![Row::Card(Card {
+            title: String::from("WHERE SERVERS ARE READ FROM"),
+            fields: vec![
+                CardField::reading(
+                    "global",
+                    match &mcp.global {
+                        Some(path) => path.display().to_string(),
+                        None => String::from("nowhere: no config directory"),
+                    },
+                ),
+                CardField::reading(
+                    "project",
+                    match &mcp.project {
+                        Some(path) => path.display().to_string(),
+                        None => String::from("nowhere until a folder is open"),
+                    },
+                ),
+            ],
+            hint: Some(String::from(hint)),
+        })];
         for server in &mcp.servers {
             rows.push(Row::Entry(Entry {
                 name: server.name.clone(),
@@ -1368,11 +1462,6 @@ impl Settings {
                 text: why.clone(),
                 bad: true,
             });
-        }
-        if !mcp.servers.is_empty() {
-            rows.push(note(
-                "the project file wins for a server named in both; turning one off moves its entry to a key the CLI does not read, and uninstall takes the entry out of the file",
-            ));
         }
         rows
     }
@@ -2791,6 +2880,16 @@ mod tests {
                     paper.under,
                     paper.body.join("\n")
                 ),
+                // The title, then every field the way a reading is said, then
+                // the sentence under them.
+                Row::Card(card) => {
+                    let mut out = vec![card.title.clone()];
+                    for field in &card.fields {
+                        out.push(format!("{} {}", field.label, field.value));
+                    }
+                    out.extend(card.hint.clone());
+                    out.join("\n")
+                }
         }
     }
 
@@ -3683,6 +3782,12 @@ mod tests {
                 // instead of the pair they are in.
                 Row::Pair(_, _) => Vec::new(),
                 Row::Paper(paper) => vec![paper.title.as_str(), paper.under.as_str()],
+                Row::Card(card) => {
+                    let mut said = vec![card.title.as_str()];
+                    said.extend(card.fields.iter().map(|field| field.label.as_str()));
+                    said.extend(card.hint.as_deref());
+                    said
+                }
             };
             for said in named {
                 for key in OFF_PANEL {
@@ -4103,30 +4208,45 @@ mod tests {
             .position(|row| matches!(row, Row::Entry(_)))
             .expect("the skill is on the list");
 
-        // Wide enough for the description on one row: the name, it, and the
-        // path under it.
-        let wide = A_WRAPPING_ABOUT.chars().count() + 1;
-        assert_eq!(about_rows(A_WRAPPING_ABOUT, wide), 1);
-        assert_eq!(panel.heights(wide)[at], 3);
-        assert_eq!(lines(panel.row(at).expect("the row"), wide), 3);
+        // Wide enough for the description on one row of the card's own body,
+        // which is narrower than the list by the border and the padding.
+        let wide = A_WRAPPING_ABOUT.chars().count() + 1 + crate::design::CARD_COLUMNS;
+        let body = crate::design::card_cols(wide);
+        assert_eq!(about_rows(A_WRAPPING_ABOUT, body), 1);
+        let one = panel.heights(wide)[at];
+        assert_eq!(one, lines(panel.row(at).expect("the row"), wide));
+        assert_eq!(
+            one,
+            crate::design::card_row_lines(
+                1.0 + crate::design::TIGHT + crate::design::TEXT_LINES,
+                true
+            ),
+            "an entry is a card of one row of words, the line under it and a footer"
+        );
 
-        // Half of it, and the description is more than one row, so the row is
+        // Half of it, and the description is more than one row, so the card is
         // taller by exactly what it wrapped to.
         let half = wide / 2;
-        let wrapped = about_rows(A_WRAPPING_ABOUT, half);
+        let wrapped = about_rows(A_WRAPPING_ABOUT, crate::design::card_cols(half));
         assert!(wrapped > 1, "{wrapped} rows in {half} columns");
-        assert_eq!(panel.heights(half)[at], 2 + wrapped);
-        assert_eq!(lines(panel.row(at).expect("the row"), half), 2 + wrapped);
-
-        // And the window counts it: where the section is a reading, a note and
-        // the entry, five rows of text hold all three at the wide column and
-        // stop short of the entry at the narrow one.
-        assert_eq!(panel.rows().len(), 3, "{:?}", panel.rows());
-        assert_eq!(panel.window(5, wide), (0, 3), "the section fits in five rows");
+        let many = panel.heights(half)[at];
+        assert_eq!(many, lines(panel.row(at).expect("the row"), half));
         assert_eq!(
-            panel.window(5, half),
-            (0, 2),
-            "the wrapped entry was counted as if it still took three"
+            many,
+            one + wrapped - 1,
+            "the wrapped card did not grow by the rows it wrapped to"
+        );
+
+        // And the window counts it: the section is the card naming the skills
+        // directory and the entry under it, and a list one row short of both of
+        // them stops at the first.
+        assert_eq!(panel.rows().len(), 2, "{:?}", panel.rows());
+        let both: usize = panel.heights(wide).iter().sum();
+        assert_eq!(panel.window(both, wide), (0, 2), "the section fits");
+        assert_eq!(
+            panel.window(both - 1, wide),
+            (0, 1),
+            "a row that does not fit whole was drawn anyway"
         );
     }
 
