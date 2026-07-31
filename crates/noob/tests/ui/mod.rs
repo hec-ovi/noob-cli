@@ -209,6 +209,25 @@ pub fn settle() {
     std::thread::sleep(std::time::Duration::from_millis(400));
 }
 
+/// End the session from the idle prompt with Ctrl-D. A byte sent during turn
+/// teardown is consumed as an in-turn key and dropped, and the in-turn input
+/// hint ("type a message; Enter queues it") shares its prefix with the idle
+/// one, so neither a sleep nor a marker wait places the boundary reliably.
+/// Drain repaints until the last hint on the wire is the idle form, then quit.
+pub fn quit_at_idle(pty: &mut Pty) {
+    for _ in 0..40 {
+        pty.drain(std::time::Duration::from_millis(200));
+        if let Some(at) = pty.seen().rfind("type a message")
+            && !pty.seen()[at..].starts_with("type a message; Enter queues")
+        {
+            pty.send(&[0x04]);
+            pty.wait_for("resume with");
+            return;
+        }
+    }
+    panic!("the idle prompt never settled; saw:\n{}", pty.seen());
+}
+
 /// Chunked-transfer frames for a run of SSE `data:` payloads (one frame per
 /// event, no terminator), for scripting a stream that stalls mid-reply.
 pub fn sse_frames(datas: &[String]) -> Vec<u8> {

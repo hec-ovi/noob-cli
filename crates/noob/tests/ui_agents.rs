@@ -66,9 +66,7 @@ fn dock_queue_during_bash_with_a_running_agent_answers_after_the_turn() {
     pty.wait_for("PARENT-TURN-END");
     pty.wait_for("QUEUED-ANSWER-END");
     pty.wait_for("AGENT-COLLECTED-END");
-    settle();
-    pty.send(&[0x04]);
-    pty.wait_for("resume with");
+    quit_at_idle(&mut pty);
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen());
@@ -145,9 +143,7 @@ fn sleep_wait_is_refused_and_the_prompt_frees_without_steering() {
     pty.wait_for("CHAT-ANSWER-END");
     pty.wait_for("agent-1 ok");
     pty.wait_for("COLLECTED-END");
-    settle();
-    pty.send(&[0x04]);
-    pty.wait_for("resume with");
+    quit_at_idle(&mut pty);
     let status = pty.finish();
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen());
 
@@ -250,9 +246,7 @@ fn status_poll_loop_is_capped_and_the_prompt_frees() {
     pty.wait_for("STILL-HERE-END");
     pty.wait_for("agent-1 ok");
     pty.wait_for("COLLECTED-END");
-    settle();
-    pty.send(&[0x04]);
-    pty.wait_for("resume with");
+    quit_at_idle(&mut pty);
     let status = pty.finish();
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen());
 
@@ -353,9 +347,7 @@ fn double_esc_at_idle_stops_all_detached_agents() {
     // Both canceled packets surface at the idle prompt on their own.
     pty.wait_for("agent-1 canceled");
     pty.wait_for("agent-2 canceled");
-    settle();
-    pty.send(&[0x04]);
-    pty.wait_for("resume with");
+    quit_at_idle(&mut pty);
     let status = pty.finish();
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen());
 
@@ -436,9 +428,7 @@ fn double_esc_during_a_turn_stops_the_fleet_too() {
     pty.send(&[0x1b]);
     pty.wait_for("[interrupted]");
     pty.wait_for("agent-1 canceled");
-    settle();
-    pty.send(&[0x04]);
-    pty.wait_for("resume with");
+    quit_at_idle(&mut pty);
     let status = pty.finish();
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen());
 
@@ -526,11 +516,7 @@ fn model_cancels_its_own_subagent() {
     pty.wait_for("canceling");
     pty.wait_for("agent-1");
     pty.wait_for("STOPPED-END");
-    // Ctrl-D only lands once the idle prompt is back; a byte sent during turn
-    // teardown is consumed as an in-turn key and dropped.
-    pty.wait_for("type a message");
-    pty.send(&[0x04]);
-    pty.wait_for("resume with");
+    quit_at_idle(&mut pty);
     let status = pty.finish();
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen());
 
@@ -631,9 +617,7 @@ fn cancel_then_spawn_in_one_batch_blocks_the_replacement() {
     pty.wait_for("canceling");
     pty.wait_for("do not spawn a replacement until the human gives a new instruction");
     pty.wait_for("REPLACEMENT-BLOCKED-END");
-    pty.wait_for("type a message");
-    pty.send(&[0x04]);
-    pty.wait_for("resume with");
+    quit_at_idle(&mut pty);
     let status = pty.finish();
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen());
 
@@ -801,8 +785,7 @@ fn background_agent_view_stays_pinned_while_the_prompt_remains_usable() {
     pty.wait_for("STEERED-END");
     pty.wait_for("agent-1 ok");
     pty.wait_for("AGENT-COLLECTED-END");
-    pty.send(&[0x04]);
-    pty.wait_for("resume with");
+    quit_at_idle(&mut pty);
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen());
@@ -959,9 +942,7 @@ fn main_turn_runs_while_three_background_children_remain_in_flight() {
     pty.wait_for("agent-2 ok");
     pty.wait_for("agent-3 ok");
     pty.wait_for("COLLECT-THREE-END");
-    pty.wait_for("type a message");
-    pty.send(&[0x04]);
-    pty.wait_for("resume with");
+    quit_at_idle(&mut pty);
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen());
@@ -1116,9 +1097,7 @@ fn typed_idle_followup_wins_the_race_with_a_ready_child() {
     pty.send(b"up\r");
     pty.wait_for("agent-1 ok");
     pty.wait_for("FOLLOWUP-WITH-RESULT-END");
-    pty.wait_for("type a message");
-    pty.send(&[0x04]);
-    pty.wait_for("resume with");
+    quit_at_idle(&mut pty);
     let status = pty.finish();
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen());
     assert!(!pty.seen().contains("[steering]"), "{}", pty.seen());
@@ -1184,8 +1163,7 @@ fn failed_background_child_leaves_the_idle_prompt_free_without_auto_retry() {
         "the failed child triggered an unrequested parent retry"
     );
 
-    pty.send(&[0x04]);
-    pty.wait_for("resume with");
+    quit_at_idle(&mut pty);
     let status = pty.finish();
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen());
     rig.server.assert_clean();
@@ -1271,8 +1249,7 @@ fn mixed_success_and_failure_leave_the_idle_prompt_without_auto_retry() {
         "a mixed terminal batch triggered parent inference"
     );
 
-    pty.send(&[0x04]);
-    pty.wait_for("resume with");
+    quit_at_idle(&mut pty);
     let status = pty.finish();
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen());
     rig.server.assert_clean();
@@ -1359,9 +1336,7 @@ fn idle_box_stays_exact_while_typing_with_a_pinned_agents_row() {
     // then the session ends cleanly.
     pty.send(&[0x03]);
     pty.wait_for("TYPING-COLLECTED-END");
-    settle();
-    pty.send(&[0x04]);
-    pty.wait_for("resume with");
+    quit_at_idle(&mut pty);
     let status = pty.finish();
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen());
     rig.server.assert_clean();
@@ -1446,12 +1421,8 @@ fn idle_prompt_keeps_the_running_agents_counter_after_closing_the_tab_view() {
     );
 
     // The slow child settles, its result is collected, and the exit is clean.
-    // Ctrl-D only after the idle prompt is back: a byte sent during turn
-    // teardown is consumed as an in-turn key and dropped (flaked under load).
     pty.wait_for("ALL-COLLECTED-END");
-    pty.wait_for("type a message");
-    pty.send(&[0x04]);
-    pty.wait_for("resume with");
+    quit_at_idle(&mut pty);
     let status = pty.finish();
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen());
     rig.server.assert_clean();
@@ -1509,10 +1480,7 @@ fn ready_child_result_is_delivered_mid_turn_at_the_next_round() {
     pty.send(b"spawn and keep working\r");
     pty.wait_for("agent-1 ok");
     pty.wait_for("SAW-THE-REPORT-END");
-    pty.wait_for("type a message");
-    settle();
-    pty.send(&[0x04]);
-    pty.wait_for("resume with");
+    quit_at_idle(&mut pty);
     let status = pty.finish();
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen());
 
@@ -1712,7 +1680,7 @@ fn responses_background_result_preserves_one_call_output_and_one_report() {
     pty.wait_for("[1] agents running (Tab to view)");
     pty.wait_for("agent-1 ok");
     pty.wait_for("RESPONSES-COLLECTED");
-    pty.send(&[0x04]);
+    quit_at_idle(&mut pty);
     assert!(pty.finish().success());
 
     let requests = rig.responses_requests();
@@ -1882,9 +1850,7 @@ fn dock_shows_the_agents_row_exactly_once_at_idle() {
     let rows = screen.render();
 
     pty.wait_for("AGENT-COLLECTED-END");
-    settle();
-    pty.send(&[0x04]);
-    pty.wait_for("resume with");
+    quit_at_idle(&mut pty);
     let status = pty.finish();
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen());
     rig.server.assert_clean();
