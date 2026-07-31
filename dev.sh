@@ -22,6 +22,21 @@ dev_image() {
     -t "$DEV_IMG" -f docker/Dockerfile .
 }
 
+# Run box contract checks: each argument is a tests/contract.py validating what
+# crosses that box's boundary against its schema/. Skipped rather than failed
+# where jsonschema is absent, so a missing dev-only Python package cannot block
+# a build.
+run_contracts() {
+  for contract in "$@"; do
+    [ -f "$contract" ] || continue
+    if python3 -c 'import jsonschema' 2>/dev/null; then
+      python3 "$contract" || return 1
+    else
+      echo "skipped $contract (pip install jsonschema to run it)"
+    fi
+  done
+}
+
 # Open the interactive agent: build the runtime image (cached, so fast when
 # nothing changed) and run it through compose in one step, forwarding any noob
 # flags (e.g. --resume <id>). Compose passes the caller's uid:gid so files
@@ -101,17 +116,8 @@ case "${1:-}" in
     cargo test --manifest-path gui/Cargo.toml
     cargo clippy --manifest-path gui/Cargo.toml --all-targets -- -D warnings
     # Layer contract tests: the Rust tests above prove behavior, these prove
-    # that what crosses a layer boundary matches its declared schema. Skipped
-    # rather than failed where jsonschema is absent, so a missing dev-only
-    # Python package cannot block a build.
-    for contract in gui/layers/*/tests/contract.py; do
-      [ -f "$contract" ] || continue
-      if python3 -c 'import jsonschema' 2>/dev/null; then
-        python3 "$contract" || exit 1
-      else
-        echo "skipped $contract (pip install jsonschema to run it)"
-      fi
-    done
+    # that what crosses a layer boundary matches its declared schema.
+    run_contracts gui/layers/*/tests/contract.py
     ;;
   gui-check)
     cargo build --release --manifest-path gui/Cargo.toml
@@ -122,6 +128,21 @@ case "${1:-}" in
       --prefix none | sed 's/ (\*)$//' | awk '{print $1}' | sort -u | grep -c .)
     echo "no0b runtime crates: $crates"
     [ "$crates" -le 400 ] || { echo "FAIL: NO0B crate graph exceeds 400"; exit 1; }
+    ;;
+  # Every suite and gate in one pass: the CLI tests, the NO0B tests and
+  # clippy, every box contract in the tree, both footprint gates. Stops at
+  # the first failure; the last line is the verdict.
+  test-all)
+    step() { "$0" "$1" || { echo "test-all: FAIL at $1"; exit 1; }; }
+    step test
+    step gui-test
+    # git finds new boxes without a list to maintain; -o adds not-yet-tracked
+    # contract runners, --exclude-standard keeps target/ and workspace/ out.
+    mapfile -t contracts < <(git ls-files -co --exclude-standard '*/tests/contract.py' | sort)
+    run_contracts "${contracts[@]}" || { echo "test-all: FAIL at contracts"; exit 1; }
+    step size-check
+    step gui-check
+    echo "test-all: PASS"
     ;;
   gui-package|gui-install)
     # Both routes stage the same directory, because they were two copies of the
@@ -163,6 +184,7 @@ case "${1:-}" in
     echo "  ./dev.sh --resume <id>      resume a saved session"
     echo "  ./dev.sh --plan | --yolo    any noob flag is forwarded to the agent"
     echo "  ./dev.sh install|test|build|docker|exec \"prompt\"|smoke|size-check|clean"
+    echo "  ./dev.sh test-all            every suite and gate in one pass"
     echo "  ./dev.sh gui [workspace]     open NO0B, the GPU front end"
     echo "  ./dev.sh gui-test|gui-check  NO0B tests and its own size gate"
     echo "  ./dev.sh gui-install         install NO0B under ~/.local"

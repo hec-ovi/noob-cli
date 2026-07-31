@@ -295,9 +295,10 @@ The `devkit` skill is not part of this repository and is not open source.
 ./dev.sh size-check
 ./dev.sh docker
 ./dev.sh smoke
+./dev.sh test-all
 ```
 
-`./dev.sh test` runs the full offline suite in the dev container. `./dev.sh size-check` enforces an 8 MiB static-binary limit and a 45-crate runtime limit. `./dev.sh smoke` runs the opt-in live model and web-search checks serially.
+`./dev.sh test` runs the full offline suite in the dev container. `./dev.sh size-check` enforces an 8 MiB static-binary limit and a 45-crate runtime limit. `./dev.sh smoke` runs the opt-in live model and web-search checks serially. `./dev.sh test-all` chains the CLI suite, the NO0B suite and clippy, every box's contract check, and both size gates, stopping at the first failure.
 
 The live checks default to `http://localhost:8080/v1` and the model name `llm` (llama-server serves whatever it loaded under its `--alias`). To point them elsewhere:
 
