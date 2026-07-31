@@ -3838,6 +3838,7 @@ impl ApplicationHandler<Wake> for App {
                         | Hit::SettingsSection(_)
                         | Hit::SettingsSlider(..)
                         | Hit::SettingsSwatch(_, _)
+                        | Hit::SettingsChoice(..)
                         | Hit::SettingsToggle(_)
                         | Hit::SettingsRemove(_)
                         | Hit::SettingsMark(..)
