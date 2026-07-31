@@ -77,8 +77,15 @@ pub const SEARCH: char = '\u{ea6d}';
 /// A full arrow, not the chevron the tab strip walks with: a chevron means one
 /// step along a row of tabs, and this is the way out of a list.
 pub const BACK: char = '\u{ea9b}';
-/// On the button that confirms a choice.
+/// On the button that confirms a choice, and on the menu row that opens the
+/// session under the pointer: the same act, so the same mark.
 pub const CONFIRM: char = '\u{eab2}';
+/// On the menu row that deletes a session.
+///
+/// A bin, which is what every other list on the desktop puts on that row. The
+/// one row in this window that destroys a file, so it is worth being the one
+/// glyph nobody has to read a label to recognise.
+pub const TRASH: char = '\u{ea81}';
 
 /// The mark for a file, chosen by extension.
 ///
@@ -165,6 +172,7 @@ mod tests {
             SEARCH,
             BACK,
             CONFIRM,
+            TRASH,
         ]
             .into_iter()
             .chain(extensions.iter().map(|e| for_path(&format!("a.{e}"))));

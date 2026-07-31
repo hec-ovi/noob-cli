@@ -73,8 +73,39 @@ pub struct Saved {
     /// directory that is not there, so this is decided when the list is read
     /// and carried on the row rather than asked again while drawing.
     pub gone: bool,
+    /// How big the transcript is on disk. Free: the directory is stat'ed anyway
+    /// to sort the list by age, and this is the other number that stat carries.
+    pub bytes: u64,
+    /// How full the context window was the last time this window watched this
+    /// session run, when it ever did. Nothing at all for a session written
+    /// before the note started carrying it, and for every session the CLI wrote
+    /// on its own: the transcript does not record it and there is no honest
+    /// guess at it. See [`Index`].
+    pub context: Option<Context>,
     /// The opening of the first thing the human said, on one line.
     pub opening: String,
+}
+
+/// How full a session's context window was: how much of it was in use, out of
+/// how much there is.
+///
+/// Two numbers rather than a fraction, because the file they are written to is
+/// meant to be read by a human, and "48000/200000" says what "0.24" does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Context {
+    pub used: u64,
+    pub total: u64,
+}
+
+impl Context {
+    /// How full, in whole percent, or nothing when the size of the window was
+    /// never reported. A percentage of an unknown total is a made-up number.
+    pub fn percent(&self) -> Option<u64> {
+        match self.total {
+            0 => None,
+            total => Some((self.used.saturating_mul(100) / total).min(100)),
+        }
+    }
 }
 
 /// What a read of the directory came back with.
@@ -111,7 +142,7 @@ fn dir_in(config: &Path) -> PathBuf {
 /// agent has never run.
 pub fn read(at: &Path, index: &Index, folders: &dyn Folders) -> Listing {
     let mut listing = Listing::default();
-    let mut files: Vec<(String, SystemTime)> = Vec::new();
+    let mut files: Vec<(String, SystemTime, u64)> = Vec::new();
     let Ok(entries) = std::fs::read_dir(at) else {
         return listing;
     };
@@ -127,12 +158,16 @@ pub fn read(at: &Path, index: &Index, folders: &dyn Folders) -> Listing {
         if !meta.is_file() {
             continue;
         }
-        files.push((id.to_string(), meta.modified().unwrap_or(SystemTime::UNIX_EPOCH)));
+        files.push((
+            id.to_string(),
+            meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            meta.len(),
+        ));
     }
     // Newest first before anything is opened, so the cap falls on the sessions
     // nobody was going to scroll to.
     files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    for (id, when) in files.into_iter().take(MOST) {
+    for (id, when, bytes) in files.into_iter().take(MOST) {
         match opening_of(&at.join(format!("{id}.jsonl"))) {
             Ok(opening) => {
                 let workspace = index.folder_of(&id);
@@ -140,10 +175,12 @@ pub fn read(at: &Path, index: &Index, folders: &dyn Folders) -> Listing {
                     .as_deref()
                     .is_some_and(|path| !folders.is_folder(path));
                 listing.sessions.push(Saved {
-                    id,
+                    id: id.clone(),
                     when,
                     workspace,
                     gone,
+                    bytes,
+                    context: index.context_of(&id),
                     opening,
                 });
             }
@@ -264,41 +301,119 @@ pub fn ago(when: SystemTime, now: SystemTime) -> String {
     }
 }
 
-/// Which folder each session was started in.
+/// What the window knows about one session that the transcript does not say.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Note {
+    id: String,
+    workspace: PathBuf,
+    context: Option<Context>,
+}
+
+/// Which folder each session was started in, and how full its context window
+/// was when this window last watched it run.
 ///
 /// Newest first, one entry per session, capped. The list is a `Vec` rather than
 /// a map because it is written back in order: the file is meant to be readable,
 /// and the newest session being the first line is what makes it so.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Index(Vec<(String, PathBuf)>);
+pub struct Index(Vec<Note>);
 
 impl Index {
+    fn note_of(&self, id: &str) -> Option<&Note> {
+        self.0.iter().find(|note| note.id == id)
+    }
+
     fn folder_of(&self, id: &str) -> Option<PathBuf> {
-        self.0
-            .iter()
-            .find(|(known, _)| known == id)
-            .map(|(_, path)| path.clone())
+        self.note_of(id).map(|note| note.workspace.clone())
+    }
+
+    fn context_of(&self, id: &str) -> Option<Context> {
+        self.note_of(id).and_then(|note| note.context)
     }
 
     /// The same list with `id` at the front. Pure, and it takes the list rather
     /// than reading the file, so the caller can re-read immediately before
     /// writing and two windows cannot erase each other's notes.
+    ///
+    /// A context reading already written down for that session is kept: this is
+    /// called again every time a session is resumed, and starting over would
+    /// throw away the last thing known about it.
     pub fn plus(&self, id: &str, workspace: &Path) -> Index {
-        let mut out = vec![(id.to_string(), workspace.to_path_buf())];
-        out.extend(
-            self.0
-                .iter()
-                .filter(|(known, _)| known != id)
-                .cloned(),
-        );
+        let context = self.context_of(id);
+        self.noting(id, workspace, context)
+    }
+
+    /// The same, with what the context window was holding written on it.
+    pub fn plus_context(&self, id: &str, workspace: &Path, context: Context) -> Index {
+        self.noting(id, workspace, Some(context))
+    }
+
+    fn noting(&self, id: &str, workspace: &Path, context: Option<Context>) -> Index {
+        let mut out = vec![Note {
+            id: id.to_string(),
+            workspace: workspace.to_path_buf(),
+            context,
+        }];
+        out.extend(self.0.iter().filter(|note| note.id != id).cloned());
         out.truncate(REMEMBERED);
         Index(out)
+    }
+
+    /// The same list without `id`, for a session whose file has been deleted.
+    ///
+    /// Left in, the note would outlive the transcript it describes and be read
+    /// back for as long as the file holds it, which at [`REMEMBERED`] entries is
+    /// a long time.
+    pub fn minus(&self, id: &str) -> Index {
+        Index(
+            self.0
+                .iter()
+                .filter(|note| note.id != id)
+                .cloned()
+                .collect(),
+        )
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
         self.0.len()
     }
+}
+
+/// The file one session id names inside `dir`, or why that id is not one this
+/// window will touch.
+///
+/// The only place a session id becomes a path. An id is a file name and nothing
+/// else: it comes off a directory listing, but it also comes back through the
+/// index file, which is plain text a hand can edit, so a name carrying a
+/// separator or a step upwards is refused rather than joined. `dir.join(name)`
+/// with a name like `../../.bashrc` in it is a delete outside the sessions
+/// directory, and there is no reading of that which is somebody's intent.
+pub fn session_file(dir: &Path, id: &str) -> Result<PathBuf, String> {
+    let plain = !id.is_empty()
+        && !id.starts_with('.')
+        && !id.contains(['/', '\\', '\0'])
+        && !id.contains("..");
+    if !plain {
+        return Err(format!("{id:?} is not a session name"));
+    }
+    let path = dir.join(format!("{id}.jsonl"));
+    // Belt and braces: whatever the name was, the file has to be a direct child
+    // of the directory the sessions live in.
+    match path.parent() == Some(dir) {
+        true => Ok(path),
+        false => Err(format!("{id:?} is not in the sessions directory")),
+    }
+}
+
+/// Delete one session's transcript.
+///
+/// The only thing in this window that destroys anything. It takes the directory
+/// as an argument rather than reading [`dir`] itself, so what it is allowed to
+/// touch is decided by the caller and can be a temp directory in a test.
+pub fn forget(dir: &Path, id: &str) -> Result<(), String> {
+    let path = session_file(dir, id)?;
+    std::fs::remove_file(&path).map_err(|e| e.to_string())
 }
 
 /// Where the note lives: beside `no0b.conf`, under the same rules as the
@@ -317,40 +432,71 @@ pub fn load_index(path: &Path) -> Index {
     }
 }
 
-/// One entry per line, `<id> <folder>`, `#` a comment.
+/// One entry per line, `<id> <folder>` or `<id> ctx=<used>/<total> <folder>`,
+/// `#` a comment.
 ///
 /// The id is split off at the first space because it cannot contain one and a
 /// path can: splitting the other way round would break on the first folder with
-/// a space in its name.
+/// a space in its name. The context reading goes between the two, behind a
+/// marker, for the same reason: a path is whatever is left of the line, so
+/// anything optional has to sit in front of it and say what it is. A line
+/// written before the reading existed has no marker and still reads.
 fn parse_index(text: &str) -> Index {
-    let mut out: Vec<(String, PathBuf)> = Vec::new();
+    let mut out: Vec<Note> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let Some((id, path)) = line.split_once(' ') else {
+        let Some((id, rest)) = line.split_once(' ') else {
             continue;
         };
-        let path = path.trim();
-        if id.is_empty() || path.is_empty() || out.iter().any(|(known, _)| known == id) {
+        let (context, rest) = match rest.trim_start().split_once(' ') {
+            Some((first, tail)) if first.starts_with(CONTEXT_MARK) => (parse_context(first), tail),
+            _ => (None, rest),
+        };
+        let path = rest.trim();
+        if id.is_empty() || path.is_empty() || out.iter().any(|note| note.id == id) {
             continue;
         }
-        out.push((id.to_string(), PathBuf::from(path)));
+        out.push(Note {
+            id: id.to_string(),
+            workspace: PathBuf::from(path),
+            context,
+        });
     }
     out.truncate(REMEMBERED);
     Index(out)
 }
 
+/// What the context reading is written behind, so the path can go on being
+/// whatever is left of the line.
+const CONTEXT_MARK: &str = "ctx=";
+
+/// `ctx=48000/200000` back into two numbers. Anything else is a line somebody
+/// edited by hand into something this cannot read, which is a session with no
+/// reading rather than a file that fails to load.
+fn parse_context(word: &str) -> Option<Context> {
+    let (used, total) = word.strip_prefix(CONTEXT_MARK)?.split_once('/')?;
+    Some(Context {
+        used: used.parse().ok()?,
+        total: total.parse().ok()?,
+    })
+}
+
 fn index_text(index: &Index) -> String {
     let mut out = String::from(
-        "# Which folder each noob session was started in, newest first.\n\
+        "# Which folder each noob session was started in, newest first, and how\n\
+         # full its context window was when NO0B last watched it run.\n\
          # Written by NO0B so a saved session can be resumed where it belongs.\n",
     );
-    for (id, path) in index.0.iter().take(REMEMBERED) {
-        out.push_str(id);
+    for note in index.0.iter().take(REMEMBERED) {
+        out.push_str(&note.id);
         out.push(' ');
-        out.push_str(&path.display().to_string());
+        if let Some(context) = note.context {
+            out.push_str(&format!("{CONTEXT_MARK}{}/{} ", context.used, context.total));
+        }
+        out.push_str(&note.workspace.display().to_string());
         out.push('\n');
     }
     out
@@ -456,6 +602,16 @@ mod tests {
         assert_eq!(whole.opening, "add a session list to the picker");
         assert_eq!(whole.workspace, None, "nothing has said where it was");
         assert!(!whole.gone, "a folder nobody knows is not a folder that went");
+        // The size comes off the same stat the age does, so every row has one.
+        assert_eq!(
+            whole.bytes,
+            std::fs::metadata(dir.join("whole.jsonl")).unwrap().len()
+        );
+        assert!(whole.bytes > 0);
+        assert_eq!(
+            whole.context, None,
+            "nothing watched this one run, so there is no reading to show"
+        );
 
         // What was left out is said, not swallowed.
         let mut skipped = listing.skipped.clone();
@@ -635,6 +791,17 @@ mod tests {
         assert_eq!(scratch.len(), 1, "the first line about a session wins");
         assert_eq!(load_index(Path::new("/nowhere/at/all")), Index::default());
 
+        // A session whose file has gone takes its line with it.
+        let fewer = index.minus("one");
+        assert_eq!(fewer.folder_of("one"), None);
+        assert_eq!(fewer.len(), 1, "and nothing else moved");
+        assert_eq!(fewer.folder_of("two"), index.folder_of("two"));
+        assert_eq!(
+            index.minus("nobody").len(),
+            2,
+            "forgetting one that was never there changes nothing"
+        );
+
         let mut long = Index::default();
         for n in 0..REMEMBERED + 10 {
             long = long.plus(&format!("s{n}"), Path::new("/p"));
@@ -657,6 +824,123 @@ mod tests {
             dir_in(Path::new("/home/hec/.config/noob")),
             PathBuf::from("/home/hec/.config/noob/sessions")
         );
+    }
+
+    /// The context reading rides on the same note the folder does, because it
+    /// is the same kind of thing: something only this window knows, which the
+    /// transcript the agent writes has no room for.
+    ///
+    /// A line written before the reading existed still reads, and a session the
+    /// CLI wrote on its own has no line at all, so both come back as nothing
+    /// rather than as a number nobody measured.
+    #[test]
+    fn the_note_carries_how_full_the_context_window_was() {
+        let full = Context {
+            used: 48_000,
+            total: 200_000,
+        };
+        let index = Index::default()
+            .plus("folder-only", Path::new("/home/hec/one"))
+            .plus_context("watched", Path::new("/home/hec/two"), full);
+        assert_eq!(index.context_of("watched"), Some(full));
+        assert_eq!(index.context_of("folder-only"), None);
+        assert_eq!(index.context_of("never-seen"), None);
+        assert_eq!(full.percent(), Some(24));
+        assert_eq!(Context { used: 1, total: 0 }.percent(), None);
+        assert_eq!(
+            Context {
+                used: 9,
+                total: 4
+            }
+            .percent(),
+            Some(100),
+            "a reading past the end of the window is a full window"
+        );
+
+        // It survives the file, beside a path with a space in it.
+        let spaced = index.plus_context(
+            "spaced",
+            Path::new("/home/hec/a folder with spaces"),
+            Context {
+                used: 7,
+                total: 10,
+            },
+        );
+        assert_eq!(parse_index(&index_text(&spaced)), spaced);
+        assert_eq!(
+            spaced.folder_of("spaced"),
+            Some(PathBuf::from("/home/hec/a folder with spaces"))
+        );
+
+        // Starting the same session again keeps the reading: `plus` is called
+        // on every SessionStart, and a resume would otherwise erase it.
+        let again = index.plus("watched", Path::new("/home/hec/two"));
+        assert_eq!(again.context_of("watched"), Some(full));
+
+        // A line from before this existed, and one somebody edited into
+        // something unreadable.
+        let old = parse_index("old /home/hec/before\nbroken ctx=lots /home/hec/x\n");
+        assert_eq!(old.folder_of("old"), Some(PathBuf::from("/home/hec/before")));
+        assert_eq!(old.context_of("old"), None);
+        assert_eq!(
+            old.folder_of("broken"),
+            Some(PathBuf::from("/home/hec/x")),
+            "an unreadable reading is not an unreadable line"
+        );
+        assert_eq!(old.context_of("broken"), None);
+    }
+
+    /// Deleting a session, which is the one thing in this window that destroys
+    /// anything: the file goes, and nothing outside the sessions directory can
+    /// be named by an id however that id got into the file.
+    #[test]
+    fn a_session_is_deleted_by_name_and_only_inside_its_own_directory() {
+        let dir = temp("delete");
+        let outside = dir.join("outside.jsonl");
+        std::fs::write(&outside, "not a session").expect("a file to try to reach");
+        let inside = dir.join("sessions");
+        std::fs::create_dir_all(&inside).expect("a sessions dir");
+        write(&inside, "keep", &good("keep", "one"));
+        write(&inside, "drop", &good("drop", "two"));
+
+        // The guard, before anything is removed. Every one of these is an id
+        // that would reach a file the window was never pointed at.
+        for id in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "../../etc/passwd",
+            "sub/one",
+            "a\\b",
+            ".hidden",
+        ] {
+            assert!(
+                session_file(&inside, id).is_err(),
+                "{id:?} was accepted as a session name"
+            );
+            assert!(forget(&inside, id).is_err(), "{id:?} was deleted");
+        }
+        assert!(outside.exists(), "a file outside the directory was deleted");
+
+        assert_eq!(
+            session_file(&inside, "drop"),
+            Ok(inside.join("drop.jsonl"))
+        );
+        assert!(forget(&inside, "drop").is_ok());
+        assert!(!inside.join("drop.jsonl").exists());
+        assert!(inside.join("keep.jsonl").exists(), "it took the wrong one");
+        assert_eq!(
+            ids(&read(&inside, &Index::default(), &Real)),
+            vec![String::from("keep")],
+            "and the list is one shorter"
+        );
+
+        // A second delete of the same session is a file that is not there, not
+        // a panic.
+        assert!(forget(&inside, "drop").is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Through a real file, since that is the only way the write half is

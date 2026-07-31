@@ -316,6 +316,60 @@ fn workspace_arg(args: &[String]) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Take one session off the disk: its transcript, and the line in the note that
+/// says which folder it belonged to.
+///
+/// Both halves in one place, and a free function over the two paths rather than
+/// a method reading them itself, so the whole of what a delete does can be
+/// driven over a temp directory. The note is rewritten only once the file is
+/// gone: a note without a transcript is a row that cannot be opened, and a
+/// transcript without a note is a row that opens in the wrong folder.
+///
+/// The note not being writable is not a failure. The file it describes is
+/// already gone, the row will not come back on the next read, and the stale line
+/// costs nothing but a line in a file: refusing here would say the session was
+/// not deleted when it was.
+fn forget_session(
+    dir: Option<PathBuf>,
+    index: Option<PathBuf>,
+    id: &str,
+) -> Result<(), String> {
+    let dir = dir.ok_or_else(|| String::from("there is nowhere to read sessions from"))?;
+    sessions::forget(&dir, id).map_err(|why| format!("{id} was not deleted: {why}"))?;
+    if let Some(path) = index {
+        let _ = sessions::save_index(&path, &sessions::load_index(&path).minus(id));
+    }
+    Ok(())
+}
+
+/// What to write down as a session's context reading, out of the two places the
+/// window hears about one, or nothing when neither has said yet.
+///
+/// The agent's own reading first and the last request's usage as the fallback,
+/// which is the order [`State::context_fraction`] reads them in: one moves
+/// during a turn and the other describes the request that already went out. A
+/// window whose size was never reported is not a reading at all, because a
+/// number of tokens with nothing to compare it against says nothing on a row.
+///
+/// A free function so the rule can be tested without a window, and the only
+/// place the figure that goes in the file is decided.
+fn context_reading(
+    fill: Option<state::ContextFill>,
+    usage: Option<noob_proto::Usage>,
+) -> Option<sessions::Context> {
+    if let Some(fill) = fill.filter(|fill| fill.total > 0) {
+        return Some(sessions::Context {
+            used: fill.used,
+            total: fill.total,
+        });
+    }
+    let usage = usage.filter(|usage| usage.context_total > 0)?;
+    Some(sessions::Context {
+        used: usage.prompt,
+        total: usage.context_total,
+    })
+}
+
 /// What a right click opens, for what it landed on, or nothing when it landed
 /// on something no menu belongs to: the title strip, a window button, the
 /// margin between panes.
@@ -330,6 +384,7 @@ fn menu_for(
     dock: &Dock,
     prompt_selection: bool,
     pane_selection: Option<View>,
+    picker: Option<&Picker>,
 ) -> Option<Menu> {
     let widget = |view: View, space: Space| {
         Some(Menu::for_widget(
@@ -352,10 +407,17 @@ fn menu_for(
         // The menu already open. Its own right click is handled before this is
         // reached, and a row is picked with the left button.
         Hit::Menu | Hit::MenuRow(_) => None,
-        // The picker is not a widget: there is no pane to close, no settings
-        // behind it, and nothing in it to select.
+        // A row of the session list is the one thing in the picker a menu can
+        // act on: it names a file, so there is something to open and something
+        // to delete. A folder row is not, because pressing it is the whole of
+        // what it does and nothing here deletes a folder.
+        Hit::PickerRow(index) => {
+            let saved = picker?.session(index)?;
+            Some(Menu::for_session(at, index, saved.gone))
+        }
+        // The rest of the picker is not a widget: there is no pane to close, no
+        // settings behind it, and nothing in it to select.
         Hit::Picker
-        | Hit::PickerRow(_)
         | Hit::PickerMark(_)
         | Hit::PickerOpen
         | Hit::PickerBack
@@ -585,6 +647,12 @@ struct App {
     /// The folder named on the command line, until it has been connected to.
     /// Taken in `resumed`, because a folder given up front skips the picker.
     workspace: Option<PathBuf>,
+    /// The session the agent says it is running, and the folder it is running
+    /// in, from the one frame that names both. Kept so the note written for it
+    /// can be updated later in the session with how full its context window
+    /// got: the frames that carry that figure do not say which session they
+    /// belong to.
+    session: Option<(String, String)>,
     /// The folder picker, while it is up. Nothing else in the window is live
     /// while it is: there is no agent until it closes.
     picker: Option<Picker>,
@@ -695,6 +763,7 @@ impl App {
             link: None,
             trouble: None,
             workspace,
+            session: None,
             picker: None,
             settings: None,
             prompt: Prompt::default(),
@@ -904,6 +973,36 @@ impl App {
         let index = sessions::load_index(&path).plus(id, Path::new(workspace));
         // A note that cannot be written costs a row in the session list its
         // folder. Not worth a line in a conversation that is starting.
+        let _ = sessions::save_index(&path, &index);
+    }
+
+    /// Write down how full this session's context window is, on the note that
+    /// already says which folder it belongs to.
+    ///
+    /// The session list has no other way to know. The transcript records what
+    /// each request spent, not what the window was holding, and summing those
+    /// deltas would mean reading every byte of every session file to draw one
+    /// column. This is the figure the running window already has, written once
+    /// per turn beside the folder, which means a session shows a reading from
+    /// the moment a window has watched it run and a dash before that. Sessions
+    /// written by the CLI on its own never get one, exactly as they never get a
+    /// folder.
+    fn remember_context(&self) {
+        let Some((id, workspace)) = self.session.as_ref() else {
+            return;
+        };
+        let Some(context) = context_reading(self.state.context, self.state.usage) else {
+            return;
+        };
+        let Some(path) = sessions::index_path() else {
+            return;
+        };
+        if id.is_empty() || workspace.is_empty() {
+            return;
+        }
+        // Read again immediately before writing, the same as the folder note:
+        // a second window that started a session in the meantime keeps its own.
+        let index = sessions::load_index(&path).plus_context(id, Path::new(workspace), context);
         let _ = sessions::save_index(&path, &index);
     }
 
@@ -1373,6 +1472,56 @@ impl App {
         }
     }
 
+    /// Carry on the session on the row at `index`, which is what the menu's Open
+    /// row does. The same call a double click makes, so the two cannot drift.
+    fn open_session(&mut self, index: usize) {
+        let chosen = self.picker.as_mut().and_then(|picker| picker.double(index));
+        self.dirty = true;
+        match chosen {
+            Some(chosen) => self.choose(chosen),
+            None => self.reveal_picker_cursor(),
+        }
+    }
+
+    /// Delete the session on the row at `index`: its transcript, and the note
+    /// saying which folder it belonged to.
+    ///
+    /// Here rather than in the picker because this is the half of the window
+    /// that touches the disk, the same rule the session list itself is read
+    /// under. The id comes off the row the menu was opened over and goes through
+    /// [`sessions::forget`], which is the only thing anywhere that removes a
+    /// file and refuses any name that could reach out of the sessions directory.
+    ///
+    /// The list is then read again rather than mended in place, so what is on
+    /// screen is what is on the disk, and it is read again through
+    /// [`Picker::refresh_sessions`], which keeps the cursor where it was:
+    /// deleting three sessions in a row should be three presses.
+    fn delete_session(&mut self, index: usize) {
+        let Some(id) = self
+            .picker
+            .as_ref()
+            .and_then(|picker| picker.session(index))
+            .map(|saved| saved.id.clone())
+        else {
+            return;
+        };
+        self.dirty = true;
+        if let Err(why) = forget_session(sessions::dir(), sessions::index_path(), &id) {
+            // The picker's own line for a press that did nothing. A delete that
+            // silently fails is a row that comes back on the next refresh with
+            // nothing anywhere saying why.
+            if let Some(picker) = self.picker.as_mut() {
+                picker.refuse(why);
+            }
+            return;
+        }
+        let listing = self.saved_sessions();
+        if let Some(picker) = self.picker.as_mut() {
+            picker.refresh_sessions(listing);
+        }
+        self.reveal_picker_cursor();
+    }
+
     fn drain(&mut self) {
         let Some(link) = self.link.as_mut() else {
             return;
@@ -1387,6 +1536,11 @@ impl App {
                     // it is running, which is the note the session list needs.
                     if let noob_proto::Event::SessionStart { id, workspace, .. } = &event {
                         self.remember_session(id, workspace);
+                        // Kept for the rest of the session, so how full its
+                        // context window got can be written on the same note
+                        // later: no other frame says which session it belongs
+                        // to.
+                        self.session = Some((id.clone(), workspace.clone()));
                     }
                     self.dirty |= self.state.apply_at(event, Some(at));
                 }
@@ -1407,6 +1561,7 @@ impl App {
         // which is the price of not rewriting the file on every token.
         if turn_ended {
             self.remember();
+            self.remember_context();
         }
         self.follow_open_file();
     }
@@ -1758,6 +1913,7 @@ impl App {
             &self.dock,
             self.prompt.selection().is_some(),
             self.pane_selection(),
+            self.picker.as_ref(),
         );
         self.dirty |= had || self.menu.is_some();
     }
@@ -1797,7 +1953,13 @@ impl App {
             // The prompt's menu has no Close row, so this cannot happen; it is
             // matched rather than caught by a wildcard so adding one is a
             // compile error here instead of a click that silently does nothing.
-            (Item::Close, Target::Input) => {}
+            (Item::Close, Target::Input | Target::Session(_)) => {}
+            // The same two things pressing the row and pressing Delete do, from
+            // the menu the right button opened over it.
+            (Item::OpenSession, Target::Session(index)) => self.open_session(index),
+            (Item::DeleteSession, Target::Session(index)) => self.delete_session(index),
+            // Neither row is on any menu but a session's.
+            (Item::OpenSession | Item::DeleteSession, Target::Input | Target::Widget(..)) => {}
             // The row that opens the list beside itself, which is the thing the
             // row is for: closing the menu would take the list with it.
             (Item::Widgets(_), _) => {
@@ -3188,7 +3350,7 @@ mod tests {
     }
 
     fn opened(layout: &Layout, dock: &Dock, at: (f32, f32)) -> Option<Menu> {
-        menu_for(layout.hit(at.0, at.1), at, dock, false, None)
+        menu_for(layout.hit(at.0, at.1), at, dock, false, None, None)
     }
 
     /// One step of the walk. Rebased on the tab the strip actually starts at, so
@@ -3325,7 +3487,7 @@ mod tests {
             Hit::SettingsClose,
         ] {
             assert!(
-                menu_for(Some(hit), (600.0, 400.0), &dock, true, Some(View::Output)).is_none(),
+                menu_for(Some(hit), (600.0, 400.0), &dock, true, Some(View::Output), None).is_none(),
                 "{hit:?}"
             );
         }
@@ -3335,6 +3497,218 @@ mod tests {
         let over = laid_out(&dock, Some(&menu), 0);
         let at = middle(over.menu_rows[0].1);
         assert!(opened(&over, &dock, at).is_none());
+    }
+
+    /// A picker with two saved sessions showing, one of them in a folder that
+    /// has been deleted since.
+    fn a_session_picker() -> Picker {
+        let saved = |id: &str, gone: bool| sessions::Saved {
+            id: String::from(id),
+            when: std::time::SystemTime::UNIX_EPOCH,
+            workspace: Some(PathBuf::from("/home/hec/workspace")),
+            gone,
+            bytes: 1_000,
+            context: None,
+            opening: String::from("carry this on"),
+        };
+        let mut picker = Picker::open(
+            Box::new(picker::Fixed(vec![String::from("gui")])),
+            PathBuf::from("/home/hec"),
+            Vec::new(),
+        );
+        picker.show_sessions_at(
+            sessions::Listing {
+                sessions: vec![saved("live", false), saved("orphan", true)],
+                skipped: Vec::new(),
+            },
+            std::time::SystemTime::UNIX_EPOCH,
+        );
+        picker
+    }
+
+    /// A right click on a saved session opens the menu for it: carry it on, or
+    /// delete it. Nothing else in the picker has a menu, because pressing a
+    /// folder row is the whole of what that row does and nothing here deletes a
+    /// folder.
+    #[test]
+    fn a_right_click_on_a_saved_session_offers_opening_it_and_deleting_it() {
+        let dock = Dock::new();
+        let at = (500.0, 400.0);
+        let picker = a_session_picker();
+
+        let menu = menu_for(
+            Some(Hit::PickerRow(0)),
+            at,
+            &dock,
+            false,
+            None,
+            Some(&picker),
+        )
+        .expect("a session row has a menu");
+        assert_eq!(menu.target, Target::Session(0));
+        assert_eq!(menu.pick(0), Some(Item::OpenSession));
+        assert_eq!(menu.pick(1), Some(Item::DeleteSession));
+
+        // The row whose folder has gone keeps both rows and cannot be opened.
+        let dead = menu_for(
+            Some(Hit::PickerRow(1)),
+            at,
+            &dock,
+            false,
+            None,
+            Some(&picker),
+        )
+        .expect("that row has one too");
+        assert_eq!(dead.rows.len(), menu.rows.len());
+        assert_eq!(dead.pick(0), None, "it cannot be resumed anywhere");
+        assert_eq!(dead.pick(1), Some(Item::DeleteSession));
+
+        // A row that is not there, and the rest of the picker.
+        assert!(
+            menu_for(Some(Hit::PickerRow(9)), at, &dock, false, None, Some(&picker)).is_none()
+        );
+        for hit in [
+            Hit::Picker,
+            Hit::PickerMark(0),
+            Hit::PickerOpen,
+            Hit::PickerBack,
+            Hit::PickerSessions,
+        ] {
+            assert!(
+                menu_for(Some(hit), at, &dock, false, None, Some(&picker)).is_none(),
+                "{hit:?}"
+            );
+        }
+
+        // And on the folder list there is no menu at all, on the same hit.
+        let folders = Picker::open(
+            Box::new(picker::Fixed(vec![String::from("gui")])),
+            PathBuf::from("/home/hec"),
+            Vec::new(),
+        );
+        assert!(
+            menu_for(
+                Some(Hit::PickerRow(0)),
+                at,
+                &dock,
+                false,
+                None,
+                Some(&folders)
+            )
+            .is_none()
+        );
+    }
+
+    /// The whole of what deleting a session does, over a real directory: the
+    /// transcript goes, the line about it in the note goes with it, and every
+    /// other session is left exactly as it was.
+    ///
+    /// Nothing in this window destroyed anything before item A7, so this is the
+    /// one path where a wrong answer costs somebody a conversation.
+    #[test]
+    fn deleting_a_session_takes_its_file_and_its_line_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("no0b-forget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sessions_dir = dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("a sessions dir");
+        let note = dir.join("no0b.sessions");
+        for id in ["keep", "drop"] {
+            std::fs::write(
+                sessions_dir.join(format!("{id}.jsonl")),
+                format!("{{\"t\":\"meta\",\"v\":1,\"id\":\"{id}\"}}\n"),
+            )
+            .expect("a transcript");
+        }
+        let index = sessions::Index::default()
+            .plus("keep", Path::new("/home/hec/one"))
+            .plus_context(
+                "drop",
+                Path::new("/home/hec/two"),
+                sessions::Context {
+                    used: 10,
+                    total: 100,
+                },
+            );
+        sessions::save_index(&note, &index).expect("the note is writable");
+
+        assert_eq!(
+            forget_session(Some(sessions_dir.clone()), Some(note.clone()), "drop"),
+            Ok(())
+        );
+        assert!(!sessions_dir.join("drop.jsonl").exists());
+        assert!(sessions_dir.join("keep.jsonl").exists());
+        let after = sessions::load_index(&note);
+        assert_eq!(after, sessions::Index::default().plus("keep", Path::new("/home/hec/one")));
+
+        // A name that would reach out of the sessions directory is refused
+        // before anything is removed, and says so in one line the picker can
+        // put on screen.
+        let outside = dir.join("no0b.sessions");
+        assert!(outside.exists());
+        let why = forget_session(
+            Some(sessions_dir.clone()),
+            Some(note.clone()),
+            "../no0b.sessions",
+        )
+        .expect_err("a path out of the directory was accepted");
+        assert!(why.starts_with("../no0b.sessions was not deleted"), "{why}");
+        assert!(outside.exists(), "it deleted a file outside the directory");
+        assert_eq!(sessions::load_index(&note), after, "and the note is intact");
+
+        // Nowhere to delete from at all, which is a machine with no config
+        // directory rather than a session that refused to go.
+        assert!(forget_session(None, Some(note.clone()), "keep").is_err());
+        assert!(sessions_dir.join("keep.jsonl").exists());
+
+        // And a window with no note file still deletes the transcript.
+        assert_eq!(forget_session(Some(sessions_dir.clone()), None, "keep"), Ok(()));
+        assert!(!sessions_dir.join("keep.jsonl").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What gets written down as a session's context reading, and when nothing
+    /// does. The agent's own figure wins over the last request's, and a window
+    /// whose size was never reported is not a reading at all: a number of tokens
+    /// with nothing to compare it against says nothing on a row.
+    #[test]
+    fn the_context_written_down_is_the_agent_s_reading_before_the_last_request_s() {
+        let fill = |used: u64, total: u64| state::ContextFill {
+            used,
+            total,
+            compact_at: 0,
+        };
+        let usage = |prompt: u64, total: u64| noob_proto::Usage {
+            prompt,
+            cached_prompt: 0,
+            completion: 12,
+            context_total: total,
+        };
+        assert_eq!(
+            context_reading(Some(fill(48_000, 200_000)), Some(usage(9, 10))),
+            Some(sessions::Context {
+                used: 48_000,
+                total: 200_000
+            })
+        );
+        assert_eq!(
+            context_reading(None, Some(usage(30_000, 120_000))),
+            Some(sessions::Context {
+                used: 30_000,
+                total: 120_000
+            }),
+            "the last request's, when the agent has not said"
+        );
+        assert_eq!(
+            context_reading(Some(fill(5, 0)), Some(usage(30_000, 120_000))),
+            Some(sessions::Context {
+                used: 30_000,
+                total: 120_000
+            }),
+            "a window of no size is not a reading, so it falls through"
+        );
+        assert_eq!(context_reading(None, None), None);
+        assert_eq!(context_reading(Some(fill(5, 0)), Some(usage(9, 0))), None);
     }
 
     /// The copy row belongs to the pane the menu opened over. A selection in
@@ -3348,9 +3722,9 @@ mod tests {
         let at = middle(tab);
         let hit = layout.hit(at.0, at.1);
 
-        let mine = menu_for(hit, at, &dock, false, Some(view)).unwrap();
+        let mine = menu_for(hit, at, &dock, false, Some(view), None).unwrap();
         assert_eq!(mine.pick(1), Some(Item::CopySelection));
-        let elsewhere = menu_for(hit, at, &dock, false, Some(View::Output)).unwrap();
+        let elsewhere = menu_for(hit, at, &dock, false, Some(View::Output), None).unwrap();
         assert_eq!(elsewhere.pick(1), None);
         assert_eq!(
             mine.rows.len(),
@@ -3362,10 +3736,10 @@ mod tests {
         let at = middle(layout.input);
         let hit = layout.hit(at.0, at.1);
         assert_eq!(
-            menu_for(hit, at, &dock, true, None).unwrap().pick(0),
+            menu_for(hit, at, &dock, true, None, None).unwrap().pick(0),
             Some(Item::Copy)
         );
-        assert_eq!(menu_for(hit, at, &dock, false, None).unwrap().pick(0), None);
+        assert_eq!(menu_for(hit, at, &dock, false, None, None).unwrap().pick(0), None);
     }
 
     /// A row of the list is a switch: a widget in the window goes out, and one

@@ -1082,12 +1082,17 @@ fn all_time_rows(totals: &Totals) -> Vec<Row> {
     ]
 }
 
-/// What a session row says: when it was, which folder it belongs to, and the
-/// opening of the first thing that was said in it.
+/// What a session row says: when it was, which folder it belongs to, how big
+/// the transcript is, how full its context window was, and the opening of the
+/// first thing that was said in it.
 ///
-/// The same three things in the same order the picker's session rows use, so the
+/// The same five things in the same order the picker's session rows use, so the
 /// list here and the list a session is resumed from are recognisably the same
-/// sessions.
+/// sessions. The two middle ones are formatted by the picker's own helpers
+/// rather than written again here, which is what keeps them saying the same
+/// thing. Only the wording for a session with no folder differs, because the
+/// picker's row says where pressing it would resume and this panel resumes
+/// nothing.
 fn session_line(saved: &crate::sessions::Saved, now: std::time::SystemTime) -> String {
     let folder = match (&saved.workspace, saved.gone) {
         (Some(path), true) => format!("{} (gone)", short_folder(path)),
@@ -1100,7 +1105,12 @@ fn session_line(saved: &crate::sessions::Saved, now: std::time::SystemTime) -> S
         true => "nothing was said",
         false => saved.opening.as_str(),
     };
-    format!("{}  {folder}  {said}", crate::sessions::ago(saved.when, now))
+    format!(
+        "{}  {folder}  {}  {}  {said}",
+        crate::sessions::ago(saved.when, now),
+        crate::picker::size_label(saved.bytes),
+        crate::picker::context_label(saved.context),
+    )
 }
 
 /// The name of the folder and no more of the path, which is what the picker's
@@ -1337,6 +1347,8 @@ mod tests {
             when: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 - ago),
             workspace: folder.map(PathBuf::from),
             gone: false,
+            bytes: 1_024,
+            context: None,
             opening: String::from(opening),
         }
     }

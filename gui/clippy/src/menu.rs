@@ -54,6 +54,13 @@ pub enum Item {
     /// picking a closed one puts it back, picking one that is in the window
     /// takes it out.
     Widget(View, bool),
+    /// Carry on the saved session the menu was opened over, which is what
+    /// pressing the row does anyway. On the menu because a menu with one row
+    /// says the row it does not have is the only thing you can do here.
+    OpenSession,
+    /// Delete that session's transcript, and the note saying which folder it
+    /// belonged to. The only row in this window that destroys anything.
+    DeleteSession,
 }
 
 impl Item {
@@ -67,6 +74,8 @@ impl Item {
             Item::Widgets(_) => "Widgets",
             // The tab's own name, so the list reads as the tabs it is a list of.
             Item::Widget(view, _) => view.label(),
+            Item::OpenSession => "Open",
+            Item::DeleteSession => "Delete",
         }
     }
 
@@ -101,6 +110,10 @@ impl Item {
                 true => icons::UNCHECKED,
                 false => icons::CHECKED,
             }),
+            // The mark the picker's own Open button wears, because it is the
+            // same act reached another way, and the bin for the row that is not.
+            Item::OpenSession => Some(icons::CONFIRM),
+            Item::DeleteSession => Some(icons::TRASH),
         }
     }
 
@@ -134,6 +147,13 @@ pub enum Target {
     Input,
     /// A pane or its tab, and the space that pane is in.
     Widget(View, Space),
+    /// A row of the picker's session list, by its number in that list.
+    ///
+    /// The number rather than the id, because that is what every other press on
+    /// the picker carries and what the model's own methods take. The row it
+    /// points at cannot move while the menu is up: nothing rebuilds the list
+    /// until a row of the menu is picked.
+    Session(usize),
 }
 
 /// An open menu: where it was opened, what it was opened on, and its rows.
@@ -217,6 +237,33 @@ impl Menu {
         }
     }
 
+    /// A saved session's menu: carry it on, or delete it.
+    ///
+    /// `gone` is whether the folder it was started in has been deleted since. A
+    /// session cannot be resumed into a directory that is not there, so Open is
+    /// greyed rather than missing, the way every other row that cannot act is:
+    /// the menu is the same two rows either way, and Delete still works, which
+    /// is the row that session is most likely to be right clicked for.
+    pub fn for_session(at: (f32, f32), index: usize, gone: bool) -> Menu {
+        let rows = vec![
+            Row {
+                item: Item::OpenSession,
+                enabled: !gone,
+            },
+            Row {
+                item: Item::DeleteSession,
+                enabled: true,
+            },
+        ];
+        Menu {
+            at,
+            target: Target::Session(index),
+            top: rows.len(),
+            rows,
+            first: 0,
+        }
+    }
+
     /// How many widgets are on the list: nine while it is open, none while it
     /// is shut. What the scroll is bounded by, and the whole of the difference
     /// between the two states.
@@ -230,7 +277,7 @@ impl Menu {
     pub fn target_view(&self) -> Option<View> {
         match self.target {
             Target::Widget(view, _) => Some(view),
-            Target::Input => None,
+            Target::Input | Target::Session(_) => None,
         }
     }
 
@@ -658,7 +705,13 @@ mod tests {
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, true);
         menu.toggle_widgets(&dock);
         let prompt = Menu::for_input((0.0, 0.0), true);
-        for row in menu.rows.iter().chain(prompt.rows.iter()) {
+        let session = Menu::for_session((0.0, 0.0), 0, false);
+        for row in menu
+            .rows
+            .iter()
+            .chain(prompt.rows.iter())
+            .chain(session.rows.iter())
+        {
             assert!(
                 row.item.icon().is_some(),
                 "{:?} has nothing in its gutter",
@@ -684,12 +737,58 @@ mod tests {
             icons::SETTINGS,
             icons::CHECKED,
             icons::UNCHECKED,
+            // The session menu's own two. Open is deliberately the picker's
+            // confirm glyph and is not in this list twice, because no other
+            // menu row wears it.
+            icons::CONFIRM,
+            icons::TRASH,
         ];
         for (step, one) in marks.iter().enumerate() {
             for other in &marks[step + 1..] {
                 assert_ne!(one, other, "two rows wear U+{:04X}", *one as u32);
             }
         }
+    }
+
+    /// A saved session's menu: carry it on, or delete it. Both rows are there
+    /// whatever the row is, and the one that cannot act is greyed rather than
+    /// missing, which is the rule every other menu here follows.
+    #[test]
+    fn a_saved_session_gets_an_open_row_and_a_delete_row() {
+        let menu = Menu::for_session((40.0, 90.0), 3, false);
+        assert_eq!(items(&menu), vec![Item::OpenSession, Item::DeleteSession]);
+        assert_eq!(menu.target, Target::Session(3));
+        assert_eq!(menu.at, (40.0, 90.0));
+        assert_eq!(menu.pick(0), Some(Item::OpenSession));
+        assert_eq!(menu.pick(1), Some(Item::DeleteSession));
+        assert_eq!(menu.pick(2), None, "there is no third row");
+        assert_eq!(menu.widgets(), 0, "a session has no widget list");
+        assert_eq!(menu.target_view(), None, "and it is not a widget");
+
+        // A session whose folder has been deleted cannot be resumed anywhere,
+        // so Open is greyed. Delete still acts: that row is the reason the menu
+        // was opened over a session like this one.
+        let dead = Menu::for_session((40.0, 90.0), 3, true);
+        assert_eq!(items(&dead), items(&menu), "the shape changed");
+        assert_eq!(dead.pick(0), None);
+        assert_eq!(dead.pick(1), Some(Item::DeleteSession));
+
+        // Marked, like every other row, and not with a mark that already means
+        // something else. Open wears the picker's own confirm glyph because it
+        // is the same act reached another way.
+        assert_eq!(Item::OpenSession.icon(), Some(icons::CONFIRM));
+        assert_eq!(Item::DeleteSession.icon(), Some(icons::TRASH));
+        assert_ne!(icons::TRASH, icons::CLOSE_WIDGET, "delete is not close");
+        for item in [Item::OpenSession, Item::DeleteSession] {
+            assert_eq!(item.marker(), None, "{item:?} does not fly out");
+        }
+        let dock = Dock::new();
+        let mut menu = menu;
+        assert!(!menu.toggle_widgets(&dock), "there is no list to open");
+        assert_eq!(
+            menu.width_chars(),
+            Item::DeleteSession.label().chars().count()
+        );
     }
 
     #[test]

@@ -185,10 +185,15 @@ const LIST_MIN_COLUMNS: usize = 9;
 /// looked at unreadable. At that size this floor wins and the list goes below
 /// [`LIST_MIN_COLUMNS`], because the file is what is being read.
 const DIFF_MIN_COLUMNS: usize = GUTTER + 20;
-/// How wide the folder picker gets, in pane columns. Wide enough for a deep
-/// path and no wider: folder names in a 200 column box are one word per row with
-/// the rest of it empty.
-const PICKER_COLUMNS: usize = 64;
+/// How wide the folder picker gets, in pane columns.
+///
+/// One width for both of its lists, because the box must not move when the
+/// button that swaps them is pressed. That makes this the width of the wider of
+/// the two, which is the session table: five columns of content, four of them a
+/// fixed size ([`SESSION_COLUMNS`]) and the last one holding what was first said
+/// in the session. Sixty-four columns fitted the folder list alone and left the
+/// opening line four words wide.
+const PICKER_COLUMNS: usize = 96;
 /// Where the two dividers sit on a window nobody has dragged one in: the left
 /// column takes this much of the width, and the top right space this much of the
 /// right column's height.
@@ -290,6 +295,80 @@ const PICKER_BACK_COLUMNS: usize = 3;
 /// indent stops growing: a name at depth twelve pushed off the right of the box
 /// is a row that says nothing.
 const PICKER_LABEL_COLUMNS: usize = 12;
+
+/// The session table's fixed columns: what each one is called at the top of the
+/// list, and how many characters wide it is.
+///
+/// The last cell of a row, the opening line, is not here: it takes whatever is
+/// left of the row, which is what makes the box's width worth having. Each cell
+/// is written into one less column than it is given, so two full cells still
+/// have a space between them and the table reads as columns rather than as one
+/// run of words.
+///
+/// One row of a session list used to be a single string, `"5m ago  hec  first"`,
+/// and item A7 is exactly the complaint that nobody could tell which part of it
+/// was what.
+const SESSION_COLUMNS: [(&str, usize); 4] = [
+    ("when", 10),
+    ("folder", 18),
+    ("size", 10),
+    ("context", 9),
+];
+/// What the last column is called. It has no width of its own.
+const SESSION_OPENING: &str = "opening";
+
+/// Where a session row's table starts and how many columns it has, for a row
+/// panel `row` wide.
+///
+/// One answer for the header above the list and for every row in it, so the two
+/// cannot come apart. In from the left by the same indent a folder row's mark
+/// takes plus the row's own glyph and the space after it, because a session row
+/// carries that glyph too and the table begins after it.
+fn session_table(row: Panel, column: f32) -> (f32, usize) {
+    let column = column.max(1.0);
+    let x = row.x + PICKER_ROW_PAD + (PICKER_MARK_COLUMNS + ROW_ICON_COLUMNS + 1) as f32 * column;
+    let room = ((row.x + row.w - x) / column).floor().max(0.0) as usize;
+    (x, room)
+}
+
+/// One line of the session table: each cell written into its own columns, in
+/// `room` columns altogether.
+///
+/// Space padded rather than drawn cell by cell. The list is monospace, so a
+/// padded string is a table, and one shaped run per row is one run to tint: a
+/// row of five texts on the cursor's green band would be five chances for one of
+/// them to be tinted wrong.
+fn session_line(cells: &[String], room: usize) -> String {
+    let mut out = String::new();
+    let mut left = room;
+    for (step, cell) in cells.iter().enumerate() {
+        if left == 0 {
+            break;
+        }
+        let width = match SESSION_COLUMNS.get(step) {
+            Some((_, wide)) => (*wide).min(left),
+            // The last cell takes the rest of the row.
+            None => left,
+        };
+        // Two columns short of its own, so a cell that fills its column still
+        // has a space after it, and hard capped at the column either way: in a
+        // window too narrow for a column the ellipsis would be the character
+        // that ran over.
+        let text = clip(cell, width.saturating_sub(2).max(1));
+        let text: String = text.chars().take(width).collect();
+        let written = text.chars().count();
+        out.push_str(&text);
+        // Not after the last cell: trailing spaces are columns nobody sees, and
+        // they would push a clipped opening line past the end of the row.
+        if step + 1 < cells.len() {
+            for _ in written..width {
+                out.push(' ');
+            }
+        }
+        left -= width;
+    }
+    out
+}
 
 /// What the picker says on its button, and the whole of what it says.
 ///
@@ -1856,11 +1935,20 @@ fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> PickerPlaces {
         h,
     );
     let content = box_.inset(PAD);
+    // The session list keeps one line above itself for the row that names its
+    // columns. Taken out of the list rather than added to the head, so the box
+    // is the same box in both lists and only the rows inside it move: a head
+    // that changed height with the mode would move the whole dialog every time
+    // the Sessions button was pressed.
+    let header = match picker.on_sessions() {
+        true => line,
+        false => 0.0,
+    };
     let list = Panel::new(
         content.x,
-        content.y + head,
+        content.y + head + header,
         content.w,
-        (content.h - head - foot - GAP).max(0.0),
+        (content.h - head - header - foot - GAP).max(0.0),
     );
     let rows_fit = Text::rows_for(shape.pane_size, list.h);
     let heights = picker.heights();
@@ -2324,9 +2412,13 @@ pub fn build(frame: &Frame) -> Scene {
     title_bar(&mut scene, frame);
 
     // No folder chosen yet, so there is nothing to arrange panes around and
-    // nothing to type at.
+    // nothing to type at. The menu still goes on top: a right click on a session
+    // row opens one, and the layout has always placed and hit tested it here, so
+    // returning before the overlay left a menu that answered presses and was
+    // nowhere on screen.
     if layout.picking {
         folder_picker(&mut scene, frame);
+        overlay(&mut scene, frame);
         return scene;
     }
 
@@ -3864,6 +3956,30 @@ fn folder_picker(scene: &mut Scene, frame: &Frame) {
         );
     }
 
+    // The row that names the columns, on the line the layout kept above the
+    // list. Only the sessions are a table: a folder list is one column of names
+    // and a header over it would be a word explaining the obvious.
+    if picker.on_sessions() {
+        let head_row = Panel::new(
+            layout.picker_list.x,
+            layout.picker_list.y - line,
+            layout.picker_list.w,
+            line,
+        );
+        let (at, room) = session_table(head_row, frame.pane_column);
+        let names: Vec<String> = SESSION_COLUMNS
+            .iter()
+            .map(|(name, _)| String::from(*name))
+            .chain(std::iter::once(String::from(SESSION_OPENING)))
+            .collect();
+        say(
+            scene,
+            vec![Run::tinted(session_line(&names, room), skin.dim)],
+            Panel::new(at, head_row.y, (head_row.w - (at - head_row.x)).max(1.0), line),
+            skin.dim,
+        );
+    }
+
     let list_cols = cols_of(layout.picker_list, frame.pane_column);
     for (index, row) in &layout.picker_rows {
         let Some(entry) = picker.row(*index) else {
@@ -3943,6 +4059,29 @@ fn folder_picker(scene: &mut Scene, frame: &Frame) {
             }
         }
         let start = indent + wide;
+        // A session is a table row: the glyph in the gutter, then the cells, at
+        // the one x the header above the list is written at. Its own text rather
+        // than one run after the glyph, because the header has no glyph and the
+        // two have to line up to the pixel.
+        if let PickerRow::Session(saved) = entry {
+            let (at, room) = session_table(*row, frame.pane_column);
+            say(
+                scene,
+                vec![Run::icon(icon.to_string(), tint)],
+                Panel::new(row.x + start, row.y, (row.w - start).max(1.0), line),
+                tint,
+            );
+            say(
+                scene,
+                vec![Run::tinted(
+                    session_line(&picker.session_cells(saved), room),
+                    tint,
+                )],
+                Panel::new(at, row.y, (row.x + row.w - at).max(1.0), line),
+                tint,
+            );
+            continue;
+        }
         let room = cols
             .saturating_sub(ROW_ICON_COLUMNS + 1 + (start / frame.pane_column.max(1.0)) as usize)
             .max(1);
@@ -10481,6 +10620,8 @@ mod tests {
                 + std::time::Duration::from_secs(1_000_000_000 - ago),
             workspace: at.map(std::path::PathBuf::from),
             gone: false,
+            bytes: 12_000,
+            context: None,
             opening: String::from(said),
         }
     }
@@ -10974,6 +11115,185 @@ mod tests {
         }
     }
 
+    /// Everything drawn at this line, left to right, as one string.
+    fn line_at(out: &Rendered, y: f32) -> String {
+        let mut texts: Vec<&noob_draw::Text> = out
+            .scene
+            .texts
+            .iter()
+            .filter(|text| (text.at.y - y).abs() < 0.01)
+            .collect();
+        texts.sort_by(|a, b| a.at.x.total_cmp(&b.at.x));
+        texts
+            .iter()
+            .flat_map(|text| text.runs.iter().map(|run| run.text.as_str()))
+            .collect()
+    }
+
+    /// The picker rendered with a menu open over it.
+    fn render_picker_menu(picker: &Picker, menu: &Menu, w: f32, h: f32) -> Rendered {
+        let dock = Dock::new();
+        let state = State::new();
+        let mut shape = shape(&dock, &[]);
+        shape.picker = Some(picker);
+        shape.menu = Some(menu);
+        let layout = Layout::compute(w, h, &shape);
+        let skin = Skin::from(&Config::default());
+        let scene = build(&Frame {
+            state: &state,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &crate::prompt::Prompt::default(),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            clock: 0.0,
+            drag: None,
+            hot: None,
+            trouble: None,
+            selection: None,
+            menu: Some(menu),
+            picker: Some(picker),
+            settings: None,
+        });
+        Rendered {
+            scene,
+            layout,
+            skin,
+        }
+    }
+
+    /// Item A7: the session list is a table. A row that read
+    /// "10m ago  hec  carry this on" said four things with nothing anywhere
+    /// naming any of them, so every cell now sits in a column of its own under a
+    /// row that says what that column is.
+    #[test]
+    fn the_session_list_is_a_table_under_a_row_naming_its_columns() {
+        let picker = a_session_picker();
+        let out = render_picker(&picker, 1205.0, 791.0, None);
+        let line = Text::line_for(13.0);
+        let list = out.layout.picker_list;
+        let (at, _) = session_table(list, 8.0);
+
+        // The header sits on the line the layout kept above the list, which is
+        // not one of the list's rows: it names the columns, it is not one of
+        // them, and pressing it must not select anything.
+        let header = line_at(&out, list.y - line);
+        assert!(
+            out.layout
+                .picker_rows
+                .iter()
+                .all(|(_, row)| (row.y - (list.y - line)).abs() > 0.01),
+            "the header took a row of the list"
+        );
+        assert_eq!(
+            out.layout.hit(at + 4.0, list.y - line + 2.0),
+            Some(Hit::Picker),
+            "the header answers as the box, not as a row"
+        );
+
+        // Each column's name starts exactly where that column starts, and the
+        // last one takes whatever is left.
+        let mut offset = 0;
+        for (name, wide) in SESSION_COLUMNS {
+            let cell: String = header.chars().skip(offset).take(wide).collect();
+            assert!(
+                cell.starts_with(name),
+                "{name:?} does not begin column {offset}: {header:?}"
+            );
+            offset += wide;
+        }
+        assert!(
+            header.chars().skip(offset).collect::<String>().starts_with(SESSION_OPENING),
+            "{header:?}"
+        );
+
+        // And every row writes its cells into those same columns, at the same x
+        // the header is drawn at.
+        for (index, row) in &out.layout.picker_rows {
+            let cells = match picker.row(*index) {
+                Some(PickerRow::Session(saved)) => picker.session_cells(saved),
+                other => panic!("not a session: {other:?}"),
+            };
+            let (row_at, _) = session_table(*row, 8.0);
+            assert!((row_at - at).abs() < 0.01, "row {index} starts elsewhere");
+            let text: String = out
+                .scene
+                .texts
+                .iter()
+                .filter(|text| (text.at.y - row.y).abs() < 0.01 && (text.at.x - at).abs() < 0.01)
+                .flat_map(|text| text.runs.iter().map(|run| run.text.as_str()))
+                .collect();
+            let mut offset = 0;
+            for (step, (_, wide)) in SESSION_COLUMNS.iter().enumerate() {
+                let cell: String = text.chars().skip(offset).take(*wide).collect();
+                assert!(
+                    cell.starts_with(&cells[step]),
+                    "row {index} column {step} says {cell:?}, not {:?}",
+                    cells[step]
+                );
+                offset += wide;
+            }
+            assert!(
+                text.chars().skip(offset).collect::<String>().starts_with(&cells[4]),
+                "row {index} lost what was said in it: {text:?}"
+            );
+        }
+
+        // The two columns that were nowhere before: how big the transcript is,
+        // and how full its context window was. Nothing has ever measured these
+        // sessions, so the reading is a dash rather than a number nobody took.
+        let first = line_at(&out, out.layout.picker_rows[0].1.y);
+        assert!(first.contains("12 kB"), "{first:?}");
+        assert!(first.contains(" - "), "{first:?}");
+
+        // The folder list has no header at all: it is one column of names, and
+        // a word over it would explain the obvious.
+        let folders = a_picker(&["gui", "crates"], &[]);
+        assert!(!folders.on_sessions());
+        let out = render_picker(&folders, 1205.0, 791.0, None);
+        let text = text_of(&out.scene);
+        for name in ["when", "context", SESSION_OPENING] {
+            assert!(!text.contains(name), "{name:?} is over the folder list");
+        }
+    }
+
+    /// A right click on a session row opens a menu over the picker, and the
+    /// picker's own drawing used to stop before the overlay: the menu was placed
+    /// and it answered presses, and nothing was on screen.
+    #[test]
+    fn a_menu_over_the_picker_is_drawn_over_the_picker() {
+        let picker = a_session_picker();
+        let row = {
+            let out = render_picker(&picker, 1205.0, 791.0, None);
+            out.layout.picker_rows[0].1
+        };
+        let menu = Menu::for_session(middle(row), 0, false);
+        let out = render_picker_menu(&picker, &menu, 1205.0, 791.0);
+
+        assert!(out.layout.menu.w >= 1.0, "the menu was not placed");
+        assert!(!out.scene.over_rects.is_empty(), "the menu box is not drawn");
+        let rows: String = out
+            .scene
+            .over_texts
+            .iter()
+            .flat_map(|text| text.runs.iter().map(|run| run.text.as_str()))
+            .collect();
+        for label in [
+            crate::menu::Item::OpenSession.label(),
+            crate::menu::Item::DeleteSession.label(),
+        ] {
+            assert!(rows.contains(label), "{label:?} is not on screen: {rows:?}");
+        }
+
+        // And it takes the press before the row it covers, which it always did.
+        let (x, y) = middle(out.layout.menu_rows[1].1);
+        assert_eq!(out.layout.hit(x, y), Some(Hit::MenuRow(1)));
+    }
+
     /// A folder with more subfolders than the box has rows scrolls. The rows
     /// that are drawn are the rows the list is showing, and nothing is dropped
     /// off the bottom of the box.
@@ -11085,6 +11405,8 @@ mod tests {
                     when: std::time::SystemTime::UNIX_EPOCH,
                     workspace: Some(std::path::PathBuf::from("/home/hec/workspace/noob-cli")),
                     gone: false,
+                    bytes: 4_096,
+                    context: None,
                     opening: String::from("rebuild the settings panel"),
                 }],
                 skipped: Vec::new(),

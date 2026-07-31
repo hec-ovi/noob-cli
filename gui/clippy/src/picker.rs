@@ -353,8 +353,47 @@ impl Picker {
         self.show_sessions_at(listing, SystemTime::now());
     }
 
+    /// The same listing again after one was deleted, keeping the cursor.
+    pub fn refresh_sessions(&mut self, listing: Listing) {
+        self.refresh_sessions_at(listing, SystemTime::now());
+    }
+
     /// The half of it that knows what time it is, so a test can say.
     pub fn show_sessions_at(&mut self, listing: Listing, now: SystemTime) {
+        self.take_sessions(listing, now);
+        // Typed against the folders, and it would leave most of the sessions
+        // dim for no reason anybody typed.
+        self.filter.clear();
+        self.refused = None;
+        self.rebuild();
+        self.cursor = 0;
+        self.first = 0;
+    }
+
+    /// Read the list again without moving anything: the same filter, the same
+    /// place on screen, and the cursor on the same row number it was on.
+    ///
+    /// What a delete leaves behind. [`Picker::show_sessions`] is the other way
+    /// to put a listing in and it starts the list over, which after deleting the
+    /// twentieth row of forty means scrolling back to where you were to delete
+    /// the next one. The row that went takes its number with it, so the cursor
+    /// lands on what moved up into its place, which is where the pointer already
+    /// is.
+    pub fn refresh_sessions_at(&mut self, listing: Listing, now: SystemTime) {
+        if !self.on_sessions() {
+            return;
+        }
+        let (held, top) = (self.cursor, self.first);
+        self.take_sessions(listing, now);
+        self.rebuild();
+        let last = self.rows.len().saturating_sub(1);
+        self.cursor = held.min(last);
+        self.first = top.min(last);
+    }
+
+    /// The half both of those share: what the rows are made of, and what the
+    /// line above them says about the list.
+    fn take_sessions(&mut self, listing: Listing, now: SystemTime) {
         let Listing {
             mut sessions,
             skipped,
@@ -363,15 +402,28 @@ impl Picker {
         // Stable, so within each group the reading order (newest first) holds.
         sessions.sort_by_key(|saved| saved.workspace.as_deref() != Some(here.as_path()));
         self.note = Some(note_for(sessions.len(), skipped.len()));
-        self.refused = None;
         self.sessions = Some(sessions);
         self.sessions_at = now;
-        // Typed against the folders, and it would leave most of the sessions
-        // dim for no reason anybody typed.
-        self.filter.clear();
-        self.rebuild();
-        self.cursor = 0;
-        self.first = 0;
+    }
+
+    /// The session on the row at `index`, when that row is one at all.
+    ///
+    /// What the right click menu is built from and what a delete is aimed at, so
+    /// the id being acted on comes off the same row the pointer landed on.
+    pub fn session(&self, index: usize) -> Option<&Saved> {
+        match self.rows.get(index)? {
+            Row::Session(saved) => Some(saved),
+            _ => None,
+        }
+    }
+
+    /// Say why something did not happen, on the line the filter is on.
+    ///
+    /// The picker refuses its own presses from [`Picker::chosen`]; this is for
+    /// the window, which is the half that touches the disk and so the half that
+    /// finds out a file could not be deleted.
+    pub fn refuse(&mut self, why: String) {
+        self.refused = Some(why);
     }
 
     /// Back to the folders. False when they were already showing, which is what
@@ -410,14 +462,20 @@ impl Picker {
         }
     }
 
-    /// What a session row says: when it was, which folder it belongs to, and
-    /// the opening of the first thing that was said in it.
+    /// What a session row says, one cell at a time: when it was, which folder it
+    /// belongs to, how big the transcript is, how full its context window was,
+    /// and the opening of the first thing that was said in it.
     ///
-    /// In that order because that is the order they narrow by. The age and the
-    /// folder are short and fixed width-ish, so the message that identifies the
-    /// session starts in about the same column on every row; a long path first
-    /// would push it off the end of every row that has one.
-    fn session_label(&self, saved: &Saved) -> String {
+    /// In that order because that is the order they narrow by. The four short
+    /// ones come first, so the message that identifies the session starts in the
+    /// same column on every row; a long path first would push it off the end of
+    /// every row that has one.
+    ///
+    /// Cells rather than one string, because the list draws them as a table
+    /// under a header that names each one. What holds them together is
+    /// [`SESSION_CELLS`]: anything counting the columns has to agree with what
+    /// is written here.
+    pub fn session_cells(&self, saved: &Saved) -> [String; SESSION_CELLS] {
         let folder = match (&saved.workspace, saved.gone) {
             (Some(path), true) => format!("{} (gone)", short_folder(path)),
             (Some(path), false) => short_folder(path),
@@ -427,13 +485,22 @@ impl Picker {
             (None, _) => String::from("this folder"),
         };
         let said = match saved.opening.is_empty() {
-            true => "nothing was said",
-            false => saved.opening.as_str(),
+            true => String::from("nothing was said"),
+            false => saved.opening.clone(),
         };
-        format!(
-            "{}  {folder}  {said}",
-            crate::sessions::ago(saved.when, self.sessions_at)
-        )
+        [
+            crate::sessions::ago(saved.when, self.sessions_at),
+            folder,
+            size_label(saved.bytes),
+            context_label(saved.context),
+            said,
+        ]
+    }
+
+    /// The same cells as one line, which is what the filter matches on and what
+    /// anything wanting a row as a single string gets.
+    fn session_label(&self, saved: &Saved) -> String {
+        self.session_cells(saved).join("  ")
     }
 
     /// The folder a row names, or nothing when there is none (the root has no
@@ -958,6 +1025,38 @@ impl Picker {
             return true;
         }
         label.to_lowercase().contains(&self.filter.to_lowercase())
+    }
+}
+
+/// How many cells a session row is made of. Named because the table's column
+/// widths live in [`crate::view`] and the two have to be the same length.
+pub const SESSION_CELLS: usize = 5;
+
+/// A transcript's size, in the shortest form that still says how big it is.
+///
+/// Decimal thousands rather than 1024s: the number is there to tell a two line
+/// session from a fortnight of one, and nobody reading a list of sessions is
+/// counting blocks.
+pub fn size_label(bytes: u64) -> String {
+    match bytes {
+        0..=999 => format!("{bytes} B"),
+        1_000..=999_999 => format!("{} kB", bytes / 1_000),
+        1_000_000..=999_999_999 => format!("{:.1} MB", bytes as f64 / 1_000_000.0),
+        _ => format!("{:.1} GB", bytes as f64 / 1_000_000_000.0),
+    }
+}
+
+/// How full the context window was, when anything ever measured it.
+///
+/// A dash when nothing did, which is every session written before the window
+/// started noting it down and every session the CLI wrote on its own. The
+/// transcript records what was spent per request, not what the window was
+/// holding, so there is nothing to work it out from after the fact and a guess
+/// here would be a number that looks measured.
+pub fn context_label(context: Option<crate::sessions::Context>) -> String {
+    match context.and_then(|context| context.percent()) {
+        Some(percent) => format!("{percent}%"),
+        None => String::from("-"),
     }
 }
 
@@ -1779,6 +1878,8 @@ mod tests {
             when: clock() - std::time::Duration::from_secs(ago),
             workspace: at.map(PathBuf::from),
             gone: false,
+            bytes: 2_048,
+            context: None,
             opening: String::from(said),
         }
     }
@@ -1834,20 +1935,38 @@ mod tests {
         assert_eq!(picker.cursor(), 0);
         assert_eq!(picker.first(), 0);
 
-        // What a row says: how long ago it was, which folder it belongs to and
-        // enough of the first thing that was said to recognise it.
-        assert_eq!(labels(&picker)[0], "5m ago  hec  first");
-        assert_eq!(labels(&picker)[1], "2h ago  workspace  second");
+        // What a row says, cell by cell: how long ago it was, which folder it
+        // belongs to, how big the transcript is, how full its context window
+        // was, and enough of the first thing that was said to recognise it.
+        //
+        // These four were one string each before the list became a table, and
+        // the columns are the whole of what item A7 asked for: a row that says
+        // "5m ago  hec  first" leaves nobody able to say which part is which.
+        let cells = |index: usize| match picker.row(index) {
+            Some(Row::Session(saved)) => picker.session_cells(saved),
+            other => panic!("not a session: {other:?}"),
+        };
         assert_eq!(
-            labels(&picker)[2],
-            "3d ago  deleted (gone)  third",
+            cells(0),
+            ["5m ago", "hec", "2 kB", "-", "first"].map(String::from)
+        );
+        assert_eq!(
+            cells(1),
+            ["2h ago", "workspace", "2 kB", "-", "second"].map(String::from)
+        );
+        assert_eq!(
+            cells(2)[1],
+            "deleted (gone)",
             "a folder that is not there any more says so on the row"
         );
         assert_eq!(
-            labels(&picker)[3],
-            "1w ago  this folder  fourth",
+            cells(3)[1],
+            "this folder",
             "a session the CLI wrote on its own opens in the folder above the list"
         );
+        // And the row as one string, which is what the filter reads, is those
+        // same cells and nothing else.
+        assert_eq!(labels(&picker)[0], "5m ago  hec  2 kB  -  first");
 
         // And the line above the list says how many there are, including the
         // file that could not be described.
@@ -1979,6 +2098,134 @@ mod tests {
         // Backspace with nothing typed is the way out of a folder, and there is
         // no folder here either.
         assert!(!picker.backspace());
+    }
+
+    /// The two columns the table gained beyond what the row used to say.
+    ///
+    /// The size comes off the same stat the age does. The context reading comes
+    /// off the window's own note and is a dash wherever nothing ever measured
+    /// it, which is every session written before the note carried it and every
+    /// session the CLI wrote on its own. A guess there would be a number that
+    /// looks measured.
+    #[test]
+    fn a_row_says_how_big_it_is_and_how_full_its_context_was() {
+        let mut picker = opened(&[]);
+        let sized = |bytes: u64, context: Option<crate::sessions::Context>| Saved {
+            bytes,
+            context,
+            ..saved("s", None, "hello", 60)
+        };
+        picker.show_sessions_at(
+            Listing {
+                sessions: vec![
+                    sized(
+                        512,
+                        Some(crate::sessions::Context {
+                            used: 48_000,
+                            total: 200_000,
+                        }),
+                    ),
+                    sized(40_000, None),
+                    sized(
+                        2_500_000,
+                        Some(crate::sessions::Context {
+                            used: 0,
+                            total: 0,
+                        }),
+                    ),
+                ],
+                skipped: Vec::new(),
+            },
+            clock(),
+        );
+        let cells = |index: usize| match picker.row(index) {
+            Some(Row::Session(saved)) => picker.session_cells(saved),
+            other => panic!("not a session: {other:?}"),
+        };
+        assert_eq!(&cells(0)[2..4], ["512 B", "24%"]);
+        assert_eq!(
+            &cells(1)[2..4],
+            ["40 kB", "-"],
+            "nothing watched this one, so there is no reading to show"
+        );
+        assert_eq!(
+            &cells(2)[2..4],
+            ["2.5 MB", "-"],
+            "a window of unknown size has no percentage either"
+        );
+        assert_eq!(size_label(0), "0 B");
+        assert_eq!(size_label(999), "999 B");
+        assert_eq!(size_label(1_000), "1 kB");
+        assert_eq!(size_label(4_000_000_000), "4.0 GB");
+    }
+
+    /// Reading the list again after a delete leaves the cursor where it was, so
+    /// deleting three sessions in a row is three presses rather than three
+    /// presses and two scrolls back to the place you were.
+    #[test]
+    fn the_list_read_again_keeps_the_cursor_and_the_scroll() {
+        let mut picker = opened(&[]);
+        showing(&mut picker);
+        assert!(picker.point_at(2));
+        assert!(picker.scroll(1, true, 2));
+        assert_eq!((picker.cursor(), picker.first()), (2, 1));
+        assert_eq!(picker.session(2).map(|saved| saved.id.clone()), Some(String::from("gone")));
+
+        // The same listing with that row taken out of it, the way the window
+        // hands it back after deleting the file.
+        let mut fewer = some_sessions();
+        fewer.sessions.retain(|saved| saved.id != "gone");
+        picker.refresh_sessions_at(fewer, clock());
+        assert_eq!(picker.rows().len(), 3);
+        assert_eq!(
+            picker.cursor(),
+            2,
+            "the row that moved up into its place, not the top of the list"
+        );
+        assert_eq!(picker.first(), 1, "and the list did not jump");
+        assert_eq!(
+            picker.session(2).map(|saved| saved.id.clone()),
+            Some(String::from("nowhere"))
+        );
+        assert_eq!(picker.note(), Some("3 saved sessions, 1 file could not be read"));
+
+        // Deleting the last row of all leaves the cursor on the new last row
+        // rather than off the end of the list.
+        let mut one = some_sessions();
+        one.sessions.retain(|saved| saved.id == "here");
+        picker.refresh_sessions_at(one, clock());
+        assert_eq!(picker.cursor(), 0);
+        assert_eq!(picker.first(), 0);
+
+        // Nothing at all is a cursor on nothing, and no panic.
+        picker.refresh_sessions_at(Listing::default(), clock());
+        assert!(picker.rows().is_empty());
+        assert_eq!(picker.cursor(), 0);
+
+        // On the folder list it does nothing: there is no session list to read
+        // again, and a folder tree is not what a listing describes.
+        assert!(picker.show_folders());
+        picker.refresh_sessions_at(some_sessions(), clock());
+        assert!(!picker.on_sessions());
+    }
+
+    /// Why a press did nothing is said on the same line the filter is on,
+    /// whether it was the picker that refused or the window that could not
+    /// delete a file.
+    #[test]
+    fn the_window_can_say_why_something_did_not_happen() {
+        let mut picker = opened(&[]);
+        showing(&mut picker);
+        assert_eq!(picker.refused(), None);
+        picker.refuse(String::from("here.jsonl was not deleted: permission denied"));
+        assert_eq!(
+            picker.refused(),
+            Some("here.jsonl was not deleted: permission denied")
+        );
+        // And leaving the list clears it, the way the picker's own refusals are
+        // cleared: it is about a row that is no longer on screen.
+        assert!(picker.show_folders());
+        assert_eq!(picker.refused(), None);
     }
 
     /// A directory with nothing in it is a list that says so, not an empty box.

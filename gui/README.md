@@ -36,16 +36,23 @@ to forget it and delete the file to forget them all.
 The Sessions button beside Open, or Ctrl-R, lists the conversations the agent
 has already saved, in the same box with the same keys. An arrow at the left of
 the heading goes back to the folders, and so do the button at the foot, which
-then says Folders, and Esc. A row says how long ago it was, the folder it belongs to
-and the start of the first thing you asked in it; Enter carries it on, which is
-`noob serve --resume <id>` in that folder. The ones belonging to the folder you
-are looking at come first. Transcripts do not record which folder they happened
-in, so the window keeps that note itself in `~/.config/noob/no0b.sessions`, one
-`<id> <folder>` per line: a session started from a terminal has no note, and
-opens in the folder written above the list. One whose folder has been deleted
-cannot be opened at all and says so instead of starting the agent somewhere you
-did not choose. A session file that was cut short (killed mid-write) is skipped
-and counted beside the heading rather than taking the list down with it.
+then says Folders, and Esc. The list is a table under a row that names its
+columns: when it was, the folder it belongs to, how big the transcript is, how
+full its context window got, and the start of the first thing you asked in it.
+Up and down move the cursor, Enter carries the session on, which is
+`noob serve --resume <id>` in that folder, and a right click on a row offers the
+same Open plus Delete, which removes the transcript and its line from the note
+below. The ones belonging to the folder you are looking at come first.
+Transcripts do not record which folder they happened in, so the window keeps
+that note itself in `~/.config/noob/no0b.sessions`, one `<id> <folder>` per
+line, with `ctx=<used>/<total>` in front of the folder once a window has watched
+that session run: a session started from a terminal has no note, opens in the
+folder written above the list, and shows `-` in the context column, and so does
+every session saved before the note started carrying the reading. Nothing here
+guesses that number. One whose folder has been deleted cannot be opened at all
+and says so instead of starting the agent somewhere you did not choose. A
+session file that was cut short (killed mid-write) is skipped and counted beside
+the heading rather than taking the list down with it.
 
 `NOOB_BIN` names the agent binary when it is not `noob` on PATH.
 
