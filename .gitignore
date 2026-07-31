@@ -4,6 +4,9 @@
 # local agent-CLI bake-off, not published
 /competition/
 
+# his own notes for the round in progress, not published
+/review.md
+
 # build caches (docker bind mounts, user-owned)
 /target
 /gui/target
