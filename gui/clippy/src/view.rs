@@ -772,6 +772,8 @@ pub struct Layout {
     /// instead, one per colour on it, each one carrying its row and its place
     /// along that row.
     pub settings: Panel,
+    /// A box per section name, every one of them, wrapped into as many columns
+    /// of the rail as the window's height needs (see [`settings_rail_cells`]).
     pub settings_rail: Vec<(usize, Panel)>,
     /// The line between the rail and the list, and the band it is grabbed by.
     /// Empty in every shape but the panel's, the way a pane divider is empty in
@@ -2572,6 +2574,44 @@ fn settings_rail_floor(column: f32) -> f32 {
     SETTING_RAIL_COLUMNS as f32 * column.max(1.0)
 }
 
+/// A box for every section name, inside the rail's own width.
+///
+/// The names used to be one column that stopped at the last one that fitted, so
+/// a big font in a small window drew three of the five and the other two had no
+/// row to press and no row to hit. One of the two is APPEARANCE, which is where
+/// the font size is put back down: raising it far enough hid the only way to
+/// lower it again. So the column wraps. As many names go down the rail as there
+/// is height for, the rest start another column beside them, and the rail's
+/// width is shared between however many columns that takes. Every section keeps
+/// a box at every size, and a box too narrow for the whole name clips it the way
+/// every other name in this window is clipped, which is a name you can still
+/// read and still press.
+///
+/// The rail is not scrolled instead, because a scrolled rail is a section you
+/// have to know is there before you can reach it, and the thing being fixed is
+/// exactly that a section nobody could see was a section nobody could get to.
+fn settings_rail_cells(body: Panel, rail_w: f32, line: f32, names: usize) -> Vec<(usize, Panel)> {
+    let names = names.max(1);
+    // A body shorter than a line still gets one row of names rather than none,
+    // cut to the room there is: a rail drawn over the footer is worse than a
+    // short one, and a rail with nothing on it is the bug itself.
+    let tall = line.min(body.h).max(1.0);
+    let down = ((body.h / tall).floor() as usize).max(1);
+    let across = names.div_ceil(down);
+    let wide = (rail_w / across as f32).floor().max(1.0);
+    (0..names)
+        .map(|index| {
+            let at = Panel::new(
+                body.x + (index / down) as f32 * wide,
+                body.y + (index % down) as f32 * tall,
+                wide,
+                tall,
+            );
+            (index, at)
+        })
+        .collect()
+}
+
 /// Where a row's value starts when it is a reading rather than a control: after
 /// the label, and running to the end of the row.
 ///
@@ -2679,17 +2719,7 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
     let room = (body.w - GAP).max(1.0);
     let rail_floor = settings_rail_floor(column);
     let rail_w = (room * held(shape.settings_rail, room, rail_floor)).floor();
-    let mut rail = Vec::new();
-    for (index, _) in panel.section_names().iter().enumerate() {
-        let y = body.y + index as f32 * line;
-        // A rail taller than the window keeps the sections that fit rather than
-        // drawing over the footer. Eight names in a window that cannot hold
-        // eight rows is a window nothing is readable in anyway.
-        if y + line > body.y + body.h {
-            break;
-        }
-        rail.push((index, Panel::new(body.x, y, rail_w, line)));
-    }
+    let rail = settings_rail_cells(body, rail_w, line, panel.section_names().len());
     let list = Panel::new(
         body.x + rail_w + GAP,
         body.y,
@@ -5061,7 +5091,9 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
     // The rail. The chosen section carries the band and the mark every list in
     // this window marks its current row with. The mark is always the focus
     // colour now: the rail is pressed rather than walked, so there is no second
-    // state for it to be in.
+    // state for it to be in. Each name is drawn in its own box, which is where
+    // the wrap put it: one column when they all fit down the rail, more columns
+    // beside it when they do not (see [`settings_rail_cells`]).
     let list = layout.settings_list;
     let names = panel.section_names();
     for (index, at) in &layout.settings_rail {
@@ -5082,7 +5114,7 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
             at.x + MARK_W + 3.0,
             at.y,
             (at.w - MARK_W - 3.0).max(1.0),
-            line,
+            at.h,
         );
         say(
             scene,
@@ -14025,7 +14057,7 @@ mod tests {
         hot: Option<Hit>,
         rail: f32,
     ) -> Rendered {
-        render_settings_with(panel, w, h, hot, rail, None)
+        render_settings_with(panel, w, h, hot, rail, None, PANE_TEXT)
     }
 
     /// And the same with a drag over the document, which is what puts a band
@@ -14036,7 +14068,24 @@ mod tests {
         h: f32,
         selection: crate::select::Selection,
     ) -> Rendered {
-        render_settings_with(panel, w, h, None, SETTINGS_RAIL, Some(selection))
+        render_settings_with(panel, w, h, None, SETTINGS_RAIL, Some(selection), PANE_TEXT)
+    }
+
+    /// The pane text every other settings test is laid out and drawn in: the
+    /// size and the advance of one character at it.
+    const PANE_TEXT: (f32, f32) = (13.0, 8.0);
+
+    /// The biggest the settings file will carry, and what a character of a
+    /// monospace face costs at that size. `font_size` and `pane_font_size` are
+    /// both clamped to 40 by `Config::apply`, and `column_width` measures the
+    /// real face and falls back to six tenths of the size, which is what a
+    /// monospace advance is within a pixel either way.
+    const BIGGEST_TEXT: (f32, f32) = (40.0, 24.0);
+
+    /// The same panel at one font size, since the rail's layout is a question
+    /// about how many lines of that size fit in the window.
+    fn render_settings_at_font(panel: &Settings, w: f32, h: f32, font: (f32, f32)) -> Rendered {
+        render_settings_with(panel, w, h, None, SETTINGS_RAIL, None, font)
     }
 
     fn render_settings_with(
@@ -14046,12 +14095,15 @@ mod tests {
         hot: Option<Hit>,
         rail: f32,
         selection: Option<crate::select::Selection>,
+        font: (f32, f32),
     ) -> Rendered {
         let dock = Dock::new();
         let state = busy_state();
         let mut shape = shape(&dock, &["a.rs"]);
         shape.settings = Some(panel);
         shape.settings_rail = rail;
+        shape.pane_size = font.0;
+        shape.pane_column = font.1;
         let layout = Layout::compute(w, h, &shape);
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
@@ -14062,9 +14114,9 @@ mod tests {
             layout: &layout,
             prompt: &crate::prompt::Prompt::default(),
             column: 8.0,
-            pane_column: 8.0,
+            pane_column: font.1,
             body_size: 14.0,
-            pane_size: 13.0,
+            pane_size: font.0,
             clock: 0.0,
             orb_morph: None,
             drag: None,
@@ -14140,9 +14192,9 @@ mod tests {
         )
     }
 
-    /// The panel with one section chosen, which is what a press on the rail
-    /// leaves behind. The keyboard is on the rows of it either way: the rail is
-    /// pressed, never walked.
+    /// The panel with one section chosen, which is what a press on the rail or
+    /// a Tab leaves behind. The keyboard is on the rows of it either way: no
+    /// arrow key touches the rail.
     fn a_panel_on(config: &Config, section: &str) -> Settings {
         let mut panel = a_settings_panel(config);
         let at = panel
@@ -15407,6 +15459,78 @@ mod tests {
         assert!(text.contains("THE WINDOW"), "{text}");
         assert!(!text.contains("api keys"), "the agent section is still up");
         assert_eq!(tint_of(&out, "APPEARANCE"), out.skin.good);
+    }
+
+    /// Item F1: the rail hides no section, at the smallest window the window
+    /// will open at and the largest text the settings file will carry.
+    ///
+    /// The names were one column that stopped at the last one that fitted, so
+    /// 40 point in a 680 by 380 window drew three of the five: MCP and
+    /// APPEARANCE had no box, answered no click, and APPEARANCE is the only
+    /// place a font size raised that far can be lowered again. The column wraps
+    /// now, so every section keeps a box it can be pressed on whatever the
+    /// window and the font are doing.
+    #[test]
+    fn every_section_keeps_a_box_at_the_smallest_window_and_the_biggest_text() {
+        let panel = a_settings_panel(&Config::default());
+        let names = panel.section_names();
+        let (w, h) = (crate::MIN_SIZE.width as f32, crate::MIN_SIZE.height as f32);
+        for font in [PANE_TEXT, BIGGEST_TEXT] {
+            let out = render_settings_at_font(&panel, w, h, font);
+            let layout = &out.layout;
+            assert_eq!(
+                layout.settings_rail.len(),
+                names.len(),
+                "{font:?} lost a section"
+            );
+            let foot = layout.settings.y + layout.settings.h;
+            for (index, at) in &layout.settings_rail {
+                let (x, y) = middle(*at);
+                assert_eq!(
+                    layout.hit(x, y),
+                    Some(Hit::SettingsSection(*index)),
+                    "{} answers nothing at {font:?}",
+                    names[*index]
+                );
+                assert!(
+                    at.x + at.w <= layout.settings_list.x,
+                    "{} runs into the list at {font:?}: {at:?}",
+                    names[*index]
+                );
+                assert!(
+                    at.y + at.h <= foot,
+                    "{} is drawn past the bottom of the panel at {font:?}: {at:?}",
+                    names[*index]
+                );
+            }
+            // No two of them are the same box, and none of them is on top of
+            // another: a box under another box is a name nothing can be aimed
+            // at even though the layout carries it.
+            for (index, at) in &layout.settings_rail {
+                for (other, was) in &layout.settings_rail {
+                    if index == other {
+                        continue;
+                    }
+                    let apart = at.x + at.w <= was.x
+                        || was.x + was.w <= at.x
+                        || at.y + at.h <= was.y
+                        || was.y + was.h <= at.y;
+                    assert!(apart, "{at:?} and {was:?} are on top of each other");
+                }
+            }
+            // And every one of them is written where its box is, in as much of
+            // the name as the box holds. A narrow box clips, the way every name
+            // in this window clips, so what is asserted is the front of the
+            // name rather than the whole of it.
+            let text = text_of(&out.scene);
+            for name in &names {
+                let front: String = name.chars().take(3).collect();
+                assert!(
+                    text.contains(&front),
+                    "{name} is not written at {font:?}: {text}"
+                );
+            }
+        }
     }
 
     /// The line between the rail and the settings is a divider like any other:

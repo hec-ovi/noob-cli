@@ -17,12 +17,20 @@
 //! the window's own settings file, the palette included, minus the keys the
 //! window itself already sets ([`OFF_PANEL`]).
 //!
-//! **The rail is pressed, not walked.** Up and down used to move the rail
+//! **The rail is pressed, and Tab walks it.** Up and down used to move the rail
 //! whenever the keyboard was not inside a section, and in [`SESSIONS`] it never
 //! was, because every row of it was a reading nothing could land on. So the two
 //! keys anybody reaches for in a list of saved conversations swapped the whole
-//! right hand side of the panel out. A press on the rail is the only thing that
-//! chooses a section now, and the arrow keys are always the rows.
+//! right hand side of the panel out. The arrow keys are always the rows now, and
+//! the rail has a key of its own: Tab on to the next section, Shift-Tab back to
+//! the one before, wrapping at both ends ([`Settings::walk_section`]). Without
+//! it the rail was pointer-only, which made [`APPEARANCE`] unreachable from the
+//! keyboard, and [`APPEARANCE`] is where a font size raised too far is put back
+//! down. Tab used to cross a form row; that is Shift with the arrow that points
+//! at the half now ([`Settings::cross`]), since shift is what takes the nudge
+//! off left and right. Every line of the footer legend ends with the section
+//! keys, because the legend is the only thing that says the arrows changed
+//! meaning.
 //!
 //! **[`SESSIONS`] is a table.** One conversation to a row, its cells in columns
 //! under a [`Row::Columns`] that names each one, the row the cursor is on under
@@ -68,8 +76,9 @@
 //! heading and three notes standing between them: a section more than half
 //! prose. They are two rows of two now ([`Row::Pair`]), the endpoint and the
 //! file the CLI reads down one column and the two numbers that decide what the
-//! agent gets down the other, with Tab crossing between them because the arrow
-//! keys are the nudge. Under the form are two blocks ([`Row::Paper`]): the
+//! agent gets down the other, with the shifted arrow crossing between them
+//! because the plain arrow keys are the nudge. Under the form are two blocks
+//! ([`Row::Paper`]): the
 //! global `AGENTS.md`, which the CLI already reads and puts at the top of every
 //! prompt, and the whole assembled prompt out of `noob debug prompt`. The file
 //! is one capped layer of that prompt, so it is named as the file and never as
@@ -769,10 +778,11 @@ pub struct Settings {
     sections: Vec<Section>,
     /// Which section the rail is on, which is the one whose rows are beside it.
     ///
-    /// Changed by a press on the rail and by nothing else. The arrow keys used
-    /// to walk it, which meant up and down in a list of saved sessions swapped
-    /// the whole right hand side out from under whoever was reading it. The
-    /// keyboard is always on the rows now.
+    /// Changed by a press on the rail and by Tab, and by nothing else. The
+    /// arrow keys used to walk it, which meant up and down in a list of saved
+    /// sessions swapped the whole right hand side out from under whoever was
+    /// reading it. They are always the rows now, and the rail's own key is Tab
+    /// ([`Settings::walk_section`]).
     chosen: usize,
     /// What has been typed into the field being edited, or nothing when no field
     /// is being edited. The row itself keeps saying what the file says until the
@@ -1412,25 +1422,54 @@ impl Settings {
         Some(cell(self.row(index)?, side))
     }
 
-    /// Move across a form row, which is the one thing on this panel the arrow
-    /// keys cannot do: left and right are the nudge. False when the cursor is
-    /// not on a form, or when the other half of it is a reading.
-    pub fn swap(&mut self) -> bool {
+    /// Move to one half of a form row, which is the one thing on this panel the
+    /// plain arrow keys cannot do: left and right are the nudge. False when the
+    /// cursor is not on a form, when it is already in that half, or when that
+    /// half is a reading.
+    ///
+    /// This was `swap`, a toggle on Tab. Tab is how the keyboard walks the rail
+    /// now ([`Settings::walk_section`]), so the crossing is the shifted arrow
+    /// instead: it points at the half it lands on, and the shift is what takes
+    /// the nudge off the key.
+    pub fn cross(&mut self, to: Side) -> bool {
         if self.editing.is_some() {
             return false;
         }
-        let side = self.side();
+        if self.side() == to {
+            return false;
+        }
         let here = self.here();
         let Some(row @ Row::Pair(_, _)) = here.rows.get(here.cursor) else {
             return false;
         };
-        if !landable(cell(row, side.other())) {
+        if !landable(cell(row, to)) {
             return false;
         }
         self.picked = None;
         self.arming = None;
-        self.here_mut().side = side.other();
+        self.here_mut().side = to;
         true
+    }
+
+    /// Walk the rail one section on, wrapping at both ends.
+    ///
+    /// The keyboard's only route between sections. The rail is a column of
+    /// names that is pressed, and at a big font in a small window it is also a
+    /// column that wraps, so the section anybody is looking for may be in the
+    /// second column of it: a key that reaches every name whatever the window is
+    /// doing is what keeps APPEARANCE, and with it the font size, reachable.
+    /// It wraps rather than stopping, so the section before the first one is the
+    /// last one instead of nothing at all.
+    pub fn walk_section(&mut self, forward: bool) -> bool {
+        let count = self.sections.len();
+        if count == 0 {
+            return false;
+        }
+        let next = match forward {
+            true => (self.chosen + 1) % count,
+            false => (self.chosen + count - 1) % count,
+        };
+        self.choose(next)
     }
 
     /// Whether the cursor is on a row at all: a section of readings has nothing
@@ -1551,54 +1590,73 @@ impl Settings {
             .unwrap_or_else(|| String::from(self.hint()))
     }
 
+    /// What the keys do here, ending in what moves between sections.
+    ///
+    /// Every line ends the same way, because the arrow keys changed meaning and
+    /// the footer is the only thing that says so: they are the rows of one
+    /// section now, and the rail is Tab. A legend that named the arrows and left
+    /// the section key to be guessed is how somebody who has raised the font too
+    /// far ends up with no way back to APPEARANCE.
     pub fn hint(&self) -> &'static str {
         if self.editing.is_some() {
             return "type it \u{2022} enter saves it \u{2022} esc leaves it alone";
         }
-        // On a form row, the one thing the arrow keys cannot say is how to get
-        // to the other half of it, because left and right are the nudge.
+        // On a form row, the one thing the plain arrow keys cannot say is how to
+        // get to the other half of it, because left and right are the nudge.
         let across = matches!(self.row(self.cursor()), Some(Row::Pair(_, _)))
             && self.here().rows.get(self.cursor()).is_some_and(|row| {
                 landable(cell(row, Side::Left)) && landable(cell(row, Side::Right))
             });
         match self.at_cursor() {
             Some(Row::Setting { kind, .. }) => match (kind, across) {
-                (Kind::Choice(_), _) => "left and right walk the presets",
-                (Kind::Number { .. }, false) => "left and right nudge it, or drag the slider",
+                (Kind::Choice(_), _) => {
+                    "up and down move \u{2022} left and right walk the presets \u{2022} tab and shift-tab change section"
+                }
+                (Kind::Number { .. }, false) => {
+                    "up and down move \u{2022} left and right nudge it, or drag the slider \u{2022} tab and shift-tab change section"
+                }
                 (Kind::Number { .. }, true) => {
-                    "left and right nudge it \u{2022} tab crosses to the other column"
+                    "left and right nudge it \u{2022} shift left and right cross the form \u{2022} tab and shift-tab change section"
                 }
             },
             Some(Row::Paper(paper)) => match paper.offer.is_some() {
-                true => "enter writes a starter AGENTS.md there",
-                false => "page up and page down read it \u{2022} up and down leave it",
+                true => {
+                    "enter writes a starter AGENTS.md there \u{2022} tab and shift-tab change section"
+                }
+                false => {
+                    "page up and page down read it \u{2022} up and down leave it \u{2022} tab and shift-tab change section"
+                }
             },
             Some(Row::Field { .. }) if across => {
-                "enter edits it \u{2022} tab crosses to the other column"
+                "enter edits it \u{2022} shift left and right cross the form \u{2022} tab and shift-tab change section"
             }
-            Some(Row::Field { .. }) => "enter edits it \u{2022} esc closes",
+            Some(Row::Field { .. }) => {
+                "enter edits it \u{2022} tab and shift-tab change section \u{2022} esc closes"
+            }
             Some(Row::Entry(entry)) => match (entry.removable, &entry.what) {
-                (false, _) => "enter turns it on and off",
+                (false, _) => {
+                    "up and down move \u{2022} enter turns it on and off \u{2022} tab and shift-tab change section"
+                }
                 (true, Which::Skill { .. }) => {
-                    "enter turns it on and off \u{2022} uninstall deletes its directory"
+                    "enter turns it on and off \u{2022} uninstall deletes its directory \u{2022} tab and shift-tab change section"
                 }
                 (true, Which::Server { .. }) => {
-                    "enter turns it on and off in its file \u{2022} uninstall takes it out of that file"
+                    "enter turns it on and off in its file \u{2022} uninstall takes it out \u{2022} tab and shift-tab change section"
                 }
             },
             Some(Row::Session { .. }) => {
-                "up and down pick a session \u{2022} the trash deletes it \u{2022} click a section on the left"
+                "up and down pick a session \u{2022} the trash deletes it \u{2022} tab and shift-tab change section"
             }
-            _ => "up and down move \u{2022} click a section on the left \u{2022} esc closes",
+            _ => "up and down move \u{2022} tab and shift-tab change section \u{2022} esc closes",
         }
     }
 
-    /// Put the rail on one section, which is what a click on it does and the
-    /// only thing that does it.
+    /// Put the rail on one section, which is what a click on it does and what
+    /// [`Settings::walk_section`] does for the keyboard.
     ///
-    /// The keyboard stays on the rows of whatever is chosen: a press on the
-    /// rail picks the section and the arrow keys go on walking the list beside
-    /// it, so up and down never swap the whole right hand side out.
+    /// The cursor stays on the rows of whatever is chosen: picking a section
+    /// does not put the keyboard on the rail, and the arrow keys go on walking
+    /// the list beside it, so up and down never swap the right hand side out.
     pub fn choose(&mut self, index: usize) -> bool {
         if index >= self.sections.len() {
             return false;
@@ -2051,8 +2109,8 @@ impl Settings {
     }
 
     /// Move the cursor one row of the chosen section, over anything it cannot
-    /// land on. Never the rail: which section is showing is a press on the rail
-    /// and nothing else. Clamped at both ends, since a list that wraps under an
+    /// land on. Never the rail: which section is showing is a press on it or a
+    /// Tab, and no arrow key. Clamped at both ends, since a list that wraps under an
     /// arrow key held down is a cursor that arrives somewhere nobody was
     /// looking.
     pub fn step(&mut self, down: bool) -> bool {
@@ -2479,7 +2537,8 @@ mod tests {
         dir
     }
 
-    /// Press a section on the rail, which is the only thing that chooses one.
+    /// Press a section on the rail, which is what a pointer does; Tab is the
+    /// other way in, and both land here.
     ///
     /// This used to walk the rail with the arrow keys. They move the cursor
     /// down the rows of the chosen section now and never touch the rail, which
@@ -2647,6 +2706,89 @@ mod tests {
                     panel.jump(down);
                     assert_eq!(panel.chosen(), at, "a key walked off {name}");
                 }
+            }
+        }
+    }
+
+    /// Item F1: Tab walks the sections and the arrow keys go on walking the
+    /// rows.
+    ///
+    /// The rail was pointer-only, so a font size raised far enough to push
+    /// APPEARANCE off the bottom of the rail left no way at all to lower it
+    /// again. Tab is the way in from the keyboard: on to the next section,
+    /// Shift-Tab back to the one before, wrapping at both ends so every section
+    /// is reachable from every other one whatever the window is doing. The
+    /// window binds it in `walk_in_settings`, which is tested beside it.
+    #[test]
+    fn tab_walks_the_sections_and_the_arrows_walk_the_rows() {
+        let mut panel = over(&Config::default());
+        assert_eq!(panel.chosen(), 0);
+
+        // Forward through every section and round to the front again.
+        for name in SECTIONS.iter().skip(1) {
+            assert!(panel.walk_section(true), "stuck on {}", panel.here().name);
+            assert_eq!(panel.here().name, *name);
+        }
+        assert!(panel.walk_section(true), "the last section is a dead end");
+        assert_eq!(panel.here().name, SECTIONS[0], "forward does not wrap");
+
+        // And backward, which from the first section is the last one.
+        assert!(panel.walk_section(false));
+        assert_eq!(
+            panel.here().name,
+            SECTIONS[SECTIONS.len() - 1],
+            "back does not wrap"
+        );
+        for at in (0..SECTIONS.len() - 1).rev() {
+            assert!(panel.walk_section(false));
+            assert_eq!(panel.here().name, SECTIONS[at]);
+        }
+        assert_eq!(panel.chosen(), 0);
+
+        // APPEARANCE, which is the section this key exists for, is a few
+        // presses away in both directions and lands on the same place.
+        let looks = SECTIONS
+            .iter()
+            .position(|name| *name == APPEARANCE)
+            .expect("appearance is a section");
+        let mut forward = over(&Config::default());
+        for _ in 0..looks {
+            forward.walk_section(true);
+        }
+        assert_eq!(forward.here().name, APPEARANCE);
+        let mut back = over(&Config::default());
+        for _ in 0..SECTIONS.len() - looks {
+            back.walk_section(false);
+        }
+        assert_eq!(back.here().name, APPEARANCE);
+
+        // The arrows are still the rows: walking a section with them moves the
+        // cursor and leaves the rail exactly where Tab put it.
+        let was = forward.chosen();
+        assert!(forward.step(true), "up and down stopped moving the cursor");
+        assert_eq!(forward.cursor(), 1);
+        assert_eq!(forward.chosen(), was, "an arrow key walked the rail");
+        assert!(forward.step(false));
+        assert_eq!((forward.cursor(), forward.chosen()), (0, was));
+
+        // And the footer names both, in every section, on every row the cursor
+        // can land on: the legend is the only thing that says the arrows are
+        // the rows and Tab is the rail.
+        for (at, name) in SECTIONS.iter().enumerate() {
+            panel.choose(at);
+            for _ in 0..panel.rows().len() {
+                let hint = panel.hint();
+                assert!(
+                    hint.contains("tab and shift-tab change section"),
+                    "{name} does not name the section keys: {hint}"
+                );
+                assert!(
+                    hint.contains("up and down")
+                        || hint.contains("left and right")
+                        || hint.contains("page up"),
+                    "{name} does not name the arrows: {hint}"
+                );
+                panel.step(true);
             }
         }
     }
@@ -3842,12 +3984,20 @@ mod tests {
             panel.rows()
         );
 
-        // It opens on the endpoint, tab crosses to the number beside it, and
-        // there the arrow keys still nudge that number rather than moving again.
+        // It opens on the endpoint, the shifted arrow crosses to the number
+        // beside it, and there the plain arrow keys still nudge that number
+        // rather than moving again. This asserted tab as the crossing: tab walks
+        // the rail now (`tab_walks_the_sections_and_the_arrows_walk_the_rows`)
+        // and the crossing is shift with the arrow that points at the half.
         assert_eq!((panel.cursor(), panel.side()), (0, Side::Left));
         assert!(matches!(panel.at_cursor(), Some(Row::Field { .. })));
-        assert!(panel.hint().contains("tab"), "{}", panel.hint());
-        assert!(panel.swap());
+        assert!(
+            panel.hint().contains("shift left and right cross the form"),
+            "{}",
+            panel.hint()
+        );
+        assert!(!panel.cross(Side::Left), "it is already in that half");
+        assert!(panel.cross(Side::Right));
         assert_eq!((panel.cursor(), panel.side()), (0, Side::Right));
         assert_eq!(
             panel.change(true).expect("the context window nudges"),
@@ -3864,12 +4014,12 @@ mod tests {
         assert!(
             matches!(panel.at_cursor(), Some(Row::Setting { key, .. }) if *key == agent::TASK_CONCURRENCY)
         );
-        // The left half of that row is a reading, so tab has nowhere to go and
-        // the cursor stays where something can be done.
-        assert!(!panel.swap(), "the cursor crossed onto a reading");
+        // The left half of that row is a reading, so the crossing has nowhere to
+        // go and the cursor stays where something can be done.
+        assert!(!panel.cross(Side::Left), "the cursor crossed onto a reading");
         assert!(panel.step(false));
         assert_eq!((panel.cursor(), panel.side()), (0, Side::Right));
-        assert!(panel.swap());
+        assert!(panel.cross(Side::Left));
         assert!(matches!(panel.at_cursor(), Some(Row::Field { .. })));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4280,8 +4430,10 @@ mod tests {
         assert_eq!(at(&panel), "ccc");
         assert_eq!(panel.chosen(), rail, "a key moved the rail");
 
-        // The rail still answers a press, which is the one thing that moves it,
-        // and each section keeps its own cursor across the swap.
+        // The rail still answers a press, and each section keeps its own cursor
+        // across the swap. Tab moves it too now, which is
+        // `tab_walks_the_sections_and_the_arrows_walk_the_rows`; what matters
+        // here is that no arrow key does.
         let looks = panel
             .section_names()
             .iter()

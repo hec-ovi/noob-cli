@@ -390,13 +390,18 @@ window too short for all eight the wheel scrolls it.
 
 **Settings opens the panel**, from a right click on any pane or tab. It takes the
 whole window under the title strip and it is five sections, named down a rail on
-the left with the chosen one beside it. **Click a section to choose it.** The
-arrow keys never touch the rail: up and down walk the rows of whatever is
-showing, and left and right change the row the cursor is on. Enter flips a
-switch, turns a skill or a server on and off, and starts an edit on the
-endpoint, Tab crosses a form row, the wheel scrolls, Ctrl-C copies what is
+the left with the chosen one beside it. **Click a section to choose it, or Tab to
+it.** The arrow keys never touch the rail: up and down walk the rows of whatever
+is showing, and left and right change the row the cursor is on. Tab moves on to
+the next section and Shift-Tab back to the one before, wrapping at both ends, and
+the footer legend says so on every row. Enter flips a switch, turns a skill or a
+server on and off, and starts an edit on the endpoint, Shift with left or right
+crosses a form row, the wheel scrolls, Ctrl-C copies what is
 selected in the document column, and Esc puts the panel
-away. The panes are exactly where
+away. The rail never hides a name: when the window is too short to list the
+sections down one column, they wrap into a second one rather than falling off the
+bottom, so a font size raised far enough to fill the screen still leaves
+APPEARANCE, where it is lowered again, one click or one Tab away. The panes are exactly where
 they were when it closes, and the agent keeps working behind it. **Drag the line
 between the rail and the settings** to give one of them more room: the pointer
 takes a resize shape over it, neither side goes narrower than the longest section
@@ -406,8 +411,8 @@ so the panel opens that way next time.
 Four of the sections are the agent's own files rather than the window's. AGENT
 opens on a form of two columns, two rows tall: the endpoint and the file the CLI
 reads down the left, the two numbers that decide what the agent gets down the
-right. Tab crosses from one column to the other, and the arrow keys go on nudging
-whatever the cursor is on. The file is `~/.config/noob/.env`, which the CLI
+right. Shift with left or right crosses from one column to the other, and the
+plain arrow keys go on nudging whatever the cursor is on. The file is `~/.config/noob/.env`, which the CLI
 re-reads on every request; the endpoint can be typed over, and every other key
 that is set is listed under the form. The two numbers are `NOOB_CTX`, the context
 window the agent budgets against before it compacts, and `NOOB_TASK_CONCURRENCY`,

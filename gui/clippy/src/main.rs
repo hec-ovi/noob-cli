@@ -790,6 +790,34 @@ fn control_in_settings(key: Key<&str>) -> Control {
     }
 }
 
+/// What a key that moves the settings panel itself, rather than the row under
+/// the cursor, is asking for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Walk {
+    /// On to the next section, or back to the one before it.
+    Section(bool),
+    /// Across a form row, to the half the arrow points at.
+    Cross(settings::Side),
+}
+
+/// Which of those a key is, with shift as the second half of the answer.
+///
+/// A free function for the same reason [`control_in_settings`] is one: these are
+/// the two bindings that changed meaning, and the window they live in cannot be
+/// built in a test. Tab is the rail, because the arrow keys are the rows of one
+/// section now and without a key of its own the rail is reachable only by
+/// pointer. It used to cross a form row, which is the shifted arrow now: shift
+/// takes the nudge off left and right and leaves them pointing at the half they
+/// land on.
+fn walk_in_settings(key: Key<&str>, shift: bool) -> Option<Walk> {
+    match (key, shift) {
+        (Key::Named(NamedKey::Tab), _) => Some(Walk::Section(!shift)),
+        (Key::Named(NamedKey::ArrowLeft), true) => Some(Walk::Cross(settings::Side::Left)),
+        (Key::Named(NamedKey::ArrowRight), true) => Some(Walk::Cross(settings::Side::Right)),
+        _ => None,
+    }
+}
+
 /// The same for the document beside the settings panel's entry list, free of
 /// the window so a test can drive it.
 ///
@@ -1386,6 +1414,9 @@ impl App {
         // survive the cursor moving off it.
         self.forget_doc_selection();
         let rows = self.settings_rows();
+        // Read before the panel is borrowed: shift is what tells the rail key
+        // which way to walk and what takes the nudge off left and right.
+        let shift = self.modifiers.shift_key();
         let Some(panel) = self.settings.as_mut() else {
             return;
         };
@@ -1405,6 +1436,18 @@ impl App {
             self.dirty = true;
             return;
         }
+        // The two keys that move the panel rather than the row: the rail, and
+        // the crossing of a form row. Answered first and on their own, because
+        // both of them are arrow keys or a key an arrow key used to be, and the
+        // arms below are all about the row under the cursor.
+        if let Some(walk) = walk_in_settings(event.logical_key.as_ref(), shift) {
+            self.dirty |= match walk {
+                Walk::Section(forward) => panel.walk_section(forward),
+                Walk::Cross(side) => panel.cross(side),
+            };
+            self.reveal_settings_cursor();
+            return;
+        }
         let mut nudge = None;
         let mut edit = false;
         let mut flip = None;
@@ -1415,8 +1458,8 @@ impl App {
                 return;
             }
             // These walk the rows of whatever section is showing, and never the
-            // rail: the sections are pressed, so a list being read with the
-            // arrow keys cannot be swapped out from under the reader.
+            // rail: a section is pressed or tabbed to, so a list being read with
+            // the arrow keys cannot be swapped out from under the reader.
             Key::Named(NamedKey::ArrowUp) => self.dirty |= panel.step(false),
             Key::Named(NamedKey::ArrowDown) => self.dirty |= panel.step(true),
             Key::Named(NamedKey::PageUp) => self.dirty |= panel.page(rows, false),
@@ -1424,8 +1467,8 @@ impl App {
             Key::Named(NamedKey::Home) => self.dirty |= panel.jump(false),
             Key::Named(NamedKey::End) => self.dirty |= panel.jump(true),
             // Left is the nudge on a row that has something to nudge, and
-            // nothing at all on one that has not: the rail is pressed, not
-            // walked, so there is nowhere for it to go back to.
+            // nothing at all on one that has not: no arrow key walks the rail,
+            // so there is nowhere for it to go back to.
             Key::Named(NamedKey::ArrowLeft) => {
                 if panel.on_row() {
                     match panel.at_cursor() {
@@ -1455,11 +1498,6 @@ impl App {
                 }
                 self.dirty = true;
             }
-            // Across a form row. Left and right are the nudge on a control, so
-            // tab is the only key that can cross a form without also meaning
-            // something to what it lands on, which is what tab means on every
-            // other form there is.
-            Key::Named(NamedKey::Tab) => self.dirty |= panel.swap(),
             _ => {}
         }
         if edit {
@@ -4668,6 +4706,55 @@ mod tests {
         ] {
             let named = format!("{key:?}");
             assert_eq!(control_in_settings(key), Control::Nothing, "{named}");
+        }
+    }
+
+    /// Item F1: Tab is the rail and the shifted arrow is the form.
+    ///
+    /// The panel's arrow keys are the rows of one section, so the rail had no
+    /// key at all and a section pushed off a short rail could not be reached
+    /// from the keyboard. Tab takes it, forward and back, and what Tab used to
+    /// do (cross the two halves of a form row) moves onto shift with the arrow
+    /// that points at the half. The plain arrows keep every meaning they had:
+    /// nothing here answers for them.
+    #[test]
+    fn tab_walks_the_settings_sections_and_shift_crosses_the_form() {
+        assert_eq!(
+            walk_in_settings(Key::Named(NamedKey::Tab), false),
+            Some(Walk::Section(true))
+        );
+        assert_eq!(
+            walk_in_settings(Key::Named(NamedKey::Tab), true),
+            Some(Walk::Section(false)),
+            "shift-tab goes back"
+        );
+        assert_eq!(
+            walk_in_settings(Key::Named(NamedKey::ArrowLeft), true),
+            Some(Walk::Cross(settings::Side::Left))
+        );
+        assert_eq!(
+            walk_in_settings(Key::Named(NamedKey::ArrowRight), true),
+            Some(Walk::Cross(settings::Side::Right))
+        );
+        // Everything else belongs to the row under the cursor, the unshifted
+        // arrows included: left and right are still the nudge.
+        for key in [
+            Key::Named(NamedKey::ArrowLeft),
+            Key::Named(NamedKey::ArrowRight),
+            Key::Named(NamedKey::ArrowUp),
+            Key::Named(NamedKey::ArrowDown),
+            Key::Named(NamedKey::Enter),
+            Key::Named(NamedKey::Escape),
+            Key::Character("a"),
+        ] {
+            let named = format!("{key:?}");
+            assert_eq!(walk_in_settings(key.clone(), false), None, "{named}");
+            if !matches!(
+                key,
+                Key::Named(NamedKey::ArrowLeft) | Key::Named(NamedKey::ArrowRight)
+            ) {
+                assert_eq!(walk_in_settings(key, true), None, "shifted {named}");
+            }
         }
     }
 
