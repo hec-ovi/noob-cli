@@ -194,12 +194,15 @@ const DIFF_MIN_COLUMNS: usize = GUTTER + 20;
 /// in the session. Sixty-four columns fitted the folder list alone and left the
 /// opening line four words wide.
 const PICKER_COLUMNS: usize = 96;
-/// Where the two dividers sit on a window nobody has dragged one in: the left
-/// column takes this much of the width, and the top right space this much of the
-/// right column's height.
+/// Where the dividers sit on a window nobody has dragged one in: a column takes
+/// this much of the width, and a top space this much of the height.
 ///
-/// Defaults, not constants. Both are dragged, both are carried in on [`Shape`],
-/// and the settings file remembers where they were left.
+/// One number each rather than one per half, because a window opened for the
+/// first time has both halves of the grid breaking in the same place. What makes
+/// them free to differ is that they are dragged apart afterwards.
+///
+/// Defaults, not constants. All of them are dragged, all of them are carried in
+/// on [`Shape`], and the settings file remembers where they were left.
 pub const LEFT_WIDTH: f32 = 0.54;
 pub const TOP_HEIGHT: f32 = 0.46;
 /// How far either side of the gap between two panes the pointer still counts as
@@ -529,12 +532,12 @@ pub enum Hit {
     SettingsClose,
     /// The panel's box, away from any row. Swallowed, like the picker's.
     Settings,
-    /// The band between the left column and the right one. Dragging it decides
-    /// how much of the width each column gets.
-    ColumnDivider,
-    /// The band between the two right hand spaces, which decides how the right
-    /// column's height is shared between them.
-    RowDivider,
+    /// The band between the left column and the right one, and the row it runs
+    /// in. Dragging it decides how much of that row's width each column gets.
+    ColumnDivider(usize),
+    /// The band between a column's two spaces, and the column it runs in, which
+    /// decides how that column's height is shared between them.
+    RowDivider(usize),
 }
 
 impl Hit {
@@ -659,10 +662,22 @@ pub struct Layout {
     /// still has its box here, because that is the box a drop into it would
     /// take. Empty in every shape that has no panes.
     pub grid: [Panel; 4],
-    /// The two dividers, both empty in every shape that has no panes and beside
-    /// any space that is standing empty or folded away.
-    pub column_divider: Divider,
-    pub row_divider: Divider,
+    /// Whether the grid reads as two rows or as two columns, which is what says
+    /// which of the two lines below runs the whole way across it. Read off the
+    /// dock, and false in every shape that has no panes.
+    pub rows_first: bool,
+    /// The dividers, one per half of the grid: the vertical lines by the row
+    /// they run in, the horizontal ones by the column.
+    ///
+    /// Only one axis has two live lines. The grid is cut in half by a single
+    /// line first, and each half is then cut by a line of its own, so a grid
+    /// reading in columns has one vertical divider (`column_divider[0]`, the
+    /// whole way down) and two horizontal ones, and a grid reading in rows has
+    /// it the other way round. The unused second entry is empty, as is every one
+    /// of them in a shape with no panes and beside a space standing empty or
+    /// folded away.
+    pub column_divider: [Divider; 2],
+    pub row_divider: [Divider; 2],
     /// The file view's explorer column, down the left of its pane. Zero sized
     /// when the file view is not showing, or when nothing has been touched yet.
     pub file_list: Panel,
@@ -763,16 +778,23 @@ pub struct Shape<'a> {
     /// How tall the prompt is. It grows with what has been typed, so it is an
     /// input to the layout rather than a constant.
     pub input_h: f32,
-    /// How much of the body's width the left column takes.
-    pub left_width: f32,
-    /// How much of the right column's height the top space takes.
+    /// How much of the body's width the left column takes, in each row.
+    pub left_width: [f32; 2],
+    /// How much of the body's height the top space takes, in each column.
     ///
-    /// Both are inputs for the same reason `input_h` is: they are dragged while
-    /// the window is up and read back out of the settings file at the next
+    /// A pair each, because only one line runs the whole way across the grid.
+    /// Reading in columns, `left_width[0]` is that line and each column breaks at
+    /// its own `top_height`; reading in rows it is the other way round. The pair
+    /// on the axis with the single line keeps its second number rather than
+    /// dropping it, so turning the grid round and back finds both lines where
+    /// they were left.
+    ///
+    /// All of them are inputs for the same reason `input_h` is: they are dragged
+    /// while the window is up and read back out of the settings file at the next
     /// launch. Held here rather than trusted: [`held`] keeps whatever arrives
     /// inside what the window can actually draw, so neither a file with a silly
     /// number in it nor a drag thrown past the edge can collapse a space.
-    pub top_height: f32,
+    pub top_height: [f32; 2],
 }
 
 fn nowhere() -> Panel {
@@ -801,30 +823,53 @@ fn around(a: Panel, b: Panel) -> Panel {
 /// The four cells of the grid, in [`Space::ALL`] order, from the box the panes
 /// share and the two ratios.
 ///
-/// One vertical line and one horizontal line across the whole box, so the four
-/// cells are a grid rather than two columns each cut at a height of its own.
-/// That is what keeps the two ratios the window already remembers ([`LEFT_WIDTH`]
-/// and [`TOP_HEIGHT`]) enough for four cells: a second horizontal ratio would
-/// buy columns whose panes do not line up, and cost a settings key for it.
+/// One line across the whole box and then a line inside each half of it, so the
+/// left column and the right one can break at heights of their own. Which axis
+/// gets the single line is `rows_first`: a grid reading in columns is cut down
+/// the middle once and each column is then cut across, and a grid reading in
+/// rows is cut across once and each row is then cut down.
 ///
-/// Both ratios are held off the same floors the dividers are dragged with, so a
+/// The pair on the axis with the single line is not read past its first number.
+/// It is still carried, because turning the grid round makes the second one live
+/// again and a number that was thrown away comes back as the default rather than
+/// as where the line was left.
+///
+/// Every ratio is held off the same floors the dividers are dragged with, so a
 /// cell is never narrower than a file view can be read in nor shorter than a
 /// gauge can be drawn in.
-fn grid_cells(body: Panel, left_width: f32, top_height: f32, column_floor: f32) -> [Panel; 4] {
+fn grid_cells(
+    body: Panel,
+    rows_first: bool,
+    left_width: [f32; 2],
+    top_height: [f32; 2],
+    column_floor: f32,
+) -> [Panel; 4] {
     let room_w = (body.w - GAP).max(0.0);
-    let left_w = (room_w * held(left_width, room_w, column_floor)).floor();
     let room_h = (body.h - GAP).max(0.0);
-    let top_h = (room_h * held(top_height, room_h, MIN_SPACE_H)).floor();
-    let right_x = body.x + left_w + GAP;
-    let right_w = body.w - left_w - GAP;
-    let bottom_y = body.y + top_h + GAP;
-    let bottom_h = body.h - top_h - GAP;
-    [
-        Panel::new(body.x, body.y, left_w, top_h),
-        Panel::new(body.x, bottom_y, left_w, bottom_h),
-        Panel::new(right_x, body.y, right_w, top_h),
-        Panel::new(right_x, bottom_y, right_w, bottom_h),
-    ]
+    // The width of the left cell of a row, and the height of the top cell of a
+    // column. One answer for every row, or for every column, on whichever axis
+    // the single line runs.
+    let left_w = |row: usize| {
+        let ratio = left_width[if rows_first { row } else { 0 }];
+        (room_w * held(ratio, room_w, column_floor)).floor()
+    };
+    let top_h = |column: usize| {
+        let ratio = top_height[if rows_first { 0 } else { column }];
+        (room_h * held(ratio, room_h, MIN_SPACE_H)).floor()
+    };
+    let cell = |row: usize, column: usize| {
+        let (left, top) = (left_w(row), top_h(column));
+        let (x, w) = match column {
+            0 => (body.x, left),
+            _ => (body.x + left + GAP, body.w - left - GAP),
+        };
+        let (y, h) = match row {
+            0 => (body.y, top),
+            _ => (body.y + top + GAP, body.h - top - GAP),
+        };
+        Panel::new(x, y, w, h)
+    };
+    [cell(0, 0), cell(1, 0), cell(0, 1), cell(1, 1)]
 }
 
 fn empty_placed() -> Placed {
@@ -884,8 +929,9 @@ impl Layout {
                     empty_placed(),
                 ],
                 grid: [nowhere(), nowhere(), nowhere(), nowhere()],
-                column_divider: Divider::none(),
-                row_divider: Divider::none(),
+                rows_first: false,
+                column_divider: [Divider::none(); 2],
+                row_divider: [Divider::none(); 2],
                 file_list: nowhere(),
                 file_diff: nowhere(),
                 file_rows: Vec::new(),
@@ -936,8 +982,9 @@ impl Layout {
                     empty_placed(),
                 ],
                 grid: [nowhere(), nowhere(), nowhere(), nowhere()],
-                column_divider: Divider::none(),
-                row_divider: Divider::none(),
+                rows_first: false,
+                column_divider: [Divider::none(); 2],
+                row_divider: [Divider::none(); 2],
                 file_list: nowhere(),
                 file_diff: nowhere(),
                 file_rows: Vec::new(),
@@ -989,8 +1036,9 @@ impl Layout {
                     empty_placed(),
                 ],
                 grid: [nowhere(), nowhere(), nowhere(), nowhere()],
-                column_divider: Divider::none(),
-                row_divider: Divider::none(),
+                rows_first: false,
+                column_divider: [Divider::none(); 2],
+                row_divider: [Divider::none(); 2],
                 file_list: nowhere(),
                 file_diff: nowhere(),
                 file_rows: Vec::new(),
@@ -1027,7 +1075,14 @@ impl Layout {
         // not anything is standing in them, because that is what a drop is read
         // off. What is drawn comes next.
         let column_floor = min_column_w(shape.pane_column);
-        let grid = grid_cells(body, shape.left_width, shape.top_height, column_floor);
+        let rows_first = shape.dock.rows_first();
+        let grid = grid_cells(
+            body,
+            rows_first,
+            shape.left_width,
+            shape.top_height,
+            column_floor,
+        );
 
         // An empty space gives its room away rather than leaving a hole: the
         // dock says which pane covers which cell, and a pane's box is the box
@@ -1042,7 +1097,6 @@ impl Layout {
 
         let folded = |space: Space| shape.dock.slot(space).folded;
         let live = |space: Space| !shape.dock.slot(space).is_empty();
-        let rows_first = shape.dock.rows_first();
         // The two cells of one half of the grid: a column apiece when the grid
         // splits into columns first, a row apiece when it splits into rows.
         let cell = |major: usize, minor: usize| match rows_first {
@@ -1096,41 +1150,36 @@ impl Layout {
                 false => column_floor,
             },
         };
-        // Inside the halves the line is only as long as the halves that are
-        // actually split, and a half whose split came from a fold has no line
-        // to drag: the fold owns where it sits until it is opened again.
-        let inside = match (0..2)
-            .filter(|major| {
-                split(*major) && (rows_first || !(folded(cell(*major, 0)) || folded(cell(*major, 1))))
-            })
+        // Inside a half the line is that half's own: it is there when the half
+        // is split and only as long as the two panes it divides. A half whose
+        // split came from a fold has no line to drag, because the fold owns
+        // where it sits until it is opened again, and a half that is not split
+        // has nothing to divide. Either way the other half keeps its line and
+        // keeps where it was dragged to.
+        let inside = |major: usize| -> Divider {
+            let dragged =
+                split(major) && (rows_first || !(folded(cell(major, 0)) || folded(cell(major, 1))));
             // The panes on either side of it, not the cells: a half whose
             // opposite number is empty has taken that room, and the line
             // between its two panes runs the whole way across with them.
-            .map(|major| around(areas[cell(major, 0).index()], areas[cell(major, 1).index()]))
-            .reduce(around)
-        {
-            Some(reach) => Divider {
+            let reach = around(areas[cell(major, 0).index()], areas[cell(major, 1).index()]);
+            if !dragged || reach.w < 1.0 || reach.h < 1.0 {
+                return Divider::none();
+            }
+            // Where the line sits is the half's own first cell, not the grid's:
+            // that is the whole point of a ratio per half.
+            let head = grid[cell(major, 0).index()];
+            Divider {
                 band: match rows_first {
-                    true => Panel::new(
-                        grid[0].x + grid[0].w - GRAB,
-                        reach.y,
-                        GRAB * 2.0 + GAP,
-                        reach.h,
-                    ),
-                    false => Panel::new(
-                        reach.x,
-                        grid[0].y + grid[0].h - GRAB,
-                        reach.w,
-                        GRAB * 2.0 + GAP,
-                    ),
+                    true => Panel::new(head.x + head.w - GRAB, reach.y, GRAB * 2.0 + GAP, reach.h),
+                    false => Panel::new(reach.x, head.y + head.h - GRAB, reach.w, GRAB * 2.0 + GAP),
                 },
                 track: body,
                 floor: match rows_first {
                     true => column_floor,
                     false => MIN_SPACE_H,
                 },
-            },
-            None => Divider::none(),
+            }
         };
         // The line between the halves is there only when both halves have
         // something in them, or there is nothing left for it to divide.
@@ -1139,10 +1188,20 @@ impl Layout {
             true => across,
             false => Divider::none(),
         };
-        let (column_divider, row_divider) = match rows_first {
-            true => (inside, across),
-            false => (across, inside),
-        };
+        // Filed by the axis each line runs on rather than by the part it plays,
+        // so what a press means never depends on which way the grid is reading.
+        let mut column_divider = [Divider::none(); 2];
+        let mut row_divider = [Divider::none(); 2];
+        match rows_first {
+            true => {
+                row_divider[0] = across;
+                column_divider = [inside(0), inside(1)];
+            }
+            false => {
+                column_divider[0] = across;
+                row_divider = [inside(0), inside(1)];
+            }
+        }
 
         let place = |space: Space, area: Panel| -> Placed {
             if area.w < 1.0 || area.h < 1.0 {
@@ -1214,6 +1273,7 @@ impl Layout {
             close: buttons[2],
             spaces,
             grid,
+            rows_first,
             column_divider,
             row_divider,
             file_list,
@@ -1386,12 +1446,17 @@ impl Layout {
         // in and so it reaches a little way into the pane on either side. After
         // the tabs and the file rows, which are smaller targets inside those
         // panes: the more particular thing under the pointer wins.
-        for (divider, hit) in [
-            (self.column_divider, Hit::ColumnDivider),
-            (self.row_divider, Hit::RowDivider),
-        ] {
+        // The vertical lines before the horizontal ones, so a point where two of
+        // them cross moves the columns. Which half each one belongs to comes
+        // back with it: two lines on the same axis are dragged apart.
+        for (half, divider) in self.column_divider.iter().enumerate() {
             if divider.live() && divider.band.contains(x, y) {
-                return Some(hit);
+                return Some(Hit::ColumnDivider(half));
+            }
+        }
+        for (half, divider) in self.row_divider.iter().enumerate() {
+            if divider.live() && divider.band.contains(x, y) {
+                return Some(Hit::RowDivider(half));
             }
         }
         for space in Space::ALL {
@@ -1453,13 +1518,38 @@ impl Layout {
         if !whole.contains(x, y) {
             return Landing::Nowhere;
         }
-        // The middle of the gap between the cells, which is the line itself.
-        let line_x = self.grid[0].x + self.grid[0].w + GAP * 0.5;
-        let line_y = self.grid[0].y + self.grid[0].h + GAP * 0.5;
-        let column = usize::from(x >= line_x);
-        let row = usize::from(y >= line_y);
-        let reach_x = GAP * 0.5 + SPAN_BAND.min(self.grid[0].w.min(self.grid[2].w) * 0.5);
-        let reach_y = GAP * 0.5 + SPAN_BAND.min(self.grid[0].h.min(self.grid[1].h) * 0.5);
+        // The middle of the gap between two cells, which is the line itself.
+        // Read off the half it belongs to, never off the first cell of the grid:
+        // with each column breaking at a height of its own, the line over the
+        // right column is not the line over the left one, and a band measured
+        // from the wrong one lands the drop in the wrong pair.
+        let mid_x = |row: usize| {
+            let head = self.grid[Space::at(row, 0).index()];
+            head.x + head.w + GAP * 0.5
+        };
+        let mid_y = |column: usize| {
+            let head = self.grid[Space::at(0, column).index()];
+            head.y + head.h + GAP * 0.5
+        };
+        // The axis with one line across the whole grid answers first, because it
+        // is the same wherever the pointer is. The half it names is then what
+        // the other axis is read against.
+        let (row, column) = match self.rows_first {
+            true => {
+                let row = usize::from(y >= mid_y(0));
+                (row, usize::from(x >= mid_x(row)))
+            }
+            false => {
+                let column = usize::from(x >= mid_x(0));
+                (usize::from(y >= mid_y(column)), column)
+            }
+        };
+        let (line_x, line_y) = (mid_x(row), mid_y(column));
+        let beside = |a: Space, b: Space| (self.grid[a.index()], self.grid[b.index()]);
+        let (left, right) = beside(Space::at(row, 0), Space::at(row, 1));
+        let (top, bottom) = beside(Space::at(0, column), Space::at(1, column));
+        let reach_x = GAP * 0.5 + SPAN_BAND.min(left.w.min(right.w) * 0.5);
+        let reach_y = GAP * 0.5 + SPAN_BAND.min(top.h.min(bottom.h) * 0.5);
         let (off_x, off_y) = ((x - line_x).abs(), (y - line_y).abs());
         let near_x = off_x <= reach_x && reach_x > 0.0;
         let near_y = off_y <= reach_y && reach_y > 0.0;
@@ -1519,28 +1609,29 @@ impl Layout {
         gap.clamp(placed.strip.x, placed.strip.x + placed.strip.w)
     }
 
-    /// Where a pointer at `x` puts the divider between the columns, as the
+    /// Where a pointer at `x` puts the vertical divider in `half`, as the
     /// fraction [`Shape::left_width`] is.
     ///
     /// The inverse of the arithmetic [`Layout::compute`] lays the columns out
     /// with, off the same box, so the divider lands under the pointer rather
     /// than near it. Held by the same rule as well, so a drag thrown past either
     /// end of the window stops at the floor instead of collapsing a column.
-    pub fn column_ratio_at(&self, x: f32) -> f32 {
-        let track = self.column_divider.track;
+    ///
+    /// Off the half's own divider, so dragging one line answers for that line
+    /// alone and the other half keeps the fraction it was left at.
+    pub fn column_ratio_at(&self, half: usize, x: f32) -> f32 {
+        let divider = self.column_divider[half];
+        let track = divider.track;
         let room = (track.w - GAP).max(1.0);
-        held(
-            (x - track.x - GAP * 0.5) / room,
-            room,
-            self.column_divider.floor,
-        )
+        held((x - track.x - GAP * 0.5) / room, room, divider.floor)
     }
 
-    /// The same for the divider between the two right hand spaces.
-    pub fn row_ratio_at(&self, y: f32) -> f32 {
-        let track = self.row_divider.track;
+    /// The same for the horizontal divider in `half`.
+    pub fn row_ratio_at(&self, half: usize, y: f32) -> f32 {
+        let divider = self.row_divider[half];
+        let track = divider.track;
         let room = (track.h - GAP).max(1.0);
-        held((y - track.y - GAP * 0.5) / room, room, self.row_divider.floor)
+        held((y - track.y - GAP * 0.5) / room, room, divider.floor)
     }
 
     /// Rows a panel can show. The header line is content, not scrollback.
@@ -4874,13 +4965,19 @@ mod tests {
             pane_size: 13.0,
             pane_column: 8.0,
             input_h: INPUT_H,
-            left_width: LEFT_WIDTH,
-            top_height: TOP_HEIGHT,
+            left_width: [LEFT_WIDTH; 2],
+            top_height: [TOP_HEIGHT; 2],
         }
     }
 
-    /// The same with the two dividers put where the test wants them.
+    /// The same with both halves of the grid breaking in the same place, which
+    /// is the window nobody has dragged one half away from the other.
     fn split_shape(dock: &Dock, left_width: f32, top_height: f32) -> Shape<'_> {
+        halves_shape(dock, [left_width; 2], [top_height; 2])
+    }
+
+    /// The same with each half put where the test wants it.
+    fn halves_shape(dock: &Dock, left_width: [f32; 2], top_height: [f32; 2]) -> Shape<'_> {
         Shape {
             left_width,
             top_height,
@@ -6242,7 +6339,7 @@ mod tests {
         let dock = Dock::new();
         for (left_width, top_height) in [(0.3, 0.3), (LEFT_WIDTH, TOP_HEIGHT), (0.7, 0.7)] {
             let layout = Layout::compute(1400.0, 900.0, &split_shape(&dock, left_width, top_height));
-            let body = layout.column_divider.track;
+            let body = layout.column_divider[0].track;
             let room = body.w - GAP;
             let (left_w, _) = box_of(&layout, Space::TopLeft);
             let (right_w, _) = box_of(&layout, Space::TopRight);
@@ -6256,7 +6353,9 @@ mod tests {
                 body.w
             );
 
-            let right = layout.row_divider.track;
+            // The right column's own line, which is the one its two spaces
+            // break at.
+            let right = layout.row_divider[1].track;
             let room = right.h - GAP;
             let (_, top_h) = box_of(&layout, Space::TopRight);
             let (_, bottom_h) = box_of(&layout, Space::BottomRight);
@@ -6271,10 +6370,13 @@ mod tests {
             );
 
             // And the band the pointer grabs straddles the gap it stands in.
-            assert_eq!(layout.column_divider.band.w, GAP + GRAB * 2.0);
-            assert!((layout.column_divider.band.x + GRAB - left_w - body.x).abs() <= 0.01);
-            assert_eq!(layout.row_divider.band.h, GAP + GRAB * 2.0);
-            assert!((layout.row_divider.band.y + GRAB - right.y - top_h).abs() <= 0.01);
+            assert_eq!(layout.column_divider[0].band.w, GAP + GRAB * 2.0);
+            assert!((layout.column_divider[0].band.x + GRAB - left_w - body.x).abs() <= 0.01);
+            assert_eq!(layout.row_divider[1].band.h, GAP + GRAB * 2.0);
+            assert!((layout.row_divider[1].band.y + GRAB - right.y - top_h).abs() <= 0.01);
+            // One line down the whole grid and one inside each half of it: the
+            // second vertical line is not there while the grid reads in columns.
+            assert!(!layout.column_divider[1].live());
         }
     }
 
@@ -6284,21 +6386,33 @@ mod tests {
     fn a_dragged_divider_lands_under_the_pointer() {
         let dock = Dock::new();
         let layout = Layout::compute(1400.0, 900.0, &split_shape(&dock, LEFT_WIDTH, TOP_HEIGHT));
-        let body = layout.column_divider.track;
-        let right = layout.row_divider.track;
+        let body = layout.column_divider[0].track;
+        let right = layout.row_divider[1].track;
 
         for x in [body.x + 400.0, body.x + 700.0, body.x + 1000.0] {
+            let ratio = layout.column_ratio_at(0, x);
             let moved =
-                Layout::compute(1400.0, 900.0, &split_shape(&dock, layout.column_ratio_at(x), 0.46));
+                Layout::compute(1400.0, 900.0, &halves_shape(&dock, [ratio; 2], [0.46; 2]));
             let gap = moved.placed(Space::TopLeft).strip.x + moved.placed(Space::TopLeft).strip.w;
             assert!((gap + GAP * 0.5 - x).abs() <= 1.0, "{x} put the gap at {gap}");
         }
+        // And the half that was dragged is the half that moved: the right
+        // column's line follows the pointer, the left column's stays put.
         for y in [right.y + 200.0, right.y + 400.0, right.y + 600.0] {
-            let moved =
-                Layout::compute(1400.0, 900.0, &split_shape(&dock, 0.54, layout.row_ratio_at(y)));
+            let ratio = layout.row_ratio_at(1, y);
+            let moved = Layout::compute(
+                1400.0,
+                900.0,
+                &halves_shape(&dock, [0.54; 2], [TOP_HEIGHT, ratio]),
+            );
             let top = moved.placed(Space::TopRight);
             let gap = top.body.y + top.body.h;
             assert!((gap + GAP * 0.5 - y).abs() <= 1.0, "{y} put the gap at {gap}");
+            assert_eq!(
+                moved.grid[Space::TopLeft.index()],
+                layout.grid[Space::TopLeft.index()],
+                "{y} moved the left column as well"
+            );
         }
     }
 
@@ -6309,12 +6423,12 @@ mod tests {
     fn a_divider_dragged_past_the_end_stops_at_the_floor() {
         let dock = Dock::new();
         let layout = Layout::compute(1400.0, 900.0, &split_shape(&dock, LEFT_WIDTH, TOP_HEIGHT));
-        let column_floor = layout.column_divider.floor;
-        let row_floor = layout.row_divider.floor;
+        let column_floor = layout.column_divider[0].floor;
+        let row_floor = layout.row_divider[1].floor;
         assert!(column_floor > 0.0 && row_floor > 0.0);
 
         for x in [-4000.0, -1.0, 700.0, 1401.0, 9000.0] {
-            let ratio = layout.column_ratio_at(x);
+            let ratio = layout.column_ratio_at(0, x);
             let moved = Layout::compute(1400.0, 900.0, &split_shape(&dock, ratio, TOP_HEIGHT));
             let (left_w, _) = box_of(&moved, Space::TopLeft);
             let (right_w, _) = box_of(&moved, Space::TopRight);
@@ -6322,7 +6436,7 @@ mod tests {
             assert!(right_w >= column_floor, "{x}: the right column is {right_w}");
         }
         for y in [-4000.0, -1.0, 500.0, 901.0, 9000.0] {
-            let ratio = layout.row_ratio_at(y);
+            let ratio = layout.row_ratio_at(1, y);
             let moved = Layout::compute(1400.0, 900.0, &split_shape(&dock, LEFT_WIDTH, ratio));
             let (_, top_h) = box_of(&moved, Space::TopRight);
             let (_, bottom_h) = box_of(&moved, Space::BottomRight);
@@ -6349,7 +6463,7 @@ mod tests {
         let layout = Layout::compute(320.0, 240.0, &split_shape(&dock, 0.9, 0.9));
         let (left_w, _) = box_of(&layout, Space::TopLeft);
         let (right_w, _) = box_of(&layout, Space::TopRight);
-        assert!(left_w < layout.column_divider.floor, "the floor still fits");
+        assert!(left_w < layout.column_divider[0].floor, "the floor still fits");
         assert!((left_w - right_w).abs() <= 1.0, "{left_w} against {right_w}");
         assert!(left_w > 1.0 && right_w > 1.0, "a column collapsed");
 
@@ -6367,11 +6481,11 @@ mod tests {
     #[test]
     fn a_divider_is_grabbed_by_a_band_wider_than_the_gap() {
         let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &[]);
-        let band = out.layout.column_divider.band;
+        let band = out.layout.column_divider[0].band;
         assert!(band.w > GAP, "the band is no wider than the gap");
         let y = band.y + TAB_H + 20.0;
         for x in [band.x + 0.5, band.x + band.w * 0.5, band.x + band.w - 0.5] {
-            assert_eq!(out.layout.hit(x, y), Some(Hit::ColumnDivider), "at {x}");
+            assert_eq!(out.layout.hit(x, y), Some(Hit::ColumnDivider(0)), "at {x}");
         }
         assert_eq!(out.layout.hit(band.x - 1.0, y), Some(Hit::Body(Space::TopLeft)));
         assert_eq!(
@@ -6379,11 +6493,13 @@ mod tests {
             Some(Hit::Body(Space::TopRight))
         );
 
-        let band = out.layout.row_divider.band;
+        // The right column's line, which is the half of the grid that is split
+        // in the arrangement the window opens with.
+        let band = out.layout.row_divider[1].band;
         assert!(band.h > GAP);
         let x = band.x + band.w * 0.5;
         for y in [band.y + 0.5, band.y + band.h * 0.5, band.y + band.h - 0.5] {
-            assert_eq!(out.layout.hit(x, y), Some(Hit::RowDivider), "at {y}");
+            assert_eq!(out.layout.hit(x, y), Some(Hit::RowDivider(1)), "at {y}");
         }
         assert_eq!(
             out.layout.hit(x, band.y - 1.0),
@@ -6417,8 +6533,8 @@ mod tests {
         let mut dock = Dock::new();
         dock.move_view(View::Output, Space::TopRight);
         let out = render(&busy_state(), 1200.0, 800.0, &dock, &[]);
-        assert!(!out.layout.column_divider.live());
-        assert!(out.layout.row_divider.live(), "the two right spaces are still there");
+        assert!(!out.layout.column_divider[0].live());
+        assert!(out.layout.row_divider[1].live(), "the two right spaces are still there");
         assert!(box_of(&out.layout, Space::TopRight).0 > 1000.0, "the width was handed over");
 
         // Nothing in the bottom right: one space in that column, so no divider
@@ -6428,10 +6544,10 @@ mod tests {
             dock.move_view(view, Space::TopRight);
         }
         let out = render(&busy_state(), 1200.0, 800.0, &dock, &[]);
-        assert!(out.layout.column_divider.live());
-        assert!(!out.layout.row_divider.live());
+        assert!(out.layout.column_divider[0].live());
+        assert!(out.layout.row_divider.iter().all(|line| !line.live()));
         let (_, top_h) = box_of(&out.layout, Space::TopRight);
-        let body = out.layout.column_divider.track;
+        let body = out.layout.column_divider[0].track;
         assert!((top_h - body.h).abs() <= 1.0, "the height was handed over");
 
         // A folded space is already as short as it goes: the fold owns the
@@ -6439,8 +6555,8 @@ mod tests {
         let mut dock = Dock::new();
         dock.slot_mut(Space::TopRight).folded = true;
         let out = render(&busy_state(), 1200.0, 800.0, &dock, &[]);
-        assert!(!out.layout.row_divider.live());
-        assert!(out.layout.column_divider.live(), "the columns can still be moved");
+        assert!(!out.layout.row_divider[1].live());
+        assert!(out.layout.column_divider[0].live(), "the columns can still be moved");
 
         // And with no divider under it, the point that would have been on one
         // belongs to the pane again.
@@ -6448,9 +6564,9 @@ mod tests {
         dock.move_view(View::Output, Space::TopRight);
         let out = render(&busy_state(), 1200.0, 800.0, &dock, &[]);
         let full = render(&busy_state(), 1200.0, 800.0, &Dock::new(), &[]);
-        let band = full.layout.column_divider.band;
+        let band = full.layout.column_divider[0].band;
         let (x, y) = (band.x + band.w * 0.5, band.y + TAB_H + 20.0);
-        assert_eq!(full.layout.hit(x, y), Some(Hit::ColumnDivider));
+        assert_eq!(full.layout.hit(x, y), Some(Hit::ColumnDivider(0)));
         assert_eq!(out.layout.hit(x, y), Some(Hit::Body(Space::TopRight)));
     }
 
@@ -6461,8 +6577,8 @@ mod tests {
     fn no_divider_survives_a_shape_change() {
         let dock = Dock::new();
         let open = Layout::compute(1200.0, 800.0, &split_shape(&dock, LEFT_WIDTH, TOP_HEIGHT));
-        assert!(open.column_divider.live() && open.row_divider.live());
-        let band = open.column_divider.band;
+        assert!(open.column_divider[0].live() && open.row_divider[1].live());
+        let band = open.column_divider[0].band;
         let (x, y) = (band.x + band.w * 0.5, band.y + TAB_H + 20.0);
 
         let picker = a_picker(&["src", "docs"], &[]);
@@ -6473,10 +6589,13 @@ mod tests {
             ("settings", Shape { settings: Some(&panel), ..split_shape(&dock, LEFT_WIDTH, TOP_HEIGHT) }),
         ] {
             let layout = Layout::compute(1200.0, 800.0, &shape);
-            assert!(!layout.column_divider.live(), "{what}");
-            assert!(!layout.row_divider.live(), "{what}");
+            let lines = layout.column_divider.iter().chain(layout.row_divider.iter());
+            assert!(lines.map(|line| line.live()).all(|live| !live), "{what}");
             assert!(
-                !matches!(layout.hit(x, y), Some(Hit::ColumnDivider | Hit::RowDivider)),
+                !matches!(
+                    layout.hit(x, y),
+                    Some(Hit::ColumnDivider(_) | Hit::RowDivider(_))
+                ),
                 "{what} still hits a divider"
             );
         }
@@ -6661,6 +6780,209 @@ mod tests {
         }
     }
 
+    /// Each half of the grid breaks where its own line was left. One ratio for
+    /// both halves is what made a left column split 30/70 and a right one split
+    /// 70/30 impossible, and it is the thing this buys.
+    #[test]
+    fn each_half_of_the_grid_breaks_where_its_own_line_was_left() {
+        let dock = Dock::new();
+        let layout =
+            Layout::compute(1400.0, 900.0, &halves_shape(&dock, [LEFT_WIDTH; 2], [0.3, 0.7]));
+        let at = |space: Space| layout.grid[space.index()];
+        // What the two cells of a column share, gap included, is what a ratio is
+        // a fraction of.
+        let room = at(Space::TopLeft).h + at(Space::BottomLeft).h;
+        assert!(
+            (at(Space::TopLeft).h - room * 0.3).abs() <= 1.0,
+            "the left column is {:?} of {room}",
+            at(Space::TopLeft).h
+        );
+        assert!(
+            (at(Space::TopRight).h - room * 0.7).abs() <= 1.0,
+            "the right column is {:?} of {room}",
+            at(Space::TopRight).h
+        );
+        assert!(
+            at(Space::TopRight).h - at(Space::TopLeft).h > 100.0,
+            "the two columns still break together"
+        );
+        // Both columns still fill the body, and the width is untouched: one
+        // line runs the whole way down, so the columns line up as they did.
+        for column in 0..2 {
+            let (top, bottom) = (Space::at(0, column), Space::at(1, column));
+            assert!((at(top).h + at(bottom).h - room).abs() <= 1.0, "{column}");
+            assert_eq!(at(top).w, at(bottom).w, "{column}");
+            assert_eq!(at(top).x, at(bottom).x, "{column}");
+        }
+    }
+
+    /// The two lines are dragged apart: each band says which half it belongs to,
+    /// each ratio comes off that half's own track, and moving one leaves the
+    /// other exactly where it was.
+    #[test]
+    fn the_two_halves_are_dragged_apart_and_neither_moves_the_other() {
+        let mut dock = Dock::new();
+        dock.move_view(View::Debug, Space::BottomLeft);
+        let start = Layout::compute(1400.0, 900.0, &split_shape(&dock, LEFT_WIDTH, TOP_HEIGHT));
+        assert!(
+            start.row_divider[0].live() && start.row_divider[1].live(),
+            "both columns are split, so both have a line"
+        );
+        for half in 0..2 {
+            let band = start.row_divider[half].band;
+            let (x, y) = (band.x + band.w * 0.5, band.y + band.h * 0.5);
+            assert_eq!(start.hit(x, y), Some(Hit::RowDivider(half)), "half {half}");
+        }
+
+        // The left column's line dragged up and the right column's down.
+        let track = start.row_divider[0].track;
+        let (up, down) = (track.y + track.h * 0.3, track.y + track.h * 0.7);
+        let ratios = [start.row_ratio_at(0, up), start.row_ratio_at(1, down)];
+        let moved = Layout::compute(1400.0, 900.0, &halves_shape(&dock, [LEFT_WIDTH; 2], ratios));
+        let line_of = |layout: &Layout, space: Space| {
+            let cell = layout.grid[space.index()];
+            cell.y + cell.h + GAP * 0.5
+        };
+        assert!((line_of(&moved, Space::TopLeft) - up).abs() <= 1.0);
+        assert!((line_of(&moved, Space::TopRight) - down).abs() <= 1.0);
+
+        // And with only the right column's ratio changed, the left column's
+        // cells are the ones it started with, to the pixel.
+        let one = Layout::compute(
+            1400.0,
+            900.0,
+            &halves_shape(&dock, [LEFT_WIDTH; 2], [TOP_HEIGHT, ratios[1]]),
+        );
+        for space in [Space::TopLeft, Space::BottomLeft] {
+            assert_eq!(
+                one.grid[space.index()],
+                start.grid[space.index()],
+                "{space:?} moved with the other column"
+            );
+        }
+        assert_eq!(
+            one.grid[Space::TopRight.index()],
+            moved.grid[Space::TopRight.index()],
+            "the right column did not take its own drag"
+        );
+    }
+
+    /// A drop near a line is read off the line of the half the pointer is over.
+    ///
+    /// The quiet one. Reading the first cell's line wherever the pointer is
+    /// still compiles and still answers, and with the two columns breaking at
+    /// heights of their own it answers with the wrong pair.
+    #[test]
+    fn a_drop_reads_the_line_of_the_half_the_pointer_is_over() {
+        let mut dock = Dock::new();
+        dock.move_view(View::Debug, Space::BottomLeft);
+        let layout =
+            Layout::compute(1400.0, 900.0, &halves_shape(&dock, [LEFT_WIDTH; 2], [0.3, 0.7]));
+        let at = |space: Space| layout.grid[space.index()];
+        let line_of = |space: Space| at(space).y + at(space).h + GAP * 0.5;
+        let (left_line, right_line) = (line_of(Space::TopLeft), line_of(Space::TopRight));
+        assert!(
+            right_line - left_line > SPAN_BAND * 4.0,
+            "the two lines are not far enough apart to tell the readings apart"
+        );
+        let over = |space: Space| at(space).x + at(space).w * 0.5;
+        let (over_left, over_right) = (over(Space::TopLeft), over(Space::TopRight));
+
+        // On the left column's line the left pair is the answer, and at the same
+        // height the right column is not near a line at all.
+        assert_eq!(
+            layout.landing(over_left, left_line),
+            Landing::Span(Space::TopLeft, Space::BottomLeft)
+        );
+        assert_eq!(
+            layout.landing(over_right, left_line),
+            Landing::In(Space::TopRight, None),
+            "the right column was read off the left column's line"
+        );
+        // And the other way round on the right column's line.
+        assert_eq!(
+            layout.landing(over_right, right_line),
+            Landing::Span(Space::TopRight, Space::BottomRight)
+        );
+        assert_eq!(
+            layout.landing(over_left, right_line),
+            Landing::In(Space::BottomLeft, None)
+        );
+
+        // And with the two columns out of step there is still no hole: every
+        // point in the room the panes share names a cell or a pair, including
+        // the two gaps, which are no longer at the same height.
+        let whole = around(at(Space::TopLeft), at(Space::BottomRight));
+        let mut x = whole.x;
+        while x < whole.x + whole.w {
+            let mut y = whole.y + TAB_H + 1.0;
+            while y < whole.y + whole.h {
+                assert!(
+                    matches!(layout.landing(x, y), Landing::In(..) | Landing::Span(..)),
+                    "nothing at {x},{y}"
+                );
+                y += 7.0;
+            }
+            x += 11.0;
+        }
+    }
+
+    /// Turned the other way round, the two lines inside the halves are the
+    /// vertical ones, one per row, and the single line across the grid is the
+    /// horizontal one. The transpose is what keeps this one rule.
+    #[test]
+    fn the_two_lines_inside_the_halves_turn_with_the_grid() {
+        let mut dock = Dock::new();
+        // A span across a row turns the grid; the cells it emptied are filled
+        // again so both rows have two panes to divide.
+        assert!(dock.span_view(View::Files, Space::TopLeft, Space::TopRight));
+        assert!(dock.move_view(View::Session, Space::TopRight));
+        assert!(dock.move_view(View::Files, Space::BottomLeft));
+        assert!(dock.rows_first(), "a tab moved does not turn the grid back");
+
+        let layout =
+            Layout::compute(1400.0, 900.0, &halves_shape(&dock, [0.3, 0.7], [TOP_HEIGHT; 2]));
+        let at = |space: Space| layout.grid[space.index()];
+        let room = at(Space::TopLeft).w + at(Space::TopRight).w;
+        assert!((at(Space::TopLeft).w - room * 0.3).abs() <= 1.0, "the top row");
+        assert!(
+            (at(Space::BottomLeft).w - room * 0.7).abs() <= 1.0,
+            "the bottom row"
+        );
+        assert_eq!(
+            at(Space::TopLeft).h,
+            at(Space::TopRight).h,
+            "one line runs across the whole grid"
+        );
+        assert!(
+            layout.column_divider[0].live() && layout.column_divider[1].live(),
+            "a vertical line for each row"
+        );
+        assert!(layout.row_divider[0].live());
+        assert!(!layout.row_divider[1].live(), "one horizontal line, not two");
+        for row in 0..2 {
+            let band = layout.column_divider[row].band;
+            let (x, y) = (band.x + band.w * 0.5, band.y + band.h * 0.5);
+            assert_eq!(layout.hit(x, y), Some(Hit::ColumnDivider(row)), "row {row}");
+        }
+
+        // And a drop near the top row's line is read off the row the pointer is
+        // in, the same way it is read off the column when the grid reads in
+        // columns.
+        let top = at(Space::TopLeft);
+        let line = top.x + top.w + GAP * 0.5;
+        assert_eq!(
+            layout.landing(line, top.y + top.h - 4.0),
+            Landing::Span(Space::TopLeft, Space::TopRight)
+        );
+        let bottom = at(Space::BottomLeft);
+        assert_eq!(
+            layout.landing(line, bottom.y + bottom.h * 0.5),
+            Landing::In(Space::BottomLeft, None),
+            "the bottom row was read off the top row's line"
+        );
+    }
+
     /// A divider is as long as the panes it divides. With one column standing
     /// empty the two panes in the other one are full width, so the line between
     /// them is too, and it can be grabbed at either end of the window.
@@ -6681,14 +7003,14 @@ mod tests {
             dock.move_view(view, Space::BottomLeft);
         }
         let layout = Layout::compute(1200.0, 800.0, &shape(&dock, &[]));
-        assert!(!layout.column_divider.live(), "there is one column");
-        assert!(layout.row_divider.live());
-        let (band, body) = (layout.row_divider.band, layout.row_divider.track);
+        assert!(!layout.column_divider[0].live(), "there is one column");
+        assert!(layout.row_divider[0].live());
+        let (band, body) = (layout.row_divider[0].band, layout.row_divider[0].track);
         assert!((band.x - body.x).abs() < 0.01, "{band:?} in {body:?}");
         assert!((band.w - body.w).abs() < 0.01, "{band:?} in {body:?}");
         let y = band.y + band.h * 0.5;
         for x in [band.x + 1.0, band.x + band.w - 1.0] {
-            assert_eq!(layout.hit(x, y), Some(Hit::RowDivider), "at {x}");
+            assert_eq!(layout.hit(x, y), Some(Hit::RowDivider(0)), "at {x}");
         }
     }
 
@@ -6719,13 +7041,56 @@ mod tests {
             );
         }
         // The line inside the folded column has nothing to drag; the one inside
-        // the other column still has.
-        assert!(folded.row_divider.live());
-        assert!(
-            folded.row_divider.band.x >= folded.grid[Space::TopRight.index()].x - 0.01,
-            "the band reaches over the column the fold owns: {:?}",
-            folded.row_divider.band
+        // the other column still has, and it is a line of its own now rather
+        // than the same line reaching over both columns.
+        assert!(!folded.row_divider[0].live(), "the fold owns where it sits");
+        assert!(folded.row_divider[1].live(), "the other column can still move");
+        assert_eq!(
+            folded.row_divider[1].band.x,
+            folded.grid[Space::TopRight.index()].x,
+            "the line left standing is the right column's alone"
         );
+    }
+
+    /// A folded half keeps the ratio it was left at. The fold decides where the
+    /// line sits while it lasts, and the number underneath is untouched, so
+    /// opening the pane again finds the line where it was rather than snapping
+    /// it to the other column's.
+    #[test]
+    fn a_folded_half_gets_its_own_line_back_when_it_opens() {
+        let mut dock = Dock::new();
+        dock.move_view(View::Debug, Space::BottomLeft);
+        let halves = [0.3, 0.7];
+        let open = Layout::compute(
+            1200.0,
+            800.0,
+            &halves_shape(&dock, [LEFT_WIDTH; 2], halves),
+        );
+        dock.slot_mut(Space::TopLeft).folded = true;
+        let folded = Layout::compute(
+            1200.0,
+            800.0,
+            &halves_shape(&dock, [LEFT_WIDTH; 2], halves),
+        );
+        // While it is folded the pane is its strip and the one under it has the
+        // rest, whatever the ratio says.
+        assert_eq!(folded.placed(Space::TopLeft).body.h, 0.0);
+        assert!(!folded.row_divider[0].live());
+
+        dock.slot_mut(Space::TopLeft).folded = false;
+        let opened = Layout::compute(
+            1200.0,
+            800.0,
+            &halves_shape(&dock, [LEFT_WIDTH; 2], halves),
+        );
+        for space in Space::ALL {
+            assert_eq!(
+                opened.placed(space).body,
+                open.placed(space).body,
+                "{space:?} came back somewhere else"
+            );
+        }
+        assert!(opened.row_divider[0].live(), "the line is draggable again");
     }
 
     /// A drop is read off the grid: inside a cell it takes that one cell, and on
@@ -7587,8 +7952,8 @@ mod tests {
                 pane_size: 13.0,
                 pane_column,
                 input_h: INPUT_H,
-                left_width: LEFT_WIDTH,
-                top_height: TOP_HEIGHT,
+                left_width: [LEFT_WIDTH; 2],
+                top_height: [TOP_HEIGHT; 2],
             };
             let layout = Layout::compute(1400.0, 900.0, &shape);
             let skin = Skin::from(&Config::default());
@@ -7684,8 +8049,8 @@ mod tests {
             pane_size: 13.0,
             pane_column: 8.0,
             input_h: INPUT_H,
-            left_width: LEFT_WIDTH,
-            top_height: TOP_HEIGHT,
+            left_width: [LEFT_WIDTH; 2],
+            top_height: [TOP_HEIGHT; 2],
         };
         let layout = Layout::compute(1400.0, 900.0, &shape);
         let skin = Skin::from(&Config::default());

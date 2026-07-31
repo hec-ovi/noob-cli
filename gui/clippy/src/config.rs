@@ -32,12 +32,19 @@ pub struct Config {
     pub pane_font_size: f32,
     /// The tallest the prompt grows before it scrolls inside itself, in rows.
     pub max_input_rows: usize,
-    /// How much of the window's width the left column takes, and how much of
-    /// the right column's height the top space takes. Where the two dividers
-    /// were left, so the arrangement survives a restart the way every other
-    /// preference in this window does.
+    /// Where the dividers were left, so the arrangement survives a restart the
+    /// way every other preference in this window does.
+    ///
+    /// Four, because each half of the grid has a line of its own: `left_width`
+    /// is how much of the width the left column takes and `left_width_bottom`
+    /// the same in the bottom row, `top_height` how much of the height the top
+    /// space takes in the left column and `top_height_right` the same in the
+    /// right one. Only three are live at once, since one line always runs the
+    /// whole way across.
     pub left_width: f32,
+    pub left_width_bottom: f32,
     pub top_height: f32,
+    pub top_height_right: f32,
 
     pub accent: [u8; 3],
     pub text: [u8; 3],
@@ -80,7 +87,9 @@ impl Default for Config {
             pane_font_size: 13.0,
             max_input_rows: 8,
             left_width: crate::view::LEFT_WIDTH,
+            left_width_bottom: crate::view::LEFT_WIDTH,
             top_height: crate::view::TOP_HEIGHT,
+            top_height_right: crate::view::TOP_HEIGHT,
             accent: [0x7c, 0xd8, 0x94],
             text: [0x9a, 0xd6, 0xac],
             dim: [0x58, 0x96, 0x6e],
@@ -279,7 +288,9 @@ pub fn keys() -> Vec<&'static str> {
         "pane_font_size",
         "max_input_rows",
         "left_width",
+        "left_width_bottom",
         "top_height",
+        "top_height_right",
         "theme",
         "accent",
         "text",
@@ -490,8 +501,16 @@ impl Config {
                     &mut config.left_width,
                     number(&value).map(|n| n.clamp(SPLIT_LOW, SPLIT_HIGH)),
                 ),
+                "left_width_bottom" => set(
+                    &mut config.left_width_bottom,
+                    number(&value).map(|n| n.clamp(SPLIT_LOW, SPLIT_HIGH)),
+                ),
                 "top_height" => set(
                     &mut config.top_height,
+                    number(&value).map(|n| n.clamp(SPLIT_LOW, SPLIT_HIGH)),
+                ),
+                "top_height_right" => set(
+                    &mut config.top_height_right,
                     number(&value).map(|n| n.clamp(SPLIT_LOW, SPLIT_HIGH)),
                 ),
                 "accent" => set(&mut config.accent, color(&value)),
@@ -829,13 +848,18 @@ pane_font_size = 13     # the activity, plan, agents and file panes
 # itself rather than taking more of the conversation.
 max_input_rows = 8
 
-# Where the two dividers sit. The first is how much of the width the left column
-# takes, the second how much of the right column's height the top space takes.
-# Dragging a divider writes them back here, so the arrangement survives a
-# restart. A space is never dragged below the room it needs to be read, whatever
-# these say.
+# Where the dividers sit, as fractions. One line runs the whole way across the
+# grid and each half of it is then cut by a line of its own, so the left column
+# and the right one can break at different heights. left_width is the left
+# column's width and left_width_bottom the same in the bottom row; top_height is
+# the top space's height in the left column and top_height_right the same in the
+# right one. Dragging a divider writes it back here, so the arrangement survives
+# a restart. A space is never dragged below the room it needs to be read,
+# whatever these say.
 left_width = 0.54
+left_width_bottom = 0.54
 top_height = 0.46
+top_height_right = 0.46
 
 # The whole palette, by name: noob, amber, ice, plum.
 theme = noob
@@ -927,7 +951,7 @@ mod tests {
         for key in keys() {
             assert!(named.contains(&key.to_string()), "{key} is undocumented");
         }
-        assert_eq!(keys().len(), 46, "a new key needs a line in the file");
+        assert_eq!(keys().len(), 48, "a new key needs a line in the file");
     }
 
     /// The commented colors are the noob theme spelled out. A stale hex there
@@ -1010,15 +1034,29 @@ mod tests {
         assert_eq!(mad.unknown, ["top_height", "left_width"]);
 
         // Through the writer and back, which is the round trip a drag makes.
+        // All four halves, each its own key: a drag of one line must not be
+        // read back as a drag of the line beside it.
         let scratch = Scratch::new("dividers");
         let _ = Config::load_from(&scratch.conf());
-        write_setting(&scratch.conf(), "left_width", Some("0.317")).unwrap();
-        write_setting(&scratch.conf(), "top_height", Some("0.628")).unwrap();
+        for (key, value) in [
+            ("left_width", "0.317"),
+            ("left_width_bottom", "0.742"),
+            ("top_height", "0.628"),
+            ("top_height_right", "0.211"),
+        ] {
+            write_setting(&scratch.conf(), key, Some(value)).unwrap();
+        }
         let after = Config::load_from(&scratch.conf());
         assert_eq!(after.left_width, 0.317);
+        assert_eq!(after.left_width_bottom, 0.742);
         assert_eq!(after.top_height, 0.628);
+        assert_eq!(after.top_height_right, 0.211);
+        // The new pair is clamped by the same rule as the old one.
+        let far = Config::parse("left_width_bottom = 0\ntop_height_right = 9\n");
+        assert_eq!(far.left_width_bottom, SPLIT_LOW);
+        assert_eq!(far.top_height_right, SPLIT_HIGH);
         // And the file the drag wrote through still documents itself.
-        assert!(scratch.read().contains("# Where the two dividers sit"), "{}", scratch.read());
+        assert!(scratch.read().contains("# Where the dividers sit"), "{}", scratch.read());
     }
 
     /// A typo must be visible. Silently ignoring it is how a setting someone

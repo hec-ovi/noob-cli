@@ -244,10 +244,16 @@ const LOOKS: [(&str, Kind); 5] = [
 const PANE_SETTINGS: [(&str, Kind); 2] =
     [("show_activity", Kind::Flag), ("show_files", Kind::Flag)];
 
-/// The same two numbers the dividers write when they are dragged. Here as well
+/// The same four numbers the dividers write when they are dragged. Here as well
 /// because a pointer is not the only way anyone works, and because a value that
 /// only a drag can reach is a value nobody can read off the window.
-const DIVIDERS: [(&str, Kind); 2] = [
+///
+/// All four whichever way the grid is reading. One line always runs the whole
+/// way across, so one of these is not on screen as a line at any given moment;
+/// it is still the number that line will take when the grid turns round, and a
+/// row that disappeared and came back would read as a setting that comes and
+/// goes.
+const DIVIDERS: [(&str, Kind); 4] = [
     (
         "left_width",
         Kind::Number {
@@ -258,7 +264,25 @@ const DIVIDERS: [(&str, Kind); 2] = [
         },
     ),
     (
+        "left_width_bottom",
+        Kind::Number {
+            step: 0.05,
+            low: config::SPLIT_LOW,
+            high: config::SPLIT_HIGH,
+            places: 2,
+        },
+    ),
+    (
         "top_height",
+        Kind::Number {
+            step: 0.05,
+            low: config::SPLIT_LOW,
+            high: config::SPLIT_HIGH,
+            places: 2,
+        },
+    ),
+    (
+        "top_height_right",
         Kind::Number {
             step: 0.05,
             low: config::SPLIT_LOW,
@@ -1183,7 +1207,9 @@ fn value_of(config: &Config, key: &str, kind: Kind) -> String {
                 "font_size" => config.font_size,
                 "pane_font_size" => config.pane_font_size,
                 "left_width" => config.left_width,
+                "left_width_bottom" => config.left_width_bottom,
                 "top_height" => config.top_height,
+                "top_height_right" => config.top_height_right,
                 // Unreachable through the groups, and a number is the honest
                 // answer for a row that says it is one.
                 _ => 0.0,
@@ -1785,7 +1811,9 @@ mod tests {
             "pane_font_size",
             "max_input_rows",
             "left_width",
+            "left_width_bottom",
             "top_height",
+            "top_height_right",
         ] {
             for forward in [false, true] {
                 put_cursor(&mut panel, key);

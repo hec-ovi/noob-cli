@@ -433,7 +433,7 @@ fn menu_for(
         | Hit::SettingsClose => None,
         // A divider is the gap between two widgets and belongs to neither of
         // them, so there is no one widget for a menu opened here to act on.
-        Hit::ColumnDivider | Hit::RowDivider => None,
+        Hit::ColumnDivider(_) | Hit::RowDivider(_) => None,
     }
 }
 
@@ -675,18 +675,24 @@ struct App {
     /// press, motion, release cycle the tabs use, and only one of the two can be
     /// running at a time because a press lands on exactly one thing.
     ///
-    /// Only ever [`Hit::ColumnDivider`] or [`Hit::RowDivider`].
+    /// Only ever a [`Hit::ColumnDivider`] or a [`Hit::RowDivider`], and the
+    /// half of the grid it carries says which of the two lines on that axis is
+    /// moving.
     sizing: Option<Hit>,
     /// The settings row whose slider the button came down on, while it is being
     /// dragged. The same cycle again, on the panel: the value follows the
     /// pointer and the file is written once, when the button comes up.
     sliding: Option<usize>,
-    /// Where the two dividers are, as fractions: how much of the width the left
-    /// column takes, and how much of the right column's height the top space
-    /// takes. Read out of the settings file at launch and written back when a
-    /// drag ends.
-    left_width: f32,
-    top_height: f32,
+    /// Where the dividers are, as fractions: how much of the width the left
+    /// column takes in each row, and how much of the height the top space takes
+    /// in each column. Read out of the settings file at launch and written back
+    /// when a drag ends.
+    ///
+    /// A pair each because each half of the grid breaks where it was dragged to,
+    /// and the half whose line is not on screen keeps its number so turning the
+    /// grid round finds it again.
+    left_width: [f32; 2],
+    top_height: [f32; 2],
     /// True while the button is down inside a pane, so pointer motion extends
     /// the selection instead of merely moving the cursor.
     selecting: bool,
@@ -745,8 +751,8 @@ impl App {
         }
         App {
             dock: Dock::hiding(&hidden),
-            left_width: config.left_width,
-            top_height: config.top_height,
+            left_width: [config.left_width, config.left_width_bottom],
+            top_height: [config.top_height, config.top_height_right],
             window: None,
             gpu: None,
             renderer: None,
@@ -1311,8 +1317,8 @@ impl App {
         self.config = config;
         // A ratio changed on the panel is a divider moved, so the window takes
         // it the way it takes a colour: the file is what both of them read.
-        self.left_width = self.config.left_width;
-        self.top_height = self.config.top_height;
+        self.left_width = [self.config.left_width, self.config.left_width_bottom];
+        self.top_height = [self.config.top_height, self.config.top_height_right];
         self.restyle();
         for (view, wanted) in panes {
             match wanted {
@@ -1826,7 +1832,7 @@ impl App {
             // Pressed, not clicked, the way a tab is: what a divider does
             // happens while the pointer moves, and letting go of one that never
             // moved has to leave the window exactly as it found it.
-            Hit::ColumnDivider | Hit::RowDivider => self.sizing = Some(hit),
+            Hit::ColumnDivider(_) | Hit::RowDivider(_) => self.sizing = Some(hit),
             Hit::File(index, _) => {
                 self.state.show_file(index);
                 self.dirty = true;
@@ -2262,9 +2268,19 @@ impl App {
         };
         let layout = self.layout();
         let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
+        // The half the press landed on and no other: dragging one line leaves
+        // the one beside it exactly where it was.
         let (slot, next) = match grip {
-            Hit::RowDivider => (&mut self.top_height, layout.row_ratio_at(y)),
-            _ => (&mut self.left_width, layout.column_ratio_at(x)),
+            Hit::RowDivider(half) => (
+                &mut self.top_height[half],
+                layout.row_ratio_at(half, y),
+            ),
+            Hit::ColumnDivider(half) => (
+                &mut self.left_width[half],
+                layout.column_ratio_at(half, x),
+            ),
+            // `sizing` is only ever one of the two.
+            _ => return,
         };
         if (*slot - next).abs() < f32::EPSILON {
             return;
@@ -2273,15 +2289,23 @@ impl App {
         self.dirty = true;
     }
 
+    /// Where the divider under `grip` is now, as the fraction its key holds.
+    fn divider_ratio(&self, grip: Hit) -> Option<f32> {
+        match grip {
+            Hit::ColumnDivider(half) => self.left_width.get(half).copied(),
+            Hit::RowDivider(half) => self.top_height.get(half).copied(),
+            _ => None,
+        }
+    }
+
     /// Write where a divider was left into the settings file.
     ///
     /// Through the same writer every other setting goes through, so the comments
     /// in the file survive a drag. A file that cannot be written is said once, in
     /// the activity pane, rather than silently losing the arrangement.
     fn remember_divider(&mut self, grip: Hit) {
-        let (key, ratio) = match grip {
-            Hit::RowDivider => ("top_height", self.top_height),
-            _ => ("left_width", self.left_width),
+        let (Some(key), Some(ratio)) = (divider_key(grip), self.divider_ratio(grip)) else {
+            return;
         };
         let Some(path) = config::path() else {
             return;
@@ -2291,8 +2315,10 @@ impl App {
         let value = format!("{ratio:.3}");
         match config::write_setting(&path, key, Some(&value)) {
             Ok(()) => match key {
+                "left_width" => self.config.left_width = ratio,
+                "left_width_bottom" => self.config.left_width_bottom = ratio,
                 "top_height" => self.config.top_height = ratio,
-                _ => self.config.left_width = ratio,
+                _ => self.config.top_height_right = ratio,
             },
             Err(why) => self
                 .state
@@ -2956,6 +2982,21 @@ impl ApplicationHandler<Wake> for App {
 /// outside six pixels, and both dividers stand inside the panes).
 ///
 /// Pure so the rule can be tested without a compositor, like [`land`].
+/// Which setting a divider writes when a drag of it ends.
+///
+/// One key per line rather than one per axis, so the two halves of an axis are
+/// remembered apart: dragging the line over the right column has to leave the
+/// one over the left column alone in the file as well as on screen.
+fn divider_key(grip: Hit) -> Option<&'static str> {
+    match grip {
+        Hit::ColumnDivider(0) => Some("left_width"),
+        Hit::ColumnDivider(_) => Some("left_width_bottom"),
+        Hit::RowDivider(0) => Some("top_height"),
+        Hit::RowDivider(_) => Some("top_height_right"),
+        _ => None,
+    }
+}
+
 fn cursor_for(
     dragging: bool,
     landing: Landing,
@@ -2969,8 +3010,8 @@ fn cursor_for(
         };
     }
     match over {
-        Some(Hit::ColumnDivider) => return CursorIcon::ColResize,
-        Some(Hit::RowDivider) => return CursorIcon::RowResize,
+        Some(Hit::ColumnDivider(_)) => return CursorIcon::ColResize,
+        Some(Hit::RowDivider(_)) => return CursorIcon::RowResize,
         _ => {}
     }
     match edge {
@@ -3339,8 +3380,8 @@ mod tests {
                 noob_draw::Text::line_for(SIZE),
                 Config::default().max_input_rows,
             ),
-            left_width: Config::default().left_width,
-            top_height: Config::default().top_height,
+            left_width: [Config::default().left_width; 2],
+            top_height: [Config::default().top_height; 2],
         };
         Layout::compute(w, h, &shape)
     }
@@ -3964,14 +4005,16 @@ mod tests {
 
         let dock = Dock::new();
         let layout = laid_out_at(&dock, None, 0, 1200.0, 800.0);
-        let column = layout.column_divider.band;
-        let row = layout.row_divider.band;
+        let column = layout.column_divider[0].band;
+        // The right column's line: it is the half of the grid the window opens
+        // with split, and each half now carries a line of its own.
+        let row = layout.row_divider[1].band;
         let at = |panel: noob_draw::Panel| {
             let (x, y) = middle(panel);
             layout.hit(x, y)
         };
-        assert_eq!(at(column), Some(Hit::ColumnDivider));
-        assert_eq!(at(row), Some(Hit::RowDivider));
+        assert_eq!(at(column), Some(Hit::ColumnDivider(0)));
+        assert_eq!(at(row), Some(Hit::RowDivider(1)));
         assert_eq!(
             cursor_for(false, Landing::Nowhere, None, at(column)),
             CursorIcon::ColResize
@@ -3982,7 +4025,7 @@ mod tests {
         );
         // A drag that ran onto the border is still that drag.
         assert_eq!(
-            cursor_for(false, Landing::Nowhere, Some(Dir::West), Some(Hit::ColumnDivider)),
+            cursor_for(false, Landing::Nowhere, Some(Dir::West), Some(Hit::ColumnDivider(0))),
             CursorIcon::ColResize
         );
         // Off the band it is the ordinary pointer again, and the border still
@@ -3998,9 +4041,33 @@ mod tests {
         // And a tab in the air outranks both: what the drop will do is the more
         // urgent answer, and the button is already down.
         assert_eq!(
-            cursor_for(true, Landing::Out, None, Some(Hit::ColumnDivider)),
+            cursor_for(true, Landing::Out, None, Some(Hit::ColumnDivider(0))),
             CursorIcon::Crosshair
         );
+    }
+
+    /// Each line writes a key of its own, so a drag of one is not read back at
+    /// the next launch as a drag of the line beside it.
+    #[test]
+    fn each_divider_remembers_its_own_half() {
+        let keys = config::keys();
+        let mut written = Vec::new();
+        for grip in [
+            Hit::ColumnDivider(0),
+            Hit::ColumnDivider(1),
+            Hit::RowDivider(0),
+            Hit::RowDivider(1),
+        ] {
+            let key = divider_key(grip).unwrap_or_else(|| panic!("{grip:?} writes nothing"));
+            assert!(keys.contains(&key), "{key} is not a key the file carries");
+            written.push(key);
+        }
+        written.sort_unstable();
+        written.dedup();
+        assert_eq!(written.len(), 4, "two of the four lines share a key");
+        // And nothing that is not a divider writes one of them.
+        assert_eq!(divider_key(Hit::Body(Space::TopLeft)), None);
+        assert_eq!(divider_key(Hit::TitleBar), None);
     }
 
     /// The landing the cursor is driven from is the layout's own, so the shape
