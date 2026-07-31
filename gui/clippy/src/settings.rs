@@ -134,6 +134,16 @@
 //! block of the colour with a plain-words label beside it, grouped under the
 //! headings they belong to. Pressing one says which key in the file writes it,
 //! which is the only thing a hex string was there for.
+//!
+//! **The palette block says where its colours came from.** "colors as theme
+//! groups i did not saw on the setup, i just sawe many colors, so i dont know":
+//! the grid opened as a wall of swatches with nothing on it saying what had set
+//! them. The `theme` row is the first row of the block now, directly over the
+//! colours it writes, with one line under it naming the theme those colours
+//! belong to and saying that a colour written in the file overrides it for that
+//! key alone. Each group is headed with what it paints rather than with the key
+//! it is stored under: the window's own tones, the code colours, the tool marks,
+//! the meters.
 
 use std::path::{Path, PathBuf};
 
@@ -565,6 +575,12 @@ const CUSTOM: &str = "custom";
 /// which reads as a value that failed to load rather than one nobody set.
 pub const UNSET: &str = "not set";
 
+/// The key that picks a preset, named here because two places want it: the row
+/// is built with the rest of [`LOOKS`] and then drawn at the top of the palette
+/// block instead of with the sizes, since it is what writes every colour under
+/// it.
+const THEME: &str = "theme";
+
 /// The settings of the window's own file that two arrow keys can cover, grouped
 /// the way their sections list them.
 ///
@@ -574,7 +590,7 @@ pub const UNSET: &str = "not set";
 /// in neither list, which is what stops a setting being added to the file and
 /// forgotten here.
 const LOOKS: [(&str, Kind); 5] = [
-    ("theme", Kind::Choice(&config::THEMES)),
+    (THEME, Kind::Choice(&config::THEMES)),
     (
         "opacity",
         Kind::Number {
@@ -707,7 +723,10 @@ const SYNTAX_TONES: usize = 5;
 /// which is when the key is the thing being asked for.
 ///
 /// Every key in [`colours`] is answered here.
-/// `every_colour_says_what_it_colours` fails on one that is not.
+/// `every_colour_says_what_it_colours` fails on one that is not, and on a label
+/// that is the key said again: `gauge_7` reading "reading 7" is the key with a
+/// word in front of it, which is what these ten were before they were the
+/// readings that actually wear them.
 fn about(key: &str) -> &'static str {
     match key {
         "accent" => "the accent",
@@ -737,20 +756,40 @@ fn about(key: &str) -> &'static str {
         "tool_agent" => "a subagent",
         "tool_plan" => "planning",
         "tool_other" => "anything else",
-        "gauge_1" => "reading 1",
-        "gauge_2" => "reading 2",
-        "gauge_3" => "reading 3",
-        "gauge_4" => "reading 4",
-        "gauge_5" => "reading 5",
-        "gauge_6" => "reading 6",
-        "gauge_7" => "reading 7",
-        "gauge_8" => "reading 8",
-        "gauge_9" => "reading 9",
-        "gauge_10" => "reading 10",
+        // Which readings wear which slot is `monitor`'s to say: its `HUE_*`
+        // constants are these ten in this order, and a slot no reading wears is
+        // spare rather than given a name it does not have.
+        // `every_meter_says_which_readings_wear_it` fails on a label that has
+        // come apart from the readings.
+        "gauge_1" => "the gpu meter",
+        "gauge_2" => "the vram meter",
+        "gauge_3" => "gtt and generated",
+        "gauge_4" => "the decode rate",
+        "gauge_5" => "the context meter",
+        "gauge_6" => "cpu and cached",
+        "gauge_7" => "ram and prefilled",
+        "gauge_8" => "the prefill rate",
+        "gauge_9" => "spare meter",
+        "gauge_10" => "the other spare",
         // A colour added to the file and not to this list. Said rather than
         // left blank, and `every_colour_says_what_it_colours` fails on it so it
         // is not a label anybody sees.
         _ => "a colour of its own",
+    }
+}
+
+/// The one line under the theme row: whose colours these are, and what a colour
+/// written in the file does to that.
+///
+/// It names the theme the row above it is showing, [`CUSTOM`] included, because
+/// the complaint this answers was a grid of colours with nothing on it saying
+/// where they came from. Short enough to be read on the row it is drawn on: a
+/// note is clipped rather than wrapped, so a second sentence would be the half
+/// nobody sees.
+fn palette_line(config: &Config) -> String {
+    match theme_name(config) {
+        CUSTOM => String::from("these colours are custom: a colour in the file overrode its theme"),
+        name => format!("the {name} theme set these; a colour in the file overrides its key"),
     }
 }
 
@@ -1345,28 +1384,51 @@ impl Settings {
     /// own headings, because a palette is what the window looks like. The two
     /// groups PANES held are not here and are not anywhere: see [`OFF_PANEL`]
     /// for which keys those were and what sets them instead.
+    ///
+    /// The sizes are the rows above the palette; [`THEME`] is not one of them
+    /// even though it is written into [`LOOKS`] with them, because it belongs
+    /// over the colours it sets ([`Settings::colour_rows`]).
     fn appearance_rows(&self, config: &Config) -> Vec<Row> {
-        let mut rows = settings_rows(config, &LOOKS);
+        let mut rows: Vec<Row> = settings_rows(config, &LOOKS)
+            .into_iter()
+            .filter(|row| !matches!(row, Row::Setting { key, .. } if *key == THEME))
+            .collect();
         rows.extend(self.colour_rows(config));
         rows
     }
 
-    /// The palette, as a grid: one heading per group and then that group's
-    /// colours [`SWATCH_COLUMNS`] to a row.
+    /// The palette, as a grid: the theme that set it, a line saying so, then one
+    /// heading per group and that group's colours [`SWATCH_COLUMNS`] to a row.
     ///
     /// It was one colour per row, thirty seven rows of hex string. That is four
     /// screens of a column half of which is empty, and no row said what it
     /// coloured. Grouped blocks of labelled blocks read as a palette, which is
     /// what this is.
+    ///
+    /// The theme row and the line under it are what makes the grid readable at
+    /// all: with the sizes carrying `theme` several rows up, the block opened as
+    /// swatches nobody could act on, since nothing on it said the colours were a
+    /// preset's or what would change them. The heading of each group says what
+    /// that group paints rather than which key holds it, for the same reason the
+    /// swatches are labelled in words.
     fn colour_rows(&self, config: &Config) -> Vec<Row> {
         let all = colours(config);
-        let mut rows = Vec::new();
+        let mut rows = vec![Row::Heading("THE PALETTE")];
+        // The control that writes every colour under it, first, out of the same
+        // table the sizes are built from so the row is the row: same choices,
+        // same nudge, same writer.
+        rows.extend(
+            settings_rows(config, &LOOKS)
+                .into_iter()
+                .filter(|row| matches!(row, Row::Setting { key, .. } if *key == THEME)),
+        );
+        rows.push(note(&palette_line(config)));
         let mut at = 0;
         for (heading, count) in [
-            ("THE WINDOW", WINDOW_TONES),
-            ("THE HIGHLIGHTER", SYNTAX_TONES),
-            ("ONE PER TOOL", config::TOOL_KEYS.len()),
-            ("ONE PER GAUGE", config::GAUGE_KEYS.len()),
+            ("THE WINDOW'S OWN TONES", WINDOW_TONES),
+            ("THE CODE COLOURS", SYNTAX_TONES),
+            ("THE TOOL MARKS", config::TOOL_KEYS.len()),
+            ("THE METERS", config::GAUGE_KEYS.len()),
         ] {
             rows.push(Row::Heading(heading));
             // Chunked inside the group rather than across the whole palette, so
@@ -2999,21 +3061,217 @@ mod tests {
                 );
                 assert!(!cell.about.is_empty(), "{} is labelled with nothing", cell.key);
                 assert_ne!(cell.about, cell.key, "{} only repeats its key", cell.key);
+                assert_ne!(
+                    cell.about,
+                    cell.key.replace('_', " "),
+                    "{} is its own key with the underscore taken out",
+                    cell.key
+                );
+                // And not the key's number with a word in front of it either:
+                // `gauge_7` labelled "reading 7" is `gauge_7` again, which is
+                // what he could not read anything out of.
+                let digits: String = cell
+                    .key
+                    .chars()
+                    .skip_while(|letter| !letter.is_ascii_digit())
+                    .collect();
+                assert!(
+                    digits.is_empty() || !cell.about.ends_with(&digits),
+                    "{} is labelled {:?}, which is its own number",
+                    cell.key,
+                    cell.about
+                );
                 said += 1;
             }
         }
         assert_eq!(said, colours(&Config::default()).len());
     }
 
+    /// Item G2: the palette block opens with the control that wrote it and one
+    /// line saying so.
+    ///
+    /// "colors as theme groups i did not saw on the setup... i just sawe many
+    /// colors... so i dont know". The grid was a wall of swatches: `theme` sat
+    /// several rows above it with the sizes, and nothing anywhere on the block
+    /// said the colours were a preset's or what would change them. The block is
+    /// its heading, then `theme`, then the line naming the theme those colours
+    /// came from, and only then the colours.
+    #[test]
+    fn the_theme_row_is_the_top_of_the_palette_block() {
+        for name in config::THEMES {
+            let config = Config::parse(&format!("theme = {name}"));
+            let mut panel = over(&config);
+            go_to(&mut panel, APPEARANCE);
+            let rows = panel.rows().to_vec();
+            let at = rows
+                .iter()
+                .position(|row| matches!(row, Row::Setting { key, .. } if *key == THEME))
+                .expect("the theme row");
+            let first = rows
+                .iter()
+                .position(|row| matches!(row, Row::Swatches(_)))
+                .expect("the grid");
+            assert!(at < first, "theme is on row {at}, under the grid at {first}");
+            assert!(
+                matches!(rows[at - 1], Row::Heading("THE PALETTE")),
+                "the theme row is under {:?} rather than the palette's own heading",
+                rows[at - 1]
+            );
+            // Directly over the colours: the heading, the row, the line, the
+            // first group's heading, the grid. Anything else between them is a
+            // row that came between the control and what it writes.
+            let Row::Note { text, bad } = &rows[at + 1] else {
+                panic!("the row under theme is {:?}", rows[at + 1]);
+            };
+            assert!(!bad, "the line reads as trouble");
+            assert!(
+                text.contains(name),
+                "the line does not name the theme that is set: {text}"
+            );
+            assert!(
+                text.contains("a colour in the file overrides its key"),
+                "the line does not say what changing one colour does: {text}"
+            );
+            assert!(
+                matches!(rows[at + 2], Row::Heading(_)),
+                "{:?} is between the line and the first group",
+                rows[at + 2]
+            );
+            assert_eq!(at + 3, first, "the grid does not start under its heading");
+            // And it is what the row above it is showing, rather than a name
+            // written into the line by hand.
+            assert_eq!(value(&panel, THEME), name);
+            // The sizes are still their own rows and still above the block: the
+            // theme moved, nothing else did.
+            assert!(
+                rows[..at]
+                    .iter()
+                    .any(|row| matches!(row, Row::Setting { key, .. } if *key == "opacity")),
+                "the sizes are not above the palette any more"
+            );
+        }
+
+        // A file carrying a preset and then one colour of its own is not that
+        // preset, and the line says so rather than naming a theme the window is
+        // not wearing.
+        let mut panel = over(&Config::parse("theme = noob-cool\naccent = #123456"));
+        go_to(&mut panel, APPEARANCE);
+        assert_eq!(value(&panel, THEME), CUSTOM);
+        let text = said(&panel);
+        assert!(text.contains("these colours are custom"), "{text}");
+        assert!(!text.contains("the noob-cool theme set these"), "{text}");
+    }
+
+    /// Every group of the grid is headed, and headed with what it paints rather
+    /// than with the key it is stored under.
+    ///
+    /// `ONE PER TOOL` and `ONE PER GAUGE` were the file's own words for those
+    /// two lists: they say how many colours there are and nothing about what
+    /// they colour.
+    #[test]
+    fn every_group_of_the_palette_says_what_it_paints() {
+        let mut panel = over(&Config::default());
+        go_to(&mut panel, APPEARANCE);
+        let rows = panel.rows().to_vec();
+        let mut heading = None;
+        let mut headed = Vec::new();
+        for row in &rows {
+            match row {
+                Row::Heading(name) => heading = Some(*name),
+                Row::Swatches(cells) => {
+                    let over = heading.unwrap_or_else(|| {
+                        panic!(
+                            "{:?} is under no heading at all",
+                            cells.iter().map(|cell| cell.key).collect::<Vec<_>>()
+                        )
+                    });
+                    assert_ne!(over, "THE PALETTE", "a group of the grid has no heading");
+                    if !headed.contains(&over) {
+                        headed.push(over);
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            headed,
+            vec![
+                "THE WINDOW'S OWN TONES",
+                "THE CODE COLOURS",
+                "THE TOOL MARKS",
+                "THE METERS",
+            ]
+        );
+    }
+
+    /// A meter's colour is labelled with the readings that actually wear that
+    /// slot, out of the monitor rather than out of a guess.
+    ///
+    /// They were "reading 1" to "reading 10", which is `gauge_1` to `gauge_10`
+    /// with a word in front of it. Which slot a reading wears is `monitor`'s to
+    /// say, so this walks what the monitor really produced and checks the label
+    /// of the slot each one asked for names it.
+    #[test]
+    fn every_meter_says_which_readings_wear_it() {
+        let mut monitor = crate::monitor::Monitor::new();
+        let state = crate::state::State::default();
+        // Twice: the processor reading is a difference between two samples and
+        // there is no reading for it after the first one.
+        monitor.sample(&state);
+        monitor.sample(&state);
+        let readings: Vec<crate::monitor::Gauge> = monitor
+            .hardware()
+            .into_iter()
+            .chain(monitor.context())
+            .chain(monitor.session())
+            .collect();
+        assert!(
+            readings.len() >= 6,
+            "the monitor read almost nothing to check against: {}",
+            readings.len()
+        );
+        for gauge in &readings {
+            let key = config::GAUGE_KEYS[gauge.hue];
+            let label = about(key);
+            assert!(
+                gauge
+                    .label
+                    .split_whitespace()
+                    .any(|word| label.contains(&word.to_lowercase())),
+                "{} wears {key}, which is labelled {label:?}",
+                gauge.label
+            );
+        }
+        // The last two slots are worn by nothing and say so: a name for a meter
+        // that is not on screen is worse than admitting the slot is spare.
+        for spare in ["gauge_9", "gauge_10"] {
+            let at = config::GAUGE_KEYS
+                .iter()
+                .position(|key| *key == spare)
+                .expect("a slot of the palette");
+            assert!(
+                !readings.iter().any(|gauge| gauge.hue == at),
+                "{spare} is worn by a reading now and is not spare"
+            );
+            assert!(about(spare).contains("spare"), "{spare} is {:?}", about(spare));
+        }
+    }
+
     /// The cursor only stops where something can happen: not on a heading, not
     /// on a reading, not on a note and not on a colour.
+    ///
+    /// The section used to open on `theme`, because `theme` was its first row.
+    /// It is the first row of the palette block now, over the colours it writes,
+    /// so what the section opens on is the first of the sizes and the assertion
+    /// says that instead. `the_theme_row_is_the_top_of_the_palette_block` is
+    /// where the move itself is held.
     #[test]
     fn the_cursor_skips_what_it_cannot_change() {
         let config = Config::default();
         let mut panel = over(&config);
         go_to(&mut panel, APPEARANCE);
         assert!(
-            matches!(panel.row(panel.cursor()), Some(Row::Setting { key, .. }) if *key == "theme"),
+            matches!(panel.row(panel.cursor()), Some(Row::Setting { key, .. }) if *key == "opacity"),
             "the section opens on {:?}",
             panel.row(panel.cursor())
         );

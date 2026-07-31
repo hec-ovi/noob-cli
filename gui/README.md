@@ -546,15 +546,19 @@ event, which would be hundreds of writes for one decision, and the live value
 goes through the same clamps the file is read with, so what you drag to is what
 the next launch reads.
 
-The palette is the last block of APPEARANCE, laid out as a grid: three colours to
-a row under `THE WINDOW`, `THE HIGHLIGHTER`, `ONE PER TOOL` and `ONE PER GAUGE`,
-each one a block of the colour with what it colours written beside it in words.
-Pressing a swatch says which key in the file writes it, on the line at the foot of
-the panel; they are swatches to read rather than fields to edit, since changing
-one means typing a hex value and the one field this window has is the endpoint. `theme` is a few rows up and
-repaints the window in a preset; a file carrying a palette that is not one of the
-three exactly reads as `custom`, which is what one hand-tuned colour over a
-preset makes it.
+The palette is the last block of APPEARANCE, under `THE PALETTE`, and it opens
+with the control that writes it: `theme` is the first row of the block, and the
+line under it names the theme those colours came from and says that a colour
+written in the file overrides it for that key. Then the grid, three colours to a
+row under `THE WINDOW'S OWN TONES`, `THE CODE COLOURS`, `THE TOOL MARKS` and
+`THE METERS`, each one a block of the colour with what it paints written beside
+it in words: the meters say which readings wear them, so `gauge_7` reads as `ram
+and prefilled`. Pressing a swatch says which key in the file writes it, on the
+line at the foot of the panel; they are swatches to read rather than fields to
+edit, since changing one means typing a hex value and the one field this window
+has is the endpoint. A file carrying a palette that is not one of the three
+exactly reads as `custom`, which is what one hand-tuned colour over a preset
+makes it.
 
 `~/.config/noob/no0b.conf`, written with the defaults on first run and
 commented. Opacity, both font sizes, how tall the prompt is, where the

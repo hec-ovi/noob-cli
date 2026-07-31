@@ -16257,10 +16257,11 @@ mod tests {
         let panel = a_panel_on(&Config::default(), crate::settings::APPEARANCE);
         let out = render_settings(&panel, 1400.0, 1200.0, None);
         for heading in [
-            "THE WINDOW",
-            "THE HIGHLIGHTER",
-            "ONE PER TOOL",
-            "ONE PER GAUGE",
+            "THE PALETTE",
+            "THE WINDOW'S OWN TONES",
+            "THE CODE COLOURS",
+            "THE TOOL MARKS",
+            "THE METERS",
         ] {
             let text = out
                 .scene
@@ -16298,7 +16299,7 @@ mod tests {
             );
             found += 1;
         }
-        assert_eq!(found, 4);
+        assert_eq!(found, 5);
         // The same green the tab wears, and not the tint a setting's key is
         // written in, or the heading is another row of the list.
         assert_eq!(
@@ -16768,6 +16769,82 @@ mod tests {
                 .unwrap_or_else(|| panic!("{} is not drawn as itself", colour.key));
             let [x, y, ..] = block.xywh();
             assert!(at.contains(x + 0.5, y + 0.5), "{block:?} is outside {at:?}");
+        }
+    }
+
+    /// Item G2: the palette is drawn under the control that wrote it, and says
+    /// which theme those colours belong to.
+    ///
+    /// "colors as theme groups i did not saw on the setup... i just sawe many
+    /// colors... so i dont know". `theme` was drawn with the sizes, several rows
+    /// and a heading above the grid, so the block was a wall of swatches with
+    /// nothing on it saying where they came from. The control is the first thing
+    /// over the colours now, with one line under it naming the theme that set
+    /// them, and every block of colour is drawn with what it paints beside it.
+    #[test]
+    fn the_palette_is_drawn_under_the_theme_that_set_it() {
+        for name in crate::config::THEMES {
+            let config = Config::parse(&format!("theme = {name}"));
+            let panel = a_panel_on(&config, crate::settings::APPEARANCE);
+            let out = render_settings(&panel, 1400.0, 1200.0, None);
+            let at = panel
+                .rows()
+                .iter()
+                .position(|row| {
+                    matches!(row, crate::settings::Row::Setting { key, .. } if *key == "theme")
+                })
+                .expect("the theme row");
+            let row = out
+                .layout
+                .settings_rows
+                .iter()
+                .find(|(index, _, _)| *index == at)
+                .map(|(_, _, row)| *row)
+                .expect("the theme row is on screen");
+            let first = out
+                .layout
+                .settings_cells
+                .iter()
+                .map(|(_, _, cell)| cell.y)
+                .fold(f32::MAX, f32::min);
+            assert!(first < f32::MAX, "no swatch is drawn at all");
+            assert!(
+                row.y + row.h <= first + 0.01,
+                "the theme control is drawn at {row:?}, not above the first swatch at {first}"
+            );
+            // And the line under it names the theme that is really set, rather
+            // than saying the colours came from somewhere in general.
+            let text = text_of(&out.scene);
+            assert!(
+                text.contains(&format!("the {name} theme set these")),
+                "the palette does not say whose colours it is showing: {text}"
+            );
+            // Every swatch on screen is drawn with what it paints beside it,
+            // inside its own cell: a block of colour on its own is what he could
+            // not read anything out of.
+            for (grid, cell, box_) in &out.layout.settings_cells {
+                let colour = panel.swatch(*grid, *cell).expect("a colour");
+                let words = out
+                    .scene
+                    .texts
+                    .iter()
+                    .flat_map(|text| {
+                        text.runs
+                            .iter()
+                            .map(move |run| (text.at, run.text.trim_end_matches('\u{2026}')))
+                    })
+                    .filter(|(place, _)| box_.contains(place.x + 1.0, place.y + 1.0))
+                    .find(|(_, said)| !said.is_empty())
+                    .map(|(_, said)| String::from(said))
+                    .unwrap_or_else(|| panic!("{} is drawn with no label", colour.key));
+                assert!(
+                    colour.about.starts_with(&words),
+                    "{} is labelled {words:?}, which is not {:?}",
+                    colour.key,
+                    colour.about
+                );
+                assert_ne!(words, colour.key, "{} is drawn as its own key", colour.key);
+            }
         }
     }
 
