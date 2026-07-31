@@ -708,6 +708,55 @@ pub fn set_server(path: &Path, name: &str, on: bool) -> Result<(), String> {
     crate::config::replace_file(path, &text)
 }
 
+/// Take one server out of its file, out of whichever of the two objects it sits
+/// in: `servers` when it is on, the [`DISABLED`] sibling when this window has
+/// moved it out of the way.
+///
+/// The one thing this window does to an `mcp.json` that the window cannot undo.
+/// A server turned off is still in the file to turn back on; this deletes the
+/// lines somebody typed by hand. So it refuses rather than guesses: a file that
+/// is not there, is not JSON, or is not an object is an error and nothing is
+/// written, and a name in neither object is an error too rather than a quiet
+/// success, because a button that answered nothing is worse than a line on the
+/// footer.
+///
+/// Everything else in the file survives. The file is parsed whole, one key is
+/// dropped, and the whole value is serialized into a string before anything is
+/// opened, so a file that could not be built is a file that was never touched.
+/// The write itself is [`crate::config::replace_file`]: a private temporary file
+/// beside it, then a rename. Nothing here truncates the file that is there.
+pub fn remove_server(path: &Path, name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err(String::from("a server has to have a name"));
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut root: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("{} is not valid JSON ({e}); fix it first", path.display()))?;
+    let Some(object) = root.as_object_mut() else {
+        return Err(format!("{} is not a JSON object", path.display()));
+    };
+    // Both objects, not the one the row said it was in: the row is a snapshot
+    // and the file is the truth, and a name left behind in the other one would
+    // come straight back as a row the moment the panel read the file again.
+    let mut gone = false;
+    for key in ["servers", DISABLED] {
+        if let Some(map) = object
+            .get_mut(key)
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            gone |= map.remove(name).is_some();
+        }
+    }
+    if !gone {
+        return Err(format!("{name} is not in {}", path.display()));
+    }
+    let mut text = serde_json::to_string_pretty(&root)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    text.push('\n');
+    crate::config::replace_file(path, &text)
+}
+
 /// Everything the panel says about the agent, read once when the panel opens.
 ///
 /// A snapshot rather than a live view: the panel is a takeover that is up for a
@@ -1221,6 +1270,143 @@ mod tests {
 
         assert!(set_server(&path, "nothing-here", false).is_err());
         assert!(set_server(&dir.join("nowhere.json"), "docs", false).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Uninstalling a server takes its entry out of the file and leaves every
+    /// other server, every other key and everything this window has never heard
+    /// of exactly where it was.
+    #[test]
+    fn a_server_is_removed_and_the_rest_of_the_file_survives() {
+        let dir = temp("mcp-remove");
+        let path = dir.join("mcp.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "servers": {
+    "docs": {"url": "http://localhost:9000/mcp", "timeout_s": 120},
+    "shell": {"command": "mcp-shell", "args": ["--safe"]}
+  },
+  "something_this_window_never_heard_of": {"keep": "me"}
+}"#,
+        )
+        .expect("a file");
+
+        remove_server(&path, "docs").expect("it goes");
+        let text = std::fs::read_to_string(&path).expect("the file");
+        let root: serde_json::Value = serde_json::from_str(&text).expect("still JSON");
+        assert!(
+            root["servers"].get("docs").is_none(),
+            "the removed server is still there: {text}"
+        );
+        assert!(
+            root.get(DISABLED).is_none(),
+            "removing put it in the off key instead of taking it out: {text}"
+        );
+        assert_eq!(
+            root["servers"]["shell"]["args"][0], "--safe",
+            "the other server did not come back whole: {text}"
+        );
+        assert_eq!(
+            root["something_this_window_never_heard_of"]["keep"], "me",
+            "the rewrite lost a key nobody here understands: {text}"
+        );
+
+        // And the CLI's own rule reads what is left: one server, no trouble.
+        let mcp = read_mcp(Some(&dir), None);
+        assert_eq!(
+            mcp.servers.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["shell"]
+        );
+        assert!(mcp.trouble.is_empty(), "{:?}", mcp.trouble);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A server that was turned off first is in the other object, and uninstall
+    /// still finds it there: a name left behind in the off key would come back
+    /// as a row the next time the panel read the file.
+    #[test]
+    fn a_server_that_is_off_is_removed_out_of_the_key_it_was_moved_to() {
+        let dir = temp("mcp-remove-off");
+        let path = dir.join("mcp.json");
+        std::fs::write(
+            &path,
+            r#"{"servers": {"docs": {"url": "http://localhost:9000/mcp"}, "shell": {"command": "mcp-shell"}}}"#,
+        )
+        .expect("a file");
+        set_server(&path, "docs", false).expect("it moves out of the way");
+        assert!(read_mcp(Some(&dir), None).servers.iter().any(|s| s.name == "docs" && !s.on));
+
+        remove_server(&path, "docs").expect("an off server goes too");
+        let text = std::fs::read_to_string(&path).expect("the file");
+        let root: serde_json::Value = serde_json::from_str(&text).expect("still JSON");
+        assert!(root["servers"].get("docs").is_none(), "{text}");
+        assert!(
+            root[DISABLED].get("docs").is_none(),
+            "it is still in the off key: {text}"
+        );
+        assert!(root["servers"]["shell"]["command"].is_string(), "{text}");
+        assert!(
+            read_mcp(Some(&dir), None).servers.iter().all(|s| s.name != "docs"),
+            "the panel would still list it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Everything that can go wrong leaves the file byte for byte as it was.
+    /// This is the one thing in the window that deletes a line somebody typed by
+    /// hand, so a refusal has to be a refusal and not half a rewrite.
+    #[test]
+    fn a_removal_that_cannot_be_finished_leaves_the_file_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp("mcp-remove-fails");
+        let path = dir.join("mcp.json");
+        let whole = "{\n  \"servers\": {\n    \"docs\": {\"url\": \"http://localhost:9000/mcp\"}\n  }\n}";
+        std::fs::write(&path, whole).expect("a file");
+
+        // A name in neither object, and a name at all.
+        assert!(remove_server(&path, "nothing-here").is_err());
+        assert!(remove_server(&path, "").is_err());
+        assert!(remove_server(&dir.join("nowhere.json"), "docs").is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the file"),
+            whole,
+            "a refusal rewrote the file"
+        );
+
+        // A file that is not JSON at all is a file to fix by hand, never one to
+        // overwrite with what this window could parse out of it.
+        let half = "{\"servers\": {\"docs\":";
+        std::fs::write(&path, half).expect("a file");
+        assert!(remove_server(&path, "docs").is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("the file"), half);
+        std::fs::write(&path, "[]").expect("a file");
+        assert!(remove_server(&path, "docs").is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("the file"), "[]");
+
+        // And a write that cannot happen at all: the temporary file goes beside
+        // the real one, so a directory nothing can be created in is a removal
+        // that fails with the whole file still there. Skipped where permissions
+        // do not apply, which is a machine running the tests as root.
+        std::fs::write(&path, whole).expect("a file");
+        let locked = dir.join("locked");
+        std::fs::create_dir_all(&locked).expect("a directory");
+        let inside = locked.join("mcp.json");
+        std::fs::write(&inside, whole).expect("a file");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555))
+            .expect("read only");
+        let refused = std::fs::write(locked.join("probe"), "x").is_err();
+        if refused {
+            let why = remove_server(&inside, "docs").expect_err("it cannot write there");
+            assert!(why.contains("temporary"), "{why}");
+            assert_eq!(
+                std::fs::read_to_string(&inside).expect("the file"),
+                whole,
+                "a failed write truncated the file"
+            );
+        }
+        let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

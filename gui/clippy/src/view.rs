@@ -539,8 +539,8 @@ pub enum Hit {
     SettingsToggle(usize),
     /// The uninstall beside that toggle, on the rows that have one. Its own
     /// region and tested before the row, the way the toggle is: one region for
-    /// the row and the button would delete a skill every time somebody pressed
-    /// the row to read it.
+    /// the row and the button would delete a skill or a server every time
+    /// somebody pressed the row to read it.
     SettingsRemove(usize),
     /// The line between the rail of section names and the settings beside it.
     /// Dragging it decides how much of the panel each of the two takes.
@@ -1505,8 +1505,9 @@ impl Layout {
                 }
             }
             // And an entry's two controls before the row they stand in, for the
-            // same reason: the uninstall deletes a directory, so it must never
-            // be a press that also reads as a press on the row.
+            // same reason: the uninstall deletes a skill's directory or a
+            // server's entry, so it must never be a press that also reads as a
+            // press on the row.
             for (index, panel) in &self.settings_removes {
                 if panel.contains(x, y) {
                     return Some(Hit::SettingsRemove(*index));

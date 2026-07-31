@@ -26,9 +26,17 @@
 //!
 //! **Two of those sections are two columns.** [`SKILLS`] and [`MCP`] were lists
 //! of text nothing could be done to. They are [`Row::Entry`] rows now: a name
-//! with what is under it, a toggle that really turns the thing off, and, on a
-//! skill, an uninstall. Beside the list is whatever the row under the cursor
+//! with what is under it, a toggle that really turns the thing off, and an
+//! uninstall beside it. Beside the list is whatever the row under the cursor
 //! is, a skill's own `SKILL.md` or a server's entry out of its file.
+//!
+//! **Both lists uninstall.** A server had the toggle and the column and no way
+//! to take it off the machine, which left the one verb the skills have and the
+//! servers did not as the one anybody would want: a server nobody wants is
+//! lines in a file, and the window that lists it should be able to take them
+//! out. It is the same two-press button, and it deletes something the window
+//! cannot write back, so [`agent::remove_server`] refuses the whole operation
+//! rather than write a file it could not fully build.
 //!
 //! **Off is a place on the disk, never a flag.** There is no enabled or
 //! disabled anywhere in the CLI: a skill is on when its directory is in one of
@@ -204,8 +212,8 @@ pub enum Row {
     /// still one panel per row index.
     Swatches(Vec<Swatch>),
     /// One installed skill or one configured server: two lines of text, a
-    /// toggle that really turns it off, and for a skill an uninstall beside it.
-    /// The row the column on the right belongs to.
+    /// toggle that really turns it off, and an uninstall beside it. The row the
+    /// column on the right belongs to.
     Entry(Entry),
 }
 
@@ -254,6 +262,10 @@ pub enum Deed {
     TurnSkill { dir: String, on: bool },
     /// Delete a skill's directory. `on` says which of the two it is in now.
     RemoveSkill { dir: String, on: bool },
+    /// Take a server's entry out of its file for good. No `on`: the entry goes
+    /// out of both objects, so which one it happened to sit in when the row was
+    /// built cannot leave half of it behind.
+    RemoveServer { name: String, project: bool },
     /// Move a server's entry between the two objects in its own file. `on` is
     /// the state it should end in.
     TurnServer {
@@ -865,10 +877,12 @@ impl Settings {
                 what: Which::Server {
                     project: server.project,
                 },
-                // A server is a few lines somebody wrote in a file. Turning it
-                // off already leaves it in that file to turn back on, and a
-                // button that edits somebody's JSON away is not worth the row.
-                removable: false,
+                // A server is a few lines somebody wrote in a file, and taking
+                // those lines out is the one thing this list could not do. It
+                // is the same two-press uninstall a skill carries, and it goes
+                // through the same rename, so a press that fails leaves the
+                // file exactly as it was.
+                removable: true,
                 doc: server_doc(server, self.mcp_file(server.project)),
             }));
         }
@@ -880,7 +894,7 @@ impl Settings {
         }
         if !mcp.servers.is_empty() {
             rows.push(note(
-                "the project file wins for a server named in both; turning one off moves its entry to a key the CLI does not read",
+                "the project file wins for a server named in both; turning one off moves its entry to a key the CLI does not read, and uninstall takes the entry out of the file",
             ));
         }
         rows
@@ -1087,16 +1101,18 @@ impl Settings {
         // on this panel that cannot be taken back, and what it would take with
         // it is the only thing worth reading at that moment.
         if let Some(Row::Entry(entry)) = self.arming.and_then(|at| self.row(at)) {
-            // By the directory, which is the thing that is about to go. The
-            // line under the name is the repository where there is one, and
-            // "delete https://github.com/..." is not what would happen.
+            // Named by the thing that is about to go, and said as what would
+            // actually happen to it. A skill goes by its directory, since the
+            // line under the name is the repository where there is one and
+            // "delete https://github.com/..." is not what would happen; a
+            // server is an entry in a file and no directory is going anywhere.
             let what = match &entry.what {
-                Which::Skill { dir } => dir.as_str(),
-                Which::Server { .. } => entry.name.as_str(),
+                Which::Skill { dir } => format!("delete the {dir} directory"),
+                Which::Server { .. } => {
+                    format!("take {} out of its mcp.json", entry.name)
+                }
             };
-            return format!(
-                "press uninstall again to delete the {what} directory; anything else leaves it alone"
-            );
+            return format!("press uninstall again to {what}; anything else leaves it alone");
         }
         self.picked_says()
             .unwrap_or_else(|| String::from(self.hint()))
@@ -1115,9 +1131,14 @@ impl Settings {
                 Kind::Number { .. } => "left and right nudge it, or drag the slider",
             },
             Some(Row::Field { .. }) => "enter edits it \u{2022} left goes back to the sections",
-            Some(Row::Entry(entry)) => match entry.removable {
-                true => "enter turns it on and off \u{2022} uninstall deletes its directory",
-                false => "enter turns it on and off in the file it came from",
+            Some(Row::Entry(entry)) => match (entry.removable, &entry.what) {
+                (false, _) => "enter turns it on and off",
+                (true, Which::Skill { .. }) => {
+                    "enter turns it on and off \u{2022} uninstall deletes its directory"
+                }
+                (true, Which::Server { .. }) => {
+                    "enter turns it on and off in its file \u{2022} uninstall takes it out of that file"
+                }
             },
             _ => "up and down move \u{2022} left goes back to the sections \u{2022} esc closes",
         }
@@ -1393,24 +1414,28 @@ impl Settings {
     /// Press the uninstall on one row. The first press arms it and answers with
     /// nothing; the second one on the same row is the delete.
     ///
-    /// Two presses because this is the only thing on the panel that cannot be
-    /// undone: a skill turned off can be turned back on, a setting written the
-    /// wrong way can be written again, and a directory that has been removed is
-    /// gone. In between the two the footer says what is about to go, which is
-    /// the whole of what a confirmation is for.
+    /// Two presses because these are the only things on the panel that cannot be
+    /// undone: a skill turned off can be turned back on, a server turned off is
+    /// still in its file, a setting written the wrong way can be written again,
+    /// and a directory or an entry that has been removed is gone. In between the
+    /// two the footer says what is about to go, which is the whole of what a
+    /// confirmation is for.
     pub fn uninstall(&mut self, index: usize) -> Option<Deed> {
         let Some(Row::Entry(entry)) = self.row(index) else {
-            return None;
-        };
-        let Which::Skill { dir } = &entry.what else {
             return None;
         };
         if !entry.removable {
             return None;
         }
-        let deed = Deed::RemoveSkill {
-            dir: dir.clone(),
-            on: entry.on,
+        let deed = match &entry.what {
+            Which::Skill { dir } => Deed::RemoveSkill {
+                dir: dir.clone(),
+                on: entry.on,
+            },
+            Which::Server { project } => Deed::RemoveServer {
+                name: entry.name.clone(),
+                project: *project,
+            },
         };
         if self.arming == Some(index) {
             self.arming = None;
@@ -3441,7 +3466,7 @@ mod tests {
         go_to(&mut panel, MCP);
         let at = panel.cursor();
         assert!(
-            matches!(panel.row(at), Some(Row::Entry(entry)) if entry.on && !entry.removable),
+            matches!(panel.row(at), Some(Row::Entry(entry)) if entry.on && entry.removable),
             "{:?}",
             panel.row(at)
         );
@@ -3468,8 +3493,170 @@ mod tests {
             "{:?}",
             panel.row(panel.cursor())
         );
-        // Nothing can be uninstalled here: a server is lines in a file.
-        assert_eq!(panel.uninstall(panel.cursor()), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The uninstall a skill has is on a server's row too, takes two presses,
+    /// names the file rather than a directory, and the row is gone once the deed
+    /// has been done.
+    ///
+    /// This used to assert the opposite: that a server had no uninstall and
+    /// `uninstall` answered nothing on its row. It is written the other way
+    /// round now because the button is there, which is the whole of this change.
+    #[test]
+    fn a_server_is_uninstalled_out_of_its_file_and_leaves_the_list() {
+        let dir = scratch_dir("server-remove");
+        std::fs::write(
+            dir.join("mcp.json"),
+            r#"{"servers": {"docs": {"url": "http://localhost:9000/mcp"}, "shell": {"command": "mcp-shell"}}, "timeout_s": 30}"#,
+        )
+        .expect("a file");
+        let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
+        let mut panel = Settings::open(&Config::default(), None, read());
+        go_to(&mut panel, MCP);
+        // The rows are sorted by name, so the first entry is "docs".
+        let at = panel.cursor();
+        assert!(
+            matches!(panel.row(at), Some(Row::Entry(entry)) if entry.name == "docs" && entry.removable),
+            "{:?}",
+            panel.row(at)
+        );
+
+        // One press arms it and says what would go, in the words of what would
+        // actually happen: nothing about a directory.
+        assert_eq!(panel.uninstall(at), None, "one press removed a server");
+        assert_eq!(panel.arming(), Some(at));
+        let said = panel.says();
+        assert!(said.contains("press uninstall again"), "{said}");
+        assert!(said.contains("docs") && said.contains("mcp.json"), "{said}");
+        assert!(!said.contains("directory"), "a server has no directory: {said}");
+
+        let deed = panel.uninstall(at).expect("the second press is the deed");
+        assert_eq!(
+            deed,
+            Deed::RemoveServer {
+                name: String::from("docs"),
+                project: false,
+            }
+        );
+        assert_eq!(panel.arming(), None, "it stayed armed after it fired");
+
+        // What `main` does with it, and then what the panel does with the disk.
+        let file = panel.mcp_file(false).expect("a global file").to_path_buf();
+        agent::remove_server(&file, "docs").expect("it goes");
+        panel.adopt_agent(read(), &Config::default());
+        go_to(&mut panel, MCP);
+        let names: Vec<String> = panel
+            .here()
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Entry(entry) => Some(entry.name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec![String::from("shell")], "the row is still listed");
+        // And nothing else in the file went with it.
+        let text = std::fs::read_to_string(&file).expect("the file");
+        let root: serde_json::Value = serde_json::from_str(&text).expect("still JSON");
+        assert_eq!(root["timeout_s"], 30, "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A server that was turned off first still uninstalls, out of the key it
+    /// was moved to, and the file it was in keeps everything else.
+    #[test]
+    fn a_server_that_is_off_uninstalls_too() {
+        let dir = scratch_dir("server-remove-off");
+        std::fs::write(
+            dir.join("mcp.json"),
+            r#"{"servers": {"docs": {"url": "http://localhost:9000/mcp"}, "shell": {"command": "mcp-shell"}}}"#,
+        )
+        .expect("a file");
+        let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
+        let mut panel = Settings::open(&Config::default(), None, read());
+        let file = panel.mcp_file(false).expect("a global file").to_path_buf();
+        agent::set_server(&file, "docs", false).expect("it moves out of the way");
+        panel.adopt_agent(read(), &Config::default());
+        go_to(&mut panel, MCP);
+        let at = panel.cursor();
+        assert!(
+            matches!(panel.row(at), Some(Row::Entry(entry)) if entry.name == "docs" && !entry.on && entry.removable),
+            "{:?}",
+            panel.row(at)
+        );
+
+        assert_eq!(panel.uninstall(at), None);
+        assert_eq!(
+            panel.uninstall(at),
+            Some(Deed::RemoveServer {
+                name: String::from("docs"),
+                project: false,
+            }),
+            "a server that is off asks for a different deed"
+        );
+        agent::remove_server(&file, "docs").expect("an off server goes too");
+        panel.adopt_agent(read(), &Config::default());
+        go_to(&mut panel, MCP);
+        assert!(
+            !panel
+                .here()
+                .rows
+                .iter()
+                .any(|row| matches!(row, Row::Entry(entry) if entry.name == "docs")),
+            "the row came back"
+        );
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).expect("the file"))
+                .expect("still JSON");
+        assert!(root["servers"]["shell"]["command"].is_string());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A removal that fails leaves the file and the row exactly as they were,
+    /// and says why on the footer.
+    #[test]
+    fn a_failed_removal_leaves_the_file_and_the_row_where_they_were() {
+        let dir = scratch_dir("server-remove-fails");
+        let path = dir.join("mcp.json");
+        let whole = "{\"servers\": {\"docs\": {\"url\": \"http://localhost:9000/mcp\"}}}";
+        std::fs::write(&path, whole).expect("a file");
+        let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
+        let mut panel = Settings::open(&Config::default(), None, read());
+        go_to(&mut panel, MCP);
+        let at = panel.cursor();
+        assert_eq!(panel.uninstall(at), None);
+        let deed = panel.uninstall(at).expect("the deed");
+
+        // Somebody edited the file to something that will not parse in between
+        // the press and the write, which is the shape every failure here has:
+        // the removal refuses and the file it refused on is untouched.
+        std::fs::write(&path, "{\"servers\": {\"docs\":").expect("a file");
+        let Deed::RemoveServer { name, project } = &deed else {
+            panic!("{deed:?}");
+        };
+        let file = panel.mcp_file(*project).expect("a global file").to_path_buf();
+        let why = agent::remove_server(&file, name).expect_err("it cannot be done");
+        assert!(why.contains("not valid JSON"), "{why}");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the file"),
+            "{\"servers\": {\"docs\":",
+            "the refusal rewrote the file"
+        );
+
+        // The panel says why and the row it was on is still the row it was on.
+        panel.say_trouble(why);
+        assert!(
+            panel.trouble().is_some_and(|why| why.contains("not valid JSON")),
+            "{:?}",
+            panel.trouble()
+        );
+        assert!(
+            matches!(panel.row(at), Some(Row::Entry(entry)) if entry.name == "docs"),
+            "{:?}",
+            panel.row(at)
+        );
+        assert_eq!(panel.arming(), None, "it stayed armed after it fired");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

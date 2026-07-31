@@ -1258,6 +1258,10 @@ impl App {
                     None => Err(String::from("there is no file to write that server in")),
                 }
             }
+            settings::Deed::RemoveServer { name, project } => match panel.mcp_file(*project) {
+                Some(path) => agent::remove_server(path, name),
+                None => Err(String::from("there is no file to take that server out of")),
+            },
         };
         match done {
             Ok(()) => {

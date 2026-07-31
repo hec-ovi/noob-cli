@@ -436,12 +436,17 @@ MCP names both files the CLI merges, `<config>/mcp.json` and
 rather than showing an empty list that reads as broken; a malformed one is a line
 saying so, and the servers from the file that did parse are still listed. Each
 server is a row with its URL or command line under it and its entry out of the
-file beside it, and a toggle of its own: off moves the entry into a `disabled`
-object in the same file, which the CLI's loader does not read, and on moves it
-back. The file is rewritten whole, so every other server, every `timeout_s` and
-anything else in there survives it. There is no uninstall here, because a server
-is a few lines somebody wrote by hand and turning it off already leaves them
-where they are.
+file beside it, and the same toggle and uninstall a skill has. Off moves the
+entry into a `disabled` object in the same file, which the CLI's loader does not
+read, and on moves it back. Uninstall takes the entry out of the file for good,
+out of whichever of the two objects it is in, and takes the same two presses:
+the first arms it and the footer names the server and the file, the second one
+does it. Both go through the same rewrite: the file is parsed whole, one key
+changes, and the whole value is written to a temporary file beside it and
+renamed, so every other server, every `timeout_s` and anything else in there
+survives, and a rewrite that cannot be finished leaves the file that was there.
+A file that is not JSON is a file to fix by hand: the panel refuses and says so
+rather than overwriting it with what it could parse.
 
 The fifth is the window's own settings file: APPEARANCE. It is the sizes and the
 theme, then the palette, each group of colours under a heading of its own drawn
