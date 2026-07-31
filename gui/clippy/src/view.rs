@@ -11783,7 +11783,6 @@ mod tests {
     fn a_settings_panel(config: &Config) -> Settings {
         Settings::open(
             config,
-            &crate::totals::Totals::default(),
             Some(std::path::Path::new("/home/hec/.config/noob/no0b.conf")),
             an_agent(),
         )
@@ -12090,7 +12089,7 @@ mod tests {
     fn the_settings_headings_are_the_accent_green() {
         let mut found = 0;
         let out = render_settings(
-            &a_panel_on(&Config::default(), crate::settings::PANES),
+            &a_panel_on(&Config::default(), crate::settings::APPEARANCE),
             1400.0,
             1200.0,
             None,
@@ -12186,10 +12185,9 @@ mod tests {
             (crate::settings::MCP, "none configured"),
             (crate::settings::APPEARANCE, "theme"),
             (crate::settings::APPEARANCE, "opacity"),
-            (crate::settings::PANES, "show_files"),
+            (crate::settings::APPEARANCE, "show_files"),
             (crate::settings::COLOURS, "accent"),
             (crate::settings::COLOURS, "#123456"),
-            (crate::settings::ALL_TIME, "prefilled"),
         ] {
             let text = words(section);
             assert!(

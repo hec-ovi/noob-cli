@@ -1,4 +1,4 @@
-//! The settings panel: eight sections, what each one carries, and what changing
+//! The settings panel: six sections, what each one carries, and what changing
 //! a row writes back.
 //!
 //! A full screen takeover rather than a popup or a second OS window. A second
@@ -8,13 +8,13 @@
 //! window, the way the folder picker is before a folder has been chosen.
 //!
 //! **Sections, not one scroll.** The panel was a single list sixty rows long:
-//! the all-time totals, four unlabelled groups of settings, then forty six
-//! colours, with nothing above it saying where you were and nothing on it about
-//! the agent the window is a front end for. It is a rail of section names now,
-//! with the chosen section's rows beside it, and each section is short enough to
-//! read at a glance. Four of them ([`AGENT`], [`SESSIONS`], [`SKILLS`], [`MCP`])
-//! are the agent's own files rather than the window's, read through
-//! [`crate::agent`]; the other four are the window's settings file.
+//! four unlabelled groups of settings and then forty six colours, with nothing
+//! above it saying where you were and nothing on it about the agent the window
+//! is a front end for. It is a rail of section names now, with the chosen
+//! section's rows beside it, and each section is short enough to read at a
+//! glance. Four of them ([`AGENT`], [`SESSIONS`], [`SKILLS`], [`MCP`]) are the
+//! agent's own files rather than the window's, read through [`crate::agent`];
+//! the other two ([`APPEARANCE`], [`COLOURS`]) are the window's settings file.
 //!
 //! Nothing here draws and only [`commit`] and [`write_endpoint`] touch a disk.
 //! [`crate::view`] turns these rows into rectangles and `main` routes keys and
@@ -40,7 +40,6 @@ use std::path::{Path, PathBuf};
 
 use crate::agent::{self, Agent};
 use crate::config::{self, Config};
-use crate::totals::Totals;
 
 /// The sections, in the order the rail lists them: the agent first, because
 /// what the window is a front end for matters more than what colour it is.
@@ -49,21 +48,17 @@ pub const SESSIONS: &str = "SESSIONS";
 pub const SKILLS: &str = "SKILLS";
 pub const MCP: &str = "MCP";
 pub const APPEARANCE: &str = "APPEARANCE";
-pub const PANES: &str = "PANES";
 pub const COLOURS: &str = "COLOURS";
-pub const ALL_TIME: &str = "ALL TIME";
 
 /// Every section name, in rail order.
-pub const SECTIONS: [&str; 8] = [
-    AGENT,
-    SESSIONS,
-    SKILLS,
-    MCP,
-    APPEARANCE,
-    PANES,
-    COLOURS,
-    ALL_TIME,
-];
+///
+/// There were two more. PANES held the four settings that decide which views
+/// open and where the dividers sit, which is what the window looks like and so
+/// belongs under [`APPEARANCE`] with everything else that does; its rows moved
+/// there whole. ALL TIME read the counts of every session that ever ran, which
+/// answered a question nobody was asking on a settings panel, and went with the
+/// file behind it.
+pub const SECTIONS: [&str; 6] = [AGENT, SESSIONS, SKILLS, MCP, APPEARANCE, COLOURS];
 
 /// What a setting holds, which is what decides how its row changes.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -152,8 +147,8 @@ pub enum Row {
     /// skill, a configured server. Its own row rather than a label and a value,
     /// because what identifies one is a sentence and not a number.
     Item(String),
-    /// Something read out rather than set: the all-time totals, what the agent's
-    /// own file says, and where the files behind all this live.
+    /// Something read out rather than set: what the agent's own file says, and
+    /// where the files behind all this live.
     Reading { label: String, value: String },
     /// A setting in the window's own file, spelled the way that file spells it.
     Setting {
@@ -390,12 +385,9 @@ pub struct Settings {
 impl Settings {
     /// Open the panel over the settings as they are now.
     ///
-    /// `totals` is the all-time file with this session already added in, which
-    /// is the caller's job: the file on disk holds the sessions that came before
-    /// and adding the live one twice is exactly the bug the totals module is
-    /// written to avoid. `agent` is a snapshot of the CLI's own files, read once
-    /// here rather than on every frame.
-    pub fn open(config: &Config, totals: &Totals, file: Option<&Path>, agent: Agent) -> Settings {
+    /// `agent` is a snapshot of the CLI's own files, read once here rather than
+    /// on every frame.
+    pub fn open(config: &Config, file: Option<&Path>, agent: Agent) -> Settings {
         let mut panel = Settings {
             sections: Vec::new(),
             chosen: 0,
@@ -406,19 +398,19 @@ impl Settings {
             agent,
             trouble: None,
         };
-        panel.sections = panel.build(config, totals);
+        panel.sections = panel.build(config);
         panel
     }
 
     /// Rebuild the rows from the files as they now read, keeping the cursor
     /// where it was. Called after a change has been written and read back.
-    pub fn refresh(&mut self, config: &Config, totals: &Totals) {
+    pub fn refresh(&mut self, config: &Config) {
         let places: Vec<(usize, usize)> = self
             .sections
             .iter()
             .map(|section| (section.cursor, section.first))
             .collect();
-        self.sections = self.build(config, totals);
+        self.sections = self.build(config);
         self.trouble = None;
         self.dragging = None;
         for (section, (cursor, first)) in self.sections.iter_mut().zip(places) {
@@ -436,15 +428,15 @@ impl Settings {
     /// Take a fresh reading of the agent's files, after the endpoint was
     /// written. Same rule as [`Settings::refresh`]: what the panel shows comes
     /// back off the disk rather than out of what was typed.
-    pub fn adopt_agent(&mut self, agent: Agent, config: &Config, totals: &Totals) {
+    pub fn adopt_agent(&mut self, agent: Agent, config: &Config) {
         self.agent = agent;
-        self.refresh(config, totals);
+        self.refresh(config);
     }
 
     /// One section per name on the rail, in rail order. Driven off [`SECTIONS`]
     /// so the rail and what is behind it cannot come apart: a name with no rows
     /// would be a section that opens on nothing.
-    fn build(&self, config: &Config, totals: &Totals) -> Vec<Section> {
+    fn build(&self, config: &Config) -> Vec<Section> {
         SECTIONS
             .into_iter()
             .map(|name| {
@@ -453,10 +445,14 @@ impl Settings {
                     SESSIONS => self.session_rows(),
                     SKILLS => self.skill_rows(),
                     MCP => self.mcp_rows(),
-                    APPEARANCE => settings_rows(config, &LOOKS),
-                    PANES => pane_rows(config),
+                    APPEARANCE => appearance_rows(config),
                     COLOURS => self.colour_rows(config),
-                    _ => all_time_rows(totals),
+                    // A name on the rail with no builder behind it opens on
+                    // nothing, which `every_section_is_reachable` fails on. The
+                    // arm this replaced was a catch-all that built the ALL TIME
+                    // rows, so a name added and forgotten got that section's
+                    // contents under its own heading and nothing said so.
+                    _ => Vec::new(),
                 };
                 Section::new(name, rows)
             })
@@ -1072,38 +1068,20 @@ fn settings_rows(config: &Config, group: &[(&'static str, Kind)]) -> Vec<Row> {
         .collect()
 }
 
-/// Which panes open, and where the dividers between them sit.
-fn pane_rows(config: &Config) -> Vec<Row> {
-    let mut rows = vec![Row::Heading("WHICH PANES OPEN")];
+/// Everything about what the window looks like: the sizes and the theme, which
+/// panes open, and where the dividers between them sit.
+///
+/// The last two groups were a section of their own called PANES. Which views
+/// are up and where the lines between them sit is what the window looks like,
+/// so they read as appearance and are grouped under headings here rather than
+/// hidden behind a rail entry of their own.
+fn appearance_rows(config: &Config) -> Vec<Row> {
+    let mut rows = settings_rows(config, &LOOKS);
+    rows.push(Row::Heading("WHICH PANES OPEN"));
     rows.extend(settings_rows(config, &PANE_SETTINGS));
     rows.push(Row::Heading("WHERE THE DIVIDERS SIT"));
     rows.extend(settings_rows(config, &DIVIDERS));
     rows
-}
-
-/// The all-time block: the one place these numbers are shown.
-///
-/// They had a pane of their own, which read as this session's spend because
-/// nothing on it said otherwise; under a section called ALL TIME they mean what
-/// they are.
-fn all_time_rows(totals: &Totals) -> Vec<Row> {
-    let reading = |label: &str, value: String| Row::Reading {
-        label: String::from(label),
-        value,
-    };
-    vec![
-        reading("prefilled", grouped(totals.prefilled)),
-        reading("generated", grouped(totals.generated)),
-        reading("from cache", grouped(totals.cached)),
-        reading(
-            "prefill",
-            rates(totals.average_prefill(), totals.median_prefill()),
-        ),
-        reading(
-            "decode",
-            rates(totals.average_decode(), totals.median_decode()),
-        ),
-    ]
 }
 
 /// What a session row says: when it was, which folder it belongs to, how big
@@ -1227,34 +1205,6 @@ fn hex(rgb: [u8; 3]) -> String {
     format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
 }
 
-/// A count with its thousands split up. Eight digits of tokens in a row is a
-/// number nobody reads, and this panel is the only place the all-time counts
-/// are shown.
-fn grouped(count: u64) -> String {
-    let digits = count.to_string();
-    let mut out = String::new();
-    for (at, digit) in digits.chars().enumerate() {
-        if at > 0 && (digits.len() - at).is_multiple_of(3) {
-            out.push(' ');
-        }
-        out.push(digit);
-    }
-    out
-}
-
-/// The two readings a rate has, said in one row.
-///
-/// Both, because they answer different questions: one cold start with a huge
-/// transcript drags the average down for the rest of the day, and the median is
-/// what a typical request actually did. A run with no requests in it yet has
-/// neither, and a row of zeros would read as a machine doing nothing.
-fn rates(average: f64, median: f64) -> String {
-    if average <= 0.0 && median <= 0.0 {
-        return String::from("nothing measured yet");
-    }
-    format!("{average:.0} mean, {median:.0} median tok/s")
-}
-
 /// Write one change to the window's settings file and read the whole file back.
 ///
 /// The value goes in through the settings writer, which keeps every comment and
@@ -1281,12 +1231,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     fn over(config: &Config) -> Settings {
-        Settings::open(
-            config,
-            &Totals::default(),
-            Some(Path::new("/tmp/no0b.conf")),
-            Agent::default(),
-        )
+        Settings::open(config, Some(Path::new("/tmp/no0b.conf")), Agent::default())
     }
 
     /// A scratch settings file of its own per test, since the writer works on a
@@ -1428,7 +1373,7 @@ mod tests {
         assert!(panel.step(true));
         let was = panel.cursor();
         assert_eq!(was, 2);
-        go_to(&mut panel, PANES);
+        go_to(&mut panel, COLOURS);
         assert_ne!(panel.cursor(), was, "the two sections share a cursor");
         go_to(&mut panel, APPEARANCE);
         assert_eq!(panel.cursor(), was);
@@ -1472,10 +1417,11 @@ mod tests {
             let Row::Setting { key, kind, .. } = row else {
                 continue;
             };
+            // Every setting that is not a colour is an appearance now: the
+            // panes and the dividers came over when PANES was removed.
             let wanted = match kind {
                 Kind::Colour(_) => COLOURS,
-                _ if LOOKS.iter().any(|(name, _)| name == key) => APPEARANCE,
-                _ => PANES,
+                _ => APPEARANCE,
             };
             assert_eq!(section, wanted, "{key} is in the wrong section");
         }
@@ -1515,23 +1461,19 @@ mod tests {
             assert_eq!(down, up, "walking back up {name} visits other rows");
         }
 
-        // The settings sections stop on their own settings and nothing else.
+        // APPEARANCE stops on its own settings and nothing else, which is all
+        // three groups now: the sizes, the panes and the dividers. The two
+        // headings between them are stepped over rather than landed on.
         go_to(&mut panel, APPEARANCE);
         let mut looks = 1;
         while panel.step(true) {
             looks += 1;
         }
-        assert_eq!(looks, LOOKS.len());
-        go_to(&mut panel, PANES);
-        let mut panes = 1;
-        while panel.step(true) {
-            panes += 1;
-        }
-        assert_eq!(panes, PANE_SETTINGS.len() + DIVIDERS.len());
+        assert_eq!(looks, LOOKS.len() + PANE_SETTINGS.len() + DIVIDERS.len());
 
         // A section of readings has nothing to land on and says so, rather than
         // drawing a band on a row nothing can be done to.
-        go_to(&mut panel, ALL_TIME);
+        go_to(&mut panel, COLOURS);
         assert!(!panel.on_row());
         go_to(&mut panel, APPEARANCE);
         assert!(panel.on_row());
@@ -1743,53 +1685,79 @@ mod tests {
         assert!(text.contains("no0b.conf"), "{text}");
     }
 
-    /// The all-time block is the totals file, with the thousands split so the
-    /// counts can be read, and says so plainly before there is anything to say.
+    /// The two sections that came off are gone from the rail, and what they
+    /// carried went where it was said to go.
+    ///
+    /// This was `the_all_time_block_reads_the_totals_it_was_handed`, which drove
+    /// an ALL TIME section that no longer exists. What survives of it is the
+    /// last assertion: a machine with no home directory still opens the panel
+    /// and says why nothing can be saved.
     #[test]
-    fn the_all_time_block_reads_the_totals_it_was_handed() {
-        let mut totals = Totals {
-            prefilled: 12_345_678,
-            generated: 9_012,
-            cached: 500,
-            decode_tokens: 300,
-            decode_seconds: 10.0,
-            decode_rates: vec![10.0, 40.0, 90.0],
-            ..Totals::default()
-        };
-        totals.prefill_rates = vec![100.0];
-        totals.prefill_tokens = 100;
-        totals.prefill_seconds = 1.0;
-        let panel = Settings::open(&Config::default(), &totals, None, Agent::default());
-        let readings: Vec<(String, String)> = panel
-            .all_rows()
-            .filter_map(|(_, row)| match row {
-                Row::Reading { label, value } => Some((label.clone(), value.clone())),
-                _ => None,
-            })
-            .collect();
-        let has = |label: &str, value: &str| readings.iter().any(|(l, v)| l == label && v == value);
-        assert!(has("prefilled", "12 345 678"), "{readings:?}");
-        assert!(has("generated", "9 012"), "{readings:?}");
-        // 300 tokens in 10 seconds is 30 a second on average; the middle of the
-        // three samples is 40.
-        assert!(has("decode", "30 mean, 40 median tok/s"), "{readings:?}");
+    fn the_retired_sections_are_off_the_rail_and_their_settings_are_not() {
+        let panel = over(&Config::default());
+        let names = panel.section_names();
+        for gone in ["PANES", "ALL TIME"] {
+            assert!(!names.contains(&gone), "{gone} is still a section: {names:?}");
+        }
+        // The four settings PANES held are on APPEARANCE now, and no reading
+        // anywhere on the panel is an all-time count.
+        for (key, _) in PANE_SETTINGS.iter().chain(DIVIDERS.iter()) {
+            let (section, _) = panel
+                .all_rows()
+                .find(|(_, row)| matches!(row, Row::Setting { key: name, .. } if name == key))
+                .unwrap_or_else(|| panic!("{key} is on no section at all"));
+            assert_eq!(section, APPEARANCE, "{key} did not land on APPEARANCE");
+        }
+        for (_, row) in panel.all_rows() {
+            let Row::Reading { label, .. } = row else {
+                continue;
+            };
+            for gone in ["prefilled", "generated", "from cache"] {
+                assert_ne!(label, gone, "an all-time reading is still on the panel");
+            }
+        }
+
         // No home directory: the panel still opens and says why nothing can be
         // saved rather than pretending there is a file.
-        let where_ = readings
-            .iter()
-            .find(|(label, _)| label == "settings")
+        let homeless = Settings::open(&Config::default(), None, Agent::default());
+        let where_ = homeless
+            .all_rows()
+            .find_map(|(_, row)| match row {
+                Row::Reading { label, value } if label == "settings" => Some(value.clone()),
+                _ => None,
+            })
             .expect("the file row");
-        assert!(where_.1.contains("no home directory"), "{where_:?}");
+        assert!(where_.contains("no home directory"), "{where_:?}");
+    }
 
-        let empty = Settings::open(&Config::default(), &Totals::default(), None, Agent::default());
-        assert!(
-            empty.all_rows().any(|(_, row)| matches!(
-                row,
-                Row::Reading { label, value }
-                    if label == "prefill" && value == "nothing measured yet"
-            )),
-            "a machine with no requests behind it reads as zeros"
-        );
+    /// A settings file an older build wrote still opens the panel: the keys it
+    /// carries that this build dropped are read off the floor by the parser and
+    /// the rail is unchanged by them.
+    ///
+    /// The retired names are not an error and never were. What is new is that a
+    /// section can go too, and a file full of dead keys must not be the thing
+    /// that decides which section the panel opens on.
+    #[test]
+    fn an_older_file_full_of_retired_keys_still_opens_the_panel() {
+        let mut text = String::from("show_activity = off\nshow_files = off\nleft_width = 0.4\n");
+        for key in config::RETIRED {
+            text.push_str(&format!("{key} = whatever it used to be\n"));
+        }
+        let config = Config::parse(&text);
+        let panel = over(&config);
+        assert_eq!(panel.section_names(), SECTIONS.to_vec());
+        assert_eq!(panel.here().name, SECTIONS[0], "the panel opened nowhere");
+        assert!(SECTIONS.contains(&panel.here().name));
+        for name in SECTIONS {
+            assert!(
+                panel.all_rows().any(|(section, _)| section == name),
+                "{name} opens on nothing"
+            );
+        }
+        // The live keys in that file still read, so a retired neighbour did not
+        // take them down with it.
+        assert_eq!(value(&panel, "show_files"), "off");
+        assert_eq!(value(&panel, "left_width"), "0.40");
     }
 
     /// The round trip: what a change writes, the file reads back as, and the
@@ -1803,7 +1771,7 @@ mod tests {
         let path = scratch("round-trip");
         let _ = std::fs::remove_file(&path);
         let mut config = Config::load_from(&path);
-        let mut panel = Settings::open(&config, &Totals::default(), Some(&path), Agent::default());
+        let mut panel = Settings::open(&config, Some(&path), Agent::default());
 
         for key in [
             "opacity",
@@ -1822,7 +1790,7 @@ mod tests {
                 let mut wrote = None;
                 while let Some(change) = panel.change(forward) {
                     config = commit(&path, &change).expect("the file takes it");
-                    panel.refresh(&config, &Totals::default());
+                    panel.refresh(&config);
                     assert_eq!(
                         value(&panel, key),
                         change.value,
@@ -1847,14 +1815,14 @@ mod tests {
         let path = scratch("lands");
         let _ = std::fs::remove_file(&path);
         let mut config = Config::load_from(&path);
-        let mut panel = Settings::open(&config, &Totals::default(), Some(&path), Agent::default());
+        let mut panel = Settings::open(&config, Some(&path), Agent::default());
         put_cursor(&mut panel, "show_activity");
         let was = (panel.chosen(), panel.cursor());
 
         let change = panel.change(true).expect("a flag");
         config = commit(&path, &change).expect("the file takes it");
         assert!(!config.show_activity);
-        panel.refresh(&config, &Totals::default());
+        panel.refresh(&config);
         assert_eq!(value(&panel, "show_activity"), "off");
         assert_eq!(
             (panel.chosen(), panel.cursor()),
@@ -1865,7 +1833,7 @@ mod tests {
         put_cursor(&mut panel, "theme");
         let change = panel.change(true).expect("a preset");
         config = commit(&path, &change).expect("the file takes it");
-        panel.refresh(&config, &Totals::default());
+        panel.refresh(&config);
         assert_eq!(value(&panel, "theme"), change.value);
         // The preset reached the palette, not just the theme row.
         assert_eq!(
@@ -1931,12 +1899,12 @@ mod tests {
         assert!(panel.scroll(3, false, rows));
 
         // A section short enough to fit does not pretend to scroll.
-        go_to(&mut panel, ALL_TIME);
-        assert!(panel.thumb(rows).is_none(), "five rows do not scroll");
+        go_to(&mut panel, MCP);
+        assert!(panel.thumb(rows).is_none(), "three rows do not scroll");
 
         // Down to the last setting of a longer one, in a window two rows tall:
         // the window follows the cursor to both ends.
-        go_to(&mut panel, PANES);
+        go_to(&mut panel, APPEARANCE);
         assert!(panel.jump(true));
         panel.reveal(2);
         assert!(panel.cursor() < panel.first() + 2, "the cursor is off screen");
@@ -1965,12 +1933,8 @@ mod tests {
         )
         .expect("a file");
         let agent = Agent::read(Some(&dir), None, crate::sessions::Listing::default());
-        let mut panel = Settings::open(
-            &Config::default(),
-            &Totals::default(),
-            Some(Path::new("/tmp/no0b.conf")),
-            agent,
-        );
+        let mut panel =
+            Settings::open(&Config::default(), Some(Path::new("/tmp/no0b.conf")), agent);
         go_to(&mut panel, AGENT);
         let text = said(&panel);
         assert!(
@@ -2013,7 +1977,6 @@ mod tests {
         panel.adopt_agent(
             Agent::read(Some(&dir), None, crate::sessions::Listing::default()),
             &Config::default(),
-            &Totals::default(),
         );
         go_to(&mut panel, AGENT);
         assert!(
@@ -2039,7 +2002,7 @@ mod tests {
         let dir = scratch_dir("bare");
         let work = dir.join("work");
         let agent = Agent::read(Some(&dir), Some(&work), crate::sessions::Listing::default());
-        let mut panel = Settings::open(&Config::default(), &Totals::default(), None, agent);
+        let mut panel = Settings::open(&Config::default(), None, agent);
 
         for (section, wanted) in [
             (MCP, "none configured"),
@@ -2086,7 +2049,7 @@ mod tests {
             Some(&dir.join("work")),
             crate::sessions::Listing::default(),
         );
-        let mut panel = Settings::open(&Config::default(), &Totals::default(), None, agent);
+        let mut panel = Settings::open(&Config::default(), None, agent);
         go_to(&mut panel, MCP);
         let rows = panel.rows();
         assert!(
@@ -2126,7 +2089,7 @@ mod tests {
             sessions: listing.clone(),
             ..Agent::default()
         };
-        let mut panel = Settings::open(&Config::default(), &Totals::default(), None, agent);
+        let mut panel = Settings::open(&Config::default(), None, agent);
         go_to(&mut panel, SESSIONS);
         let listed: Vec<String> = panel
             .rows()
@@ -2195,7 +2158,7 @@ mod tests {
             skills_at: Some(PathBuf::from("/home/hec/.config/noob/skills")),
             ..Agent::default()
         };
-        let mut panel = Settings::open(&Config::default(), &Totals::default(), None, agent);
+        let mut panel = Settings::open(&Config::default(), None, agent);
         go_to(&mut panel, SKILLS);
         let listed: Vec<String> = panel
             .rows()

@@ -180,16 +180,11 @@ rather than reported: prefill is from the request leaving to the first token
 arriving, which is what a long transcript costs, and decode is from the first
 token to the last, which is what the answer costs.
 
-Neither pane reads the all-time totals. Those are still kept in
-`~/.config/noob/no0b.totals` beside the settings, written by rename at the end of
-every turn and when the window closes, with a mean and a median per phase: the
-mean is every request ever, the median is the middle one, which is the reading
-that survives a cold start with a full transcript. That needs the samples
-themselves, so the file keeps the last 512 per-request rates. A missing file is a
-first run and an unreadable one reads as zero; neither stops the window opening.
-They had a pane and it showed those counts with nothing on it to say they were
-not this session, which is why it went. They are a section of the settings panel
-now, called ALL TIME, with this session already added in.
+Neither pane reads anything that outlives the window. There were all-time counts
+across every session this machine had ever run, first as a pane called OVERALL
+and then as a settings section called ALL TIME, kept in a file beside the
+settings. A column of numbers from sessions nobody remembers reads as this
+session's however it is labelled, so both are gone and so is the file.
 
 DEBUG counts the calls that failed and shows what was sent to them. Click a row
 and the arguments of that call open under it. Both halves are already on the
@@ -308,7 +303,7 @@ window too short for all nine the wheel scrolls it.
 ## Settings
 
 **Settings opens the panel**, from a right click on any pane or tab. It takes the
-whole window under the title strip and it is eight sections, named down a rail on
+whole window under the title strip and it is six sections, named down a rail on
 the left with the chosen one beside it. Up and down on the rail walk the sections,
 right goes into one, left comes back out, and inside a section up and down walk
 its rows while left and right change the row the cursor is on. Enter flips a
@@ -333,8 +328,10 @@ MCP names both files the CLI merges, `<config>/mcp.json` and
 rather than showing an empty list that reads as broken; a malformed one is a line
 saying so, and the servers from the file that did parse are still listed.
 
-The other four are the window's own settings file, and every key in it is on one
-of them: APPEARANCE, PANES, COLOURS and ALL TIME. Each row is the key as the file
+The other two are the window's own settings file, and every key in it is on one
+of them: APPEARANCE and COLOURS. APPEARANCE is the sizes and the theme, then
+`WHICH PANES OPEN` and `WHERE THE DIVIDERS SIT` under headings of their own.
+Each row is the key as the file
 spells it and the value as the file spells it, so the panel doubles as the
 reference for editing the file by hand. A change is written straight away through
 the same writer `no0b --set` uses, so the comments stay, and then the whole file
@@ -356,10 +353,6 @@ repaints the window in a preset; a file carrying a palette that is not one of th
 four exactly reads as `custom`, which is what one hand-tuned colour over a preset
 makes it.
 
-ALL TIME is the all-time totals: tokens prefilled, generated and served from
-cache, and a mean and a median prefill and decode speed across every request this
-machine has ever run.
-
 `~/.config/noob/no0b.conf`, written with the defaults on first run and
 commented. Opacity, both font sizes, how tall the prompt may grow, where the two
 dividers sit, which panes exist, and the whole palette: the eight base colors, one per tool,
@@ -377,11 +370,11 @@ uncomment one line to keep the theme and override that single color.
 `no0b --set theme=amber` makes the same edit from a terminal without touching
 the comments.
 
-The window shipped as CLIppy up to 0.6.0 and wrote `clippy.conf`,
-`clippy.recent` and `clippy.totals`. The first run under the new name moves each
-of those to `no0b.*`, so a tuned palette, the folders you have opened and the
-all-time totals survive the rename. A file that already exists under the new
-name wins and the old one is left alone.
+The window shipped as CLIppy up to 0.6.0 and wrote `clippy.conf` and
+`clippy.recent`. The first run under the new name moves each of those to
+`no0b.*`, so a tuned palette and the folders you have opened survive the rename.
+A file that already exists under the new name wins and the old one is left
+alone.
 
 Opacity defaults to 88%. Lower it to see more of your desktop through the
 reading surface; below about 60% a busy wallpaper starts competing with the

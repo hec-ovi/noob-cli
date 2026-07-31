@@ -40,7 +40,6 @@ mod settings;
 mod skin;
 mod state;
 mod syntax;
-mod totals;
 mod view;
 
 use std::path::{Path, PathBuf};
@@ -65,7 +64,6 @@ use settings::Settings;
 use prompt::Prompt;
 use skin::Skin;
 use state::{State, Tone};
-use totals::Totals;
 use view::{Drag, Hit, Landing, Layout, Shape};
 
 /// The only user event: something arrived, come and look. Deliberately carries
@@ -632,14 +630,6 @@ struct App {
     /// running, which is what keeps a window nobody is talking to at zero frames
     /// a second. See [`orb_deadline`].
     next_orb: Option<Instant>,
-    /// The sessions that came before this one, as loaded. Never the live one:
-    /// the running session is added on top whenever a reading or a write needs
-    /// it, so writing the file twice cannot count this session twice.
-    totals: Totals,
-    totals_path: Option<std::path::PathBuf>,
-    /// Whether a failed write has already been reported. A totals file that
-    /// cannot be written is worth saying once and not once per turn.
-    totals_trouble: bool,
     skin: Skin,
     link: Option<Link>,
     trouble: Option<String>,
@@ -738,7 +728,6 @@ struct App {
 impl App {
     fn new(proxy: EventLoopProxy<Wake>, config: Config, workspace: Option<PathBuf>) -> App {
         let skin = Skin::from(&config);
-        let totals_path = totals::path();
         // A view the settings turned off has no tab at all. Folding it away
         // would leave a strip saying the name of something you asked not to
         // see, which is not the same thing.
@@ -762,9 +751,6 @@ impl App {
             monitor: Monitor::new(),
             next_sample: None,
             next_orb: None,
-            totals: totals_path.as_deref().map(Totals::load).unwrap_or_default(),
-            totals_path,
-            totals_trouble: false,
             skin,
             link: None,
             trouble: None,
@@ -1013,15 +999,9 @@ impl App {
     }
 
     /// Open the settings panel over the window.
-    ///
-    /// The all-time totals go on it with this session already added in. The file
-    /// on disk holds the sessions that came before, and adding the live one here
-    /// is the same sum `remember` writes, so the panel and the next write agree.
     fn open_settings(&mut self) {
-        let totals = self.totals.plus(&self.state);
         self.settings = Some(Settings::open(
             &self.config,
-            &totals,
             self.settings_path().as_deref(),
             self.read_agent(),
         ));
@@ -1167,11 +1147,10 @@ impl App {
         };
         match settings::write_endpoint(&path, key, &value) {
             Ok(()) => {
-                let totals = self.totals.plus(&self.state);
                 let agent = self.read_agent();
                 let config = self.config.clone();
                 if let Some(panel) = self.settings.as_mut() {
-                    panel.adopt_agent(agent, &config, &totals);
+                    panel.adopt_agent(agent, &config);
                 }
             }
             Err(why) => {
@@ -1289,9 +1268,8 @@ impl App {
         match settings::commit(&path, change) {
             Ok(config) => {
                 self.adopt(config);
-                let totals = self.totals.plus(&self.state);
                 if let Some(panel) = self.settings.as_mut() {
-                    panel.refresh(&self.config, &totals);
+                    panel.refresh(&self.config);
                 }
             }
             // Said on the panel rather than in the activity pane, which is
@@ -1561,12 +1539,7 @@ impl App {
                 }
             }
         }
-        // The end of a turn is the natural boundary to record at: the numbers
-        // have stopped moving and there are a handful of turns a minute, not a
-        // handful of writes a second. A window killed mid-turn loses that turn,
-        // which is the price of not rewriting the file on every token.
         if turn_ended {
-            self.remember();
             self.remember_context();
         }
         self.follow_open_file();
@@ -1583,24 +1556,6 @@ impl App {
         }
         let rows = layout.rows(layout.file_list, self.config.pane_font_size);
         self.dirty |= self.state.reveal_open_file(rows);
-    }
-
-    /// Write the running totals: what was carried in, plus this session.
-    fn remember(&mut self) {
-        let Some(path) = self.totals_path.clone() else {
-            return;
-        };
-        if let Err(error) = self.totals.plus(&self.state).save(&path) {
-            // Once. A path that cannot be written will not start working, and a
-            // line per turn about it would bury the conversation it interrupts.
-            if !self.totals_trouble {
-                self.totals_trouble = true;
-                self.state
-                    .output
-                    .say(format!("cannot keep the running totals: {error}"), Tone::Bad);
-                self.dirty = true;
-            }
-        }
     }
 
     fn submit(&mut self) {
@@ -2923,9 +2878,8 @@ impl ApplicationHandler<Wake> for App {
         if sampling(self.shaded, covered, &self.dock) {
             let now = Instant::now();
             if self.next_sample.is_none_or(|at| now >= at) {
-                // The state and nothing else. The totals file used to be merged
-                // in here for the pane that read it; it is still written at the
-                // end of every turn, it just has no reader on screen.
+                // The state and nothing else. Every number the monitor draws is
+                // this run: nothing on screen outlives the window any more.
                 self.monitor.sample(&self.state);
                 self.next_sample = Some(now + SAMPLE_EVERY);
                 self.dirty = true;
@@ -2949,9 +2903,6 @@ impl ApplicationHandler<Wake> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        // Last chance to keep what this session did: everything since the last
-        // turn ended is only in memory until here.
-        self.remember();
         if let Some(link) = self.link.as_mut() {
             link.shutdown();
         }

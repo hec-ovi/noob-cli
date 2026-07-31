@@ -471,7 +471,7 @@ pub struct Rates {
     decode_tokens: u64,
     decode_seconds: f64,
     /// One tokens-per-second reading per measured request, oldest first, capped
-    /// at [`crate::totals::SAMPLES`] because the totals file carries these on.
+    /// at [`SAMPLES`].
     prefill_rates: Vec<f32>,
     decode_rates: Vec<f32>,
     /// When the request in flight went out, and when its first token landed.
@@ -488,24 +488,6 @@ impl Rates {
     /// Tokens per second it generated at, over the session.
     pub fn decode(&self) -> f64 {
         rate(self.decode_tokens, self.decode_seconds)
-    }
-
-    /// The sums behind the averages, for the totals file to carry on with.
-    pub fn prefill_sum(&self) -> (u64, f64) {
-        (self.prefill_tokens, self.prefill_seconds)
-    }
-
-    pub fn decode_sum(&self) -> (u64, f64) {
-        (self.decode_tokens, self.decode_seconds)
-    }
-
-    /// Every request's own rate, oldest first.
-    pub fn prefill_rates(&self) -> &[f32] {
-        &self.prefill_rates
-    }
-
-    pub fn decode_rates(&self) -> &[f32] {
-        &self.decode_rates
     }
 
     fn request_started(&mut self, at: f64) {
@@ -549,11 +531,18 @@ fn rate(tokens: u64, seconds: f64) -> f64 {
     tokens as f64 / seconds
 }
 
-/// Record one request's rate, dropping the oldest once the ring is full. The
-/// same bound the totals file uses, so what is measured is what is kept.
+/// How many per-request rate samples are kept, per phase.
+///
+/// A median needs the samples themselves: a running sum gives an average and
+/// has already forgotten which requests it was made of. Bounded because a list
+/// that grew one entry per request forever would be a session log, and the
+/// newest samples are the ones that describe the machine as it is now.
+const SAMPLES: usize = 512;
+
+/// Record one request's rate, dropping the oldest once the ring is full.
 fn sample(rates: &mut Vec<f32>, tokens: u64, seconds: f64) {
     rates.push((tokens as f64 / seconds) as f32);
-    if rates.len() > crate::totals::SAMPLES {
+    if rates.len() > SAMPLES {
         rates.remove(0);
     }
 }

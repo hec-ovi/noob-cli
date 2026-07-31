@@ -6,11 +6,10 @@
 //! has spent altogether and how fast it moved. The last two both come out of the
 //! event stream, so every number in this module is the window that is open.
 //!
-//! Nothing here reads the all-time totals any more. [`crate::totals`] is still
-//! recorded and still written at the end of every turn, it simply has no pane:
-//! a column of counts from sessions nobody remembers was read as this session's,
-//! which is the confusion it came off for. Those numbers belong in the settings
-//! panel, as a block that says what it is.
+//! Nothing here reads anything that outlives the window. There was a pane of
+//! all-time counts, and then a settings block of them: a column of numbers from
+//! sessions nobody remembers reads as this session's however it is labelled,
+//! and both are gone along with the file behind them.
 //!
 //! All three are the same [`Gauge`]: a `max` means the value is a proportion and
 //! is drawn as a block of dots, and without one the reading is the number alone.
@@ -142,10 +141,9 @@ impl Monitor {
     /// Read every source once. Cheap: six small files, no allocation past the
     /// strings they contain.
     ///
-    /// The state is the only argument. It used to take the totals file with this
-    /// run added on top, for a pane that is gone: both token lists are this run
-    /// and nothing else, so there is nothing here to confuse with the numbers in
-    /// [`crate::totals`].
+    /// The state is the only argument. It used to take an all-time totals file
+    /// with this run added on top, for a pane that is gone: both token lists are
+    /// this run and nothing else.
     pub fn sample(&mut self, state: &crate::state::State) {
         let mut gauges = Vec::new();
 
@@ -251,7 +249,7 @@ impl Monitor {
         }
         // How much work went into that fill: every request and every call this
         // run has made, which is why TOTAL is in the label. The two beneath them
-        // are the last request alone, so a pane of totals still says what one
+        // are the last request alone, so a pane of sums still says what one
         // request currently costs.
         context.push(Gauge {
             key: "requests",
@@ -290,9 +288,9 @@ impl Monitor {
         // were moved at. Measured rather than reported, which is what says
         // whether something is wrong right now.
         //
-        // These read the same numbers the totals file is written from, out of
-        // the live state instead of the file. That is the whole of item 22: the
-        // pane used to show the file and there was nothing on it to say so.
+        // Read out of the live state. That is the whole of item 22: the pane
+        // used to show a file of past sessions and there was nothing on it to
+        // say so.
         let session = vec![
             Gauge {
                 key: "prefilled",
@@ -588,10 +586,9 @@ Buffers:          100000 kB
     /// A reading in the wrong pane is the complaint this split came from.
     ///
     /// This asserted BEST OUTPUT in the context pane and seven all-time readings
-    /// in a third list read out of the totals file. Both are gone: the context
-    /// pane carries the fill and what it cost, the session pane carries this
-    /// run's own spend, and the file has no pane at all until the settings panel
-    /// gets one.
+    /// in a third list read out of a totals file. Both are gone: the context
+    /// pane carries the fill and what it cost, and the session pane carries this
+    /// run's own spend.
     #[test]
     fn each_pane_carries_the_readings_it_was_asked_for() {
         let mut monitor = bare();
@@ -649,8 +646,7 @@ Buffers:          100000 kB
         assert_eq!(read(monitor.context(), "tool_calls").value, 1.0);
         assert_eq!(read(monitor.context(), "last_prefill").value, 600.0);
         assert_eq!(read(monitor.context(), "last_generated").value, 20.0);
-        // The session pane: the same numbers the totals file is written from,
-        // read out of the live run rather than out of the file.
+        // The session pane: read out of the live run and nothing else.
         assert_eq!(read(monitor.session(), "prefilled").value, 1_100.0);
         assert_eq!(read(monitor.session(), "generated").value, 80.0);
         assert_eq!(read(monitor.session(), "cached").value, 1_300.0);
@@ -661,11 +657,16 @@ Buffers:          100000 kB
         );
     }
 
-    /// A pane that reads the file is the bug item 22 reported: OVERALL showed
-    /// prefilled and generated from somewhere unexplained. Nothing in the
-    /// monitor may move when the totals file does.
+    /// A pane that reads a file is the bug item 22 reported: OVERALL showed
+    /// prefilled and generated from somewhere unexplained. Every reading here is
+    /// this run, so sampling the same run twice cannot move one.
+    ///
+    /// This asserted the same thing against a live `crate::totals::Totals`,
+    /// which no longer exists: the all-time file went with the settings section
+    /// that was the last thing reading it. What it asserts now is the property
+    /// that survived, which is that the panes are the state and nothing else.
     #[test]
-    fn no_pane_reads_the_all_time_totals() {
+    fn no_pane_reads_anything_but_this_run() {
         let mut monitor = bare();
         let mut state = crate::state::State::new();
         state.apply(noob_proto::Event::UsageReport {
@@ -683,22 +684,15 @@ Buffers:          100000 kB
             monitor.context().into_iter().chain(monitor.session()).collect()
         };
         let before = reading(&monitor);
-        // A file with millions in it, still written and still loaded, and the
-        // panes do not know it exists.
-        let file = crate::totals::Totals {
-            prefilled: 4_200_000,
-            generated: 90_000,
-            cached: 3_100_000,
-            ..crate::totals::Totals::default()
-        };
-        assert_eq!(file.plus(&state).prefilled, 4_200_500, "the file still adds");
         monitor.sample(&state);
         let after = reading(&monitor);
         assert_eq!(before, after, "a second sample of the same run moved");
+        // Nothing carries a number this run never produced: one request of 900
+        // prompt tokens and 60 completion bounds every count on these two panes.
         for gauge in &after {
             assert!(
-                gauge.value < 4_200_000.0,
-                "{} is reading the file: {}",
+                gauge.value <= 65_536.0,
+                "{} reads more than this run did: {}",
                 gauge.key,
                 gauge.value
             );

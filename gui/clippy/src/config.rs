@@ -393,19 +393,20 @@ pub fn path() -> Option<PathBuf> {
 
 /// The prefix these files carried while the window was called CLIppy.
 const LEGACY_PREFIX: &str = "clippy";
-/// The prefix they carry now. `no0b.conf`, `no0b.recent`, `no0b.totals`.
+/// The prefix they carry now. `no0b.conf` and `no0b.recent`.
 const PREFIX: &str = "no0b";
 
 /// Take over the file the same reading used to live in under the old name.
 ///
-/// The window was CLIppy and wrote `clippy.conf`, `clippy.recent` and
-/// `clippy.totals`. Renaming it must not read as a fresh install: the palette
-/// somebody tuned, the folders they have opened and the all-time totals are all
-/// still theirs and still valid, and there is no version of this where losing
-/// them is acceptable.
+/// The window was CLIppy and wrote `clippy.conf` and `clippy.recent`. Renaming
+/// it must not read as a fresh install: the palette somebody tuned and the
+/// folders they have opened are still theirs and still valid, and there is no
+/// version of this where losing them is acceptable.
 ///
-/// Called by each of the three readers on the way in, so it runs once per file
-/// and only until the new name exists.
+/// Called by each reader on the way in, so it runs once per file and only until
+/// the new name exists. It carried a third file, `clippy.totals`, until the
+/// all-time counts came off the settings panel and the file went with them; the
+/// rename is by prefix and never named any of them, so nothing here changed.
 ///
 /// Nothing here is an error. A rename that cannot happen leaves the new name
 /// absent, which every caller already treats as a first run and answers with
@@ -712,9 +713,9 @@ pub fn write_setting(path: &Path, key: &str, value: Option<&str>) -> Result<(), 
 
 /// Put `text` in the file, by rename, keeping the permissions the old file had.
 ///
-/// Extracted from the settings writer because the running totals file has the
-/// same requirement and no business having its own opinion about it: a crash
-/// mid-write must not leave a half-written file where a whole one was.
+/// Extracted from the settings writer because every other file the window keeps
+/// has the same requirement and no business having its own opinion about it: a
+/// crash mid-write must not leave a half-written file where a whole one was.
 pub(crate) fn replace_file(path: &Path, text: &str) -> Result<(), String> {
     if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)
@@ -1347,14 +1348,14 @@ mod tests {
         assert_eq!(scratch.read(), DEFAULT_FILE);
     }
 
-    /// The migration is one function for all three files the window keeps, so it
+    /// The migration is one function for every file the window keeps, so it
     /// carries any of them and touches nothing it was not asked about.
     #[test]
     fn the_migration_carries_every_file_the_window_keeps() {
         let scratch = Scratch::new("every");
         for (legacy, current) in [
             ("clippy.recent", "no0b.recent"),
-            ("clippy.totals", "no0b.totals"),
+            ("clippy.conf", "no0b.conf"),
         ] {
             std::fs::write(scratch.0.join(legacy), format!("from {legacy}\n")).unwrap();
             adopt_legacy(&scratch.0.join(current));
