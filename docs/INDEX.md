@@ -76,6 +76,9 @@ Boxes so far:
 - [`crates/noob/src/mcp`](../crates/noob/src/mcp/CONTRACT.md) - the lazy MCP
   client: connect caches a catalog, calls validate locally, timeouts kill
   wedged servers.
+- [`crates/noob/src/subagent`](../crates/noob/src/subagent/CONTRACT.md) - the
+  subagent tool and the background hub: detached children of the binary
+  itself, one result line each.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,
