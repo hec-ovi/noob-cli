@@ -22,7 +22,9 @@ import pathlib
 import sys
 
 try:
-    from jsonschema import Draft202012Validator, RefResolver
+    from jsonschema import Draft202012Validator
+    from referencing import Registry, Resource
+    from referencing.jsonschema import DRAFT202012
 except ImportError:
     sys.exit("contract.py needs jsonschema: pip install jsonschema")
 
@@ -36,12 +38,14 @@ def schema_for(fixture: pathlib.Path) -> pathlib.Path:
 
 def validator_for(path: pathlib.Path) -> Draft202012Validator:
     schema = json.loads(path.read_text())
-    # The schemas cross-reference each other by bare filename, resolved against
-    # this directory. Every one is preloaded into the store so a ref can never
-    # reach the network, which a contract test must not depend on.
-    store = {f"{SCHEMA.as_uri()}/{p.name}": json.loads(p.read_text()) for p in SCHEMA.glob("*.json")}
-    resolver = RefResolver(base_uri=f"{SCHEMA.as_uri()}/", referrer=schema, store=store)
-    return Draft202012Validator(schema, resolver=resolver)
+    # The schemas cross-reference each other by bare filename. Every one is
+    # preloaded into the registry under that name so a ref can never reach the
+    # network, which a contract test must not depend on.
+    registry = Registry().with_resources(
+        (p.name, Resource.from_contents(json.loads(p.read_text()), default_specification=DRAFT202012))
+        for p in SCHEMA.glob("*.json")
+    )
+    return Draft202012Validator(schema, registry=registry)
 
 
 def main() -> int:
