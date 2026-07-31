@@ -4,8 +4,9 @@ Written for someone picking this up cold. Everything here was checked against
 the tree it describes; where a claim rests on a specific line, the line is
 named, and the lines were re-read at 0.8.0.
 
-Two things remain on the roadmap, and neither blocks the other: native binaries
-for the three desktop platforms, and letting the agent run containers.
+Three things remain on the roadmap, in this order: restructuring the tree into
+contract-carrying boxes (task 0, first by explicit request), native binaries for
+the three desktop platforms, and letting the agent run containers.
 
 The GPU front end is built. It shipped as NO0B at 0.7.0 and is task 2 below,
 kept for the design record. It did not wait for native binaries after all: it
@@ -26,6 +27,48 @@ directory at `/config`. `docker/Dockerfile` cross-builds
 `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl` depending on
 `TARGETARCH`. So "installing noob" today means "installing Docker and a script
 that calls it".
+
+## Task 0: boxes and contracts, first
+
+The whole tree becomes a set of boxes: each a folder with a CONTRACT.md
+(purpose, params in and out, error set, invariants, dependencies) and its own
+tests, on the pattern `gui/layers/text-geometry` already proves. Outsiders read
+the contract, never the code. `docs/INDEX.md` lists the boxes as they land.
+
+Forming a box also de-bloats it: inline `#[cfg(test)]` modules move out into
+the box's own test files, tests that are redundant or prove nothing get cut
+rather than moved, and any doc the contract now covers is deleted. A box holds
+what it needs and nothing else.
+
+The rounds, each ending green and committed, one agent per box:
+
+1. Contracts for the five seams already crate-shaped: noob-proto, noob-provider,
+   noob-testkit, noob-gpu, noob-draw. No code moves.
+2. One command runs every box's tests plus the budget, egress, and size gates.
+3. The pty rig and vt emulator move from `e2e_ui.rs` into noob-testkit;
+   `e2e_ui.rs` splits per subsystem.
+4. CLI leaf boxes: session, mcp, emit, config, subagent, skills.
+5. Platform seams as boxes: the process runner (spawn, group kill, reap) and the
+   terminal backend (raw mode, keys, size, interrupt, resize). Contracts worded
+   platform-neutral so second implementations can exist.
+6. The tool registry partitions: the ToolCtx god-object becomes per-capability
+   contexts; file tools, the shell tool, and the web tool box separately.
+7. The agent loop emits events instead of holding the UI; agent and terminal-UI
+   boxes (core, dock, editor, textkit) form against that seam.
+8. Entry points: serve (the contract the GUI consumes) and the CLI shell.
+9. GUI leaf boxes: dock model, prompt, selection, scroll, orb, design,
+   transcript model, style, menu, monitor, config, agent-files, link, sessions.
+10. The reducer purifies (Scrolls and Selection move to the shell) and boxes.
+11. `view.rs` splits per surface, placement, paint, and hit regions together:
+    layout and chrome first, then one box per pane widget (output, activity,
+    plan, agents, files, context, gauges), then the settings panel reunited
+    from its three-file spread, the picker likewise. Inside settings, each
+    section heavy enough to deserve it (sessions, skills, mcp, appearance)
+    nests as its own box; thin forms stay files in the parent. The point of
+    the grain: an agent improves one widget or one settings screen, or adds a
+    new one, reading only that box and the layout contract.
+12. The App god-object in `main.rs` dissolves one controller at a time into the
+    GUI shell; packaging formalized.
 
 ## Task 1: native binaries for macOS, Windows, and Linux
 
@@ -71,7 +114,10 @@ defines two modes: `Container`, where tools run unrestricted because the
 container is the boundary, and `Workspace`, where write and edit refuse paths
 outside the workspace. A native binary has no container, so `Workspace` becomes
 the only real boundary and it needs to hold up. Read that code before assuming
-it does; it was written when a container was always there behind it.
+it does; it was written when a container was always there behind it. The chosen
+direction (2026-07-31): shell commands get folder-scoped too, best effort, with
+the OS mechanism each platform has (Landlock on Linux, Seatbelt on macOS, the
+closest available on Windows).
 
 **The test suite assumes a pty.** `crates/noob/tests/e2e_ui.rs`,
 `e2e_p3.rs`, `e2e_p5.rs`, and `vt.rs` drive the real binary through a pseudo
@@ -88,8 +134,10 @@ not after.
    supervised child and killing its tree, with per-platform implementations
    behind it. Do this before Windows, because on Windows it is the whole job.
 3. Windows last: terminal, signals, process tree, path handling.
-4. Only then work out distribution (per-platform archives, checksums). Note the
-   repository rule: do not add or edit anything under `.github/workflows`.
+4. Only then work out distribution: a release workflow under `.github/workflows`
+   builds all three platforms on tag and publishes to GitHub Releases; the
+   online install command fetches from there (approved 2026-07-31). macOS ships
+   unsigned for now, with the one-time approval step documented.
 
 ## Task 2: the GPU front end. Built, at 0.7.0
 
@@ -183,8 +231,9 @@ exists.
   `noob debug prompt --json` and the server's `/tokenize` endpoint.
 - **Never cap model output.** No `max_tokens` and no word or sentence limits in
   prompts. `crates/noob/tests/budget.rs` enforces both.
-- **Every behavioural change ships with a test**, run locally. Do not add or
-  modify CI workflows.
+- **Every behavioural change ships with a test**, run locally. The one CI
+  surface is the release workflow that builds and publishes binaries on tag;
+  tests never move to CI.
 - **The repository is not rustfmt-clean.** Running `cargo fmt --all` reformats
   files unrelated to your change. Format only the files you touched, and only if
   they were clean before.
