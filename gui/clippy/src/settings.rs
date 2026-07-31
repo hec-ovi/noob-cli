@@ -415,9 +415,10 @@ pub struct Entry {
     /// the end of this with two spaces, which made the name and what it is one
     /// run of text competing for one line with two buttons on the end of it.
     pub name: String,
-    /// What it is for, on its own line under the name: a skill's own
+    /// What it is for, on its own lines under the name: a skill's own
     /// description, or the address or command line a server is started with.
-    /// Empty when there is none to read.
+    /// Wrapped rather than clipped, so a long one is as many rows as it takes
+    /// and the row grows with it. Empty when there is none to read.
     pub about: String,
     /// The line under that: the repository a skill records, or the directory it
     /// was found in when it records none; for a server, the file its entry
@@ -493,27 +494,44 @@ pub struct Swatch {
 /// narrow window clips a label rather than moving it.
 pub const SWATCH_COLUMNS: usize = 3;
 
-/// How many rows of text one row of the panel takes.
+/// How many rows of text one row of the panel takes, in a list `cols` wide.
 ///
 /// A heading is two, because it is drawn larger than the settings under it: a
 /// heading measured at one height and drawn at another puts every click below it
 /// on the wrong row. [`Settings::heights`] and `view::place_settings` both read
 /// this, which is what keeps the two agreeing.
-pub fn lines(row: &Row) -> usize {
+///
+/// `cols` is the width the list has, because an entry's description wraps in it
+/// and a row that wrapped to four rows is four rows tall. Every other kind of
+/// row ignores it: a value too long for the panel is still clipped rather than
+/// wrapped, so a click cannot resolve to a setting other than the one under the
+/// pointer.
+pub fn lines(row: &Row, cols: usize) -> usize {
     match row {
         // A heading is drawn larger, which is two lines of the ordinary text.
         Row::Heading(_) => 2,
-        // A name, what it is for, and where it is: three things that were two
-        // lines with the first two sharing one, so the description was the end
-        // of the name and was cut by whatever the buttons left of the row.
-        Row::Entry(_) => 3,
+        // A name, what it is for, and where it is. The middle one wraps, so an
+        // entry is as tall as its description needs: it was three rows whatever
+        // the description said, and a description longer than the column ended
+        // in an ellipsis with the rest of it unreadable.
+        Row::Entry(entry) => 2 + about_rows(&entry.about, cols),
         // As tall as the taller half, so the two columns of a form sit on the
         // same lines and the rows under them do not move when one half changes.
-        Row::Pair(left, right) => lines(left).max(lines(right)),
+        Row::Pair(left, right) => lines(left, cols).max(lines(right, cols)),
         // Its title, the line under it, and the text.
         Row::Paper(_) => PAPER_LINES + 2,
         _ => 1,
     }
+}
+
+/// How many rows an entry's description takes in a column `cols` wide.
+///
+/// The panes' own wrap rule, through the one function that owns it, so the
+/// height counted here, the room the layout leaves the row and the rows the
+/// renderer breaks the text into are the same rows. Always at least one, which
+/// is what an entry with no description to read still spends on it.
+pub fn about_rows(about: &str, cols: usize) -> usize {
+    text_geometry::rows_in(about, cols, crate::state::PANE_WRAP).len()
 }
 
 /// Which file a setting lives in.
@@ -2254,18 +2272,20 @@ impl Settings {
         (index, side) != was
     }
 
-    /// How many rows of text each row of the list takes, for the scroll window.
+    /// How many rows of text each row of the list takes, for the scroll window,
+    /// in a list `cols` characters wide.
     ///
     /// Not one each any more: a heading is drawn larger than the settings under
-    /// it and takes two ([`lines`]). A value too long for the panel is still
-    /// clipped rather than wrapped, so a click still cannot resolve to a setting
-    /// other than the one under the pointer.
-    pub fn heights(&self) -> Vec<usize> {
-        text_geometry::heights(self.here().rows.iter().map(lines), 1)
+    /// it and takes two, and an entry takes what its description wrapped to
+    /// ([`lines`]). A value too long for the panel is still clipped rather than
+    /// wrapped, so a click still cannot resolve to a setting other than the one
+    /// under the pointer.
+    pub fn heights(&self, cols: usize) -> Vec<usize> {
+        text_geometry::heights(self.here().rows.iter().map(|row| lines(row, cols)), 1)
     }
 
-    /// Which rows are on screen in a list `rows` tall: the first one, and how
-    /// many fit under it.
+    /// Which rows are on screen in a list `rows` tall and `cols` wide: the first
+    /// one, and how many fit under it.
     ///
     /// Anchored on a row rather than on a row of text, so the top of the list is
     /// always the top of a row. Half a heading at the top of the list is a
@@ -2273,8 +2293,8 @@ impl Settings {
     /// every hit region below it would be a row out of step with what is drawn.
     /// A row that does not fit whole is left for the next screenful, except when
     /// it is the only one there is room to start with.
-    pub fn window(&self, rows: usize) -> (usize, usize) {
-        let heights = self.heights();
+    pub fn window(&self, rows: usize, cols: usize) -> (usize, usize) {
+        let heights = self.heights(cols);
         if rows == 0 || heights.is_empty() {
             return (0, 0);
         }
@@ -2292,12 +2312,12 @@ impl Settings {
         (first, count)
     }
 
-    /// Bring the cursor on screen, for a `rows` tall list.
-    pub fn reveal(&mut self, rows: usize) -> bool {
+    /// Bring the cursor on screen, for a `rows` tall and `cols` wide list.
+    pub fn reveal(&mut self, rows: usize, cols: usize) -> bool {
         if rows == 0 || self.here().rows.is_empty() {
             return false;
         }
-        let heights = self.heights();
+        let heights = self.heights(cols);
         let most = last_top(&heights, rows);
         let section = self.here_mut();
         let cursor = section.cursor.min(heights.len() - 1);
@@ -2314,8 +2334,8 @@ impl Settings {
     }
 
     /// Move the window without moving the cursor, for the wheel.
-    pub fn scroll(&mut self, by: usize, down: bool, rows: usize) -> bool {
-        let most = last_top(&self.heights(), rows);
+    pub fn scroll(&mut self, by: usize, down: bool, rows: usize, cols: usize) -> bool {
+        let most = last_top(&self.heights(cols), rows);
         let section = self.here_mut();
         let next = match down {
             true => (section.first + by).min(most),
@@ -2327,9 +2347,9 @@ impl Settings {
     }
 
     /// How much of the list is on screen, for the scrollbar.
-    pub fn thumb(&self, rows: usize) -> Option<(f32, f32)> {
-        let heights = self.heights();
-        let (first, _) = self.window(rows);
+    pub fn thumb(&self, rows: usize, cols: usize) -> Option<(f32, f32)> {
+        let heights = self.heights(cols);
+        let (first, _) = self.window(rows, cols);
         // The scrollbar counts rows of text, so the row the list starts on has
         // to be turned into the row of text it starts on first.
         let above: usize = heights.iter().take(first).sum();
@@ -2562,6 +2582,11 @@ pub fn write_endpoint(path: &Path, key: &str, value: &str) -> Result<(), String>
 mod tests {
     use super::*;
     use std::time::{Duration, SystemTime};
+
+    /// How wide the list is taken to be where a test does not care. Only a row
+    /// carrying an entry reads it, since that is the only kind of row whose
+    /// height depends on the width it wraps in.
+    const COLS: usize = 60;
 
     fn over(config: &Config) -> Settings {
         Settings::open(config, Some(Path::new("/tmp/no0b.conf")), Agent::default())
@@ -3699,26 +3724,26 @@ mod tests {
         let rows = 10;
         assert!(panel.rows().len() > rows, "the longest section is one screenful");
         assert_eq!(panel.first(), 0);
-        assert!(panel.thumb(rows).is_some(), "a list this long says so");
+        assert!(panel.thumb(rows, COLS).is_some(), "a list this long says so");
 
         // The wheel moves the window and leaves the cursor where it was.
         let cursor = panel.cursor();
-        assert!(panel.scroll(3, true, rows));
+        assert!(panel.scroll(3, true, rows, COLS));
         assert_eq!(panel.cursor(), cursor);
-        assert!(panel.scroll(3, false, rows));
+        assert!(panel.scroll(3, false, rows, COLS));
 
         // A section short enough to fit does not pretend to scroll.
         go_to(&mut panel, MCP);
-        assert!(panel.thumb(rows).is_none(), "three rows do not scroll");
+        assert!(panel.thumb(rows, COLS).is_none(), "three rows do not scroll");
 
         // Down to the last setting of a longer one, in a window two rows tall:
         // the window follows the cursor to both ends.
         go_to(&mut panel, APPEARANCE);
         assert!(panel.jump(true));
-        panel.reveal(2);
+        panel.reveal(2, COLS);
         assert!(panel.cursor() < panel.first() + 2, "the cursor is off screen");
         assert!(panel.jump(false));
-        panel.reveal(2);
+        panel.reveal(2, COLS);
         assert!(
             panel.first() <= panel.cursor(),
             "the cursor is above the window"
@@ -3745,7 +3770,7 @@ mod tests {
     fn the_window_counts_a_heading_as_the_two_rows_it_takes() {
         let mut panel = over(&Config::default());
         go_to(&mut panel, APPEARANCE);
-        let heights = panel.heights();
+        let heights = panel.heights(COLS);
         let headings: Vec<usize> = panel
             .rows()
             .iter()
@@ -3760,28 +3785,85 @@ mod tests {
             assert_eq!(heights[*at], 2, "a heading is drawn larger than a row");
         }
         for (at, row) in panel.rows().iter().enumerate() {
-            assert_eq!(heights[at], lines(row), "the model and the window disagree");
+            assert_eq!(heights[at], lines(row, COLS), "the model and the window disagree");
         }
 
         // Whatever it is scrolled to, the rows on screen start at the top of a
         // row and take no more room than the list has.
         let rows = 12;
         for _ in 0..40 {
-            let (first, count) = panel.window(rows);
+            let (first, count) = panel.window(rows, COLS);
             let used: usize = heights[first..first + count].iter().sum();
             assert!(count > 0, "the list showed nothing at {first}");
             assert!(
                 used <= rows || count == 1,
                 "{count} rows from {first} take {used} of {rows}"
             );
-            if !panel.scroll(1, true, rows) {
+            if !panel.scroll(1, true, rows, COLS) {
                 break;
             }
         }
         // The end of the list is reachable and stops there.
-        let (first, count) = panel.window(rows);
+        let (first, count) = panel.window(rows, COLS);
         assert_eq!(first + count, panel.rows().len(), "the last row is off screen");
-        assert!(!panel.scroll(1, true, rows), "the list scrolled past its end");
+        assert!(!panel.scroll(1, true, rows, COLS), "the list scrolled past its end");
+    }
+
+    /// A description longer than one row of a narrow column, so the height of
+    /// the row that carries it depends on the width it is read in.
+    const A_WRAPPING_ABOUT: &str = "reads the file before it writes one and says which file it read";
+
+    /// An entry is as tall as its description wrapped to, and the window counts
+    /// it that way.
+    ///
+    /// The row was three lines whatever the description said, so a long one was
+    /// cut off at the width of the column. Now that it wraps, a row measured at
+    /// three lines and drawn at five would put every press below it on the wrong
+    /// row and let the wheel run off the end of the list.
+    #[test]
+    fn the_window_counts_an_entry_as_the_rows_its_description_wrapped_to() {
+        let dir = scratch_dir("wrapping-skill");
+        let skills = dir.join("skills");
+        std::fs::create_dir_all(skills.join("coding")).expect("a directory");
+        std::fs::write(
+            skills.join("coding").join("SKILL.md"),
+            format!("---\nname: coding\ndescription: {A_WRAPPING_ABOUT}\n---\n\n# Changing code\n"),
+        )
+        .expect("a file");
+        let agent = Agent::read(Some(&dir), None, crate::sessions::Listing::default());
+        let mut panel = Settings::open(&Config::default(), None, agent);
+        go_to(&mut panel, SKILLS);
+        let at = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, Row::Entry(_)))
+            .expect("the skill is on the list");
+
+        // Wide enough for the description on one row: the name, it, and the
+        // path under it.
+        let wide = A_WRAPPING_ABOUT.chars().count() + 1;
+        assert_eq!(about_rows(A_WRAPPING_ABOUT, wide), 1);
+        assert_eq!(panel.heights(wide)[at], 3);
+        assert_eq!(lines(panel.row(at).expect("the row"), wide), 3);
+
+        // Half of it, and the description is more than one row, so the row is
+        // taller by exactly what it wrapped to.
+        let half = wide / 2;
+        let wrapped = about_rows(A_WRAPPING_ABOUT, half);
+        assert!(wrapped > 1, "{wrapped} rows in {half} columns");
+        assert_eq!(panel.heights(half)[at], 2 + wrapped);
+        assert_eq!(lines(panel.row(at).expect("the row"), half), 2 + wrapped);
+
+        // And the window counts it: where the section is a reading, a note and
+        // the entry, five rows of text hold all three at the wide column and
+        // stop short of the entry at the narrow one.
+        assert_eq!(panel.rows().len(), 3, "{:?}", panel.rows());
+        assert_eq!(panel.window(5, wide), (0, 3), "the section fits in five rows");
+        assert_eq!(
+            panel.window(5, half),
+            (0, 2),
+            "the wrapped entry was counted as if it still took three"
+        );
     }
 
     /// The agent section reads the CLI's own file: where it is, what it points
@@ -4018,7 +4100,7 @@ mod tests {
                 cell(row, Side::Right)
             );
             // Both halves on the same lines, so the two columns line up.
-            assert_eq!(lines(row), 1);
+            assert_eq!(lines(row, COLS), 1);
         }
         // Nothing that cannot be set stands between the two rows of the form.
         assert!(
@@ -4140,8 +4222,8 @@ mod tests {
             .iter()
             .position(|row| matches!(row, Row::Paper(paper) if paper.title.contains("PROMPT")))
             .expect("the prompt block");
-        assert_eq!(lines(panel.row(at).expect("the row")), PAPER_LINES + 2);
-        assert_eq!(panel.heights()[at], PAPER_LINES + 2, "the model and the window disagree");
+        assert_eq!(lines(panel.row(at).expect("the row"), COLS), PAPER_LINES + 2);
+        assert_eq!(panel.heights(COLS)[at], PAPER_LINES + 2, "the model and the window disagree");
 
         // And it is read with the page keys: the cursor is on it, the block
         // moves and the list under it does not.
@@ -4662,15 +4744,15 @@ mod tests {
         // not all fit in; the document is asked for the eight the column holds.
         let list_rows = 2;
         assert_eq!(panel.doc_first(cols, rows), 0);
-        let list_was = panel.window(list_rows);
+        let list_was = panel.window(list_rows, COLS);
 
         assert!(panel.scroll_doc(5, true, cols, rows), "the document moves");
         assert_eq!(panel.doc_first(cols, rows), 5);
         assert_eq!(panel.doc_window(cols, rows).first, 5);
-        assert_eq!(panel.window(list_rows), list_was, "the list moved with it");
+        assert_eq!(panel.window(list_rows, COLS), list_was, "the list moved with it");
 
-        assert!(panel.scroll(1, true, list_rows), "the list moves");
-        assert_ne!(panel.window(list_rows), list_was);
+        assert!(panel.scroll(1, true, list_rows, COLS), "the list moves");
+        assert_ne!(panel.window(list_rows, COLS), list_was);
         assert_eq!(
             panel.doc_first(cols, rows),
             5,

@@ -1826,6 +1826,16 @@ impl Layout {
         Text::rows_for(size, self.settings_list.h)
     }
 
+    /// How many characters wide the list's own text is, which is what a row
+    /// carrying a wrapped description is as tall as.
+    ///
+    /// The window asks here for the same reason the drawing does: the keys, the
+    /// wheel and the scrollbar all count a row's height, and a height counted in
+    /// a width the row was not drawn in scrolls the list past what is on screen.
+    pub fn settings_entry_columns(&self, column: f32) -> usize {
+        settings_entry_cols(self.settings_list.w, column)
+    }
+
     /// How many rows of the document beside it are on screen, and how many
     /// columns it wraps in.
     ///
@@ -2694,6 +2704,18 @@ const SETTING_REMOVE_COLUMNS: usize = 13;
 /// puts the same air on the right of the row that the list has on its left.
 const SETTING_ENTRY_INSET: f32 = GAP;
 
+/// How many characters an entry's text wraps in: the list's own width, less the
+/// mark down the edge of a row and the air after it.
+///
+/// The one number. A description is wrapped by the renderer, its height is
+/// counted by the model and the room for it is left by the layout, and a row
+/// measured in one width and drawn in another puts every click below it on the
+/// wrong row. Read off the list rather than off a row, because the row is what
+/// it decides the height of.
+fn settings_entry_cols(list_w: f32, column: f32) -> usize {
+    columns_in((list_w - MARK_W - 3.0).max(1.0), column)
+}
+
 /// The least the column beside the entry list goes down to, in columns of pane
 /// text, and the least the list itself keeps.
 ///
@@ -2787,7 +2809,11 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
         false => list,
     };
     let rows_fit = Text::rows_for(shape.pane_size, list.h);
-    let (first, count) = panel.window(rows_fit);
+    // The width a wrapped description is measured in, taken after the document
+    // column has been split off: a row is as tall as it wraps to in the list it
+    // is actually drawn in, not in the whole panel.
+    let entry_cols = settings_entry_cols(list.w, column);
+    let (first, count) = panel.window(rows_fit, entry_cols);
     let mut rows = Vec::new();
     let mut values = Vec::new();
     let mut tracks = Vec::new();
@@ -2805,7 +2831,8 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
         };
         // Cut off at the bottom of the list rather than drawn over it: a list
         // one row tall that opens on a heading has room for one row of it.
-        let tall = (crate::settings::lines(entry) as f32 * line).min(list.y + list.h - y);
+        let tall =
+            (crate::settings::lines(entry, entry_cols) as f32 * line).min(list.y + list.h - y);
         if tall < 1.0 {
             break;
         }
@@ -5618,9 +5645,9 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     tint,
                 );
                 // What it is for, in the ordinary tone, and where it is, in the
-                // quiet one: three things on three lines rather than a name with
-                // its description glued to the end of it and cut by whatever the
-                // buttons left over.
+                // quiet one: three things on lines of their own rather than a
+                // name with its description glued to the end of it and cut by
+                // whatever the buttons left over.
                 let about = match (on, entry.on) {
                     (true, _) => skin.picked_ink,
                     (false, true) => skin.body,
@@ -5632,15 +5659,46 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     true => skin.picked_ink,
                     false => skin.dim,
                 };
-                for (step, (text, ink)) in [(&entry.about, about), (&entry.under, under)]
-                    .into_iter()
-                    .enumerate()
-                {
-                    let at = Panel::new(text_x, row.y + (step as f32 + 1.0) * line, whole.w, line);
-                    if text.is_empty() || at.y + line > row.y + row.h {
-                        continue;
-                    }
-                    say(scene, vec![Run::tinted(clip(text, whole_cols), ink)], at, ink);
+                // The description wraps onto as many rows as it needs, and the
+                // row was made that tall by the model, which counted them with
+                // the same rule the renderer breaks the box with. It used to be
+                // one line ending in an ellipsis, which is a sentence cut off at
+                // the width of the column with the rest of it unreadable.
+                let about_cols = settings_entry_cols(row.w, column);
+                let about_rows = crate::settings::about_rows(&entry.about, about_cols);
+                let about_at = Panel::new(
+                    text_x,
+                    row.y + line,
+                    whole.w,
+                    (about_rows as f32 * line).min((row.h - line).max(0.0)),
+                );
+                if !entry.about.is_empty() && about_at.h >= line {
+                    scene.text(
+                        Text::rich(
+                            vec![Run::tinted(entry.about.clone(), about)],
+                            about_at,
+                            size,
+                            about,
+                        )
+                        .wrap_at(about_cols),
+                    );
+                }
+                // Under the last row of it, wherever that landed. Still clipped
+                // rather than wrapped: a path is one thing to read and a second
+                // row of it says nothing the first did not.
+                let under_at = Panel::new(
+                    text_x,
+                    row.y + (about_rows as f32 + 1.0) * line,
+                    whole.w,
+                    line,
+                );
+                if !entry.under.is_empty() && under_at.y + line <= row.y + row.h {
+                    say(
+                        scene,
+                        vec![Run::tinted(clip(&entry.under, whole_cols), under)],
+                        under_at,
+                        under,
+                    );
                 }
                 for (at, box_) in &layout.settings_toggles {
                     if at != index {
@@ -5881,7 +5939,10 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
         scene,
         skin,
         layout.settings_list,
-        panel.thumb(layout.settings_capacity(size)),
+        panel.thumb(
+            layout.settings_capacity(size),
+            layout.settings_entry_columns(column),
+        ),
     );
 
     // What the keys do to the row under the cursor, which swatch was pressed, or
@@ -15149,6 +15210,170 @@ mod tests {
         }
     }
 
+    /// A description several times the width of the entry column. Giving it a
+    /// line of its own took the buttons out of its way; it still ended in an
+    /// ellipsis at the edge of the column, which is what this one is long
+    /// enough to prove.
+    const A_WRAPPING_ABOUT: &str = "reads the file before it writes one, says which file it read, and stops at the first thing it does not recognise rather than guessing what the rest of the line was meant to say";
+
+    /// The skills section with two skills, the first wordy enough that its
+    /// description cannot be one row of the column and the second short enough
+    /// that it is.
+    fn a_wrapping_skills_panel() -> Settings {
+        let mut agent = an_agent();
+        agent.skills[0].about = String::from(A_WRAPPING_ABOUT);
+        agent.skills.push(crate::agent::Skill {
+            dir: String::from("web-search"),
+            name: String::from("web-search"),
+            about: String::from("Searches the live web."),
+            repo: Some(String::from("https://github.com/someone/web-search")),
+            path: std::path::PathBuf::from("/home/hec/.config/noob/skills/web-search"),
+            on: true,
+            doc: vec![String::from("# Searching")],
+        });
+        let mut panel = Settings::open(
+            &Config::default(),
+            Some(std::path::Path::new("/home/hec/.config/noob/no0b.conf")),
+            agent,
+        );
+        let at = panel
+            .section_names()
+            .iter()
+            .position(|name| *name == crate::settings::SKILLS)
+            .expect("SKILLS is a section");
+        panel.choose(at);
+        panel
+    }
+
+    /// Every entry row of a rendered skills panel, in the order they are drawn.
+    fn the_entry_rows(out: &Rendered, panel: &Settings) -> Vec<(usize, Panel)> {
+        out.layout
+            .settings_rows
+            .iter()
+            .filter(|(index, _, _)| {
+                matches!(panel.row(*index), Some(crate::settings::Row::Entry(_)))
+            })
+            .map(|(index, _, row)| (*index, *row))
+            .collect()
+    }
+
+    /// A description too long for the column wraps onto as many rows as it
+    /// needs and the row grows to hold them.
+    ///
+    /// Moving it off the name's line stopped the buttons cutting it; the column
+    /// itself was still cutting it, so a skill whose description ran past the
+    /// width of the list ended in three dots with the rest unreadable. It is
+    /// broken by the rule the panes and the document column use, in the columns
+    /// the model counted its height in.
+    #[test]
+    fn a_long_description_wraps_instead_of_ending_in_an_ellipsis() {
+        let panel = a_wrapping_skills_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let line = Text::line_for(PANE_TEXT.0);
+        let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
+        assert!(
+            A_WRAPPING_ABOUT.chars().count() > cols,
+            "the description fits in {cols} columns, so this proves nothing"
+        );
+        let (_, row) = the_entry_rows(&out, &panel)[0];
+        let text_x = row.x + MARK_W + 3.0;
+        let drawn = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| {
+                (text.at.x - text_x).abs() < 0.51 && (text.at.y - (row.y + line)).abs() < 0.51
+            })
+            .expect("the description");
+        let said: String = drawn.runs.iter().map(|run| run.text.as_str()).collect();
+        assert_eq!(said, A_WRAPPING_ABOUT, "the description was cut");
+        assert!(!said.contains('\u{2026}'), "it still ends in an ellipsis");
+        assert_eq!(
+            drawn.wrap_cols,
+            Some(cols),
+            "it wraps in the columns its height was counted in"
+        );
+        // As many rows as it wrapped to, and the row is the name, those rows and
+        // the path underneath.
+        let wrapped = crate::settings::about_rows(A_WRAPPING_ABOUT, cols);
+        assert!(wrapped > 1, "{wrapped} rows in {cols} columns");
+        assert!(
+            drawn.at.h >= wrapped as f32 * line - 0.01,
+            "the box holds {} of {wrapped} rows: {:?}",
+            drawn.at.h / line,
+            drawn.at
+        );
+        assert!(
+            row.h >= (wrapped as f32 + 2.0) * line - 0.01,
+            "the row did not grow: {row:?} at {line}"
+        );
+    }
+
+    /// And the entry under it starts below those rows rather than over them.
+    #[test]
+    fn the_entry_under_a_wrapped_one_is_drawn_below_its_rows() {
+        let panel = a_wrapping_skills_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let line = Text::line_for(PANE_TEXT.0);
+        let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
+        let wrapped = crate::settings::about_rows(A_WRAPPING_ABOUT, cols);
+        let rows = the_entry_rows(&out, &panel);
+        assert_eq!(rows.len(), 2, "two skills are two rows");
+        let ((_, first), (_, second)) = (rows[0], rows[1]);
+        assert!(
+            second.y >= first.y + first.h - 0.01,
+            "the rows overlap: {first:?} then {second:?}"
+        );
+        let text_x = first.x + MARK_W + 3.0;
+        // The path sits under the last row of the description, not on top of it.
+        assert_eq!(
+            line_of(&out, text_x, first.y + (wrapped as f32 + 1.0) * line),
+            "https://github.com/someone/coding"
+        );
+        // And the next name is under that.
+        assert_eq!(line_of(&out, text_x, second.y), "web-search");
+        assert!(
+            second.y >= first.y + (wrapped as f32 + 2.0) * line - 0.01,
+            "the second entry is drawn over the first: {second:?}"
+        );
+    }
+
+    /// A press on the entry after a wrapped one lands on that entry.
+    ///
+    /// The height of a row is read by the layout and by the scroll window
+    /// alike, so a description counted at one row and drawn as four would put
+    /// every press below it on its neighbour.
+    #[test]
+    fn a_press_below_a_wrapped_entry_lands_on_the_entry_under_it() {
+        let panel = a_wrapping_skills_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let rows = the_entry_rows(&out, &panel);
+        assert_eq!(rows.len(), 2, "two skills are two rows");
+        let named = |index: usize| match panel.row(index) {
+            Some(crate::settings::Row::Entry(entry)) => entry.name.clone(),
+            other => panic!("row {index} is {other:?}"),
+        };
+        assert_eq!(named(rows[0].0), "coding");
+        assert_eq!(named(rows[1].0), "web-search");
+        for (index, row) in rows {
+            let (x, y) = middle(row);
+            assert_eq!(
+                out.layout.hit(x, y),
+                Some(Hit::SettingsRow(index, crate::settings::Side::Left)),
+                "the middle of {} answers for another row",
+                named(index)
+            );
+            // Its own last line as well, which is the press a row measured
+            // short hands to the entry below it.
+            assert_eq!(
+                out.layout.hit(x, row.y + row.h - 1.0),
+                Some(Hit::SettingsRow(index, crate::settings::Side::Left)),
+                "the last line of {} answers for another row",
+                named(index)
+            );
+        }
+    }
+
     /// The uninstall is a button with a word in it, and both of them fit: it
     /// ended exactly on the edge of the column, three pixels from the document's
     /// own border, in a box a column and a half wider than the word it holds, so
@@ -16435,9 +16660,9 @@ mod tests {
         // A short window, so the palette is off the bottom until it is scrolled
         // to and the rows on screen change as it moves.
         let (w, h) = (1400.0, 520.0);
-        let rows = render_settings(&panel, w, h, None)
-            .layout
-            .settings_capacity(13.0);
+        let out = render_settings(&panel, w, h, None);
+        let rows = out.layout.settings_capacity(13.0);
+        let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
         assert!(rows > 2, "the list is too short to scroll: {rows}");
         let mut seen = 0;
         for _ in 0..40 {
@@ -16473,7 +16698,7 @@ mod tests {
                 );
                 seen += 1;
             }
-            if !panel.scroll(1, true, rows) {
+            if !panel.scroll(1, true, rows, cols) {
                 break;
             }
         }

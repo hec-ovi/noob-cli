@@ -1895,12 +1895,20 @@ impl App {
         self.layout().settings_capacity(self.config.pane_font_size)
     }
 
+    /// How wide those rows are, in characters. A row carrying an entry is as
+    /// tall as its description wraps to in this width, so anything that counts
+    /// rows has to be told it.
+    fn settings_cols(&self) -> usize {
+        self.layout().settings_entry_columns(self.pane_column)
+    }
+
     /// Bring the cursor on screen, measured against the layout the panel is
     /// drawn in rather than against the panel alone.
     fn reveal_settings_cursor(&mut self) {
         let rows = self.settings_rows();
+        let cols = self.settings_cols();
         if let Some(panel) = self.settings.as_mut() {
-            self.dirty |= panel.reveal(rows);
+            self.dirty |= panel.reveal(rows, cols);
         }
     }
 
@@ -3164,10 +3172,11 @@ impl App {
                 false => layout.settings_capacity(self.config.pane_font_size),
             };
             let by = ((rows as f32 * pages.abs()).round() as usize).max(1);
+            let list_cols = layout.settings_entry_columns(self.pane_column);
             if let Some(panel) = self.settings.as_mut() {
                 self.dirty |= match on_doc {
                     true => panel.scroll_doc(by, pages < 0.0, doc_cols, doc_rows),
-                    false => panel.scroll(by, pages < 0.0, rows),
+                    false => panel.scroll(by, pages < 0.0, rows, list_cols),
                 };
             }
             return;
