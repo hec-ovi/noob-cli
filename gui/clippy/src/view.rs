@@ -560,6 +560,15 @@ pub enum Hit {
     /// so while it is up there are no panes and no grid for a column divider to
     /// mean anything about.
     SettingsRailDivider,
+    /// The text of the document beside the entry list. Its own region so a
+    /// press there can start a selection: everywhere else on the panel a press
+    /// is a control, and the one thing to do with a page of prose is to take
+    /// some of it away with you.
+    ///
+    /// The text box inside the wrapper rather than the whole column, so the
+    /// title over it and the border around it are still panel and still
+    /// swallow their press.
+    SettingsDoc,
     /// The mark that closes the panel, for a pointer with no Escape key handy.
     SettingsClose,
     /// The panel's box, away from any row. Swallowed, like the picker's.
@@ -1552,6 +1561,11 @@ impl Layout {
                     return Some(Hit::SettingsRow(*index, *side));
                 }
             }
+            // The document's text, which is the one place on this panel with
+            // characters to point at rather than a control to press.
+            if self.settings_doc_text.w >= 1.0 && self.settings_doc_text.contains(x, y) {
+                return Some(Hit::SettingsDoc);
+            }
             if self.settings.w >= 1.0 && self.settings.contains(x, y) {
                 return Some(Hit::Settings);
             }
@@ -1822,6 +1836,28 @@ impl Layout {
             true => columns_in(self.settings_doc_text.w, column),
             false => 0,
         }
+    }
+
+    /// The character cell of that document nearest the pointer, wherever the
+    /// pointer is.
+    ///
+    /// The document's twin of [`Layout::cell_in`], and clamped for the same
+    /// reason: a drag that ran off the box keeps running to the nearest cell,
+    /// which is what puts the last characters of the bottom row within reach.
+    /// Its box is [`Layout::settings_doc_text`], which is already the rectangle
+    /// the glyphs are in, so nothing is inset here: the wrapper's padding was
+    /// taken off when the box was placed, and taking it off twice would put
+    /// every column one to the left of the glyph under the pointer.
+    pub fn settings_doc_cell(&self, x: f32, y: f32, size: f32, column: f32) -> Option<(usize, usize)> {
+        let body = self.settings_doc_text;
+        if self.shaded || column <= 0.0 || body.w < 1.0 || body.h < 1.0 {
+            return None;
+        }
+        let line = Text::line_for(size);
+        let rows = Text::rows_for(size, body.h);
+        let row = ((y - body.y) / line).floor().max(0.0) as usize;
+        let at = (((x - body.x) / column).round().max(0.0)) as usize;
+        Some((row.min(rows.saturating_sub(1)), at.min(columns_in(body.w, column))))
     }
 
     /// Where along one row's track a pointer sits, 0 at the low end and 1 at the
@@ -3739,7 +3775,7 @@ fn selection_band(scene: &mut Scene, frame: &Frame, panel: Panel, showing: Optio
     let (Some(selection), Some(view)) = (frame.selection, showing) else {
         return;
     };
-    if selection.view != view || selection.is_empty() {
+    if selection.at != crate::select::Where::Pane(view) || selection.is_empty() {
         return;
     }
     let Some(pane) = frame.state.pane_of(view) else {
@@ -3756,6 +3792,56 @@ fn selection_band(scene: &mut Scene, frame: &Frame, panel: Panel, showing: Optio
     // band measured in the full width of the box was four columns wide of the
     // glyphs on every row of a file.
     let (cols, chrome) = text_columns(view, panel, column);
+    paint_selection(scene, selection, pane, Painted {
+        content,
+        rows,
+        cols,
+        chrome,
+        size,
+        column,
+        tint: frame.skin.select,
+    });
+}
+
+/// Everything about a box a band is painted in that is not the selection or the
+/// pane it is over.
+///
+/// One struct rather than nine arguments, because a band drawn with any of them
+/// off by one is a highlight over text the clipboard does not have.
+struct Painted {
+    /// The rectangle the glyphs are in, already inset.
+    content: Panel,
+    rows: usize,
+    cols: usize,
+    /// Columns in front of the text on every row, which the file view spends on
+    /// line numbers and everything else spends on nothing.
+    chrome: usize,
+    size: f32,
+    column: f32,
+    tint: [f32; 4],
+}
+
+/// The rectangles behind one selection, over the pane that resolves it.
+///
+/// Split out of [`selection_band`] so the settings document bands with the same
+/// arithmetic rather than with a second copy of it: the two boxes differ in
+/// where they are and in nothing else, and a document highlighted by its own
+/// rule would be a highlight the copy disagreed with.
+fn paint_selection(
+    scene: &mut Scene,
+    selection: crate::select::Selection,
+    pane: &crate::state::Pane,
+    at: Painted,
+) {
+    let Painted {
+        content,
+        rows,
+        cols,
+        chrome,
+        size,
+        column,
+        tint,
+    } = at;
     let line_h = Text::line_for(size);
     let window = pane.window(rows, cols);
     let first = pane.showing_from(rows, cols);
@@ -3799,7 +3885,7 @@ fn selection_band(scene: &mut Scene, frame: &Frame, panel: Panel, showing: Optio
             if width <= 0.0 || y + line_h > content.y + content.h {
                 continue;
             }
-            scene.rect(Panel::new(x, y, width, line_h).fill(frame.skin.select));
+            scene.rect(Panel::new(x, y, width, line_h).fill(tint));
         }
     }
 }
@@ -5659,6 +5745,28 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 // the formatter draws, and the renderer breaks the box with that
                 // rule rather than with one of its own.
                 let window = panel.doc_window(doc_cols, doc_rows);
+                // The band under the glyphs, over the pane the panel builds its
+                // document into. Before the text and not after it: a highlight
+                // painted over the characters it highlights hides them.
+                if let Some(selection) = frame.selection
+                    && selection.at == crate::select::Where::SettingsDoc
+                    && !selection.is_empty()
+                {
+                    paint_selection(
+                        scene,
+                        selection,
+                        &panel.doc_pane_at(doc_cols, doc_rows),
+                        Painted {
+                            content: inside,
+                            rows: doc_rows,
+                            cols: doc_cols,
+                            chrome: 0,
+                            size,
+                            column,
+                            tint: skin.select,
+                        },
+                    );
+                }
                 let mut fence = crate::markdown::fence_after(
                     entry.doc.iter().take(window.first).map(String::as_str),
                 );
@@ -7492,7 +7600,7 @@ mod tests {
         let chars = long.chars().count();
         let selection = {
             let mut selection =
-                crate::select::Selection::new(View::Files, crate::select::Spot::new(line, 0));
+                crate::select::Selection::new(crate::select::Where::Pane(View::Files), crate::select::Spot::new(line, 0));
             selection.extend(crate::select::Spot::new(line, chars));
             selection
         };
@@ -8889,7 +8997,7 @@ mod tests {
         }
         let last = state.output.last() - 1;
         let mut selection =
-            crate::select::Selection::new(View::Output, crate::select::Spot::new(last - 2, 6));
+            crate::select::Selection::new(crate::select::Where::Pane(View::Output), crate::select::Spot::new(last - 2, 6));
         selection.extend(crate::select::Spot::new(last, 5));
         state.selection = Some(selection);
 
@@ -9308,7 +9416,7 @@ mod tests {
         state.activity.say("something to select", Tone::Body);
         let last = state.activity.last() - 1;
         let mut selection =
-            crate::select::Selection::new(View::Activity, crate::select::Spot::new(last, 0));
+            crate::select::Selection::new(crate::select::Where::Pane(View::Activity), crate::select::Spot::new(last, 0));
         selection.extend(crate::select::Spot::new(last, 9));
         state.selection = Some(selection);
 
@@ -13732,6 +13840,28 @@ mod tests {
         hot: Option<Hit>,
         rail: f32,
     ) -> Rendered {
+        render_settings_with(panel, w, h, hot, rail, None)
+    }
+
+    /// And the same with a drag over the document, which is what puts a band
+    /// under the glyphs.
+    fn render_settings_selecting(
+        panel: &Settings,
+        w: f32,
+        h: f32,
+        selection: crate::select::Selection,
+    ) -> Rendered {
+        render_settings_with(panel, w, h, None, SETTINGS_RAIL, Some(selection))
+    }
+
+    fn render_settings_with(
+        panel: &Settings,
+        w: f32,
+        h: f32,
+        hot: Option<Hit>,
+        rail: f32,
+        selection: Option<crate::select::Selection>,
+    ) -> Rendered {
         let dock = Dock::new();
         let state = busy_state();
         let mut shape = shape(&dock, &["a.rs"]);
@@ -13754,7 +13884,7 @@ mod tests {
             drag: None,
             hot,
             trouble: None,
-            selection: None,
+            selection,
             menu: None,
             picker: None,
             settings: Some(panel),
@@ -14204,8 +14334,20 @@ mod tests {
                 "row {index} runs into the document: {row:?}"
             );
         }
+        // The text of the document is its own region, because there is a
+        // selection to begin there. This asserted `Hit::Settings` for as long as
+        // the whole panel body was one swallowed press, and the region is what
+        // changed rather than the geometry around it: the title line over the
+        // box and the border around it are still panel.
         let (x, y) = middle(doc);
-        assert_eq!(layout.hit(x, y), Some(Hit::Settings), "{doc:?}");
+        assert_eq!(layout.hit(x, y), Some(Hit::SettingsDoc), "{doc:?}");
+        let text = layout.settings_doc_text;
+        assert!(text.w >= 1.0 && text.contains(x, y), "{text:?}");
+        assert_eq!(
+            layout.hit(doc.x + PAD, doc.y + 1.0),
+            Some(Hit::Settings),
+            "the title over the box is not text to select"
+        );
 
         // What is drawn: the name and the repository on the left, the document
         // on the right, and no Markdown marks in it.
@@ -14795,6 +14937,235 @@ mod tests {
         assert!(!written.contains("line 0 of it"), "{written:?}");
         // The list did not move with it: the two columns are two scrolls.
         assert_eq!(after.layout.settings_rows[0], first_row);
+    }
+
+    /// The first line is Markdown, so what is on screen is four characters
+    /// shorter than what is in the file and a copy measured on the source would
+    /// hand back marks that were nowhere.
+    const A_MARKED_DOC_LINE: &str = "- **read** a file with `cat`";
+    const A_DRAWN_DOC_LINE: &str = "• read a file with cat";
+
+    /// A skill whose document is three short lines, one of them marked up.
+    fn a_selectable_skills_panel() -> Settings {
+        let mut agent = an_agent();
+        agent.skills[0].doc = vec![
+            String::from(A_MARKED_DOC_LINE),
+            String::from("second line of the document"),
+            String::from("third line of the document"),
+        ];
+        let mut panel = a_panel_on(&Config::default(), crate::settings::SKILLS);
+        panel.adopt_agent(agent, &Config::default());
+        panel
+    }
+
+    /// The pixel in the middle of one drawn cell of the document.
+    fn doc_cell(layout: &Layout, row: usize, at: usize) -> (f32, f32) {
+        let inside = layout.settings_doc_text;
+        let line = Text::line_for(13.0);
+        (
+            inside.x + at as f32 * 8.0,
+            inside.y + row as f32 * line + line * 0.5,
+        )
+    }
+
+    /// Where a press at that pixel lands in the document.
+    fn doc_spot(layout: &Layout, panel: &Settings, row: usize, at: usize) -> crate::select::Spot {
+        let (x, y) = doc_cell(layout, row, at);
+        crate::spot_in_doc(layout, panel, x, y, 13.0, 8.0).expect("a character under the pointer")
+    }
+
+    fn doc_drag(
+        layout: &Layout,
+        panel: &Settings,
+        from: (usize, usize),
+        to: (usize, usize),
+    ) -> crate::select::Selection {
+        let mut selection = crate::select::Selection::new(
+            crate::select::Where::SettingsDoc,
+            doc_spot(layout, panel, from.0, from.1),
+        );
+        selection.extend(doc_spot(layout, panel, to.0, to.1));
+        selection
+    }
+
+    /// The rectangles the band is painted with, in the document's own box.
+    fn doc_bands(out: &Rendered) -> Vec<[f32; 4]> {
+        let inside = out.layout.settings_doc_text;
+        out.scene
+            .rects
+            .iter()
+            .filter(|rect| rect.rgba() == out.skin.select)
+            .map(|rect| rect.xywh())
+            .filter(|[x, y, _, _]| *x >= inside.x - 0.01 && *y >= inside.y - 0.01)
+            .collect()
+    }
+
+    /// A drag across the document selects the characters under the pointer, and
+    /// what comes off it is what was highlighted: the glyphs, with the Markdown
+    /// marks gone the same way they are gone from the screen.
+    #[test]
+    fn a_drag_across_the_document_selects_the_characters_under_it() {
+        let panel = a_selectable_skills_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let layout = &out.layout;
+        let cols = layout.settings_doc_columns(8.0);
+        assert!(
+            cols > A_DRAWN_DOC_LINE.chars().count(),
+            "the line has to fit on one row for the columns to be the characters"
+        );
+
+        // Two columns into the drawn first line, and six: `read`.
+        let word = doc_drag(layout, &panel, (0, 2), (0, 6));
+        assert_eq!(word.range().0, crate::select::Spot::new(0, 2));
+        assert_eq!(word.range().1, crate::select::Spot::new(0, 6));
+        assert_eq!(word.text(&panel.doc_pane()), "read");
+
+        // The whole of that line is the rendering, not the source: no stars, no
+        // backticks, and every column of it is reachable.
+        let whole = doc_drag(layout, &panel, (0, 0), (0, A_DRAWN_DOC_LINE.chars().count()));
+        let copied = whole.text(&panel.doc_pane());
+        assert_eq!(copied, A_DRAWN_DOC_LINE);
+        assert!(
+            !copied.contains('*') && !copied.contains('`'),
+            "a marker that is nowhere on screen came back: {copied:?}"
+        );
+
+        // Down two rows: one break per line and not one more, and nothing of the
+        // last line past where the drag stopped.
+        let block = doc_drag(layout, &panel, (0, 0), (2, 5));
+        let copied = block.text(&panel.doc_pane());
+        assert_eq!(
+            copied,
+            format!("{A_DRAWN_DOC_LINE}\nsecond line of the document\nthird")
+        );
+        assert_eq!(copied.matches('\n').count(), 2, "a break was doubled: {copied:?}");
+
+        // A press that never moved is not a selection, so it cannot swallow the
+        // next copy.
+        let click =
+            crate::select::Selection::new(crate::select::Where::SettingsDoc, doc_spot(layout, &panel, 1, 3));
+        assert!(click.is_empty());
+        assert_eq!(click.text(&panel.doc_pane()), "");
+    }
+
+    /// The band covers what is selected and nothing else: it starts at the
+    /// column the drag started on and is as wide as the run.
+    #[test]
+    fn the_band_covers_what_the_document_drag_selected() {
+        let panel = a_selectable_skills_panel();
+        let layout = render_settings(&panel, 1400.0, 900.0, None).layout;
+        let word = doc_drag(&layout, &panel, (0, 2), (0, 6));
+        let out = render_settings_selecting(&panel, 1400.0, 900.0, word);
+        let inside = out.layout.settings_doc_text;
+        let line = Text::line_for(13.0);
+
+        let bands = doc_bands(&out);
+        assert_eq!(bands.len(), 1, "one run is one rectangle: {bands:?}");
+        let [x, y, w, h] = bands[0];
+        assert!((x - (inside.x + 2.0 * 8.0)).abs() < 0.01, "{bands:?}");
+        assert!((w - 4.0 * 8.0).abs() < 0.01, "the band is not four columns: {bands:?}");
+        assert!((y - inside.y).abs() < 0.01, "{bands:?}");
+        assert!((h - line).abs() < 0.01, "{bands:?}");
+
+        // Nothing highlighted paints nothing at all.
+        let none = render_settings(&panel, 1400.0, 900.0, None);
+        assert!(doc_bands(&none).is_empty());
+
+        // Three lines are three rectangles, one per line, because the first and
+        // the last stop partway along.
+        let block = doc_drag(&layout, &panel, (0, 4), (2, 5));
+        let out = render_settings_selecting(&panel, 1400.0, 900.0, block);
+        let bands = doc_bands(&out);
+        assert_eq!(bands.len(), 3, "{bands:?}");
+        assert!((bands[0][0] - (inside.x + 4.0 * 8.0)).abs() < 0.01, "{bands:?}");
+        assert!((bands[2][0] - inside.x).abs() < 0.01, "the last line starts at the left");
+        assert!((bands[2][2] - 5.0 * 8.0).abs() < 0.01, "{bands:?}");
+        for (step, band) in bands.iter().enumerate() {
+            assert!(
+                (band[1] - (inside.y + step as f32 * line)).abs() < 0.01,
+                "row {step} is not where it is drawn: {bands:?}"
+            );
+        }
+    }
+
+    /// A selection is made of line numbers, so scrolling the column moves the
+    /// band with the text and copies the same characters.
+    #[test]
+    fn a_document_selection_survives_a_scroll_of_the_column() {
+        let mut panel = a_selectable_skills_panel();
+        let mut agent = an_agent();
+        agent.skills[0].doc = (0..200).map(|n| format!("line {n} of it")).collect();
+        panel.adopt_agent(agent, &Config::default());
+        let layout = render_settings(&panel, 1400.0, 900.0, None).layout;
+        let cols = layout.settings_doc_columns(8.0);
+        let rows = layout.settings_doc_rows(13.0);
+        assert!(rows > 6, "the box has to hold the rows this drags across");
+
+        // `line 5` on the sixth row, which is where the sixth line is drawn.
+        let selection = doc_drag(&layout, &panel, (5, 0), (5, 6));
+        assert_eq!(selection.text(&panel.doc_pane()), "line 5");
+
+        // Three rows up. The same characters come off it, and the band is three
+        // rows higher up the box.
+        let before = doc_bands(&render_settings_selecting(&panel, 1400.0, 900.0, selection));
+        assert!(panel.scroll_doc(3, true, cols, rows), "the wheel moves it");
+        let after_out = render_settings_selecting(&panel, 1400.0, 900.0, selection);
+        assert_eq!(
+            selection.text(&panel.doc_pane()),
+            "line 5",
+            "the selection came to mean another line"
+        );
+        let after = doc_bands(&after_out);
+        assert_eq!(before.len(), 1, "{before:?}");
+        assert_eq!(after.len(), 1, "{after:?}");
+        assert!(
+            (before[0][1] - after[0][1] - 3.0 * Text::line_for(13.0)).abs() < 0.01,
+            "the band did not move with the text: {before:?} then {after:?}"
+        );
+        assert!((before[0][0] - after[0][0]).abs() < 0.01);
+        assert!((before[0][2] - after[0][2]).abs() < 0.01);
+
+        // And the pointer over that row now lands on the line that is drawn
+        // there, which is three further down the document.
+        assert_eq!(doc_spot(&layout, &panel, 5, 0), crate::select::Spot::new(8, 0));
+    }
+
+    /// The pane the selection is resolved in is the text the column draws: the
+    /// same lines, wrapped into the same rows, or a band would be over glyphs
+    /// the clipboard does not have.
+    #[test]
+    fn the_document_pane_holds_what_the_column_draws() {
+        let panel = a_wordy_skills_panel();
+        let layout = render_settings(&panel, 1400.0, 900.0, None).layout;
+        let cols = layout.settings_doc_columns(8.0);
+        let rows = layout.settings_doc_rows(13.0);
+        let pane = panel.doc_pane_at(cols, rows);
+        assert_eq!(pane.window(rows, cols), panel.doc_window(cols, rows));
+        let heights = panel.doc_heights(cols);
+        assert!(heights[0] > 1, "the long line has to wrap for this to prove anything");
+        for (line, tall) in heights.iter().enumerate() {
+            assert_eq!(pane.rows_of_line(line, cols).len(), *tall, "line {line}");
+        }
+    }
+
+    /// The document is the one thing on the panel a menu can act on, and the
+    /// row it offers is greyed until something is highlighted.
+    #[test]
+    fn the_document_offers_a_copy_on_the_right_button() {
+        let panel = a_selectable_skills_panel();
+        let layout = render_settings(&panel, 1400.0, 900.0, None).layout;
+        let (x, y) = doc_cell(&layout, 0, 3);
+        assert_eq!(layout.hit(x, y), Some(Hit::SettingsDoc));
+
+        let empty = crate::menu::Menu::for_settings_doc((x, y), false);
+        assert_eq!(empty.target, crate::menu::Target::SettingsDoc);
+        assert_eq!(empty.rows.len(), 1);
+        assert_eq!(empty.rows[0].item, crate::menu::Item::CopySelection);
+        assert!(!empty.rows[0].enabled, "it copies nothing and says so");
+
+        let held = crate::menu::Menu::for_settings_doc((x, y), true);
+        assert_eq!(held.rows.len(), empty.rows.len(), "the menu is the same shape");
+        assert!(held.rows[0].enabled);
     }
 
     /// Every section is on the rail, is hit where its name is drawn, and picking

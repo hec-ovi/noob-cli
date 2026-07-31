@@ -155,6 +155,10 @@ pub enum Target {
     /// points at cannot move while the menu is up: nothing rebuilds the list
     /// until a row of the menu is picked.
     Session(usize),
+    /// The document beside the entry list on the settings panel. It carries
+    /// nothing: the one row acts on whatever is highlighted there, and the
+    /// panel already knows which entry that is.
+    SettingsDoc,
 }
 
 /// An open menu: where it was opened, what it was opened on, and its rows.
@@ -265,6 +269,28 @@ impl Menu {
         }
     }
 
+    /// The settings document's menu: one row, which copies what is highlighted
+    /// in it.
+    ///
+    /// One row rather than none, because the panel is a takeover: there is no
+    /// pane behind it to close, no settings to open from it, and nothing else a
+    /// right click on a page of prose could be asking for. Greyed when nothing
+    /// is highlighted, the way every other row that cannot act is, so the menu
+    /// is the same shape either way.
+    pub fn for_settings_doc(at: (f32, f32), has_selection: bool) -> Menu {
+        let rows = vec![Row {
+            item: Item::CopySelection,
+            enabled: has_selection,
+        }];
+        Menu {
+            at,
+            target: Target::SettingsDoc,
+            top: rows.len(),
+            rows,
+            first: 0,
+        }
+    }
+
     /// How many widgets are on the list: eight while it is open, none while it
     /// is shut. What the scroll is bounded by, and the whole of the difference
     /// between the two states.
@@ -278,7 +304,7 @@ impl Menu {
     pub fn target_view(&self) -> Option<View> {
         match self.target {
             Target::Widget(view, _) => Some(view),
-            Target::Input | Target::Session(_) => None,
+            Target::Input | Target::Session(_) | Target::SettingsDoc => None,
         }
     }
 

@@ -1688,7 +1688,9 @@ impl State {
             return false;
         }
         self.open_file = index;
-        if self.selection.map(|s| s.view) == Some(crate::dock::View::Files) {
+        if self.selection.map(|s| s.at)
+            == Some(crate::select::Where::Pane(crate::dock::View::Files))
+        {
             self.selection = None;
         }
         true
@@ -2902,7 +2904,7 @@ mod tests {
     fn showing_another_file_drops_the_selection_from_the_last_one() {
         let mut state = with_files(3);
         state.selection = Some(crate::select::Selection::new(
-            crate::dock::View::Files,
+            crate::select::Where::Pane(crate::dock::View::Files),
             crate::select::Spot::new(1, 0),
         ));
         assert!(state.show_file(0), "file 0 was not the one showing");
@@ -2911,7 +2913,7 @@ mod tests {
 
         // A selection somewhere else is none of this pane's business.
         state.selection = Some(crate::select::Selection::new(
-            crate::dock::View::Output,
+            crate::select::Where::Pane(crate::dock::View::Output),
             crate::select::Spot::new(1, 0),
         ));
         assert!(state.show_file(2));

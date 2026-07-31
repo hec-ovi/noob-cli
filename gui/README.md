@@ -302,8 +302,8 @@ select a span, Ctrl-A selects the whole line, and typing or backspace over a
 selection replaces it. Ctrl-V pastes; a pasted newline becomes a space, because
 the prompt is one wrapped line and Enter is what sends it.
 
-Drag across the conversation, the activity list or a file to select text, and
-Ctrl-C copies it. Ctrl-C with nothing selected still cancels the turn, which is
+Drag across the conversation, the activity list, a file or the document beside
+the settings panel's entry list to select text, and Ctrl-C copies it. Ctrl-C with nothing selected still cancels the turn, which is
 the thing that must never get hard to reach; Ctrl-Shift-C always copies, and
 Escape drops the selection before it touches anything else. Selection is only
 on the panes that are made of lines, because the plan, the agent list and the
@@ -356,8 +356,9 @@ every other window on the desktop.
 **Click a row of the activity list** to open that call out over the window, and
 press anywhere else or Escape to put it away.
 
-Right click the prompt for Copy and Paste, or a pane or its tab for Settings,
-Copy selection, Close this widget and Widgets. A row with nothing to act on is
+Right click the prompt for Copy and Paste, a pane or its tab for Settings,
+Copy selection, Close this widget and Widgets, or the settings panel's document
+column for the one row that fits there, Copy selection. A row with nothing to act on is
 greyed rather than absent, so the menu is the same shape every time and the row
 you were aiming for has not moved. Closing a widget takes it out of the window
 and a space left with no tabs gives its room to its neighbour rather than
@@ -385,7 +386,8 @@ the left with the chosen one beside it. **Click a section to choose it.** The
 arrow keys never touch the rail: up and down walk the rows of whatever is
 showing, and left and right change the row the cursor is on. Enter flips a
 switch, turns a skill or a server on and off, and starts an edit on the
-endpoint, Tab crosses a form row, the wheel scrolls, and Esc puts the panel
+endpoint, Tab crosses a form row, the wheel scrolls, Ctrl-C copies what is
+selected in the document column, and Esc puts the panel
 away. The panes are exactly where
 they were when it closes, and the agent keeps working behind it. **Drag the line
 between the rail and the settings** to give one of them more room: the pointer
@@ -448,6 +450,16 @@ picker marks its rows with. The column beside the list is titled with the name o
 whatever it belongs to and the text sits in a box of its own, wrapped at whatever
 width the column has, by the same rule the panes wrap prose at. Both sides
 scroll, each in its own box: the wheel moves whichever one the pointer is over.
+
+The text in that column selects. Drag across it and the characters under the
+pointer are banded, Ctrl-C puts them on the clipboard, and the right button
+offers the same copy. It is the transcript's selection, over the same kind of
+pane: the document is measured in the Markdown it draws, so a bullet copies as
+`• read a file` with the marks gone the way they are gone from the screen, and a
+run that crosses a wrap comes back with the blank the row broke at. Scrolling the
+column moves the band with the text, since a selection holds line numbers. Moving
+the cursor onto another entry drops it, because the document under it is then a
+different document.
 
 SKILLS lists the directories under `~/.config/noob/skills`, named and described
 from each `SKILL.md`'s front matter and by the directory name when it has none.

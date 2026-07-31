@@ -1957,6 +1957,45 @@ impl Settings {
             .collect()
     }
 
+    /// The showing document as a pane, which is what selecting over it is
+    /// measured in.
+    ///
+    /// A pane rather than a second arithmetic of its own: the panes already
+    /// know how a Markdown line reaches the screen, how many rows it takes
+    /// there, which character a row holds and what a run of them copies, and
+    /// every one of those answers has to be the same answer the column was
+    /// drawn with. Built here rather than kept, because the document is a
+    /// property of whichever entry the cursor is on and a stored one would go
+    /// stale the moment the cursor moved.
+    ///
+    /// Its capacity is the whole document, so nothing falls off the front and a
+    /// line's number in the pane is its number in the file.
+    pub fn doc_pane(&self) -> crate::state::Pane {
+        let empty: Vec<String> = Vec::new();
+        let doc = self.showing().map_or(&empty, |entry| &entry.doc);
+        let mut pane = crate::state::Pane::new(doc.len().max(1)).rendered();
+        for text in doc {
+            pane.push(crate::state::Line::new(
+                text.clone(),
+                crate::state::Tone::Body,
+            ));
+        }
+        pane
+    }
+
+    /// The same, scrolled to where the column is drawn, so the row a pointer is
+    /// over is the row the pane resolves.
+    ///
+    /// The column keeps its place as a row counted from the top and a pane
+    /// keeps its place as rows held back from the bottom, so the two are the
+    /// same place said the two ways round.
+    pub fn doc_pane_at(&self, cols: usize, rows: usize) -> crate::state::Pane {
+        let mut pane = self.doc_pane();
+        let heights = self.doc_heights(cols);
+        pane.scrollback = text_geometry::scrollback_for(&heights, rows, self.doc_at(&heights, rows));
+        pane
+    }
+
     /// Which row of that document the column starts on, given its heights.
     ///
     /// A wrapped row, not a line of the file: a line of a `SKILL.md` is as many
@@ -4432,6 +4471,52 @@ mod tests {
             "a wrapped document scrolls further than it has lines: {}",
             panel.doc_first(8, rows)
         );
+    }
+
+    /// The pane the document is selected in is the document: the same lines,
+    /// rendered the same way, wrapped into the same rows, and scrolled to the
+    /// same place the column is drawn at.
+    ///
+    /// One rule rather than two. A pane measured on the source while the column
+    /// was drawn on the rendering is a band over glyphs the clipboard has never
+    /// heard of, which is the bug this whole arrangement exists to make
+    /// impossible.
+    #[test]
+    fn the_document_pane_is_the_document_the_column_draws() {
+        let long = "the whole point of a document column is that a sentence in it can be read to the end of itself";
+        let panel = a_panel_showing(vec![
+            String::from("- **read** a file"),
+            String::from(long),
+            String::from("last"),
+        ]);
+        let (cols, rows) = (20, 6);
+        let pane = panel.doc_pane_at(cols, rows);
+
+        // The marks are eaten here exactly as they are on screen.
+        assert_eq!(pane.line(0).expect("the line").shown(), "• read a file");
+        assert_eq!(pane.last(), 3, "one pane line per line of the file");
+
+        // The rows agree line for line with what the column is scrolled by.
+        let heights = panel.doc_heights(cols);
+        assert!(heights[1] > 1, "the long line has to wrap");
+        for (line, tall) in heights.iter().enumerate() {
+            assert_eq!(pane.rows_of_line(line, cols).len(), *tall, "line {line}");
+        }
+        assert_eq!(pane.window(rows, cols), panel.doc_window(cols, rows));
+
+        // And it follows the column when the column is scrolled.
+        let mut panel = panel;
+        assert!(panel.scroll_doc(2, true, cols, rows));
+        assert_eq!(
+            panel.doc_pane_at(cols, rows).window(rows, cols),
+            panel.doc_window(cols, rows)
+        );
+
+        // A section with no entry at all has no document and no pane lines,
+        // rather than a pane of one empty line nothing can point at.
+        let mut bare = Settings::open(&Config::default(), None, Agent::default());
+        go_to(&mut bare, APPEARANCE);
+        assert_eq!(bare.doc_pane().last(), 0);
     }
 
     /// Moving the cursor to another entry takes the column back to the top of

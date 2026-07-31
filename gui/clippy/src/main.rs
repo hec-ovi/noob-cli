@@ -381,15 +381,18 @@ fn menu_for(
     at: (f32, f32),
     dock: &Dock,
     prompt_selection: bool,
-    pane_selection: Option<View>,
+    selection: Option<select::Selection>,
     picker: Option<&Picker>,
 ) -> Option<Menu> {
+    // A click that never moved leaves an empty selection behind, and a Copy row
+    // that lit up for one would copy nothing.
+    let selection = selection.filter(|selection| !selection.is_empty());
     let widget = |view: View, space: Space| {
         Some(Menu::for_widget(
             at,
             view,
             space,
-            pane_selection == Some(view),
+            selection.and_then(|selection| selection.view()) == Some(view),
         ))
     };
     match hit? {
@@ -424,9 +427,17 @@ fn menu_for(
         | Hit::PickerOpen
         | Hit::PickerFolders
         | Hit::PickerSessions => None,
-        // Neither is the settings panel. A Settings row on a menu opened over
-        // the settings panel would be a row that opens what is already open,
-        // and there is no pane behind it to close.
+        // The one thing on that panel a menu can act on: the document is a page
+        // of prose, so there is something in it to highlight and something to
+        // copy. The menu is already built and the row costs one line, which is
+        // the cheaper half of the same act the drag and Ctrl-C are.
+        Hit::SettingsDoc => Some(Menu::for_settings_doc(
+            at,
+            selection.is_some_and(|selection| selection.at == select::Where::SettingsDoc),
+        )),
+        // Nothing else on the settings panel is. A Settings row on a menu opened
+        // over the settings panel would be a row that opens what is already
+        // open, and there is no pane behind it to close.
         Hit::Settings
         | Hit::SettingsSection(_)
         | Hit::SettingsRow(..)
@@ -599,6 +610,22 @@ fn spot_in_pane(
     // character it is over.
     let (cols, chrome) = view::text_columns(view, body, column);
     let at = at.saturating_sub(chrome);
+    Some(spot_in_rows(pane, rows, cols, row, at))
+}
+
+/// The character a row and a column of one box land on, in the pane that box is
+/// drawn from.
+///
+/// The half of [`spot_in_pane`] that is about the text rather than about the
+/// window, so the settings document reaches the same answer through the same
+/// call instead of through a second copy of it.
+fn spot_in_rows(
+    pane: &state::Pane,
+    rows: usize,
+    cols: usize,
+    row: usize,
+    at: usize,
+) -> select::Spot {
     let Some((line, column)) = pane.spot_in(rows, cols, row, at) else {
         // Below the last line on screen the selection runs to the end of the
         // text that is on screen. The end of the whole ring would be wrong
@@ -613,7 +640,7 @@ fn spot_in_pane(
         // Counted in what is drawn: the last column of a Markdown line is the
         // last glyph of it, not the last character the model wrote.
         let end = pane.line(last).map_or(0, |l| l.shown().chars().count());
-        return Some(select::Spot::new(last, end));
+        return select::Spot::new(last, end);
     };
     // The column is the character `at` columns into the row that was pointed
     // at, which on the second row of a wrapped line is past the wrap and, since
@@ -621,7 +648,59 @@ fn spot_in_pane(
     // out past the end of the row takes that row's last character: the pane
     // clamps it, so a drag off the right of a short line still reaches its end
     // without running into the row below.
-    Some(select::Spot::new(line, column))
+    select::Spot::new(line, column)
+}
+
+/// What a key held with control does while the settings panel is up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Control {
+    Quit,
+    /// Put what is highlighted in the document on the clipboard.
+    Copy,
+    Nothing,
+}
+
+/// Which of those a key is.
+///
+/// A free function because the panel is a takeover and this is the whole of
+/// what reaches it with control held: the list used to be Ctrl-Q alone, which
+/// made the panel a surface you could read a document on and not copy a word
+/// off. Nothing here touches the window, so the list is testable.
+fn control_in_settings(key: Key<&str>) -> Control {
+    match key {
+        Key::Character("q") => Control::Quit,
+        Key::Character("c") => Control::Copy,
+        _ => Control::Nothing,
+    }
+}
+
+/// The same for the document beside the settings panel's entry list, free of
+/// the window so a test can drive it.
+///
+/// The panel is a takeover, so there is no space and no view here: the box is
+/// named on the layout and the text comes from whichever entry the panel is
+/// showing. Nothing at all when the column is not drawn, which is what a narrow
+/// window and a section with no entries both look like.
+fn spot_in_doc(
+    layout: &view::Layout,
+    panel: &settings::Settings,
+    x: f32,
+    y: f32,
+    size: f32,
+    column: f32,
+) -> Option<select::Spot> {
+    let (cols, rows) = (
+        layout.settings_doc_columns(column),
+        layout.settings_doc_rows(size),
+    );
+    if cols == 0 || rows == 0 {
+        return None;
+    }
+    let (row, at) = layout.settings_doc_cell(x, y, size, column)?;
+    let pane = panel.doc_pane_at(cols, rows);
+    // An entry with no document has nothing to point at, and a spot in it would
+    // read as a selection that copies nothing.
+    (pane.last() > 0).then(|| spot_in_rows(&pane, rows, cols, row, at))
 }
 
 struct App {
@@ -1159,20 +1238,36 @@ impl App {
         if self.settings.take().is_some() {
             self.dirty = true;
         }
+        // A highlight in the document goes with the panel that held it. Left
+        // behind, it is what the next Ctrl-C would copy with nothing on screen
+        // saying so, and the text it names is not even in the window any more.
+        self.forget_doc_selection();
     }
 
     /// Keys while the settings panel is up. It is a takeover, so this answers for
     /// the whole keyboard: nothing here falls through to the prompt.
     fn key_in_settings(&mut self, event: &winit::event::KeyEvent, event_loop: &ActiveEventLoop) {
-        // The one key that means the same thing everywhere in this window. Every
+        // The two keys that mean the same thing everywhere in this window. Every
         // other key here belongs to the panel, so without this arm the panel
-        // would be a surface Ctrl-Q could not be pressed on.
+        // would be a surface Ctrl-Q could not be pressed on and Ctrl-C could not
+        // copy off.
         if self.modifiers.control_key() {
-            if matches!(event.logical_key.as_ref(), Key::Character("q")) {
-                event_loop.exit();
+            match control_in_settings(event.logical_key.as_ref()) {
+                Control::Quit => event_loop.exit(),
+                // What was highlighted in the document beside the list. The
+                // panel covers the panes and the prompt, so there is nothing
+                // else here for a copy to mean.
+                Control::Copy => {
+                    self.copy_selection();
+                }
+                Control::Nothing => {}
             }
             return;
         }
+        // Any other key is about the rows, and the rows decide which document is
+        // beside them. A highlight over the one that was showing does not
+        // survive the cursor moving off it.
+        self.forget_doc_selection();
         let rows = self.settings_rows();
         let Some(panel) = self.settings.as_mut() else {
             return;
@@ -1378,8 +1473,18 @@ impl App {
     /// A press inside the panel: a section, a row, the control on it, or the
     /// mark that closes.
     fn click_in_settings(&mut self, hit: Hit) {
+        // Everything but the document itself moves the cursor or presses a
+        // control, and which document is showing follows the cursor.
+        if !matches!(hit, Hit::SettingsDoc) {
+            self.forget_doc_selection();
+        }
         match hit {
             Hit::SettingsClose => self.close_settings(),
+            // Pressed, not clicked, the way a pane is: the anchor goes down here
+            // and the far end of it follows the pointer until the button comes
+            // up. A press that never moves selects nothing, which is what keeps
+            // a click in the document from swallowing the next Ctrl-C.
+            Hit::SettingsDoc => self.begin_doc_selection(),
             Hit::SettingsSection(index) => {
                 if let Some(panel) = self.settings.as_mut() {
                     self.dirty |= panel.choose(index);
@@ -2135,6 +2240,7 @@ impl App {
             | Hit::SettingsToggle(_)
             | Hit::SettingsRemove(_)
             | Hit::SettingsRailDivider
+            | Hit::SettingsDoc
             | Hit::SettingsClose
             | Hit::Settings => {}
             Hit::Input => {
@@ -2218,20 +2324,10 @@ impl App {
             at,
             &self.dock,
             self.prompt.selection().is_some(),
-            self.pane_selection(),
+            self.state.selection,
             self.picker.as_ref(),
         );
         self.dirty |= had || self.menu.is_some();
-    }
-
-    /// Which pane holds a selection worth copying, if any. A click that never
-    /// moved leaves an empty selection behind, and a Copy row that lights up
-    /// for one would copy nothing.
-    fn pane_selection(&self) -> Option<View> {
-        self.state
-            .selection
-            .filter(|selection| !selection.is_empty())
-            .map(|selection| selection.view)
     }
 
     /// Do what the row at `index` says, and put the menu away either way.
@@ -2259,13 +2355,14 @@ impl App {
             // The prompt's menu has no Close row, so this cannot happen; it is
             // matched rather than caught by a wildcard so adding one is a
             // compile error here instead of a click that silently does nothing.
-            (Item::Close, Target::Input | Target::Session(_)) => {}
+            (Item::Close, Target::Input | Target::Session(_) | Target::SettingsDoc) => {}
             // The same two things pressing the row and pressing Delete do, from
             // the menu the right button opened over it.
             (Item::OpenSession, Target::Session(index)) => self.open_session(index),
             (Item::DeleteSession, Target::Session(index)) => self.delete_session(index),
             // Neither row is on any menu but a session's.
-            (Item::OpenSession | Item::DeleteSession, Target::Input | Target::Widget(..)) => {}
+            (Item::OpenSession | Item::DeleteSession,
+                Target::Input | Target::Widget(..) | Target::SettingsDoc) => {}
             // The row that opens the list beside itself, which is the thing the
             // row is for: closing the menu would take the list with it.
             (Item::Widgets(_), _) => {
@@ -2308,9 +2405,26 @@ impl App {
         if self
             .state
             .selection
-            .is_some_and(|selection| selection.view == view)
+            .is_some_and(|selection| selection.at == select::Where::Pane(view))
         {
             self.state.selection = None;
+        }
+    }
+
+    /// Drop a selection made in the settings document.
+    ///
+    /// Called by everything on the panel that is not the document itself: which
+    /// document is showing is a property of the row the cursor is on, so a key
+    /// or a press that moves the cursor puts other text under the same line
+    /// numbers, and a band left behind would be over words nobody highlighted.
+    fn forget_doc_selection(&mut self) {
+        if self
+            .state
+            .selection
+            .is_some_and(|selection| selection.at == select::Where::SettingsDoc)
+        {
+            self.state.selection = None;
+            self.dirty = true;
         }
     }
 
@@ -2361,9 +2475,31 @@ impl App {
         };
         let layout = self.layout();
         let spot = self.spot_at(&layout, space, view);
-        self.state.selection = spot.map(|spot| select::Selection::new(view, spot));
+        self.state.selection = spot.map(|spot| select::Selection::new(select::Where::Pane(view), spot));
         self.selecting = self.state.selection.is_some();
         self.dirty = true;
+    }
+
+    /// The same for a press on the settings document. The panel covers every
+    /// space, so this one is not begun through a space at all.
+    fn begin_doc_selection(&mut self) {
+        let layout = self.layout();
+        let spot = self.doc_spot_at(&layout);
+        self.state.selection = spot.map(|spot| select::Selection::new(select::Where::SettingsDoc, spot));
+        self.selecting = self.state.selection.is_some();
+        self.dirty = true;
+    }
+
+    /// The character of the settings document under the pointer.
+    fn doc_spot_at(&self, layout: &view::Layout) -> Option<select::Spot> {
+        spot_in_doc(
+            layout,
+            self.settings.as_ref()?,
+            self.cursor.x as f32,
+            self.cursor.y as f32,
+            self.config.pane_font_size,
+            self.pane_column,
+        )
     }
 
     /// The character under the pointer, as a line and a column the pane can
@@ -2402,10 +2538,14 @@ impl App {
             return;
         };
         let layout = self.layout();
-        let Some(space) = self.dock_space_of(selection.view) else {
-            return;
+        let spot = match selection.at {
+            select::Where::Pane(view) => match self.dock_space_of(view) {
+                Some(space) => self.spot_at(&layout, space, view),
+                None => return,
+            },
+            select::Where::SettingsDoc => self.doc_spot_at(&layout),
         };
-        if let Some(spot) = self.spot_at(&layout, space, selection.view) {
+        if let Some(spot) = spot {
             selection.extend(spot);
             // A drag is a selection, not a look at one call. The popup the press
             // put up goes away as soon as the drag has actually selected
@@ -2431,10 +2571,19 @@ impl App {
         let Some(selection) = self.state.selection else {
             return false;
         };
-        let Some(pane) = self.state.pane_of(selection.view) else {
-            return false;
+        let text = match selection.at {
+            select::Where::Pane(view) => match self.state.pane_of(view) {
+                Some(pane) => selection.text(pane),
+                None => return false,
+            },
+            // Off the same pane the band was painted over, unscrolled: what a
+            // copy returns is the characters between the two ends of the drag,
+            // and where the column happens to be scrolled to is none of it.
+            select::Where::SettingsDoc => match self.settings.as_ref() {
+                Some(panel) => selection.text(&panel.doc_pane()),
+                None => return false,
+            },
         };
-        let text = selection.text(pane);
         if text.is_empty() {
             return false;
         }
@@ -3873,7 +4022,7 @@ mod tests {
             Hit::SettingsClose,
         ] {
             assert!(
-                menu_for(Some(hit), (600.0, 400.0), &dock, true, Some(View::Output), None).is_none(),
+                menu_for(Some(hit), (600.0, 400.0), &dock, true, a_selection_in(View::Output), None).is_none(),
                 "{hit:?}"
             );
         }
@@ -4208,6 +4357,35 @@ mod tests {
         assert_eq!(context_reading(Some(fill(5, 0)), Some(usage(9, 0))), None);
     }
 
+    /// Ctrl-C reaches the panel. Every control-modified key but Ctrl-Q used to
+    /// be swallowed there, which made the settings panel a surface you could
+    /// read a skill's document on and not copy one word off it.
+    #[test]
+    fn control_c_copies_while_the_settings_panel_is_up() {
+        assert_eq!(control_in_settings(Key::Character("c")), Control::Copy);
+        assert_eq!(control_in_settings(Key::Character("q")), Control::Quit);
+        // Nothing else has a meaning here: the panel owns the keyboard, so a
+        // key that fell through would fall through to nothing.
+        for key in [
+            Key::Character("v"),
+            Key::Character("a"),
+            Key::Named(NamedKey::Enter),
+            Key::Named(NamedKey::ArrowDown),
+        ] {
+            let named = format!("{key:?}");
+            assert_eq!(control_in_settings(key), Control::Nothing, "{named}");
+        }
+    }
+
+    /// A selection worth copying, in one pane. Two spots apart, because a click
+    /// that never moved is not a selection and lights no Copy row.
+    fn a_selection_in(view: View) -> Option<select::Selection> {
+        let mut selection =
+            select::Selection::new(select::Where::Pane(view), select::Spot::new(0, 0));
+        selection.extend(select::Spot::new(0, 4));
+        Some(selection)
+    }
+
     /// The copy row belongs to the pane the menu opened over. A selection in
     /// some other pane must not light it up, because copying would then hand
     /// over text from a pane nobody pointed at.
@@ -4219,9 +4397,9 @@ mod tests {
         let at = middle(tab);
         let hit = layout.hit(at.0, at.1);
 
-        let mine = menu_for(hit, at, &dock, false, Some(view), None).unwrap();
+        let mine = menu_for(hit, at, &dock, false, a_selection_in(view), None).unwrap();
         assert_eq!(mine.pick(1), Some(Item::CopySelection));
-        let elsewhere = menu_for(hit, at, &dock, false, Some(View::Output), None).unwrap();
+        let elsewhere = menu_for(hit, at, &dock, false, a_selection_in(View::Output), None).unwrap();
         assert_eq!(elsewhere.pick(1), None);
         assert_eq!(
             mine.rows.len(),
@@ -5009,12 +5187,12 @@ mod tests {
 
         // The boundary after the final 'd' of the first line.
         assert_eq!(spot(at(0, 11)), select::Spot::new(0, 11));
-        let mut selection = select::Selection::new(View::Output, spot(at(0, 0)));
+        let mut selection = select::Selection::new(select::Where::Pane(View::Output), spot(at(0, 0)));
         selection.extend(spot(at(0, 11)));
         assert_eq!(selection.text(&pane), "hello world");
 
         // And the last character of the whole buffer, from the start of it.
-        let mut selection = select::Selection::new(View::Output, spot(at(0, 0)));
+        let mut selection = select::Selection::new(select::Where::Pane(View::Output), spot(at(0, 0)));
         selection.extend(spot(at(1, 11)));
         assert_eq!(selection.text(&pane), "hello world\nsecond line");
     }
@@ -5042,7 +5220,7 @@ mod tests {
         assert_eq!(start, select::Spot::new(0, 0));
 
         // Off the right hand edge of the window entirely, on the first row.
-        let mut selection = select::Selection::new(View::Output, start);
+        let mut selection = select::Selection::new(select::Where::Pane(View::Output), start);
         selection.extend(spot(W + 500.0, inner.y + line * 0.5));
         assert_eq!(
             selection.text(&pane),
@@ -5051,12 +5229,12 @@ mod tests {
         );
 
         // And below the pane, which is the sweep to the end of the text.
-        let mut selection = select::Selection::new(View::Output, start);
+        let mut selection = select::Selection::new(select::Where::Pane(View::Output), start);
         selection.extend(spot(W + 500.0, body.y + body.h + 400.0));
         assert_eq!(selection.text(&pane), "hello world\nsecond line");
 
         // Above and to the left of it, which is the same sweep backwards.
-        let mut selection = select::Selection::new(View::Output, spot(W, body.y + body.h));
+        let mut selection = select::Selection::new(select::Where::Pane(View::Output), spot(W, body.y + body.h));
         selection.extend(spot(-200.0, -200.0));
         assert_eq!(selection.text(&pane), "hello world\nsecond line");
     }

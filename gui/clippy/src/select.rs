@@ -30,23 +30,48 @@ impl Spot {
     }
 }
 
+/// Which body of text a selection is in.
+///
+/// A selection belongs to one of them: dragging out of one and into another
+/// selects more of the first, not some span across two unrelated lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Where {
+    /// A pane in the dock, named by the view showing in it.
+    Pane(View),
+    /// The document beside the entry list on the settings panel.
+    ///
+    /// Not a view and not in a space: the panel is a takeover and covers every
+    /// space there is, so the only way to say where this selection lives is to
+    /// say the panel. What resolves it is the pane the panel builds its showing
+    /// document into, which is why everything below still takes a
+    /// [`crate::state::Pane`].
+    SettingsDoc,
+}
+
 /// A drag in progress, or a finished one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
-    /// Which pane it is in. A selection belongs to one pane: dragging out of
-    /// one and into another selects more of the first, not some span across
-    /// two unrelated lists.
-    pub view: View,
+    /// Which text it is in.
+    pub at: Where,
     anchor: Spot,
     focus: Spot,
 }
 
 impl Selection {
-    pub fn new(view: View, at: Spot) -> Selection {
+    pub fn new(at: Where, spot: Spot) -> Selection {
         Selection {
-            view,
-            anchor: at,
-            focus: at,
+            at,
+            anchor: spot,
+            focus: spot,
+        }
+    }
+
+    /// The pane this is in, when it is in one. Nothing for a selection over the
+    /// settings document, which no view and no space can name.
+    pub fn view(&self) -> Option<View> {
+        match self.at {
+            Where::Pane(view) => Some(view),
+            Where::SettingsDoc => None,
         }
     }
 
@@ -153,7 +178,7 @@ mod tests {
     }
 
     fn drag(from: (usize, usize), to: (usize, usize)) -> Selection {
-        let mut selection = Selection::new(View::Output, Spot::new(from.0, from.1));
+        let mut selection = Selection::new(Where::Pane(View::Output), Spot::new(from.0, from.1));
         selection.extend(Spot::new(to.0, to.1));
         selection
     }
@@ -187,10 +212,23 @@ mod tests {
     #[test]
     fn a_click_that_never_moved_selects_nothing() {
         let pane = pane(&["hello"]);
-        let click = Selection::new(View::Output, Spot::new(0, 2));
+        let click = Selection::new(Where::Pane(View::Output), Spot::new(0, 2));
         assert!(click.is_empty());
         assert_eq!(click.text(&pane), "");
         assert_eq!(click.columns_on(0, 5), None);
+    }
+
+    /// A selection says which text it is in, and the two kinds are told apart
+    /// rather than both answering with a view: the settings document is not in
+    /// a space, so a caller that asked it for one would be asking the dock
+    /// about text the dock has never seen.
+    #[test]
+    fn a_selection_names_the_text_it_is_in() {
+        let pane = Selection::new(Where::Pane(View::Output), Spot::new(0, 0));
+        assert_eq!(pane.view(), Some(View::Output));
+        let doc = Selection::new(Where::SettingsDoc, Spot::new(0, 0));
+        assert_eq!(doc.view(), None);
+        assert_ne!(pane.at, doc.at);
     }
 
     /// Dragging past the end of a short line selects to its end and no
