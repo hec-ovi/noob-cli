@@ -317,7 +317,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     };
     let mut command = Command::new(program);
     command.args(&argv).current_dir(&ctx.workspace);
-    let run = match super::exec::run(
+    let run = match crate::exec::run(
         command,
         PROGRAM,
         timeout_s,
@@ -326,19 +326,19 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         crate::emit::Progress::for_current_call(&ctx.emitter),
     ) {
         Ok(run) => run,
-        Err(super::exec::RunError::Spawn(message)) => {
+        Err(crate::exec::RunError::Spawn(message)) => {
             return Err(format!(
                 "{message}. Install it with `uv tool install websearch-skill`, or use bash if \
                  this session has it."
             ));
         }
-        Err(super::exec::RunError::Canceled { body, elapsed }) => {
+        Err(crate::exec::RunError::Canceled { body, elapsed }) => {
             return Err(format!(
                 "websearch canceled by user after {:.1}s; partial output:\n{body}",
                 elapsed.as_secs_f32()
             ));
         }
-        Err(super::exec::RunError::TimedOut { body, timeout_s }) => {
+        Err(crate::exec::RunError::TimedOut { body, timeout_s }) => {
             return Err(format!(
                 "websearch {action} timed out after {timeout_s}s and was killed; raise \
                  timeout_s (max {MAX_TIMEOUT_S}); partial output:\n{body}"

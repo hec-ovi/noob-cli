@@ -77,12 +77,7 @@ impl Proc {
             return;
         }
         self.live = false;
-        let pid = self.child.id() as libc::pid_t;
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        crate::exec::kill_group(&mut self.child);
     }
 }
 
@@ -168,12 +163,7 @@ impl StdioTransport {
         // and never sees the interrupt flag). Writes go through
         // write_deadline below.
         if let Err(error) = set_nonblocking(&stdin) {
-            let pid = child.id() as libc::pid_t;
-            unsafe {
-                libc::kill(-pid, libc::SIGKILL);
-            }
-            let _ = child.kill();
-            let _ = child.wait();
+            crate::exec::kill_group(&mut child);
             return Err(format!(
                 "cannot configure the MCP server input pipe ({error}); restart noob and try again"
             ));

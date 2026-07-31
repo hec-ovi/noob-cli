@@ -5,7 +5,6 @@
 pub mod bash;
 pub mod context;
 pub mod edit;
-pub mod exec;
 pub mod glob;
 pub mod grep;
 pub mod guard;

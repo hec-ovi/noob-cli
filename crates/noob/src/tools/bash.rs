@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 
 use serde_json::Value;
 
-use super::exec;
+use crate::exec;
 use super::{ToolCtx, ToolOutcome, fail, need_str, opt_u64};
 
 const DEFAULT_TIMEOUT_S: u64 = 120;

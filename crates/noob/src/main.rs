@@ -5,6 +5,7 @@ mod agent;
 mod config;
 mod doctor;
 mod emit;
+mod exec;
 mod mcp;
 mod session;
 mod skills;

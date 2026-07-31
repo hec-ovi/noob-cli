@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 
 use noob_provider::http::INTERRUPTED;
 
-use super::truncate::HeadTailBuffer;
+mod buffer;
+
+use buffer::HeadTailBuffer;
 
 /// What one finished command left behind. `body` is the merged, truncated
 /// output, already carrying any note about escaped background processes.
@@ -309,4 +311,17 @@ fn reap_group_zombies(pgid: i32, window: Duration) {
             _ => return,       // ECHILD: nothing of ours left in the group
         }
     }
+}
+
+/// Kill a supervised child's whole process group, then reap the leader.
+/// For long-lived children spawned into their own group (`process_group(0)`
+/// or a pre-exec `setsid`): the group SIGKILL reaches every descendant, and
+/// the wait leaves no zombie.
+pub(crate) fn kill_group(child: &mut std::process::Child) {
+    let pid = child.id() as i32;
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }

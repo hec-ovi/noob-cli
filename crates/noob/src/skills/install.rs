@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use noob_provider::http::INTERRUPTED;
 
 use super::frontmatter::{parse, read_frontmatter_file, validate};
+use crate::exec::kill_group;
 
 const GIT_CLONE_TIMEOUT: Duration = Duration::from_secs(120);
 const GIT_ERROR_CAP: usize = 64 * 1024;
@@ -236,15 +237,6 @@ fn staging_path(workspace: &Path, kind: &str) -> PathBuf {
         ".skill-{kind}-{}-{stamp:x}-{serial:x}",
         std::process::id(),
     ))
-}
-
-fn kill_group(child: &mut std::process::Child) {
-    let pid = child.id() as libc::pid_t;
-    unsafe {
-        libc::kill(-pid, libc::SIGKILL);
-    }
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 fn read_capped(mut stream: impl Read, cap: usize) -> String {

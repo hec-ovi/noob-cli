@@ -81,6 +81,9 @@ Boxes so far:
   itself, one result line each.
 - [`crates/noob/src/skills`](../crates/noob/src/skills/CONTRACT.md) - SKILL.md
   discovery, the L1 index, install and remove with staged atomic publish.
+- [`crates/noob/src/exec`](../crates/noob/src/exec/CONTRACT.md) - the one
+  process runner: merged bounded output, the child tree as one killable
+  unit, no residue.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,
