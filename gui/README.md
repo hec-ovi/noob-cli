@@ -565,13 +565,15 @@ than ignored, and a key an older build wrote and this one dropped, such as any o
 the `view_*` colours, is read off the floor without a word.
 
 `theme = noob-matrix | noob-cool | noob-red` sets the eight base tones, the five
-code colors and the two tool colors that are prose rather than a tool.
-noob-matrix is the green the window has always been, noob-cool is cyan over a
-blue-black panel, noob-red is warm over a deep maroon bar. The yes marks stay
-green in all three: the drop target, the picked row and the showing tab's line
-are one colour between them, and a red window whose green went would have lost
-that. The rest of the tool and gauge colors name the thing rather than the
-window, so a theme leaves them alone. The colors ship as commented defaults so
+code colors, the ten gauge slots and the two tool colors that are prose rather
+than a tool. noob-matrix is the green the window has always been, noob-cool is
+cyan over a blue-black panel, noob-red is warm over a deep maroon bar. The yes
+marks stay green in all three: the drop target, the picked row and the showing
+tab's line are one colour between them, and a red window whose green went would
+have lost that. The gauges come with the palette too, ten cold hues in noob-cool
+and ten warm ones in noob-red, still ten you can tell apart as a column. The
+twelve tool colors are the exception: they name the tool rather than the window,
+so a theme leaves them where they are. The colors ship as commented defaults so
 the theme has something to set, so uncomment one line to keep the theme and
 override that single color. `no0b --set theme=noob-red` makes the same edit from
 a terminal without touching the comments. The names were `noob`, `amber`, `ice`

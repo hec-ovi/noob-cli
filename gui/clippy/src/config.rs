@@ -193,8 +193,13 @@ pub const GAUGE_KEYS: [&str; 10] = [
 ///
 /// Ten slots so no pane ever has to repeat one: the widest carries five
 /// readings today (hardware on an AMD card, and both LLM monitors), and nine of
-/// the ten are spoken for. A theme leaves these alone, the way it leaves the
-/// tool and view hues alone: they name the metric.
+/// the ten are spoken for.
+///
+/// A slot is a slot rather than a severity, so a set does not have to run from
+/// red to green: what a set has to do is stay ten colours you can tell apart
+/// side by side, since the blocks are read as a column. This one is the whole
+/// spectrum, which is what noob-matrix draws in; the other two themes carry the
+/// same ten readings into their own palette below.
 const GAUGES: [[u8; 3]; 10] = [
     [0xf0, 0x65, 0x5c], // 1, red
     [0xf5, 0x9a, 0x4f], // 2, orange
@@ -206,6 +211,38 @@ const GAUGES: [[u8; 3]; 10] = [
     [0x8f, 0x8f, 0xf5], // 8, indigo
     [0xc6, 0x82, 0xed], // 9, violet
     [0xf0, 0x75, 0xc3], // 10, pink
+];
+
+/// noob-cool's ten. The cold half of the wheel, green through cyan and blue to
+/// violet and rose. A slate sits between the blues, because that stretch is
+/// where ten cold hues run closest together and a grey one splits it.
+const COOL_GAUGES: [[u8; 3]; 10] = [
+    [0x3f, 0xbf, 0x6a], // 1, spring green
+    [0x3f, 0xd9, 0xc4], // 2, turquoise
+    [0x5c, 0xc8, 0xf5], // 3, sky, the theme's accent
+    [0xa8, 0xd8, 0xff], // 4, ice
+    [0x8f, 0xa8, 0xbc], // 5, slate
+    [0x6f, 0x8f, 0xf0], // 6, periwinkle
+    [0xa8, 0x6e, 0xf5], // 7, violet
+    [0xd9, 0x8c, 0xf5], // 8, orchid
+    [0xf5, 0x7f, 0xc8], // 9, rose
+    [0x7c, 0xf2, 0xc0], // 10, mint
+];
+
+/// noob-red's ten. Warm the whole way, red through amber and wheat to a leaf
+/// green and back out through clay and rose, so the block belongs to the red
+/// window the way its syntax colours do.
+const RED_GAUGES: [[u8; 3]; 10] = [
+    [0xf0, 0x55, 0x4c], // 1, red
+    [0xff, 0x94, 0x40], // 2, orange
+    [0xf5, 0xc2, 0x5a], // 3, amber
+    [0xe8, 0xe8, 0x8c], // 4, wheat
+    [0xc8, 0xd8, 0x6a], // 5, warm lime
+    [0x82, 0xd4, 0x72], // 6, leaf
+    [0xb0, 0x8f, 0x7a], // 7, clay
+    [0xe8, 0x96, 0x8f], // 8, dusty rose
+    [0xf5, 0x66, 0xb4], // 9, magenta
+    [0xcf, 0x8f, 0xd8], // 10, plum
 ];
 
 fn prose_tools(bright: [u8; 3], text: [u8; 3]) -> [[u8; 3]; 14] {
@@ -279,6 +316,8 @@ pub fn theme(name: &str) -> Option<Config> {
         // with just enough blue in it to be a colour rather than black. `good`
         // stays green because it is the window's yes and reads as one on a cold
         // palette; the cyan next to it is the accent, which is a different job.
+        // The gauges come with it: a cold window drawing its meters in the
+        // green window's ten was the one thing a theme did not reach.
         "noob-cool" => {
             let (bright, text) = ([0xdf, 0xf2, 0xff], [0xa6, 0xc8, 0xe8]);
             Config {
@@ -291,6 +330,7 @@ pub fn theme(name: &str) -> Option<Config> {
                 panel: [0x02, 0x05, 0x0b],
                 bar: [0x0f, 0x24, 0x3c],
                 tools: prose_tools(bright, text),
+                gauges: COOL_GAUGES,
                 syntax_comment: [0x5c, 0x82, 0x9c],
                 syntax_string: [0x8f, 0xd8, 0xd0],
                 syntax_number: [0xb8, 0xbe, 0xf5],
@@ -317,6 +357,7 @@ pub fn theme(name: &str) -> Option<Config> {
                 panel: [0x0a, 0x03, 0x03],
                 bar: [0x36, 0x11, 0x10],
                 tools: prose_tools(bright, text),
+                gauges: RED_GAUGES,
                 syntax_comment: [0x9a, 0x68, 0x64],
                 syntax_string: [0xe8, 0xc0, 0x86],
                 syntax_number: [0xc8, 0xb4, 0xf0],
@@ -987,7 +1028,8 @@ theme = noob-matrix
 
 # The gauge palette, in slot order. Every reading in a monitor names one of
 # these, so a block and its number carry the metric's own colour rather than one
-# colour shared by every gauge in the window. A theme leaves them alone.
+# colour shared by every gauge in the window. A theme sets these too: these ten
+# are noob-matrix's, and the other two themes have ten of their own.
 # gauge_1  = #f0655c
 # gauge_2  = #f59a4f
 # gauge_3  = #f5e05a
@@ -1462,6 +1504,135 @@ mod tests {
         assert_eq!(Config::parse("gauge_11 = #fff").unknown, ["gauge_11"]);
     }
 
+    /// A theme paints the meters too. It did not until this build: all three
+    /// arms ended at `..base`, so a red window drew its readings in the green
+    /// window's ten.
+    ///
+    /// noob-matrix's ten are written out here rather than compared against the
+    /// table, so the window in use keeps exactly the colours it had.
+    #[test]
+    fn each_theme_draws_the_gauges_in_its_own_ten() {
+        assert_eq!(
+            theme("noob-matrix").unwrap().gauges,
+            [
+                [0xf0, 0x65, 0x5c],
+                [0xf5, 0x9a, 0x4f],
+                [0xf5, 0xe0, 0x5a],
+                [0xb9, 0xe0, 0x4f],
+                [0x7c, 0xd8, 0x94],
+                [0x4f, 0xd6, 0xc8],
+                [0x5f, 0xa3, 0xf2],
+                [0x8f, 0x8f, 0xf5],
+                [0xc6, 0x82, 0xed],
+                [0xf0, 0x75, 0xc3],
+            ],
+            "the green window's meters moved"
+        );
+
+        // Every slot is a different colour in every theme, so no reading keeps
+        // a hue the palette around it left behind.
+        for (i, one) in THEMES.iter().enumerate() {
+            let a = theme(one).expect(one);
+            for other in &THEMES[i + 1..] {
+                let b = theme(other).expect(other);
+                for slot in 0..a.gauges.len() {
+                    assert_ne!(
+                        a.gauges[slot], b.gauges[slot],
+                        "{one} and {other} share gauge {}",
+                        slot + 1
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every colour in a `Config`, by the key that writes it.
+    ///
+    /// Destructured with no `..`, so a field added to the struct stops this
+    /// compiling until somebody names it here and the test below decides
+    /// whether a theme has to set it.
+    fn colours(config: &Config) -> Vec<(&'static str, Vec<u8>)> {
+        let Config {
+            opacity: _,
+            font_size: _,
+            pane_font_size: _,
+            prompt_rows: _,
+            left_width: _,
+            left_width_bottom: _,
+            top_height: _,
+            top_height_right: _,
+            settings_rail: _,
+            accent,
+            text,
+            dim,
+            bright,
+            good,
+            bad,
+            panel,
+            bar,
+            tools,
+            gauges,
+            syntax_comment,
+            syntax_string,
+            syntax_number,
+            syntax_keyword,
+            syntax_markup,
+            show_activity: _,
+            show_files: _,
+            unknown: _,
+        } = config;
+        let flat = |rows: &[[u8; 3]]| rows.iter().flatten().copied().collect::<Vec<u8>>();
+        vec![
+            ("accent", accent.to_vec()),
+            ("text", text.to_vec()),
+            ("dim", dim.to_vec()),
+            ("bright", bright.to_vec()),
+            ("good", good.to_vec()),
+            ("bad", bad.to_vec()),
+            ("panel", panel.to_vec()),
+            ("bar", bar.to_vec()),
+            ("tools", flat(tools)),
+            ("gauges", flat(gauges)),
+            ("syntax_comment", syntax_comment.to_vec()),
+            ("syntax_string", syntax_string.to_vec()),
+            ("syntax_number", syntax_number.to_vec()),
+            ("syntax_keyword", syntax_keyword.to_vec()),
+            ("syntax_markup", syntax_markup.to_vec()),
+        ]
+    }
+
+    /// `..base` says nothing out loud: a theme arm that never mentions a colour
+    /// inherits the default's, and there is no line anywhere to notice. That is
+    /// how all three themes ended up drawing their gauges in noob-matrix's ten
+    /// for four releases.
+    ///
+    /// So every colour a theme carries has to be a colour the theme chose. A
+    /// colour that genuinely belongs to every palette goes in `SHARED` by name,
+    /// where it can be argued with, rather than passing in silence.
+    #[test]
+    fn every_theme_sets_every_colour_in_the_window() {
+        /// Colours every theme is meant to share. Empty today: everything the
+        /// window is painted in moves with the palette.
+        const SHARED: &[&str] = &[];
+
+        let base = colours(&Config::default());
+        // noob-matrix is the defaults on purpose, which is its own test above.
+        for name in THEMES.iter().filter(|name| **name != "noob-matrix") {
+            let preset = colours(&theme(name).expect(name));
+            assert_eq!(preset.len(), base.len());
+            for ((key, mine), (was, default)) in preset.iter().zip(&base) {
+                assert_eq!(key, was, "the two lists are the same fields in order");
+                if SHARED.contains(key) {
+                    continue;
+                }
+                assert_ne!(
+                    mine, default,
+                    "{name}: {key} is still the default's, so the theme arm does not set it"
+                );
+            }
+        }
+    }
+
     /// The whole point of a preset: one word changes every color, and the one
     /// color you also wrote down is still yours.
     #[test]
@@ -1493,7 +1664,13 @@ mod tests {
             assert!(preset.unknown.is_empty(), "{name}");
             assert_eq!(preset.tools[12], preset.bright, "{name}: plan is prose");
             assert_eq!(preset.tools[13], preset.text, "{name}: the catch-all is prose");
-            assert_eq!(preset.gauges, GAUGES, "{name}: a gauge hue names the metric");
+            // The gauges belong to the palette like everything else in it, so
+            // only the green window draws them in the green window's ten.
+            if name == "noob-matrix" {
+                assert_eq!(preset.gauges, GAUGES, "{name}");
+            } else {
+                assert_ne!(preset.gauges, GAUGES, "{name}: the matrix meters");
+            }
             // Every preset opens at the opacity the defaults do, since each one
             // is the defaults with the colours changed.
             assert_eq!(preset.opacity, 0.90, "{name}");

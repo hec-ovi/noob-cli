@@ -559,64 +559,99 @@ mod tests {
     }
 
     /// A gauge hue is one colour used three ways, and the three have to agree:
-    /// a lit dot, a fainter one behind it, and the number beside them.
+    /// a lit dot, a fainter one behind it, and the number beside them. Run over
+    /// every theme, since each one brings ten hues of its own.
     #[test]
     fn a_gauge_slot_is_one_hue_lit_unlit_and_written() {
-        let skin = Skin::default();
-        assert_eq!(skin.gauges.len(), skin.gauges_unlit.len());
-        assert_eq!(skin.gauges.len(), skin.gauge_ink.len());
-        for slot in 0..skin.gauges.len() {
-            let (lit, unlit, ink) = skin.gauge_slot(slot);
-            assert_eq!(lit[3], 1.0, "{slot}");
-            assert_eq!(lit[..3], unlit[..3], "{slot}: the unlit dot changed hue");
-            assert!(unlit[3] > 0.0 && unlit[3] < lit[3], "{slot}: {unlit:?}");
-            assert_eq!(ink[3], 255, "{slot}");
-            let written = [
-                (ink[0] as f32 / 255.0),
-                (ink[1] as f32 / 255.0),
-                (ink[2] as f32 / 255.0),
-            ];
-            for channel in 0..3 {
-                assert!(
-                    (written[channel] - lit[channel]).abs() < 0.01,
-                    "{slot}: the number is not the block's colour"
-                );
+        for name in crate::config::THEMES {
+            let skin = Skin::from(&crate::config::theme(name).expect(name));
+            assert_eq!(skin.gauges.len(), skin.gauges_unlit.len());
+            assert_eq!(skin.gauges.len(), skin.gauge_ink.len());
+            for slot in 0..skin.gauges.len() {
+                let (lit, unlit, ink) = skin.gauge_slot(slot);
+                assert_eq!(lit[3], 1.0, "{name}: {slot}");
+                assert_eq!(lit[..3], unlit[..3], "{name}: {slot}: the unlit dot changed hue");
+                assert!(unlit[3] > 0.0 && unlit[3] < lit[3], "{name}: {slot}: {unlit:?}");
+                assert_eq!(ink[3], 255, "{name}: {slot}");
+                let written = [
+                    (ink[0] as f32 / 255.0),
+                    (ink[1] as f32 / 255.0),
+                    (ink[2] as f32 / 255.0),
+                ];
+                for channel in 0..3 {
+                    assert!(
+                        (written[channel] - lit[channel]).abs() < 0.01,
+                        "{name}: {slot}: the number is not the block's colour"
+                    );
+                }
+                // Readable on black, the way every other tint has to be.
+                let sum = ink[0] as u32 + ink[1] as u32 + ink[2] as u32;
+                assert!(sum > 180, "{name}: {slot} is too dark to read: {ink:?}");
             }
-            // Readable on black, the way every other tint has to be.
-            let sum = ink[0] as u32 + ink[1] as u32 + ink[2] as u32;
-            assert!(sum > 180, "{slot} is too dark to read: {ink:?}");
+            // A slot past the end takes another metric's hue rather than panicking.
+            assert_eq!(
+                skin.gauge_slot(skin.gauges.len()).0,
+                skin.gauge_slot(0).0,
+                "{name}"
+            );
         }
-        // A slot past the end takes another metric's hue rather than panicking.
-        assert_eq!(
-            skin.gauge_slot(skin.gauges.len()).0,
-            skin.gauge_slot(0).0
-        );
     }
 
     /// Two readings in the same colour say nothing about which is which, which
-    /// is the whole reason the table exists.
+    /// is the whole reason the table exists. The blocks are read side by side,
+    /// so this holds inside every theme's ten and not only the green one's.
     #[test]
     fn every_gauge_hue_is_unlike_the_others() {
-        let skin = Skin::default();
         let apart =
             |a: [f32; 4], b: [f32; 4]| (0..3).map(|i| (a[i] - b[i]).abs() * 255.0).sum::<f32>();
-        for slot in 0..skin.gauges.len() {
-            for other in slot + 1..skin.gauges.len() {
-                let distance = apart(skin.gauges[slot], skin.gauges[other]);
-                assert!(distance > 60.0, "{slot} and {other} are {distance} apart");
+        for name in crate::config::THEMES {
+            let skin = Skin::from(&crate::config::theme(name).expect(name));
+            for slot in 0..skin.gauges.len() {
+                for other in slot + 1..skin.gauges.len() {
+                    let distance = apart(skin.gauges[slot], skin.gauges[other]);
+                    assert!(distance > 60.0, "{name}: {slot} and {other} are {distance} apart");
+                }
             }
         }
     }
 
-    /// A theme moves the window around the readings, not the readings: a gauge
-    /// hue names its metric, the way a tool hue names its tool.
+    /// A theme carries the readings with it. It did not until this build: every
+    /// arm ended at `..base`, so a red window drew its meters in the green
+    /// window's ten and the palette stopped at the text.
+    ///
+    /// A gauge hue still names its metric inside a theme, which is what the
+    /// distinctness test above is for. What it does not do is name it across
+    /// themes, the way a tool hue does: there are ten of them and no fixed
+    /// meaning to hold on to, so they belong to the window they are drawn in.
     #[test]
-    fn a_theme_leaves_the_gauge_hues_where_they_are() {
+    fn every_theme_carries_the_gauges_into_its_own_palette() {
         let noob = Skin::default();
         for name in crate::config::THEMES {
             let skin = Skin::from(&crate::config::theme(name).expect(name));
-            assert_eq!(skin.gauges, noob.gauges, "{name}");
-            assert_eq!(skin.gauge_ink, noob.gauge_ink, "{name}");
+            // A hue and the number beside it are one colour, in every theme.
+            for slot in 0..skin.gauges.len() {
+                assert_eq!(
+                    skin.gauge_ink[slot],
+                    [
+                        (skin.gauges[slot][0] * 255.0).round() as u8,
+                        (skin.gauges[slot][1] * 255.0).round() as u8,
+                        (skin.gauges[slot][2] * 255.0).round() as u8,
+                        255
+                    ],
+                    "{name}: slot {slot}"
+                );
+            }
+            if name == "noob-matrix" {
+                assert_eq!(skin.gauges, noob.gauges, "{name}: the window in use moved");
+                assert_eq!(skin.gauge_ink, noob.gauge_ink, "{name}");
+            } else {
+                for slot in 0..skin.gauges.len() {
+                    assert_ne!(
+                        skin.gauges[slot], noob.gauges[slot],
+                        "{name}: slot {slot} is still the matrix hue"
+                    );
+                }
+            }
         }
     }
 
