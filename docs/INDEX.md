@@ -44,6 +44,7 @@ package, the binary and everything a user sees are `no0b`.
 | Endpoint, keys, sandbox detection | `crates/noob/src/config/CONTRACT.md` |
 | Talking to a model server | `crates/noob-provider/CONTRACT.md` |
 | Skills | `crates/noob/src/skills/` |
+| Talking to MCP servers, mcp.json | `crates/noob/src/mcp/CONTRACT.md` |
 | The `serve` subcommand the window drives | `crates/noob/src/main.rs` |
 
 ## Boxes
@@ -72,6 +73,9 @@ Boxes so far:
 - [`crates/noob/src/session`](../crates/noob/src/session/CONTRACT.md) -
   append-only JSONL transcripts, resume with repair, token totals, shapes in
   `schema/`.
+- [`crates/noob/src/mcp`](../crates/noob/src/mcp/CONTRACT.md) - the lazy MCP
+  client: connect caches a catalog, calls validate locally, timeouts kill
+  wedged servers.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,
