@@ -32,15 +32,15 @@
 //! keys, because the legend is the only thing that says the arrows changed
 //! meaning.
 //!
-//! **[`SESSIONS`] is a table.** One conversation to a row, its cells in columns
-//! under a [`Row::Columns`] that names each one, the row the cursor is on under
-//! a band across the whole of it, and a trash in the last column that takes two
-//! presses: the same two the uninstall on a skill takes, because it is the same
-//! kind of act. The row carries the session's id ([`Row::Session`]) so what a
-//! delete names is what the reader read, not a path parsed back out of the words
-//! on screen. The header stands on a filled band rather than on rules alone, so
-//! it separates from the data instead of reading as one more row of it, and the
-//! two columns of numbers are written against their right edge
+//! **[`SESSIONS`] is a table inside a card.** The table is one row of the panel
+//! ([`Row::Table`]): a header saying how many conversations there are and how
+//! many are chosen, the banded column names and the rows themselves in the body,
+//! and the three buttons in the footer. It scrolls inside its own body the way a
+//! [`Row::Paper`] does, because a row's height cannot depend on the height of the
+//! window. Each row carries the session's id ([`Kept`]) so what a delete names is
+//! what the reader read, not a path parsed back out of the words on screen, and a
+//! mark in the first column, because several conversations are deleted in one
+//! press. The two columns of numbers are written against their right edge
 //! ([`SESSION_COLUMNS`], [`Align`]): sizes and context counts started at the
 //! left like the words did, which is a column of digits nobody can compare
 //! down. What the section is called is said once, by the panel's own heading
@@ -189,25 +189,47 @@ pub enum Align {
 /// The columns of the saved-conversations table: what each one is called, how
 /// many characters wide it is, and which edge its cells are written against.
 ///
-/// Zero is a column with no width of its own. There are two of them: the first
-/// message takes whatever is left of the row, and the delete at the end is a
-/// button rather than text, so it is sized by the panel that draws it.
+/// The first one is the mark, which is why it has no name: a word over a column
+/// of ticks is a word describing a control that says what it is by being one.
+/// Zero is a column with no width of its own, and there is one: the first
+/// message takes whatever is left of the row.
 ///
 /// The names live here rather than in the drawing because they are what the
 /// section says about itself. The widths and the alignment live here too so the
 /// header and the cells under it cannot come apart: one list, read by the row
 /// builder and by the layout.
 pub const SESSION_COLUMNS: [(&str, usize, Align); 6] = [
+    ("", 4, Align::Left),
     ("when", 10, Align::Left),
     ("folder", 20, Align::Left),
     ("size", 9, Align::Right),
     ("context", 9, Align::Right),
     ("first message", 0, Align::Left),
-    ("delete", 0, Align::Left),
 ];
 
-/// How many of [`SESSION_COLUMNS`] carry text. The last one is the trash.
+/// How many of [`SESSION_COLUMNS`] carry text. The first one is the mark.
 pub const SESSION_CELLS: usize = SESSION_COLUMNS.len() - 1;
+
+/// Which column of [`SESSION_COLUMNS`] the mark stands in, and where the text
+/// cells start.
+pub const SESSION_MARK: usize = 0;
+pub const SESSION_FIRST_CELL: usize = SESSION_MARK + 1;
+
+/// How many conversations are on screen inside the table at once.
+///
+/// A number rather than what fits, for the reason [`PAPER_LINES`] is one: the
+/// height of a row cannot depend on the height of the window, because [`lines`]
+/// is what the scroll window counts in and what the layout places with. The
+/// table scrolls inside its own body instead, and the card stays where it is.
+pub const TABLE_ROWS: usize = 12;
+
+/// How tall the table's body is, in lines: the row naming the columns, and the
+/// [`TABLE_ROWS`] of conversations under it.
+pub fn table_body_lines() -> f32 {
+    crate::design::TEXT_LINES
+        + crate::design::TIGHT
+        + TABLE_ROWS as f32 * crate::design::TEXT_LINES
+}
 
 /// The name of the section's list, said once, in the panel's own heading.
 ///
@@ -302,14 +324,14 @@ pub enum Row {
     /// Prose: what a section is, or why it is empty. `bad` when it is something
     /// wrong rather than something explained.
     Note { text: String, bad: bool },
-    /// The row that names the columns of the table under it. Not a row anything
-    /// can be done to: it says what the cells below it are, and a cursor that
-    /// could land on it would be a cursor sitting on a word.
-    Columns(Vec<&'static str>),
-    /// One saved conversation, as the cells of a table rather than as a
-    /// sentence. `id` is the name of its transcript on the disk, which is what
-    /// a delete needs and what a row of joined text threw away.
-    Session { id: String, cells: Vec<String> },
+    /// The saved conversations, as one table inside one card: the column names,
+    /// the rows under them, and the buttons that act on whatever is marked.
+    ///
+    /// One row of the panel, like every other card, and the rows of the table
+    /// scroll inside its body. They were rows of the panel themselves, with a
+    /// trash on the end of each one, which meant deleting four conversations was
+    /// eight presses and nothing on the panel said the list was a group at all.
+    Table(Table),
     /// Something read out rather than set: what the agent's own file says, and
     /// where the files behind all this live.
     Reading { label: String, value: String },
@@ -545,6 +567,111 @@ impl Paper {
 /// would put every click under it on another row.
 pub const PAPER_LINES: usize = 12;
 
+/// The saved conversations, as a table in the body of one card.
+///
+/// The rows scroll inside the body rather than down the panel, so the header
+/// naming the columns and the buttons under them stay where they are however far
+/// down the list you are: a header that scrolls away is a table of five unnamed
+/// columns, and buttons that scroll away are buttons nobody can reach without
+/// first scrolling back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Table {
+    /// What each column is called, in order, out of [`SESSION_COLUMNS`].
+    pub names: Vec<&'static str>,
+    /// One conversation per entry, newest first, the way the reader read them.
+    pub rows: Vec<Kept>,
+    /// Which row the body starts on.
+    pub first: usize,
+    /// Which row the keys are on. Its own number rather than the section's
+    /// cursor, because the section's cursor is on the card: the card is one row
+    /// of the panel and this is one row of the card.
+    pub cursor: usize,
+}
+
+/// One saved conversation on the table: the cells that are drawn, the id a
+/// delete needs, and whether it is one of the ones marked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Kept {
+    /// The name of its transcript on the disk. What a delete names, so what goes
+    /// is what the reader read rather than a path parsed back out of the words
+    /// on screen.
+    pub id: String,
+    /// [`SESSION_CELLS`] of them, in [`SESSION_COLUMNS`] order after the mark.
+    pub cells: Vec<String>,
+    pub marked: bool,
+}
+
+impl Table {
+    /// What the card's header says: how many conversations there are, and how
+    /// many of them are marked once any of them is.
+    ///
+    /// The count rather than the section's own name, which the panel's heading
+    /// already says: a card headed with the words above it says nothing, and how
+    /// many are about to be deleted is the one thing the header can say that
+    /// nothing else on the panel does.
+    pub fn title(&self) -> String {
+        let all = match self.rows.len() {
+            1 => String::from("1 CONVERSATION"),
+            many => format!("{many} CONVERSATIONS"),
+        };
+        match self.chosen() {
+            0 => all,
+            some => format!("{all}, {some} CHOSEN"),
+        }
+    }
+
+    /// How many rows are marked.
+    pub fn chosen(&self) -> usize {
+        self.rows.iter().filter(|row| row.marked).count()
+    }
+
+    /// The ids a delete would take: every marked row, or the row the keys are on
+    /// when none of them is marked.
+    ///
+    /// So the single row path is still one press on one row, and marking is what
+    /// makes it several. In row order, which is the order they are read in.
+    pub fn taking(&self) -> Vec<String> {
+        match self.chosen() {
+            0 => self
+                .rows
+                .get(self.cursor)
+                .map(|row| vec![row.id.clone()])
+                .unwrap_or_default(),
+            _ => self
+                .rows
+                .iter()
+                .filter(|row| row.marked)
+                .map(|row| row.id.clone())
+                .collect(),
+        }
+    }
+
+    /// The row the keys are on.
+    pub fn at_cursor(&self) -> Option<&Kept> {
+        self.rows.get(self.cursor)
+    }
+
+    /// The furthest down the body can start and still be full.
+    pub fn most(&self) -> usize {
+        self.rows.len().saturating_sub(TABLE_ROWS)
+    }
+
+    /// Bring the row the keys are on back inside the body.
+    ///
+    /// Called by everything that moves the cursor, so a cursor walked off the
+    /// bottom of the body scrolls the body rather than leaving the band drawn
+    /// somewhere nobody can see it.
+    fn reveal(&mut self) {
+        self.first = self.first.min(self.most());
+        if self.cursor < self.first {
+            self.first = self.cursor;
+        }
+        if self.cursor >= self.first + TABLE_ROWS {
+            self.first = self.cursor + 1 - TABLE_ROWS;
+        }
+    }
+}
+
 /// Which field of a card something is in. Left for every row that is not one, so
 /// a press on an ordinary row is still a press on the row.
 ///
@@ -650,10 +777,14 @@ pub enum Deed {
     /// Write a starter `AGENTS.md` where the agent looks for one. Only ever
     /// asked for by a block that found nothing there.
     StartInstructions { path: PathBuf },
-    /// Delete one saved conversation: its transcript and the line about it in
-    /// the note beside them. Named by the id the row carries, which came off
-    /// the reader rather than off anything drawn.
-    ForgetSession { id: String },
+    /// Delete saved conversations: each transcript and the line about it in the
+    /// note beside them. Named by the ids the rows carry, which came off the
+    /// reader rather than off anything drawn.
+    ///
+    /// A set rather than one id, because the table is marked and deleted in one
+    /// press. One marked row and one row with nothing marked are the same deed
+    /// with one id in it, so there is one delete path and not two.
+    ForgetSessions { ids: Vec<String> },
 }
 
 /// One colour on the grid: the key the file writes it under, what it actually
@@ -706,6 +837,12 @@ pub fn lines(row: &Row, cols: usize) -> usize {
         // which on a panel of cards is the one thing on screen that reads as
         // loose text.
         Row::Paper(_) => crate::design::card_row_lines(paper_body_lines(), false),
+        // A table is a card as well: the column names and the rows in the body,
+        // and the buttons that act on what is marked in the footer. A fixed
+        // number of rows, scrolled inside itself, for the same reason a block of
+        // text is: the height of a row cannot depend on the height of the
+        // window.
+        Row::Table(_) => crate::design::card_row_lines(table_body_lines(), true),
         _ => 1,
     }
 }
@@ -1131,6 +1268,14 @@ struct Place {
     side: Side,
     /// Where each block of text was scrolled to, by the row it was on.
     papers: Vec<(usize, usize)>,
+    /// Where each table was left, by the row it was on: what it was scrolled to,
+    /// which row the keys were on, and which conversations were marked.
+    ///
+    /// The marks are ids and not row numbers. The rows are rebuilt here and a
+    /// delete takes one out from under the ones below it, so a mark kept by
+    /// number would come back on the wrong conversation; an id that is no longer
+    /// on the disk simply drops out.
+    tables: Vec<(usize, usize, usize, Vec<String>)>,
 }
 
 /// What `noob debug prompt` answered, which is the only place the whole
@@ -1250,6 +1395,25 @@ impl Settings {
                         _ => None,
                     })
                     .collect(),
+                tables: section
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(at, row)| match row {
+                        Row::Table(table) => Some((
+                            at,
+                            table.first,
+                            table.cursor,
+                            table
+                                .rows
+                                .iter()
+                                .filter(|row| row.marked)
+                                .map(|row| row.id.clone())
+                                .collect(),
+                        )),
+                        _ => None,
+                    })
+                    .collect(),
             })
             .collect();
         self.sections = self.build(config);
@@ -1264,6 +1428,7 @@ impl Settings {
                 doc_first,
                 side,
                 papers,
+                tables,
             } = place;
             let last = section.rows.len().saturating_sub(1);
             section.first = first.min(last);
@@ -1275,6 +1440,20 @@ impl Settings {
             for (at, was) in papers {
                 if let Some(Row::Paper(paper)) = section.rows.get_mut(at) {
                     paper.first = was.min(paper.most());
+                }
+            }
+            // The same for a table, marks and all. Pruned by the rebuild itself:
+            // a mark whose conversation is no longer on the disk has no row to
+            // land on, which is what makes a delete of four marked rows leave
+            // nothing marked behind it.
+            for (at, was_first, was_cursor, marked) in tables {
+                if let Some(Row::Table(table)) = section.rows.get_mut(at) {
+                    table.cursor = was_cursor.min(table.rows.len().saturating_sub(1));
+                    table.first = was_first.min(table.most());
+                    for row in table.rows.iter_mut() {
+                        row.marked = marked.contains(&row.id);
+                    }
+                    table.reveal();
                 }
             }
             // Clamped where it is read, since the document that comes back may
@@ -1568,34 +1747,44 @@ impl Settings {
 
     /// The conversations the agent has already written, read with the same
     /// reader the folder picker offers them with.
+    /// Two cards: where the transcripts are kept, and the table of them.
+    ///
+    /// No title row: the panel's own heading says SAVED CONVERSATIONS
+    /// ([`SESSION_TITLE`]), and a section that repeats its heading two lines
+    /// under it is the same noise the rail's word was.
     fn session_rows(&self) -> Vec<Row> {
-        let mut rows = vec![
-            // No title row: the panel's own heading says SAVED CONVERSATIONS
-            // ([`SESSION_TITLE`]), and a section that repeats its heading two
-            // lines under it is the same noise the rail's word was.
-            Row::Reading {
-                label: String::from("kept in"),
-                value: match crate::sessions::dir() {
+        let empty = self.agent.sessions.sessions.is_empty();
+        let mut rows = vec![Row::Card(Card {
+            title: String::from("WHERE CONVERSATIONS ARE KEPT"),
+            fields: vec![CardField::reading(
+                "folder",
+                match crate::sessions::dir() {
                     Some(dir) => dir.display().to_string(),
                     None => String::from("nowhere: no config directory"),
                 },
-            },
-        ];
-        if self.agent.sessions.sessions.is_empty() {
-            rows.push(note("no saved sessions yet"));
-        } else {
-            rows.push(note(
-                "one row is one conversation the agent has already had",
-            ));
-            rows.push(Row::Columns(
-                SESSION_COLUMNS.iter().map(|(name, ..)| *name).collect(),
-            ));
-        }
-        for saved in &self.agent.sessions.sessions {
-            rows.push(Row::Session {
-                id: saved.id.clone(),
-                cells: session_cells(saved, self.agent.now).to_vec(),
-            });
+            )],
+            hint: Some(String::from(match empty {
+                true => "none saved yet: the agent writes one transcript here per conversation",
+                false => "one row of the table is one conversation the agent has already had",
+            })),
+        })];
+        if !empty {
+            rows.push(Row::Table(Table {
+                names: SESSION_COLUMNS.iter().map(|(name, ..)| *name).collect(),
+                rows: self
+                    .agent
+                    .sessions
+                    .sessions
+                    .iter()
+                    .map(|saved| Kept {
+                        id: saved.id.clone(),
+                        cells: session_cells(saved, self.agent.now).to_vec(),
+                        marked: false,
+                    })
+                    .collect(),
+                first: 0,
+                cursor: 0,
+            }));
         }
         for why in &self.agent.sessions.skipped {
             rows.push(Row::Note {
@@ -2038,7 +2227,22 @@ impl Settings {
         // A saved conversation says which one, by the folder it belongs to and
         // how long ago it was: the id is a name nobody typed and nobody would
         // recognise on a footer.
-        if let Some(Row::Session { cells, .. }) = self.arming.and_then(|at| self.row(at)) {
+        // Several at once says how many. "sure?" over a marked list is a
+        // question that does not say what is about to go, and the whole of what
+        // a confirmation is for is saying that.
+        if let Some(Row::Table(table)) = self.arming.and_then(|at| self.row(at)) {
+            let taking = table.taking();
+            if taking.len() > 1 {
+                return format!(
+                    "press delete again to remove {} conversations; anything else leaves them alone",
+                    taking.len()
+                );
+            }
+            let row = match table.chosen() {
+                0 => table.at_cursor(),
+                _ => table.rows.iter().find(|row| row.marked),
+            };
+            let cells = row.map(|row| row.cells.clone()).unwrap_or_default();
             let when = cells.first().map(String::as_str).unwrap_or("that session");
             let folder = cells.get(1).map(String::as_str).unwrap_or_default();
             return format!(
@@ -2122,8 +2326,11 @@ impl Settings {
                     "enter turns it on and off in its file \u{2022} uninstall takes it out \u{2022} tab and shift-tab change section"
                 }
             },
-            Some(Row::Session { .. }) => {
-                "up and down pick a session \u{2022} the trash deletes it \u{2022} tab and shift-tab change section"
+            // The one row on the panel whose keys are not the panel's own, so
+            // the legend names all four of them: nothing else says that space
+            // marks a conversation or that delete takes every marked one.
+            Some(Row::Table(_)) => {
+                "up and down pick a session \u{2022} space marks it \u{2022} delete removes what is marked \u{2022} tab and shift-tab change section"
             }
             _ => "up and down move \u{2022} tab and shift-tab change section \u{2022} esc closes",
         }
@@ -2402,10 +2609,14 @@ impl Settings {
                     project: *project,
                 },
             },
-            // The trash at the end of a saved conversation. The same two
-            // presses, because it is the same kind of act: the transcript is
-            // gone and nothing here can put it back.
-            Some(Row::Session { id, .. }) => Deed::ForgetSession { id: id.clone() },
+            // The delete under the table of saved conversations. The same two
+            // presses, because it is the same kind of act: the transcripts are
+            // gone and nothing here can put them back. What it takes is whatever
+            // is marked, or the row the keys are on when nothing is.
+            Some(Row::Table(table)) => match table.taking() {
+                ids if ids.is_empty() => return None,
+                ids => Deed::ForgetSessions { ids },
+            },
             _ => return None,
         };
         if self.arming == Some(index) {
@@ -2447,6 +2658,137 @@ impl Settings {
         let moved = next != paper.first;
         paper.first = next;
         moved
+    }
+
+    /// The table on one row, for whoever draws it.
+    pub fn table(&self, index: usize) -> Option<&Table> {
+        match self.row(index)? {
+            Row::Table(table) => Some(table),
+            _ => None,
+        }
+    }
+
+    /// The row the panel's cursor is on, when that row is a table.
+    pub fn table_at_cursor(&self) -> Option<(usize, &Table)> {
+        let at = self.cursor();
+        self.table(at).map(|table| (at, table))
+    }
+
+    fn table_mut(&mut self, index: usize) -> Option<&mut Table> {
+        match self.here_mut().rows.get_mut(index)? {
+            Row::Table(table) => Some(table),
+            _ => None,
+        }
+    }
+
+    /// Put the keys on one row of a table, which is what a press on it does.
+    ///
+    /// The panel's own cursor goes on the card at the same time, so the card
+    /// wears the focus border while one of its rows wears the band.
+    pub fn point_at_row(&mut self, index: usize, at: usize) -> bool {
+        let moved = self.point_at(index, Side::Left);
+        let Some(table) = self.table_mut(index) else {
+            return moved;
+        };
+        if at >= table.rows.len() {
+            return moved;
+        }
+        let walked = table.cursor != at;
+        table.cursor = at;
+        table.reveal();
+        // An armed delete with nothing marked names the row the keys are on, so
+        // moving them is the question changing: leaving it armed would make the
+        // next press take a conversation nothing had asked about.
+        if walked {
+            self.arming = None;
+        }
+        moved || walked
+    }
+
+    /// Mark one row of a table, or take the mark off it.
+    ///
+    /// Never cleared by a keypress the way an armed delete is: marking three
+    /// rows means moving between them, and a set the arrow keys emptied could
+    /// only ever hold one.
+    pub fn mark(&mut self, index: usize, at: usize) -> bool {
+        let Some(table) = self.table_mut(index) else {
+            return false;
+        };
+        let Some(row) = table.rows.get_mut(at) else {
+            return false;
+        };
+        row.marked = !row.marked;
+        // An armed delete names a set, and this is that set changing: the
+        // question on the footer would be about a list that is no longer the one
+        // the second press would take.
+        self.arming = None;
+        true
+    }
+
+    /// Mark every row of a table, or none of them.
+    ///
+    /// Every row on the list and not only the ones on screen: the body holds
+    /// [`TABLE_ROWS`] of them and "all" meaning "the twelve you can see" is a
+    /// button that says one thing and does another. What it took is on the
+    /// header and on the button that would delete them.
+    pub fn mark_all(&mut self, index: usize, on: bool) -> bool {
+        let Some(table) = self.table_mut(index) else {
+            return false;
+        };
+        let mut moved = false;
+        for row in table.rows.iter_mut() {
+            moved |= row.marked != on;
+            row.marked = on;
+        }
+        let armed = self.arming.is_some();
+        self.arming = None;
+        moved || armed
+    }
+
+    /// Move a table inside its own body, without moving the list. Same rule as a
+    /// block of text: the pointer is on the thing being scrolled.
+    pub fn scroll_table(&mut self, index: usize, by: usize, down: bool) -> bool {
+        let Some(table) = self.table_mut(index) else {
+            return false;
+        };
+        let most = table.most();
+        let next = match down {
+            true => (table.first + by).min(most),
+            false => table.first.saturating_sub(by),
+        };
+        let moved = next != table.first;
+        table.first = next;
+        moved
+    }
+
+    /// Walk the rows inside the table the cursor is on. Nothing at all when the
+    /// cursor is not on one, which is what leaves the arrow keys to the list.
+    fn step_table(&mut self, down: bool, by: usize) -> Option<bool> {
+        let at = self.cursor();
+        let table = self.table_mut(at)?;
+        let last = table.rows.len().saturating_sub(1);
+        let next = match down {
+            true => (table.cursor + by).min(last),
+            false => table.cursor.saturating_sub(by),
+        };
+        let moved = next != table.cursor;
+        table.cursor = next;
+        table.reveal();
+        Some(moved)
+    }
+
+    /// The first or last row of the table the cursor is on.
+    fn jump_table(&mut self, last: bool) -> Option<bool> {
+        let at = self.cursor();
+        let table = self.table_mut(at)?;
+        let edge = match last {
+            true => table.rows.len().saturating_sub(1),
+            false => 0,
+        };
+        let moved = edge != table.cursor;
+        table.cursor = edge;
+        table.reveal();
+        Some(moved)
     }
 
     /// What a press on a block with nothing in it asks for: the file it offered
@@ -2600,6 +2942,15 @@ impl Settings {
         self.picked = None;
         self.arming = None;
         self.rewind_doc();
+        // Inside a table these walk its rows rather than the panel's: the card
+        // is one row of the panel and the conversation being picked is one row
+        // of the card. The marks are left alone, unlike the armed delete above:
+        // a set the arrow keys emptied could only ever hold one row.
+        if let Some(moved) = self.step_table(down, 1)
+            && moved
+        {
+            return true;
+        }
         let section = self.here_mut();
         let Some(next) = next_landing(&section.rows, section.cursor, down) else {
             return false;
@@ -2620,6 +2971,11 @@ impl Settings {
         if matches!(self.at_cursor(), Some(Row::Paper(_))) {
             let at = self.cursor();
             return self.scroll_paper(at, PAPER_LINES, down);
+        }
+        // A table is paged the same way, by the rows its body holds: the list
+        // under the pointer is the one being paged.
+        if let Some(moved) = self.step_table(down, TABLE_ROWS) {
+            return moved;
         }
         let by = rows.max(1);
         let section = self.here_mut();
@@ -2643,6 +2999,12 @@ impl Settings {
         self.picked = None;
         self.arming = None;
         self.rewind_doc();
+        // The ends of the table, when the cursor is in one: the section has
+        // nothing else the cursor can reach, and Home in a list of two hundred
+        // conversations means the first conversation.
+        if let Some(moved) = self.jump_table(last) {
+            return moved;
+        }
         let section = self.here_mut();
         let edge = match last {
             true => section.rows.len().saturating_sub(1),
@@ -2909,14 +3271,12 @@ fn landable(row: &Row) -> bool {
         // changed: the page keys scroll the one the cursor is on, and a block
         // with nothing in it yet is where the press that writes the file is
         // aimed.
-        // A saved conversation holds it because there is something to do to
-        // one: the trash at the end of the row deletes it, and the arrow keys
-        // are how the row it is on is picked.
-        Row::Setting { .. }
-        | Row::Field { .. }
-        | Row::Entry(_)
-        | Row::Paper(_)
-        | Row::Session { .. } => true,
+        Row::Setting { .. } | Row::Field { .. } | Row::Entry(_) | Row::Paper(_) => true,
+        // A table holds it because there is something to do to a conversation:
+        // the arrow keys pick one inside it, space marks it, and the buttons in
+        // its footer act on what is marked. A table with nothing in it is never
+        // built, and would be a card the cursor stopped on for nothing.
+        Row::Table(table) => !table.rows.is_empty(),
         // A card of readings is read and never landed on; a card with something
         // to set holds the cursor on whichever of its first two fields that is.
         // Only those two, because a press carries a [`Side`]: a card that kept
@@ -3128,8 +3488,11 @@ mod tests {
     fn says(row: &Row) -> String {
         match row {
                 Row::Note { text, .. } => text.clone(),
-                Row::Columns(names) => names.join(" "),
-                Row::Session { cells, .. } => cells.join("  "),
+                Row::Table(table) => {
+                    let mut out = vec![table.title(), table.names.join(" ")];
+                    out.extend(table.rows.iter().map(|row| row.cells.join("  ")));
+                    out.join("\n")
+                }
                 Row::Reading { label, value } => format!("{label} {value}"),
                 Row::Setting { key, value, .. } | Row::Field { key, value } => {
                     format!("{key} {value}")
@@ -3168,6 +3531,28 @@ mod tests {
                     out.join("\n")
                 }
         }
+    }
+
+    /// The table of saved conversations on the section that is showing.
+    fn the_table(panel: &Settings) -> &Table {
+        panel
+            .rows()
+            .iter()
+            .find_map(|row| match row {
+                Row::Table(table) => Some(table),
+                _ => None,
+            })
+            .expect("the section carries a table")
+    }
+
+    /// Where that table stands on the section, which is what every press on it
+    /// carries.
+    fn the_table_row(panel: &Settings) -> usize {
+        panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, Row::Table(_)))
+            .expect("the section carries a table")
     }
 
     fn a_session(id: &str, ago: u64, folder: Option<&str>, opening: &str) -> crate::sessions::Saved {
@@ -4101,8 +4486,16 @@ mod tests {
                 Row::Heading(name) => vec![*name],
                 Row::Reading { label, .. } => vec![label.as_str()],
                 Row::Note { text, .. } => vec![text.as_str()],
-                Row::Columns(names) => names.clone(),
-                Row::Session { cells, .. } => cells.iter().map(String::as_str).collect(),
+                Row::Table(table) => {
+                    let mut said = table.names.clone();
+                    said.extend(
+                        table
+                            .rows
+                            .iter()
+                            .flat_map(|row| row.cells.iter().map(String::as_str)),
+                    );
+                    said
+                }
                 Row::Entry(entry) => vec![entry.name.as_str()],
                 Row::Paper(paper) => vec![paper.title.as_str(), paper.under.as_str()],
                 Row::Card(card) => {
@@ -4381,8 +4774,9 @@ mod tests {
             }
         }
 
-        // On a saved conversation it says what the two keys do here and what
-        // the column at the end of the row is for.
+        // On the table of saved conversations it names all four of its keys:
+        // nothing else on the panel says that space marks a conversation or
+        // that delete takes every marked one.
         let mut panel = Settings::open(
             &config,
             None,
@@ -4403,7 +4797,8 @@ mod tests {
         go_to(&mut panel, SESSIONS);
         let said = panel.says();
         assert!(said.contains("up and down pick a session"), "{said}");
-        assert!(said.contains("trash"), "{said}");
+        assert!(said.contains("space marks it"), "{said}");
+        assert!(said.contains("delete removes what is marked"), "{said}");
     }
 
     /// A section's list scrolls like every other list in the window, and the
@@ -5174,7 +5569,7 @@ mod tests {
         for (section, wanted) in [
             (MCP, "none configured"),
             (SKILLS, "none installed"),
-            (SESSIONS, "no saved sessions yet"),
+            (SESSIONS, "none saved yet"),
             (AGENT, "probes the usual local ports"),
         ] {
             go_to(&mut panel, section);
@@ -5262,13 +5657,11 @@ mod tests {
         };
         let mut panel = Settings::open(&Config::default(), None, agent);
         go_to(&mut panel, SESSIONS);
-        let listed: Vec<(String, Vec<String>)> = panel
-            .rows()
+        let table = the_table(&panel);
+        let listed: Vec<(String, Vec<String>)> = table
+            .rows
             .iter()
-            .filter_map(|row| match row {
-                Row::Session { id, cells } => Some((id.clone(), cells.clone())),
-                _ => None,
-            })
+            .map(|row| (row.id.clone(), row.cells.clone()))
             .collect();
         assert_eq!(
             listed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
@@ -5313,20 +5706,17 @@ mod tests {
 
         // Every column has a name over it, and the header is one row of the
         // section rather than a word floated above the list.
-        let header = panel
-            .rows()
-            .iter()
-            .find_map(|row| match row {
-                Row::Columns(names) => Some(names.clone()),
-                _ => None,
-            })
-            .expect("a row naming the columns");
+        let header = table.names.clone();
         assert_eq!(
             header,
             SESSION_COLUMNS.iter().map(|(name, ..)| *name).collect::<Vec<_>>()
         );
-        assert_eq!(header.len(), SESSION_CELLS + 1, "the last column is the trash");
-        for name in &header {
+        assert_eq!(header.len(), SESSION_CELLS + 1, "the first column is the mark");
+        // Every column that carries text is named. The first one is the mark,
+        // and a word over a column of ticks describes a control that says what
+        // it is by being one.
+        assert!(header[SESSION_MARK].is_empty(), "the mark is headed by a word");
+        for name in &header[SESSION_FIRST_CELL..] {
             assert!(!name.is_empty(), "a column with no name");
         }
 
@@ -5340,7 +5730,10 @@ mod tests {
         assert_eq!(section_title(SESSIONS), SESSION_TITLE);
         let text = said(&panel);
         assert!(!text.contains(SESSION_TITLE), "the title is said twice: {text}");
-        assert!(text.contains("kept in"), "{text}");
+        assert!(text.contains("WHERE CONVERSATIONS ARE KEPT"), "{text}");
+        // The card over the table says how many there are, which is the one
+        // thing a header here can say that the panel's own heading does not.
+        assert_eq!(table.title(), "2 CONVERSATIONS", "{text}");
         // Every other section is headed by the word the rail marks it with:
         // only this one lists something its rail word does not name.
         for name in SECTIONS {
@@ -5389,9 +5782,15 @@ mod tests {
         );
         go_to(&mut panel, SESSIONS);
         let rail = panel.chosen();
+        // Which conversation the keys are on. Inside the table now, because the
+        // table is one row of the panel and a conversation is one row of the
+        // table: the arrow keys walk the rows of the card the cursor is on.
         let at = |panel: &Settings| match panel.at_cursor() {
-            Some(Row::Session { id, .. }) => id.clone(),
-            other => panic!("the cursor is not on a session: {other:?}"),
+            Some(Row::Table(table)) => table
+                .at_cursor()
+                .map(|row| row.id.clone())
+                .expect("the table has no row under the keys"),
+            other => panic!("the cursor is not on the table: {other:?}"),
         };
 
         // It opens on the first conversation rather than on the title or the
@@ -5432,6 +5831,107 @@ mod tests {
         assert!(panel.choose(rail));
         assert_eq!(at(&panel), "ccc", "the section lost where the cursor was");
     }
+
+    /// Item H3: the table is marked, scrolled inside itself, and the marks
+    /// outlive everything except the conversations they are on.
+    ///
+    /// The marks are per row and the armed delete is per panel, and the two have
+    /// deliberately different lifetimes: an armed delete is disarmed by any
+    /// other input, and a set the arrow keys emptied could only ever hold one
+    /// row, which is no multi selection at all.
+    #[test]
+    fn the_table_keeps_its_marks_while_the_keys_walk_it() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let many: Vec<crate::sessions::Saved> = (0..TABLE_ROWS + 3)
+            .map(|at| {
+                a_session(
+                    &format!("s{at:02}"),
+                    60 * (at as u64 + 1),
+                    Some("/home/hec/one"),
+                    "said something",
+                )
+            })
+            .collect();
+        let mut panel = Settings::open(
+            &Config::default(),
+            None,
+            Agent {
+                now,
+                sessions: crate::sessions::Listing {
+                    sessions: many.clone(),
+                    skipped: Vec::new(),
+                },
+                ..Agent::default()
+            },
+        );
+        go_to(&mut panel, SESSIONS);
+        let index = the_table_row(&panel);
+        assert_eq!(the_table(&panel).rows.len(), many.len());
+        assert_eq!(the_table(&panel).title(), format!("{} CONVERSATIONS", many.len()));
+
+        // Two of them, marked, with the keys walked between the two: neither the
+        // arrow keys nor the page keys take a mark off.
+        assert!(panel.mark(index, 0));
+        assert!(panel.step(true));
+        assert!(panel.step(true));
+        assert!(panel.mark(index, 2));
+        assert!(panel.step(false));
+        panel.page(4, true);
+        let table = the_table(&panel);
+        assert_eq!(table.chosen(), 2, "a key took a mark off");
+        assert_eq!(table.taking(), vec![String::from("s00"), String::from("s02")]);
+        assert_eq!(table.title(), format!("{} CONVERSATIONS, 2 CHOSEN", many.len()));
+
+        // Marked again is unmarked, and the delete then falls back to the row
+        // the keys are on rather than taking nothing.
+        assert!(panel.mark(index, 0));
+        assert!(panel.mark(index, 2));
+        let table = the_table(&panel);
+        assert_eq!(table.chosen(), 0);
+        assert_eq!(table.taking().len(), 1, "a delete with nothing marked takes one row");
+
+        // The body holds a fixed number of rows and scrolls inside itself, so
+        // the card is one row of the panel however long the list is. The keys
+        // walked past the end of the body bring the body with them.
+        assert_eq!(lines(panel.row(index).expect("the table"), 80), crate::design::card_row_lines(table_body_lines(), true));
+        assert!(panel.jump(true));
+        let table = the_table(&panel);
+        assert_eq!(table.cursor, many.len() - 1);
+        assert!(table.first > 0, "the body did not follow the keys");
+        assert!(table.cursor < table.first + TABLE_ROWS, "the row is off the body");
+        assert!(panel.jump(false));
+        assert_eq!(the_table(&panel).first, 0, "the body did not come back");
+
+        // Select all is every conversation on the list and not only the ones the
+        // body is showing; select none is all of them again.
+        assert!(panel.mark_all(index, true));
+        assert_eq!(the_table(&panel).chosen(), many.len());
+        assert_eq!(the_table(&panel).taking().len(), many.len());
+        assert!(panel.mark_all(index, false));
+        assert_eq!(the_table(&panel).chosen(), 0);
+
+        // And the marks outlive a walk to another section and back, the way the
+        // cursor does: they are the section's, not the keystroke's.
+        assert!(panel.mark(index, 1));
+        let looks = panel
+            .section_names()
+            .iter()
+            .position(|name| *name == APPEARANCE)
+            .expect("the appearance section");
+        let rail = panel.chosen();
+        assert!(panel.choose(looks));
+        assert!(panel.choose(rail));
+        assert_eq!(the_table(&panel).chosen(), 1, "the marks went with the rail");
+
+        // An armed delete does not: anything else at all puts it back, marking
+        // included, because the question on the footer names a set and this is
+        // that set changing.
+        assert_eq!(panel.uninstall(index), None);
+        assert_eq!(panel.arming(), Some(index));
+        assert!(panel.mark(index, 2));
+        assert_eq!(panel.arming(), None, "the question outlived the answer");
+    }
+
 
     /// The skills section lists what is on the disk: a row per skill, the
     /// repository it records or the directory it was found in underneath, and

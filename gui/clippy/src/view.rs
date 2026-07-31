@@ -482,6 +482,23 @@ const CARET_W: f32 = 3.0;
 /// release.
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// What a button in the footer of the saved-conversations table asks for.
+///
+/// The three of them, in one enum, so a press is one hit with an answer on it
+/// rather than three regions the routing has to keep in the same order as the
+/// layout. Which is which is decided where they are placed, and read where they
+/// are drawn.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Act {
+    /// Mark every conversation on the list, not only the ones on screen.
+    All,
+    /// Take the mark off every one of them.
+    None,
+    /// Delete what is marked, or the row the keys are on when nothing is. Two
+    /// presses, like every other delete on this panel.
+    Forget,
+}
+
 /// Something the pointer can land on. Returned by [`Layout::hit`] so every
 /// click is resolved in one place instead of in a chain of `if` in the event
 /// handler.
@@ -567,6 +584,16 @@ pub enum Hit {
     /// the row and the button would delete a skill or a server every time
     /// somebody pressed the row to read it.
     SettingsRemove(usize),
+    /// One conversation on the table, as the row the table is on and the row of
+    /// the table itself. Puts the keys on it, the way a press on any other row
+    /// of the panel does.
+    SettingsPick(usize, usize),
+    /// The mark in front of that conversation. Its own region and tested before
+    /// the row, the way the picker's own mark is: one region for both would make
+    /// every press that picks a row also mark it.
+    SettingsMark(usize, usize),
+    /// One of the buttons in the table's footer, by the row the table is on.
+    SettingsAct(usize, Act),
     /// The line between the rail of section names and the settings beside it.
     /// Dragging it decides how much of the panel each of the two takes.
     ///
@@ -800,6 +827,13 @@ pub struct Layout {
     /// servers.
     pub settings_toggles: Vec<(usize, Panel)>,
     pub settings_removes: Vec<(usize, Panel)>,
+    /// The rows of the saved-conversations table that are inside its body right
+    /// now, each one carrying the panel row the table is on and its own place on
+    /// the list; the mark in front of each of them; and the buttons in the
+    /// table's footer. All three empty in every section but that one.
+    pub settings_picks: Vec<(usize, usize, Panel)>,
+    pub settings_marks: Vec<(usize, usize, Panel)>,
+    pub settings_acts: Vec<(usize, Act, Panel)>,
     /// The column beside that list, where the entry under the cursor is shown:
     /// a skill's own `SKILL.md`, or a server's entry out of its file. Empty in
     /// every section that has no entries, which is what leaves those sections
@@ -1059,6 +1093,9 @@ impl Layout {
                 settings_cells: Vec::new(),
                 settings_toggles: Vec::new(),
                 settings_removes: Vec::new(),
+                settings_picks: Vec::new(),
+                settings_marks: Vec::new(),
+                settings_acts: Vec::new(),
                 settings_doc: nowhere(),
                 settings_doc_text: nowhere(),
                 settings_close: nowhere(),
@@ -1119,6 +1156,9 @@ impl Layout {
                 settings_cells: Vec::new(),
                 settings_toggles: Vec::new(),
                 settings_removes: Vec::new(),
+                settings_picks: Vec::new(),
+                settings_marks: Vec::new(),
+                settings_acts: Vec::new(),
                 settings_doc: nowhere(),
                 settings_doc_text: nowhere(),
                 settings_close: nowhere(),
@@ -1180,6 +1220,9 @@ impl Layout {
                 settings_cells: places.cells,
                 settings_toggles: places.toggles,
                 settings_removes: places.removes,
+                settings_picks: places.picks,
+                settings_marks: places.marks,
+                settings_acts: places.acts,
                 settings_doc: places.doc,
                 settings_doc_text: places.doc_text,
                 settings_close: places.close,
@@ -1432,6 +1475,9 @@ impl Layout {
             settings_cells: Vec::new(),
             settings_toggles: Vec::new(),
             settings_removes: Vec::new(),
+            settings_picks: Vec::new(),
+            settings_marks: Vec::new(),
+            settings_acts: Vec::new(),
             settings_doc: nowhere(),
             settings_doc_text: nowhere(),
             settings_close: nowhere(),
@@ -1566,6 +1612,24 @@ impl Layout {
             for (index, panel) in &self.settings_toggles {
                 if panel.contains(x, y) {
                     return Some(Hit::SettingsToggle(*index));
+                }
+            }
+            // The table's buttons, then the mark on a row, then the row itself,
+            // all before the card they stand in: each one sits inside the last,
+            // and the more particular thing is what the press means.
+            for (index, act, panel) in &self.settings_acts {
+                if panel.contains(x, y) {
+                    return Some(Hit::SettingsAct(*index, *act));
+                }
+            }
+            for (index, at, panel) in &self.settings_marks {
+                if panel.contains(x, y) {
+                    return Some(Hit::SettingsMark(*index, *at));
+                }
+            }
+            for (index, at, panel) in &self.settings_picks {
+                if panel.contains(x, y) {
+                    return Some(Hit::SettingsPick(*index, *at));
                 }
             }
             // The line between the rail and the list, before either of them: the
@@ -2471,6 +2535,11 @@ struct SettingsPlaces {
     cells: Vec<(usize, usize, Panel)>,
     toggles: Vec<(usize, Panel)>,
     removes: Vec<(usize, Panel)>,
+    /// The rows of the saved-conversations table that are inside its body, the
+    /// mark in front of each of them, and the buttons under them.
+    picks: Vec<(usize, usize, Panel)>,
+    marks: Vec<(usize, usize, Panel)>,
+    acts: Vec<(usize, Act, Panel)>,
     doc: Panel,
     /// The box the document itself is written in: inside the outlined wrapper,
     /// under the title over it. What the wheel counts a page in and what the
@@ -2504,47 +2573,90 @@ fn settings_cell(row: Panel, cell: usize, cells: usize) -> Panel {
     Panel::new(x + cell as f32 * width, row.y, width, row.h)
 }
 
-/// How wide the trash at the end of a saved conversation is, in columns of pane
-/// text.
-///
-/// Sized for the word the first press puts in it rather than for the mark, so
-/// pressing it once does not change the width of the thing that was just
-/// pressed and the second press lands on the same box.
-const SETTING_SESSION_TRASH_COLUMNS: usize = 7;
-
 /// Where every cell of the saved-conversations table sits inside one row.
 ///
 /// One answer for the row that names the columns and for every row under it, so
-/// a cell cannot drift out from under its own header. The widths come from the
-/// model, [`crate::settings::SESSION_COLUMNS`]; the two written as zero there
-/// are the first message, which takes whatever is left, and the trash, which is
-/// a button pinned to the right end of the row.
+/// a cell cannot drift out from under its own header. One box per entry of
+/// [`crate::settings::SESSION_COLUMNS`], in that order, so the name of a column,
+/// the cell under it and the alignment they share are all read off the same
+/// index. The widths come from the model; the one written as zero there is the
+/// first message, which takes whatever is left of the row.
+///
+/// From the row's own left edge, because the table stands inside a card: the
+/// card's border and the mark down it say which row of the panel the keys are
+/// on, and the strip an ordinary row leaves for that mark would push the first
+/// column out from under its name.
 ///
 /// Cell by cell rather than one space padded string, which is what the picker's
-/// list does: this table has a column that is a button and a line between every
+/// list does: this table has a column that is a mark and a line between every
 /// pair of columns, and both of those need each cell's own x.
 fn settings_session_cells(row: Panel, column: f32) -> Vec<Panel> {
-    let x = row.x + MARK_W + 3.0;
     let right = row.x + row.w;
-    let trash =
-        (SETTING_SESSION_TRASH_COLUMNS as f32 * column).min(((right - x) * 0.5).floor().max(0.0));
     let mut out = Vec::new();
-    let mut at = x;
-    for (_, wide, _) in crate::settings::SESSION_COLUMNS
-        .iter()
-        .take(crate::settings::SESSION_CELLS)
-    {
-        let room = (right - trash - at).max(0.0);
+    let mut at = row.x;
+    for (_, wide, _) in crate::settings::SESSION_COLUMNS {
+        let room = (right - at).max(0.0);
         let want = match wide {
             0 => room,
-            wide => *wide as f32 * column,
+            wide => wide as f32 * column,
         };
         let w = want.min(room);
         out.push(Panel::new(at, row.y, w, row.h));
         at += w;
     }
-    out.push(Panel::new(right - trash, row.y, trash, row.h));
     out
+}
+
+/// Where the column names and the rows of a table sit inside the card's body.
+///
+/// The names on the first line, the rows [`design::TIGHT`] under them, one line
+/// each, exactly as many as the body was measured for
+/// ([`crate::settings::table_body_lines`]). Asked by the placement and by the
+/// drawing, the way [`settings_card_parts`] is, so a row is drawn where the
+/// press on it is tested for.
+fn settings_table_parts(body: Panel, line: f32) -> (Panel, Vec<Panel>) {
+    let names = Panel::new(body.x, body.y, body.w, line);
+    let top = body.y + line + design::tight(line);
+    let rows = (0..crate::settings::TABLE_ROWS)
+        .map(|step| Panel::new(body.x, top + step as f32 * line, body.w, line))
+        .filter(|at| at.y + at.h <= body.y + body.h + 0.01)
+        .collect();
+    (names, rows)
+}
+
+/// How wide each button in the table's footer is, in columns of pane text.
+///
+/// Sized for the longest word each of them can hold rather than for the word it
+/// is holding now, so arming the delete does not resize the thing that was just
+/// pressed and the second press lands on the same box.
+const SETTING_ACT_COLUMNS: usize = 13;
+
+/// The buttons in the table's footer: select all, select none, and the delete,
+/// centred as one group.
+///
+/// Centred because that is where a button that acts on the whole list belongs:
+/// pinned to one end of a footer it reads as belonging to whatever is nearest
+/// that end. Nothing at all in a footer too narrow to hold the three of them
+/// side by side, since a button drawn over another one is a press nobody can
+/// aim.
+fn settings_act_boxes(footer: Panel, line: f32, column: f32) -> Vec<(Act, Panel)> {
+    let acts = [Act::All, Act::None, Act::Forget];
+    let wide = SETTING_ACT_COLUMNS as f32 * column;
+    let step = design::step(line);
+    let whole = wide * acts.len() as f32 + step * (acts.len() - 1) as f32;
+    if footer.w < whole || footer.h < 1.0 {
+        return Vec::new();
+    }
+    let x = footer.x + ((footer.w - whole) * 0.5).floor();
+    acts.into_iter()
+        .enumerate()
+        .map(|(step_at, act)| {
+            (
+                act,
+                Panel::new(x + step_at as f32 * (wide + step), footer.y, wide, footer.h),
+            )
+        })
+        .collect()
 }
 
 /// Where a cell's text is written inside the box its column gives it.
@@ -3158,6 +3270,9 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
             cells: Vec::new(),
             toggles: Vec::new(),
             removes: Vec::new(),
+            picks: Vec::new(),
+            marks: Vec::new(),
+            acts: Vec::new(),
             doc: nowhere(),
             doc_text: nowhere(),
             close: nowhere(),
@@ -3239,6 +3354,9 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
     let mut cells = Vec::new();
     let mut toggles = Vec::new();
     let mut removes = Vec::new();
+    let mut picks = Vec::new();
+    let mut marks = Vec::new();
+    let mut acts = Vec::new();
     // A running height rather than the row number times a line: a heading is two
     // rows of text tall and everything under it moves down by that much. The
     // heights come from the model, which is what the scroll window counts in.
@@ -3293,16 +3411,41 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
             // way every value on the panel does. Nothing at all in a column too
             // narrow to hold them beside a name, since a button drawn over the
             // name it belongs to is a press nobody can aim.
-            // The trash at the end of a saved conversation, in the last column
-            // of the table. Placed from the same function that places the cells
-            // beside it, so the button is under its own header. Nothing at all
-            // in a row too narrow to hold it, since a button drawn over the
-            // words it belongs to is a press nobody can aim.
-            SettingRow::Session { .. } => {
-                if let Some(trash) = settings_session_cells(row, column).last()
-                    && trash.w >= column * 3.0
-                {
-                    removes.push((index, Panel::new(trash.x, row.y, trash.w, line)));
+            // The saved conversations: one region per row inside the body, the
+            // mark in front of each of them, and the three buttons in the
+            // footer. Only the rows the body is showing, since the table scrolls
+            // inside itself: a region for a row that is not drawn is a press
+            // that answers for something nobody can see.
+            SettingRow::Table(table) => {
+                let card = settings_card(row, line);
+                let parts = settings_card_parts(
+                    card,
+                    line,
+                    shape.pane_size,
+                    column,
+                    entry_cols,
+                    true,
+                );
+                let (_, boxes) = settings_table_parts(parts.body, line);
+                for (step, at) in boxes.iter().enumerate() {
+                    let Some(_) = table.rows.get(table.first + step) else {
+                        break;
+                    };
+                    let on = table.first + step;
+                    picks.push((index, on, *at));
+                    if let Some(mark) = settings_session_cells(*at, column)
+                        .get(crate::settings::SESSION_MARK)
+                        && mark.w >= 1.0
+                    {
+                        marks.push((index, on, *mark));
+                    }
+                }
+                let inside = parts.footer.y >= card.y
+                    && parts.footer.y + parts.footer.h <= card.y + card.h + 0.01;
+                if inside {
+                    for (act, at) in settings_act_boxes(parts.footer, line, column) {
+                        acts.push((index, act, at));
+                    }
                 }
             }
             // An entry is a card: its buttons stand in the footer, at the
@@ -3416,6 +3559,9 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
         cells,
         toggles,
         removes,
+        picks,
+        marks,
+        acts,
         doc,
         doc_text: settings_doc_text(doc, line),
         close,
@@ -3891,7 +4037,7 @@ fn menu_row(
     // showing does, rather than by being missing. A row waiting for a second
     // press before it destroys something says so in the colour this window
     // uses for everything that throws work away, which is the colour the
-    // settings panel's own trash asks the same question in.
+    // settings panel's own delete asks the same question in.
     let tint = match (row.enabled, row.item.warns()) {
         (true, true) => skin.bad,
         (true, false) => skin.bright,
@@ -5700,7 +5846,10 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
         // edge says the same thing.
         let carded = matches!(
             entry,
-            SettingRow::Card(_) | SettingRow::Entry(_) | SettingRow::Paper(_)
+            SettingRow::Card(_)
+                | SettingRow::Entry(_)
+                | SettingRow::Paper(_)
+                | SettingRow::Table(_)
         );
         if on {
             // A card says the keys are on it with its own border and the mark
@@ -5717,7 +5866,7 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 // and the strip it used to wear is the panel's own colour at a
                 // tenth more alpha, which over a dark desktop is no band at all.
                 let band = match entry {
-                    SettingRow::Session { .. } | SettingRow::Entry(_) => skin.picked,
+                    SettingRow::Entry(_) => skin.picked,
                     _ => skin.strip,
                 };
                 scene.rect(row.fill(band));
@@ -5725,15 +5874,6 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
             if !carded {
                 scene.rect(Panel::new(row.x, row.y, MARK_W, row.h).fill(skin.edge_focus));
             }
-        }
-        // The row naming the columns of the table stands on a band of its own.
-        // Column rules and a hairline under it were the whole of it, which drew
-        // the names as one more row of the list with smaller words in it; a
-        // filled strip is what separates a header from the data under it, and
-        // it is the same surface the file view puts behind a block header.
-        // Before the hairline below, so the line still closes the band off.
-        if matches!(entry, SettingRow::Columns(_)) {
-            scene.rect(row.fill(skin.strip));
         }
         // There is no hairline under a row. There was one under every row on
         // the panel, which is a line between every two things on screen and
@@ -5799,12 +5939,54 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     tint,
                 );
             }
-            // The row that names the columns of the table under it, written in
-            // the same boxes the cells are written in: one function places both,
-            // so a name cannot end up over the wrong column.
-            SettingRow::Columns(names) => {
-                let cells = settings_session_cells(*row, column);
-                for (step, (at, name)) in cells.iter().zip(names).enumerate() {
+            // The saved conversations, as a table inside a card: the count in
+            // the header, the banded column names and the rows in the body, and
+            // the three buttons in the footer. The rows were rows of the panel
+            // with a trash on the end of each one, which said nothing about the
+            // list being one thing and made deleting four of them eight presses.
+            SettingRow::Table(table) => {
+                let card = settings_card(*row, line);
+                let parts = settings_card_parts(card, line, size, column, list_cols, true);
+                settings_card_shell(
+                    scene,
+                    card,
+                    &parts,
+                    &table.title(),
+                    skin.good,
+                    on,
+                    skin,
+                    size,
+                    column,
+                );
+                // How far down a list longer than its body has been read, at the
+                // right end of the header: a body showing twelve of forty with
+                // nothing saying so reads as the whole list.
+                if table.rows.len() > crate::settings::TABLE_ROWS {
+                    let last =
+                        (table.first + crate::settings::TABLE_ROWS).min(table.rows.len());
+                    let counter = format!("{}-{} of {}", table.first + 1, last, table.rows.len());
+                    let wide = (counter.chars().count() as f32 + 1.0) * column;
+                    if wide < parts.title.w * 0.5 {
+                        say(
+                            scene,
+                            vec![Run::tinted(counter, skin.dim)],
+                            Panel::new(
+                                parts.title.x + parts.title.w - wide,
+                                parts.title.y,
+                                wide,
+                                line.min(parts.title.h),
+                            ),
+                            skin.dim,
+                        );
+                    }
+                }
+                let (names_at, boxes) = settings_table_parts(parts.body, line);
+                // The names stand on a filled band, which is what separates a
+                // header from the data under it: rules between the columns and
+                // nothing else drew them as one more row of the list.
+                scene.rect(names_at.fill(skin.strip));
+                let names = settings_session_cells(names_at, column);
+                for (step, (at, name)) in names.iter().zip(&table.names).enumerate() {
                     if at.w < column {
                         continue;
                     }
@@ -5813,67 +5995,109 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     say(
                         scene,
                         vec![Run::tinted(shown, skin.dim)],
-                        Panel::new(ink.x, row.y, ink.w, line),
+                        Panel::new(ink.x, names_at.y, ink.w, line),
                         skin.dim,
                     );
                 }
-                settings_session_lines(scene, &cells, *row, skin.edge);
-            }
-            // One saved conversation, cell by cell under the header. The band
-            // under the cursor is the solid one the session list in the folder
-            // picker uses rather than the quiet strip the rest of the panel
-            // uses: this is a list being picked from, not a form being read.
-            SettingRow::Session { cells, .. } => {
-                let ink = match on {
-                    true => skin.picked_ink,
-                    false => skin.body,
-                };
-                let boxes = settings_session_cells(*row, column);
-                for (step, (at, text)) in boxes.iter().zip(cells).enumerate() {
-                    if at.w < column {
-                        continue;
+                settings_session_lines(scene, &names, names_at, skin.edge);
+                for (step, at) in boxes.iter().enumerate() {
+                    let Some(kept) = table.rows.get(table.first + step) else {
+                        break;
+                    };
+                    // The row the keys are on wears the solid band the folder
+                    // picker's own session list wears, across the whole row:
+                    // this is a list being picked from, and a tint on the words
+                    // is invisible next to fourteen other tints.
+                    let here = on && table.first + step == table.cursor;
+                    if here {
+                        scene.rect(at.fill(skin.picked));
                     }
-                    let shown = clip(text, columns_in(at.w, column).saturating_sub(1));
-                    let room = settings_session_ink(*at, step, &shown, column);
-                    say(
-                        scene,
-                        vec![Run::tinted(shown, ink)],
-                        Panel::new(room.x, row.y, room.w, line),
-                        ink,
-                    );
+                    let ink = match here {
+                        true => skin.picked_ink,
+                        false => skin.body,
+                    };
+                    let cells = settings_session_cells(*at, column);
+                    for (step, (box_, text)) in cells
+                        .iter()
+                        .skip(crate::settings::SESSION_FIRST_CELL)
+                        .zip(&kept.cells)
+                        .enumerate()
+                    {
+                        if box_.w < column {
+                            continue;
+                        }
+                        let step = step + crate::settings::SESSION_FIRST_CELL;
+                        let shown = clip(text, columns_in(box_.w, column).saturating_sub(1));
+                        let room = settings_session_ink(*box_, step, &shown, column);
+                        say(
+                            scene,
+                            vec![Run::tinted(shown, ink)],
+                            Panel::new(room.x, at.y, room.w, line),
+                            ink,
+                        );
+                    }
+                    settings_session_lines(scene, &cells, *at, skin.edge);
+                    // The mark. A box that is filled when the row is one of the
+                    // ones about to go: the whole of what multi selection is is
+                    // being able to see which rows are in it without pressing
+                    // anything.
+                    if let Some(mark) = cells.get(crate::settings::SESSION_MARK) {
+                        let hot = frame.hot == Some(Hit::SettingsMark(*index, table.first + step));
+                        let tint = match (kept.marked, here) {
+                            (true, _) => skin.good,
+                            (false, true) => skin.picked_ink,
+                            (false, false) => skin.dim,
+                        };
+                        if hot {
+                            scene.rect(panel_fill(*mark, skin.hot));
+                        }
+                        say(
+                            scene,
+                            vec![Run::icon(
+                                match kept.marked {
+                                    true => icons::CHECKED.to_string(),
+                                    false => icons::UNCHECKED.to_string(),
+                                },
+                                tint,
+                            )],
+                            Panel::new(mark.x + INPUT_PAD, at.y, mark.w, line),
+                            tint,
+                        );
+                    }
                 }
-                settings_session_lines(scene, &boxes, *row, skin.edge);
-                // The trash. A mark rather than a word, in the colour this
-                // window uses for everything that throws work away; pressed
-                // once it says so and waits for the second press, and the
-                // footer says which conversation would go with it.
-                for (at, box_) in &layout.settings_removes {
+                // The buttons, centred in the footer: they act on the whole
+                // list, and a button pinned to one end of a footer reads as
+                // belonging to whatever is nearest that end.
+                for (at, act, box_) in &layout.settings_acts {
                     if at != index {
                         continue;
                     }
-                    let armed = panel.arming() == Some(*index);
-                    scene.rect(panel_fill(*box_, skin.input));
-                    if frame.hot == Some(Hit::SettingsRemove(*index)) {
-                        scene.rect(panel_fill(*box_, skin.hot));
-                    }
-                    scene.rect(panel_edge(
-                        *box_,
-                        match armed {
-                            true => skin.close_hot,
-                            false => skin.edge,
-                        },
-                    ));
-                    let room = Panel::new(
-                        box_.x + INPUT_PAD,
-                        box_.y,
-                        (box_.w - INPUT_PAD * 2.0).max(1.0),
-                        box_.h,
-                    );
-                    let run = match armed {
-                        true => Run::tinted("sure?", skin.bad),
-                        false => Run::icon(icons::TRASH.to_string(), skin.bad),
+                    let armed = *act == Act::Forget && panel.arming() == Some(*index);
+                    let (kind, tint, word) = match act {
+                        Act::All => (ButtonKind::Secondary, skin.body, String::from("select all")),
+                        Act::None => {
+                            (ButtonKind::Secondary, skin.body, String::from("select none"))
+                        }
+                        Act::Forget => (
+                            ButtonKind::Danger,
+                            skin.bad,
+                            match (armed, table.chosen()) {
+                                (true, _) => String::from("sure?"),
+                                (false, 0) => String::from("delete"),
+                                (false, many) => format!("delete {many}"),
+                            },
+                        ),
                     };
-                    say(scene, vec![run], room, skin.bad);
+                    settings_button(
+                        scene,
+                        *box_,
+                        kind,
+                        vec![Run::tinted(word, tint)],
+                        tint,
+                        frame.hot == Some(Hit::SettingsAct(*index, *act)),
+                        skin,
+                        size,
+                    );
                 }
             }
             // A reading's value starts in the same column a control does and
@@ -14708,7 +14932,7 @@ mod tests {
     /// gives everything that throws work away, and the box under it does not
     /// move: the second press lands on the same pixels the first one did.
     ///
-    /// The wording is the settings panel's, because the panel's trash asks the
+    /// The wording is the settings panel's, because the panel's delete asks the
     /// same question and the two are one product.
     #[test]
     fn an_armed_delete_row_reads_sure_without_moving_the_menu() {
@@ -15083,20 +15307,24 @@ mod tests {
                         assert_eq!(layout.hit(x, y), Some(hit), "{section}");
                         assert!(row.contains(x, y), "the control is outside its row");
                     }
-                    // A saved conversation carries its own delete in the last
-                    // column of the table, so its right hand end is a button
-                    // rather than more of the row.
+                    // The table of saved conversations is a card whose body is a
+                    // list, so the middle of it is a row of that list rather
+                    // than more of the panel row it stands in. The card itself
+                    // still answers where its own border and header are.
                     (None, None)
-                        if matches!(
-                            panel.row(*index),
-                            Some(crate::settings::Row::Session { .. })
-                        ) =>
+                        if matches!(panel.row(*index), Some(crate::settings::Row::Table(_))) =>
                     {
                         assert_eq!(
-                            layout.hit(row.x + row.w - 2.0, row.y + row.h * 0.5),
-                            Some(Hit::SettingsRemove(*index)),
-                            "{section}"
+                            layout.hit(row.x + 1.0, row.y + 1.0),
+                            Some(Hit::SettingsRow(*index, *side)),
+                            "{section}: the card's own edge is not the card"
                         );
+                        let picks = layout
+                            .settings_picks
+                            .iter()
+                            .filter(|(at, _, _)| at == index)
+                            .count();
+                        assert!(picks > 0, "{section}: the table has no rows to press");
                     }
                     // A heading, a note, a column name or a reading: the whole
                     // row is the row, and a press on its right hand end changes
@@ -15585,35 +15813,74 @@ mod tests {
         panel
     }
 
-    /// Item E3: the saved conversations are a table. A row that read
-    /// "17h ago  noob-cli  283 B  -  fix the panel" said five things with
+    /// Item H3: the saved conversations are a table inside a card. A row that
+    /// read "17h ago  noob-cli  283 B  -  fix the panel" said five things with
     /// nothing naming any of them, so every cell sits in a column of its own
-    /// under a row that says what that column is, the row the cursor is on
+    /// under a name that says what that column is, the row the keys are on
     /// carries a band across the whole of it rather than differently coloured
-    /// words, and the last column is a trash of its own.
+    /// words, and the whole list stands in one card: a header saying how many
+    /// there are, the table in the body, the buttons in the footer.
     #[test]
-    fn the_sessions_section_is_a_table_under_a_row_naming_its_columns() {
+    fn the_sessions_section_is_a_table_in_a_card_with_its_buttons_in_the_footer() {
         let panel = a_sessions_panel();
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let layout = &out.layout;
         let column = 8.0;
-        let find = |want: fn(&crate::settings::Row) -> bool| -> Vec<(usize, Panel)> {
-            layout
-                .settings_rows
-                .iter()
-                .filter(|(index, _, _)| panel.row(*index).is_some_and(want))
-                .map(|(index, _, at)| (*index, *at))
-                .collect()
-        };
-        let header = find(|row| matches!(row, crate::settings::Row::Columns(_)));
-        assert_eq!(header.len(), 1, "one row names the columns");
-        let (_, header_at) = header[0];
-        let rows = find(|row| matches!(row, crate::settings::Row::Session { .. }));
-        assert_eq!(rows.len(), 3, "every saved conversation is drawn");
+        let line = Text::line_for(PANE_TEXT.0);
+        let index = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, crate::settings::Row::Table(_)))
+            .expect("the section carries a table");
+        let table = panel.table(index).expect("a table");
+        let row = layout
+            .settings_rows
+            .iter()
+            .find(|(at, _, _)| *at == index)
+            .map(|(_, _, at)| *at)
+            .expect("the table is placed");
+        let card = settings_card(row, line);
+        let parts = settings_card_parts(
+            card,
+            line,
+            PANE_TEXT.0,
+            column,
+            settings_entry_cols(layout.settings_list.w, column),
+            true,
+        );
+        let (names_at, boxes) = settings_table_parts(parts.body, line);
+
+        // One region per conversation, all three of them inside the body of the
+        // card, and each one carries which row of the table it is.
+        let picks: Vec<(usize, Panel)> = layout
+            .settings_picks
+            .iter()
+            .filter(|(at, _, _)| *at == index)
+            .map(|(_, on, at)| (*on, *at))
+            .collect();
+        assert_eq!(picks.len(), 3, "every saved conversation is drawn");
+        // The body was measured for a fixed number of rows and the layout laid
+        // out exactly that many boxes: a row drawn where the model did not count
+        // one puts every press below it on another row.
+        assert_eq!(boxes.len(), crate::settings::TABLE_ROWS);
+        for (step, (_, at)) in picks.iter().enumerate() {
+            assert!(
+                (at.y - boxes[step].y).abs() < 0.01 && (at.h - boxes[step].h).abs() < 0.01,
+                "row {step} is not on the band the body counted"
+            );
+        }
+        for (on, at) in &picks {
+            let (x, y) = middle(*at);
+            assert_eq!(layout.hit(x, y), Some(Hit::SettingsPick(index, *on)));
+            assert!(
+                at.y >= parts.body.y - 0.01 && at.y + at.h <= parts.body.y + parts.body.h + 0.01,
+                "row {on} is outside the card's body"
+            );
+        }
 
         // Every column has its name over it, and the name starts exactly where
         // the cells under it start.
-        let names = settings_session_cells(header_at, column);
+        let names = settings_session_cells(names_at, column);
         assert_eq!(names.len(), crate::settings::SESSION_COLUMNS.len());
         let text_at = |out: &Rendered, at: Panel| -> String {
             out.scene
@@ -15626,9 +15893,9 @@ mod tests {
                 .collect()
         };
         // Where a cell of this column is written: against the left edge of its
-        // box for a word, against the right edge for a number. This asserted
-        // every cell at its box's left edge, which is what left the size and the
-        // context ragged; it asserts the edge the column says it takes now.
+        // box for a word, against the right edge for a number. Asserting every
+        // cell at its box's left edge is what left the size and the context
+        // ragged, so it asserts the edge the column says it takes.
         let written_at = |at: Panel, step: usize, text: &str| -> f32 {
             let wide = text.chars().count() as f32 * column;
             match crate::settings::SESSION_COLUMNS[step].2 {
@@ -15637,92 +15904,46 @@ mod tests {
             }
         };
         for (step, (name, _, _)) in crate::settings::SESSION_COLUMNS.iter().enumerate() {
+            if name.is_empty() {
+                continue;
+            }
             let shown = clip(name, columns_in(names[step].w, column).saturating_sub(1));
             let x = written_at(names[step], step, &shown);
-            let said = text_at(&out, Panel::new(x, header_at.y, 1.0, 1.0));
+            let said = text_at(&out, Panel::new(x, names_at.y, 1.0, 1.0));
             assert!(said.starts_with(&shown), "column {step} is headed {said:?}");
         }
 
         // And every row writes its cells into those same columns, against the
         // same edge the name above it is written against.
-        for (index, row) in &rows {
-            let cells = match panel.row(*index) {
-                Some(crate::settings::Row::Session { cells, .. }) => cells.clone(),
-                other => panic!("not a session: {other:?}"),
-            };
-            let boxes = settings_session_cells(*row, column);
+        for (on, at) in &picks {
+            let cells = table.rows[*on].cells.clone();
+            let places = settings_session_cells(*at, column);
             for (step, cell) in cells.iter().enumerate() {
+                let step = step + crate::settings::SESSION_FIRST_CELL;
                 assert!(
-                    (boxes[step].x - names[step].x).abs() < 0.01,
-                    "row {index} column {step} is not under its header"
+                    (places[step].x - names[step].x).abs() < 0.01,
+                    "row {on} column {step} is not under its header"
                 );
-                let shown = clip(cell, columns_in(boxes[step].w, column) - 1);
-                let x = written_at(boxes[step], step, &shown);
-                let said = text_at(&out, Panel::new(x, row.y, 1.0, 1.0));
+                let shown = clip(cell, columns_in(places[step].w, column) - 1);
+                let x = written_at(places[step], step, &shown);
+                let said = text_at(&out, Panel::new(x, at.y, 1.0, 1.0));
                 assert!(
                     said.starts_with(&shown),
-                    "row {index} column {step} says {said:?}, not {cell:?}"
+                    "row {on} column {step} says {said:?}, not {cell:?}"
                 );
             }
         }
-
-        // A number ends at the right edge of its column and a word starts at
-        // the left edge of its own, which is the whole of what makes a column
-        // of sizes scannable. Read off the scene rather than off the helper: the
-        // panel is what has to have drawn it there.
-        let (a_row, at) = rows[0];
-        let cells = match panel.row(a_row) {
-            Some(crate::settings::Row::Session { cells, .. }) => cells.clone(),
-            other => panic!("not a session: {other:?}"),
-        };
-        let boxes = settings_session_cells(at, column);
-        let drawn = |text: &str| -> Vec<f32> {
-            out.scene
-                .texts
-                .iter()
-                .filter(|drawn| {
-                    (drawn.at.y - at.y).abs() < 0.01
-                        && drawn.runs.iter().any(|run| run.text == text)
-                })
-                .map(|drawn| drawn.at.x)
-                .collect()
-        };
-        for (step, (_, _, align)) in crate::settings::SESSION_COLUMNS
-            .iter()
-            .enumerate()
-            .take(crate::settings::SESSION_CELLS)
-        {
-            let shown = clip(&cells[step], columns_in(boxes[step].w, column) - 1);
-            let places = drawn(&shown);
-            let wide = shown.chars().count() as f32 * column;
-            let want = match align {
-                crate::settings::Align::Left => boxes[step].x,
-                crate::settings::Align::Right => boxes[step].x + boxes[step].w - wide,
-            };
-            assert!(
-                places.iter().any(|x| (x - want).abs() < 0.01),
-                "column {step} ({shown:?}) is drawn at {places:?}, not {want} ({align:?})"
-            );
-        }
         assert!(
             matches!(
-                crate::settings::SESSION_COLUMNS[2].2,
+                crate::settings::SESSION_COLUMNS[3].2,
                 crate::settings::Align::Right
             ) && matches!(
-                crate::settings::SESSION_COLUMNS[3].2,
+                crate::settings::SESSION_COLUMNS[4].2,
                 crate::settings::Align::Right
             ),
             "the size and the context are the numeric columns"
         );
 
-        // The row the cursor is on is a band across the whole row, in the solid
-        // colour the folder picker's own session list uses, not a tint on the
-        // words.
-        let (cursor, band) = rows
-            .iter()
-            .find(|(index, _)| *index == panel.cursor())
-            .copied()
-            .expect("the cursor is on a session");
         let filled = |out: &Rendered, want: Panel, rgba: [f32; 4]| {
             out.scene.rects.iter().any(|rect| {
                 let [x, y, w, h] = rect.xywh();
@@ -15733,20 +15954,44 @@ mod tests {
                     && (h - want.h).abs() < 0.01
             })
         };
-        assert!(filled(&out, band, out.skin.picked), "no band on row {cursor}");
-        for (index, at) in &rows {
-            if index != &cursor {
-                assert!(!filled(&out, *at, out.skin.picked), "row {index} is banded too");
+        // The row the keys are on is a band across the whole row, in the solid
+        // colour the folder picker's own session list uses, not a tint on the
+        // words.
+        let (_, banded) = picks
+            .iter()
+            .find(|(on, _)| *on == table.cursor)
+            .copied()
+            .expect("the keys are on a row of the table");
+        assert!(filled(&out, banded, out.skin.picked), "no band on the row");
+        for (on, at) in &picks {
+            if *on != table.cursor {
+                assert!(!filled(&out, *at, out.skin.picked), "row {on} is banded too");
             }
         }
 
-        // And the row naming the columns stands on a filled band of its own,
-        // across the whole row, in the surface this window puts behind a block
-        // header. Rules between the columns and a hairline under it were all it
-        // had, which read as one more row of the list.
+        // And the names stand on a filled band of their own, across the body, in
+        // the surface this window puts behind a block header. Rules between the
+        // columns and a hairline under them were all they had, which read as one
+        // more row of the list.
         assert!(
-            filled(&out, header_at, out.skin.strip),
-            "the header has no band: {header_at:?}"
+            filled(&out, names_at, out.skin.strip),
+            "the header has no band: {names_at:?}"
+        );
+
+        // The card says what it holds, in the card title role, and the count is
+        // the one thing it can say that the panel's own heading does not.
+        let said = text_of(&out.scene);
+        assert!(said.contains("3 CONVERSATIONS"), "{said}");
+        assert!(
+            out.scene.texts.iter().any(|text| {
+                (text.at.y - parts.title.y).abs() < 0.01
+                    && text.size > PANE_TEXT.0
+                    && text
+                        .runs
+                        .iter()
+                        .any(|run| run.text.contains("3 CONVERSATIONS"))
+            }),
+            "the card's title is not drawn in the card title role"
         );
 
         // The heading at the top of the panel names what this section lists. It
@@ -15758,99 +16003,227 @@ mod tests {
             .iter()
             .find(|text| text.runs.iter().any(|run| run.text == " SETTINGS "))
             .expect("the panel says what it is");
-        let said: String = heading.runs.iter().map(|run| run.text.as_str()).collect();
+        let words: String = heading.runs.iter().map(|run| run.text.as_str()).collect();
         assert!(
-            said.ends_with(crate::settings::SESSION_TITLE),
-            "the heading is {said:?}"
-        );
-        assert!(
-            !said.ends_with(crate::settings::SESSIONS),
-            "the heading is still the rail's word: {said:?}"
+            words.ends_with(crate::settings::SESSION_TITLE),
+            "the heading is {words:?}"
         );
 
-        // The last column is a trash of its own: pressed where it is drawn, in
-        // the colour this window uses for everything that throws work away, and
-        // it is not the row, so a press on the words still moves the cursor.
-        let trash: Vec<(usize, Panel)> = layout
-            .settings_removes
+        // The three buttons stand in the card's footer, centred as one group,
+        // and each one is pressed where it is drawn. They were a trash on the
+        // end of every row, which is a delete per conversation and nothing that
+        // could take several.
+        let acts: Vec<(Act, Panel)> = layout
+            .settings_acts
             .iter()
-            .filter(|(index, _)| rows.iter().any(|(row, _)| row == index))
-            .map(|(index, at)| (*index, *at))
+            .filter(|(at, _, _)| *at == index)
+            .map(|(_, act, at)| (*act, *at))
             .collect();
-        assert_eq!(trash.len(), 3, "every row can be deleted");
-        for (index, box_) in &trash {
-            let (x, y) = middle(*box_);
-            assert_eq!(layout.hit(x, y), Some(Hit::SettingsRemove(*index)));
-            let marks: Vec<&noob_draw::Run> = out
-                .scene
-                .texts
-                .iter()
-                .filter(|text| text.at.x >= box_.x && text.at.x < box_.x + box_.w)
-                .flat_map(|text| text.runs.iter())
-                .collect();
+        assert_eq!(acts.len(), 3, "select all, select none and the delete");
+        for (act, at) in &acts {
+            let (x, y) = middle(*at);
+            assert_eq!(layout.hit(x, y), Some(Hit::SettingsAct(index, *act)));
             assert!(
-                marks
-                    .iter()
-                    .any(|run| {
-                        run.text.contains(icons::TRASH)
-                            && run.icon
-                            && run.color == Some(out.skin.bad)
-                    }),
-                "row {index} has no trash mark in the bad colour"
+                (at.y - parts.footer.y).abs() < 0.01,
+                "{act:?} is not on the footer line"
             );
-            // In the last column of the table, under the name of it.
-            let row = rows
-                .iter()
-                .find(|(at, _)| at == index)
-                .map(|(_, at)| *at)
-                .expect("the row it belongs to");
-            let last = *settings_session_cells(row, column)
-                .last()
-                .expect("a last column");
-            assert!((box_.x - last.x).abs() < 0.01, "the trash is not the last column");
-            assert!(
-                (box_.x - names[names.len() - 1].x).abs() < 0.01,
-                "the trash is not under the name of its column"
-            );
-            assert!(row.contains(box_.x + 1.0, box_.y + 1.0), "the trash is outside its row");
+            assert!(card.contains(x, y), "{act:?} is outside its card");
         }
-        let (_, first) = rows[0];
+        let left = acts[0].1.x;
+        let right = acts[2].1.x + acts[2].1.w;
+        // Within a pixel and a half either way: the group's left edge is
+        // floored to a whole pixel, and a button on a half pixel draws a blurred
+        // border.
+        assert!(
+            ((left - parts.footer.x) - (parts.footer.x + parts.footer.w - right)).abs() <= 2.0,
+            "the buttons are not centred: {left} to {right} in {:?}",
+            parts.footer
+        );
+        assert!(said.contains("select all") && said.contains("select none"), "{said}");
+        assert!(said.contains("delete"), "{said}");
+
+        // Nothing else on the panel grows any of the three, and the per row
+        // trash is gone with them: one delete, under the list it deletes from.
+        assert!(layout.settings_removes.is_empty(), "a session still has a trash");
+        let plain = render_settings(
+            &a_panel_on(&Config::default(), crate::settings::APPEARANCE),
+            1400.0,
+            900.0,
+            None,
+        );
+        assert!(plain.layout.settings_acts.is_empty());
+        assert!(plain.layout.settings_picks.is_empty());
+        assert!(plain.layout.settings_marks.is_empty());
+
+        // The card's own border and header are still the card: a press there
+        // puts the panel's cursor on it rather than on a conversation.
         assert_eq!(
-            layout.hit(first.x + 2.0, first.y + first.h * 0.5),
-            Some(Hit::SettingsRow(rows[0].0, crate::settings::Side::Left)),
-            "the words of a row still put the cursor there"
+            layout.hit(row.x + 1.0, row.y + 1.0),
+            Some(Hit::SettingsRow(index, crate::settings::Side::Left)),
+            "the card's edge is not the card"
         );
     }
 
-    /// The trash asks before it acts: pressed once it says so on the button and
-    /// on the footer, and nothing is drawn differently anywhere else.
+    /// The table is used at every width the window has, and at each of them its
+    /// rows stay inside its card and under the names of their columns.
+    ///
+    /// A card is full width and stacks, so what a narrow window costs the table
+    /// is the width of its last column and, below the width the three buttons
+    /// need, the buttons themselves. Nothing is ever drawn outside the card it
+    /// belongs to, which is what a press on a row of it depends on.
     #[test]
-    fn the_trash_on_a_session_says_sure_before_it_deletes() {
-        let mut panel = a_sessions_panel();
-        let row = panel
+    fn the_table_holds_its_rows_inside_its_card_at_every_width() {
+        let panel = a_sessions_panel();
+        let index = panel
             .rows()
             .iter()
-            .position(|row| matches!(row, crate::settings::Row::Session { .. }))
-            .expect("a session row");
+            .position(|row| matches!(row, crate::settings::Row::Table(_)))
+            .expect("the section carries a table");
+        for (w, h) in [(1400.0, 900.0), (900.0, 700.0), (700.0, 460.0), (520.0, 400.0)] {
+            let out = render_settings(&panel, w, h, None);
+            let line = Text::line_for(PANE_TEXT.0);
+            let Some(row) = out
+                .layout
+                .settings_rows
+                .iter()
+                .find(|(at, _, _)| *at == index)
+                .map(|(_, _, at)| *at)
+            else {
+                continue;
+            };
+            let card = settings_card(row, line);
+            for (_, on, at) in out
+                .layout
+                .settings_picks
+                .iter()
+                .filter(|(at, _, _)| *at == index)
+            {
+                assert!(
+                    at.x >= card.x - 0.01
+                        && at.x + at.w <= card.x + card.w + 0.01
+                        && at.y >= card.y - 0.01
+                        && at.y + at.h <= card.y + card.h + 0.01,
+                    "{w}x{h}: row {on} is outside its card: {at:?} in {card:?}"
+                );
+                let (x, y) = middle(*at);
+                assert_eq!(
+                    out.layout.hit(x, y),
+                    Some(Hit::SettingsPick(index, *on)),
+                    "{w}x{h}: row {on} is not pressed where it is drawn"
+                );
+            }
+            for (_, act, at) in out
+                .layout
+                .settings_acts
+                .iter()
+                .filter(|(at, _, _)| *at == index)
+            {
+                let (x, y) = middle(*at);
+                assert!(card.contains(x, y), "{w}x{h}: {act:?} is outside its card");
+                assert_eq!(out.layout.hit(x, y), Some(Hit::SettingsAct(index, *act)));
+            }
+        }
+    }
+
+    /// The mark in front of a conversation is its own control: pressing it marks
+    /// the row without moving the keys, and the mark is drawn where it is
+    /// pressed.
+    #[test]
+    fn a_conversation_is_marked_by_the_box_in_front_of_it() {
+        let mut panel = a_sessions_panel();
+        let index = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, crate::settings::Row::Table(_)))
+            .expect("the section carries a table");
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let marks: Vec<(usize, Panel)> = out
+            .layout
+            .settings_marks
+            .iter()
+            .filter(|(at, _, _)| *at == index)
+            .map(|(_, on, at)| (*on, *at))
+            .collect();
+        assert_eq!(marks.len(), 3, "every row can be marked");
+        for (on, at) in &marks {
+            let (x, y) = middle(*at);
+            assert_eq!(out.layout.hit(x, y), Some(Hit::SettingsMark(index, *on)));
+            // In the first column of the table, in front of the words.
+            let row = out
+                .layout
+                .settings_picks
+                .iter()
+                .find(|(row, at, _)| *row == index && at == on)
+                .map(|(_, _, at)| *at)
+                .expect("the row it belongs to");
+            assert!(
+                (at.x - row.x).abs() < 0.01 && at.w < row.w * 0.5,
+                "the mark is not the first column: {at:?} in {row:?}"
+            );
+        }
+
+        // Unmarked, every one of them is an empty box. Marked, the row says so
+        // where the box is: the whole of what multi selection is is seeing which
+        // rows are in it without pressing anything.
+        let boxes = |out: &Rendered, at: Panel, icon: char| -> bool {
+            out.scene.texts.iter().any(|text| {
+                (text.at.y - at.y).abs() < 2.0
+                    && text.at.x >= at.x - 1.0
+                    && text.at.x < at.x + at.w + 1.0
+                    && text
+                        .runs
+                        .iter()
+                        .any(|run| run.icon && run.text.contains(icon))
+            })
+        };
+        for (_, at) in &marks {
+            assert!(boxes(&out, *at, icons::UNCHECKED), "no empty box at {at:?}");
+        }
+        assert!(panel.mark(index, 1), "the second row could not be marked");
+        let after = render_settings(&panel, 1400.0, 900.0, None);
+        assert!(boxes(&after, marks[1].1, icons::CHECKED), "the mark is not drawn");
+        assert!(boxes(&after, marks[0].1, icons::UNCHECKED), "it marked another row");
+        // And the header counts it, which is what says how many a delete would
+        // take before the delete is pressed.
+        let said = text_of(&after.scene);
+        assert!(said.contains("3 CONVERSATIONS, 1 CHOSEN"), "{said}");
+        assert!(said.contains("delete 1"), "the button does not say how many: {said}");
+    }
+
+    /// The delete asks before it acts: pressed once it says so on the button and
+    /// on the footer, and the question names how many would go.
+    #[test]
+    fn the_delete_under_the_table_says_sure_before_it_takes_the_marked_rows() {
+        let mut panel = a_sessions_panel();
+        let index = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, crate::settings::Row::Table(_)))
+            .expect("the section carries a table");
+        assert!(panel.mark(index, 0));
+        assert!(panel.mark(index, 2));
 
         let before = render_settings(&panel, 1400.0, 900.0, None);
         assert!(!text_of(&before.scene).contains("sure?"));
 
-        assert_eq!(panel.uninstall(row), None, "the first press deleted it");
+        assert_eq!(panel.uninstall(index), None, "the first press deleted them");
         let after = render_settings(&panel, 1400.0, 900.0, None);
         let text = text_of(&after.scene);
         assert!(text.contains("sure?"), "the button does not ask: {text}");
-        assert!(text.contains("press delete again"), "the footer does not ask: {text}");
+        assert!(
+            text.contains("press delete again to remove 2 conversations"),
+            "the footer does not say how many: {text}"
+        );
 
         // The box says so with its edge as well, which is what makes it read as
         // armed rather than as a word that changed.
         let box_ = after
             .layout
-            .settings_removes
+            .settings_acts
             .iter()
-            .find(|(index, _)| *index == row)
-            .map(|(_, at)| *at)
-            .expect("the trash is placed");
+            .find(|(at, act, _)| *at == index && *act == Act::Forget)
+            .map(|(_, _, at)| *at)
+            .expect("the delete is placed");
         assert!(
             after.scene.rects.iter().any(|rect| {
                 let [x, y, ..] = rect.xywh();
@@ -15858,9 +16231,10 @@ mod tests {
                     && (x - box_.x).abs() < 2.0
                     && (y - box_.y).abs() < 2.0
             }),
-            "the armed trash looks exactly like the unarmed one"
+            "the armed delete looks exactly like the unarmed one"
         );
     }
+
 
     /// The toggle and the uninstall on an entry are pressed where they are
     /// drawn, and neither of them is the row: a press on the name still puts
@@ -17721,6 +18095,13 @@ mod tests {
                         .settings_removes
                         .iter()
                         .map(|(index, at)| (*at, Hit::SettingsRemove(*index))),
+                )
+                .chain(
+                    plain
+                        .layout
+                        .settings_acts
+                        .iter()
+                        .map(|(index, act, at)| (*at, Hit::SettingsAct(*index, *act))),
                 )
                 .collect();
             assert!(!controls.is_empty(), "{section} has no control on it");

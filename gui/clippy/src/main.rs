@@ -457,6 +457,23 @@ fn forget_session(
     Ok(())
 }
 
+/// Delete a set of saved conversations, and say which of them refused.
+///
+/// Every id is tried, whatever happened to the one before it: a set where the
+/// third file is read only must still take the other four, because a delete that
+/// stopped at the first refusal would leave the list half taken with nothing
+/// saying which half. Each one goes through [`forget_session`], so the batch
+/// cannot skip the path guard the single delete has, and each failure already
+/// names the conversation it belongs to.
+///
+/// A free function so the loop can be tested without a window, the same way the
+/// single delete under it is.
+fn forget_sessions(dir: Option<PathBuf>, index: Option<PathBuf>, ids: &[String]) -> Vec<String> {
+    ids.iter()
+        .filter_map(|id| forget_session(dir.clone(), index.clone(), id).err())
+        .collect()
+}
+
 /// What to write down as a session's context reading, out of the two places the
 /// window hears about one, or nothing when neither has said yet.
 ///
@@ -563,6 +580,9 @@ fn menu_for(
         | Hit::SettingsSwatch(_, _)
         | Hit::SettingsToggle(_)
         | Hit::SettingsRemove(_)
+        | Hit::SettingsPick(..)
+        | Hit::SettingsMark(..)
+        | Hit::SettingsAct(..)
         | Hit::SettingsClose => None,
         // A divider is the gap between two widgets and belongs to neither of
         // them, so there is no one widget for a menu opened here to act on.
@@ -774,6 +794,9 @@ enum Control {
     Quit,
     /// Put what is highlighted in the document on the clipboard.
     Copy,
+    /// Mark every conversation on the table, which is what Ctrl-A means in
+    /// every list anybody has ever used.
+    MarkAll,
     Nothing,
 }
 
@@ -787,6 +810,7 @@ fn control_in_settings(key: Key<&str>) -> Control {
     match key {
         Key::Character("q") => Control::Quit,
         Key::Character("c") => Control::Copy,
+        Key::Character("a") => Control::MarkAll,
         _ => Control::Nothing,
     }
 }
@@ -1406,6 +1430,17 @@ impl App {
                 Control::Copy => {
                     self.copy_selection();
                 }
+                // Every conversation on the list and not only the twelve the
+                // table's body is showing. Nothing at all anywhere else on the
+                // panel, which is what it did before.
+                Control::MarkAll => {
+                    if let Some(panel) = self.settings.as_mut() {
+                        let at = panel.table_at_cursor().map(|(at, _)| at);
+                        if let Some(at) = at {
+                            self.dirty |= panel.mark_all(at, true);
+                        }
+                    }
+                }
                 Control::Nothing => {}
             }
             return;
@@ -1453,6 +1488,13 @@ impl App {
         let mut edit = false;
         let mut flip = None;
         let mut make = None;
+        // Which conversation the keys are on, when they are on the table at
+        // all: read before the match, because three of the arms below act on it
+        // and the panel is borrowed for the whole of them.
+        let table = panel
+            .table_at_cursor()
+            .map(|(at, table)| (at, table.cursor));
+        let mut forget = None;
         match event.logical_key.as_ref() {
             Key::Named(NamedKey::Escape) => {
                 self.close_settings();
@@ -1476,7 +1518,10 @@ impl App {
                         // An entry has two states, so either arrow means the
                         // other one, the way a flag does.
                         Some(settings::Row::Entry(_)) => flip = Some(panel.cursor()),
-                        Some(settings::Row::Session { .. }) => {}
+                        // A table is walked up and down, marked with space and
+                        // deleted with delete: there is nothing on a row of it
+                        // for left and right to nudge.
+                        Some(settings::Row::Table(_)) => {}
                         _ => nudge = Some(false),
                     }
                 }
@@ -1491,13 +1536,32 @@ impl App {
                     // A block with nothing in it offers to write the file it
                     // was looking for.
                     Some(settings::Row::Paper(_)) => make = Some(panel.cursor()),
-                    // A conversation is deleted by its own trash and by nothing
-                    // else: enter on a list is the key that gets pressed by
-                    // accident.
-                    Some(settings::Row::Session { .. }) => {}
+                    // Enter marks the conversation the keys are on, the same as
+                    // space: enter on a row of a list is expected to do
+                    // something to that row, and marking it is the one thing
+                    // here that cannot lose anything.
+                    Some(settings::Row::Table(_)) => {
+                        if let Some((index, at)) = table {
+                            self.dirty |= panel.mark(index, at);
+                        }
+                    }
                     _ => nudge = Some(true),
                 }
                 self.dirty = true;
+            }
+            // The same mark, on the key a list is marked with everywhere else.
+            Key::Named(NamedKey::Space) => {
+                if let Some((index, at)) = table {
+                    self.dirty |= panel.mark(index, at);
+                }
+            }
+            // The delete under the table, from the keyboard: the first press
+            // arms it and the second takes what is marked, which is the two
+            // presses the button itself takes.
+            Key::Named(NamedKey::Delete) => {
+                if let Some((index, _)) = table {
+                    forget = Some(index);
+                }
             }
             _ => {}
         }
@@ -1510,6 +1574,14 @@ impl App {
         }
         if let Some(index) = make {
             let deed = self.settings.as_ref().and_then(|panel| panel.make(index));
+            self.do_deed(deed);
+        }
+        if let Some(index) = forget {
+            let deed = self
+                .settings
+                .as_mut()
+                .and_then(|panel| panel.uninstall(index));
+            self.dirty = true;
             self.do_deed(deed);
         }
         if let Some(forward) = nudge {
@@ -1576,6 +1648,25 @@ impl App {
         let Some(deed) = deed else {
             return;
         };
+        // A set of conversations is its own path, because it is the one deed
+        // that can half succeed. Every id is tried, the agent is read back
+        // whatever happened, and what failed is said after the read: a delete of
+        // five where the third refuses must not leave four rows on screen whose
+        // transcripts are gone, and `refresh` clears the trouble line, so the
+        // reason goes on after it and not before.
+        if let settings::Deed::ForgetSessions { ids } = &deed {
+            let failed = forget_sessions(sessions::dir(), sessions::index_path(), ids);
+            let agent = self.read_agent();
+            let config = self.config.clone();
+            if let Some(panel) = self.settings.as_mut() {
+                panel.adopt_agent(agent, &config);
+                if !failed.is_empty() {
+                    panel.say_trouble(failed.join("; "));
+                }
+            }
+            self.dirty = true;
+            return;
+        }
         let panel = match self.settings.as_ref() {
             Some(panel) => panel,
             None => return,
@@ -1602,12 +1693,9 @@ impl App {
             // The path came off the block that offered it, which read it off the
             // agent's own config directory: nothing here spells one out.
             settings::Deed::StartInstructions { path } => agent::start_instructions(path),
-            // The same free function the picker's own delete goes through, so
-            // the transcript and the line about it in the note go together and
-            // the name is checked by the one path guard either route has.
-            settings::Deed::ForgetSession { id } => {
-                forget_session(sessions::dir(), sessions::index_path(), id)
-            }
+            // Handled above, because a set of them cannot answer with one
+            // result: some of it can land and the rest fail.
+            settings::Deed::ForgetSessions { .. } => Ok(()),
         };
         match done {
             Ok(()) => {
@@ -1710,6 +1798,41 @@ impl App {
                         self.dirty |= panel.point_at(index, settings::Side::Left);
                         panel.uninstall(index)
                     }
+                    None => None,
+                };
+                self.do_deed(deed);
+            }
+            // One conversation on the table: the press puts the keys on it, the
+            // way a press on any other row of the panel does.
+            Hit::SettingsPick(index, at) => {
+                if let Some(panel) = self.settings.as_mut() {
+                    self.dirty |= panel.point_at_row(index, at);
+                }
+            }
+            // The mark in front of it. It does not move the keys: a mark is
+            // pressed down a column, and a cursor dragged along with it would
+            // disarm whatever the delete under the list was armed on.
+            Hit::SettingsMark(index, at) => {
+                if let Some(panel) = self.settings.as_mut() {
+                    self.dirty |= panel.mark(index, at);
+                }
+            }
+            // The three buttons under the table. The delete arms on the first
+            // press and takes what is marked on the second, the same two presses
+            // every other delete on this panel takes.
+            Hit::SettingsAct(index, act) => {
+                let deed = match self.settings.as_mut() {
+                    Some(panel) => match act {
+                        view::Act::All => {
+                            self.dirty |= panel.mark_all(index, true);
+                            None
+                        }
+                        view::Act::None => {
+                            self.dirty |= panel.mark_all(index, false);
+                            None
+                        }
+                        view::Act::Forget => panel.uninstall(index),
+                    },
                     None => None,
                 };
                 self.do_deed(deed);
@@ -2417,6 +2540,9 @@ impl App {
             | Hit::SettingsSwatch(_, _)
             | Hit::SettingsToggle(_)
             | Hit::SettingsRemove(_)
+            | Hit::SettingsPick(..)
+            | Hit::SettingsMark(..)
+            | Hit::SettingsAct(..)
             | Hit::SettingsRailDivider
             | Hit::SettingsDoc
             | Hit::SettingsClose
@@ -2540,7 +2666,7 @@ impl App {
             // Delete is the one row here that is pressed twice. The first press
             // only arms it, and the menu stays open under the pointer so the
             // second press has something to land on; the rule is
-            // [`Menu::press_delete`], and the panel's trash asks the same
+            // [`Menu::press_delete`], and the panel's delete asks the same
             // question in the same words.
             (Item::DeleteSession(_), Target::Session(session)) => {
                 match menu.press_delete(index) {
@@ -3164,6 +3290,25 @@ impl App {
                 }
                 return;
             }
+            // And the same over the table of saved conversations, which scrolls
+            // inside its own card: the rows move and the card stays where it is.
+            // Its rows and its mark answer with hits of their own, so the row
+            // under the pointer is asked for by all three.
+            let over = layout.hit(self.cursor.x as f32, self.cursor.y as f32);
+            if let Some(
+                Hit::SettingsRow(index, _) | Hit::SettingsPick(index, _) | Hit::SettingsMark(index, _),
+            ) = over
+                && self
+                    .settings
+                    .as_ref()
+                    .is_some_and(|panel| panel.table(index).is_some())
+            {
+                let by = ((settings::TABLE_ROWS as f32 * pages.abs()).round() as usize).max(1);
+                if let Some(panel) = self.settings.as_mut() {
+                    self.dirty |= panel.scroll_table(index, by, pages < 0.0);
+                }
+                return;
+            }
             // Over the column beside the entry list, the wheel moves that
             // document rather than the list: the pointer is on the thing being
             // scrolled, which is what every two-column view in this window does.
@@ -3499,6 +3644,8 @@ impl ApplicationHandler<Wake> for App {
                         | Hit::SettingsSwatch(_, _)
                         | Hit::SettingsToggle(_)
                         | Hit::SettingsRemove(_)
+                        | Hit::SettingsMark(..)
+                        | Hit::SettingsAct(..)
                         | Hit::SettingsValue(..)),
                     ) => Some(hit),
                     _ => None,
@@ -4654,25 +4801,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The trash at the end of a saved conversation on the settings panel asks
-    /// before it acts, and the second press takes the transcript and the line
-    /// about it in the note.
-    ///
-    /// The panel decides and this file acts: the first press answers with
-    /// nothing and puts the question on the footer, the second answers with a
-    /// [`settings::Deed::ForgetSession`], and the deed carries the id the row
-    /// was built from rather than anything read back off what was drawn. The
-    /// deed is then run through the same free function the folder picker's own
-    /// delete goes through, which is what keeps one route from deleting more or
-    /// less than the other.
-    #[test]
-    fn the_panel_s_trash_asks_once_and_then_takes_the_file_and_its_line() {
-        let dir = std::env::temp_dir().join(format!("no0b-panel-forget-{}", std::process::id()));
+    /// A panel over a scratch directory of saved conversations, and where the
+    /// files are: the transcripts, the note beside them, and the panel row the
+    /// table stands on.
+    fn a_panel_over_sessions(
+        name: &str,
+        ids: &[&str],
+    ) -> (PathBuf, PathBuf, PathBuf, settings::Settings, usize) {
+        let dir = std::env::temp_dir().join(format!("no0b-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let sessions_dir = dir.join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("a sessions dir");
         let note = dir.join("no0b.sessions");
-        for id in ["keep", "drop"] {
+        let mut index = sessions::Index::default();
+        for id in ids {
             std::fs::write(
                 sessions_dir.join(format!("{id}.jsonl")),
                 format!(
@@ -4680,14 +4822,11 @@ mod tests {
                 ),
             )
             .expect("a transcript");
+            index = index.plus(id, &dir);
         }
-        let index = sessions::Index::default()
-            .plus("keep", &dir)
-            .plus("drop", &dir);
         sessions::save_index(&note, &index).expect("the note is writable");
-
         let listing = sessions::read(&sessions_dir, &index, &picker::Disk);
-        assert_eq!(listing.sessions.len(), 2, "{listing:?}");
+        assert_eq!(listing.sessions.len(), ids.len(), "{listing:?}");
         let agent = agent::Agent {
             sessions: listing,
             ..agent::Agent::default()
@@ -4699,50 +4838,104 @@ mod tests {
             .position(|name| *name == settings::SESSIONS)
             .expect("the sessions section");
         panel.choose(at);
-        let (row, id) = panel
+        let table = panel
             .rows()
             .iter()
-            .enumerate()
-            .find_map(|(row, entry)| match entry {
-                settings::Row::Session { id, .. } if id == "drop" => Some((row, id.clone())),
+            .position(|row| matches!(row, settings::Row::Table(_)))
+            .expect("the section carries a table");
+        (dir, sessions_dir, note, panel, table)
+    }
+
+    /// Which conversations the panel is listing, in the order it lists them.
+    fn conversations(panel: &settings::Settings) -> Vec<String> {
+        panel
+            .rows()
+            .iter()
+            .find_map(|row| match row {
+                settings::Row::Table(table) => {
+                    Some(table.rows.iter().map(|row| row.id.clone()).collect())
+                }
                 _ => None,
             })
-            .expect("the row for the session about to go");
+            .unwrap_or_default()
+    }
 
-        // Once: nothing happens, and the panel says what would.
-        assert_eq!(panel.uninstall(row), None, "the first press deleted it");
-        assert_eq!(panel.arming(), Some(row));
+    /// Item H3: several conversations are marked and taken in one press.
+    ///
+    /// The panel decides and this file acts: the first press answers with
+    /// nothing and puts the question on the footer, naming how many would go,
+    /// and the second answers with a [`settings::Deed::ForgetSessions`] carrying
+    /// the ids the rows were built from rather than anything read back off what
+    /// was drawn. The deed is then run through the same free function the folder
+    /// picker's own delete goes through, which is what keeps one route from
+    /// deleting more or less than the other.
+    ///
+    /// This was one trash per row and one id per deed, so deleting four
+    /// conversations was eight presses and four confirmations.
+    #[test]
+    fn the_panel_takes_every_marked_conversation_in_one_press() {
+        let (dir, sessions_dir, note, mut panel, table) =
+            a_panel_over_sessions("panel-forget-many", &["keep", "drop", "gone"]);
+        let listed = conversations(&panel);
+        assert_eq!(listed.len(), 3, "{listed:?}");
+
+        // Two of the three, marked. The marks are not cleared by the arrow keys
+        // the way an armed delete is: marking three rows means moving between
+        // them, and a set the arrow keys emptied could only ever hold one.
+        let ids: Vec<String> = listed
+            .iter()
+            .filter(|id| *id != "keep")
+            .cloned()
+            .collect();
+        for id in &ids {
+            let at = listed.iter().position(|row| row == id).expect("the row");
+            assert!(panel.mark(table, at));
+        }
+        assert!(panel.step(true));
+        assert!(panel.step(false));
+        let marked = panel.table(table).expect("the table").chosen();
+        assert_eq!(marked, 2, "an arrow key took the marks off");
+
+        // Once: nothing happens, and the panel says how many would go rather
+        // than asking "sure?" over a list of three.
+        assert_eq!(panel.uninstall(table), None, "the first press deleted them");
+        assert_eq!(panel.arming(), Some(table));
         let asked = panel.says();
+        assert!(asked.contains("2 conversations"), "{asked}");
         assert!(asked.contains("press delete again"), "{asked}");
-        assert!(asked.contains("leaves it alone"), "{asked}");
         assert!(sessions_dir.join("drop.jsonl").exists(), "it went anyway");
 
-        // Anything else at all puts it back, so an armed trash cannot be left
+        // Anything else at all puts it back, so an armed delete cannot be left
         // sitting there for the next pointer that goes past.
         panel.step(true);
         assert_eq!(panel.arming(), None);
-        assert_eq!(panel.uninstall(row), None, "it stayed armed");
+        assert_eq!(panel.uninstall(table), None, "it stayed armed");
 
-        // Twice on the same row: the deed, naming the session by its id.
-        let deed = panel.uninstall(row);
-        assert_eq!(deed, Some(settings::Deed::ForgetSession { id: id.clone() }));
-        assert_eq!(panel.arming(), None, "the button is still armed after it fired");
-
-        // And what the deed asks for, done: both halves, and nothing else.
+        // Twice: the deed, naming both conversations by the ids the rows carry.
+        let deed = panel.uninstall(table);
         assert_eq!(
-            forget_session(Some(sessions_dir.clone()), Some(note.clone()), &id),
-            Ok(())
+            deed,
+            Some(settings::Deed::ForgetSessions { ids: ids.clone() })
+        );
+        assert_eq!(panel.arming(), None, "it is still armed after it fired");
+
+        // And what the deed asks for, done: both halves of both of them, and
+        // nothing else.
+        assert!(
+            forget_sessions(Some(sessions_dir.clone()), Some(note.clone()), &ids).is_empty(),
+            "a conversation refused"
         );
         assert!(!sessions_dir.join("drop.jsonl").exists());
+        assert!(!sessions_dir.join("gone.jsonl").exists());
         assert!(sessions_dir.join("keep.jsonl").exists());
         assert_eq!(
             sessions::load_index(&note),
             sessions::Index::default().plus("keep", &dir),
-            "the line about it is still in the note"
+            "the lines about them are still in the note"
         );
 
-        // The panel re-read off the disk has lost the row, which is what the
-        // window does with `adopt_agent` after every write.
+        // The panel re-read off the disk has lost both rows and every mark with
+        // them, which is what the window does with `adopt_agent` after a write.
         let after = sessions::read(&sessions_dir, &sessions::load_index(&note), &picker::Disk);
         panel.adopt_agent(
             agent::Agent {
@@ -4751,19 +4944,120 @@ mod tests {
             },
             &config::Config::default(),
         );
-        panel.choose(at);
-        let left: Vec<String> = panel
+        assert_eq!(conversations(&panel), vec![String::from("keep")]);
+        let table = panel
             .rows()
             .iter()
-            .filter_map(|row| match row {
-                settings::Row::Session { id, .. } => Some(id.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(left, vec![String::from("keep")]);
+            .position(|row| matches!(row, settings::Row::Table(_)))
+            .expect("the table is still there");
+        assert_eq!(
+            panel.table(table).expect("the table").chosen(),
+            0,
+            "a mark survived the conversation it was on"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// The single row path is still one row: with nothing marked, the delete
+    /// takes the conversation the keys are on and says which one it is.
+    #[test]
+    fn the_delete_with_nothing_marked_takes_the_row_the_keys_are_on() {
+        let (dir, sessions_dir, note, mut panel, table) =
+            a_panel_over_sessions("panel-forget-one", &["first", "second"]);
+        let listed = conversations(&panel);
+        // Down one row, so what goes is the row the keys are on rather than the
+        // first one on the list.
+        assert!(panel.step(true));
+        let id = listed[1].clone();
+
+        assert_eq!(panel.uninstall(table), None, "the first press deleted it");
+        let asked = panel.says();
+        assert!(asked.contains("press delete again"), "{asked}");
+        assert!(
+            !asked.contains("conversations"),
+            "one conversation is named, not counted: {asked}"
+        );
+        let deed = panel.uninstall(table);
+        assert_eq!(
+            deed,
+            Some(settings::Deed::ForgetSessions {
+                ids: vec![id.clone()]
+            })
+        );
+        assert!(forget_sessions(Some(sessions_dir.clone()), Some(note.clone()), &[id]).is_empty());
+        assert_eq!(
+            std::fs::read_dir(&sessions_dir)
+                .expect("the directory")
+                .count(),
+            1,
+            "it took more than the row the keys were on"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Select all marks every conversation on the list, not only the ones the
+    /// table's body is showing, and select none takes them all off again.
+    #[test]
+    fn select_all_marks_every_conversation_on_the_list() {
+        let ids: Vec<String> = (0..settings::TABLE_ROWS + 4)
+            .map(|at| format!("s{at:02}"))
+            .collect();
+        let (dir, _, _, mut panel, table) = a_panel_over_sessions(
+            "panel-select-all",
+            &ids.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        let all = conversations(&panel).len();
+        assert!(all > settings::TABLE_ROWS, "the list fits in one screenful");
+
+        assert!(panel.mark_all(table, true));
+        assert_eq!(panel.table(table).expect("the table").chosen(), all);
+        // And the delete then takes every one of them, which is what the header
+        // and the button both say before it is pressed.
+        let deed = panel.uninstall(table).is_none().then(|| panel.uninstall(table));
+        let Some(Some(settings::Deed::ForgetSessions { ids })) = deed else {
+            panic!("the delete did not take the marked list: {deed:?}");
+        };
+        assert_eq!(ids.len(), all);
+
+        assert!(panel.mark_all(table, false));
+        assert_eq!(panel.table(table).expect("the table").chosen(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One conversation of several refusing does not stop the rest: what could
+    /// be deleted is deleted, and what refused is named.
+    #[test]
+    fn a_conversation_that_refuses_is_named_and_the_others_still_go() {
+        let (dir, sessions_dir, note, ..) =
+            a_panel_over_sessions("panel-forget-partial", &["one", "two", "three"]);
+        // The middle one cannot be deleted: its transcript is a directory, which
+        // the remove refuses, and the guard that resolves the name is the same
+        // one either route goes through.
+        std::fs::remove_file(sessions_dir.join("two.jsonl")).expect("the transcript");
+        std::fs::create_dir(sessions_dir.join("two.jsonl")).expect("something in its place");
+        std::fs::write(sessions_dir.join("two.jsonl").join("held"), "no").expect("a file in it");
+
+        let ids: Vec<String> = ["one", "two", "three"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let failed = forget_sessions(Some(sessions_dir.clone()), Some(note.clone()), &ids);
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(
+            failed[0].starts_with("two was not deleted"),
+            "the failure does not name which one: {failed:?}"
+        );
+        // The other two went, and the note lost their lines with them.
+        assert!(!sessions_dir.join("one.jsonl").exists());
+        assert!(!sessions_dir.join("three.jsonl").exists());
+        assert!(sessions_dir.join("two.jsonl").exists(), "it went after all");
+        let left = sessions::load_index(&note);
+        assert_eq!(left, sessions::Index::default().plus("two", &dir), "{left:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 
     /// What gets written down as a session's context reading, and when nothing
     /// does. The agent's own figure wins over the last request's, and a window
@@ -4816,11 +5110,13 @@ mod tests {
     fn control_c_copies_while_the_settings_panel_is_up() {
         assert_eq!(control_in_settings(Key::Character("c")), Control::Copy);
         assert_eq!(control_in_settings(Key::Character("q")), Control::Quit);
+        // And the key every list is selected with, which the table of saved
+        // conversations reads and nothing else on the panel does.
+        assert_eq!(control_in_settings(Key::Character("a")), Control::MarkAll);
         // Nothing else has a meaning here: the panel owns the keyboard, so a
         // key that fell through would fall through to nothing.
         for key in [
             Key::Character("v"),
-            Key::Character("a"),
             Key::Named(NamedKey::Enter),
             Key::Named(NamedKey::ArrowDown),
         ] {

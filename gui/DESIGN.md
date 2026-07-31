@@ -104,6 +104,15 @@ server are.
   assembled prompt) is a card whose header is its title, whose body opens with
   where the text came from, in the hint role, and whose text scrolls inside the
   body while the card stays where it is.
+- **A table is a card too, and it is the one card with a list in it.** The saved
+  conversations are a card whose header says how many there are and how many are
+  chosen, whose body is the column names on a band with the rows under them, and
+  whose footer carries the buttons that act on the marked rows. It holds a fixed
+  number of rows (`settings::TABLE_ROWS`) and the rest scroll inside the body,
+  for the reason a document does: the height of a row cannot depend on the height
+  of the window, because the model counts rows before the layout knows either.
+  A list whose rows carry actions of their own is still a stack of cards; a list
+  whose rows are cells of one table, acted on together, is one card.
 
 ## A field
 
@@ -131,6 +140,11 @@ one line: that is what made every value look like part of a sentence.
 ## A button
 
 Three kinds, and no others.
+
+A group of buttons that acts on a whole list (select all, select none, delete)
+is centred in its card's footer. Pinned to one end it reads as belonging to
+whatever is nearest that end; the actions of one card's own fields stay at the
+bottom right, where the card's own action belongs.
 
 | Kind | Fill | Border | Ink | For |
 |---|---|---|---|---|
@@ -160,7 +174,10 @@ and they must not look alike. The three roles:
 Where the list is a stack of cards, the row the cursor is on is the card wearing
 the focus border. A table that is really a table (the saved conversations) keeps
 the full row band in `skin.picked` with its ink in `skin.picked_ink`: a band, not
-a tint on the text, because a tint is invisible next to fourteen other tints.
+a tint on the text, because a tint is invisible next to fourteen other tints. The
+band says which row the keys are on and the mark in the first column says which
+rows are chosen, and the two are different things: one row is banded, any number
+of rows are marked.
 
 ## Scrolling
 
@@ -193,6 +210,6 @@ hairline under every row, with buttons wherever the row happened to put them and
 values on the same line as their labels. If you are changing a section and it
 still looks like that, the section has not been done yet.
 
-AGENT, SKILLS and MCP are built this way. SESSIONS and APPEARANCE are not yet:
-their rows are the old flat ones, without the hairline, and they are what the
-next passes convert.
+AGENT, SESSIONS, SKILLS and MCP are built this way. APPEARANCE is not yet: its
+rows are the old flat ones, without the hairline, and it is what the next pass
+converts.

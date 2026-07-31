@@ -425,9 +425,9 @@ reading does not. There is no hairline under a row any more: space and the
 card's own border say where one group ends, which is what a line between every
 two things on screen never did. Cards are full width and stack, and it is a
 card's contents that answer a narrow window: two fields go side by side while
-both keep their columns and stack when they cannot. AGENT, SKILLS and MCP are
-the sections built this way so far; SESSIONS and APPEARANCE are still the flat
-rows they were.
+both keep their columns and stack when they cannot. AGENT, SESSIONS, SKILLS and
+MCP are the sections built this way so far; APPEARANCE is still the flat rows it
+was.
 
 Four of the sections are the agent's own files rather than the window's. AGENT
 is five cards, in the order somebody meeting the window needs them: where the
@@ -474,17 +474,29 @@ with, so what it prints is the prompt the session sends and not a different one.
 command that failed puts the reason on the block. Both blocks are a fixed twelve
 lines tall and read with Page Up and Page Down, or the wheel over them.
 
-SESSIONS is a table of the saved conversations the folder picker offers, read
-through the same reader and headed by a row naming its columns: when each one
-was, which folder it belongs to, how big the transcript is, how full its context
-window was, and the opening of what was first said in it. The header sits on a
-filled band, and the two number columns are written against their right edge so
-they can be read down. The heading at the top of the panel says SAVED
-CONVERSATIONS rather than repeating the rail's word, which is the only place the
-section is titled. Up and down pick a row and it carries a band across the whole
-of it. The last column is a trash: press
-it once and it says `sure?`, press it again and the transcript and the line about
-it in `no0b.sessions` both go.
+SESSIONS is one card holding a table of the saved conversations the folder
+picker offers, read through the same reader. The header says how many there are
+and how many are chosen; the body is the table, headed by the names of its
+columns on a filled band: a mark, when each conversation was, which folder it
+belongs to, how big the transcript is, how full its context window was, and the
+opening of what was first said in it. The two number columns are written against
+their right edge so they can be read down. The heading at the top of the panel
+says SAVED CONVERSATIONS rather than repeating the rail's word, which is the only
+place the section is titled. Up and down pick a row and it carries a band across
+the whole of it; twelve rows are on screen at once and the rest scroll inside the
+card, with the wheel or Page Up and Page Down, so the header and the buttons stay
+where they are.
+
+Several conversations go in one press. Space or Enter marks the row the keys are
+on, a press on the box in the first column marks that row without moving the
+keys, and Ctrl-A or the `select all` button marks every conversation on the list
+rather than the twelve on screen. The three buttons are centred in the card's
+footer: `select all`, `select none`, and the delete, which says how many it would
+take. Press it, or the Delete key, once and it says `sure?` while the line under
+the panel says how many conversations would go; press it again and each
+transcript and the line about it in `no0b.sessions` both go. With nothing marked
+it takes the row the keys are on and names that one instead. When one of several
+refuses, the rest still go and the panel says which one refused.
 
 SKILLS and MCP are two columns: a list on the left and, beside it, whatever the
 row under the cursor is. In a window too narrow to hold both, the list keeps the

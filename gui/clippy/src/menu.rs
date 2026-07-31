@@ -82,7 +82,7 @@ impl Item {
             Item::Widget(view, _) => view.label(),
             Item::OpenSession => "Open",
             Item::DeleteSession(false) => "Delete",
-            // The word the settings panel's own trash uses once it has been
+            // The word the settings panel's own delete uses once it has been
             // pressed once. The same act asked the same way, so the two read as
             // one product rather than as two deletes with two manners.
             Item::DeleteSession(true) => "sure?",
@@ -406,7 +406,7 @@ impl Menu {
     /// menu stays open under the pointer for the second one. Two presses
     /// because a transcript is gone once it is deleted and nothing in this
     /// window can put it back, which is the same reason the settings panel's
-    /// trash is pressed twice, and the same wording.
+    /// delete is pressed twice, and the same wording.
     ///
     /// Anything but a second press on that row leaves it alone: the pointer
     /// moving off it disarms it through [`Menu::point_at`], and every way of
@@ -920,7 +920,7 @@ mod tests {
     }
 
     /// The right click's Delete asks before it acts, the way the settings
-    /// panel's trash does. The first press only changes what the row says; the
+    /// panel's delete does. The first press only changes what the row says; the
     /// second one on the same row is the delete.
     ///
     /// Before this the picker was the unguarded half of the pair: the panel
