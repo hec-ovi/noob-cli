@@ -25,6 +25,42 @@ pub enum Incoming {
     Ended(String),
 }
 
+/// Exactly the command the agent is started with, built without starting it.
+///
+/// Its own function so the launch can be asserted on in a test: what a window
+/// hands the agent decides what the agent does, and spawning a process to find
+/// that out is not a test anybody runs.
+///
+/// `serve` takes no flag for anything in the CLI's config file and exits 2 on
+/// one it does not know, so nothing configurable is passed as an argument. What
+/// this does instead is take the named settings out of the child's environment.
+/// The CLI reads its settings as "the process environment, then the `.env`", so
+/// a value exported in whatever shell started this window would win over the
+/// file forever and the settings panel would be writing lines nothing reads.
+/// Cleared, the file is what the agent reads, which is the file the panel
+/// writes, and it is re-read on every request rather than at launch.
+pub fn command_for(
+    program: &str,
+    workspace: &std::path::Path,
+    session: Option<&str>,
+    clear: &[&str],
+) -> Command {
+    let mut command = Command::new(program);
+    command.arg("serve");
+    if let Some(id) = session {
+        command.args(["--resume", id]);
+    }
+    for key in clear {
+        command.env_remove(key);
+    }
+    command
+        .current_dir(workspace)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
 pub struct Link {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -44,18 +80,10 @@ impl Link {
         program: &str,
         workspace: &std::path::Path,
         session: Option<&str>,
+        clear: &[&str],
         notify: impl Fn() + Send + 'static,
     ) -> Result<Link, String> {
-        let mut command = Command::new(program);
-        command.arg("serve");
-        if let Some(id) = session {
-            command.args(["--resume", id]);
-        }
-        command
-            .current_dir(workspace)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        let mut command = command_for(program, workspace, session, clear);
         let mut child = command.spawn().map_err(|e| {
             format!("cannot start {program:?}: {e}; is noob on PATH, or set NOOB_BIN")
         })?;
@@ -214,6 +242,57 @@ mod tests {
         dir
     }
 
+    /// What the settings panel writes has to be what the agent runs with.
+    ///
+    /// `serve` refuses a flag it does not know, so neither of the two settings
+    /// the panel owns can be passed as an argument; they reach the agent through
+    /// the CLI's own file, which it re-reads on every request. What the launch
+    /// does about them is get out of the way. The CLI prefers the process
+    /// environment over that file, so an exported value in whatever shell
+    /// started this window would outrank every line the panel writes, and the
+    /// rows would be a control that does nothing.
+    #[test]
+    fn the_agent_s_own_settings_are_left_to_its_file() {
+        let workspace = std::env::temp_dir();
+        let fresh = command_for("noob", &workspace, None, &crate::agent::OWNED);
+        let args: Vec<&str> = fresh
+            .get_args()
+            .map(|arg| arg.to_str().expect("a flag is text"))
+            .collect();
+        assert_eq!(args, ["serve"], "serve takes no flag for a config setting");
+        assert_eq!(fresh.get_current_dir(), Some(workspace.as_path()));
+
+        let mut cleared: Vec<&str> = fresh
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_str().expect("a name is text"))
+            .collect();
+        cleared.sort_unstable();
+        assert_eq!(
+            cleared,
+            ["NOOB_CTX", "NOOB_TASK_CONCURRENCY"],
+            "the settings the panel writes are not left to the file"
+        );
+        assert!(
+            fresh.get_envs().all(|(_, value)| value.is_none()),
+            "the launch sets a value the file can no longer change"
+        );
+
+        // And a resumed session still arrives as its flag, cleared the same way.
+        let resumed = command_for(
+            "noob",
+            &workspace,
+            Some("19fb08fb0cf-55ace-0-ee6569bb"),
+            &crate::agent::OWNED,
+        );
+        let args: Vec<&str> = resumed
+            .get_args()
+            .map(|arg| arg.to_str().expect("a flag is text"))
+            .collect();
+        assert_eq!(args, ["serve", "--resume", "19fb08fb0cf-55ace-0-ee6569bb"]);
+        assert_eq!(resumed.get_envs().count(), crate::agent::OWNED.len());
+    }
+
     /// The session chosen in the picker has to reach the agent, or resuming one
     /// silently starts a fresh conversation in the right folder, which looks
     /// exactly like a session whose transcript has been lost.
@@ -229,6 +308,7 @@ mod tests {
             program.to_str().expect("a path"),
             &workspace,
             Some("19fb08fb0cf-55ace-0-ee6569bb"),
+            &[],
             || {},
         )
         .expect("the stub starts");
@@ -248,7 +328,7 @@ mod tests {
         // being passed empty.
         let plain_log = dir.join("called-plain");
         let plain = stub(&dir, "fresh-noob", &plain_log);
-        let link = Link::spawn(plain.to_str().expect("a path"), &workspace, None, || {})
+        let link = Link::spawn(plain.to_str().expect("a path"), &workspace, None, &[], || {})
             .expect("the stub starts");
         assert_eq!(
             written(&plain_log, 2),
@@ -264,7 +344,7 @@ mod tests {
     #[test]
     fn an_agent_that_cannot_be_started_says_so() {
         let dir = temp("missing");
-        let trouble = Link::spawn("no0b-nothing-of-this-name", &dir, None, || {})
+        let trouble = Link::spawn("no0b-nothing-of-this-name", &dir, None, &[], || {})
             .err()
         .expect("there is no such program");
         assert!(trouble.contains("NOOB_BIN"), "{trouble}");

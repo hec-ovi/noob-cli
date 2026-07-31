@@ -321,9 +321,21 @@ so the panel opens that way next time.
 Four of the sections are the agent's own files rather than the window's. AGENT
 reads `~/.config/noob/.env`, the file the CLI re-reads on every request: it names
 the file, shows the endpoint and every other key that is set, and the endpoint can
-be typed over. That write goes through a port of the CLI's own `.env` writer, so
+be typed over. Two of the keys in it are controls rather than lines to read, under
+`HOW MUCH THE AGENT GETS`: `NOOB_CTX`, the context window the agent budgets
+against before it compacts, and `NOOB_TASK_CONCURRENCY`, how many sub-agent tasks
+it runs at once. Both are tracks held to the CLI's own bounds, so the context
+window starts at the 4096 below which the CLI stops reading it and the right end
+of the concurrency track is the 16 the CLI caps itself at: the maximum is a place
+to drop the pointer, not a number to guess. Until either is in the file the row
+reads what the CLI falls back to and the section says so. That write goes through
+a port of the CLI's own `.env` writer, so
 every other line and every comment survives it, and the file is read back
-afterwards. No credential is ever shown or written from here: a key, token, secret
+afterwards. Nothing is passed to the agent on its command line, because `serve`
+rejects a flag it does not know; instead the launch clears those two names out of
+the child's environment, since the CLI prefers the environment over its file and
+an exported value would outrank every line the panel writes. No credential is ever
+shown or written from here: a key, token, secret
 or password reads as `set, and not shown here`, which is the same line the CLI
 takes by keeping secrets out of settable config. SESSIONS lists the saved
 conversations the folder picker offers, through the same reader, with when each

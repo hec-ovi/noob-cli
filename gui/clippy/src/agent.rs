@@ -31,6 +31,40 @@ const MCP_BYTES: u64 = 1024 * 1024;
 /// The key the panel lets anybody edit: where the model lives.
 pub const ENDPOINT: &str = "NOOB_BASE_URL";
 
+/// The context window the CLI budgets against before it compacts.
+pub const CTX: &str = "NOOB_CTX";
+
+/// How many sub-agent tasks the CLI runs at once.
+pub const TASK_CONCURRENCY: &str = "NOOB_TASK_CONCURRENCY";
+
+/// The settings in the agent's file the panel owns: the ones it draws as
+/// controls rather than listing as readings, and the ones [`crate::link`] clears
+/// out of the child's environment so the file is what the agent reads.
+///
+/// The endpoint is not one of them. It is typed rather than nudged, and a
+/// machine that points the agent somewhere with an exported `NOOB_BASE_URL` is
+/// a machine doing that on purpose.
+pub const OWNED: [&str; 2] = [CTX, TASK_CONCURRENCY];
+
+/// The CLI's own bounds for [`CTX`], read off `crates/noob/src/config/mod.rs`:
+/// anything under 4096 is refused there and silently becomes the default, so
+/// the panel does not offer one. The top is the panel's own: the CLI has no
+/// ceiling, and a track has to end somewhere.
+pub const CTX_LOW: f32 = 4096.0;
+pub const CTX_HIGH: f32 = 1_048_576.0;
+pub const CTX_STEP: f32 = 4096.0;
+/// What the CLI uses when the key is not set.
+pub const CTX_DEFAULT: u32 = 131_072;
+
+/// The CLI's own bounds for [`TASK_CONCURRENCY`]: at least one, and capped at
+/// sixteen there, so the right end of this track is the maximum the agent will
+/// honour rather than a number to guess at.
+pub const TASK_CONCURRENCY_LOW: f32 = 1.0;
+pub const TASK_CONCURRENCY_HIGH: f32 = 16.0;
+pub const TASK_CONCURRENCY_STEP: f32 = 1.0;
+/// What the CLI uses when the key is not set (`subagent::DEFAULT_CONCURRENCY`).
+pub const TASK_CONCURRENCY_DEFAULT: u32 = 4;
+
 /// The agent's config directory.
 ///
 /// The agent's own rule, not the window's: `noob` resolves it as
@@ -503,14 +537,21 @@ impl Agent {
         }
     }
 
+    /// What the file says one setting is, or nothing when the file does not
+    /// carry it. An empty value counts as unset, the way the CLI's own lookup
+    /// counts it.
+    pub fn setting(&self, key: &str) -> Option<&str> {
+        self.env
+            .iter()
+            .find(|(known, _)| known == key)
+            .map(|(_, value)| value.as_str())
+            .filter(|value| !value.is_empty())
+    }
+
     /// What the file says the endpoint is, or nothing when it is unset. Unset is
     /// a working agent: with no base URL the CLI probes the usual local ports.
     pub fn endpoint(&self) -> Option<&str> {
-        self.env
-            .iter()
-            .find(|(key, _)| key == ENDPOINT)
-            .map(|(_, value)| value.as_str())
-            .filter(|value| !value.is_empty())
+        self.setting(ENDPOINT)
     }
 }
 

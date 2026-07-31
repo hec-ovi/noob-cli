@@ -16,6 +16,15 @@
 //! agent's own files rather than the window's; the last one ([`APPEARANCE`]) is
 //! everything in the window's own settings file, the palette included.
 //!
+//! **Two of the agent's own settings are controls, not readings.** Everything
+//! in the CLI's `.env` was listed as text with the endpoint as the only thing
+//! anybody could change, which left the two numbers that decide what the agent
+//! actually gets, its context window and how many sub-agent tasks it runs at
+//! once, as lines to read and edit somewhere else. They are tracks on the AGENT
+//! section now, held to the CLI's own bounds ([`crate::agent`] carries them), so
+//! the right end of the concurrency track is the maximum the agent will honour.
+//! A [`Change`] says which [`File`] it belongs to and `main` writes it there.
+//!
 //! Nothing here draws and only [`commit`] and [`write_endpoint`] touch a disk.
 //! [`crate::view`] turns these rows into rectangles and `main` routes keys and
 //! clicks at them, so the whole model can be driven in a test with no window.
@@ -155,11 +164,14 @@ pub enum Row {
     /// Something read out rather than set: what the agent's own file says, and
     /// where the files behind all this live.
     Reading { label: String, value: String },
-    /// A setting in the window's own file, spelled the way that file spells it.
+    /// A setting spelled the way the file that carries it spells it. Most of
+    /// them are the window's own; [`File::Agent`] marks the few that are the
+    /// CLI's, which are nudged exactly the same way and land in the other file.
     Setting {
         key: &'static str,
         value: String,
         kind: Kind,
+        file: File,
     },
     /// A line of text in the agent's file, edited by typing. The endpoint, and
     /// nothing else: it is the one setting here whose value is not a number, a
@@ -203,11 +215,26 @@ pub fn lines(row: &Row) -> usize {
     }
 }
 
-/// What a nudge on the row under the cursor should write.
+/// Which file a setting lives in.
+///
+/// The panel writes two: the window's own settings file, and the `.env` the CLI
+/// reads. They are written by different writers with different rules, so a
+/// change carries the answer with it rather than having `main` guess it back out
+/// of a key name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum File {
+    /// The window's own settings file.
+    Window,
+    /// The agent's `.env`, which the CLI re-reads on every request.
+    Agent,
+}
+
+/// What a nudge on the row under the cursor should write, and where.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Change {
     pub key: &'static str,
     pub value: String,
+    pub file: File,
 }
 
 /// Which half of the panel the keyboard is in.
@@ -279,6 +306,36 @@ const LOOKS: [(&str, Kind); 5] = [
 /// Which panes open.
 const PANE_SETTINGS: [(&str, Kind); 2] =
     [("show_activity", Kind::Flag), ("show_files", Kind::Flag)];
+
+/// The two settings of the agent's own file that are numbers with a range, so
+/// the panel can offer them as tracks instead of asking for a number to be
+/// typed: the context window the CLI budgets against, and how many sub-agent
+/// tasks it runs at once.
+///
+/// The bounds are the CLI's own ([`crate::agent`] reads them off it), so the
+/// right end of the concurrency track is the maximum the agent will honour and
+/// there is nothing to guess. Every other key in that file is listed as a
+/// reading, because the window does not know what the CLI would accept for it.
+const AGENT_SETTINGS: [(&str, Kind); 2] = [
+    (
+        agent::CTX,
+        Kind::Number {
+            step: agent::CTX_STEP,
+            low: agent::CTX_LOW,
+            high: agent::CTX_HIGH,
+            places: 0,
+        },
+    ),
+    (
+        agent::TASK_CONCURRENCY,
+        Kind::Number {
+            step: agent::TASK_CONCURRENCY_STEP,
+            low: agent::TASK_CONCURRENCY_LOW,
+            high: agent::TASK_CONCURRENCY_HIGH,
+            places: 0,
+        },
+    ),
+];
 
 /// The numbers the dividers write when they are dragged. Here as well because a
 /// pointer is not the only way anyone works, and because a value that only a
@@ -594,8 +651,34 @@ impl Settings {
                 "with no endpoint set, noob probes the usual local ports and takes the first that answers",
             ));
         }
+        rows.push(Row::Heading("HOW MUCH THE AGENT GETS"));
+        rows.push(note(
+            "the context window it budgets against before it compacts, and how many sub-agent tasks it runs at once; 16 is the CLI's own cap, so the end of that track is the most it will take",
+        ));
+        let mut unset = Vec::new();
+        for (key, kind) in AGENT_SETTINGS {
+            let value = match self.agent.setting(key) {
+                Some(value) => value.to_string(),
+                None => {
+                    unset.push(key);
+                    agent_default(key)
+                }
+            };
+            rows.push(Row::Setting {
+                key,
+                value,
+                kind,
+                file: File::Agent,
+            });
+        }
+        if !unset.is_empty() {
+            rows.push(note(&format!(
+                "not in the file yet: {}. Until then those rows read what the CLI falls back to, and nudging one writes the line",
+                unset.join(" and ")
+            )));
+        }
         for (key, value) in &self.agent.env {
-            if key == agent::ENDPOINT {
+            if key == agent::ENDPOINT || agent::OWNED.contains(&key.as_str()) {
                 continue;
             }
             rows.push(Row::Reading {
@@ -969,7 +1052,13 @@ impl Settings {
         if self.focus == Focus::Rail || self.editing.is_some() {
             return None;
         }
-        let Row::Setting { key, value, kind } = self.row(self.cursor())? else {
+        let Row::Setting {
+            key,
+            value,
+            kind,
+            file,
+        } = self.row(self.cursor())?
+        else {
             return None;
         };
         let next = match kind {
@@ -1012,7 +1101,11 @@ impl Settings {
                 format!("{next:.places$}")
             }
         };
-        Some(Change { key, value: next })
+        Some(Change {
+            key,
+            value: next,
+            file: *file,
+        })
     }
 
     /// Where along its track the value of a row sits, for drawing the thumb.
@@ -1059,12 +1152,13 @@ impl Settings {
     /// away and came back has to put the window back too.
     pub fn previewed(&self) -> Option<Change> {
         let (index, value) = self.dragging.as_ref()?;
-        let Some(Row::Setting { key, .. }) = self.row(*index) else {
+        let Some(Row::Setting { key, file, .. }) = self.row(*index) else {
             return None;
         };
         Some(Change {
             key,
             value: value.clone(),
+            file: *file,
         })
     }
 
@@ -1072,13 +1166,23 @@ impl Settings {
     /// what the file already said.
     pub fn drop_slider(&mut self) -> Option<Change> {
         let (index, value) = self.dragging.take()?;
-        let Some(Row::Setting { key, value: was, .. }) = self.row(index) else {
+        let Some(Row::Setting {
+            key,
+            value: was,
+            file,
+            ..
+        }) = self.row(index)
+        else {
             return None;
         };
         if *was == value {
             return None;
         }
-        Some(Change { key, value })
+        Some(Change {
+            key,
+            value,
+            file: *file,
+        })
     }
 
     /// Start typing into the field under the cursor, from what it says now.
@@ -1342,8 +1446,22 @@ fn settings_rows(config: &Config, group: &[(&'static str, Kind)]) -> Vec<Row> {
             key,
             value: value_of(config, key, *kind),
             kind: *kind,
+            file: File::Window,
         })
         .collect()
+}
+
+/// What the CLI uses for one of its own settings when the file does not carry
+/// it. Read off the CLI rather than chosen here: a row that shows a number the
+/// agent is not actually running with is worse than no row.
+fn agent_default(key: &str) -> String {
+    match key {
+        agent::CTX => agent::CTX_DEFAULT.to_string(),
+        agent::TASK_CONCURRENCY => agent::TASK_CONCURRENCY_DEFAULT.to_string(),
+        // Unreachable through AGENT_SETTINGS, and a number is the honest answer
+        // for a row that says it is one.
+        _ => String::from("0"),
+    }
 }
 
 
@@ -1483,7 +1601,8 @@ pub fn commit(path: &Path, change: &Change) -> Result<Config, String> {
 ///
 /// The other half of [`commit`], for the other file. Same shape and same rule:
 /// the writer keeps every other line and every comment, and the caller reads the
-/// file back rather than trusting what was typed.
+/// file back rather than trusting what was typed. The endpoint goes through here
+/// and so does every [`File::Agent`] change.
 pub fn write_endpoint(path: &Path, key: &str, value: &str) -> Result<(), String> {
     agent::write_env(path, key, value)
 }
@@ -1674,10 +1793,17 @@ mod tests {
     fn every_key_in_the_file_is_on_the_panel() {
         let config = Config::default();
         let panel = over(&config);
+        // The window's own keys only. A row of the agent's file is a setting the
+        // same way, nudged the same way, but it is the other file's key and it
+        // has no business in this count.
         let mut on_panel: Vec<&str> = panel
             .all_rows()
             .flat_map(|(_, row)| match row {
-                Row::Setting { key, .. } => vec![*key],
+                Row::Setting {
+                    key,
+                    file: File::Window,
+                    ..
+                } => vec![*key],
                 // A colour is a cell of a grid row now, not a row of its own.
                 Row::Swatches(cells) => cells.iter().map(|cell| cell.key).collect(),
                 _ => Vec::new(),
@@ -1687,6 +1813,23 @@ mod tests {
         on_panel.sort_unstable();
         known.sort_unstable();
         assert_eq!(on_panel, known);
+
+        // And the agent's own settings are exactly the two the CLI's bounds are
+        // known for, so a third one added to the table without a range read off
+        // the CLI is a row the agent could refuse.
+        let mut of_agent: Vec<&str> = panel
+            .all_rows()
+            .filter_map(|(_, row)| match row {
+                Row::Setting {
+                    key,
+                    file: File::Agent,
+                    ..
+                } => Some(*key),
+                _ => None,
+            })
+            .collect();
+        of_agent.sort_unstable();
+        assert_eq!(of_agent, vec![agent::CTX, agent::TASK_CONCURRENCY]);
 
         // And nothing retired sneaked in with them: those keys are dead in the
         // file, and the writer refuses them, so a row for one would be a row
@@ -1698,13 +1841,18 @@ mod tests {
             );
         }
 
-        // Every key in the file is an appearance now, colours included: the
-        // panes and the dividers came over when PANES was removed, and the
-        // palette came over when COLOURS did.
+        // Every key in the window's file is an appearance now, colours included:
+        // the panes and the dividers came over when PANES was removed, and the
+        // palette came over when COLOURS did. The agent's two are on the agent's
+        // section, beside the file they are written into.
         for (section, row) in panel.all_rows() {
             match row {
-                Row::Setting { key, .. } => {
-                    assert_eq!(section, APPEARANCE, "{key} is in the wrong section")
+                Row::Setting { key, file, .. } => {
+                    let wanted = match file {
+                        File::Window => APPEARANCE,
+                        File::Agent => AGENT,
+                    };
+                    assert_eq!(section, wanted, "{key} is in the wrong section")
                 }
                 Row::Swatches(cells) => {
                     let keys: Vec<&str> = cells.iter().map(|cell| cell.key).collect();
@@ -2446,8 +2594,8 @@ mod tests {
         assert!(text.contains("NOOB_API_KEY set, and not shown here"), "{text}");
         assert_eq!(panel.agent_file(), Some(dir.join(".env").as_path()));
 
-        // The endpoint is the one row here anything can be done to, and what it
-        // does is take typing.
+        // The endpoint is the one row here that is typed into rather than
+        // nudged, and it is where the section opens.
         assert!(panel.on_row());
         assert!(
             matches!(panel.row(panel.cursor()), Some(Row::Field { key, .. }) if *key == agent::ENDPOINT)
@@ -2491,6 +2639,120 @@ mod tests {
         let after = std::fs::read_to_string(dir.join(".env")).expect("the file");
         assert!(after.contains("NOOB_CTX=262144"), "{after}");
         assert!(after.contains("NOOB_API_KEY=sk-secret"), "{after}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The two numbers that decide what the agent actually gets are controls on
+    /// its own section: read off the CLI's file, held to the CLI's own bounds,
+    /// nudged and dragged the way every other setting is, and written back into
+    /// that file rather than the window's.
+    #[test]
+    fn the_agent_s_context_and_task_concurrency_are_set_on_the_panel() {
+        let dir = scratch_dir("agent-numbers");
+        let env = dir.join(".env");
+        std::fs::write(
+            &env,
+            "NOOB_BASE_URL=http://localhost:8080/v1\nNOOB_CTX=262144\nNOOB_TASK_CONCURRENCY=2   # two at a time\n",
+        )
+        .expect("a file");
+        let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
+        let mut panel = Settings::open(&Config::default(), Some(Path::new("/tmp/no0b.conf")), read());
+
+        // What the file says, on the agent's section, once each: a row that is
+        // also listed as a reading is the same setting twice with only one of
+        // them doing anything.
+        put_cursor(&mut panel, agent::CTX);
+        assert_eq!(panel.here().name, AGENT);
+        assert_eq!(value(&panel, agent::CTX), "262144");
+        assert_eq!(value(&panel, agent::TASK_CONCURRENCY), "2");
+        let text = said(&panel);
+        assert_eq!(text.matches(agent::CTX).count(), 1, "{text}");
+        assert_eq!(text.matches(agent::TASK_CONCURRENCY).count(), 1, "{text}");
+
+        // A nudge steps by the CLI's own unit and says which file it belongs in.
+        assert_eq!(
+            panel.change(true).expect("the context window nudges"),
+            Change {
+                key: agent::CTX,
+                value: String::from("266240"),
+                file: File::Agent,
+            }
+        );
+
+        // Both ends of the concurrency track are the CLI's own: one at the
+        // bottom, and at the top the sixteen it caps itself at, so the maximum
+        // is somewhere the pointer can be dropped rather than a number to guess.
+        put_cursor(&mut panel, agent::TASK_CONCURRENCY);
+        let at = panel.cursor();
+        assert!(panel.slide(at, 0.0));
+        assert_eq!(panel.preview(at), Some("1"));
+        assert!(panel.slide(at, 1.0));
+        let most = panel.drop_slider().expect("the drag decided something");
+        assert_eq!(
+            most,
+            Change {
+                key: agent::TASK_CONCURRENCY,
+                value: String::from("16"),
+                file: File::Agent,
+            }
+        );
+        // And the context window bottoms out where the CLI stops reading it.
+        put_cursor(&mut panel, agent::CTX);
+        let at = panel.cursor();
+        assert!(panel.slide(at, 0.0));
+        assert_eq!(panel.preview(at), Some("4096"));
+        panel.drop_slider();
+
+        // Written, it lands in the agent's file, the line keeps its comment and
+        // nothing else in the file moves.
+        write_endpoint(&env, most.key, &most.value).expect("the file takes it");
+        panel.adopt_agent(read(), &Config::default());
+        assert_eq!(value(&panel, agent::TASK_CONCURRENCY), "16");
+        let after = std::fs::read_to_string(&env).expect("the file");
+        assert!(after.contains("NOOB_TASK_CONCURRENCY=16"), "{after}");
+        assert!(after.contains("# two at a time"), "the comment is gone: {after}");
+        assert!(after.contains("NOOB_CTX=262144"), "{after}");
+        assert!(
+            after.contains("NOOB_BASE_URL=http://localhost:8080/v1"),
+            "{after}"
+        );
+
+        // The two files are not interchangeable, which is why a change carries
+        // the answer: the window's writer refuses a key of the agent's outright
+        // rather than adding a line the window will never read.
+        let wrong = commit(
+            Path::new("/tmp/no0b.conf"),
+            &Change {
+                key: agent::CTX,
+                value: String::from("8192"),
+                file: File::Agent,
+            },
+        );
+        assert!(wrong.is_err(), "the window's file took a setting of the agent's");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With neither of them in the file the rows read what the CLI falls back
+    /// to, and the section says that is what they are. A slider showing a number
+    /// nobody wrote, with nothing saying so, is a window inventing a setting.
+    #[test]
+    fn the_agent_s_numbers_read_as_the_cli_s_defaults_until_they_are_written() {
+        let dir = scratch_dir("agent-unset");
+        let mut panel = Settings::open(
+            &Config::default(),
+            None,
+            Agent::read(Some(&dir), None, crate::sessions::Listing::default()),
+        );
+        go_to(&mut panel, AGENT);
+        assert_eq!(value(&panel, agent::CTX), agent::CTX_DEFAULT.to_string());
+        assert_eq!(
+            value(&panel, agent::TASK_CONCURRENCY),
+            agent::TASK_CONCURRENCY_DEFAULT.to_string()
+        );
+        let text = said(&panel);
+        assert!(text.contains("not in the file yet"), "{text}");
+        assert!(text.contains(agent::CTX), "{text}");
+        assert!(text.contains(agent::TASK_CONCURRENCY), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

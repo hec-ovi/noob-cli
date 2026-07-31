@@ -868,6 +868,7 @@ impl App {
             &program,
             &chosen.workspace,
             chosen.session.as_deref(),
+            &agent::OWNED,
             move || {
                 let _ = proxy.send_event(Wake);
             },
@@ -1152,7 +1153,16 @@ impl App {
         let Some((key, value)) = panel.finish_edit() else {
             return;
         };
-        match settings::write_endpoint(&path, key, &value) {
+        self.write_agent_setting(&path, key, &value);
+    }
+
+    /// Write one setting into the agent's own file and read the whole file back.
+    ///
+    /// Shared by the endpoint field and by the two tracks beside it, because a
+    /// nudged number and a typed URL are the same write to the same file. What
+    /// the panel shows next is what the file answered.
+    fn write_agent_setting(&mut self, path: &Path, key: &str, value: &str) {
+        match settings::write_endpoint(path, key, value) {
             Ok(()) => {
                 let agent = self.read_agent();
                 let config = self.config.clone();
@@ -1266,6 +1276,13 @@ impl App {
         let Some(change) = self.settings.as_ref().and_then(Settings::previewed) else {
             return;
         };
+        // Nothing of the agent's is live in this window: the CLI reads its file
+        // on its next request, so the drag has nothing to show until the button
+        // comes up and the line is written. The row's own number still follows
+        // the thumb, which is what a drag needs to be aimed.
+        if change.file == settings::File::Agent {
+            return;
+        }
         let mut config = self.config.clone();
         if !config.apply(change.key, &change.value) || config == self.config {
             return;
@@ -1302,6 +1319,27 @@ impl App {
     /// [`App::change_setting`] the slider shares, since a drag decides its value
     /// the other way round and lands in exactly the same place.
     fn write_setting(&mut self, change: &settings::Change) {
+        // A setting of the agent's goes to the agent's file, through the agent's
+        // writer. Same nudge, same track, other file.
+        if change.file == settings::File::Agent {
+            let path = self
+                .settings
+                .as_ref()
+                .and_then(Settings::agent_file)
+                .map(std::path::Path::to_path_buf);
+            match path {
+                Some(path) => self.write_agent_setting(&path, change.key, &change.value),
+                None => {
+                    if let Some(panel) = self.settings.as_mut() {
+                        panel.say_trouble(String::from(
+                            "there is no config directory to write it in",
+                        ));
+                    }
+                    self.dirty = true;
+                }
+            }
+            return;
+        }
         let Some(path) = self.settings_path() else {
             if let Some(panel) = self.settings.as_mut() {
                 panel.say_trouble(String::from("there is no home directory to write settings in"));
@@ -2325,7 +2363,11 @@ impl App {
         // that failed has to be said on the panel rather than in the activity
         // pane behind it.
         if grip == Hit::SettingsRailDivider {
-            self.write_setting(&settings::Change { key, value });
+            self.write_setting(&settings::Change {
+                key,
+                value,
+                file: settings::File::Window,
+            });
             return;
         }
         let Some(path) = config::path() else {

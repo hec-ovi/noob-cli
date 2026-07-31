@@ -2304,7 +2304,12 @@ fn settings_label_w(list_w: f32, column: f32) -> f32 {
 
 /// How much of a slider's row the number beside the track takes. The track gets
 /// the rest.
-const SETTING_TRACK_VALUE_COLUMNS: usize = 6;
+///
+/// Eight, because the widest number on any track is the agent's context window
+/// and that is seven digits at the top of its range. Six fitted every setting of
+/// the window's own and clipped `1048576` to `10485\u{2026}`, which is a slider
+/// whose number cannot be read at the end anybody would drag it to.
+const SETTING_TRACK_VALUE_COLUMNS: usize = 8;
 
 fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlaces {
     if area.w < 1.0 || area.h < 1.0 {
@@ -12902,6 +12907,64 @@ mod tests {
                     && rect.xywh() == [row.x, row.y, MARK_W, row.h]),
             "the cursor's row has no mark"
         );
+    }
+
+    /// The agent's own numbers are tracks like every other number on the panel,
+    /// and the number beside one is drawn whole.
+    ///
+    /// The context window is seven digits at the top of its range, which is two
+    /// more than the value column beside a track used to hold: a slider reading
+    /// `10485\u{2026}` at the end anybody would drag it to says nothing at all.
+    #[test]
+    fn the_agent_s_context_window_is_a_track_with_its_number_beside_it() {
+        let agent = crate::agent::Agent {
+            env: vec![
+                (
+                    String::from(crate::agent::ENDPOINT),
+                    String::from("http://localhost:8080/v1"),
+                ),
+                (String::from(crate::agent::CTX), String::from("1048576")),
+            ],
+            ..an_agent()
+        };
+        let mut panel = Settings::open(
+            &Config::default(),
+            Some(std::path::Path::new("/home/hec/.config/noob/no0b.conf")),
+            agent,
+        );
+        let at = panel
+            .section_names()
+            .iter()
+            .position(|name| *name == crate::settings::AGENT)
+            .expect("the agent section");
+        panel.choose(at);
+        panel.enter();
+
+        let out = render_settings(&panel, 1400.0, 1200.0, None);
+        assert!(
+            text_of(&out.scene).contains("1048576"),
+            "the context window is not drawn as the number it is: {}",
+            text_of(&out.scene)
+        );
+
+        // And both of them are tracks, so the maximum concurrency is a place to
+        // drop the pointer rather than a number to type.
+        for key in crate::agent::OWNED {
+            let index = panel
+                .rows()
+                .iter()
+                .position(|row| {
+                    matches!(row, crate::settings::Row::Setting { key: k, .. } if *k == key)
+                })
+                .unwrap_or_else(|| panic!("{key} is not on the agent section"));
+            assert!(
+                out.layout
+                    .settings_tracks
+                    .iter()
+                    .any(|(row, _)| *row == index),
+                "{key} is not drawn as a track"
+            );
+        }
     }
 
     /// The palette is a grid: more than one colour to a row, each one hit where
