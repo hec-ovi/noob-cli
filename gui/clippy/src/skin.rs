@@ -145,9 +145,10 @@ pub struct Skin {
     /// One colour per tool, in the order [`Kind`] declares them.
     pub tools: [[u8; 4]; 14],
 
-    /// The line along the top of the tab that is showing, and the mark down the
-    /// left of the open row in the file list. One colour for the whole window,
-    /// not one per view.
+    /// The border of the tab that is showing (the line along its top, the two
+    /// hairlines down its sides and the heavier one down its cut corner), and the
+    /// mark down the left of the open row in the file list. One colour for the
+    /// whole window, not one per view.
     ///
     /// It was a hue each, nine of them, and nine hues on nine tabs is a
     /// harlequin strip: what a tab says is its label, and the accent's one job
