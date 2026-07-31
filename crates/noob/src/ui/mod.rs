@@ -29,7 +29,6 @@ mod table;
 mod theme;
 
 pub use dock::DockSession;
-pub(crate) use dock::WINCH;
 use markdown::Markdown;
 pub use prompt::Input;
 use style::{ColorDepth, DIM, RESET};
@@ -609,7 +608,7 @@ impl Ui {
             _ if self.rich_text() => {
                 let rendered = self
                     .markdown
-                    .feed(s, prompt::term_width(), &self.theme, self.depth);
+                    .feed(s, crate::term::term_width(), &self.theme, self.depth);
                 if !rendered.is_empty() {
                     self.out(&rendered);
                     self.mid_line = !rendered.ends_with('\n');
@@ -670,7 +669,7 @@ impl Ui {
             // has no visible bytes, so every assistant message starts clean.
             let rendered = self
                 .markdown
-                .finish(prompt::term_width(), &self.theme, self.depth);
+                .finish(crate::term::term_width(), &self.theme, self.depth);
             if !rendered.is_empty() {
                 self.out(&rendered);
                 self.mid_line = !rendered.ends_with('\n');
@@ -779,7 +778,7 @@ impl Ui {
             return;
         }
         self.end_line();
-        let width = prompt::term_width();
+        let width = crate::term::term_width();
         let mut rendered = String::new();
         for line in block.lines() {
             let safe = safe_terminal_text(line);

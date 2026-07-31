@@ -84,6 +84,9 @@ Boxes so far:
 - [`crates/noob/src/exec`](../crates/noob/src/exec/CONTRACT.md) - the one
   process runner: merged bounded output, the child tree as one killable
   unit, no residue.
+- [`crates/noob/src/term`](../crates/noob/src/term/CONTRACT.md) - the
+  terminal backend: raw mode with guaranteed restore, bytes to keys, size,
+  signals.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,

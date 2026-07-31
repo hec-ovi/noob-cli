@@ -10,14 +10,16 @@
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
 use noob_provider::http::INTERRUPTED;
 
-use super::prompt::{
-    Decoder, Editor, Input, InputExtent, Key, RawGuard, Step, term_height, term_width,
+use super::prompt::{Editor, Input, InputExtent, Step};
+use crate::term::{
+    Decoder, Key, RawGuard, StdinRead, WINCH, poll_stdin, read_stdin, term_height, term_width,
+    unblock_sigwinch,
 };
 use super::style::RESET;
 use super::table;
@@ -54,12 +56,6 @@ pub(crate) enum Ev {
     /// re-reads the width each tick; this just makes it instant.
     Resize,
 }
-
-/// Set by the SIGWINCH handler (installed in `main`), consumed by the reader
-/// thread when its read returns EINTR. The signal is blocked in every thread
-/// except the reader, so it always interrupts the read and never races another
-/// blocking call. Async-signal-safe: the handler only stores this flag.
-pub(crate) static WINCH: AtomicBool = AtomicBool::new(false);
 
 /// `NOOB_DOCK=0|false|off|no` opts out of the dock. Unset and every other
 /// value leave the default interactive driver enabled.
@@ -372,12 +368,7 @@ fn reader(tx: SyncSender<Ev>) {
     // SIGWINCH is blocked in every other thread (see `install_sigwinch_handler`),
     // so unblock it here: this thread's blocking read is the one that must catch
     // the resize as EINTR and turn it into a `Resize` event.
-    unsafe {
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGWINCH);
-        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
-    }
+    unblock_sigwinch();
     let mut dec = Decoder::default();
     let mut buf = [0u8; 1024];
     loop {
@@ -387,15 +378,8 @@ fn reader(tx: SyncSender<Ev>) {
         if WINCH.swap(false, Ordering::SeqCst) && tx.send(Ev::Resize).is_err() {
             return;
         }
-        let n = unsafe {
-            libc::read(
-                libc::STDIN_FILENO,
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-            )
-        };
-        if n < 0 {
-            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+        let n = match read_stdin(&mut buf) {
+            StdinRead::Interrupted => {
                 // A terminal resize: reflow the prompt to the new width even
                 // while idle (the read that just unblocked was the only thing
                 // waiting). Checked first because a resize is the common EINTR.
@@ -410,27 +394,19 @@ fn reader(tx: SyncSender<Ev>) {
                 }
                 continue;
             }
-            // A real read error (a closed/broken tty): the reader is done.
-            let _ = tx.send(Ev::ReaderGone);
-            return;
-        }
-        if n == 0 {
-            // Genuine end of the input stream, not a Ctrl-D byte.
-            let _ = tx.send(Ev::ReaderGone);
-            return;
-        }
-        for key in dec.feed(&buf[..n as usize]) {
+            StdinRead::Eof | StdinRead::Gone => {
+                let _ = tx.send(Ev::ReaderGone);
+                return;
+            }
+            StdinRead::Data(n) => n,
+        };
+        for key in dec.feed(&buf[..n]) {
             if tx.send(Ev::Key(key)).is_err() {
                 return;
             }
         }
         if dec.has_dangling_esc() {
-            let mut pfd = libc::pollfd {
-                fd: libc::STDIN_FILENO,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let ready = unsafe { libc::poll(&mut pfd, 1, ESC_GRACE_MS) };
+            let ready = poll_stdin(ESC_GRACE_MS);
             if ready == 0
                 && let Some(key) = dec.flush_dangling_esc()
                 && tx.send(Ev::Key(key)).is_err()
@@ -524,7 +500,7 @@ impl Cancel {
 }
 
 fn hard_exit() -> ! {
-    super::prompt::restore_terminal();
+    crate::term::restore_terminal();
     unsafe { libc::_exit(130) }
 }
 
