@@ -319,8 +319,6 @@ impl Kind {
 /// One row of a section.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Row {
-    /// A group's name, inside a section that has more than one.
-    Heading(&'static str),
     /// Prose: what a section is, or why it is empty. `bad` when it is something
     /// wrong rather than something explained.
     Note { text: String, bad: bool },
@@ -348,11 +346,16 @@ pub enum Row {
     /// nothing else: it is the one setting here whose value is not a number, a
     /// flag or a name from a list.
     Field { key: &'static str, value: String },
-    /// One row of the palette grid: several colours side by side, each one a
-    /// block of the colour and a plain-words label. Up to [`SWATCH_COLUMNS`] of
-    /// them, so the row is always as wide as every other row and the list is
-    /// still one panel per row index.
-    Swatches(Vec<Swatch>),
+    /// One group of the palette, as a card: what that group paints in the
+    /// header, and its colours in the body, each one a block of the colour with
+    /// a plain-words label beside it.
+    ///
+    /// It was one row of the panel per three colours, under a bare heading, so
+    /// a group of fourteen was five rows nothing tied together and the grid
+    /// stopped at three across however wide the window was. The card is the
+    /// group, and the colours in it reflow with the card
+    /// ([`crate::design::swatch_across`]).
+    Palette(Palette),
     /// One installed skill or one configured server: three lines of text, a
     /// toggle that really turns it off, and an uninstall beside it. The row the
     /// column on the right belongs to.
@@ -404,6 +407,9 @@ pub enum Doing {
     /// Take what was typed into the card's first field and install it as a
     /// skill.
     Install,
+    /// Take every line the appearance settings own out of the file, so all of
+    /// them go back to what the window ships with.
+    Restore,
 }
 
 impl Doing {
@@ -411,7 +417,15 @@ impl Doing {
     pub fn word(self) -> &'static str {
         match self {
             Doing::Install => "install",
+            Doing::Restore => "restore",
         }
+    }
+
+    /// Whether pressing it loses something. A destructive button is drawn in
+    /// the danger kind and takes two presses, the way every other delete on
+    /// this panel does.
+    pub fn dangerous(self) -> bool {
+        matches!(self, Doing::Restore)
     }
 }
 
@@ -459,9 +473,9 @@ impl CardField {
         CardField::of(label, Row::Field { key, value })
     }
 
-    /// A field that is a number on a track, held to the bounds of whoever reads
-    /// the file it is written in.
-    pub fn number(
+    /// A field that is a setting of a file: a number on a track, held to the
+    /// bounds of whoever reads that file, or one name out of a list.
+    pub fn setting(
         label: &str,
         key: &'static str,
         value: String,
@@ -811,6 +825,15 @@ pub enum Deed {
     /// press. One marked row and one row with nothing marked are the same deed
     /// with one id in it, so there is one delete path and not two.
     ForgetSessions { ids: Vec<String> },
+    /// Take every appearance line out of the window's own settings file, so the
+    /// sizes, the transparency and the whole palette go back to what the window
+    /// ships with ([`restoring`] is the list).
+    ///
+    /// Commented out rather than written back as values: a key with no live
+    /// line falls back to the default on the next read, and spelling the
+    /// defaults out would put thirty seven colours in the file and make `theme`
+    /// mean nothing ever again.
+    RestoreLooks,
 }
 
 /// One colour on the grid: the key the file writes it under, what it actually
@@ -822,14 +845,31 @@ pub struct Swatch {
     pub rgb: [u8; 3],
 }
 
-/// How many colours share a row.
+/// One group of the palette, in a card of its own.
 ///
-/// Three rather than as many as fit: the layout would have to hand the model a
-/// width for that, and a grid that reflows as the window is resized is a grid
-/// whose rows change height while it is being read. Three holds the longest
-/// label there is at the width the list has on a window this runs on, and a
-/// narrow window clips a label rather than moving it.
-pub const SWATCH_COLUMNS: usize = 3;
+/// The card with a grid in it, the way [`Table`] is the card with a list in it:
+/// a colour is read and never set here, so the body is cells rather than fields
+/// and nothing in it holds the cursor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Palette {
+    /// What this group paints, in the header. Not the keys it holds: `THE
+    /// METERS` says what the ten colours under it are for and `gauge_1` does
+    /// not.
+    pub title: &'static str,
+    /// The colours, in file order.
+    pub cells: Vec<Swatch>,
+}
+
+/// How tall a group of the palette is inside its card, in lines: one line per
+/// row of colours, as many across as the card is wide enough for.
+///
+/// The width is the list's own, which [`lines`] is handed and the layout reads
+/// off the same list, so the rows counted here and the rows drawn are the same
+/// rows.
+pub fn palette_body_lines(cells: usize, cols: usize) -> f32 {
+    let across = crate::design::swatch_across(crate::design::card_cols(cols));
+    cells.div_ceil(across).max(1) as f32 * crate::design::TEXT_LINES
+}
 
 /// How many rows of text one row of the panel takes, in a list `cols` wide.
 ///
@@ -845,8 +885,6 @@ pub const SWATCH_COLUMNS: usize = 3;
 /// pointer.
 pub fn lines(row: &Row, cols: usize) -> usize {
     match row {
-        // A heading is drawn larger, which is two lines of the ordinary text.
-        Row::Heading(_) => 2,
         // A card: its header, its body, the room around the body and the space
         // under the card itself, all counted by the one function the layout
         // places it with. A footer only when it has an action, since a card
@@ -872,6 +910,13 @@ pub fn lines(row: &Row, cols: usize) -> usize {
         // text is: the height of a row cannot depend on the height of the
         // window.
         Row::Table(_) => crate::design::card_row_lines(table_body_lines(), true),
+        // A group of the palette is a card as well: what it paints in the
+        // header and its colours in the body, as many across as the width
+        // leaves room for.
+        Row::Palette(palette) => crate::design::card_row_lines(
+            palette_body_lines(palette.cells.len(), cols),
+            false,
+        ),
         _ => 1,
     }
 }
@@ -1051,11 +1096,86 @@ fn agent_has_a_field(key: &str) -> bool {
     AGENT_FIELDS.iter().any(|(known, ..)| *known == key)
 }
 
-/// The key that picks a preset, named here because two places want it: the row
-/// is built with the rest of [`LOOKS`] and then drawn at the top of the palette
-/// block instead of with the sizes, since it is what writes every colour under
-/// it.
+/// The key that picks a preset, named here because two places want it: the
+/// field is built out of [`LOOKS`] with the sizes and then stands at the top of
+/// the palette instead, since it is what writes every colour under it.
 const THEME: &str = "theme";
+
+/// What to call each of the window's own settings in plain words, and the
+/// sentence under it.
+///
+/// The same rule the agent's fields follow: the key is in the sentence, not in
+/// the label. `window_opacity` over a slider says nothing to somebody who has
+/// not read the file, and two sliders both labelled "opacity" say nothing to
+/// anybody at all.
+const LOOK_FIELDS: [(&str, &str, &str); 6] = [
+    (
+        THEME,
+        "theme",
+        "theme. Picking one clears the colour lines in your file that were overriding it",
+    ),
+    (
+        "opacity",
+        "the panels",
+        "opacity. The panes, the bars and the menus: everything with words on it",
+    ),
+    (
+        "window_opacity",
+        "the space around them",
+        "window_opacity. The empty space between the panes, where your desktop shows through",
+    ),
+    (
+        "font_size",
+        "the conversation",
+        "font_size. The messages, and everything else in the transcript",
+    ),
+    (
+        "pane_font_size",
+        "the panes",
+        "pane_font_size. The activity, plan, agents and file panes, and this panel",
+    ),
+    (
+        "prompt_rows",
+        "the box you type in",
+        "prompt_rows. How many rows tall it is, full or empty",
+    ),
+];
+
+/// One of the window's own settings, as a field of a card: its plain-words
+/// name, what the file says it is now, and the sentence that says what it
+/// decides.
+///
+/// Built off [`LOOKS`] rather than spelled out here, so a field and the bounds
+/// it is nudged inside cannot come apart. A key on neither list is not a field
+/// anybody can reach, which `every_key_in_the_file_is_on_the_panel` fails on.
+fn look_field(config: &Config, key: &str) -> CardField {
+    let (key, kind) = LOOKS
+        .iter()
+        .find(|(known, _)| *known == key)
+        .unwrap_or_else(|| panic!("{key} is not one of the window's settings"));
+    let (_, label, hint) = LOOK_FIELDS
+        .iter()
+        .find(|(known, ..)| known == key)
+        .unwrap_or_else(|| panic!("{key} has nothing to call it"));
+    CardField::setting(label, key, value_of(config, key, *kind), *kind, File::Window).saying(hint)
+}
+
+/// Every key a restore takes out of the window's own file: the settings this
+/// section carries, and the whole palette under them.
+///
+/// The dividers and the pane flags are not on it. They are set by using the
+/// window rather than by this panel ([`OFF_PANEL`]), and putting the panes back
+/// where they started is not what somebody pressing a button under the colours
+/// is asking for.
+pub fn restoring() -> Vec<&'static str> {
+    let mut keys: Vec<&'static str> = LOOKS
+        .iter()
+        .map(|(key, _)| *key)
+        .filter(|key| !OFF_PANEL.contains(key))
+        .collect();
+    keys.extend(config::colour_keys());
+    keys
+}
 
 /// The settings of the window's own file that two arrow keys can cover, grouped
 /// the way their sections list them.
@@ -1065,13 +1185,24 @@ const THEME: &str = "theme";
 /// edit at all. `every_key_in_the_file_is_on_the_panel` fails if a key ends up
 /// in neither list, which is what stops a setting being added to the file and
 /// forgotten here.
-const LOOKS: [(&str, Kind); 5] = [
+const LOOKS: [(&str, Kind); 6] = [
     (THEME, Kind::Choice(&config::THEMES)),
     (
         "opacity",
         Kind::Number {
             step: 0.05,
             low: 0.05,
+            high: 1.0,
+            places: 2,
+        },
+    ),
+    // The window's own, which goes all the way to nothing: the empty space has
+    // no text in it, so a window whose gaps are glass is still readable.
+    (
+        "window_opacity",
+        Kind::Number {
+            step: 0.05,
+            low: 0.0,
             high: 1.0,
             places: 2,
         },
@@ -1264,8 +1395,10 @@ fn about(key: &str) -> &'static str {
 /// nobody sees.
 fn palette_line(config: &Config) -> String {
     match theme_name(config) {
-        CUSTOM => String::from("these colours are custom: a colour in the file overrode its theme"),
-        name => format!("the {name} theme set these; a colour in the file overrides its key"),
+        CUSTOM => {
+            String::from("these colours are custom: a line in the file is overriding the theme")
+        }
+        name => format!("the {name} theme set these; a colour written in the file overrides its key"),
     }
 }
 
@@ -1692,7 +1825,7 @@ impl Settings {
                 }
             };
             let (label, hint) = agent_says(key);
-            numbers.push(CardField::number(label, key, value, kind, File::Agent).saying(hint));
+            numbers.push(CardField::setting(label, key, value, kind, File::Agent).saying(hint));
         }
         let tasks = numbers.pop().expect("both of the agent's numbers");
         let ctx = numbers.pop().expect("both of the agent's numbers");
@@ -2091,90 +2224,130 @@ impl Settings {
         rows
     }
 
-    /// Everything about what the window looks like: the sizes, the theme and
-    /// the palette.
+    /// Everything about what the window looks like, as cards: how big the text
+    /// is, how solid the window is, the box you type in, then the palette.
     ///
-    /// COLOURS was a section of its own and is the last block here, under its
-    /// own headings, because a palette is what the window looks like. The two
-    /// groups PANES held are not here and are not anywhere: see [`OFF_PANEL`]
-    /// for which keys those were and what sets them instead.
-    ///
-    /// The sizes are the rows above the palette; [`THEME`] is not one of them
-    /// even though it is written into [`LOOKS`] with them, because it belongs
-    /// over the colours it sets ([`Settings::colour_rows`]).
+    /// This was the last flat section: bare rows at one text size, the key of
+    /// the file in the label column, the two transparencies that were really one
+    /// number, and the palette under four headings that grouped nothing. Each
+    /// group is a card now, every field is a plain-words name over its value
+    /// with the key in the sentence under it, and the two groups PANES held are
+    /// still nowhere (see [`OFF_PANEL`] for which keys those were and what sets
+    /// them instead).
     fn appearance_rows(&self, config: &Config) -> Vec<Row> {
-        let mut rows: Vec<Row> = settings_rows(config, &LOOKS)
-            .into_iter()
-            .filter(|row| !matches!(row, Row::Setting { key, .. } if *key == THEME))
-            .collect();
+        let mut rows = vec![
+            Row::Card(Card {
+                title: String::from("HOW BIG THE TEXT IS"),
+                fields: vec![
+                    look_field(config, "font_size"),
+                    look_field(config, "pane_font_size"),
+                ],
+                hint: None,
+                does: None,
+            }),
+            // The two transparencies together, because the whole of what makes
+            // either of them readable is which surface it moves: one setting
+            // called "opacity" with a backdrop pinned to 55% of it is what made
+            // "the empty spaces of noob" unreachable.
+            Row::Card(Card {
+                title: String::from("HOW SOLID THE WINDOW IS"),
+                fields: vec![
+                    look_field(config, "opacity"),
+                    look_field(config, "window_opacity"),
+                ],
+                hint: None,
+                does: None,
+            }),
+            Row::Card(Card {
+                title: String::from("THE PROMPT"),
+                fields: vec![look_field(config, "prompt_rows")],
+                hint: None,
+                does: None,
+            }),
+        ];
         rows.extend(self.colour_rows(config));
         rows
     }
 
-    /// The palette, as a grid: the theme that set it, a line saying so, then one
-    /// heading per group and that group's colours [`SWATCH_COLUMNS`] to a row.
+    /// The palette: the theme that set it, then one card per group of colours,
+    /// then where the file is and the way back to the defaults.
     ///
     /// It was one colour per row, thirty seven rows of hex string. That is four
     /// screens of a column half of which is empty, and no row said what it
     /// coloured. Grouped blocks of labelled blocks read as a palette, which is
     /// what this is.
     ///
-    /// The theme row and the line under it are what makes the grid readable at
-    /// all: with the sizes carrying `theme` several rows up, the block opened as
-    /// swatches nobody could act on, since nothing on it said the colours were a
-    /// preset's or what would change them. The heading of each group says what
-    /// that group paints rather than which key holds it, for the same reason the
+    /// The theme stands over the colours it writes, as the first card, because
+    /// with it several rows up among the sizes the grid opened as swatches
+    /// nobody could act on: nothing on it said the colours were a preset's or
+    /// what would change them. Each group's card is headed with what that group
+    /// paints rather than with the keys it holds, for the same reason the
     /// swatches are labelled in words.
     fn colour_rows(&self, config: &Config) -> Vec<Row> {
         let all = colours(config);
-        let mut rows = vec![Row::Heading("THE PALETTE")];
         // The control that writes every colour under it, first, out of the same
-        // table the sizes are built from so the row is the row: same choices,
-        // same nudge, same writer.
-        rows.extend(
-            settings_rows(config, &LOOKS)
-                .into_iter()
-                .filter(|row| matches!(row, Row::Setting { key, .. } if *key == THEME)),
-        );
-        rows.push(note(&palette_line(config)));
+        // table the sizes are built from so the field is the field: same
+        // choices, same nudge, same writer.
+        let mut rows = vec![Row::Card(Card {
+            title: String::from("THE PALETTE"),
+            fields: vec![look_field(config, THEME)],
+            hint: Some(palette_line(config)),
+            does: None,
+        })];
         let mut at = 0;
-        for (heading, count) in [
+        for (title, count) in [
             ("THE WINDOW'S OWN TONES", WINDOW_TONES),
             ("THE CODE COLOURS", SYNTAX_TONES),
             ("THE TOOL MARKS", config::TOOL_KEYS.len()),
             ("THE METERS", config::GAUGE_KEYS.len()),
         ] {
-            rows.push(Row::Heading(heading));
-            // Chunked inside the group rather than across the whole palette, so
-            // a row never carries the end of one group and the start of the
-            // next: a grid whose blocks run into each other is the list again.
-            for chunk in all[at..at + count].chunks(SWATCH_COLUMNS) {
-                rows.push(Row::Swatches(
-                    chunk
-                        .iter()
-                        .map(|(key, rgb)| Swatch {
-                            key,
-                            about: about(key),
-                            rgb: *rgb,
-                        })
-                        .collect(),
-                ));
-            }
+            // One card per group rather than one row per three colours, so a
+            // row never carries the end of one group and the start of the next:
+            // a grid whose blocks run into each other is the list again.
+            rows.push(Row::Palette(Palette {
+                title,
+                cells: all[at..at + count]
+                    .iter()
+                    .map(|(key, rgb)| Swatch {
+                        key,
+                        about: about(key),
+                        rgb: *rgb,
+                    })
+                    .collect(),
+            }));
             at += count;
         }
-        rows.push(note(
-            "press a colour to see which key writes it: colours are edited in the file, since a hex value needs a keyboard this window has nowhere to put",
-        ));
-        rows.push(Row::Reading {
-            label: String::from("settings"),
-            value: match &self.file {
-                Some(path) => path.display().to_string(),
-                // Not a failure worth refusing to open the panel over: every
-                // reading is still true and the presets still apply for as long
-                // as the window is up. It is why nothing can be saved.
-                None => String::from("nowhere: no home directory to write one in"),
-            },
-        });
+        rows.push(Row::Card(Card {
+            title: String::from("WHERE ALL THIS IS WRITTEN"),
+            fields: vec![
+                CardField::reading(
+                    "the settings file",
+                    match &self.file {
+                        Some(path) => path.display().to_string(),
+                        // Not a failure worth refusing to open the panel over:
+                        // every reading is still true and the presets still
+                        // apply for as long as the window is up. It is why
+                        // nothing can be saved.
+                        None => String::from("nowhere: no home directory to write one in"),
+                    },
+                )
+                .saying("a colour is edited here: a hex value needs a keyboard this window has nowhere to put"),
+            ],
+            hint: Some(String::from(
+                "press a colour above to see which key of that file writes it",
+            )),
+            does: None,
+        }));
+        // The way out, on a card of its own and at the end, because it takes
+        // back everything above it rather than anything on one card.
+        rows.push(Row::Card(Card {
+            title: String::from("BACK TO THE DEFAULTS"),
+            fields: Vec::new(),
+            hint: Some(String::from(
+                "comments out the sizes, the transparency and the palette in that file, and leaves every other line of it alone",
+            )),
+            does: Some(Doing::Restore),
+        }));
         rows
     }
 
@@ -2360,12 +2533,12 @@ impl Settings {
     }
 
     /// The swatch at a place on the grid, or nothing when that row is not a
-    /// grid row or has no such cell.
+    /// palette card or has no such cell.
     pub fn swatch(&self, row: usize, cell: usize) -> Option<&Swatch> {
-        let Row::Swatches(cells) = self.row(row)? else {
+        let Row::Palette(palette) = self.row(row)? else {
             return None;
         };
-        cells.get(cell)
+        palette.cells.get(cell)
     }
 
     /// Press one swatch: which colour it is stays on the footer until something
@@ -2436,6 +2609,16 @@ impl Settings {
                 "press delete again to remove the {folder} conversation from {when}; anything else leaves it alone"
             );
         }
+        // The restore under the palette. It says what would go, which is lines
+        // of a file rather than a directory: somebody who has tuned a colour by
+        // hand is about to lose that line, and nothing else on screen says so.
+        if let Some(Row::Card(card)) = self.arming.and_then(|at| self.row(at))
+            && card.does == Some(Doing::Restore)
+        {
+            return String::from(
+                "press restore again to comment out every size, transparency and colour line in the settings file; anything else leaves them alone",
+            );
+        }
         if let Some(Row::Entry(entry)) = self.arming.and_then(|at| self.row(at)) {
             // Named by the thing that is about to go, and said as what would
             // actually happen to it. A skill goes by its directory, since the
@@ -2481,8 +2664,10 @@ impl Settings {
         });
         match self.at_cursor() {
             Some(Row::Setting { kind, .. }) => match (kind, across) {
+                // Every theme is drawn, so pressing one is the shortest way
+                // there; the arrows are still what the keyboard walks them with.
                 (Kind::Choice(_), _) => {
-                    "up and down move \u{2022} left and right walk the presets \u{2022} tab and shift-tab change section"
+                    "press a theme to wear it \u{2022} left and right walk them \u{2022} tab and shift-tab change section"
                 }
                 (Kind::Number { .. }, false) => {
                     "up and down move \u{2022} left and right nudge it, or drag the slider \u{2022} tab and shift-tab change section"
@@ -2610,6 +2795,35 @@ impl Settings {
         Some(Change {
             key,
             value: next,
+            file: *file,
+        })
+    }
+
+    /// Press one option of a choice by name: what that writes, or nothing when
+    /// the field is not a choice or has no such option.
+    ///
+    /// The options are all drawn, so all of them can be pressed. Left and right
+    /// still walk them ([`Settings::change`]), and both land in the same writer:
+    /// this is the same [`Change`] the arrow keys make, with the option that was
+    /// pressed instead of the next one along.
+    ///
+    /// The one already set is not refused. A file carrying colours of its own
+    /// reads as [`CUSTOM`] however many times the theme line says otherwise, and
+    /// pressing the theme it claims to be is then the one press that puts the
+    /// window back on it.
+    pub fn choose_option(&self, index: usize, side: Side, at: usize) -> Option<Change> {
+        let Row::Setting {
+            key,
+            kind: Kind::Choice(names),
+            file,
+            ..
+        } = self.cell(index, side)?
+        else {
+            return None;
+        };
+        Some(Change {
+            key,
+            value: String::from(*names.get(at)?),
             file: *file,
         })
     }
@@ -2815,6 +3029,13 @@ impl Settings {
             Some(Row::Table(table)) => match table.taking() {
                 ids if ids.is_empty() => return None,
                 ids => Deed::ForgetSessions { ids },
+            },
+            // A card whose own action loses something: the restore under the
+            // palette, which takes lines out of a file somebody may have edited
+            // by hand. Same two presses for the same reason.
+            Some(Row::Card(card)) => match card.does {
+                Some(Doing::Restore) => Deed::RestoreLooks,
+                _ => return None,
             },
             _ => return None,
         };
@@ -3348,33 +3569,6 @@ fn last_top(heights: &[usize], rows: usize) -> usize {
     0
 }
 
-fn note(text: &str) -> Row {
-    Row::Note {
-        text: String::from(text),
-        bad: false,
-    }
-}
-
-/// The rows for a group of the window's own settings, read off the config.
-///
-/// A key on [`OFF_PANEL`] never becomes a row, whatever group it is written
-/// into. The list is the rule and not a note about one: putting `show_files`
-/// back in a table is not enough to put it back on the panel, which is what
-/// stops the removal being undone by a later edit that meant to add something
-/// else.
-fn settings_rows(config: &Config, group: &[(&'static str, Kind)]) -> Vec<Row> {
-    group
-        .iter()
-        .filter(|(key, _)| !OFF_PANEL.contains(key))
-        .map(|(key, kind)| Row::Setting {
-            key,
-            value: value_of(config, key, *kind),
-            kind: *kind,
-            file: File::Window,
-        })
-        .collect()
-}
-
 /// What the CLI uses for one of its own settings when the file does not carry
 /// it. Read off the CLI rather than chosen here: a row that shows a number the
 /// agent is not actually running with is worse than no row.
@@ -3533,6 +3727,7 @@ fn value_of(config: &Config, key: &str, kind: Kind) -> String {
         (_, Kind::Number { places, .. }) => {
             let value = match key {
                 "opacity" => config.opacity,
+                "window_opacity" => config.window_opacity,
                 "font_size" => config.font_size,
                 "pane_font_size" => config.pane_font_size,
                 // Unreachable through the groups, and a number is the honest
@@ -3558,7 +3753,27 @@ fn hex(rgb: [u8; 3]) -> String {
 /// parsed from the file rather than patched in memory, so what the panel shows
 /// next is what the next launch will read.
 pub fn commit(path: &Path, change: &Change) -> Result<Config, String> {
-    config::write_setting(path, change.key, Some(&change.value))?;
+    match change.key == THEME {
+        // A theme is not one line. An explicit colour beats the preset it
+        // belongs to, so a file carrying eight of them answered every theme
+        // change with the same window under a different name and the panel then
+        // read the palette back as custom: "themes are only 2 custom and noob".
+        // Picking one takes those lines out of the way as it writes.
+        true => config::pick_theme(path, &change.value)?,
+        false => config::write_setting(path, change.key, Some(&change.value))?,
+    }
+    Ok(Config::load_from(path))
+}
+
+/// Take every appearance line out of the window's settings file and read the
+/// whole file back.
+///
+/// The other half of [`commit`], for the one press that writes no value at all:
+/// [`restoring`] names the keys, the writer comments each of them out where it
+/// stands, and what comes back is the file parsed again, so the window and the
+/// next launch agree the way they do after any other change here.
+pub fn restore(path: &Path) -> Result<Config, String> {
+    config::clear_settings(path, &restoring())?;
     Ok(Config::load_from(path))
 }
 
@@ -3669,7 +3884,8 @@ mod tests {
             .iter()
             .enumerate()
             .find_map(|(at, row)| match row {
-                Row::Swatches(cells) => cells
+                Row::Palette(palette) => palette
+                    .cells
                     .iter()
                     .position(|cell| cell.key == key)
                     .map(|cell| (at, cell)),
@@ -3696,12 +3912,16 @@ mod tests {
                 Row::Setting { key, value, .. } | Row::Field { key, value } => {
                     format!("{key} {value}")
                 }
-                Row::Heading(name) => String::from(*name),
-                Row::Swatches(cells) => cells
-                    .iter()
-                    .map(|cell| format!("{} {} {}", cell.key, cell.about, hex(cell.rgb)))
-                    .collect::<Vec<_>>()
-                    .join("  "),
+                Row::Palette(palette) => {
+                    let mut out = vec![String::from(palette.title)];
+                    out.extend(
+                        palette
+                            .cells
+                            .iter()
+                            .map(|cell| format!("{} {} {}", cell.key, cell.about, hex(cell.rgb))),
+                    );
+                    out.join("\n")
+                }
                 Row::Entry(entry) => format!(
                     "{} {} {} {}",
                     entry.name,
@@ -3981,8 +4201,9 @@ mod tests {
                     file: File::Window,
                     ..
                 } => vec![*key],
-                // A colour is a cell of a grid row now, not a row of its own.
-                Row::Swatches(cells) => cells.iter().map(|cell| cell.key).collect(),
+                // A colour is a cell of a palette card now, not a row of its
+                // own.
+                Row::Palette(palette) => palette.cells.iter().map(|cell| cell.key).collect(),
                 _ => Vec::new(),
             })
             .collect();
@@ -4039,13 +4260,10 @@ mod tests {
                     };
                     assert_eq!(section, wanted, "{key} is in the wrong section")
                 }
-                Row::Swatches(cells) => {
-                    let keys: Vec<&str> = cells.iter().map(|cell| cell.key).collect();
+                Row::Palette(palette) => {
+                    let keys: Vec<&str> = palette.cells.iter().map(|cell| cell.key).collect();
                     assert_eq!(section, APPEARANCE, "{keys:?} are in the wrong section");
-                    assert!(
-                        cells.len() <= SWATCH_COLUMNS,
-                        "{keys:?} is more than a row of the grid holds"
-                    );
+                    assert!(!palette.title.is_empty(), "{keys:?} are under no title");
                 }
                 _ => {}
             }
@@ -4059,7 +4277,7 @@ mod tests {
         let panel = over(&Config::default());
         let mut said = 0;
         for (_, row) in panel.all_rows() {
-            let Row::Swatches(cells) = row else {
+            let Row::Palette(Palette { cells, .. }) = row else {
                 continue;
             };
             for cell in cells {
@@ -4096,17 +4314,22 @@ mod tests {
         assert_eq!(said, colours(&Config::default()).len());
     }
 
-    /// Item G2: the palette block opens with the control that wrote it and one
-    /// line saying so.
+    /// The theme stands over the colours it writes, on a card of its own, and
+    /// that card says whose colours these are.
     ///
     /// "colors as theme groups i did not saw on the setup... i just sawe many
     /// colors... so i dont know". The grid was a wall of swatches: `theme` sat
     /// several rows above it with the sizes, and nothing anywhere on the block
-    /// said the colours were a preset's or what would change them. The block is
-    /// its heading, then `theme`, then the line naming the theme those colours
-    /// came from, and only then the colours.
+    /// said the colours were a preset's or what would change them. It is the
+    /// first field of the first card of the palette now, with the sentence
+    /// naming the theme those colours came from under it, and the groups
+    /// underneath.
+    ///
+    /// Written when the block was a heading, a bare row and a note. There is no
+    /// heading and no note in this section any more: every group is a card, so
+    /// the assertions are about which card carries what.
     #[test]
-    fn the_theme_row_is_the_top_of_the_palette_block() {
+    fn the_theme_field_is_the_top_of_the_palette() {
         for name in config::THEMES {
             let config = Config::parse(&format!("theme = {name}"));
             let mut panel = over(&config);
@@ -4114,48 +4337,50 @@ mod tests {
             let rows = panel.rows().to_vec();
             let at = rows
                 .iter()
-                .position(|row| matches!(row, Row::Setting { key, .. } if *key == THEME))
-                .expect("the theme row");
+                .position(|row| {
+                    matches!(row, Row::Card(card)
+                        if card.fields.iter().any(|field| {
+                            matches!(field.holds.as_ref(), Row::Setting { key, .. } if *key == THEME)
+                        }))
+                })
+                .expect("the theme card");
             let first = rows
                 .iter()
-                .position(|row| matches!(row, Row::Swatches(_)))
+                .position(|row| matches!(row, Row::Palette(_)))
                 .expect("the grid");
-            assert!(at < first, "theme is on row {at}, under the grid at {first}");
-            assert!(
-                matches!(rows[at - 1], Row::Heading("THE PALETTE")),
-                "the theme row is under {:?} rather than the palette's own heading",
-                rows[at - 1]
-            );
-            // Directly over the colours: the heading, the row, the line, the
-            // first group's heading, the grid. Anything else between them is a
-            // row that came between the control and what it writes.
-            let Row::Note { text, bad } = &rows[at + 1] else {
-                panic!("the row under theme is {:?}", rows[at + 1]);
+            assert_eq!(at + 1, first, "{:?} came between them", rows[at + 1]);
+            let Row::Card(card) = &rows[at] else {
+                panic!("{:?}", rows[at]);
             };
-            assert!(!bad, "the line reads as trouble");
+            assert_eq!(card.title, "THE PALETTE");
+            // The theme is the card's first field, so it is the one the keys
+            // land on and the one a press can name.
             assert!(
-                text.contains(name),
-                "the line does not name the theme that is set: {text}"
+                matches!(card.fields[0].holds.as_ref(), Row::Setting { key, .. } if *key == THEME)
+            );
+            let hint = card.hint.clone().expect("the line under the field");
+            assert!(
+                hint.contains(name),
+                "the line does not name the theme that is set: {hint}"
             );
             assert!(
-                text.contains("a colour in the file overrides its key"),
-                "the line does not say what changing one colour does: {text}"
+                hint.contains("a colour written in the file overrides its key"),
+                "the line does not say what changing one colour does: {hint}"
             );
-            assert!(
-                matches!(rows[at + 2], Row::Heading(_)),
-                "{:?} is between the line and the first group",
-                rows[at + 2]
-            );
-            assert_eq!(at + 3, first, "the grid does not start under its heading");
-            // And it is what the row above it is showing, rather than a name
-            // written into the line by hand.
+            // And the field's own sentence says what picking one will do to the
+            // file, which is the whole of why picking one works now.
+            let said = card.fields[0].hint.clone().expect("the field's sentence");
+            assert!(said.contains("clears the colour lines"), "{said}");
             assert_eq!(value(&panel, THEME), name);
-            // The sizes are still their own rows and still above the block: the
-            // theme moved, nothing else did.
+            // The sizes are still their own cards and still above the palette:
+            // the theme did not take them with it.
             assert!(
                 rows[..at]
                     .iter()
-                    .any(|row| matches!(row, Row::Setting { key, .. } if *key == "opacity")),
+                    .any(|row| matches!(row, Row::Card(card)
+                        if card.fields.iter().any(|field| {
+                            matches!(field.holds.as_ref(), Row::Setting { key, .. } if *key == "opacity")
+                        }))),
                 "the sizes are not above the palette any more"
             );
         }
@@ -4171,39 +4396,28 @@ mod tests {
         assert!(!text.contains("the noob-cool theme set these"), "{text}");
     }
 
-    /// Every group of the grid is headed, and headed with what it paints rather
-    /// than with the key it is stored under.
+    /// Every group of the palette is a card of its own, titled with what it
+    /// paints rather than with the keys it holds.
     ///
     /// `ONE PER TOOL` and `ONE PER GAUGE` were the file's own words for those
     /// two lists: they say how many colours there are and nothing about what
-    /// they colour.
+    /// they colour. The groups were bare headings over rows of three swatches
+    /// until this round, which is the shape the whole panel is being taken out
+    /// of: a heading is not a group, a card is.
     #[test]
     fn every_group_of_the_palette_says_what_it_paints() {
         let mut panel = over(&Config::default());
         go_to(&mut panel, APPEARANCE);
-        let rows = panel.rows().to_vec();
-        let mut heading = None;
-        let mut headed = Vec::new();
-        for row in &rows {
-            match row {
-                Row::Heading(name) => heading = Some(*name),
-                Row::Swatches(cells) => {
-                    let over = heading.unwrap_or_else(|| {
-                        panic!(
-                            "{:?} is under no heading at all",
-                            cells.iter().map(|cell| cell.key).collect::<Vec<_>>()
-                        )
-                    });
-                    assert_ne!(over, "THE PALETTE", "a group of the grid has no heading");
-                    if !headed.contains(&over) {
-                        headed.push(over);
-                    }
-                }
-                _ => {}
-            }
-        }
+        let titles: Vec<&str> = panel
+            .rows()
+            .iter()
+            .filter_map(|row| match row {
+                Row::Palette(palette) => Some(palette.title),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            headed,
+            titles,
             vec![
                 "THE WINDOW'S OWN TONES",
                 "THE CODE COLOURS",
@@ -4211,6 +4425,23 @@ mod tests {
                 "THE METERS",
             ]
         );
+        // And every colour in the file is in exactly one of them, in file
+        // order: a group that dropped one is a colour nobody can find.
+        let cells: Vec<&str> = panel
+            .rows()
+            .iter()
+            .flat_map(|row| match row {
+                Row::Palette(palette) => {
+                    palette.cells.iter().map(|cell| cell.key).collect::<Vec<_>>()
+                }
+                _ => Vec::new(),
+            })
+            .collect();
+        let all: Vec<&str> = colours(&Config::default())
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(cells, all);
     }
 
     /// A meter's colour is labelled with the readings that actually wear that
@@ -4266,23 +4497,23 @@ mod tests {
         }
     }
 
-    /// The cursor only stops where something can happen: not on a heading, not
-    /// on a reading, not on a note and not on a colour.
+    /// The cursor only stops where something can happen: not on a card of
+    /// readings, not on a note and not on a colour.
     ///
     /// The section used to open on `theme`, because `theme` was its first row.
-    /// It is the first row of the palette block now, over the colours it writes,
-    /// so what the section opens on is the first of the sizes and the assertion
-    /// says that instead. `the_theme_row_is_the_top_of_the_palette_block` is
-    /// where the move itself is held.
+    /// It is the first field of the palette's own card now, over the colours it
+    /// writes, so what the section opens on is the first of the sizes and the
+    /// assertion says that instead. `the_theme_field_is_the_top_of_the_palette`
+    /// is where the move itself is held.
     #[test]
     fn the_cursor_skips_what_it_cannot_change() {
         let config = Config::default();
         let mut panel = over(&config);
         go_to(&mut panel, APPEARANCE);
         assert!(
-            matches!(panel.row(panel.cursor()), Some(Row::Setting { key, .. }) if *key == "opacity"),
+            matches!(panel.at_cursor(), Some(Row::Setting { key, .. }) if *key == "font_size"),
             "the section opens on {:?}",
-            panel.row(panel.cursor())
+            panel.at_cursor()
         );
 
         for name in SECTIONS {
@@ -4306,17 +4537,33 @@ mod tests {
             assert_eq!(down, up, "walking back up {name} visits other rows");
         }
 
-        // APPEARANCE stops on its own settings and nothing else, which is the
-        // sizes and the theme: every row of the palette grid under them is
-        // stepped over rather than landed on, and that is the whole rest of the
-        // section. The panes and the dividers used to be counted here too and
-        // are not rows any more.
+        // APPEARANCE stops on the cards that carry a setting and on nothing
+        // else: the palette's own cards, the one naming the file and the one
+        // that puts it all back are stepped over rather than landed on. Four
+        // cards carry the six settings, since two fields share a card twice.
         go_to(&mut panel, APPEARANCE);
-        let mut looks = 1;
+        let mut cards = 1;
         while panel.step(true) {
-            looks += 1;
+            cards += 1;
         }
-        assert_eq!(looks, LOOKS.len());
+        assert_eq!(cards, 4);
+        let held: Vec<&str> = panel
+            .rows()
+            .iter()
+            .filter(|row| landable(row))
+            .flat_map(|row| match row {
+                Row::Card(card) => card
+                    .fields
+                    .iter()
+                    .filter_map(|field| match field.holds.as_ref() {
+                        Row::Setting { key, .. } => Some(*key),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(held.len(), LOOKS.len(), "{held:?}");
 
         // A section of readings has nothing to land on and says so, rather than
         // drawing a band on a row nothing can be done to.
@@ -4581,7 +4828,13 @@ mod tests {
     fn a_drag_cannot_show_a_value_the_file_would_clamp() {
         let was = Config::default();
         let mut panel = over(&was);
-        for key in ["opacity", "font_size", "pane_font_size", "prompt_rows"] {
+        for key in [
+            "opacity",
+            "window_opacity",
+            "font_size",
+            "pane_font_size",
+            "prompt_rows",
+        ] {
             put_cursor(&mut panel, key);
             let at = panel.cursor();
             // Past both ends as well as along the track: a pointer dragged out
@@ -4631,12 +4884,12 @@ mod tests {
                 rgb: [0x12, 0x34, 0x56],
             }
         );
-        // More than one to a row, which is what makes it a grid.
+        // A whole group in one card, which is what makes it a grid.
         let count = match panel.row(at) {
-            Some(Row::Swatches(cells)) => cells.len(),
-            other => panic!("the accent is not on a grid row: {other:?}"),
+            Some(Row::Palette(palette)) => palette.cells.len(),
+            other => panic!("the accent is not on a palette card: {other:?}"),
         };
-        assert!(count > 1, "one swatch to a row is the list again");
+        assert!(count > 1, "one swatch to a card is the list again");
 
         // The cursor cannot get there, so no change can be aimed at it.
         assert!(!panel.point_at(at, Side::Left));
@@ -4661,7 +4914,7 @@ mod tests {
         // And the section says where a colour is edited, with the file to do it
         // in beside it.
         let text = said(&panel);
-        assert!(text.contains("edited in the file"), "{text}");
+        assert!(text.contains("a colour is edited here"), "{text}");
         assert!(text.contains("no0b.conf"), "{text}");
     }
 
@@ -4681,8 +4934,11 @@ mod tests {
         for (section, row) in panel.all_rows() {
             let named: Vec<&str> = match row {
                 Row::Setting { key, .. } | Row::Field { key, .. } => vec![key],
-                Row::Swatches(cells) => cells.iter().map(|cell| cell.key).collect(),
-                Row::Heading(name) => vec![*name],
+                Row::Palette(palette) => {
+                    let mut said = vec![palette.title];
+                    said.extend(palette.cells.iter().map(|cell| cell.key));
+                    said
+                }
                 Row::Reading { label, .. } => vec![label.as_str()],
                 Row::Note { text, .. } => vec![text.as_str()],
                 Row::Table(table) => {
@@ -4709,12 +4965,14 @@ mod tests {
                     assert!(!said.contains(key), "{section} still says {key}: {said:?}");
                 }
             }
-            // The headings those rows sat under went with them: a heading with
-            // nothing under it is worse than the rows were.
-            if let Row::Heading(name) = row {
+            // The headings those rows sat under went with them, and so did
+            // headings altogether: every group is a card with a title now, and
+            // no card is titled for either of them.
+            if let Row::Card(card) = row {
                 assert!(
-                    !name.contains("PANE") && !name.contains("DIVIDER"),
-                    "{name} is still a heading"
+                    !card.title.contains("PANE") && !card.title.contains("DIVIDER"),
+                    "{} is still a group",
+                    card.title
                 );
             }
         }
@@ -4727,19 +4985,11 @@ mod tests {
             go_to(&mut panel, name);
             assert!(!panel.rows().is_empty(), "{name} has no rows at all");
         }
-        // The list is the rule, not a note about one: a group that names one of
-        // them builds no row for it.
-        let config = Config::default();
-        let rows = settings_rows(
-            &config,
-            &[
-                ("font_size", Kind::Number { step: 1.0, low: 8.0, high: 40.0, places: 0 }),
-                ("show_files", Kind::Choice(&["on", "off"])),
-                ("left_width", Kind::Number { step: 0.05, low: 0.1, high: 0.9, places: 2 }),
-            ],
-        );
-        assert_eq!(rows.len(), 1, "{rows:?}");
-        assert!(matches!(&rows[0], Row::Setting { key, .. } if *key == "font_size"));
+        // The list is the rule, not a note about one: none of those keys is a
+        // field of any card, and a restore never writes one either.
+        for key in OFF_PANEL {
+            assert!(!restoring().contains(&key), "{key} is put back by a restore");
+        }
 
         // And APPEARANCE did not empty out with them: the sizes, the theme and
         // the whole palette are what it was carrying before PANES ever got
@@ -4748,11 +4998,15 @@ mod tests {
         let settings = panel
             .rows()
             .iter()
-            .filter(|row| matches!(row, Row::Setting { .. }))
+            .flat_map(|row| match row {
+                Row::Card(card) => card.fields.iter().map(|field| field.holds.as_ref()).collect(),
+                _ => Vec::new(),
+            })
+            .filter(|held| matches!(held, Row::Setting { file: File::Window, .. }))
             .count();
         assert_eq!(settings, LOOKS.len());
         assert!(
-            panel.rows().iter().any(|row| matches!(row, Row::Swatches(_))),
+            panel.rows().iter().any(|row| matches!(row, Row::Palette(_))),
             "the palette went with them"
         );
     }
@@ -4798,10 +5052,12 @@ mod tests {
         let where_ = homeless
             .all_rows()
             .find_map(|(_, row)| match row {
-                Row::Reading { label, value } if label == "settings" => Some(value.clone()),
+                Row::Reading { label, value } if label == "the settings file" => {
+                    Some(value.clone())
+                }
                 _ => None,
             })
-            .expect("the file row");
+            .expect("the file field");
         assert!(where_.contains("no home directory"), "{where_:?}");
     }
 
@@ -4853,7 +5109,13 @@ mod tests {
         let mut config = Config::load_from(&path);
         let mut panel = Settings::open(&config, Some(&path), Agent::default());
 
-        for key in ["opacity", "font_size", "pane_font_size", "prompt_rows"] {
+        for key in [
+            "opacity",
+            "window_opacity",
+            "font_size",
+            "pane_font_size",
+            "prompt_rows",
+        ] {
             // Up first, then down from the top. `prompt_rows` ships at 1,
             // which is the bottom of its range, so a key walked down first has
             // nowhere to go and the walk would prove nothing about its bounds.
@@ -4879,6 +5141,216 @@ mod tests {
         // the whole reason the writer is used instead of rewriting the file.
         let text = std::fs::read_to_string(&path).expect("the file");
         assert!(text.contains('#'), "{text}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Item H5: picking a theme puts the window on that theme, on the file that
+    /// made him say there were only two of them.
+    ///
+    /// "themes are only 2 custom and noob", "i only see noob matrix the others i
+    /// asked are absent". The control was never broken: his file is the one
+    /// adopted from CLIppy and it carries eight live colour lines, which land on
+    /// top of whatever preset the theme line names. So a pick wrote
+    /// `theme = noob-cool`, the eight lines put the green back on reload, the
+    /// palette then matched no preset and the field read `custom`. Picking one
+    /// takes those lines out of the way now, so the window really wears it.
+    #[test]
+    fn picking_a_theme_puts_the_window_on_it_over_a_file_that_was_overriding_it() {
+        let path = scratch("theme-applies");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(
+            &path,
+            "\
+# CLIppy settings
+accent = #7cd894
+text   = #9ad6ac
+dim    = #58966e
+bright = #cefadb
+good   = #74d194
+bad    = #e87a6c
+panel  = #000000
+bar    = #0e2e1e
+theme = noob-matrix
+font_size = 15   # mine
+",
+        )
+        .expect("his file");
+        let mut config = Config::load_from(&path);
+        let mut panel = Settings::open(&config, Some(&path), Agent::default());
+        put_cursor(&mut panel, THEME);
+
+        // Every one of the three, pressed by name the way the panel draws them.
+        let (at, side) = (panel.cursor(), panel.side());
+        for (option, name) in config::THEMES.iter().enumerate() {
+            let change = panel.choose_option(at, side, option).expect("an option");
+            assert_eq!(change.value, *name);
+            config = commit(&path, &change).expect("the file takes it");
+            panel.refresh(&config);
+            // The window is that theme, not the name of it over the old
+            // colours: every colour in hand is the preset's.
+            assert_eq!(
+                colours(&config),
+                colours(&config::theme(name).expect("a preset")),
+                "{name} did not reach the palette"
+            );
+            assert_eq!(value(&panel, THEME), *name, "the field still reads custom");
+        }
+
+        // And the file is still his: the size he set, the comment on it, the
+        // header, and the eight colour lines kept as comments rather than
+        // deleted.
+        let text = std::fs::read_to_string(&path).expect("the file");
+        assert!(text.starts_with("# CLIppy settings\n"), "{text}");
+        assert!(text.contains("font_size = 15   # mine"), "{text}");
+        assert!(text.contains("# accent = #7cd894"), "{text}");
+        assert!(text.contains("# bar    = #0e2e1e"), "{text}");
+        assert_eq!(text.matches("theme = ").count(), 1, "{text}");
+        assert_eq!(config.font_size, 15.0);
+        // An option nobody drew is not a press.
+        assert!(panel.choose_option(at, side, config::THEMES.len()).is_none());
+        assert!(panel.choose_option(0, side, 0).is_none(), "the sizes are not a choice");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The window's own transparency is a setting of its own, beside the
+    /// panels', and each one says which surface it moves.
+    ///
+    /// "another opacity should be present in settings which is the window itself
+    /// the empty spaces of noob". There was one key, and the empty space was
+    /// pinned at 55% of it, so the only way to see more desktop through the gaps
+    /// was to make the text harder to read.
+    #[test]
+    fn the_window_has_a_transparency_of_its_own_beside_the_panels() {
+        let path = scratch("window-opacity");
+        let _ = std::fs::remove_file(&path);
+        let config = Config::load_from(&path);
+        let mut panel = Settings::open(&config, Some(&path), Agent::default());
+        go_to(&mut panel, APPEARANCE);
+
+        // Both on one card, both named in words, and each sentence naming its
+        // own key: two sliders labelled "opacity" say nothing to anybody.
+        let card = panel
+            .rows()
+            .iter()
+            .find_map(|row| match row {
+                Row::Card(card)
+                    if card.fields.iter().any(|field| {
+                        matches!(field.holds.as_ref(), Row::Setting { key, .. } if *key == "window_opacity")
+                    }) =>
+                {
+                    Some(card.clone())
+                }
+                _ => None,
+            })
+            .expect("the card the two of them stand on");
+        assert_eq!(card.fields.len(), 2);
+        assert_ne!(card.fields[0].label, card.fields[1].label);
+        assert!(card.fields[0].hint.as_deref().is_some_and(|said| said.starts_with("opacity.")));
+        assert!(
+            card.fields[1]
+                .hint
+                .as_deref()
+                .is_some_and(|said| said.starts_with("window_opacity."))
+        );
+
+        // Nudging it writes that key and nothing else, and the surface the
+        // window paints its empty space with follows it.
+        put_cursor(&mut panel, "window_opacity");
+        let change = panel.change(false).expect("a number");
+        assert_eq!(change.key, "window_opacity");
+        let next = commit(&path, &change).expect("the file takes it");
+        assert!(next.window_opacity < config.window_opacity);
+        assert_eq!(next.opacity, config.opacity, "the panels moved with it");
+        assert_eq!(
+            crate::skin::Skin::from(&next).backdrop[3],
+            next.window_opacity
+        );
+        assert_ne!(
+            crate::skin::Skin::from(&next).backdrop[3],
+            crate::skin::Skin::from(&config).backdrop[3]
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Restoring puts every appearance key back to what the window ships with,
+    /// in one press, and leaves the file a file.
+    ///
+    /// "put also in appearance restore to default". Two presses, because it
+    /// throws away lines somebody may have written by hand, and the footer says
+    /// what is about to go in between them.
+    #[test]
+    fn restoring_puts_every_appearance_key_back_and_leaves_the_file_readable() {
+        let path = scratch("restore");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(
+            &path,
+            "\
+# mine
+opacity = 20%
+window_opacity = 100%
+font_size = 30
+pane_font_size = 9
+prompt_rows = 6
+theme = noob-red
+accent = #123456
+gauge_3 = #654321
+left_width = 0.31
+show_files = off
+something_else = keep me
+",
+        )
+        .expect("a file");
+        let config = Config::load_from(&path);
+        let mut panel = Settings::open(&config, Some(&path), Agent::default());
+        go_to(&mut panel, APPEARANCE);
+        let at = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, Row::Card(card) if card.does == Some(Doing::Restore)))
+            .expect("the card that puts it back");
+
+        // The first press arms it and writes nothing; the footer says what
+        // would go.
+        assert!(panel.uninstall(at).is_none(), "one press restored it");
+        assert_eq!(panel.arming(), Some(at));
+        let says = panel.says();
+        assert!(says.contains("press restore again"), "{says}");
+        assert!(says.contains("colour"), "{says}");
+        assert_eq!(Config::load_from(&path), config, "the file changed anyway");
+
+        // The second one does it.
+        assert_eq!(panel.uninstall(at), Some(Deed::RestoreLooks));
+        let after = restore(&path).expect("the file takes it");
+        let fresh = Config::default();
+        for key in restoring() {
+            assert!(config::keys().contains(&key), "{key} is not a key at all");
+        }
+        assert_eq!(after.opacity, fresh.opacity);
+        assert_eq!(after.window_opacity, fresh.window_opacity);
+        assert_eq!(after.font_size, fresh.font_size);
+        assert_eq!(after.pane_font_size, fresh.pane_font_size);
+        assert_eq!(after.prompt_rows, fresh.prompt_rows);
+        assert_eq!(colours(&after), colours(&fresh), "the palette stayed red");
+
+        // What it did not take: the divider it was never asked about, the pane
+        // flag, and a line this build has never heard of.
+        assert_eq!(after.left_width, 0.31);
+        assert!(!after.show_files);
+        let text = std::fs::read_to_string(&path).expect("the file");
+        assert!(text.contains("something_else = keep me"), "{text}");
+        assert!(text.starts_with("# mine\n"), "{text}");
+        // Commented out rather than deleted, so the lines are still there to
+        // read and the file still parses clean.
+        assert!(text.contains("# opacity = 20%"), "{text}");
+        assert!(text.contains("# theme = noob-red"), "{text}");
+        assert!(text.contains("# accent = #123456"), "{text}");
+        assert!(after.unknown.is_empty() || after.unknown == ["something_else"], "{:?}", after.unknown);
+
+        // And the panel reads the restored file as the defaults.
+        panel.refresh(&after);
+        go_to(&mut panel, APPEARANCE);
+        assert_eq!(value(&panel, "opacity"), "0.90");
+        assert_eq!(value(&panel, THEME), "noob-matrix");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -4955,8 +5427,14 @@ mod tests {
         let config = Config::default();
         let mut panel = over(&config);
         put_cursor(&mut panel, "theme");
-        assert!(panel.hint().contains("presets"), "{}", panel.hint());
+        assert!(panel.hint().contains("press a theme"), "{}", panel.hint());
+        // On a card of two, the one thing the arrow keys cannot say for
+        // themselves is how to reach the other field, so that is what the line
+        // spends itself on; on a card of one it names the slider.
         put_cursor(&mut panel, "opacity");
+        assert!(panel.hint().contains("nudge it"), "{}", panel.hint());
+        assert!(panel.hint().contains("cross the card"), "{}", panel.hint());
+        put_cursor(&mut panel, "prompt_rows");
         assert!(panel.hint().contains("slider"), "{}", panel.hint());
 
         // Every footer the panel can say, walking every row of every section.
@@ -5008,7 +5486,11 @@ mod tests {
         let mut panel = over(&config);
         go_to(&mut panel, APPEARANCE);
         let rows = 10;
-        assert!(panel.rows().len() > rows, "the longest section is one screenful");
+        // Counted in rows of text rather than in rows of the list: a card is
+        // nine or ten of them, so a section of ten cards is many screenfuls
+        // even though it is ten rows.
+        let tall: usize = panel.heights(COLS).iter().sum();
+        assert!(tall > rows, "the longest section is one screenful");
         assert_eq!(panel.first(), 0);
         assert!(panel.thumb(rows, COLS).is_some(), "a list this long says so");
 
@@ -5046,33 +5528,42 @@ mod tests {
         );
     }
 
-    /// The window is counted in rows of text and starts on a row, so a heading
-    /// two rows tall never sits half on and half off the top of the list.
+    /// The window is counted in rows of text and starts on a row, so a card
+    /// nine rows tall never sits half on and half off the top of the list.
     ///
-    /// The list was every row exactly one row tall, which the headings are not
-    /// any more. If [`Settings::heights`] and the window ever disagree, the rows
-    /// the panel draws are not the rows it hit tests.
+    /// This counted headings, which were two rows of text and the only thing on
+    /// the panel drawn larger than a row. There are no headings: every group is
+    /// a card, and a card's height is its header, its body and the space under
+    /// it. If [`Settings::heights`] and the window ever disagree, the rows the
+    /// panel draws are not the rows it hit tests.
     #[test]
-    fn the_window_counts_a_heading_as_the_two_rows_it_takes() {
+    fn the_window_counts_a_card_as_the_rows_it_takes() {
         let mut panel = over(&Config::default());
         go_to(&mut panel, APPEARANCE);
         let heights = panel.heights(COLS);
-        let headings: Vec<usize> = panel
+        let cards: Vec<usize> = panel
             .rows()
             .iter()
             .enumerate()
-            .filter(|(_, row)| matches!(row, Row::Heading(_)))
+            .filter(|(_, row)| matches!(row, Row::Card(_) | Row::Palette(_)))
             .map(|(at, _)| at)
             .collect();
-        // The four groups of the palette, which are what is left of the
-        // headings now the panes and the dividers are off the section.
-        assert!(headings.len() >= 4, "{headings:?}");
-        for at in &headings {
-            assert_eq!(heights[*at], 2, "a heading is drawn larger than a row");
+        // Every row of this section is one of the two: there is nothing loose
+        // on it any more.
+        assert_eq!(cards.len(), panel.rows().len(), "{cards:?}");
+        for at in &cards {
+            assert!(heights[*at] > 2, "a card is drawn taller than two rows");
         }
         for (at, row) in panel.rows().iter().enumerate() {
             assert_eq!(heights[at], lines(row, COLS), "the model and the window disagree");
         }
+        // A palette card is taller in a narrow list than in a wide one, because
+        // its colours reflow: the model is handed the width, so the height it
+        // counts follows it.
+        let (grid, _) = swatch_at(&panel, "tool_bash");
+        let narrow = panel.heights(30)[grid];
+        let wide = panel.heights(160)[grid];
+        assert!(narrow > wide, "the palette does not reflow: {narrow} and {wide}");
 
         // Whatever it is scrolled to, the rows on screen start at the top of a
         // row and take no more room than the list has.

@@ -28,6 +28,18 @@ use std::os::unix::fs::OpenOptionsExt;
 pub struct Config {
     /// 0.0 fully see-through, 1.0 fully opaque. Scales every panel fill.
     pub opacity: f32,
+    /// The same for the window itself: the empty space around and between the
+    /// panes, which is one rect painted over the whole surface.
+    ///
+    /// Its own key because it is its own surface. It used to be 55% of
+    /// [`Config::opacity`], so the only way to see more of the desktop through
+    /// the gaps was to make the reading surfaces see-through as well, and the
+    /// one thing nobody wants translucent is the text they are reading.
+    ///
+    /// 0.0 is allowed here, unlike the panels': a window whose empty space is
+    /// gone is a window of floating panes, which is a look somebody may want,
+    /// and everything with words in it is still drawn at its own opacity.
+    pub window_opacity: f32,
     pub font_size: f32,
     pub pane_font_size: f32,
     /// How tall the prompt is, in rows. Exactly that many, empty or full.
@@ -106,6 +118,10 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             opacity: 0.90,
+            // What the backdrop has always been drawn at: 55% of the 90% the
+            // panels open at. A number of its own now, and the same number, so
+            // giving it a key did not change what the window looks like.
+            window_opacity: 0.50,
             font_size: 14.0,
             pane_font_size: 13.0,
             prompt_rows: 1,
@@ -375,6 +391,7 @@ pub fn theme(name: &str) -> Option<Config> {
 pub fn keys() -> Vec<&'static str> {
     let mut keys = vec![
         "opacity",
+        "window_opacity",
         "font_size",
         "pane_font_size",
         "prompt_rows",
@@ -399,6 +416,34 @@ pub fn keys() -> Vec<&'static str> {
         "syntax_markup",
         "show_activity",
         "show_files",
+    ];
+    keys.extend(TOOL_KEYS);
+    keys.extend(GAUGE_KEYS);
+    keys
+}
+
+/// Every key that holds a colour, which is every key a [`theme`] sets.
+///
+/// The list a theme has to clear to be worth picking: an explicit colour beats
+/// the preset it belongs to, so a file carrying eight of them turns every theme
+/// but the one it was copied from into a name with no effect. [`pick_theme`] is
+/// what uses it, and `the_colour_keys_are_the_ones_a_theme_sets` fails if a
+/// colour is added to the file and not to this list.
+pub fn colour_keys() -> Vec<&'static str> {
+    let mut keys = vec![
+        "accent",
+        "text",
+        "dim",
+        "bright",
+        "good",
+        "bad",
+        "panel",
+        "bar",
+        "syntax_comment",
+        "syntax_string",
+        "syntax_number",
+        "syntax_keyword",
+        "syntax_markup",
     ];
     keys.extend(TOOL_KEYS);
     keys.extend(GAUGE_KEYS);
@@ -609,6 +654,13 @@ impl Config {
         let name = canonical(key);
         match name {
             "opacity" => set(&mut self.opacity, number(value).map(|n| n.clamp(0.05, 1.0))),
+            // Down to nothing, unlike the panels': the empty space has no text
+            // in it, so a window whose gaps are fully see-through is still a
+            // window that can be read.
+            "window_opacity" => set(
+                &mut self.window_opacity,
+                number(value).map(|n| n.clamp(0.0, 1.0)),
+            ),
             "font_size" => set(&mut self.font_size, number(value).map(|n| n.clamp(8.0, 40.0))),
             "pane_font_size" => set(
                 &mut self.pane_font_size,
@@ -832,6 +884,75 @@ pub fn write_setting(path: &Path, key: &str, value: Option<&str>) -> Result<(), 
     replace_file(path, &next)
 }
 
+/// Comment out every live line the listed keys own, in one pass.
+///
+/// The unset half of [`write_setting`], for several keys at once and without
+/// its error when there was nothing to unset: this is what "put it back to the
+/// default" means in this format, since a key with no live line falls back to
+/// [`Config::default`] on the next parse and the sentence documenting the line
+/// survives as a comment. Writing the defaults out as values instead would put
+/// thirty seven live colours in the file and make `theme` a no-op forever.
+///
+/// One read and one rename however many keys are handed in, and no write at all
+/// when the file carries none of them. A key nothing wrote is not an error here:
+/// the caller is asking for a state, not for a line to be edited.
+pub fn clear_settings(path: &Path, keys: &[&str]) -> Result<(), String> {
+    let wanted: Vec<String> = keys
+        .iter()
+        .map(|key| canonical(key.trim()).to_ascii_lowercase())
+        .collect();
+    let old = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        // Nothing set is already the state being asked for.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    let mut cleared = false;
+    let lines: Vec<String> = old
+        .lines()
+        .map(|line| {
+            let live = split(line)
+                .is_some_and(|(key, ..)| wanted.iter().any(|want| *want == canonical(&key)));
+            match live {
+                true => {
+                    cleared = true;
+                    format!("# {}", line.trim_end())
+                }
+                false => line.to_string(),
+            }
+        })
+        .collect();
+    if !cleared {
+        return Ok(());
+    }
+    let mut next = lines.join("\n");
+    if !next.is_empty() {
+        next.push('\n');
+    }
+    replace_file(path, &next)
+}
+
+/// Put the file on one theme, and take the colours that were overriding it out
+/// of the way.
+///
+/// Two things, because one of them alone does nothing: `theme = <name>` lands
+/// the way any other setting does, and every live colour line is commented out
+/// first, since [`Config::parse`] applies explicit keys on top of the preset. A
+/// file carrying `accent` through `bar` from an older build answers a theme
+/// change with the same window in a different name, which is exactly what it
+/// did.
+///
+/// Everything else in the file is left alone: the comments, the sizes, the
+/// dividers, and any line this build has never heard of.
+pub fn pick_theme(path: &Path, name: &str) -> Result<(), String> {
+    if theme(name).is_none() {
+        return Err(format!("theme must be one of {}", THEMES.join(", ")));
+    }
+    let keys = colour_keys();
+    clear_settings(path, &keys)?;
+    write_setting(path, "theme", Some(name))
+}
+
 /// Put `text` in the file, by rename, keeping the permissions the old file had.
 ///
 /// Extracted from the settings writer because every other file the window keeps
@@ -962,6 +1083,11 @@ const DEFAULT_FILE: &str = "\
 # your desktop through the reading surface. Below about 60% a busy wallpaper
 # starts competing with the text; that is a taste call, not a bug.
 opacity = 90%
+
+# How solid the window itself is: the empty space around and between the panes,
+# where nothing is drawn. Its own setting, so the space can go to glass while
+# the panes you are reading stay solid. 0% shows the desktop through every gap.
+window_opacity = 50%
 
 font_size = 14          # the conversation
 pane_font_size = 13     # the activity, plan, agents and file panes
@@ -1195,7 +1321,7 @@ mod tests {
         for key in keys() {
             assert!(named.contains(&key.to_string()), "{key} is undocumented");
         }
-        assert_eq!(keys().len(), 49, "a new key needs a line in the file");
+        assert_eq!(keys().len(), 50, "a new key needs a line in the file");
     }
 
     /// The commented colors are the noob theme spelled out. A stale hex there
@@ -1554,6 +1680,7 @@ mod tests {
     fn colours(config: &Config) -> Vec<(&'static str, Vec<u8>)> {
         let Config {
             opacity: _,
+            window_opacity: _,
             font_size: _,
             pane_font_size: _,
             prompt_rows: _,
@@ -1912,6 +2039,135 @@ mod tests {
             write_setting(&scratch.conf(), "opacity", None),
             Err("opacity is not set; nothing to unset".to_string())
         );
+    }
+
+    /// Picking a theme has to reach the window, and on a file carrying colours
+    /// of its own it only does that if those lines go.
+    ///
+    /// This is Hector's file: the one adopted from CLIppy, with eight live
+    /// colour lines equal to the matrix palette and `theme = noob-matrix` under
+    /// them. Every preset he picked wrote the theme line, the eight lines then
+    /// landed on top of it, and the window stayed green while the panel read the
+    /// palette back as `custom`, which is what "themes are only 2 custom and
+    /// noob" was.
+    #[test]
+    fn picking_a_theme_takes_the_colours_that_were_overriding_it_out_of_the_way() {
+        let scratch = Scratch::new("pick-theme");
+        let his = "\
+# CLIppy settings
+accent = #7cd894
+text   = #9ad6ac
+dim    = #58966e
+bright = #cefadb
+good   = #74d194
+bad    = #e87a6c
+panel  = #000000
+bar    = #0e2e1e
+theme = noob-matrix
+font_size = 15
+something_else = keep me
+";
+        std::fs::write(scratch.conf(), his).unwrap();
+        pick_theme(&scratch.conf(), "noob-cool").unwrap();
+
+        let after = scratch.read();
+        let config = Config::parse(&after);
+        let cool = theme("noob-cool").expect("the preset");
+        assert_eq!(config.accent, cool.accent, "the window is still green");
+        assert_eq!(config.panel, cool.panel);
+        assert_eq!(config.bar, cool.bar);
+        assert_eq!(config.text, cool.text);
+
+        // What it wrote: the theme line, and every colour line commented out
+        // where it stood. Nothing else in the file moved.
+        assert!(after.contains("theme = noob-cool"), "{after}");
+        assert!(after.contains("# accent = #7cd894"), "{after}");
+        assert!(after.contains("# bar    = #0e2e1e"), "{after}");
+        assert!(after.starts_with("# CLIppy settings\n"), "{after}");
+        assert!(after.contains("font_size = 15"), "{after}");
+        assert!(after.contains("something_else = keep me"), "{after}");
+        assert_eq!(config.font_size, 15.0);
+
+        // And it is still the file it was: picking again lands the same way.
+        pick_theme(&scratch.conf(), "noob-red").unwrap();
+        let after = scratch.read();
+        assert_eq!(
+            Config::parse(&after).accent,
+            theme("noob-red").expect("the preset").accent
+        );
+        assert_eq!(after.matches("theme = ").count(), 1, "{after}");
+        assert!(scratch.leftovers().is_empty(), "{:?}", scratch.leftovers());
+
+        // A name nothing knows writes nothing at all.
+        assert!(pick_theme(&scratch.conf(), "tangerine").is_err());
+    }
+
+    /// Clearing is the unset half of the writer for a list of keys: one pass,
+    /// one rename, no error for a key that was never set, and the sentences that
+    /// documented the lines still in the file.
+    #[test]
+    fn clearing_keys_comments_them_out_and_leaves_everything_else() {
+        let scratch = Scratch::new("clear");
+        std::fs::write(scratch.conf(), DEFAULT_FILE).unwrap();
+        write_setting(&scratch.conf(), "opacity", Some("30%")).unwrap();
+        write_setting(&scratch.conf(), "accent", Some("#ff0000")).unwrap();
+
+        let keys = ["opacity", "window_opacity", "theme", "accent", "gauge_3"];
+        clear_settings(&scratch.conf(), &keys).unwrap();
+
+        let after = scratch.read();
+        let config = Config::parse(&after);
+        assert_eq!(config, Config::default(), "{after}");
+        assert!(config.unknown.is_empty(), "{:?}", config.unknown);
+        assert!(after.contains("# opacity = 30%"), "{after}");
+        assert!(after.contains("# window_opacity = 50%"), "{after}");
+        assert!(after.contains("# theme = noob-matrix"), "{after}");
+        // The lines the file never had live are left exactly as they were.
+        assert!(after.contains("# gauge_3  = #f5e05a"), "{after}");
+        // Everything not on the list is untouched.
+        assert!(after.contains("font_size = 14"), "{after}");
+        assert!(after.contains("show_files    = true"), "{after}");
+
+        // A second pass has nothing to do and says so by doing nothing.
+        clear_settings(&scratch.conf(), &keys).unwrap();
+        assert_eq!(scratch.read(), after);
+        // A file that is not there is already in the state being asked for.
+        clear_settings(&scratch.0.join("nothing.conf"), &keys).unwrap();
+        assert!(!scratch.0.join("nothing.conf").exists());
+        assert!(scratch.leftovers().is_empty(), "{:?}", scratch.leftovers());
+    }
+
+    /// The colours a theme sets and the colours the file carries are the same
+    /// list. A colour missing from it is a line that would go on overriding
+    /// every preset picked after it.
+    #[test]
+    fn the_colour_keys_are_the_ones_a_theme_sets() {
+        let mut colours = colour_keys();
+        colours.sort_unstable();
+        let mut known: Vec<&str> = keys();
+        known.sort_unstable();
+        for key in &colours {
+            assert!(known.contains(key), "{key} is not a key of the file");
+        }
+        // Every key that holds a colour is on it: a colour is what the parser
+        // reads with `color`, which is every key whose default is three bytes.
+        let default = Config::default();
+        let cool = theme("noob-cool").expect("the preset");
+        let moved: Vec<&str> = keys()
+            .into_iter()
+            .filter(|key| {
+                let mut one = default.clone();
+                let mut two = default.clone();
+                one.apply(key, "#010203");
+                two.apply(key, "#040506");
+                one != two
+            })
+            .collect();
+        for key in &moved {
+            assert!(colours.contains(key), "{key} holds a colour and is not listed");
+        }
+        assert_eq!(colours.len(), moved.len(), "{colours:?} against {moved:?}");
+        assert_ne!(cool.accent, default.accent, "the presets share a palette");
     }
 
     /// The writer refuses anything the reader would refuse, so a written

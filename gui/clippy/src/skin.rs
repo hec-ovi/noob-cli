@@ -200,9 +200,12 @@ impl Skin {
     pub fn from(config: &Config) -> Skin {
         let o = config.opacity;
         Skin {
-            // The reading surface is darkest; everything else lets more of the
-            // desktop through, so the eye lands where the text is.
-            backdrop: rgba(config.panel, o * 0.55),
+            // The empty space around and between the panes, on its own key. It
+            // was 55% of the panels' opacity, which meant the only way to see
+            // more of the desktop through the gaps was to make the text harder
+            // to read. The default is the number that ratio came to, so the
+            // window opens looking exactly as it did.
+            backdrop: rgba(config.panel, config.window_opacity),
             bar: rgba(config.bar, (o + 0.25).min(1.0)),
             panel: rgba(config.panel, o * 0.86),
             strip: rgba(config.panel, o * 0.97),
@@ -361,19 +364,59 @@ mod tests {
 
     /// Turning the opacity down must move every fill together, or the layering
     /// inverts halfway down the range.
+    ///
+    /// Written against one key, when the backdrop was 55% of it. The window's
+    /// empty space is its own key now, so the two move together here: the fills
+    /// with text on them are one setting, the space around them is the other,
+    /// and the order still holds all the way down.
     #[test]
     fn opacity_scales_the_whole_stack_and_keeps_its_order() {
         let ghost = Skin::from(&Config {
             opacity: 0.2,
+            window_opacity: 0.1,
             ..Config::default()
         });
         let solid = Skin::from(&Config {
             opacity: 1.0,
+            window_opacity: 0.55,
             ..Config::default()
         });
         assert!(ghost.panel[3] < solid.panel[3]);
         assert!(ghost.backdrop[3] < ghost.panel[3], "order survives");
         assert!(solid.backdrop[3] < solid.panel[3]);
+    }
+
+    /// The window's own opacity moves the empty space and nothing else: the
+    /// panes, the bars and the menus are the other setting.
+    ///
+    /// "another opacity should be present in settings which is the window
+    /// itself the empty spaces of noob". One rect is painted over the whole
+    /// window under everything else, and this is the alpha it carries.
+    #[test]
+    fn the_windows_own_opacity_moves_the_empty_space_and_nothing_else() {
+        let glass = Skin::from(&Config {
+            window_opacity: 0.0,
+            ..Config::default()
+        });
+        let solid = Skin::from(&Config {
+            window_opacity: 1.0,
+            ..Config::default()
+        });
+        assert_eq!(glass.backdrop[3], 0.0, "the desktop does not show through");
+        assert_eq!(solid.backdrop[3], 1.0);
+        // Everything with words on it stayed exactly where it was.
+        let same = Skin::default();
+        for (a, b) in [
+            (glass.panel, solid.panel),
+            (glass.bar, solid.bar),
+            (glass.strip, solid.strip),
+            (glass.input, solid.input),
+            (glass.menu, solid.menu),
+        ] {
+            assert_eq!(a, b, "a surface with text on it followed the empty space");
+        }
+        assert_eq!(same.backdrop[3], 0.50, "the default is what it always was");
+        assert_eq!(same.backdrop[3], Config::default().window_opacity);
     }
 
     #[test]

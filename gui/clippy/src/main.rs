@@ -579,6 +579,7 @@ fn menu_for(
         | Hit::SettingsValue(..)
         | Hit::SettingsSlider(..)
         | Hit::SettingsSwatch(_, _)
+        | Hit::SettingsChoice(..)
         | Hit::SettingsToggle(_)
         | Hit::SettingsRemove(_)
         | Hit::SettingsPick(..)
@@ -1643,8 +1644,17 @@ impl App {
             // arms it and the second takes what is marked, which is the two
             // presses the button itself takes.
             Key::Named(NamedKey::Delete) => {
-                if let Some((index, _)) = table {
-                    forget = Some(index);
+                let card = panel.row(panel.cursor()).is_some_and(|row| {
+                    matches!(row, settings::Row::Card(card)
+                        if card.does.is_some_and(settings::Doing::dangerous))
+                });
+                match (table, card) {
+                    (Some((index, _)), _) => forget = Some(index),
+                    // The restore under the palette, from the keyboard: the
+                    // same two presses the button takes, on the key everything
+                    // destructive on this panel is on.
+                    (None, true) if panel.on_row() => forget = Some(panel.cursor()),
+                    _ => {}
                 }
             }
             _ => {}
@@ -1765,6 +1775,14 @@ impl App {
             self.dirty = true;
             return;
         }
+        // Restoring is the other deed that is not the agent's: it writes the
+        // window's own settings file, and what comes back is a whole Config
+        // rather than an Ok, so it lands where a nudged setting lands instead of
+        // going through the agent read below.
+        if let settings::Deed::RestoreLooks = &deed {
+            self.restore_looks();
+            return;
+        }
         let panel = match self.settings.as_ref() {
             Some(panel) => panel,
             None => return,
@@ -1791,9 +1809,10 @@ impl App {
             // The path came off the block that offered it, which read it off the
             // agent's own config directory: nothing here spells one out.
             settings::Deed::StartInstructions { path } => agent::start_instructions(path),
-            // Handled above, because a set of them cannot answer with one
-            // result: some of it can land and the rest fail.
-            settings::Deed::ForgetSessions { .. } => Ok(()),
+            // Both handled above: a set of conversations cannot answer with one
+            // result, since some of it can land and the rest fail, and a
+            // restore writes the window's own file rather than the agent's.
+            settings::Deed::ForgetSessions { .. } | settings::Deed::RestoreLooks => Ok(()),
         };
         match done {
             Ok(()) => {
@@ -1801,6 +1820,38 @@ impl App {
                 let config = self.config.clone();
                 if let Some(panel) = self.settings.as_mut() {
                     panel.adopt_agent(agent, &config);
+                }
+            }
+            Err(why) => {
+                if let Some(panel) = self.settings.as_mut() {
+                    panel.say_trouble(why);
+                }
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Take every appearance line out of the settings file, and apply the file
+    /// that is left.
+    ///
+    /// The same path a nudged setting takes, with a writer that comments lines
+    /// out instead of writing one: the whole file is read back, the window is
+    /// restyled from it, and the panel rebuilds off the Config that came out of
+    /// it. So the sizes, the transparency and the palette all go at once and the
+    /// next launch reads the same window this one is now showing.
+    fn restore_looks(&mut self) {
+        let Some(path) = self.settings_path() else {
+            if let Some(panel) = self.settings.as_mut() {
+                panel.say_trouble(String::from("there is no home directory to write settings in"));
+            }
+            self.dirty = true;
+            return;
+        };
+        match settings::restore(&path) {
+            Ok(config) => {
+                self.adopt(config);
+                if let Some(panel) = self.settings.as_mut() {
+                    panel.refresh(&self.config);
                 }
             }
             Err(why) => {
@@ -1869,6 +1920,23 @@ impl App {
             // the pointer while the button is down and the fraction it was left
             // at is written when the button comes up.
             Hit::SettingsRailDivider => self.sizing = Some(hit),
+            // One option of a choice. It writes that option rather than the
+            // next one along: the options are all on screen, so pressing the
+            // one wanted is the whole gesture. The theme goes through the same
+            // writer the arrow keys use, which is what clears the colour lines
+            // that were overriding it.
+            Hit::SettingsChoice(index, side, at) => {
+                let change = match self.settings.as_mut() {
+                    Some(panel) => {
+                        self.dirty |= panel.point_at(index, side);
+                        panel.choose_option(index, side, at)
+                    }
+                    None => None,
+                };
+                if let Some(change) = change {
+                    self.write_setting(&change);
+                }
+            }
             // A colour on the grid. Nothing is written: the panel says which key
             // in the settings file writes that colour, which is the one thing a
             // block of colour cannot say for itself.
@@ -1929,7 +1997,10 @@ impl App {
                             self.dirty |= panel.mark_all(index, false);
                             None
                         }
-                        view::Act::Forget => panel.uninstall(index),
+                        // Both of these arm on the first press and act on the
+                        // second: one deletes transcripts, the other takes
+                        // lines out of a file somebody may have edited by hand.
+                        view::Act::Forget | view::Act::Restore => panel.uninstall(index),
                         // The install card's own button. Not a deed: a deed is
                         // done here and now, and this is a clone with two
                         // minutes to answer in.
@@ -2662,6 +2733,7 @@ impl App {
             | Hit::SettingsValue(..)
             | Hit::SettingsSlider(..)
             | Hit::SettingsSwatch(_, _)
+            | Hit::SettingsChoice(..)
             | Hit::SettingsToggle(_)
             | Hit::SettingsRemove(_)
             | Hit::SettingsPick(..)

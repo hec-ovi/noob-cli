@@ -236,6 +236,28 @@ pub fn reflow_columns() -> usize {
     FIELD_COLUMNS * 2 + STEP_COLUMNS + CARD_COLUMNS
 }
 
+/// The least one colour of the palette keeps, in columns: the block itself and
+/// the longest thing said beside it ("gtt and generated", "running a command").
+pub const SWATCH_COLUMNS: usize = 22;
+
+/// The most colours that go across, however wide the window is.
+///
+/// A palette read in more columns than this is a wall again: the eye stops
+/// finding a row and starts scanning a field of blocks. Six is where the longest
+/// group (fourteen tools) still comes to three rows.
+pub const SWATCH_ACROSS_MOST: usize = 6;
+
+/// How many colours go across a card body `cols` wide.
+///
+/// The palette was chunked three to a row whatever the window was, because the
+/// model was never handed a width. It is handed one now ([`crate::settings::lines`]
+/// takes the list's columns), so the grid reflows the way a card's fields do:
+/// as many as keep [`SWATCH_COLUMNS`], one at the narrowest, never more than
+/// [`SWATCH_ACROSS_MOST`].
+pub fn swatch_across(cols: usize) -> usize {
+    (cols / SWATCH_COLUMNS).clamp(1, SWATCH_ACROSS_MOST)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +335,26 @@ mod tests {
         assert!(down[1].1 > down[0].1, "the sentence is not a line taller");
         assert!(fields_lines(&hints, 1) > fields_lines(&hints, 2));
         assert_eq!(fields_lines(&[], 2), 0.0, "an empty body claims a band");
+    }
+
+    /// The palette reflows with the window instead of chunking at three
+    /// whatever the width is, and it never goes so wide that a row stops being
+    /// a row.
+    #[test]
+    fn the_palette_goes_as_wide_as_the_card_it_stands_in() {
+        assert_eq!(swatch_across(0), 1, "a card with no width still draws one");
+        assert_eq!(swatch_across(SWATCH_COLUMNS - 1), 1);
+        assert_eq!(swatch_across(SWATCH_COLUMNS), 1);
+        assert_eq!(swatch_across(SWATCH_COLUMNS * 3), 3);
+        assert_eq!(swatch_across(SWATCH_COLUMNS * 40), SWATCH_ACROSS_MOST);
+        // Wider is never narrower, or the grid would jump about as the window
+        // is dragged.
+        let mut was = 0;
+        for cols in 0..400 {
+            let across = swatch_across(cols);
+            assert!(across >= was, "{cols} columns fits fewer than {}", cols - 1);
+            was = across;
+        }
     }
 
     /// Two fields go across only while both keep their columns, and the flip is
