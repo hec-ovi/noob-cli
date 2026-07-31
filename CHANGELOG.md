@@ -3,10 +3,75 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.9.0 - 2026-07-31
+
+NO0B again, from a second round of notes taken while using the 0.8.0 window.
+0.8.0 was never tagged, so a release from 0.7.1 lands both sections at once. The
+CLI's behaviour is unchanged; only its version moved.
+
+### Added
+
+- The first screen leads with one title, OPEN FOLDER OR CONTINUE SESSION, and
+  three buttons: Folders and Sessions choose which list is under it, with the
+  one you are looking at wearing the green band so two buttons cannot look
+  alike, and Open selected at the right edge opens whatever the cursor is on,
+  a folder or a session. The foot Open button, the foot swap and the back arrow
+  it replaces are gone, because four ways to do two things is worse than the
+  problem it solved.
+- The settings AGENT section shows the instructions the agent really gets. Two
+  blocks under the form: the global `AGENTS.md` from the config directory, with
+  its path, and an offer to write a starter file when there is none; and the
+  whole assembled prompt, read by running `noob debug prompt` the way the window
+  runs the agent. They are separate blocks because they are separate things: the
+  file is one layer, and the prompt is that layer plus the base prompt, the
+  environment block, the skills index and the MCP line.
+- Text in the settings document selects with a drag, bands what is under the
+  pointer, and copies with Ctrl-C or from its right click menu.
+- The settings rail wraps into as many columns as it needs, so no section can be
+  hidden by a large font on a small window, and Tab and Shift-Tab walk the
+  sections now that the arrows belong to the rows.
+- Deleting a session asks first, in the settings table and in the picker's right
+  click menu both, since two routes to the same delete should not disagree about
+  whether it is dangerous.
+
+### Changed
+
+- The orb rests as a SQUARE of dots rather than a globe of them, and going into
+  a turn the dots travel from that square out to the orbits they are paired
+  with, rounding off from square to disc as they go, rather than one animation
+  being swapped for another. The working frame itself is untouched.
+- The themes are noob-matrix, noob-cool and noob-red. Matrix is the green the
+  window has always been. A theme sets every colour in the window: the bar, the
+  panel, the accent and the tones the borders are derived from, the tool marks,
+  the code colours and the ten meters. A test now fails when a colour is added
+  to the window and a theme does not set it, because the hole that let the
+  meters stay green in a red window was silent. A theme name an older build
+  wrote still loads and lands on the nearest of the three.
+- The palette block opens with the theme control and one line naming the theme
+  that set the swatches under it, and each group is titled by what it paints
+  (the window's own tones, the code colours, the tool marks, the meters) rather
+  than by its config key. The ten meter swatches say which reading wears each
+  one.
+- The settings sessions list is a data grid: a banded header naming every
+  column, numbers reading down the right edge of their columns, a full row band
+  on the row you are on, and a delete column that asks before it acts. The
+  panel's heading says SAVED CONVERSATIONS rather than repeating the rail's word.
+- A skill or a server is three lines with its controls clear of the panel edge,
+  its description wrapped onto as many rows as it needs rather than cut with an
+  ellipsis, and the document beside it is titled, boxed, wrapped and scrolled.
+- A tab is thin down both sides, bold down its cut corner and open along its
+  foot. The foot line 0.8.0 added is gone, and a pane's cut corner is bold too.
+- The prompt is fixed at the number of rows it is set to, empty or full, and
+  the panes keep a floor under them so a tall prompt gives room back rather
+  than taking the last of it.
+- Opacity starts at 0.9.
+- No gesture collapses a pane. A click on a tab shows that tab and nothing else.
+
 ## 0.8.0 - 2026-07-31
 
-All of this is NO0B, the GPU window, driven by a session's worth of notes from
-using it. The CLI's behaviour is unchanged; only its version moved.
+Never tagged; its contents ship as part of 0.9.0. All of this is NO0B, the GPU
+window, driven by a session's worth of notes from using it. The CLI's behaviour
+is unchanged; only its version moved.
 
 ### Added
 
