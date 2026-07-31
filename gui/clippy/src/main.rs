@@ -433,6 +433,8 @@ fn menu_for(
         | Hit::SettingsValue(_)
         | Hit::SettingsSlider(_)
         | Hit::SettingsSwatch(_, _)
+        | Hit::SettingsToggle(_)
+        | Hit::SettingsRemove(_)
         | Hit::SettingsClose => None,
         // A divider is the gap between two widgets and belongs to neither of
         // them, so there is no one widget for a menu opened here to act on.
@@ -1086,6 +1088,7 @@ impl App {
         }
         let mut nudge = None;
         let mut edit = false;
+        let mut flip = None;
         match event.logical_key.as_ref() {
             Key::Named(NamedKey::Escape) => {
                 self.close_settings();
@@ -1103,19 +1106,23 @@ impl App {
             // readings would otherwise be a place the keyboard cannot leave
             // without the pointer.
             Key::Named(NamedKey::ArrowLeft) => match panel.on_row() {
-                true => nudge = Some(false),
+                true => match panel.row(panel.cursor()) {
+                    // An entry has two states, so either arrow means the other
+                    // one, the way a flag does.
+                    Some(settings::Row::Entry(_)) => flip = Some(panel.cursor()),
+                    _ => nudge = Some(false),
+                },
                 false => self.dirty |= panel.leave(),
             },
             // Right goes into the section from the rail, and nudges inside it.
-            // Enter is the same, except on the endpoint, where it starts typing.
+            // Enter is the same, except on the endpoint, where it starts typing,
+            // and on an entry, where it turns the thing on or off.
             Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Enter) => {
                 if !panel.enter() {
-                    match matches!(
-                        panel.row(panel.cursor()),
-                        Some(settings::Row::Field { .. })
-                    ) {
-                        true => edit = true,
-                        false => nudge = Some(true),
+                    match panel.row(panel.cursor()) {
+                        Some(settings::Row::Field { .. }) => edit = true,
+                        Some(settings::Row::Entry(_)) => flip = Some(panel.cursor()),
+                        _ => nudge = Some(true),
                     }
                 }
                 self.dirty = true;
@@ -1132,6 +1139,10 @@ impl App {
         }
         if edit {
             self.dirty |= panel.edit();
+        }
+        if let Some(index) = flip {
+            let deed = self.settings.as_ref().and_then(|panel| panel.toggle(index));
+            self.do_deed(deed);
         }
         if let Some(forward) = nudge {
             self.change_setting(forward);
@@ -1168,6 +1179,56 @@ impl App {
     /// the panel shows next is what the file answered.
     fn write_agent_setting(&mut self, path: &Path, key: &str, value: &str) {
         match settings::write_endpoint(path, key, value) {
+            Ok(()) => {
+                let agent = self.read_agent();
+                let config = self.config.clone();
+                if let Some(panel) = self.settings.as_mut() {
+                    panel.adopt_agent(agent, &config);
+                }
+            }
+            Err(why) => {
+                if let Some(panel) = self.settings.as_mut() {
+                    panel.say_trouble(why);
+                }
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Do what a press on an entry's toggle or its uninstall asked for, and read
+    /// the agent's files back.
+    ///
+    /// The same rule every other write on this panel goes through: the disk is
+    /// changed, the whole of the agent is read again, and what the panel shows
+    /// next is what came back off the disk. So a skill's row says on or off
+    /// because its directory is where it is, never because a press was
+    /// remembered, and a move that failed leaves the row exactly as it was with
+    /// the reason on the footer.
+    fn do_deed(&mut self, deed: Option<settings::Deed>) {
+        let Some(deed) = deed else {
+            return;
+        };
+        let panel = match self.settings.as_ref() {
+            Some(panel) => panel,
+            None => return,
+        };
+        let done = match &deed {
+            settings::Deed::TurnSkill { dir, on } => match panel.skills_at() {
+                Some(at) => agent::set_skill(at, dir, *on),
+                None => Err(String::from("there is no skills directory to move it in")),
+            },
+            settings::Deed::RemoveSkill { dir, on } => match panel.skills_at() {
+                Some(at) => agent::remove_skill(at, dir, *on),
+                None => Err(String::from("there is no skills directory to remove it from")),
+            },
+            settings::Deed::TurnServer { name, project, on } => {
+                match panel.mcp_file(*project) {
+                    Some(path) => agent::set_server(path, name, *on),
+                    None => Err(String::from("there is no file to write that server in")),
+                }
+            }
+        };
+        match done {
             Ok(()) => {
                 let agent = self.read_agent();
                 let config = self.config.clone();
@@ -1238,6 +1299,29 @@ impl App {
                 if let Some(panel) = self.settings.as_mut() {
                     self.dirty |= panel.pick(index, cell);
                 }
+            }
+            // The toggle on a skill or a server, and the uninstall beside it.
+            // Both put the cursor on the row first, so what the panel says at
+            // the bottom is about the row that was just acted on.
+            Hit::SettingsToggle(index) => {
+                let deed = match self.settings.as_mut() {
+                    Some(panel) => {
+                        self.dirty |= panel.point_at(index);
+                        panel.toggle(index)
+                    }
+                    None => None,
+                };
+                self.do_deed(deed);
+            }
+            Hit::SettingsRemove(index) => {
+                let deed = match self.settings.as_mut() {
+                    Some(panel) => {
+                        self.dirty |= panel.point_at(index);
+                        panel.uninstall(index)
+                    }
+                    None => None,
+                };
+                self.do_deed(deed);
             }
             // The panel's own margin. Swallowed: it covers the window, so a
             // press here has nothing behind it to reach.
@@ -1909,12 +1993,14 @@ impl App {
             | Hit::PickerBack
             | Hit::PickerSessions
             | Hit::Picker => {}
-            // The same for the seven the settings panel owns.
+            // The same for the nine the settings panel owns.
             Hit::SettingsSection(_)
             | Hit::SettingsRow(_)
             | Hit::SettingsValue(_)
             | Hit::SettingsSlider(_)
             | Hit::SettingsSwatch(_, _)
+            | Hit::SettingsToggle(_)
+            | Hit::SettingsRemove(_)
             | Hit::SettingsRailDivider
             | Hit::SettingsClose
             | Hit::Settings => {}
@@ -2595,10 +2681,22 @@ impl App {
         // And the same for the settings panel, which is the only thing on screen
         // while it is up.
         if self.settings.is_some() {
-            let rows = layout.settings_capacity(self.config.pane_font_size);
+            // Over the column beside the entry list, the wheel moves that
+            // document rather than the list: the pointer is on the thing being
+            // scrolled, which is what every two-column view in this window does.
+            let doc = layout.settings_doc;
+            let on_doc = doc.w >= 1.0
+                && doc.contains(self.cursor.x as f32, self.cursor.y as f32);
+            let rows = match on_doc {
+                true => layout.rows(doc, self.config.pane_font_size),
+                false => layout.settings_capacity(self.config.pane_font_size),
+            };
             let by = ((rows as f32 * pages.abs()).round() as usize).max(1);
             if let Some(panel) = self.settings.as_mut() {
-                self.dirty |= panel.scroll(by, pages < 0.0, rows);
+                self.dirty |= match on_doc {
+                    true => panel.scroll_doc(by, pages < 0.0, rows),
+                    false => panel.scroll(by, pages < 0.0, rows),
+                };
             }
             return;
         }
@@ -2904,6 +3002,8 @@ impl ApplicationHandler<Wake> for App {
                         | Hit::SettingsSection(_)
                         | Hit::SettingsSlider(_)
                         | Hit::SettingsSwatch(_, _)
+                        | Hit::SettingsToggle(_)
+                        | Hit::SettingsRemove(_)
                         | Hit::SettingsValue(_)),
                     ) => Some(hit),
                     _ => None,

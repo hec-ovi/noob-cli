@@ -24,6 +24,33 @@ use std::path::{Path, PathBuf};
 /// whole skill to print its one line description is work nobody asked for.
 const SKILL_HEAD_BYTES: u64 = 16 * 1024;
 
+/// How much of a `SKILL.md` is read for the column that shows the skill itself.
+/// The whole document this time, up to a size no skill anybody wrote is: a
+/// pane cannot show a megabyte of prose and reading one to draw forty lines is
+/// work nobody asked for either.
+const SKILL_BODY_BYTES: u64 = 256 * 1024;
+
+/// What is on the end of the directory a turned-off skill is moved to.
+///
+/// The agent has no idea of a skill being off. It discovers `<ws>/.noob/skills`,
+/// `<ws>/.claude/skills`, `<ws>/.agents/skills` and `<config>/skills`, plus each
+/// entry of `NOOB_SKILL_PATHS` as one directory, and a skill is on when its
+/// directory is in one of those and off when it is not. So off is a move: the
+/// directory goes to a sibling of the skills directory with this on the end of
+/// its name, which is not any of those roots, and comes back the same way.
+/// Reversible, visible in a file manager, and nothing in the agent had to learn
+/// a new concept for it.
+pub const OFF: &str = ".off";
+
+/// Where the file keeps the servers that are configured but turned off.
+///
+/// A sibling of `servers` in the same `mcp.json`. The CLI's loader reads
+/// `parsed.get("servers")` and nothing else off the top level, so an entry
+/// moved in here is one the next session does not connect to, and its writer
+/// (`add_server`/`remove_server`) parses the whole file into a value and writes
+/// it back, so this key survives anything the CLI does to that file.
+pub const DISABLED: &str = "disabled";
+
 /// How much of an `mcp.json` is read. These files are a handful of entries; a
 /// gigabyte of JSON where one was expected is a mistake, not a configuration.
 const MCP_BYTES: u64 = 1024 * 1024;
@@ -242,7 +269,8 @@ fn rewritten(line: &str, key: &str, value: &str) -> String {
     format!("{key}={value}{spacer}{trailer}")
 }
 
-/// One skill installed under `skills/`.
+/// One skill installed under `skills/`, or under the sibling directory a
+/// turned-off one is moved to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Skill {
     /// The directory it lives in, which is what the agent loads it by.
@@ -253,15 +281,33 @@ pub struct Skill {
     /// What its front matter says it is for, on one line. Empty when there is
     /// no description to read.
     pub about: String,
+    /// The repository its front matter records, when it records one.
+    ///
+    /// Nothing on disk records where an installed skill came from: the CLI's
+    /// skill model is name, description and two paths, its git installer
+    /// deletes the clone it staged and copies without `.git`, and neither skill
+    /// this repo ships carries the key. So this is read where a skill's author
+    /// wrote one and is nothing for every skill nobody did, which is why the
+    /// panel says the directory it was found in instead.
+    pub repo: Option<String>,
+    /// Where it is on disk.
+    pub path: PathBuf,
+    /// Whether the agent would load it: true in the skills directory, false in
+    /// the [`OFF`] sibling beside it. Read off the disk every time, never
+    /// remembered: the directory it is in is the whole of the state.
+    pub on: bool,
+    /// Its `SKILL.md` with the front matter taken off, one line per line, which
+    /// is what the panel shows beside the list.
+    pub doc: Vec<String>,
 }
 
-/// Every skill directory under `at`, by directory name.
+/// Every skill directory under `at`, by directory name, marked `on` or not.
 ///
 /// A directory with no `SKILL.md`, or one whose front matter is missing or
 /// unreadable, is still a skill: it is installed, the agent will find it, and
 /// leaving it off this list would say it is not there. It falls back to its
 /// directory name.
-pub fn read_skills(at: &Path) -> Vec<Skill> {
+pub fn read_skills(at: &Path, on: bool) -> Vec<Skill> {
     let Ok(entries) = std::fs::read_dir(at) else {
         return Vec::new();
     };
@@ -276,10 +322,16 @@ pub fn read_skills(at: &Path) -> Vec<Skill> {
         if dir.starts_with('.') {
             continue;
         }
-        let (name, about) = front_matter(&entry.path().join("SKILL.md"));
+        let path = entry.path();
+        let file = path.join("SKILL.md");
+        let (name, about, repo) = front_matter(&file);
         out.push(Skill {
             name: name.unwrap_or_else(|| dir.clone()),
             about: about.unwrap_or_default(),
+            repo,
+            doc: skill_doc(&file),
+            path,
+            on,
             dir,
         });
     }
@@ -287,22 +339,142 @@ pub fn read_skills(at: &Path) -> Vec<Skill> {
     out
 }
 
-/// The `name` and `description` out of a skill's front matter.
+/// Where a turned-off skill lives: beside the skills directory, named the same
+/// with [`OFF`] on the end.
+pub fn skills_off(skills_at: &Path) -> PathBuf {
+    let mut name = skills_at
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .unwrap_or_else(|| std::ffi::OsString::from("skills"));
+    name.push(OFF);
+    skills_at.with_file_name(name)
+}
+
+/// One skill directory inside one of those two roots, or why it is not one.
+///
+/// The guard in front of every move and every delete, and it is deliberately
+/// narrow. `dir` has to be one plain directory name, so nothing built from it
+/// can walk out of the root with `..` or a path of its own; the thing at that
+/// name has to be a real directory and not a symlink, so nothing can be moved
+/// or deleted through a link; and the directory's own canonical path has to sit
+/// directly inside the canonical root, which is what a link in the root itself
+/// or anywhere above it cannot get past. The CLI's own remove has the same
+/// shape and refuses every directory this window lists, which is why this is
+/// written here rather than sent there.
+fn skill_at(root: &Path, dir: &str) -> Result<PathBuf, String> {
+    if dir.is_empty()
+        || dir.starts_with('.')
+        || dir.contains('/')
+        || dir.contains('\\')
+        || Path::new(dir).components().count() != 1
+    {
+        return Err(format!("{dir:?} is not the name of a skill directory"));
+    }
+    let path = root.join(dir);
+    let kind = std::fs::symlink_metadata(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?
+        .file_type();
+    if kind.is_symlink() {
+        return Err(format!("{} is a link, not a skill", path.display()));
+    }
+    if !kind.is_dir() {
+        return Err(format!("{} is not a directory", path.display()));
+    }
+    let root_real = std::fs::canonicalize(root)
+        .map_err(|e| format!("cannot read {}: {e}", root.display()))?;
+    let real =
+        std::fs::canonicalize(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    if real.parent() != Some(root_real.as_path()) {
+        return Err(format!(
+            "{} is not inside {}",
+            real.display(),
+            root_real.display()
+        ));
+    }
+    Ok(path)
+}
+
+/// Turn one skill on or off, which is a move between the skills directory and
+/// the [`OFF`] sibling beside it. `on` is the state it should end in.
+pub fn set_skill(skills_at: &Path, dir: &str, on: bool) -> Result<(), String> {
+    let off = skills_off(skills_at);
+    let (from_root, to_root) = match on {
+        true => (off.as_path(), skills_at),
+        false => (skills_at, off.as_path()),
+    };
+    let from = skill_at(from_root, dir)?;
+    std::fs::create_dir_all(to_root)
+        .map_err(|e| format!("cannot create {}: {e}", to_root.display()))?;
+    let to = to_root.join(dir);
+    if std::fs::symlink_metadata(&to).is_ok() {
+        return Err(format!("{} is already there", to.display()));
+    }
+    std::fs::rename(&from, &to).map_err(|e| {
+        format!(
+            "cannot move {} to {}: {e}",
+            from.display(),
+            to.display()
+        )
+    })
+}
+
+/// Delete one skill directory. `on` says which of the two roots it is in now.
+///
+/// The only thing in this window that deletes anything, so it goes through
+/// [`skill_at`] and nothing else does the arithmetic: no path this cannot name
+/// is ever handed to `remove_dir_all`.
+pub fn remove_skill(skills_at: &Path, dir: &str, on: bool) -> Result<(), String> {
+    let root = match on {
+        true => skills_at.to_path_buf(),
+        false => skills_off(skills_at),
+    };
+    let path = skill_at(&root, dir)?;
+    std::fs::remove_dir_all(&path).map_err(|e| format!("cannot remove {}: {e}", path.display()))
+}
+
+/// A skill's own document: its `SKILL.md` with the front matter block taken
+/// off, since that block is what the name and the description on the row beside
+/// it already say.
+fn skill_doc(path: &Path) -> Vec<String> {
+    let Some(text) = head_of(path, SKILL_BODY_BYTES) else {
+        return Vec::new();
+    };
+    let mut lines = text.lines();
+    let mut out: Vec<String> = Vec::new();
+    match lines.next() {
+        None => return out,
+        Some(first) if first.trim() == "---" => {
+            for line in lines.by_ref() {
+                if line.trim() == "---" {
+                    break;
+                }
+            }
+        }
+        Some(first) => out.push(first.to_string()),
+    }
+    out.extend(lines.map(str::to_string));
+    while out.first().is_some_and(|line| line.trim().is_empty()) {
+        out.remove(0);
+    }
+    out
+}
+
+/// The `name`, `description` and `repo` out of a skill's front matter.
 ///
 /// The front matter is the block between the first `---` line and the next one.
 /// Both YAML scalar shapes a description is written in are read: the value on
 /// the same line, and a folded block (`>-`, `>`, `|`) whose indented lines
 /// follow it. Nothing else about YAML is understood, and nothing else is
-/// needed: two keys off the top of a file is not a reason to carry a parser.
-fn front_matter(path: &Path) -> (Option<String>, Option<String>) {
+/// needed: three keys off the top of a file is not a reason to carry a parser.
+fn front_matter(path: &Path) -> (Option<String>, Option<String>, Option<String>) {
     let Some(text) = head_of(path, SKILL_HEAD_BYTES) else {
-        return (None, None);
+        return (None, None, None);
     };
     let mut lines = text.lines();
     if lines.next().map(str::trim) != Some("---") {
-        return (None, None);
+        return (None, None, None);
     }
-    let (mut name, mut about) = (None, None);
+    let (mut name, mut about, mut repo) = (None, None, None);
     let mut folding: Option<&mut Option<String>> = None;
     for line in lines {
         if line.trim() == "---" {
@@ -331,6 +503,7 @@ fn front_matter(path: &Path) -> (Option<String>, Option<String>) {
         let slot = match key.trim() {
             "name" => &mut name,
             "description" => &mut about,
+            "repo" => &mut repo,
             _ => continue,
         };
         let value = value.trim();
@@ -340,7 +513,8 @@ fn front_matter(path: &Path) -> (Option<String>, Option<String>) {
         }
         *slot = Some(value.trim_matches(['"', '\'']).to_string());
     }
-    (name.filter(|it| !it.is_empty()), about.filter(|it| !it.is_empty()))
+    let said = |it: Option<String>| it.filter(|it: &String| !it.is_empty());
+    (said(name), said(about), said(repo))
 }
 
 /// The head of a file as text, or nothing when it cannot be read. Lossy, since
@@ -366,6 +540,12 @@ pub struct Server {
     /// project file wins per server, so this is why a global entry is not the
     /// one in use.
     pub project: bool,
+    /// Whether the agent would connect to it: true under `servers`, false under
+    /// the [`DISABLED`] sibling in the same file. Read off the file every time.
+    pub on: bool,
+    /// The entry exactly as the file carries it, pretty printed, which is what
+    /// the panel shows beside the list.
+    pub entry: String,
 }
 
 /// The MCP servers configured for one workspace, and where they were read from.
@@ -428,20 +608,33 @@ pub fn read_mcp(config_dir: Option<&Path>, workspace: Option<&Path>) -> Mcp {
             ));
             continue;
         };
-        for (name, entry) in map {
-            match how_of(entry) {
-                Some(how) => {
-                    mcp.servers.retain(|server| server.name != *name);
-                    mcp.servers.push(Server {
-                        name: name.clone(),
-                        how,
-                        project,
-                    });
+        // The servers the agent would connect to, then the ones this window
+        // moved out of its way. The second key is not the CLI's: its loader
+        // reads `servers` and nothing else, which is exactly what makes an
+        // entry in there an entry that is off.
+        let off = parsed.get(DISABLED).and_then(serde_json::Value::as_object);
+        for (map, on) in [(Some(map), true), (off, false)] {
+            let Some(map) = map else {
+                continue;
+            };
+            for (name, entry) in map {
+                match how_of(entry) {
+                    Some(how) => {
+                        mcp.servers.retain(|server| server.name != *name);
+                        mcp.servers.push(Server {
+                            name: name.clone(),
+                            how,
+                            project,
+                            on,
+                            entry: serde_json::to_string_pretty(entry)
+                                .unwrap_or_else(|_| entry.to_string()),
+                        });
+                    }
+                    None => mcp.trouble.push(format!(
+                        "{name} in {} has neither a url nor a command",
+                        path.display()
+                    )),
                 }
-                None => mcp.trouble.push(format!(
-                    "{name} in {} has neither a url nor a command",
-                    path.display()
-                )),
             }
         }
     }
@@ -472,6 +665,49 @@ fn how_of(entry: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// Turn one server on or off, by moving its entry between `servers` and the
+/// [`DISABLED`] object beside it in the same file. `on` is the state it should
+/// end in.
+///
+/// The entry is moved whole and nothing else in the file is touched: the file
+/// is parsed, one key changes object, and the whole value is written back, so
+/// every other server, every `timeout_s` and anything the CLI keeps in there
+/// that this window has never heard of comes back out unchanged. The write goes
+/// through the same rename the settings file goes through, so a crash mid-write
+/// cannot leave half an `mcp.json`.
+pub fn set_server(path: &Path, name: &str, on: bool) -> Result<(), String> {
+    if name.is_empty() {
+        return Err(String::from("a server has to have a name"));
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut root: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("{} is not valid JSON ({e}); fix it first", path.display()))?;
+    let (from, to) = match on {
+        true => (DISABLED, "servers"),
+        false => ("servers", DISABLED),
+    };
+    let Some(object) = root.as_object_mut() else {
+        return Err(format!("{} is not a JSON object", path.display()));
+    };
+    let entry = object
+        .get_mut(from)
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|map| map.remove(name))
+        .ok_or_else(|| format!("{name} is not in {:?} in {}", from, path.display()))?;
+    let into = object
+        .entry(to)
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(into) = into.as_object_mut() else {
+        return Err(format!("{:?} in {} is not an object", to, path.display()));
+    };
+    into.insert(name.to_string(), entry);
+    let mut text = serde_json::to_string_pretty(&root)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    text.push('\n');
+    crate::config::replace_file(path, &text)
+}
+
 /// Everything the panel says about the agent, read once when the panel opens.
 ///
 /// A snapshot rather than a live view: the panel is a takeover that is up for a
@@ -487,7 +723,8 @@ pub struct Agent {
     pub env_exists: bool,
     /// Every active assignment in it, in file order.
     pub env: Vec<(String, String)>,
-    /// Where the skills live, and what is installed there.
+    /// Where the skills live, and what is installed there. The list carries the
+    /// turned-off ones as well, out of the [`OFF`] sibling of that directory.
     pub skills_at: Option<PathBuf>,
     pub skills: Vec<Skill>,
     pub mcp: Mcp,
@@ -523,13 +760,24 @@ impl Agent {
         sessions: crate::sessions::Listing,
     ) -> Agent {
         let env_path = dir.map(|dir| dir.join(".env"));
+        let skills_at = dir.map(|dir| dir.join("skills"));
         Agent {
             env_exists: env_path.as_deref().is_some_and(Path::is_file),
             env: env_path.as_deref().map(read_env).unwrap_or_default(),
-            skills: dir
-                .map(|dir| read_skills(&dir.join("skills")))
+            // Both roots, in one list: a skill that has been turned off is still
+            // installed, and a list that dropped it would read as one that lost
+            // it. Sorted by directory so the two come back interleaved the way
+            // they would be if nothing were off.
+            skills: skills_at
+                .as_deref()
+                .map(|at| {
+                    let mut all = read_skills(at, true);
+                    all.extend(read_skills(&skills_off(at), false));
+                    all.sort_by(|a, b| a.dir.cmp(&b.dir));
+                    all
+                })
                 .unwrap_or_default(),
-            skills_at: dir.map(|dir| dir.join("skills")),
+            skills_at,
             mcp: read_mcp(dir, workspace),
             env_path,
             sessions,
@@ -707,47 +955,142 @@ mod tests {
     }
 
     /// A skill is its directory, named and described by its front matter when it
-    /// has one and by its directory name when it does not.
+    /// has one and by its directory name when it does not. Its document is the
+    /// rest of the file, which is what the panel shows beside the list, and the
+    /// repository is read only where its author wrote one.
     #[test]
     fn skills_are_named_by_their_front_matter() {
         let dir = temp("skills");
         std::fs::create_dir_all(dir.join("coding")).expect("a directory");
         std::fs::write(
             dir.join("coding").join("SKILL.md"),
-            "---\nname: coding\ndescription: >-\n  Changing code that already\n  exists.\n---\n\n# Changing code\n",
+            "---\nname: coding\ndescription: >-\n  Changing code that already\n  exists.\n---\n\n# Changing code\n\nRead it first.\n",
         )
         .expect("a file");
         std::fs::create_dir_all(dir.join("web-search")).expect("a directory");
         std::fs::write(
             dir.join("web-search").join("SKILL.md"),
-            "---\nname: web search\ndescription: Search the live web.\n---\n",
+            "---\nname: web search\ndescription: Search the live web.\nrepo: https://github.com/someone/web-search\n---\n",
         )
         .expect("a file");
         // Installed, undocumented, and still installed.
         std::fs::create_dir_all(dir.join("bare")).expect("a directory");
         std::fs::write(dir.join("loose.md"), "not a skill").expect("a file");
 
+        let read = read_skills(&dir, true);
         assert_eq!(
-            read_skills(&dir),
-            vec![
-                Skill {
-                    dir: String::from("bare"),
-                    name: String::from("bare"),
-                    about: String::new(),
-                },
-                Skill {
-                    dir: String::from("coding"),
-                    name: String::from("coding"),
-                    about: String::from("Changing code that already exists."),
-                },
-                Skill {
-                    dir: String::from("web-search"),
-                    name: String::from("web search"),
-                    about: String::from("Search the live web."),
-                },
-            ]
+            read.iter().map(|skill| skill.dir.as_str()).collect::<Vec<_>>(),
+            vec!["bare", "coding", "web-search"]
         );
-        assert!(read_skills(&dir.join("nowhere")).is_empty(), "no skills is not an error");
+        assert!(read.iter().all(|skill| skill.on), "read as the on list");
+        assert_eq!(read[0].name, "bare", "a skill with no front matter is its directory");
+        assert_eq!(read[0].about, "");
+        assert!(read[0].doc.is_empty(), "no SKILL.md is no document");
+        assert_eq!(read[1].name, "coding");
+        assert_eq!(read[1].about, "Changing code that already exists.");
+        assert_eq!(read[1].path, dir.join("coding"));
+        assert_eq!(
+            read[1].doc,
+            vec![
+                String::from("# Changing code"),
+                String::new(),
+                String::from("Read it first."),
+            ],
+            "the front matter is not the document"
+        );
+        // Nothing the CLI writes records where a skill came from, so this is
+        // read where a skill's author wrote it and is nothing everywhere else.
+        assert_eq!(read[1].repo, None);
+        assert_eq!(read[2].name, "web search");
+        assert_eq!(
+            read[2].repo.as_deref(),
+            Some("https://github.com/someone/web-search")
+        );
+
+        // The off sibling is read the same way and marked for what it is.
+        std::fs::create_dir_all(skills_off(&dir).join("noisy")).expect("a directory");
+        let off = read_skills(&skills_off(&dir), false);
+        assert_eq!(off.len(), 1);
+        assert!(!off[0].on);
+        assert!(
+            read_skills(&dir.join("nowhere"), true).is_empty(),
+            "no skills is not an error"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Turning a skill off moves its directory out of the one place the agent
+    /// looks, and turning it back on puts it back. The state is where the
+    /// directory is and nothing is remembered anywhere.
+    #[test]
+    fn a_skill_is_turned_off_by_moving_it_out_of_the_way() {
+        let dir = temp("skill-toggle");
+        let skills = dir.join("skills");
+        std::fs::create_dir_all(skills.join("coding")).expect("a directory");
+        std::fs::write(
+            skills.join("coding").join("SKILL.md"),
+            "---\nname: coding\ndescription: Change code.\n---\n\n# Changing code\n",
+        )
+        .expect("a file");
+        assert_eq!(skills_off(&skills), dir.join("skills.off"));
+
+        set_skill(&skills, "coding", false).expect("it moves out of the way");
+        assert!(!skills.join("coding").exists(), "it is still where it was");
+        assert!(dir.join("skills.off/coding/SKILL.md").is_file(), "it was lost");
+        let agent = Agent::read(Some(&dir), None, crate::sessions::Listing::default());
+        assert_eq!(agent.skills.len(), 1, "a skill that is off is still installed");
+        assert!(!agent.skills[0].on);
+        assert_eq!(agent.skills[0].name, "coding", "and still reads its own file");
+
+        set_skill(&skills, "coding", true).expect("it comes back");
+        assert!(skills.join("coding/SKILL.md").is_file());
+        assert!(!dir.join("skills.off/coding").exists());
+        assert!(
+            Agent::read(Some(&dir), None, crate::sessions::Listing::default()).skills[0].on
+        );
+
+        // Nothing to move is said rather than done quietly.
+        assert!(set_skill(&skills, "coding", true).is_err(), "it is already on");
+        assert!(set_skill(&skills, "nothing-here", false).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The delete refuses everything that is not a directory sitting directly
+    /// in one of the two roots: a path of its own, a walk up out of the root,
+    /// and a link pointing anywhere else.
+    #[test]
+    fn uninstalling_refuses_any_path_that_is_not_a_skill() {
+        let dir = temp("skill-remove");
+        let skills = dir.join("skills");
+        let keep = dir.join("source");
+        std::fs::create_dir_all(skills.join("coding")).expect("a directory");
+        std::fs::write(skills.join("coding").join("SKILL.md"), "---\n---\n").expect("a file");
+        std::fs::create_dir_all(&keep).expect("a directory");
+        std::fs::write(keep.join("main.rs"), "fn main() {}").expect("a file");
+
+        for name in ["", ".", "..", "../source", "coding/..", "/etc", ".hidden"] {
+            assert!(
+                remove_skill(&skills, name, true).is_err(),
+                "{name:?} was taken as a skill"
+            );
+        }
+        assert!(keep.join("main.rs").is_file(), "real source was deleted");
+
+        // A link in the skills directory pointing at somebody's project is not
+        // a skill and is never followed.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&keep, skills.join("linked")).expect("a link");
+            assert!(remove_skill(&skills, "linked", true).is_err());
+            assert!(set_skill(&skills, "linked", false).is_err());
+            assert!(keep.join("main.rs").is_file(), "the link was followed");
+            assert!(skills.join("linked").exists(), "the link itself was removed");
+        }
+
+        // And the one thing it does do.
+        remove_skill(&skills, "coding", true).expect("a skill in the root goes");
+        assert!(!skills.join("coding").exists());
+        assert!(remove_skill(&skills, "coding", true).is_err(), "it is gone");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -788,20 +1131,20 @@ mod tests {
         assert!(mcp.any_file);
         assert!(mcp.trouble.is_empty(), "{:?}", mcp.trouble);
         assert_eq!(
-            mcp.servers,
+            mcp.servers
+                .iter()
+                .map(|server| (server.name.as_str(), server.how.as_str(), server.project, server.on))
+                .collect::<Vec<_>>(),
             vec![
-                Server {
-                    name: String::from("docs"),
-                    how: String::from("http://localhost:9100/mcp"),
-                    project: true,
-                },
-                Server {
-                    name: String::from("shell"),
-                    how: String::from("mcp-shell --safe"),
-                    project: false,
-                },
+                ("docs", "http://localhost:9100/mcp", true, true),
+                ("shell", "mcp-shell --safe", false, true),
             ],
             "the project file wins per server"
+        );
+        assert!(
+            mcp.servers[1].entry.contains("--safe"),
+            "the entry itself is not carried: {}",
+            mcp.servers[1].entry
         );
 
         // Half a file, which is what an editor killed mid-save leaves.
@@ -820,6 +1163,64 @@ mod tests {
         let odd = read_mcp(Some(&dir), Some(&work));
         assert_eq!(odd.trouble.len(), 1, "{:?}", odd.trouble);
         assert!(odd.trouble[0].contains("odd"), "{:?}", odd.trouble);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A server is turned off by moving its entry to a key beside `servers`,
+    /// which the CLI's loader does not read, and the rest of the file comes back
+    /// out of the rewrite exactly as it went in.
+    #[test]
+    fn a_server_is_turned_off_without_losing_the_rest_of_the_file() {
+        let dir = temp("mcp-toggle");
+        let path = dir.join("mcp.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "servers": {
+    "docs": {"url": "http://localhost:9000/mcp", "timeout_s": 120},
+    "shell": {"command": "mcp-shell", "args": ["--safe"]}
+  },
+  "something_this_window_never_heard_of": {"keep": "me"}
+}"#,
+        )
+        .expect("a file");
+
+        set_server(&path, "docs", false).expect("it moves out of the way");
+        let text = std::fs::read_to_string(&path).expect("the file");
+        let root: serde_json::Value = serde_json::from_str(&text).expect("still JSON");
+        assert!(
+            root["servers"].get("docs").is_none(),
+            "a server that is off is still in servers: {text}"
+        );
+        assert!(root[DISABLED]["docs"]["url"].is_string(), "{text}");
+        assert_eq!(
+            root[DISABLED]["docs"]["timeout_s"], 120,
+            "the entry was not moved whole: {text}"
+        );
+        assert!(root["servers"]["shell"]["command"].is_string(), "{text}");
+        assert_eq!(
+            root["something_this_window_never_heard_of"]["keep"], "me",
+            "the rewrite lost a key nobody here understands: {text}"
+        );
+
+        // The panel reads it back as configured and off, not as gone.
+        let mcp = read_mcp(Some(&dir), None);
+        assert_eq!(mcp.servers.len(), 2);
+        let docs = mcp.servers.iter().find(|s| s.name == "docs").expect("still listed");
+        assert!(!docs.on);
+        assert!(docs.entry.contains("timeout_s"), "{}", docs.entry);
+        assert!(mcp.trouble.is_empty(), "{:?}", mcp.trouble);
+
+        set_server(&path, "docs", true).expect("it comes back");
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("the file"))
+                .expect("still JSON");
+        assert!(root["servers"]["docs"]["url"].is_string());
+        assert!(root[DISABLED].as_object().is_some_and(|map| map.is_empty()));
+        assert!(read_mcp(Some(&dir), None).servers.iter().all(|s| s.on));
+
+        assert!(set_server(&path, "nothing-here", false).is_err());
+        assert!(set_server(&dir.join("nowhere.json"), "docs", false).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

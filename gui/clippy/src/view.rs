@@ -533,6 +533,15 @@ pub enum Hit {
     /// it. A grid row is several controls wide, so the row on its own cannot say
     /// which colour the pointer is over.
     SettingsSwatch(usize, usize),
+    /// The toggle on an entry row, by the row it is on. Pressing it turns that
+    /// skill or that server on or off, which is a move on the disk: nothing in
+    /// this window remembers a flag for either.
+    SettingsToggle(usize),
+    /// The uninstall beside that toggle, on the rows that have one. Its own
+    /// region and tested before the row, the way the toggle is: one region for
+    /// the row and the button would delete a skill every time somebody pressed
+    /// the row to read it.
+    SettingsRemove(usize),
     /// The line between the rail of section names and the settings beside it.
     /// Dragging it decides how much of the panel each of the two takes.
     ///
@@ -751,6 +760,17 @@ pub struct Layout {
     pub settings_values: Vec<(usize, Panel)>,
     pub settings_tracks: Vec<(usize, Panel)>,
     pub settings_cells: Vec<(usize, usize, Panel)>,
+    /// The two controls an entry row carries: the toggle that turns it on and
+    /// off, and the uninstall on the rows that have one. Empty on every section
+    /// that lists no entries, which is every section but the skills and the
+    /// servers.
+    pub settings_toggles: Vec<(usize, Panel)>,
+    pub settings_removes: Vec<(usize, Panel)>,
+    /// The column beside that list, where the entry under the cursor is shown:
+    /// a skill's own `SKILL.md`, or a server's entry out of its file. Empty in
+    /// every section that has no entries, which is what leaves those sections
+    /// one column wide.
+    pub settings_doc: Panel,
     pub settings_close: Panel,
 
     /// The floating layer. The open menu's box, and one panel per row on
@@ -1000,6 +1020,9 @@ impl Layout {
                 settings_values: Vec::new(),
                 settings_tracks: Vec::new(),
                 settings_cells: Vec::new(),
+                settings_toggles: Vec::new(),
+                settings_removes: Vec::new(),
+                settings_doc: nowhere(),
                 settings_close: nowhere(),
                 menu,
                 menu_rows,
@@ -1056,6 +1079,9 @@ impl Layout {
                 settings_values: Vec::new(),
                 settings_tracks: Vec::new(),
                 settings_cells: Vec::new(),
+                settings_toggles: Vec::new(),
+                settings_removes: Vec::new(),
+                settings_doc: nowhere(),
                 settings_close: nowhere(),
                 menu,
                 menu_rows,
@@ -1113,6 +1139,9 @@ impl Layout {
                 settings_values: places.values,
                 settings_tracks: places.tracks,
                 settings_cells: places.cells,
+                settings_toggles: places.toggles,
+                settings_removes: places.removes,
+                settings_doc: places.doc,
                 settings_close: places.close,
                 menu,
                 menu_rows,
@@ -1353,6 +1382,9 @@ impl Layout {
             settings_values: Vec::new(),
             settings_tracks: Vec::new(),
             settings_cells: Vec::new(),
+            settings_toggles: Vec::new(),
+            settings_removes: Vec::new(),
+            settings_doc: nowhere(),
             settings_close: nowhere(),
             menu,
             menu_rows,
@@ -1470,6 +1502,19 @@ impl Layout {
             for (index, cell, panel) in &self.settings_cells {
                 if panel.contains(x, y) {
                     return Some(Hit::SettingsSwatch(*index, *cell));
+                }
+            }
+            // And an entry's two controls before the row they stand in, for the
+            // same reason: the uninstall deletes a directory, so it must never
+            // be a press that also reads as a press on the row.
+            for (index, panel) in &self.settings_removes {
+                if panel.contains(x, y) {
+                    return Some(Hit::SettingsRemove(*index));
+                }
+            }
+            for (index, panel) in &self.settings_toggles {
+                if panel.contains(x, y) {
+                    return Some(Hit::SettingsToggle(*index));
                 }
             }
             // The line between the rail and the list, before either of them: the
@@ -2297,6 +2342,9 @@ struct SettingsPlaces {
     values: Vec<(usize, Panel)>,
     tracks: Vec<(usize, Panel)>,
     cells: Vec<(usize, usize, Panel)>,
+    toggles: Vec<(usize, Panel)>,
+    removes: Vec<(usize, Panel)>,
+    doc: Panel,
     close: Panel,
 }
 
@@ -2380,6 +2428,27 @@ fn settings_label_w(list_w: f32, column: f32) -> f32 {
 /// whose number cannot be read at the end anybody would drag it to.
 const SETTING_TRACK_VALUE_COLUMNS: usize = 8;
 
+/// What the two controls on an entry row take, in columns of pane text: the
+/// toggle that turns it on and off, and the uninstall beside it.
+///
+/// Both are boxes with a word in them, sized for the longer of the two words
+/// they can hold, so pressing one does not change the width of the thing that
+/// was just pressed.
+const SETTING_TOGGLE_COLUMNS: usize = 5;
+const SETTING_REMOVE_COLUMNS: usize = 11;
+
+/// The least the column beside the entry list goes down to, in columns of pane
+/// text, and the least the list itself keeps.
+///
+/// Below either of them the split is not made at all and the section is one
+/// column: a document forty characters wide is a column of hyphenated words,
+/// and a list of skills squeezed to nothing is a list nobody can read.
+const SETTING_DOC_MIN_COLUMNS: usize = 40;
+const SETTING_ENTRY_MIN_COLUMNS: usize = 34;
+
+/// How much of the two-column split the list takes. The document gets the rest.
+const SETTING_ENTRY_SHARE: f32 = 0.45;
+
 fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlaces {
     if area.w < 1.0 || area.h < 1.0 {
         return SettingsPlaces {
@@ -2391,6 +2460,9 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
             values: Vec::new(),
             tracks: Vec::new(),
             cells: Vec::new(),
+            toggles: Vec::new(),
+            removes: Vec::new(),
+            doc: nowhere(),
             close: nowhere(),
         };
     }
@@ -2439,6 +2511,33 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
         track: body,
         floor: rail_floor,
     };
+    // A section that lists skills or servers is two columns: the entries on the
+    // left and the one under the cursor beside them. Split off the list rather
+    // than off the body, so the rail keeps the width it was dragged to and the
+    // document takes its share of what is left. Not split at all when either
+    // half would be too narrow to read, which is what a small window gets: the
+    // entries win, since the document is what the entry is for.
+    let (list, doc) = match panel.showing() {
+        Some(_) => {
+            let total = columns_in(list.w, column);
+            match total.checked_sub(SETTING_DOC_MIN_COLUMNS + SETTING_ENTRY_MIN_COLUMNS) {
+                Some(_) => {
+                    let want = (list.w * SETTING_ENTRY_SHARE).floor();
+                    let least = SETTING_ENTRY_MIN_COLUMNS as f32 * column;
+                    let most = list.w - SETTING_DOC_MIN_COLUMNS as f32 * column;
+                    list.split_left(want.clamp(least, most.max(least)))
+                }
+                None => (list, nowhere()),
+            }
+        }
+        None => (list, nowhere()),
+    };
+    // The entries themselves stop a gap short of the document, so the two
+    // columns read as two columns and a long name does not run into the text.
+    let list = match doc.w >= 1.0 {
+        true => Panel::new(list.x, list.y, (list.w - GAP).max(1.0), list.h),
+        false => list,
+    };
     let rows_fit = Text::rows_for(shape.pane_size, list.h);
     let (first, count) = panel.window(rows_fit);
     let label_w = settings_label_w(list.w, column);
@@ -2446,6 +2545,8 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
     let mut values = Vec::new();
     let mut tracks = Vec::new();
     let mut cells = Vec::new();
+    let mut toggles = Vec::new();
+    let mut removes = Vec::new();
     // A running height rather than the row number times a line: a heading is two
     // rows of text tall and everything under it moves down by that much. The
     // heights come from the model, which is what the scroll window counts in.
@@ -2486,6 +2587,32 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
                     cells.push((index, cell, settings_cell(row, cell, swatches.len())));
                 }
             }
+            // The toggle and, where there is one, the uninstall: both at the
+            // right of the row's first line, so they line up down the list the
+            // way every value on the panel does. Nothing at all in a column too
+            // narrow to hold them beside a name, since a button drawn over the
+            // name it belongs to is a press nobody can aim.
+            SettingRow::Entry(entry) => {
+                let remove_w = match entry.removable {
+                    true => SETTING_REMOVE_COLUMNS as f32 * column,
+                    false => 0.0,
+                };
+                let toggle_w = SETTING_TOGGLE_COLUMNS as f32 * column;
+                let gap = match entry.removable {
+                    true => column,
+                    false => 0.0,
+                };
+                let x = row.x + row.w - remove_w - gap - toggle_w;
+                if x > row.x + MARK_W + 3.0 + column * 8.0 {
+                    toggles.push((index, Panel::new(x, row.y, toggle_w, line)));
+                    if entry.removable {
+                        removes.push((
+                            index,
+                            Panel::new(x + toggle_w + gap, row.y, remove_w, line),
+                        ));
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -2501,6 +2628,9 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
         values,
         tracks,
         cells,
+        toggles,
+        removes,
+        doc,
         close,
     }
 }
@@ -4957,6 +5087,162 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                         ink,
                     );
                 }
+            }
+            // One skill or one server: what it is called, what is under it, and
+            // the two controls at the right. A row that is off is drawn in the
+            // quiet tint the whole way across, so a list of skills says which
+            // ones the agent will actually load without anything having to be
+            // read.
+            SettingRow::Entry(entry) => {
+                let tint = match (entry.on, on) {
+                    (true, true) => skin.bright,
+                    (true, false) => skin.body,
+                    (false, _) => skin.dim,
+                };
+                // The name stops a column short of the controls: a name drawn
+                // under the toggle is a name whose end nobody can read.
+                let controls = layout
+                    .settings_toggles
+                    .iter()
+                    .chain(layout.settings_removes.iter())
+                    .filter(|(at, _)| at == index)
+                    .map(|(_, at)| at.x)
+                    .fold(f32::INFINITY, f32::min);
+                let name_w = match controls.is_finite() {
+                    true => (controls - column - text_x).max(1.0),
+                    false => whole.w,
+                };
+                say(
+                    scene,
+                    vec![Run::tinted(
+                        clip(&entry.name, columns_in(name_w, column).saturating_sub(1)),
+                        tint,
+                    )],
+                    Panel::new(text_x, row.y, name_w, line),
+                    tint,
+                );
+                if row.h >= line * 2.0 {
+                    say(
+                        scene,
+                        vec![Run::tinted(clip(&entry.under, whole_cols), skin.dim)],
+                        Panel::new(text_x, row.y + line, whole.w, line),
+                        skin.dim,
+                    );
+                }
+                for (at, box_) in &layout.settings_toggles {
+                    if at != index {
+                        continue;
+                    }
+                    let ink = match entry.on {
+                        true => skin.good,
+                        false => skin.dim,
+                    };
+                    scene.rect(panel_fill(*box_, skin.input));
+                    if frame.hot == Some(Hit::SettingsToggle(*index)) {
+                        scene.rect(box_.fill(skin.hot));
+                    }
+                    scene.rect(panel_edge(
+                        *box_,
+                        match on {
+                            true => skin.edge_focus,
+                            false => skin.edge,
+                        },
+                    ));
+                    say(
+                        scene,
+                        vec![Run::tinted(
+                            match entry.on {
+                                true => "on",
+                                false => "off",
+                            },
+                            ink,
+                        )],
+                        Panel::new(
+                            box_.x + INPUT_PAD,
+                            box_.y,
+                            (box_.w - INPUT_PAD * 2.0).max(1.0),
+                            box_.h,
+                        ),
+                        ink,
+                    );
+                }
+                // In the colour this window uses for everything that throws
+                // work away, which is what a delete is.
+                for (at, box_) in &layout.settings_removes {
+                    if at != index {
+                        continue;
+                    }
+                    // Pressed once, it says so and waits for the second press.
+                    // The footer says what would go with it.
+                    let armed = panel.arming() == Some(*index);
+                    scene.rect(panel_fill(*box_, skin.input));
+                    if frame.hot == Some(Hit::SettingsRemove(*index)) {
+                        scene.rect(box_.fill(skin.hot));
+                    }
+                    scene.rect(panel_edge(
+                        *box_,
+                        match armed {
+                            true => skin.close_hot,
+                            false => skin.edge,
+                        },
+                    ));
+                    say(
+                        scene,
+                        vec![Run::tinted(
+                            match armed {
+                                true => "sure?",
+                                false => "uninstall",
+                            },
+                            skin.bad,
+                        )],
+                        Panel::new(
+                            box_.x + INPUT_PAD,
+                            box_.y,
+                            (box_.w - INPUT_PAD * 2.0).max(1.0),
+                            box_.h,
+                        ),
+                        skin.bad,
+                    );
+                }
+            }
+        }
+    }
+    // The column beside that list: the entry under the cursor, rendered the way
+    // the transcript renders what the model writes, because a `SKILL.md` is
+    // Markdown and showing it with its marks in would be showing the file
+    // rather than the skill.
+    let doc = layout.settings_doc;
+    if doc.w >= 1.0 && doc.h >= 1.0 {
+        scene.rect(Panel::new(doc.x - (GAP * 0.5).floor(), doc.y, 1.0, doc.h).fill(skin.edge));
+        let inside = Panel::new(doc.x + PAD, doc.y, (doc.w - PAD).max(1.0), doc.h);
+        let doc_cols = columns_in(inside.w, column).saturating_sub(1);
+        let doc_rows = Text::rows_for(size, inside.h);
+        if let Some(entry) = panel.showing() {
+            let first = panel.doc_first(doc_rows);
+            // Where the fences stand after everything scrolled off, so a column
+            // that starts inside a code block is drawn as code.
+            let mut fence =
+                crate::markdown::fence_after(entry.doc.iter().take(first).map(String::as_str));
+            for (step, text) in entry.doc.iter().skip(first).take(doc_rows).enumerate() {
+                let mut runs = Vec::new();
+                crate::markdown::line(&clip(text, doc_cols), &mut fence, skin, &mut runs);
+                scene.text(Text::rich(
+                    runs,
+                    Panel::new(inside.x, inside.y + step as f32 * line, inside.w, line),
+                    size,
+                    skin.body,
+                ));
+            }
+            if entry.doc.is_empty() {
+                say(
+                    scene,
+                    vec![Run::tinted(
+                        clip("nothing to show: this one has no SKILL.md", doc_cols),
+                        skin.dim,
+                    )],
+                    Panel::new(inside.x, inside.y, inside.w, line),
+                    skin.dim,
+                );
             }
         }
     }
@@ -12454,6 +12740,14 @@ mod tests {
                 dir: String::from("coding"),
                 name: String::from("coding"),
                 about: String::from("Changing code that already exists."),
+                repo: Some(String::from("https://github.com/someone/coding")),
+                path: std::path::PathBuf::from("/home/hec/.config/noob/skills/coding"),
+                on: true,
+                doc: vec![
+                    String::from("# Changing code"),
+                    String::new(),
+                    String::from("Read the file before writing it."),
+                ],
             }],
             sessions: crate::sessions::Listing {
                 sessions: vec![crate::sessions::Saved {
@@ -12620,6 +12914,143 @@ mod tests {
                 "{section}: {lefts:?}"
             );
         }
+    }
+
+    /// The skills section is two columns: the entries down the left, and the
+    /// `SKILL.md` of the one under the cursor beside them, rendered rather than
+    /// printed with its marks in.
+    #[test]
+    fn the_skills_section_puts_the_skill_beside_the_list() {
+        let panel = a_panel_on(&Config::default(), crate::settings::SKILLS);
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let layout = &out.layout;
+        let (list, doc) = (layout.settings_list, layout.settings_doc);
+        assert!(doc.w >= 1.0, "there is no second column");
+        assert!(
+            list.x + list.w <= doc.x,
+            "the two columns overlap: {list:?} and {doc:?}"
+        );
+        assert!(
+            doc.x + doc.w <= layout.settings.x + layout.settings.w,
+            "the document runs off the panel"
+        );
+        // Every row of the list is in the left column, so a press in the
+        // document cannot land on a skill.
+        for (index, row) in &layout.settings_rows {
+            assert!(
+                row.x + row.w <= doc.x,
+                "row {index} runs into the document: {row:?}"
+            );
+        }
+        let (x, y) = middle(doc);
+        assert_eq!(layout.hit(x, y), Some(Hit::Settings), "{doc:?}");
+
+        // What is drawn: the name and the repository on the left, the document
+        // on the right, and no Markdown marks in it.
+        let text = text_of(&out.scene);
+        assert!(text.contains("coding"), "{text}");
+        assert!(
+            text.contains("https://github.com/someone/coding"),
+            "the repository is not under the name: {text}"
+        );
+        assert!(
+            text.contains("Read the file before writing it."),
+            "the skill's own document is not beside the list: {text}"
+        );
+        assert!(
+            !text.contains("# Changing code"),
+            "the document is printed rather than rendered: {text}"
+        );
+
+        // A section with no entries is one column, so the settings keep the
+        // whole width they had.
+        let plain = render_settings(
+            &a_panel_on(&Config::default(), crate::settings::APPEARANCE),
+            1400.0,
+            900.0,
+            None,
+        );
+        assert!(plain.layout.settings_doc.w < 1.0, "APPEARANCE grew a column");
+        assert!(plain.layout.settings_list.w > list.w, "the list did not split");
+    }
+
+    /// A window too narrow to hold both columns is one column: the entries win,
+    /// because a document forty characters wide is a column of broken words.
+    #[test]
+    fn a_narrow_panel_keeps_the_entries_and_drops_the_column() {
+        let panel = a_panel_on(&Config::default(), crate::settings::SKILLS);
+        let out = render_settings(&panel, 520.0, 400.0, None);
+        assert!(out.layout.settings_doc.w < 1.0, "{:?}", out.layout.settings_doc);
+        assert!(!out.layout.settings_rows.is_empty(), "and the list is still there");
+    }
+
+    /// The toggle and the uninstall on an entry are pressed where they are
+    /// drawn, and neither of them is the row: a press on the name still puts
+    /// the cursor there rather than deleting a skill.
+    #[test]
+    fn an_entry_carries_a_toggle_and_an_uninstall_of_its_own() {
+        let panel = a_panel_on(&Config::default(), crate::settings::SKILLS);
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let layout = &out.layout;
+        let entries: Vec<usize> = layout
+            .settings_rows
+            .iter()
+            .filter(|(index, _)| {
+                matches!(panel.row(*index), Some(crate::settings::Row::Entry(_)))
+            })
+            .map(|(index, _)| *index)
+            .collect();
+        assert_eq!(entries.len(), 1, "the one skill is not a row of its own");
+        let index = entries[0];
+        let row = layout
+            .settings_rows
+            .iter()
+            .find(|(at, _)| *at == index)
+            .map(|(_, row)| *row)
+            .expect("the row");
+
+        let toggle = layout
+            .settings_toggles
+            .iter()
+            .find(|(at, _)| *at == index)
+            .map(|(_, at)| *at)
+            .expect("a toggle");
+        let remove = layout
+            .settings_removes
+            .iter()
+            .find(|(at, _)| *at == index)
+            .map(|(_, at)| *at)
+            .expect("an uninstall");
+        for (at, hit) in [
+            (toggle, Hit::SettingsToggle(index)),
+            (remove, Hit::SettingsRemove(index)),
+        ] {
+            let (x, y) = middle(at);
+            assert_eq!(layout.hit(x, y), Some(hit), "{at:?}");
+            assert!(row.contains(x, y), "{at:?} is outside its row {row:?}");
+        }
+        assert!(
+            toggle.x + toggle.w <= remove.x,
+            "the two controls overlap: {toggle:?} and {remove:?}"
+        );
+        // The row itself is still the row.
+        assert_eq!(
+            layout.hit(row.x + 2.0, row.y + 2.0),
+            Some(Hit::SettingsRow(index))
+        );
+        let text = text_of(&out.scene);
+        assert!(text.contains("uninstall"), "{text}");
+        assert!(text.contains("on"), "{text}");
+
+        // Nothing else on the panel grows one: a setting is not an entry.
+        let plain = render_settings(
+            &a_panel_on(&Config::default(), crate::settings::APPEARANCE),
+            1400.0,
+            900.0,
+            None,
+        );
+        assert!(plain.layout.settings_toggles.is_empty());
+        assert!(plain.layout.settings_removes.is_empty());
     }
 
     /// Every section is on the rail, is hit where its name is drawn, and picking

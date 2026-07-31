@@ -352,7 +352,8 @@ whole window under the title strip and it is five sections, named down a rail on
 the left with the chosen one beside it. Up and down on the rail walk the sections,
 right goes into one, left comes back out, and inside a section up and down walk
 its rows while left and right change the row the cursor is on. Enter flips a
-switch and starts an edit on the endpoint, Tab crosses between the rail and the
+switch, turns a skill or a server on and off, and starts an edit on the
+endpoint, Tab crosses between the rail and the
 rows, the wheel scrolls, and Esc puts the panel away. The panes are exactly where
 they were when it closes, and the agent keeps working behind it. **Drag the line
 between the rail and the settings** to give one of them more room: the pointer
@@ -382,12 +383,37 @@ or password reads as `set, and not shown here`, which is the same line the CLI
 takes by keeping secrets out of settable config. SESSIONS lists the saved
 conversations the folder picker offers, through the same reader, with when each
 one was, which folder it belongs to and the opening of what was first said in it.
+SKILLS and MCP are two columns: a list on the left and, beside it, whatever the
+row under the cursor is. In a window too narrow to hold both, the list keeps the
+width and the second column is not drawn.
+
 SKILLS lists the directories under `~/.config/noob/skills`, named and described
 from each `SKILL.md`'s front matter and by the directory name when it has none.
+Under each name is the repository the skill records, or, since nothing the CLI
+writes down records where an installed skill came from, the directory it was
+found in. The column beside the list is that skill's own `SKILL.md`, rendered
+the way the transcript renders what the model writes; the wheel over it scrolls
+the document rather than the list. Every row carries a toggle and an uninstall.
+The toggle really turns the skill off: there is no enabled flag anywhere in the
+CLI, so off means the directory is moved to `~/.config/noob/skills.off`, which is
+none of the four places the agent looks, and on moves it back. Nothing is
+remembered in a settings file; what the row says is where the directory is.
+Uninstall deletes the directory, and it takes two presses: the first arms it and
+the footer names what is about to go, the second one does it, and anything else
+at all puts it back. It will only ever delete a directory sitting directly inside
+those two, never a link and never a path that walks out of them.
+
 MCP names both files the CLI merges, `<config>/mcp.json` and
 `<workspace>/.noob/mcp.json`, and says `none configured` when neither is there
 rather than showing an empty list that reads as broken; a malformed one is a line
-saying so, and the servers from the file that did parse are still listed.
+saying so, and the servers from the file that did parse are still listed. Each
+server is a row with its URL or command line under it and its entry out of the
+file beside it, and a toggle of its own: off moves the entry into a `disabled`
+object in the same file, which the CLI's loader does not read, and on moves it
+back. The file is rewritten whole, so every other server, every `timeout_s` and
+anything else in there survives it. There is no uninstall here, because a server
+is a few lines somebody wrote by hand and turning it off already leaves them
+where they are.
 
 The fifth is the window's own settings file, and every key in it is on that one:
 APPEARANCE. It is the sizes and the theme, then `WHICH PANES OPEN` and `WHERE THE

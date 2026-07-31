@@ -16,6 +16,22 @@
 //! agent's own files rather than the window's; the last one ([`APPEARANCE`]) is
 //! everything in the window's own settings file, the palette included.
 //!
+//! **Two of those sections are two columns.** [`SKILLS`] and [`MCP`] were lists
+//! of text nothing could be done to. They are [`Row::Entry`] rows now: a name
+//! with what is under it, a toggle that really turns the thing off, and, on a
+//! skill, an uninstall. Beside the list is whatever the row under the cursor
+//! is, a skill's own `SKILL.md` or a server's entry out of its file.
+//!
+//! **Off is a place on the disk, never a flag.** There is no enabled or
+//! disabled anywhere in the CLI: a skill is on when its directory is in one of
+//! the four places the agent looks, and a server is on when its entry is under
+//! `servers`. So a toggle moves it, to the `.off` sibling of the skills
+//! directory or to a key beside `servers` in the same file, neither of which
+//! the agent reads. Nothing here remembers which is which: what a row says is
+//! read off the disk every time the rows are built, so the panel and the next
+//! session cannot disagree. [`Deed`] is what a press asks for and `main` is
+//! what does it, the same way a [`Change`] is written there and not here.
+//!
 //! **Two of the agent's own settings are controls, not readings.** Everything
 //! in the CLI's `.env` was listed as text with the endpoint as the only thing
 //! anybody could change, which left the two numbers that decide what the agent
@@ -182,6 +198,64 @@ pub enum Row {
     /// them, so the row is always as wide as every other row and the list is
     /// still one panel per row index.
     Swatches(Vec<Swatch>),
+    /// One installed skill or one configured server: two lines of text, a
+    /// toggle that really turns it off, and for a skill an uninstall beside it.
+    /// The row the column on the right belongs to.
+    Entry(Entry),
+}
+
+/// One thing off the agent's disk that can be turned on and off.
+///
+/// Everything on it is read off the disk as the rows are built. There is no
+/// remembered flag anywhere: a skill is on when its directory is in the one
+/// place the agent looks and a server is on when its entry is under `servers`,
+/// so what the toggle shows is what the next session will do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub name: String,
+    /// The line under the name: the repository a skill records, or the
+    /// directory it was found in when it records none; the address or the
+    /// command line for a server, and which file it came from.
+    pub under: String,
+    pub on: bool,
+    /// What turning it on and off means on the disk.
+    pub what: Which,
+    /// Whether there is an uninstall beside the toggle.
+    pub removable: bool,
+    /// What the column beside the list shows while this is the entry the cursor
+    /// is on: a skill's own `SKILL.md`, or a server's entry out of its file.
+    pub doc: Vec<String>,
+}
+
+/// Which of the two kinds of entry it is, and what naming it on the disk takes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Which {
+    /// A skill, named by the directory it lives in.
+    Skill { dir: String },
+    /// A server, named by [`Entry::name`] inside one of the two `mcp.json`
+    /// files. Which file is the whole of what `project` says.
+    Server { project: bool },
+}
+
+/// What a press on an entry's toggle or its uninstall asks the disk to do.
+///
+/// The panel decides what should happen and `main` is what makes it happen, the
+/// same way a [`Change`] is written by `main` rather than here: nothing in this
+/// file touches a disk except [`commit`] and [`write_endpoint`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Deed {
+    /// Move a skill's directory between the skills directory and the sibling
+    /// beside it. `on` is the state it should end in.
+    TurnSkill { dir: String, on: bool },
+    /// Delete a skill's directory. `on` says which of the two it is in now.
+    RemoveSkill { dir: String, on: bool },
+    /// Move a server's entry between the two objects in its own file. `on` is
+    /// the state it should end in.
+    TurnServer {
+        name: String,
+        project: bool,
+        on: bool,
+    },
 }
 
 /// One colour on the grid: the key the file writes it under, what it actually
@@ -210,7 +284,9 @@ pub const SWATCH_COLUMNS: usize = 3;
 /// this, which is what keeps the two agreeing.
 pub fn lines(row: &Row) -> usize {
     match row {
-        Row::Heading(_) => 2,
+        // A heading is drawn larger; an entry is a name with what it is
+        // underneath, which is two lines of the ordinary text.
+        Row::Heading(_) | Row::Entry(_) => 2,
         _ => 1,
     }
 }
@@ -509,6 +585,10 @@ pub struct Section {
     rows: Vec<Row>,
     cursor: usize,
     first: usize,
+    /// Where the column beside the list is scrolled to, in lines of that
+    /// document. Its own number because the two columns scroll separately: the
+    /// wheel over a skill's own text must not walk the list of skills.
+    doc_first: usize,
 }
 
 impl Section {
@@ -519,6 +599,7 @@ impl Section {
             rows,
             cursor,
             first: 0,
+            doc_first: 0,
         }
     }
 }
@@ -539,6 +620,14 @@ pub struct Settings {
     /// it. Nothing is changed by it: the footer says which key in the file
     /// writes that colour, which is what a grid of blocks cannot say on its own.
     picked: Option<(usize, usize)>,
+    /// The entry row whose uninstall has been pressed once.
+    ///
+    /// The one thing on this panel that cannot be undone, so it takes two
+    /// presses: the first says what is about to be deleted on the footer and
+    /// the second deletes it. Anything else at all, a key, another row, a
+    /// refresh, puts it back to nothing, so an armed button cannot be left
+    /// sitting there for the next pointer that goes past.
+    arming: Option<usize>,
     /// The settings file, or nothing when there is no home directory to put one
     /// in. Kept so [`Settings::refresh`] does not have to be handed it again.
     file: Option<PathBuf>,
@@ -562,6 +651,7 @@ impl Settings {
             editing: None,
             dragging: None,
             picked: None,
+            arming: None,
             file: file.map(PathBuf::from),
             agent,
             trouble: None,
@@ -573,19 +663,23 @@ impl Settings {
     /// Rebuild the rows from the files as they now read, keeping the cursor
     /// where it was. Called after a change has been written and read back.
     pub fn refresh(&mut self, config: &Config) {
-        let places: Vec<(usize, usize)> = self
+        let places: Vec<(usize, usize, usize)> = self
             .sections
             .iter()
-            .map(|section| (section.cursor, section.first))
+            .map(|section| (section.cursor, section.first, section.doc_first))
             .collect();
         self.sections = self.build(config);
         self.trouble = None;
         self.dragging = None;
         self.picked = None;
-        for (section, (cursor, first)) in self.sections.iter_mut().zip(places) {
+        self.arming = None;
+        for (section, (cursor, first, doc_first)) in self.sections.iter_mut().zip(places) {
             let last = section.rows.len().saturating_sub(1);
             section.first = first.min(last);
             section.cursor = cursor.min(last);
+            // Clamped where it is read, since the document that comes back may
+            // be a different length or another entry's altogether.
+            section.doc_first = doc_first;
             if !section.rows.get(section.cursor).is_some_and(landable) {
                 section.cursor = landing_from(&section.rows, section.cursor, true)
                     .or_else(|| landing_from(&section.rows, section.cursor, false))
@@ -724,7 +818,14 @@ impl Settings {
         rows
     }
 
-    /// What is installed under the agent's `skills/`.
+    /// What is installed under the agent's `skills/`, and what has been turned
+    /// off into the sibling beside it.
+    ///
+    /// Two columns: these rows are the left one, and the skill under the cursor
+    /// carries its own `SKILL.md` for the right one. Each row is the skill's
+    /// name with the repository it records underneath, or, since nothing the
+    /// CLI writes records where a skill came from, the directory it was found
+    /// in instead.
     fn skill_rows(&self) -> Vec<Row> {
         let mut rows = vec![Row::Reading {
             label: String::from("skills"),
@@ -737,14 +838,35 @@ impl Settings {
             rows.push(note(
                 "none installed: a skill is a directory here with a SKILL.md in it",
             ));
+        } else {
+            rows.push(note(
+                "turning one off moves its directory beside the skills directory, where the agent does not look; uninstall deletes it",
+            ));
         }
         for skill in &self.agent.skills {
-            rows.push(Row::Item(skill_line(skill)));
+            rows.push(Row::Entry(Entry {
+                name: skill_line(skill),
+                under: match &skill.repo {
+                    Some(repo) => repo.clone(),
+                    // Nothing on disk records the repository of an installed
+                    // skill, so where it is is the truthful second line.
+                    None => skill.path.display().to_string(),
+                },
+                on: skill.on,
+                what: Which::Skill {
+                    dir: skill.dir.clone(),
+                },
+                removable: true,
+                doc: skill.doc.clone(),
+            }));
         }
         rows
     }
 
     /// The MCP servers, out of the two files the CLI merges.
+    ///
+    /// The same two columns the skills are: a row per server with what it is
+    /// underneath, and that server's entry out of its own file beside them.
     fn mcp_rows(&self) -> Vec<Row> {
         let mcp = &self.agent.mcp;
         let mut rows = vec![Row::Reading {
@@ -771,7 +893,19 @@ impl Settings {
             rows.push(note("none configured: the files carry no servers"));
         }
         for server in &mcp.servers {
-            rows.push(Row::Item(server_line(server)));
+            rows.push(Row::Entry(Entry {
+                name: server.name.clone(),
+                under: server_line(server),
+                on: server.on,
+                what: Which::Server {
+                    project: server.project,
+                },
+                // A server is a few lines somebody wrote in a file. Turning it
+                // off already leaves it in that file to turn back on, and a
+                // button that edits somebody's JSON away is not worth the row.
+                removable: false,
+                doc: server_doc(server, self.mcp_file(server.project)),
+            }));
         }
         for why in &mcp.trouble {
             rows.push(Row::Note {
@@ -780,7 +914,9 @@ impl Settings {
             });
         }
         if !mcp.servers.is_empty() {
-            rows.push(note("the project file wins for a server named in both"));
+            rows.push(note(
+                "the project file wins for a server named in both; turning one off moves its entry to a key the CLI does not read",
+            ));
         }
         rows
     }
@@ -986,6 +1122,21 @@ impl Settings {
     /// A pressed swatch answers instead, because a press that said nothing at
     /// all would read as a grid that does not answer the pointer.
     pub fn says(&self) -> String {
+        // An armed uninstall answers before anything else: it is the one press
+        // on this panel that cannot be taken back, and what it would take with
+        // it is the only thing worth reading at that moment.
+        if let Some(Row::Entry(entry)) = self.arming.and_then(|at| self.row(at)) {
+            // By the directory, which is the thing that is about to go. The
+            // line under the name is the repository where there is one, and
+            // "delete https://github.com/..." is not what would happen.
+            let what = match &entry.what {
+                Which::Skill { dir } => dir.as_str(),
+                Which::Server { .. } => entry.name.as_str(),
+            };
+            return format!(
+                "press uninstall again to delete the {what} directory; anything else leaves it alone"
+            );
+        }
         self.picked_says()
             .unwrap_or_else(|| String::from(self.hint()))
     }
@@ -1004,6 +1155,10 @@ impl Settings {
                 Kind::Number { .. } => "left and right nudge it, or drag the slider",
             },
             Some(Row::Field { .. }) => "enter edits it \u{2022} left goes back to the sections",
+            Some(Row::Entry(entry)) => match entry.removable {
+                true => "enter turns it on and off \u{2022} uninstall deletes its directory",
+                false => "enter turns it on and off in the file it came from",
+            },
             _ => "up and down move \u{2022} left goes back to the sections \u{2022} esc closes",
         }
     }
@@ -1019,6 +1174,8 @@ impl Settings {
         self.editing = None;
         self.dragging = None;
         self.picked = None;
+        self.arming = None;
+        self.rewind_doc();
         moved
     }
 
@@ -1245,14 +1402,133 @@ impl Settings {
         self.agent.env_path.as_deref()
     }
 
+    /// Where the skills live, for the move a toggle asks for and the delete an
+    /// uninstall asks for. Both are done against this directory and the sibling
+    /// beside it, and nowhere else.
+    pub fn skills_at(&self) -> Option<&Path> {
+        self.agent.skills_at.as_deref()
+    }
+
+    /// Which `mcp.json` a server belongs to, which is the only file a toggle on
+    /// its row writes.
+    pub fn mcp_file(&self, project: bool) -> Option<&Path> {
+        match project {
+            true => self.agent.mcp.project.as_deref(),
+            false => self.agent.mcp.global.as_deref(),
+        }
+    }
+
+    /// What turning the entry on one row on or off means on the disk, or
+    /// nothing when that row is not an entry.
+    pub fn toggle(&self, index: usize) -> Option<Deed> {
+        let Row::Entry(entry) = self.row(index)? else {
+            return None;
+        };
+        Some(match &entry.what {
+            Which::Skill { dir } => Deed::TurnSkill {
+                dir: dir.clone(),
+                on: !entry.on,
+            },
+            Which::Server { project } => Deed::TurnServer {
+                name: entry.name.clone(),
+                project: *project,
+                on: !entry.on,
+            },
+        })
+    }
+
+    /// Press the uninstall on one row. The first press arms it and answers with
+    /// nothing; the second one on the same row is the delete.
+    ///
+    /// Two presses because this is the only thing on the panel that cannot be
+    /// undone: a skill turned off can be turned back on, a setting written the
+    /// wrong way can be written again, and a directory that has been removed is
+    /// gone. In between the two the footer says what is about to go, which is
+    /// the whole of what a confirmation is for.
+    pub fn uninstall(&mut self, index: usize) -> Option<Deed> {
+        let Some(Row::Entry(entry)) = self.row(index) else {
+            return None;
+        };
+        let Which::Skill { dir } = &entry.what else {
+            return None;
+        };
+        if !entry.removable {
+            return None;
+        }
+        let deed = Deed::RemoveSkill {
+            dir: dir.clone(),
+            on: entry.on,
+        };
+        if self.arming == Some(index) {
+            self.arming = None;
+            return Some(deed);
+        }
+        self.arming = Some(index);
+        None
+    }
+
+    /// Which uninstall is armed, for the button that says so.
+    pub fn arming(&self) -> Option<usize> {
+        self.arming
+    }
+
+    /// The entry the column beside the list is showing: the one under the
+    /// cursor, or the first in the section when the cursor is not on one, so
+    /// the column has something in it the moment the section opens.
+    pub fn showing(&self) -> Option<&Entry> {
+        let here = self.here();
+        match here.rows.get(here.cursor) {
+            Some(Row::Entry(entry)) => Some(entry),
+            _ => here.rows.iter().find_map(|row| match row {
+                Row::Entry(entry) => Some(entry),
+                _ => None,
+            }),
+        }
+    }
+
+    /// Which line of that document the column starts on, in a column `rows`
+    /// tall. Clamped here rather than where it is set, so a document that got
+    /// shorter cannot leave the column showing nothing.
+    pub fn doc_first(&self, rows: usize) -> usize {
+        let lines = self.showing().map(|entry| entry.doc.len()).unwrap_or(0);
+        self.here().doc_first.min(lines.saturating_sub(rows))
+    }
+
+    /// Move that column, for a wheel with the pointer over it.
+    pub fn scroll_doc(&mut self, by: usize, down: bool, rows: usize) -> bool {
+        let most = self
+            .showing()
+            .map(|entry| entry.doc.len())
+            .unwrap_or(0)
+            .saturating_sub(rows);
+        let section = self.here_mut();
+        let next = match down {
+            true => (section.doc_first + by).min(most),
+            false => section.doc_first.saturating_sub(by),
+        };
+        let moved = next != section.doc_first;
+        section.doc_first = next;
+        moved
+    }
+
+    /// Back to the top of that column, which is what moving to another entry
+    /// means: the lines on screen belong to the entry the cursor was on.
+    fn rewind_doc(&mut self) {
+        self.here_mut().doc_first = 0;
+    }
+
     /// Move the cursor one row, over anything it cannot land on, or the rail one
     /// section. Clamped at both ends: a list that wraps under an arrow key held
     /// down is a cursor that arrives somewhere nobody was looking.
     pub fn step(&mut self, down: bool) -> bool {
         // The footer goes back to saying what the keys do the moment a key is
         // pressed: a swatch that was pressed a screen ago is not what the
-        // keyboard is on.
+        // keyboard is on. The column beside the list goes back to the top of
+        // its document for the same reason: the cursor is about to be on
+        // another entry, and that entry's text starts at its own first line.
         self.picked = None;
+        self.arming = None;
+        self.rewind_doc();
         if self.focus == Focus::Rail {
             let next = match down {
                 true => (self.chosen + 1).min(self.sections.len() - 1),
@@ -1274,6 +1550,8 @@ impl Settings {
     /// A screenful, then the nearest row that can hold the cursor.
     pub fn page(&mut self, rows: usize, down: bool) -> bool {
         self.picked = None;
+        self.arming = None;
+        self.rewind_doc();
         if self.focus == Focus::Rail {
             return self.step(down);
         }
@@ -1297,6 +1575,8 @@ impl Settings {
     /// The first or last row anything can be done to.
     pub fn jump(&mut self, last: bool) -> bool {
         self.picked = None;
+        self.arming = None;
+        self.rewind_doc();
         if self.focus == Focus::Rail {
             let next = match last {
                 true => self.sections.len() - 1,
@@ -1327,6 +1607,12 @@ impl Settings {
             return false;
         }
         self.picked = None;
+        // Only when the pointer moved to another row: the press that deletes is
+        // the second one on the same uninstall, and it comes through here first.
+        if self.arming.is_some_and(|at| at != index) {
+            self.arming = None;
+        }
+        self.rewind_doc();
         let was = (self.here().cursor, self.focus);
         self.focus = Focus::Content;
         self.here_mut().cursor = index;
@@ -1520,12 +1806,33 @@ fn server_line(server: &agent::Server) -> String {
     format!("{}  {}  ({where_})", server.name, server.how)
 }
 
+/// What the column beside the list shows for a server: its entry out of the
+/// file, exactly as the file carries it.
+///
+/// Fenced as JSON so the highlighter reads it the way it reads any other code
+/// block: the whole column is Markdown, and a skill's own document is the thing
+/// it was built for.
+fn server_doc(server: &agent::Server, file: Option<&Path>) -> Vec<String> {
+    let mut out = vec![format!("# {}", server.name), String::new()];
+    out.push(String::from("```json"));
+    out.extend(server.entry.lines().map(str::to_string));
+    out.push(String::from("```"));
+    if let Some(path) = file {
+        out.push(String::new());
+        out.push(format!("in {}", path.display()));
+    }
+    out
+}
+
 /// Whether the cursor stops on a row. A cursor that lands where nothing can
 /// happen is a dead stop the arrow keys have to be pressed through, so it stops
 /// on the settings and the one field and on nothing else. A swatch is a colour
 /// to read: the keys cannot change one, and the file is where they are edited.
 fn landable(row: &Row) -> bool {
-    matches!(row, Row::Setting { .. } | Row::Field { .. })
+    matches!(
+        row,
+        Row::Setting { .. } | Row::Field { .. } | Row::Entry(_)
+    )
 }
 
 /// The next row in that direction the cursor can land on, not counting the one
@@ -1711,6 +2018,15 @@ mod tests {
                     .map(|cell| format!("{} {} {}", cell.key, cell.about, hex(cell.rgb)))
                     .collect::<Vec<_>>()
                     .join("  "),
+                Row::Entry(entry) => format!(
+                    "{} {} {}",
+                    entry.name,
+                    entry.under,
+                    match entry.on {
+                        true => "on",
+                        false => "off",
+                    }
+                ),
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -2814,10 +3130,11 @@ mod tests {
         go_to(&mut panel, MCP);
         let rows = panel.rows();
         assert!(
-            rows.iter().any(|row| matches!(row, Row::Item(text)
-                if text.contains("docs")
-                    && text.contains("http://localhost:9000/mcp")
-                    && text.contains("project"))),
+            rows.iter().any(|row| matches!(row, Row::Entry(entry)
+                if entry.name == "docs"
+                    && entry.under.contains("http://localhost:9000/mcp")
+                    && entry.under.contains("project")
+                    && entry.on)),
             "{rows:?}"
         );
         assert!(
@@ -2899,46 +3216,219 @@ mod tests {
         );
     }
 
-    /// The skills section lists the directories under the agent's `skills/`,
-    /// named and described by their own front matter.
+    /// The skills section lists what is on the disk: a row per skill, the
+    /// repository it records or the directory it was found in underneath, and
+    /// its own `SKILL.md` in the column beside the list.
+    ///
+    /// This used to assert two `Row::Item` strings, which is the read-only list
+    /// it was. The rows carry an identity now because they can be turned off
+    /// and uninstalled, and the section is two columns.
     #[test]
-    fn the_skills_section_lists_what_is_installed() {
-        let agent = Agent {
-            skills: vec![
-                agent::Skill {
-                    dir: String::from("coding"),
-                    name: String::from("coding"),
-                    about: String::from("Changing code that already exists."),
-                },
-                agent::Skill {
-                    dir: String::from("web-search"),
-                    name: String::from("web-search"),
-                    about: String::new(),
-                },
-            ],
-            skills_at: Some(PathBuf::from("/home/hec/.config/noob/skills")),
-            ..Agent::default()
-        };
+    fn the_skills_section_lists_what_is_on_the_disk() {
+        let dir = scratch_dir("skills-section");
+        let skills = dir.join("skills");
+        std::fs::create_dir_all(skills.join("coding")).expect("a directory");
+        std::fs::write(
+            skills.join("coding").join("SKILL.md"),
+            "---\nname: coding\ndescription: Changing code that already exists.\n---\n\n# Changing code\n\nRead it first.\n",
+        )
+        .expect("a file");
+        std::fs::create_dir_all(skills.join("web-search")).expect("a directory");
+        std::fs::write(
+            skills.join("web-search").join("SKILL.md"),
+            "---\nname: web-search\ndescription: Search the web.\nrepo: https://github.com/someone/web-search\n---\n\n# Searching\n",
+        )
+        .expect("a file");
+        // Installed and turned off, which is a move rather than a delete: it is
+        // still on the list and still says what it is.
+        std::fs::create_dir_all(agent::skills_off(&skills).join("noisy")).expect("a directory");
+        std::fs::write(
+            agent::skills_off(&skills).join("noisy").join("SKILL.md"),
+            "---\nname: noisy\ndescription: Talks too much.\n---\n",
+        )
+        .expect("a file");
+
+        let agent = Agent::read(Some(&dir), None, crate::sessions::Listing::default());
         let mut panel = Settings::open(&Config::default(), None, agent);
         go_to(&mut panel, SKILLS);
-        let listed: Vec<String> = panel
+        let listed: Vec<&Entry> = panel
             .rows()
             .iter()
             .filter_map(|row| match row {
-                Row::Item(text) => Some(text.clone()),
+                Row::Entry(entry) => Some(entry),
                 _ => None,
             })
             .collect();
         assert_eq!(
-            listed,
+            listed
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.on))
+                .collect::<Vec<_>>(),
             vec![
-                String::from("coding  Changing code that already exists."),
-                String::from("web-search"),
+                ("coding  Changing code that already exists.", true),
+                ("noisy  Talks too much.", false),
+                ("web-search  Search the web.", true),
             ]
         );
+        // Nothing the CLI writes records a repository, so a skill that names one
+        // says it and every other one says where it was found.
+        assert_eq!(listed[0].under, skills.join("coding").display().to_string());
+        assert_eq!(
+            listed[1].under,
+            agent::skills_off(&skills).join("noisy").display().to_string(),
+            "a skill that is off says where it went"
+        );
+        assert_eq!(listed[2].under, "https://github.com/someone/web-search");
+        assert!(listed.iter().all(|entry| entry.removable));
         assert!(
-            said(&panel).contains(".config/noob/skills"),
+            said(&panel).contains(&skills.display().to_string()),
             "the panel does not say where they live"
         );
+
+        // The column beside the list is the skill under the cursor, and the
+        // section opens on the first one rather than on an empty column.
+        let showing = panel.showing().expect("something to show");
+        assert_eq!(showing.name, "coding  Changing code that already exists.");
+        assert_eq!(
+            showing.doc,
+            vec![
+                String::from("# Changing code"),
+                String::new(),
+                String::from("Read it first."),
+            ],
+            "the front matter is not the document"
+        );
+        assert!(panel.step(true), "the cursor walks the entries");
+        assert_eq!(panel.showing().expect("the next one").name, "noisy  Talks too much.");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The toggle on a skill's row is a move on the disk and back, and what the
+    /// row says next comes from reading the disk again rather than from
+    /// remembering what was pressed.
+    #[test]
+    fn turning_a_skill_off_moves_it_and_the_row_reads_the_disk_again() {
+        let dir = scratch_dir("skill-toggle");
+        let skills = dir.join("skills");
+        std::fs::create_dir_all(skills.join("coding")).expect("a directory");
+        std::fs::write(
+            skills.join("coding").join("SKILL.md"),
+            "---\nname: coding\ndescription: Change code.\n---\n\n# Changing code\n",
+        )
+        .expect("a file");
+        let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
+        let mut panel = Settings::open(&Config::default(), None, read());
+        go_to(&mut panel, SKILLS);
+        let at = panel.cursor();
+        assert!(matches!(panel.row(at), Some(Row::Entry(entry)) if entry.on));
+
+        let deed = panel.toggle(at).expect("an entry toggles");
+        assert_eq!(
+            deed,
+            Deed::TurnSkill {
+                dir: String::from("coding"),
+                on: false,
+            }
+        );
+        // What `main` does with it, and then what the panel does with the disk.
+        agent::set_skill(panel.skills_at().expect("a skills directory"), "coding", false)
+            .expect("it moves");
+        panel.adopt_agent(read(), &Config::default());
+        go_to(&mut panel, SKILLS);
+        assert!(
+            matches!(panel.row(panel.cursor()), Some(Row::Entry(entry)) if !entry.on),
+            "the row still says it is on: {:?}",
+            panel.row(panel.cursor())
+        );
+        assert!(!skills.join("coding").exists());
+
+        let back = panel.toggle(panel.cursor()).expect("and back");
+        assert_eq!(
+            back,
+            Deed::TurnSkill {
+                dir: String::from("coding"),
+                on: true,
+            }
+        );
+        agent::set_skill(panel.skills_at().expect("a skills directory"), "coding", true)
+            .expect("it comes back");
+        panel.adopt_agent(read(), &Config::default());
+        go_to(&mut panel, SKILLS);
+        assert!(matches!(panel.row(panel.cursor()), Some(Row::Entry(entry)) if entry.on));
+        assert!(skills.join("coding/SKILL.md").is_file());
+
+        // And the uninstall beside it takes two presses and names the same
+        // directory: the only thing on this panel that cannot be undone.
+        let at = panel.cursor();
+        assert_eq!(panel.uninstall(at), None, "one press deleted a skill");
+        assert_eq!(panel.arming(), Some(at));
+        assert!(
+            panel.says().contains("press uninstall again"),
+            "the panel does not say what is about to go: {}",
+            panel.says()
+        );
+        assert_eq!(
+            panel.uninstall(at),
+            Some(Deed::RemoveSkill {
+                dir: String::from("coding"),
+                on: true,
+            })
+        );
+        assert_eq!(panel.arming(), None, "it stayed armed after it fired");
+
+        // And anything else at all disarms it, so a button pressed once and
+        // walked away from cannot be finished off by the next press that lands.
+        assert_eq!(panel.uninstall(at), None);
+        assert!(panel.step(true) || panel.arming().is_none());
+        assert_eq!(panel.arming(), None, "a key left it armed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A server's row toggles the same way, in its own file, and a server that
+    /// is off is still a row rather than a server that disappeared.
+    #[test]
+    fn turning_a_server_off_moves_its_entry_in_its_own_file() {
+        let dir = scratch_dir("server-toggle");
+        std::fs::write(
+            dir.join("mcp.json"),
+            r#"{"servers": {"docs": {"url": "http://localhost:9000/mcp"}}}"#,
+        )
+        .expect("a file");
+        let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
+        let mut panel = Settings::open(&Config::default(), None, read());
+        go_to(&mut panel, MCP);
+        let at = panel.cursor();
+        assert!(
+            matches!(panel.row(at), Some(Row::Entry(entry)) if entry.on && !entry.removable),
+            "{:?}",
+            panel.row(at)
+        );
+        // The entry itself is what the column beside the list shows.
+        let showing = panel.showing().expect("something to show");
+        assert!(showing.doc.iter().any(|line| line.contains("localhost:9000")), "{:?}", showing.doc);
+
+        let deed = panel.toggle(at).expect("an entry toggles");
+        assert_eq!(
+            deed,
+            Deed::TurnServer {
+                name: String::from("docs"),
+                project: false,
+                on: false,
+            }
+        );
+        let file = panel.mcp_file(false).expect("a global file").to_path_buf();
+        assert_eq!(file, dir.join("mcp.json"));
+        agent::set_server(&file, "docs", false).expect("it moves");
+        panel.adopt_agent(read(), &Config::default());
+        go_to(&mut panel, MCP);
+        assert!(
+            matches!(panel.row(panel.cursor()), Some(Row::Entry(entry)) if !entry.on),
+            "{:?}",
+            panel.row(panel.cursor())
+        );
+        // Nothing can be uninstalled here: a server is lines in a file.
+        assert_eq!(panel.uninstall(panel.cursor()), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
