@@ -43,7 +43,7 @@ package, the binary and everything a user sees are `no0b`.
 | Sessions on disk, resume | `crates/noob/src/session/CONTRACT.md` |
 | Endpoint, keys, sandbox detection | `crates/noob/src/config/CONTRACT.md` |
 | Talking to a model server | `crates/noob-provider/CONTRACT.md` |
-| Skills | `crates/noob/src/skills/` |
+| Skills | `crates/noob/src/skills/CONTRACT.md` |
 | Talking to MCP servers, mcp.json | `crates/noob/src/mcp/CONTRACT.md` |
 | The `serve` subcommand the window drives | `crates/noob/src/main.rs` |
 
@@ -79,6 +79,8 @@ Boxes so far:
 - [`crates/noob/src/subagent`](../crates/noob/src/subagent/CONTRACT.md) - the
   subagent tool and the background hub: detached children of the binary
   itself, one result line each.
+- [`crates/noob/src/skills`](../crates/noob/src/skills/CONTRACT.md) - SKILL.md
+  discovery, the L1 index, install and remove with staged atomic publish.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,
