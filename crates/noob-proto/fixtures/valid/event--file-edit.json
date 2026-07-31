@@ -1,0 +1,1 @@
+{"v":1,"t":"file.edit","path":"src/a.rs","span":{"start":10,"end":14,"kind":"fn","name":"add"},"before":"a - b","after":"a + b","call_id":"c7"}

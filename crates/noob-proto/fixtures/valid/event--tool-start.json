@@ -1,0 +1,1 @@
+{"v":1,"t":"tool.start","call_id":"c1","name":"bash","brief":"cargo test","args":{"cmd":"cargo test","n":2}}

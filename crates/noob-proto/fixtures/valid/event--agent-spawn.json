@@ -1,0 +1,1 @@
+{"v":1,"t":"agent.spawn","agent_id":"agent-1","prompt":"audit the parser","tools":"read,grep"}

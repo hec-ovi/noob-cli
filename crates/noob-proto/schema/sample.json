@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Sample",
+  "description": "One measured quantity at one instant. A max means the value is a proportion and can be a bar; a stream of samples over time is a series and can be a graph. The renderer chooses; the protocol does not.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["key", "label", "value"],
+  "properties": {
+    "key": {
+      "description": "Stable identifier, so a consumer can follow one quantity across frames even if its label changes.",
+      "type": "string"
+    },
+    "label": {
+      "description": "What to show a human.",
+      "type": "string"
+    },
+    "value": {
+      "description": "Null when the reading was not finite: JSON has no NaN or infinity, and a frame that cannot be parsed is worse than a reading that is missing.",
+      "type": ["number", "null"]
+    },
+    "max": {
+      "description": "Full scale, when the quantity has one. Omitted means unbounded, which a bar cannot render and a graph can. Null when the scale itself was not finite.",
+      "type": ["number", "null"]
+    },
+    "unit": { "type": "string" }
+  }
+}

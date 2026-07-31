@@ -37,30 +37,38 @@ package, the binary and everything a user sees are `no0b`.
 
 | You want to change | Open |
 |---|---|
-| The wire protocol between agent and window | `crates/noob-proto/src/lib.rs` |
+| The wire protocol between agent and window | `crates/noob-proto/CONTRACT.md`, shapes in `crates/noob-proto/schema/` |
 | What the agent can do: tools and their schemas | `crates/noob/src/tools/` |
 | The system prompt and what goes into it | `crates/noob/src/agent/prompt.rs` |
 | Sessions on disk, resume | `crates/noob/src/session/` |
 | Endpoint, keys, sandbox detection | `crates/noob/src/config/` |
-| Talking to a model server | `crates/noob-provider/src/lib.rs` |
+| Talking to a model server | `crates/noob-provider/CONTRACT.md` |
 | Skills | `crates/noob/src/skills/` |
 | The `serve` subcommand the window drives | `crates/noob/src/main.rs` |
 
-## Layers
+## Boxes
 
-A layer is a blackbox. From outside it you read its `CONTRACT.md` and its
-`schema/`, and nothing else: not its `src/`, not its tests. Cross-layer data is
+A box is a blackbox. From outside it you read its `CONTRACT.md` and its
+`schema/`, and nothing else: not its `src/`, not its tests. Cross-box data is
 schema shaped and the boundary fails closed.
 
-Layers so far:
+Boxes so far:
 
 - [`gui/layers/text-geometry`](../gui/layers/text-geometry/CONTRACT.md) - logical
   lines to visual rows.
+- [`crates/noob-proto`](../crates/noob-proto/CONTRACT.md) - the wire protocol:
+  Event frames out, Command frames in, shapes in `schema/`.
+- [`crates/noob-provider`](../crates/noob-provider/CONTRACT.md) - transcript in,
+  model events out, over both OpenAI wire shapes.
+- [`crates/noob-testkit`](../crates/noob-testkit/CONTRACT.md) - dev-only mock
+  OpenAI and MCP servers with wire assertions.
+- [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
+  acquire, present, resize, transparency probing.
+- [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,
+  rects, glyph text, the embedded symbol font.
 
-The rest of `gui/clippy/src` is not yet split into layers. The next candidates,
-in the order that makes the work after them cheaper, are the selection model in
-`select.rs` and the palette in `skin.rs`: both are pure, both are read by
-several modules, and both already have their rule written down in one place.
+The rest of the tree becomes boxes round by round; the plan and its order are
+Task 0 in [`NEXT.md`](NEXT.md).
 
 ### One note on how the boundary is enforced
 

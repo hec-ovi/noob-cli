@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Command frame",
+  "description": "One front-end-to-agent line, as the version 1 writer emits it: v and t lead, every declared field present, no extra fields. The reader is looser by design (unknown t reads as the Unknown body, a missing field reads as its zero value).",
+  "oneOf": [
+    {
+      "title": "prompt.submit",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "text"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "prompt.submit" },
+        "text": { "type": "string" }
+      }
+    },
+    {
+      "title": "prompt.queue",
+      "description": "Queue behind the running turn instead of interrupting it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "text"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "prompt.queue" },
+        "text": { "type": "string" }
+      }
+    },
+    {
+      "title": "turn.cancel",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "turn.cancel" }
+      }
+    },
+    {
+      "title": "agent.cancel",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "agent_id"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "agent.cancel" },
+        "agent_id": { "type": "string" }
+      }
+    },
+    {
+      "title": "skill.add",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "source"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "skill.add" },
+        "source": { "type": "string" }
+      }
+    },
+    {
+      "title": "skill.remove",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "name"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "skill.remove" },
+        "name": { "type": "string" }
+      }
+    },
+    {
+      "title": "mcp.add",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "name", "spec"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "mcp.add" },
+        "name": { "type": "string" },
+        "spec": { "type": "string" }
+      }
+    },
+    {
+      "title": "mcp.remove",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "name"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "mcp.remove" },
+        "name": { "type": "string" }
+      }
+    },
+    {
+      "title": "mcp.connect",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "name"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "mcp.connect" },
+        "name": { "type": "string" }
+      }
+    },
+    {
+      "title": "config.set",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "key", "value"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "config.set" },
+        "key": { "type": "string" },
+        "value": { "type": "string" }
+      }
+    },
+    {
+      "title": "config.unset",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "key"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "config.unset" },
+        "key": { "type": "string" }
+      }
+    },
+    {
+      "title": "session.list",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "session.list" }
+      }
+    },
+    {
+      "title": "session.open",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "id"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "session.open" },
+        "id": { "type": "string" }
+      }
+    },
+    {
+      "title": "unknown",
+      "description": "What the Unknown body writes: the envelope and nothing else.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "unknown" }
+      }
+    }
+  ],
+  "$defs": {
+    "v": {
+      "description": "Protocol version. This writer writes 1; a reader refuses a frame above its own version.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1
+    }
+  }
+}

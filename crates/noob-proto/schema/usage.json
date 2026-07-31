@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Usage",
+  "description": "What one request cost, in tokens. Prefill is prompt minus cached_prompt; summing raw prompt tokens across a session counts work the cache served.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["prompt", "cached_prompt", "completion", "context_total"],
+  "properties": {
+    "prompt": { "type": "integer", "minimum": 0 },
+    "cached_prompt": { "type": "integer", "minimum": 0 },
+    "completion": { "type": "integer", "minimum": 0 },
+    "context_total": {
+      "description": "The configured context window, so a consumer can render a budget without knowing how the agent is configured.",
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

@@ -1,0 +1,1 @@
+{ "kind": "exit_status", "code": 1, "message": "error: could not compile `noob`", "detail": "full compiler output", "remedy": "fix the type error on line 42" }

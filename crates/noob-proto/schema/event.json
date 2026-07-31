@@ -1,0 +1,343 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Event frame",
+  "description": "One agent-to-front-end line, as the version 1 writer emits it: v and t lead, every declared field present, absent options omitted rather than null, no extra fields. The reader is looser by design (unknown t reads as the Unknown body, a missing field reads as its zero value); that tolerance is the crate's job, not this schema's.",
+  "oneOf": [
+    {
+      "title": "session.start",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "id", "workspace", "model", "resumed"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "session.start" },
+        "id": { "type": "string" },
+        "workspace": { "type": "string" },
+        "model": { "type": "string" },
+        "resumed": { "type": "boolean" }
+      }
+    },
+    {
+      "title": "session.end",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "id"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "session.end" },
+        "id": { "type": "string" }
+      }
+    },
+    {
+      "title": "turn.start",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "turn"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "turn.start" },
+        "turn": { "$ref": "#/$defs/u32" }
+      }
+    },
+    {
+      "title": "turn.end",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "turn"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "turn.end" },
+        "turn": { "$ref": "#/$defs/u32" },
+        "interrupted": {
+          "description": "Present only when known; omitted otherwise.",
+          "type": "boolean"
+        }
+      }
+    },
+    {
+      "title": "text.delta",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "d"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "text.delta" },
+        "d": { "type": "string" }
+      }
+    },
+    {
+      "title": "reasoning.delta",
+      "description": "Ephemeral: never enters a transcript, and a consumer may drop it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "d"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "reasoning.delta" },
+        "d": { "type": "string" }
+      }
+    },
+    {
+      "title": "tool.start",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "call_id", "name", "brief", "args"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "tool.start" },
+        "call_id": { "type": "string" },
+        "name": { "type": "string" },
+        "brief": {
+          "description": "The short human label, built by the agent so every consumer renders the same words.",
+          "type": "string"
+        },
+        "args": {
+          "description": "The call's arguments, any JSON value, null included."
+        }
+      }
+    },
+    {
+      "title": "tool.progress",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "call_id", "line"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "tool.progress" },
+        "call_id": { "type": "string" },
+        "line": { "type": "string" }
+      }
+    },
+    {
+      "title": "tool.end",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "call_id", "summary", "elapsed_ms"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "tool.end" },
+        "call_id": { "type": "string" },
+        "summary": { "type": "string" },
+        "elapsed_ms": { "$ref": "#/$defs/u64" },
+        "error": {
+          "description": "Present only on failure, never null.",
+          "$ref": "tool-error.json"
+        }
+      }
+    },
+    {
+      "title": "file.open",
+      "description": "The agent is now looking at this file.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "path", "lines"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "file.open" },
+        "path": { "type": "string" },
+        "lines": { "$ref": "#/$defs/u32" },
+        "call_id": { "$ref": "#/$defs/fileCallId" }
+      }
+    },
+    {
+      "title": "file.span",
+      "description": "The part of that file it is about to work on.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "path", "span"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "file.span" },
+        "path": { "type": "string" },
+        "span": { "$ref": "span.json" },
+        "call_id": { "$ref": "#/$defs/fileCallId" }
+      }
+    },
+    {
+      "title": "file.edit",
+      "description": "A range that just changed, with both sides, so a diff needs no second read of the file.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "path", "span", "before", "after"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "file.edit" },
+        "path": { "type": "string" },
+        "span": { "$ref": "span.json" },
+        "before": { "type": "string" },
+        "after": { "type": "string" },
+        "call_id": { "$ref": "#/$defs/fileCallId" }
+      }
+    },
+    {
+      "title": "file.close",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "path"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "file.close" },
+        "path": { "type": "string" },
+        "call_id": { "$ref": "#/$defs/fileCallId" }
+      }
+    },
+    {
+      "title": "agent.spawn",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "agent_id", "prompt", "tools"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "agent.spawn" },
+        "agent_id": { "type": "string" },
+        "prompt": { "type": "string" },
+        "tools": {
+          "description": "Which tools the sub-agent may use, as one string.",
+          "type": "string"
+        }
+      }
+    },
+    {
+      "title": "agent.state",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "agent_id", "state"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "agent.state" },
+        "agent_id": { "type": "string" },
+        "state": {
+          "description": "What this writer can emit. A reader maps any other string to its Unknown state rather than dropping the frame.",
+          "type": "string",
+          "enum": ["queued", "running", "done", "failed", "canceled", "unknown"]
+        },
+        "detail": { "type": "string" }
+      }
+    },
+    {
+      "title": "agent.output",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "agent_id", "line"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "agent.output" },
+        "agent_id": { "type": "string" },
+        "line": { "type": "string" }
+      }
+    },
+    {
+      "title": "skill.list",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "names"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "skill.list" },
+        "names": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    {
+      "title": "mcp.list",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "names"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "mcp.list" },
+        "names": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    {
+      "title": "mcp.state",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "name", "connected"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "mcp.state" },
+        "name": { "type": "string" },
+        "connected": { "type": "boolean" },
+        "tools": {
+          "description": "How many tools the server offers, when known.",
+          "$ref": "#/$defs/u32"
+        }
+      }
+    },
+    {
+      "title": "usage",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "usage"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "usage" },
+        "usage": { "$ref": "usage.json" }
+      }
+    },
+    {
+      "title": "metrics",
+      "description": "A batch of measurements taken together. A new readout is a new group, not a new frame type.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "group", "at_ms", "samples"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "metrics" },
+        "group": { "type": "string" },
+        "at_ms": {
+          "description": "When the batch was taken, so a consumer can build a time series without its own clock.",
+          "$ref": "#/$defs/u64"
+        },
+        "samples": { "type": "array", "items": { "$ref": "sample.json" } }
+      }
+    },
+    {
+      "title": "note",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "line"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "note" },
+        "line": { "type": "string" }
+      }
+    },
+    {
+      "title": "error",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "line"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "error" },
+        "line": { "type": "string" }
+      }
+    },
+    {
+      "title": "unknown",
+      "description": "What the Unknown body writes: the envelope and nothing else.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "unknown" }
+      }
+    }
+  ],
+  "$defs": {
+    "v": {
+      "description": "Protocol version. This writer writes 1; a reader refuses a frame above its own version.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "u32": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "u64": { "type": "integer", "minimum": 0 },
+    "fileCallId": {
+      "description": "The tool call that caused this file frame. Optional because compaction produces file frames outside any call.",
+      "type": "string"
+    }
+  }
+}

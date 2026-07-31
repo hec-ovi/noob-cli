@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tool error",
+  "description": "Why a tool call failed, as fields rather than prose, so a consumer routes on kind instead of parsing a message.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "message"],
+  "properties": {
+    "kind": {
+      "description": "Coarse class, for routing and display. The agent uses: not_found, denied, timeout, canceled, exit_status, invalid_argument, internal. Open by design: a new class is a new string, not a protocol bump.",
+      "type": "string"
+    },
+    "code": {
+      "description": "Machine detail where one exists, such as a process exit status.",
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    "message": {
+      "description": "One line, already the most useful line rather than the first one.",
+      "type": "string"
+    },
+    "detail": {
+      "description": "The rest, unbounded and unsummarized. Consumers decide how much to show.",
+      "type": "string"
+    },
+    "remedy": {
+      "description": "What to do next, when that is knowable.",
+      "type": "string"
+    }
+  }
+}

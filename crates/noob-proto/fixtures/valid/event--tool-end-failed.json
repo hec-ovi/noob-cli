@@ -1,0 +1,1 @@
+{"v":1,"t":"tool.end","call_id":"c9","summary":"bash cargo test (2.1s, exit 1)","elapsed_ms":2100,"error":{"kind":"exit_status","code":1,"message":"error: could not compile `noob`","detail":"full compiler output","remedy":"fix the type error on line 42"}}

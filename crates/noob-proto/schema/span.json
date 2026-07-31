@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Span",
+  "description": "A part of a file as line numbers, 1-based and inclusive, indifferent to whether a scanner, a parser or a human cursor found it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["start", "end"],
+  "properties": {
+    "start": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "end": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "kind": {
+      "description": "What the span is, when known: fn, class, section, selection.",
+      "type": "string"
+    },
+    "name": { "type": "string" }
+  }
+}

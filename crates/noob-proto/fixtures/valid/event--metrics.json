@@ -1,0 +1,1 @@
+{"v":1,"t":"metrics","group":"gpu","at_ms":1500,"samples":[{"key":"vram","label":"VRAM","value":1619,"max":1875,"unit":"MiB"},{"key":"tokens_per_s","label":"generation","value":47.2,"unit":"tok/s"}]}
