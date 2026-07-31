@@ -1281,6 +1281,27 @@ mod tests {
         assert_eq!(Config::parse("view_weather = #fff").unknown, ["view_weather"]);
     }
 
+    /// A file written while the DEBUG pane existed still loads, in full and
+    /// without a word about it.
+    ///
+    /// That pane is gone, and every file this window has ever written carries
+    /// `view_debug` because the defaults were written commented into it. The
+    /// key stays retired for exactly that reason: a build that called it a typo
+    /// would report a line in the settings file on every start, for a change
+    /// this window made.
+    #[test]
+    fn a_file_that_still_names_the_debug_pane_loads_without_complaint() {
+        let text = "view_debug = #ff0000\nopacity = 80%\nshow_files = off\n";
+        let config = Config::parse(text);
+        assert!(config.unknown.is_empty(), "{:?}", config.unknown);
+        // The rest of the file was read: one dead key does not cost the lines
+        // around it.
+        assert_eq!(config.opacity, 0.8);
+        assert!(!config.show_files);
+        assert!(RETIRED.contains(&"view_debug"), "it has to stay retired");
+        assert!(!keys().contains(&"view_debug"), "and it is not a live key");
+    }
+
     /// A known key with an unreadable value keeps the default and is reported,
     /// rather than quietly becoming zero.
     #[test]

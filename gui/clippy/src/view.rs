@@ -100,9 +100,9 @@ const DOT_ROWS: usize = 4;
 /// edge of a narrow pane.
 const BIG_READING: f32 = 1.0;
 /// Rows the CONTEXT pane spends on its header before its readings start: the
-/// phase, the model and the workspace. They stay put while the readings under
-/// them scroll.
-const CONTEXT_HEAD: usize = 3;
+/// phase, then the three counts that say what this run has asked for. They stay
+/// put while the readings under them scroll.
+const CONTEXT_HEAD: usize = 4;
 /// The smallest a dot shrinks to, across or down, when a pane has more readings
 /// than room. Below this the block stops reading as a block, so it is not drawn:
 /// too tall for its rows and they scroll off, too narrow for its columns and the
@@ -458,17 +458,6 @@ const CARET_W: f32 = 3.0;
 /// workspaces, the CLI and this window, set the same number and ship as one
 /// release.
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// The commit the build came from, as ` abc1234`, with a `+` when the tree had
-/// uncommitted changes, and nothing at all when there was no repository to ask.
-///
-/// `build.rs` stamps [`VERSION`] and the commit into one string. The strip takes
-/// the version from the crate, so what is left to take from the stamp is the
-/// part after it. A version alone cannot tell two test builds of the same
-/// release apart, which is what the commit is for.
-fn build_commit() -> &'static str {
-    env!("NO0B_BUILD").strip_prefix(VERSION).unwrap_or("")
-}
 
 /// Something the pointer can land on. Returned by [`Layout::hit`] so every
 /// click is resolved in one place instead of in a chain of `if` in the event
@@ -1762,6 +1751,14 @@ impl Layout {
     /// column is rounded to the nearest boundary rather than floored, so
     /// pressing on the right half of a character puts the caret after it, the
     /// way a text cursor behaves everywhere else.
+    ///
+    /// Built for the DEBUG pane, whose rows were clicked rather than selected.
+    /// That pane is gone and every press now arrives with the space already
+    /// named by its [`Hit`], so the window asks [`Layout::cell_in`] instead and
+    /// what is left of this is the layout tests: it is the one query that
+    /// answers "is this point in any text box at all", which is what a shaded
+    /// window and an open settings panel are checked with.
+    #[cfg(test)]
     pub fn cell(&self, x: f32, y: f32, size: f32, column: f32) -> Option<(Space, usize, usize)> {
         if self.shaded || column <= 0.0 {
             return None;
@@ -1928,10 +1925,9 @@ fn place_menu(menu: &Menu, column: f32, width: f32, height: f32) -> MenuPlaces {
 ///
 /// The explorer clips a name that does not fit rather than wrapping it, so a row
 /// is always exactly one row. That is what keeps a click from resolving to a
-/// different file than the one under the pointer, the same rule the debug pane
-/// follows. Written as heights, and read through
-/// [`text_geometry`], so the window and the clamp come from the one place that
-/// owns them rather than from arithmetic at two call sites.
+/// different file than the one under the pointer. Written as heights, and read
+/// through [`text_geometry`], so the window and the clamp come from the one
+/// place that owns them rather than from arithmetic at two call sites.
 pub fn file_heights(count: usize) -> Vec<usize> {
     flat_heights(count)
 }
@@ -2960,18 +2956,38 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
     let room = (layout.width - BUTTON_W * 3.0 - ORB_W - 12.0).max(1.0);
     let mut runs = vec![
         Run::tinted("NO0B \u{25b8}", skin.bright),
-        // Which build this is: the version the crate carries, then the commit
-        // build.rs stamped after it, because a version cannot tell two test
-        // builds of the same release apart. At the text tint, not the dim one:
-        // dim is the faintest thing the palette has and two builds side by side
-        // could not be told apart, which is the one job this reading has.
-        Run::tinted(format!(" {VERSION}{}", build_commit()), skin.title),
+        // Which release this is. At the text tint, not the dim one: dim is the
+        // faintest thing the palette has, and the version is the answer to the
+        // first question anyone asks about a build.
+        //
+        // The commit used to follow it, out of a build.rs stamp. It is gone:
+        // seven characters of hex is not something anyone reads off a title,
+        // and the room they took now says where the agent is working.
+        Run::tinted(format!(" {VERSION}"), skin.title),
     ];
-    // Open, the strip says which build this is and nothing more. The phase, the
-    // model, the workspace and the token budget were readings squeezed into a
-    // title with no room to label them; they belong in the monitors, which have
-    // both. Trouble stays because it is the one thing that makes the rest of
-    // the window meaningless.
+    // Then the folder this session is in, after the same marker that separates
+    // the name from the version. Clipped by column against the room the strip
+    // actually has, because the strip is one box with no ellipsis of its own
+    // and a deep path would be cut mid-glyph instead of shortened. Before
+    // SessionStart there is no folder, and a marker with nothing after it is
+    // worse than no marker.
+    if !state.workspace.is_empty() {
+        // One estimated advance, the guess the rest of this strip measures with.
+        let taken = "NO0B \u{25b8}".chars().count() + VERSION.chars().count() + 4;
+        let space = columns_in(room, SMALL * 0.6).saturating_sub(taken);
+        if space > 1 {
+            runs.push(Run::tinted(" \u{25b8}", skin.bright));
+            runs.push(Run::tinted(
+                format!(" {}", clip(&short_path(&state.workspace), space)),
+                skin.title,
+            ));
+        }
+    }
+    // Open, the strip says which build this is and where it is working. The
+    // phase, the model and the token budget were readings squeezed into a title
+    // with no room to label them; they belong in the monitors, which have both.
+    // Trouble stays because it is the one thing that makes the rest of the
+    // window meaningless.
     if let Some(trouble) = frame.trouble {
         runs.push(Run::tinted(format!("   {trouble}"), skin.bad));
     } else if layout.shaded {
@@ -3267,7 +3283,6 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
         // files away.
         Some(View::Context) => context(scene, frame, panel),
         Some(View::Session) => gauges(scene, frame, panel, View::Session, frame.monitor.session()),
-        Some(View::Debug) => debug(scene, frame, panel),
         Some(View::Files) => files(scene, frame, panel),
     }
 }
@@ -3481,10 +3496,9 @@ impl ListRow {
 
 /// A pane that is a list of lines, scrolled inside its own box.
 ///
-/// PLAN, AGENTS and DEBUG. All three drew every row they had, with no window and
-/// no bar: the first two into one text box that ran off the bottom of the pane,
-/// and the third by taking as many rows as fitted and dropping the rest. What was
-/// past the edge could not be reached at all, which is what item 14 reported.
+/// PLAN and AGENTS. Both drew every row they had, with no window and no bar,
+/// into one text box that ran off the bottom of the pane. What was past the edge
+/// could not be reached at all, which is what item 14 reported.
 ///
 /// The window, the clamp and the thumb come from `text_geometry` through
 /// [`crate::scroll::Scrolls`], the same numbers the transcript is drawn from, so a row of
@@ -3528,10 +3542,10 @@ pub fn flat_heights(count: usize) -> Vec<usize> {
 /// (OUTPUT, ACTIVITY and the open file), and for one with nothing to scroll.
 ///
 /// The one place outside the drawing that knows how tall a pane's content is: the
-/// wheel, the page keys, the click in the debug pane and the per-frame clamp all
-/// ask here. Anything that worked it out for itself would eventually scroll a pane
-/// by a different number of rows than the pane drew, which is the class of bug
-/// `text_geometry` exists to end.
+/// wheel, the page keys and the per-frame clamp all ask here. Anything that
+/// worked it out for itself would eventually scroll a pane by a different number
+/// of rows than the pane drew, which is the class of bug `text_geometry` exists
+/// to end.
 pub fn scroll_extent(frame: &Frame, view: View, panel: Panel) -> Option<(Vec<usize>, usize)> {
     let fit = frame.layout.rows(panel, frame.pane_size);
     let cols = cols_of(panel, frame.pane_column);
@@ -3544,7 +3558,6 @@ pub fn scroll_extent(frame: &Frame, view: View, panel: Panel) -> Option<(Vec<usi
     match view {
         View::Plan => lines(plan_rows(frame.state, frame.skin)),
         View::Agents => lines(agent_rows(frame.state, frame.skin)),
-        View::Debug => lines(debug_list(frame.state, cols, frame.skin)),
         View::Hardware => gauge_extent(frame, panel, frame.monitor.hardware()),
         View::Session => gauge_extent(frame, panel, frame.monitor.session()),
         // The readings sit under the header, in a box of their own, and it is that
@@ -3807,18 +3820,32 @@ fn gauge_grid(gauges: &[Gauge], content: Panel, size: f32, column: f32) -> Grid 
     }
 }
 
-/// The CONTEXT pane: what the agent is, where it is working, and how full it is.
+/// The CONTEXT pane: what phase this run is in, what it has asked for, and how
+/// full it is.
 ///
-/// The first three rows are what came off the title strip when that was cut
-/// back to the build stamp. They are readings with labels, which is what they
-/// never were up there: the phase, the model and the workspace sat unlabelled
-/// on one line with the token budget, and nothing said which was which. The
-/// readings under them are [`Monitor::context`], named for this pane.
+/// The header is four rows with labels beside them, in the separation the phase
+/// row has had since the title strip was cut back. The three under the phase are
+/// counts that were readings in the list below until they were the three most
+/// worth reading first, so they came up here: a labelled row is easier to find
+/// than a dot block. The model and the workspace were up here too and are not
+/// any more, because the strip says the path again and the model is on the
+/// settings panel. The readings under the header are [`Monitor::context`], named
+/// for this pane.
 fn context(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let (skin, state) = (frame.skin, frame.state);
     let content = panel.inset(PAD);
     let line = Text::line_for(frame.pane_size);
-    let label_w = (LABEL_COLUMNS + 1) as f32 * frame.pane_column;
+    // The failed count rides with the total rather than getting a row of its
+    // own: the two are one reading, and a pane that failed nothing still says
+    // so. It is where the DEBUG pane's count went when that pane was removed.
+    let calls = match state.failed_calls {
+        0 => crate::state::thousands(state.tool_calls as u64),
+        failed => format!(
+            "{} ({} failed)",
+            crate::state::thousands(state.tool_calls as u64),
+            crate::state::thousands(failed as u64)
+        ),
+    };
     let rows: [(&str, String, [u8; 4]); CONTEXT_HEAD] = [
         (
             "PHASE",
@@ -3836,9 +3863,38 @@ fn context(scene: &mut Scene, frame: &Frame, panel: Panel) {
                 skin.body
             },
         ),
-        ("MODEL", state.model.clone(), skin.body),
-        ("PATH", short_path(&state.workspace), skin.body),
+        (
+            "TOTAL REQUESTS",
+            crate::state::thousands(state.requests as u64),
+            skin.body,
+        ),
+        (
+            "TOTAL TOOL CALLS",
+            calls,
+            // In the fault colour once something has failed, which is how the
+            // pane it came from read its own count. A run with nothing wrong
+            // with it reads the same as every other row.
+            match state.failed_calls {
+                0 => skin.body,
+                _ => skin.bad,
+            },
+        ),
+        (
+            "LAST PREFILL",
+            crate::state::thousands(state.last_prefill),
+            skin.body,
+        ),
     ];
+    // As wide as the longest label, the way the readings below size theirs.
+    // Fixed at ten columns, "TOTAL TOOL CALLS" ran into its own number.
+    let label_cols = rows
+        .iter()
+        .map(|(label, _, _)| label.chars().count())
+        .max()
+        .unwrap_or(LABEL_COLUMNS)
+        .max(LABEL_COLUMNS)
+        + 1;
+    let label_w = label_cols as f32 * frame.pane_column;
     for (index, (label, value, tint)) in rows.iter().enumerate() {
         let y = content.y + index as f32 * line;
         scene.text(Text::rich(
@@ -3847,9 +3903,9 @@ fn context(scene: &mut Scene, frame: &Frame, panel: Panel) {
             frame.pane_size,
             skin.dim,
         ));
-        // Clipped, not wrapped: the rows are at fixed heights, so a long model
-        // name that wrapped would have its second row cut off by its own box.
-        let room = cols_of(panel, frame.pane_column).saturating_sub(LABEL_COLUMNS + 2);
+        // Clipped, not wrapped: the rows are at fixed heights, so a long value
+        // that wrapped would have its second row cut off by its own box.
+        let room = cols_of(panel, frame.pane_column).saturating_sub(label_cols + 1);
         let text = match value.is_empty() {
             true => String::from("\u{2014}"),
             false => clip(value, room.max(1)),
@@ -3876,9 +3932,9 @@ fn context(scene: &mut Scene, frame: &Frame, panel: Panel) {
 /// The room the CONTEXT pane's readings get, under its header.
 ///
 /// `None` when the pane is too short to hold even one reading under it. The
-/// header itself does not scroll: it is three rows saying which agent this is,
-/// and a monitor whose first rows scrolled away would be a monitor of an
-/// unnamed session.
+/// header itself does not scroll: it is four rows saying what this run is
+/// doing and what it has asked for, and a monitor whose first rows scrolled
+/// away would be a monitor with no summary.
 fn gauge_area(panel: Panel, size: f32) -> Option<Panel> {
     let line = Text::line_for(size);
     let used = CONTEXT_HEAD as f32 * line + line * 0.5;
@@ -3886,43 +3942,6 @@ fn gauge_area(panel: Panel, size: f32) -> Option<Panel> {
         return None;
     }
     Some(Panel::new(panel.x, panel.y + used, panel.w, panel.h - used))
-}
-
-/// Calls that failed, and what was sent to the one that is open.
-///
-/// One row per line, clipped rather than wrapped. A click is turned into a row
-/// by dividing by the line height, so a row that wrapped onto two would expand a
-/// different failure than the one under the pointer. The rows themselves come
-/// from [`State::debug_rows`], which is also what resolves the click, and the
-/// window they are drawn from is what the click has added back to it: the row
-/// under the pointer is the row on screen, not the row in the list.
-fn debug(scene: &mut Scene, frame: &Frame, panel: Panel) {
-    let cols = cols_of(panel, frame.pane_column);
-    list_pane(
-        scene,
-        frame,
-        panel,
-        View::Debug,
-        debug_list(frame.state, cols, frame.skin),
-    );
-}
-
-/// The debug pane's rows, each clipped to one row of a pane `cols` wide.
-fn debug_list(state: &State, cols: usize, skin: &Skin) -> Vec<ListRow> {
-    // One column short of the pane, because `clip` spends one on the ellipsis it
-    // adds: a row exactly as wide as the pane would come back one wider and
-    // wrap, which is the one thing this pane cannot allow.
-    let room = cols.saturating_sub(1).max(1);
-    state
-        .debug_rows()
-        .into_iter()
-        .map(|row| {
-            ListRow::new(vec![Run::tinted(
-                clip(&row.text, room),
-                skin.tone(row.tone),
-            )])
-        })
-        .collect()
 }
 
 /// The file view: the explorer column, and the open file beside it.
@@ -5347,38 +5366,44 @@ mod tests {
         render_with(state, w, h, dock, files, &Monitor::new(), None)
     }
 
-    /// The window has to say which build it is, or a tester cannot tell two of
-    /// them apart. The crate version alone cannot: it does not move between
-    /// commits, so `build.rs` stamps the commit into it.
+    /// The window says which release it is, and no longer which commit.
+    ///
+    /// The commit was seven characters of hex nobody read off a title strip,
+    /// and the room it took says where the agent is working instead. `build.rs`
+    /// still stamps it; nothing draws it.
     #[test]
-    fn the_title_bar_names_the_build() {
+    fn the_title_bar_names_the_release_and_not_the_commit() {
         let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &[]);
         let text = text_of(&out.scene);
         // The window is NO0B and has one name. It used to draw the product name
         // twice, "NO0B \u{25b8} CLIppy", and the second one is gone.
         assert!(text.contains("NO0B"), "{text}");
         assert!(!text.contains("CLIppy"), "the old name is still drawn: {text}");
-        assert!(
-            text.contains(env!("NO0B_BUILD")),
-            "the build stamp {:?} is not on screen: {text}",
-            env!("NO0B_BUILD")
-        );
-        assert!(
-            env!("NO0B_BUILD").starts_with(env!("CARGO_PKG_VERSION")),
-            "the stamp has to start with the version, got {:?}",
-            env!("NO0B_BUILD")
-        );
+        assert!(text.contains(VERSION), "the version is not on screen: {text}");
+        let commit = env!("NO0B_BUILD")
+            .strip_prefix(VERSION)
+            .unwrap_or("")
+            .trim()
+            .trim_end_matches('+');
+        if !commit.is_empty() {
+            assert!(
+                !text.contains(commit),
+                "the build commit {commit:?} is still drawn: {text}"
+            );
+        }
     }
 
-    /// What item 21 asked for, read left to right: the orb, the name, the
-    /// marker, the version.
+    /// Read left to right: the orb, the name, the marker, the version, the same
+    /// marker again, and the folder the agent is working in.
     ///
-    /// Both halves of that. The orb is drawn, as discs inside the leftmost
-    /// [`ORB_W`] of the strip, and no text starts inside that square, so the two
-    /// share the strip instead of overlapping.
+    /// The path is what the commit hash used to be. Both halves of the orb are
+    /// here too: it is drawn, as discs inside the leftmost [`ORB_W`] of the
+    /// strip, and no text starts inside that square, so the two share the strip
+    /// instead of overlapping.
     #[test]
-    fn the_title_strip_reads_orb_then_name_then_marker_then_version() {
-        let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &[]);
+    fn the_title_strip_reads_orb_then_name_then_version_then_path() {
+        let state = busy_state();
+        let out = render(&state, 1400.0, 900.0, &Dock::new(), &[]);
         assert!(
             discs_of(&out.scene).len() > 100,
             "the orb is not drawn: {} discs",
@@ -5391,10 +5416,30 @@ mod tests {
             .find(|text| text.runs.iter().any(|run| run.text.contains("NO0B")))
             .expect("the title strip names the window");
         let line: String = title.runs.iter().map(|run| run.text.as_str()).collect();
-        assert!(
-            line.starts_with(&format!("NO0B \u{25b8} {VERSION}")),
+        assert_eq!(
+            line,
+            format!(
+                "NO0B \u{25b8} {VERSION} \u{25b8} {}",
+                short_path(&state.workspace)
+            ),
             "the strip reads {line:?}"
         );
+        // The same marker between each pair, and only those two.
+        assert_eq!(line.matches('\u{25b8}').count(), 2, "{line:?}");
+        // Before the agent says where it is, the marker has nothing to point at
+        // and is not drawn either.
+        let quiet = render(&State::new(), 1400.0, 900.0, &Dock::new(), &[]);
+        let bare: String = quiet
+            .scene
+            .texts
+            .iter()
+            .find(|text| text.runs.iter().any(|run| run.text.contains("NO0B")))
+            .expect("the strip names the window before a session starts")
+            .runs
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect();
+        assert_eq!(bare, format!("NO0B \u{25b8} {VERSION}"), "{bare:?}");
         assert!(title.at.x >= ORB_W, "the text starts at {}", title.at.x);
         for text in &out.scene.texts {
             if text.at.y >= TITLE_H {
@@ -5569,8 +5614,6 @@ mod tests {
             reading.text
         );
         assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
-        // The commit follows the version rather than repeating it.
-        assert!(!build_commit().contains(VERSION), "{:?}", build_commit());
     }
 
     /// The CLI and the window are separate cargo workspaces with separate
@@ -5595,14 +5638,16 @@ mod tests {
         );
     }
 
-    /// The strip carries the name and the build stamp, and nothing else.
+    /// The strip carries the name, the release and the folder, and nothing else.
     ///
     /// It used to carry the phase, the model, the workspace, a resumed marker
     /// and the whole token budget on one unlabelled line. Those are readings
-    /// and they are moving to the monitors, so this asserts they are gone from
-    /// here rather than that they are here, which is what it asserted before.
+    /// and they moved to the monitors, so this asserts they are gone from here
+    /// rather than that they are here, which is what it asserted before. The
+    /// folder came back on its own terms: with a marker in front of it and
+    /// nothing else competing for the line.
     #[test]
-    fn the_title_strip_carries_only_the_name_and_the_build() {
+    fn the_title_strip_carries_only_the_name_the_release_and_the_folder() {
         let state = busy_state();
         let out = render(&state, 1400.0, 900.0, &Dock::new(), &[]);
         let title = out
@@ -5612,13 +5657,13 @@ mod tests {
             .find(|text| text.runs.iter().any(|run| run.text.contains("NO0B")))
             .expect("the title strip names the window");
         let line: String = title.runs.iter().map(|run| run.text.as_str()).collect();
-        assert!(line.contains(env!("NO0B_BUILD")), "{line}");
+        assert!(line.contains(VERSION), "{line}");
+        assert!(line.contains(&short_path(&state.workspace)), "{line}");
         // The budget was a whole line of readings up here. It is a set of
         // monitor rows now, so what is asserted is that none of its words are.
         for evicted in [
             state.phase.word().to_lowercase(),
             state.model.clone(),
-            short_path(&state.workspace),
             String::from("prefilled"),
             String::from("requests"),
         ] {
@@ -5627,15 +5672,15 @@ mod tests {
                 "{evicted:?} is still in the title strip: {line}"
             );
         }
-        // And the stamp is readable. It was in the dim tint, the faintest the
+        // And the reading is readable. It was in the dim tint, the faintest the
         // palette has, and two builds could not be told apart by it.
-        let stamp = title
+        let reading = title
             .runs
             .iter()
-            .find(|run| run.text.contains(env!("NO0B_BUILD")))
-            .expect("the build stamp is a run of its own");
-        assert_eq!(stamp.color, Some(out.skin.title));
-        assert_ne!(stamp.color, Some(out.skin.dim));
+            .find(|run| run.text.contains(VERSION))
+            .expect("the version is a run of its own");
+        assert_eq!(reading.color, Some(out.skin.title));
+        assert_ne!(reading.color, Some(out.skin.dim));
     }
 
     /// The bar along the bottom is gone and nothing was put back down there.
@@ -6812,9 +6857,7 @@ mod tests {
         // Nothing in the bottom right: one space in that column, so no divider
         // across it, and the vertical one is still there.
         let mut dock = Dock::new();
-        for view in [View::Files, View::Debug] {
-            dock.move_view(view, Space::TopRight);
-        }
+        dock.move_view(View::Files, Space::TopRight);
         let out = render(&busy_state(), 1200.0, 800.0, &dock, &[]);
         assert!(out.layout.column_divider[0].live());
         assert!(out.layout.row_divider.iter().all(|line| !line.live()));
@@ -7018,7 +7061,7 @@ mod tests {
     fn every_pane_is_the_cells_it_covers() {
         let mut docks = vec![Dock::new()];
         let mut split = Dock::new();
-        split.move_view(View::Debug, Space::BottomLeft);
+        split.move_view(View::Hardware, Space::BottomLeft);
         docks.push(split.clone());
         let mut rows = Dock::new();
         rows.span_view(View::Files, Space::TopLeft, Space::TopRight);
@@ -7094,7 +7137,7 @@ mod tests {
     #[test]
     fn the_two_halves_are_dragged_apart_and_neither_moves_the_other() {
         let mut dock = Dock::new();
-        dock.move_view(View::Debug, Space::BottomLeft);
+        dock.move_view(View::Hardware, Space::BottomLeft);
         let start = Layout::compute(1400.0, 900.0, &split_shape(&dock, LEFT_WIDTH, TOP_HEIGHT));
         assert!(
             start.row_divider[0].live() && start.row_divider[1].live(),
@@ -7147,7 +7190,7 @@ mod tests {
     #[test]
     fn a_drop_reads_the_line_of_the_half_the_pointer_is_over() {
         let mut dock = Dock::new();
-        dock.move_view(View::Debug, Space::BottomLeft);
+        dock.move_view(View::Hardware, Space::BottomLeft);
         let layout =
             Layout::compute(1400.0, 900.0, &halves_shape(&dock, [LEFT_WIDTH; 2], [0.3, 0.7]));
         let at = |space: Space| layout.grid[space.index()];
@@ -7210,6 +7253,7 @@ mod tests {
         assert!(dock.span_view(View::Files, Space::TopLeft, Space::TopRight));
         assert!(dock.move_view(View::Session, Space::TopRight));
         assert!(dock.move_view(View::Files, Space::BottomLeft));
+        assert!(dock.move_view(View::Hardware, Space::BottomRight));
         assert!(dock.rows_first(), "a tab moved does not turn the grid back");
 
         let layout =
@@ -7271,9 +7315,7 @@ mod tests {
         ] {
             dock.move_view(view, Space::TopLeft);
         }
-        for view in [View::Files, View::Debug] {
-            dock.move_view(view, Space::BottomLeft);
-        }
+        dock.move_view(View::Files, Space::BottomLeft);
         let layout = Layout::compute(1200.0, 800.0, &shape(&dock, &[]));
         assert!(!layout.column_divider[0].live(), "there is one column");
         assert!(layout.row_divider[0].live());
@@ -7293,7 +7335,7 @@ mod tests {
     #[test]
     fn folding_a_pane_hands_its_room_down_its_own_column() {
         let mut dock = Dock::new();
-        dock.move_view(View::Debug, Space::BottomLeft);
+        dock.move_view(View::Hardware, Space::BottomLeft);
         let open = Layout::compute(1200.0, 800.0, &shape(&dock, &[]));
         dock.slot_mut(Space::TopLeft).folded = true;
         let folded = Layout::compute(1200.0, 800.0, &shape(&dock, &[]));
@@ -7331,7 +7373,7 @@ mod tests {
     #[test]
     fn a_folded_half_gets_its_own_line_back_when_it_opens() {
         let mut dock = Dock::new();
-        dock.move_view(View::Debug, Space::BottomLeft);
+        dock.move_view(View::Hardware, Space::BottomLeft);
         let halves = [0.3, 0.7];
         let open = Layout::compute(
             1200.0,
@@ -8070,14 +8112,16 @@ mod tests {
         assert!(seen(View::Agents).contains("search the web"));
         assert!(seen(View::Files).contains("return a + b"));
         // The monitors are three different lists: the machine, how full this run
-        // is, and what it spent getting there. Plus what failed.
+        // is, and what it spent getting there.
         let hardware = seen(View::Hardware);
         assert!(hardware.contains("CPU") || hardware.contains("RAM"), "{hardware}");
         let context = seen(View::Context);
         assert!(context.contains("TOTAL TOOL CALLS"), "{context}");
         assert!(context.contains("LAST PREFILL"), "{context}");
-        assert!(context.contains("laguna-s21"), "the model belongs here: {context}");
         assert!(!context.contains("CPU"), "hardware leaked into CONTEXT: {context}");
+        // The model and the workspace were rows of this pane. The strip says
+        // where the agent is working and the settings panel says what it is.
+        assert!(!context.contains("laguna-s21"), "the model row is back: {context}");
         let session = seen(View::Session);
         for wanted in ["PREFILLED", "GENERATED", "CACHED", "PREFILL", "DECODE"] {
             assert!(session.contains(wanted), "{wanted} is not in {session}");
@@ -8085,8 +8129,6 @@ mod tests {
         assert!(!session.contains("TOOL CALLS"), "the other pane leaked: {session}");
         assert!(!session.contains("MEAN"), "the all-time readings are gone: {session}");
         assert!(!hardware.contains("DECODE"), "the reverse: {hardware}");
-        let debug = seen(View::Debug);
-        assert!(debug.contains("failed calls"), "{debug}");
     }
 
     /// The tabs are the whole of what the rename changed, so this reads them off
@@ -8555,10 +8597,16 @@ mod tests {
         assert!(text.contains("1,816 / 65,536"), "the fill still reads: {text}");
     }
 
-    /// The session monitor carries what the title strip lost: which phase, which
-    /// model, which workspace. Labelled, which they never were up there.
+    /// The header of the context pane is four labelled rows: the phase, and the
+    /// three counts that say what this run has asked for. They are separated the
+    /// way the phase row always was, a label in the dim tint and the reading
+    /// beside it, which is what the counts never had as gauges.
+    ///
+    /// This asserted MODEL and PATH, which were the other two rows. The strip
+    /// says where the agent is working now, so a PATH row here would be the same
+    /// answer twice, and the model is on the settings panel.
     #[test]
-    fn the_session_monitor_carries_what_the_title_strip_lost() {
+    fn the_context_header_is_the_phase_and_the_three_counts() {
         let state = busy_state();
         let mut monitor = Monitor::new();
         monitor.sample(&state);
@@ -8566,26 +8614,118 @@ mod tests {
         dock.reveal(View::Context);
         let out = render_with(&state, 1400.0, 900.0, &dock, &[], &monitor, None);
         let text = text_of(&out.scene);
+        let body = out.layout.placed(Space::TopRight).body;
         for wanted in [
             "PHASE",
-            "MODEL",
-            "PATH",
-            state.model.as_str(),
-            &short_path(&state.workspace),
+            "TOTAL REQUESTS",
+            "TOTAL TOOL CALLS",
+            "LAST PREFILL",
             "CONTEXT",
         ] {
             assert!(text.contains(wanted), "{wanted:?} is not in the pane: {text}");
         }
+        for gone in ["MODEL", "PATH", state.model.as_str()] {
+            assert!(!text.contains(gone), "{gone:?} is still in the pane: {text}");
+        }
+        // Every label is drawn in its own box in the dim tint, with its reading
+        // in a box of its own beside it. That separation is the whole of what
+        // moving these three off the gauge list bought.
+        for (label, reading) in [
+            ("TOTAL REQUESTS", crate::state::thousands(state.requests as u64)),
+            ("TOTAL TOOL CALLS", crate::state::thousands(state.tool_calls as u64)),
+            ("LAST PREFILL", crate::state::thousands(state.last_prefill)),
+        ] {
+            let row: Vec<&noob_draw::Text> = out
+                .scene
+                .texts
+                .iter()
+                .filter(|t| body.contains(t.at.x, t.at.y))
+                .filter(|t| {
+                    t.runs.iter().any(|r| r.text == label || r.text == reading)
+                })
+                .collect();
+            assert_eq!(row.len(), 2, "{label} is not a label and a reading");
+            let (name, value) = (row[0], row[1]);
+            assert_eq!(name.runs[0].text, label);
+            assert_eq!(value.runs[0].text, reading, "{label}");
+            assert_eq!(name.runs[0].color, Some(out.skin.dim), "{label} is not dim");
+            assert_eq!(value.runs[0].color, Some(out.skin.body), "{label}'s reading");
+            assert!(value.at.x > name.at.x, "{label} is not beside its reading");
+            assert!((value.at.y - name.at.y).abs() < 0.01, "{label} is not on one row");
+        }
         // And the reading above the header is a row of its own, not a line of
         // the title strip: the phase word is drawn in the pane, not up there.
-        let body = out.layout.placed(Space::TopRight).body;
         assert!(
             out.scene.texts.iter().any(|t| {
                 body.contains(t.at.x, t.at.y)
                     && t.runs.iter().any(|r| r.text.contains(state.phase.word()))
             }),
-            "the phase is not drawn in the session pane"
+            "the phase is not drawn in the context pane"
         );
+    }
+
+    /// The calls that failed are counted beside the calls that were made.
+    ///
+    /// That count was the whole of the DEBUG pane's first row and the pane is
+    /// gone. It rides with the total rather than taking a row of its own,
+    /// because the two are one reading, and it takes the fault colour once
+    /// there is anything to say.
+    #[test]
+    fn the_failed_calls_are_counted_beside_the_total() {
+        let mut state = busy_state();
+        let mut dock = Dock::new();
+        dock.reveal(View::Context);
+        let reading = |state: &State| {
+            let out = render_with(state, 1400.0, 900.0, &dock, &[], &Monitor::new(), None);
+            let body = out.layout.placed(Space::TopRight).body;
+            let run = out
+                .scene
+                .texts
+                .iter()
+                .filter(|t| body.contains(t.at.x, t.at.y))
+                .flat_map(|t| t.runs.iter())
+                .find(|r| r.text == crate::state::thousands(state.tool_calls as u64)
+                    || r.text.starts_with(&format!(
+                        "{} (",
+                        crate::state::thousands(state.tool_calls as u64)
+                    )))
+                .expect("the tool call total is drawn")
+                .clone();
+            (run.text.clone(), run.color, out.skin)
+        };
+
+        // Nothing has failed: the total is the whole reading, in the ordinary
+        // tint. A "(0 failed)" on every window is noise.
+        assert_eq!(state.failed_calls, 0);
+        let (text, tint, skin) = reading(&state);
+        assert_eq!(text, crate::state::thousands(state.tool_calls as u64));
+        assert_eq!(tint, Some(skin.body));
+
+        state.apply(noob_proto::Event::ToolStart {
+            call_id: "boom".into(),
+            name: "bash".into(),
+            brief: "no".into(),
+            args: serde_json::json!({"cmd": "no"}),
+        });
+        state.apply(noob_proto::Event::ToolEnd {
+            call_id: "boom".into(),
+            summary: "refused".into(),
+            elapsed_ms: 1,
+            error: Some(noob_proto::ToolError {
+                kind: "denied".into(),
+                code: None,
+                message: "outside the workspace".into(),
+                detail: None,
+                remedy: None,
+            }),
+        });
+        let (text, tint, skin) = reading(&state);
+        assert_eq!(
+            text,
+            format!("{} (1 failed)", crate::state::thousands(state.tool_calls as u64))
+        );
+        assert_eq!(tint, Some(skin.bad), "a failure does not read as a number");
+        assert_ne!(skin.bad, skin.body);
     }
 
     /// While a turn is running the phase reads INFERRING in the bad colour, and
@@ -8638,67 +8778,8 @@ mod tests {
         assert_ne!(skin.body, skin.bad);
     }
 
-    /// One row per line and one line per row, because a click in this pane is
-    /// turned into a row by dividing by the line height. A row that wrapped
-    /// would open a different failure than the one under the pointer.
-    ///
-    /// The rows are one text box now that the pane scrolls, rather than one box
-    /// each, so what this reads is the lines of that box: every one of them is at
-    /// most as wide as the pane, and the box steps a line at a time, which is what
-    /// the click arithmetic divides by.
-    #[test]
-    fn every_row_of_the_debug_pane_is_one_line_of_it() {
-        let mut state = busy_state();
-        state.apply(noob_proto::Event::ToolStart {
-            call_id: "z".into(),
-            name: "write".into(),
-            brief: "write it".into(),
-            args: serde_json::json!({"path": "x".repeat(400), "content": "y"}),
-        });
-        state.apply(noob_proto::Event::ToolEnd {
-            call_id: "z".into(),
-            summary: "refused".into(),
-            elapsed_ms: 4,
-            error: Some(noob_proto::ToolError {
-                kind: "denied".into(),
-                code: None,
-                message: "outside the workspace".into(),
-                detail: None,
-                remedy: None,
-            }),
-        });
-        state.open_failure = Some(0);
-
-        let mut dock = Dock::new();
-        dock.reveal(View::Debug);
-        let out = render_with(&state, 1400.0, 900.0, &dock, &[], &Monitor::new(), None);
-        let body = out.layout.placed(Space::BottomRight).body;
-        let line = Text::line_for(13.0);
-        let cols = cols_of(body, 8.0);
-        let box_ = out
-            .scene
-            .texts
-            .iter()
-            .find(|t| body.contains(t.at.x, t.at.y))
-            .expect("the pane wrote its rows");
-        assert_eq!(box_.line_height, line, "the rows do not step by one line");
-        let written: String = box_.runs.iter().map(|r| r.text.as_str()).collect();
-        let rows: Vec<&str> = written.lines().collect();
-        assert_eq!(rows.len(), state.debug_rows().len(), "{rows:?}");
-        for (index, row) in rows.iter().enumerate() {
-            assert!(
-                row.chars().count() <= cols,
-                "row {index} is {} columns wide in a pane {cols} wide",
-                row.chars().count()
-            );
-        }
-        // The long argument was cut rather than wrapped, and it says so.
-        assert!(written.contains("outside the workspace"), "{written}");
-        assert!(written.contains('\u{2026}'), "the long argument was not clipped");
-    }
-
     /// A window whose every list is longer than any pane can hold: forty todos,
-    /// twelve children with news each, and thirty failed calls.
+    /// twelve children with news each, and thirty calls that failed.
     fn crowded_state() -> State {
         let mut state = busy_state();
         let todos: Vec<serde_json::Value> = (0..40)
@@ -8822,20 +8903,19 @@ mod tests {
     }
 
     /// Item 14: a widget whose content is taller than its box scrolls inside
-    /// itself. One mechanism for four panes, so this drives all four.
+    /// itself. One mechanism for every list pane, so this drives a list and a
+    /// monitor.
     ///
-    /// Every one of them used to lose what did not fit: PLAN and AGENTS drew past
-    /// the bottom edge of the pane, DEBUG stopped at the last row that fitted, and
-    /// a monitor stopped at the last reading that fitted. None of them had a bar,
-    /// so nothing on screen even said there was more.
+    /// Both used to lose what did not fit: PLAN and AGENTS drew past the bottom
+    /// edge of the pane, and a monitor stopped at the last reading that fitted.
+    /// Neither had a bar, so nothing on screen even said there was more.
     #[test]
     fn a_pane_with_more_rows_than_its_box_scrolls_to_the_end() {
         for (view, w, h, last) in [
             (View::Plan, 1400.0, 900.0, "step 39"),
             (View::Agents, 1400.0, 900.0, "news 11"),
-            (View::Debug, 1400.0, 900.0, "boom 29"),
-            // The monitor pane is five readings in a box that holds three.
-            (View::Context, 900.0, 520.0, "LAST GENERATED"),
+            // The monitor pane is five readings in a box that holds fewer.
+            (View::Session, 900.0, 330.0, "DECODE"),
         ] {
             let mut state = crowded_state();
             let monitor = sampled(&state);
@@ -8890,7 +8970,7 @@ mod tests {
     fn a_pane_whose_content_fits_draws_no_bar() {
         let state = busy_state();
         let monitor = sampled(&state);
-        for view in [View::Plan, View::Agents, View::Debug, View::Session] {
+        for view in [View::Plan, View::Agents, View::Session] {
             let mut dock = Dock::new();
             dock.reveal(view);
             let (space, heights, rows) = measured(&state, 1400.0, 900.0, &dock, &monitor, view);
@@ -9987,9 +10067,7 @@ mod tests {
         );
         // A space with no tabs has one place: the start.
         let mut empty = Dock::new();
-        for view in [View::Files, View::Debug] {
-            assert!(empty.hide(view));
-        }
+        assert!(empty.hide(View::Files));
         let layout = Layout::compute(1400.0, 900.0, &shape(&empty, &[]));
         assert_eq!(layout.insertion(Space::BottomRight, 500.0), 0);
     }
@@ -10519,10 +10597,10 @@ mod tests {
 
     /// The list floats with the menu it came from: it is painted on the floating
     /// layer, above the pane text it covers, and inside its own box. In the base
-    /// layer it would be nine tab names drawn under that box.
+    /// layer it would be eight tab names drawn under that box.
     #[test]
     fn the_widget_list_is_drawn_on_the_floating_layer() {
-        let dock = Dock::hiding(&[View::Debug]);
+        let dock = Dock::hiding(&[View::Hardware]);
         let mut menu = Menu::for_widget((400.0, 200.0), View::Plan, Space::TopLeft, false);
         menu.toggle_widgets(&dock);
         let out = render_menu(&busy_state(), 1400.0, 900.0, &dock, &menu, None);
@@ -10673,7 +10751,7 @@ mod tests {
     #[test]
     fn every_menu_row_is_drawn_with_its_own_mark_in_the_gutter() {
         use crate::menu::Item;
-        let dock = Dock::hiding(&[View::Debug]);
+        let dock = Dock::hiding(&[View::Hardware]);
         let mut widget = Menu::for_widget((400.0, 300.0), View::Plan, Space::TopLeft, true);
         widget.toggle_widgets(&dock);
         for menu in [widget, Menu::for_input((400.0, 300.0), true)] {
@@ -10925,9 +11003,8 @@ mod tests {
     fn an_emptied_space_gives_its_room_away() {
         let full = Layout::compute(1400.0, 900.0, &shape(&Dock::new(), &[]));
         let mut dock = Dock::new();
-        // Both tabs of the bottom space: the debug pane opens beside the files.
+        // The bottom right space's only tab.
         assert!(dock.hide(View::Files));
-        assert!(dock.hide(View::Debug));
         let out = render(&busy_state(), 1400.0, 900.0, &dock, &[]);
 
         assert_eq!(out.layout.placed(Space::BottomRight).body.h, 0.0);

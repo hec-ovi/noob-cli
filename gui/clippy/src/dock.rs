@@ -40,8 +40,6 @@ pub enum View {
     Context,
     /// What this run has cost: tokens in, tokens out, and how fast.
     Session,
-    /// Tool calls that failed, and what was sent to them.
-    Debug,
     /// The files the agent has touched, listed down the left of the pane with
     /// the open one's diff beside it.
     Files,
@@ -56,8 +54,10 @@ impl View {
     /// The order has not moved since the views were renamed: OUTPUT was TALK,
     /// CONTEXT was the pane called SESSION and SESSION was the one called
     /// OVERALL, each in the same slot it already had, so nobody's accents
-    /// shifted along by one when the labels changed.
-    pub const ALL: [View; 9] = [
+    /// shifted along by one when the labels changed. DEBUG came out from
+    /// between SESSION and FILES when its pane went; the two either side of the
+    /// hole closed up rather than moving anywhere else.
+    pub const ALL: [View; 8] = [
         View::Output,
         View::Activity,
         View::Plan,
@@ -65,7 +65,6 @@ impl View {
         View::Hardware,
         View::Context,
         View::Session,
-        View::Debug,
         View::Files,
     ];
 
@@ -78,7 +77,6 @@ impl View {
             View::Hardware => "HARDWARE",
             View::Context => "CONTEXT",
             View::Session => "SESSION",
-            View::Debug => "DEBUG",
             View::Files => "FILES",
         }
     }
@@ -322,14 +320,12 @@ impl Dock {
                     folded: false,
                     tab_first: 0,
                 },
-                // DEBUG opens down here rather than above, where seven tabs are
-                // more than the strip can show at the width this window opens
-                // at. A strip that overflows can be walked with its arrows now,
-                // so nothing up there would be unreachable; six tabs and one
-                // pane apiece is simply easier to read than seven tabs and a
-                // strip you have to scroll to see them.
+                // FILES has this space to itself. DEBUG opened down here beside
+                // it, to keep the strip above from opening with seven tabs in
+                // it; that pane is gone, and one tab in each of the two right
+                // spaces is what is left rather than a reason to move FILES up.
                 Slot {
-                    views: vec![View::Files, View::Debug],
+                    views: vec![View::Files],
                     active: 0,
                     folded: false,
                     tab_first: 0,
@@ -640,31 +636,31 @@ mod tests {
         assert_eq!(dock.walk().len(), View::ALL.len());
     }
 
-    /// The decorative avatar was a view of its own and is not one any more, and
-    /// the one LLM monitor is now three. Both are asserted by absence: the
-    /// palette and the walk are indexed by `View::ALL`, so a leftover variant
-    /// would keep a tab and an accent alive with nothing behind them.
+    /// The decorative avatar was a view of its own and is not one any more, the
+    /// one LLM monitor is now three, and the pane of failed calls has gone the
+    /// same way. All three are asserted by absence: the palette and the walk are
+    /// indexed by `View::ALL`, so a leftover variant would keep a tab and an
+    /// accent alive with nothing behind them.
     ///
-    /// TALK and OVERALL are gone the same way. They were renamed rather than
-    /// removed, so the count is the same and only the labels moved: a tab still
-    /// reading either of them means a variant kept its old label.
+    /// TALK and OVERALL are gone differently. They were renamed rather than
+    /// removed, so they cost no slot: a tab still reading either of them means a
+    /// variant kept its old label.
     #[test]
-    fn there_are_nine_views_and_no_avatar_and_no_single_llm_monitor() {
-        assert_eq!(View::ALL.len(), 9);
+    fn there_are_eight_views_and_no_avatar_no_single_llm_monitor_and_no_debug() {
+        assert_eq!(View::ALL.len(), 8);
         for view in View::ALL {
-            for gone in ["CLIPPY", "LLM", "TALK", "OVERALL"] {
+            for gone in ["CLIPPY", "LLM", "TALK", "OVERALL", "DEBUG"] {
                 assert_ne!(view.label(), gone, "{view:?}");
             }
         }
-        for wanted in [View::Context, View::Session, View::Debug] {
+        for wanted in [View::Context, View::Session, View::Files] {
             assert!(View::ALL.contains(&wanted), "{wanted:?}");
         }
         let dock = Dock::new();
         assert!(dock.is_sound());
-        assert_eq!(
-            dock.slot(Space::BottomRight).views,
-            vec![View::Files, View::Debug]
-        );
+        // FILES has the bottom right space to itself: DEBUG opened beside it
+        // and there is no such view any more.
+        assert_eq!(dock.slot(Space::BottomRight).views, vec![View::Files]);
         assert_eq!(dock.slot(Space::BottomRight).active(), Some(View::Files));
     }
 
@@ -834,7 +830,7 @@ mod tests {
         assert!(dock.is_sound());
         assert_eq!(
             dock.slot(Space::BottomRight).views,
-            vec![View::Files, View::Debug, View::Output]
+            vec![View::Files, View::Output]
         );
         // An empty space takes a drop at any place at all.
         assert!(dock.place_view(View::Output, Space::TopLeft, 7));
@@ -852,8 +848,8 @@ mod tests {
             (View::Session, Space::TopRight, 6),
             (View::Files, Space::TopRight, 3),
             (View::Output, Space::BottomRight, 0),
-            (View::Debug, Space::TopLeft, 0),
-            (View::Debug, Space::TopLeft, 2),
+            (View::Hardware, Space::TopLeft, 0),
+            (View::Hardware, Space::TopLeft, 2),
             (View::Plan, Space::BottomRight, 99),
             (View::Activity, Space::TopRight, 1),
         ];
@@ -934,13 +930,12 @@ mod tests {
     /// cannot be dragged back in.
     #[test]
     fn a_hidden_view_is_gone_rather_than_folded() {
-        // Both of the bottom space's tabs, so that space ends up empty: the
-        // debug pane opens down there beside the files.
-        let dock = Dock::hiding(&[View::Files, View::Debug, View::Activity]);
+        // The bottom right space's only tab, so that space ends up empty.
+        let dock = Dock::hiding(&[View::Files, View::Activity]);
         assert!(dock.is_sound());
         assert_eq!(dock.space_of(View::Files), None);
         assert_eq!(dock.space_of(View::Activity), None);
-        assert_eq!(dock.walk().len(), View::ALL.len() - 3);
+        assert_eq!(dock.walk().len(), View::ALL.len() - 2);
         assert!(!dock.walk().contains(&View::Files));
         // The space those two were the only occupants of is empty, not broken.
         assert!(dock.slot(Space::BottomRight).is_empty());
@@ -1004,7 +999,6 @@ mod tests {
     fn hiding_the_last_tab_in_a_space_leaves_it_empty_and_usable() {
         let mut dock = Dock::new();
         assert!(dock.hide(View::Files));
-        assert!(dock.hide(View::Debug));
         let slot = dock.slot(Space::BottomRight);
         assert!(slot.is_empty());
         assert_eq!(slot.active(), None);
@@ -1157,7 +1151,6 @@ mod tests {
                 View::Hardware,
                 View::Context,
                 View::Files,
-                View::Debug,
                 View::Session,
             ],
             "both cells' tabs, in the order they were in"
@@ -1185,10 +1178,10 @@ mod tests {
     fn a_drop_inside_one_cell_takes_a_span_apart() {
         let mut dock = Dock::new();
         assert_eq!(dock.cover()[Space::BottomLeft.index()], Some(Space::TopLeft));
-        assert!(dock.move_view(View::Debug, Space::BottomLeft));
+        assert!(dock.move_view(View::Hardware, Space::BottomLeft));
         assert!(dock.is_sound());
         assert_eq!(dock.space_of(View::Output), Some(Space::TopLeft));
-        assert_eq!(dock.slot(Space::BottomLeft).views, vec![View::Debug]);
+        assert_eq!(dock.slot(Space::BottomLeft).views, vec![View::Hardware]);
         assert_eq!(
             dock.cover(),
             [
@@ -1208,6 +1201,9 @@ mod tests {
     #[test]
     fn a_span_across_a_row_turns_the_grid_the_other_way() {
         let mut dock = Dock::new();
+        // Something in the bottom right that is not the tab being spanned, so
+        // the row it leaves still has a pane in it.
+        assert!(dock.move_view(View::Session, Space::BottomRight));
         assert!(dock.span_view(View::Files, Space::TopLeft, Space::TopRight));
         assert!(dock.is_sound());
         assert!(dock.rows_first());
@@ -1225,7 +1221,7 @@ mod tests {
             "a full width row over another"
         );
         // And back: a column pair turns it round again.
-        assert!(dock.span_view(View::Debug, Space::TopLeft, Space::BottomLeft));
+        assert!(dock.span_view(View::Hardware, Space::TopLeft, Space::BottomLeft));
         assert!(!dock.rows_first());
         assert!(dock.is_sound());
         assert_eq!(dock.cover()[Space::BottomLeft.index()], Some(Space::TopLeft));
@@ -1269,7 +1265,6 @@ mod tests {
             View::Context,
             View::Session,
             View::Files,
-            View::Debug,
         ] {
             assert!(dock.move_view(view, Space::BottomLeft));
         }
@@ -1322,7 +1317,7 @@ mod tests {
         };
         dock.span_view(View::Files, Space::TopLeft, Space::BottomLeft);
         check(&dock, "spanning the left column");
-        dock.move_view(View::Debug, Space::BottomLeft);
+        dock.move_view(View::Hardware, Space::BottomLeft);
         check(&dock, "splitting it again");
         dock.span_view(View::Plan, Space::BottomLeft, Space::BottomRight);
         check(&dock, "spanning the bottom row");

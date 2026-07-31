@@ -549,44 +549,12 @@ fn sample(rates: &mut Vec<f32>, tokens: u64, seconds: f64) {
 
 /// A call in flight, kept so its end can be reported the way its start was.
 ///
-/// The arguments come along because a call that fails is worth keeping and the
-/// end frame does not carry them. Moved off the frame rather than cloned, so a
-/// call that works costs nothing for this.
+/// The label comes along because the end frame does not carry it and a turn
+/// that ends with calls still open has to name them. The arguments do not: they
+/// were kept for the pane of failed calls, and that pane is gone.
 struct Open {
     kind: Kind,
     brief: String,
-    args: noob_proto::Value,
-}
-
-/// A tool call that came back with an error, and what was sent to it.
-///
-/// Both halves are already on the wire and both were being rendered to a line
-/// of the activity log and then dropped. Keeping them is what makes a debug
-/// pane possible without touching the protocol.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Failure {
-    pub kind: Kind,
-    /// The agent's own label for the call. Empty for a tool that sent none.
-    pub brief: String,
-    /// The class and code the system gave, as [`fault`] writes it.
-    pub fault: String,
-    pub message: String,
-    /// The argument object, one line per field, rendered when it was recorded.
-    pub args: Vec<String>,
-}
-
-/// One row of the debug pane: its text, how it reads, and which failure it
-/// belongs to.
-///
-/// Built in this module rather than in the drawing because a click on the pane
-/// is resolved by row number, and only the list that was drawn can say which
-/// failure a row number means. Two lists would be two answers.
-#[derive(Clone, Debug, PartialEq)]
-pub struct DebugRow {
-    pub text: String,
-    pub tone: Tone,
-    /// `None` for the count at the top, which is not a failure and cannot open.
-    pub failure: Option<usize>,
 }
 
 pub struct State {
@@ -606,9 +574,9 @@ pub struct State {
     /// entry down, and new files arrive at the end without moving the rest.
     pub file_scroll: usize,
     /// Where every pane that is a list rather than a transcript is scrolled to:
-    /// PLAN, AGENTS, DEBUG and the three monitors. One place for all six, so a
-    /// pane gains a scroll by being added to [`crate::view::scroll_extent`]
-    /// rather than by growing a field of its own here.
+    /// PLAN, AGENTS and the three monitors. One place for all five, so a pane
+    /// gains a scroll by being added to [`crate::view::scroll_extent`] rather
+    /// than by growing a field of its own here.
     pub scrolls: crate::scroll::Scrolls,
 
     pub usage: Option<Usage>,
@@ -627,14 +595,16 @@ pub struct State {
     pub best_generated: u64,
     /// Every tool call started this session, working or not.
     pub tool_calls: u32,
+    /// How many of those came back with an error. A count and nothing else:
+    /// the pane that kept the failures themselves is gone, and what is left is
+    /// the one figure that says whether this run is going well, read beside the
+    /// total in the CONTEXT pane.
+    ///
+    /// Counted rather than measured off a list, so it cannot saturate: the list
+    /// it replaces was bounded at a hundred and a run that failed more than
+    /// that under-reported.
+    pub failed_calls: u32,
     pub rates: Rates,
-
-    /// Calls that failed, oldest first, bounded.
-    pub failures: Vec<Failure>,
-    /// Which failure is showing its arguments, by position in `failures`. One
-    /// at a time: an argument block is several rows and two of them open at
-    /// once pushes the rest of the list off the pane.
-    pub open_failure: Option<usize>,
 
     /// The agent's own reading of how full it is. None until it says.
     pub context: Option<ContextFill>,
@@ -680,9 +650,8 @@ impl State {
             last_generated: 0,
             best_generated: 0,
             tool_calls: 0,
+            failed_calls: 0,
             rates: Rates::default(),
-            failures: Vec::new(),
-            open_failure: None,
             context: None,
             selection: None,
             turn: 0,
@@ -821,7 +790,7 @@ impl State {
                     format!("{:>5}  {}", kind.tag(), subject(kind, &brief, &args)),
                     Tone::Call(kind),
                 );
-                self.open.insert(call_id, Open { kind, brief, args });
+                self.open.insert(call_id, Open { kind, brief });
             }
             Event::ToolProgress { call_id, line } => {
                 let kind = self.open.get(&call_id).map_or(Kind::Other, |o| o.kind);
@@ -834,11 +803,14 @@ impl State {
                 error,
                 ..
             } => {
-                let open = self.open.remove(&call_id);
+                self.open.remove(&call_id);
                 match error {
                     None => self.activity.say(format!("       {summary}"), Tone::Good),
                     Some(error) => {
-                        self.remember_failure(open, &error);
+                        // Counted whether or not this window saw the call
+                        // start: an end frame with an error on it is a call
+                        // that failed either way.
+                        self.failed_calls += 1;
                         self.activity.say(format!("       {summary}"), Tone::Bad);
                         // The class and the number the system gave, when the
                         // failure was minted with them. `exit_status 3` is the
@@ -1105,113 +1077,6 @@ impl State {
         }
     }
 
-    /// Keep a failed call, with the arguments its start frame carried.
-    ///
-    /// Bounded, because a loop that fails on every iteration would otherwise
-    /// keep every one of them. The open row is held by position, so dropping
-    /// the oldest has to move it or the pane would expand a different failure
-    /// than the one that was clicked.
-    fn remember_failure(&mut self, open: Option<Open>, error: &noob_proto::ToolError) {
-        let (kind, brief, args) = match open {
-            Some(open) => (open.kind, open.brief, args_lines(&open.args)),
-            // An end whose start this window never saw. The failure is still
-            // real and still worth counting, and saying there are no arguments
-            // to show is truer than inventing some.
-            None => (
-                Kind::Other,
-                String::new(),
-                vec![String::from("this window never saw the call start")],
-            ),
-        };
-        if self.failures.len() >= MAX_FAILURES {
-            self.failures.remove(0);
-            self.open_failure = match self.open_failure {
-                None | Some(0) => None,
-                Some(at) => Some(at - 1),
-            };
-        }
-        self.failures.push(Failure {
-            kind,
-            brief,
-            fault: fault(error),
-            message: error.message.clone(),
-            args,
-        });
-    }
-
-    /// The debug pane, as one row per visual line.
-    ///
-    /// The count first, because that is the reading the pane is for. Then one
-    /// row per failed call, and the arguments of the one that is open.
-    pub fn debug_rows(&self) -> Vec<DebugRow> {
-        let mut rows = vec![DebugRow {
-            text: format!("failed calls  {}", self.failures.len()),
-            tone: if self.failures.is_empty() {
-                Tone::Dim
-            } else {
-                Tone::Bad
-            },
-            failure: None,
-        }];
-        if self.failures.is_empty() {
-            rows.push(DebugRow {
-                text: String::from("nothing has failed this session"),
-                tone: Tone::Dim,
-                failure: None,
-            });
-            return rows;
-        }
-        for (at, failure) in self.failures.iter().enumerate() {
-            let open = self.open_failure == Some(at);
-            // A plain `+` and `-` rather than a triangle: the mono font here is
-            // whatever the system provides, and a glyph it lacks draws as
-            // nothing, which is how a row would lose its marker entirely.
-            let mark = if open { '-' } else { '+' };
-            let subject = match failure.brief.is_empty() {
-                true => failure.message.clone(),
-                false => format!("{}  {}", failure.brief, failure.message),
-            };
-            rows.push(DebugRow {
-                text: format!("{mark} {:>5}  {subject}", failure.kind.tag()),
-                tone: Tone::Bad,
-                failure: Some(at),
-            });
-            if !open {
-                continue;
-            }
-            rows.push(DebugRow {
-                text: format!("      {}", failure.fault),
-                tone: Tone::Dim,
-                failure: Some(at),
-            });
-            for line in &failure.args {
-                rows.push(DebugRow {
-                    text: format!("      {line}"),
-                    tone: Tone::Body,
-                    failure: Some(at),
-                });
-            }
-        }
-        rows
-    }
-
-    /// Open or close the failure the pane's row `row` belongs to. Returns
-    /// whether anything changed, which is what tells the window to redraw.
-    ///
-    /// Resolved through [`State::debug_rows`], the same list the pane draws, so
-    /// a click cannot land on a different failure than the one under it.
-    pub fn toggle_failure(&mut self, row: usize) -> bool {
-        let Some(at) = self.debug_rows().get(row).and_then(|row| row.failure) else {
-            return false;
-        };
-        self.open_failure = if self.open_failure == Some(at) {
-            None
-        } else {
-            Some(at)
-        };
-        true
-    }
-
     /// The line the shaded window shows, which is the only thing visible when
     /// it is collapsed to a strip.
     pub fn headline(&self) -> String {
@@ -1297,9 +1162,6 @@ const SUBJECT_CHARS: usize = 96;
 const DIFF_LINES: usize = 60;
 const DETAIL_LINES: usize = 6;
 const MAX_FILES: usize = 40;
-/// Failures kept for the debug pane. A retry loop can fail dozens of times in a
-/// minute, and the pane shows a handful of rows at once.
-const MAX_FAILURES: usize = 100;
 
 /// The checklist, straight out of the plan tool's own arguments. The call
 /// carries the whole updated list by contract, so nothing has to be merged and
@@ -1322,38 +1184,6 @@ fn read_todos(args: &noob_proto::Value) -> Vec<Todo> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// The argument object as lines, one per field.
-///
-/// Values are written on one line each: a shell command arrives as a string
-/// with newlines in it, and a newline has no glyph, so it would draw as nothing
-/// at all while still taking a column. Long ones are cut by the pane, which is
-/// the only place that knows how wide it is.
-fn args_lines(args: &noob_proto::Value) -> Vec<String> {
-    let nothing = || vec![String::from("no arguments were sent")];
-    match args {
-        noob_proto::Value::Null => nothing(),
-        noob_proto::Value::Object(fields) if fields.is_empty() => nothing(),
-        noob_proto::Value::Object(fields) => fields
-            .iter()
-            .map(|(key, value)| format!("{key} = {}", one_line(value)))
-            .collect(),
-        other => vec![one_line(other)],
-    }
-}
-
-/// One JSON value on one line. A string loses its quotes, because a path in
-/// quotes is a path you cannot paste, and every control character becomes a
-/// space.
-fn one_line(value: &noob_proto::Value) -> String {
-    let raw = match value {
-        noob_proto::Value::String(text) => text.clone(),
-        other => other.to_string(),
-    };
-    raw.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
 }
 
 /// Grouped digits, so a six figure token count can be read at a glance. Used by
@@ -1681,18 +1511,18 @@ mod tests {
         assert!(shown.contains(&"-> available here: python3 node"), "{shown:?}");
     }
 
-    /// A failed call keeps what was sent to it. Both halves are already on the
-    /// wire and both were being written to a line of the activity log and then
-    /// dropped, which is why the debug pane needed no protocol change.
+    /// Every call that came back with an error is counted, and nothing else is.
+    ///
+    /// This is what is left of the DEBUG pane: that pane kept the failures
+    /// themselves, bounded at a hundred, and showed the length of the list as
+    /// its count. The count is the part worth keeping, so it is a counter now
+    /// and reads beside the total in the CONTEXT pane.
     #[test]
-    fn a_failed_call_keeps_the_arguments_that_were_sent() {
+    fn a_call_that_came_back_with_an_error_is_counted() {
         let mut state = State::new();
-        state.apply(tool_start(
-            "b",
-            "bash",
-            serde_json::json!({"cmd": "cargo build\n --release", "timeout": 30}),
-        ));
-        // One that works is not a failure and leaves nothing behind.
+        assert_eq!(state.failed_calls, 0);
+
+        // One that works is not a failure.
         state.apply(tool_start("r", "read", serde_json::json!({"path": "a.rs"})));
         state.apply(Event::ToolEnd {
             call_id: "r".into(),
@@ -1700,6 +1530,13 @@ mod tests {
             elapsed_ms: 3,
             error: None,
         });
+        assert_eq!(state.failed_calls, 0, "a call that worked is not a failure");
+
+        state.apply(tool_start(
+            "b",
+            "bash",
+            serde_json::json!({"cmd": "cargo build", "timeout": 30}),
+        ));
         state.apply(Event::ToolEnd {
             call_id: "b".into(),
             summary: "bash cargo build".into(),
@@ -1712,23 +1549,10 @@ mod tests {
                 remedy: None,
             }),
         });
+        assert_eq!(state.failed_calls, 1);
+        assert_eq!(state.tool_calls, 2, "both calls are still calls");
 
-        assert_eq!(state.failures.len(), 1);
-        let failure = &state.failures[0];
-        assert_eq!(failure.kind, Kind::Bash);
-        assert_eq!(failure.fault, "exit_status 127");
-        assert_eq!(failure.message, "cargo: command not found");
-        // One line per field, unquoted, and the newline in the command is a
-        // space: a newline has no glyph, so it would draw as nothing.
-        assert_eq!(
-            failure.args,
-            vec![
-                String::from("cmd = cargo build  --release"),
-                String::from("timeout = 30"),
-            ]
-        );
-
-        // An end with no start still counts, and says it has nothing to show.
+        // An end whose start this window never saw is still a call that failed.
         state.apply(Event::ToolEnd {
             call_id: "never-seen".into(),
             summary: "gone".into(),
@@ -1741,93 +1565,16 @@ mod tests {
                 remedy: None,
             }),
         });
-        assert_eq!(state.failures.len(), 2);
-        assert_eq!(state.failures[1].fault, "internal");
-        assert!(state.failures[1].args[0].contains("never saw the call"));
+        assert_eq!(state.failed_calls, 2);
     }
 
-    /// A tool that sent no arguments says so rather than showing an empty block.
+    /// The count does not saturate. The list it replaced was bounded at a
+    /// hundred and dropped the oldest, so a run that failed more than that
+    /// under-reported for the rest of the session.
     #[test]
-    fn a_call_with_no_arguments_says_there_were_none() {
-        assert_eq!(
-            args_lines(&serde_json::json!({})),
-            vec![String::from("no arguments were sent")]
-        );
-        assert_eq!(
-            args_lines(&noob_proto::Value::Null),
-            vec![String::from("no arguments were sent")]
-        );
-        // Something that is not an object at all is still shown.
-        assert_eq!(args_lines(&serde_json::json!([1, 2])), vec![String::from("[1,2]")]);
-    }
-
-    /// The count first, then a row per failure, and the arguments of the one
-    /// that is open. Clicking the same row again closes it.
-    #[test]
-    fn the_debug_pane_counts_the_failures_and_opens_the_one_that_was_clicked() {
+    fn the_failed_count_is_not_bounded_the_way_the_old_list_was() {
         let mut state = State::new();
-        let rows = state.debug_rows();
-        assert_eq!(rows[0].text, "failed calls  0");
-        assert!(rows[1].text.contains("nothing has failed"));
-        assert!(rows.iter().all(|row| row.failure.is_none()));
-        assert!(!state.toggle_failure(1), "nothing to open");
-
-        for (id, name) in [("a", "bash"), ("b", "read")] {
-            state.apply(tool_start(id, name, serde_json::json!({"x": id})));
-            state.apply(Event::ToolEnd {
-                call_id: id.into(),
-                summary: "no".into(),
-                elapsed_ms: 1,
-                error: Some(ToolError {
-                    kind: "denied".into(),
-                    code: None,
-                    message: format!("{name} was refused"),
-                    detail: None,
-                    remedy: None,
-                }),
-            });
-        }
-        let rows = state.debug_rows();
-        assert_eq!(rows[0].text, "failed calls  2");
-        assert_eq!(rows.len(), 3, "closed, each failure is one row");
-        assert!(rows[1].text.starts_with("+ "), "closed rows say so");
-        assert_eq!(rows[1].failure, Some(0));
-        assert_eq!(rows[2].failure, Some(1));
-
-        // Open the second one: its rows appear under it and nowhere else.
-        assert!(state.toggle_failure(2));
-        let rows = state.debug_rows();
-        assert_eq!(rows[2].failure, Some(1));
-        assert!(rows[2].text.starts_with("- "), "an open row says so");
-        assert!(rows[1].text.starts_with("+ "), "and the other stays closed");
-        assert!(rows[3].text.contains("denied"), "{:?}", rows[3].text);
-        assert!(rows[4].text.contains("x = b"), "{:?}", rows[4].text);
-        assert!(rows.iter().skip(3).all(|row| row.failure == Some(1)));
-
-        // The same row again closes it, and only one is ever open.
-        assert!(state.toggle_failure(2));
-        assert_eq!(state.debug_rows().len(), 3);
-        assert!(state.toggle_failure(1));
-        assert_eq!(state.open_failure, Some(0));
-        // With a block open above it, the second failure's row has moved down
-        // past that block, and the click follows the rows rather than the list.
-        let rows = state.debug_rows();
-        let moved = rows
-            .iter()
-            .position(|row| row.failure == Some(1))
-            .expect("the second failure still has a row");
-        assert_eq!(moved, 4, "{:?}", rows.iter().map(|r| &r.text).collect::<Vec<_>>());
-        assert!(state.toggle_failure(moved));
-        assert_eq!(state.open_failure, Some(1));
-    }
-
-    /// The list is bounded, and the row that is open moves with it: it is held
-    /// by position, so dropping the oldest would otherwise expand a different
-    /// failure than the one that was clicked.
-    #[test]
-    fn the_failure_list_is_bounded_and_the_open_row_follows_it() {
-        let mut state = State::new();
-        let fail = |state: &mut State, n: usize| {
+        for n in 0..250 {
             let id = format!("c{n}");
             state.apply(tool_start(&id, "bash", serde_json::json!({"n": n})));
             state.apply(Event::ToolEnd {
@@ -1842,21 +1589,8 @@ mod tests {
                     remedy: None,
                 }),
             });
-        };
-        for n in 0..MAX_FAILURES {
-            fail(&mut state, n);
         }
-        assert_eq!(state.failures.len(), MAX_FAILURES);
-        state.open_failure = Some(1);
-        fail(&mut state, MAX_FAILURES);
-        assert_eq!(state.failures.len(), MAX_FAILURES, "bounded");
-        assert!(state.failures[0].message.contains("call 1"), "the oldest fell off");
-        assert_eq!(state.open_failure, Some(0), "and the open one slid with it");
-        // The one that was open falling off leaves nothing open, rather than
-        // leaving a position pointing at whatever took its place.
-        state.open_failure = Some(0);
-        fail(&mut state, MAX_FAILURES + 1);
-        assert_eq!(state.open_failure, None);
+        assert_eq!(state.failed_calls, 250);
     }
 
     /// The agent's own reading of how full it is beats the last request's

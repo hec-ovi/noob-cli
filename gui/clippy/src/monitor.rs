@@ -14,8 +14,10 @@
 //! All three are the same [`Gauge`]: a `max` means the value is a proportion and
 //! is drawn as a block of dots, and without one the reading is the number alone.
 //!
-//! The failed calls the DEBUG pane shows are not here. They are events rather
-//! than samples, so they live on [`crate::state::State`] where the events land.
+//! The counts the CONTEXT pane heads itself with are not here. Requests, tool
+//! calls and failed calls are events rather than samples, so they live on
+//! [`crate::state::State`] where the events land, and the pane reads them
+//! straight off it.
 //!
 //! Everything the machine reports is read from `/sys` and `/proc` as text. No
 //! dependency, no vendor library, and nothing that fails harder than reporting
@@ -84,10 +86,10 @@ const HUE_GREEN: usize = 4;
 const HUE_TEAL: usize = 5;
 const HUE_BLUE: usize = 6;
 const HUE_INDIGO: usize = 7;
-const HUE_VIOLET: usize = 8;
-// Slot 9 has no name because no reading wears it. The palette in `skin.rs` is
-// ten wide and wraps, so an unnamed slot costs nothing until something claims
-// it.
+// Slots 8 and 9 have no name because no reading wears them. The palette in
+// `skin.rs` is ten wide and wraps, so an unnamed slot costs nothing until
+// something claims it. Slot 8 was TOTAL TOOL CALLS, which is a header row in
+// the CONTEXT pane now rather than a reading with a colour.
 
 pub struct Monitor {
     /// The amdgpu device directory, when there is one.
@@ -122,10 +124,11 @@ impl Monitor {
         self.hardware.clone()
     }
 
-    /// What the CONTEXT pane shows: how full the window is, how many requests
-    /// and calls it took to get there, and what the last request alone cost.
-    /// Named for the pane it feeds, because it was called `session` while
-    /// feeding CONTEXT and that is a trap for whoever reads it next.
+    /// What the CONTEXT pane draws as readings: how full the window is, and
+    /// what the last response cost. The counts above them are header rows the
+    /// pane takes off the state itself. Named for the pane it feeds, because it
+    /// was called `session` while feeding CONTEXT and that is a trap for
+    /// whoever reads it next.
     pub fn context(&self) -> Vec<Gauge> {
         self.context.clone()
     }
@@ -247,34 +250,12 @@ impl Monitor {
             }),
             _ => {}
         }
-        // How much work went into that fill: every request and every call this
-        // run has made, which is why TOTAL is in the label. The two beneath them
-        // are the last request alone, so a pane of sums still says what one
-        // request currently costs.
-        context.push(Gauge {
-            key: "requests",
-            label: "TOTAL REQUESTS",
-            value: state.requests as f64,
-            max: None,
-            unit: "",
-            hue: HUE_ORANGE,
-        });
-        context.push(Gauge {
-            key: "tool_calls",
-            label: "TOTAL TOOL CALLS",
-            value: state.tool_calls as f64,
-            max: None,
-            unit: "",
-            hue: HUE_VIOLET,
-        });
-        context.push(Gauge {
-            key: "last_prefill",
-            label: "LAST PREFILL",
-            value: state.last_prefill as f64,
-            max: None,
-            unit: "tok",
-            hue: HUE_BLUE,
-        });
+        // The three counts that said how much work went into that fill (total
+        // requests, total tool calls, last prefill) are not readings any more:
+        // they are labelled rows in the pane's own header, where they read
+        // beside the phase instead of under a dot block. What is left here is
+        // the fill and the last response, which is the one number the header
+        // does not carry.
         context.push(Gauge {
             key: "last_generated",
             label: "LAST GENERATED",
@@ -529,7 +510,7 @@ Buffers:          100000 kB
             value: 1234.0,
             max: None,
             unit: "",
-            hue: HUE_VIOLET,
+            hue: HUE_INDIGO,
         };
         assert_eq!(count.reading(), "1,234");
         // A rate nobody has measured yet says so rather than claiming zero.
@@ -568,7 +549,7 @@ Buffers:          100000 kB
         monitor.sample(&state);
         let hardware: Vec<&str> = monitor.hardware().iter().map(|g| g.key).collect();
         let context: Vec<&str> = monitor.context().iter().map(|g| g.key).collect();
-        assert!(context.contains(&"tool_calls"), "{context:?}");
+        assert!(context.contains(&"last_generated"), "{context:?}");
         assert!(!hardware.contains(&"gpu"), "{hardware:?}");
         // The lists are separate questions and must not share a row.
         let session: Vec<&str> = monitor.session().iter().map(|g| g.key).collect();
@@ -618,16 +599,10 @@ Buffers:          100000 kB
         monitor.sample(&state);
 
         let context: Vec<&str> = monitor.context().iter().map(|g| g.key).collect();
-        assert_eq!(
-            context,
-            vec![
-                "context",
-                "requests",
-                "tool_calls",
-                "last_prefill",
-                "last_generated"
-            ]
-        );
+        // Two readings, not five. TOTAL REQUESTS, TOTAL TOOL CALLS and LAST
+        // PREFILL are header rows of the pane now, read straight off the state,
+        // and a gauge for any of them would draw the same number twice.
+        assert_eq!(context, vec!["context", "last_generated"]);
         let session: Vec<&str> = monitor.session().iter().map(|g| g.key).collect();
         assert_eq!(
             session,
@@ -640,12 +615,14 @@ Buffers:          100000 kB
                 .find(|g| g.key == key)
                 .unwrap_or_else(|| panic!("{key}"))
         };
-        // The context pane: this run's totals of work done, and the last request
-        // on its own beneath them.
-        assert_eq!(read(monitor.context(), "requests").value, 2.0);
-        assert_eq!(read(monitor.context(), "tool_calls").value, 1.0);
-        assert_eq!(read(monitor.context(), "last_prefill").value, 600.0);
+        // The context pane: how full the window is, and what the last response
+        // cost. The counts its header carries are the state's own, which is
+        // where the pane reads them.
+        assert_eq!(read(monitor.context(), "context").value, 1_500.0);
         assert_eq!(read(monitor.context(), "last_generated").value, 20.0);
+        assert_eq!(state.requests, 2);
+        assert_eq!(state.tool_calls, 1);
+        assert_eq!(state.last_prefill, 600);
         // The session pane: read out of the live run and nothing else.
         assert_eq!(read(monitor.session(), "prefilled").value, 1_100.0);
         assert_eq!(read(monitor.session(), "generated").value, 80.0);

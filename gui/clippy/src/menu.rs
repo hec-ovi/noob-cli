@@ -16,9 +16,10 @@
 //! The one deliberate exception is the widget list, and it is not a row of the
 //! menu at all: the Widgets row stays where it is and the list flies out beside
 //! it, in a box of its own, the way every other desktop menu opens a submenu.
-//! The nine rows it carries are only there while it is open. A menu that always
-//! held all nine would be a wall of tab names in front of a Close row, and one
-//! that opened them downwards would push its own rows around under the pointer.
+//! The eight rows it carries are only there while it is open. A menu that
+//! always held all eight would be a wall of tab names in front of a Close row,
+//! and one that opened them downwards would push its own rows around under the
+//! pointer.
 //!
 //! The rows are still one list here, top level first and the flyout after it, so
 //! a row is one number wherever it is drawn. Which of the two boxes a row is in
@@ -264,7 +265,7 @@ impl Menu {
         }
     }
 
-    /// How many widgets are on the list: nine while it is open, none while it
+    /// How many widgets are on the list: eight while it is open, none while it
     /// is shut. What the scroll is bounded by, and the whole of the difference
     /// between the two states.
     pub fn widgets(&self) -> usize {
@@ -435,6 +436,16 @@ mod tests {
             View::ALL.to_vec(),
             "the list is in the one order, so it is in the same place every time"
         );
+        // Eight rows, and none of them is the pane of failed calls: the list is
+        // built from `View::ALL`, so a variant left behind would still be
+        // switchable from here with nothing to draw.
+        assert_eq!(menu.widgets(), 8);
+        for row in &menu.rows[menu.top..] {
+            let Item::Widget(view, _) = row.item else {
+                panic!("{:?} is not a widget row", row.item)
+            };
+            assert_ne!(view.label(), "DEBUG");
+        }
 
         assert!(menu.toggle_widgets(&dock));
         assert_eq!(menu.widgets(), 0);
@@ -495,12 +506,12 @@ mod tests {
     /// an empty box for one that is out.
     #[test]
     fn the_list_marks_what_is_closed_and_every_row_of_it_can_be_picked() {
-        let dock = Dock::hiding(&[View::Debug, View::Files]);
+        let dock = Dock::hiding(&[View::Hardware, View::Files]);
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
         menu.toggle_widgets(&dock);
         for (step, view) in View::ALL.into_iter().enumerate() {
             let index = menu.top + step;
-            let hidden = matches!(view, View::Debug | View::Files);
+            let hidden = matches!(view, View::Hardware | View::Files);
             assert_eq!(
                 menu.pick(index),
                 Some(Item::Widget(view, hidden)),
@@ -572,7 +583,7 @@ mod tests {
             })
             .collect();
 
-        assert!(dock.hide(View::Debug));
+        assert!(dock.hide(View::Hardware));
         assert!(menu.relist(&dock));
         assert_eq!(menu.first, 3, "the list did not jump back to the top");
         assert_eq!(
@@ -589,7 +600,7 @@ mod tests {
         for (step, view) in View::ALL.into_iter().enumerate() {
             assert_eq!(
                 menu.pick(menu.top + step),
-                Some(Item::Widget(view, view == View::Debug))
+                Some(Item::Widget(view, view == View::Hardware))
             );
         }
         // Shut, there is nothing to read.
@@ -701,7 +712,7 @@ mod tests {
     /// rows that had lost their icons.
     #[test]
     fn every_row_of_both_menus_is_marked_in_its_gutter() {
-        let dock = Dock::hiding(&[View::Debug]);
+        let dock = Dock::hiding(&[View::Hardware]);
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, true);
         menu.toggle_widgets(&dock);
         let prompt = Menu::for_input((0.0, 0.0), true);

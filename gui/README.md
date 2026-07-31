@@ -109,17 +109,21 @@ answerable without reading the labels. A tab strip has no surface of its own; th
 tabs carry the pane's, the showing one at full strength and the rest at a lower
 alpha.
 
-The title strip reads the orb, then NO0B, then the version and commit this build
-was cut from. The orb is the one animated thing in the window, and it is two
-objects rather than one: while a turn is running it is twelve tilted rings of
-dots around one centre with three runners chasing each ring, 516 discs a frame,
-and at rest it is a dotted globe, 112 square dots on a lattice of latitude and
-longitude. Both are ported from `thinking-orbs` and neither needs a shader,
-because a dot is one rectangle through the same rounded-rect distance field
-every panel is drawn with: corner radius at half the width for a disc, none at
-all for a square. Its clock is a 30 frames a second deadline that exists only
-while the agent is working; the resting globe reads no clock at all, so a window
-with nothing happening in it goes back to blocking until you touch it.
+The title strip reads the orb, then NO0B, then the version, then the folder the
+agent is working in, each pair separated by the same marker. It used to end on
+the commit the build was cut from; seven characters of hex is not something
+anyone reads off a title, and the room they took says where you are instead.
+
+The orb is the one animated thing in the window, and it is two objects rather
+than one: while a turn is running it is twelve tilted rings of dots around one
+centre with three runners chasing each ring, 516 discs a frame, and at rest it is
+a dotted globe, 112 square dots on a lattice of latitude and longitude. Both are
+ported from `thinking-orbs` and neither needs a shader, because a dot is one
+rectangle through the same rounded-rect distance field every panel is drawn
+with: corner radius at half the width for a disc, none at all for a square. Its
+clock is a 30 frames a second deadline that exists only while the agent is
+working; the resting globe reads no clock at all, so a window with nothing
+happening in it goes back to blocking until you touch it.
 
 While a turn runs, the prompt's marker is three dots taking turns rising, one up
 and two down, on the same deadline. At rest it is the chevron again and nothing
@@ -132,9 +136,8 @@ moves.
 | PLAN | the checklist, straight from the plan tool's own arguments |
 | AGENTS | sub-agents: their tool set, their brief, the last thing each one said, and how it ended |
 | HARDWARE | CPU and RAM, plus GPU, VRAM and GTT on an AMD card |
-| CONTEXT | how full this run is: which phase, model and workspace, the context fill, total requests and tool calls, and what the last request prefilled and generated |
+| CONTEXT | how full this run is: the phase, total requests, total tool calls (with the failed ones beside them) and the last prefill as labelled rows, then the context fill and the last response as readings |
 | SESSION | what this run has spent: tokens prefilled, generated and served from cache, and the measured prefill and decode speed |
-| DEBUG | tool calls that failed, and the arguments that were sent to the one you click |
 | FILES | every file touched, listed down the left, with the open one's diff, a line-number gutter and syntax coloring |
 
 The conversation is rendered as Markdown, because the model writes Markdown
@@ -170,10 +173,13 @@ alone. Reading an Nvidia card means its own library, which is the dependency
 this deliberately does not have.
 
 CONTEXT is the other question: not whether the machine is keeping up but whether
-the budget is. The fill comes from the agent's own estimate rather than from the
-last request, so it moves while a turn is still running. Under it are the totals
-for this run and then the last request on its own, which is the pair that says
-what one more turn is going to cost.
+the budget is. Its first four rows are labelled the way the phase always was: the
+phase, the requests this run has made, the calls it has made (and how many of
+those came back with an error), and what the last request prefilled. Under them
+the fill itself, which comes from the agent's own estimate rather than from the
+last request and so moves while a turn is still running, and the last response.
+The model and the workspace were rows up there too. The strip says the folder now
+and the settings panel says the model, so neither is worth a second answer.
 
 SESSION is what the run has spent, out of the same events. The rates are measured
 rather than reported: prefill is from the request leaving to the first token
@@ -186,20 +192,20 @@ and then as a settings section called ALL TIME, kept in a file beside the
 settings. A column of numbers from sessions nobody remembers reads as this
 session's however it is labelled, so both are gone and so is the file.
 
-DEBUG counts the calls that failed and shows what was sent to them. Click a row
-and the arguments of that call open under it. Both halves are already on the
-wire, they were being written into the activity log and then dropped, so this
-needed no protocol change. What it does not show is the schema the tool expected:
-that is on no event at all.
+There was a DEBUG pane that listed the calls that failed and opened the arguments
+of the one you clicked. It is gone: a pane of its own for something that is one
+number most of the time, and the failure itself is already written into ACTIVITY
+where it happened, with its class, its message and what to do about it. The
+number survives, beside the total tool calls in CONTEXT.
 
-Every pane scrolls inside its own box. The plan, the agent list, the failed calls
-and the three monitors used to draw what fitted and lose the rest, so a long plan
-ran off the bottom edge with nothing on screen saying it was there. All of them
-take their window, their clamp and their bar from the same place the conversation
-does, so the wheel and PageUp/PageDown mean the same thing in every pane and a bar
-appears only when there is more than the box holds. CONTEXT keeps its three header
+Every pane scrolls inside its own box. The plan, the agent list and the three
+monitors used to draw what fitted and lose the rest, so a long plan ran off the
+bottom edge with nothing on screen saying it was there. All of them take their
+window, their clamp and their bar from the same place the conversation does, so
+the wheel and PageUp/PageDown mean the same thing in every pane and a bar appears
+only when there is more than the box holds. CONTEXT keeps its four header
 rows in place while its readings scroll, because a monitor whose first rows
-scrolled away is a monitor of an unnamed session.
+scrolled away is a monitor with no summary.
 
 A running command scrolls. `cargo build` used to be one row that said nothing
 for two minutes and then said how it went; its output now arrives line by line
@@ -249,10 +255,9 @@ Drag across the conversation, the activity list or a file to select text, and
 Ctrl-C copies it. Ctrl-C with nothing selected still cancels the turn, which is
 the thing that must never get hard to reach; Ctrl-Shift-C always copies, and
 Escape drops the selection before it touches anything else. Selection is only
-on the panes that are made of lines, because the plan, the agent list, the three
-monitors and the debug list are lists and readings rather than text, and
-pretending otherwise would mean guessing at a layout that does not exist. A click
-in DEBUG opens a failed call instead of starting a selection.
+on the panes that are made of lines, because the plan, the agent list and the
+three monitors are lists and readings rather than text, and pretending otherwise
+would mean guessing at a layout that does not exist.
 
 A selection holds line numbers rather than screen positions, so output arriving
 underneath it does not slide it onto different text mid-drag.
@@ -293,15 +298,16 @@ for a copy, a clipboard for a paste, a gear for Settings, a cross for Close this
 widget and a grid of frames for Widgets.
 
 **Widgets** is the way back, and the way out. It is the last row, marked in front
-with that grid and with a `>` at its end, and it opens a list of all nine in a box beside itself, right by
-default and left when the menu is near the right edge of the window. Every row
+with that grid and with a `>` at its end, and it opens a list of all eight in a
+box beside itself, right by default and left when the menu is near the right edge
+of the window. Every row
 of the list is a switch: a ticked box means the widget is in the window and
 picking it takes the widget out, an empty box means it is closed and picking it
 puts it back in the space it opens in by default. The menu stays open over the
 list so you can switch a second widget without opening it again, unless what you
 switched off is the widget the menu was opened over, which takes the rest of its
 rows with it. The list is clamped into the window like the menu itself, and in a
-window too short for all nine the wheel scrolls it.
+window too short for all eight the wheel scrolls it.
 
 ## Settings
 
@@ -386,7 +392,7 @@ dividers sit, how wide the settings rail is, which panes exist, and the whole pa
 ten gauge slots a monitor reading picks from, and the five the highlighter uses
 for code. A key it does not recognise is reported in the ACTIVITY pane rather
 than ignored, and a key an older build wrote and this one dropped, such as any of
-the nine `view_*` colours, is read off the floor without a word.
+the `view_*` colours, is read off the floor without a word.
 
 `theme = noob | amber | ice | plum` sets the eight base tones, the five code
 colors and the two tool colors that are prose rather than a tool. The rest of the

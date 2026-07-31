@@ -1875,13 +1875,6 @@ impl App {
                 self.state.show_file(index);
                 self.dirty = true;
             }
-            // The debug pane is a list you click rather than text you select:
-            // its rows open to show what was sent to the call that failed, and
-            // there is nothing selectable in it (`State::pane_of` has no
-            // scrollback for it), so a press here would otherwise do nothing.
-            Hit::Body(space) if self.dock.slot(space).active() == Some(View::Debug) => {
-                self.open_failure_under_pointer(space);
-            }
             Hit::Body(space) => self.begin_selection(space),
             // All four are handled above, while the picker is up, which is the
             // only time any of them can be hit at all.
@@ -2088,42 +2081,6 @@ impl App {
                     .say(format!("nothing to paste: {e}"), state::Tone::Bad);
                 self.dirty = true;
             }
-        }
-    }
-
-    /// Open or close the failed call the pointer is on, in the debug pane.
-    ///
-    /// The row comes from the same `Layout::cell` arithmetic the panes are drawn
-    /// with, and which failure that row belongs to comes from
-    /// [`State::debug_rows`], which is the list that was drawn. Neither end
-    /// guesses.
-    ///
-    /// The pane scrolls, so the row under the pointer is a row of the window and
-    /// not of the list: what the window starts at has to be added back, or a
-    /// scrolled pane opens the arguments of a different call than the one clicked.
-    fn open_failure_under_pointer(&mut self, space: Space) {
-        let layout = self.layout();
-        let Some((at, row, _)) = layout.cell(
-            self.cursor.x as f32,
-            self.cursor.y as f32,
-            self.config.pane_font_size,
-            self.pane_column,
-        ) else {
-            return;
-        };
-        if at != space {
-            return;
-        }
-        let first = self.scroll_first(&layout, View::Debug, layout.placed(space).body);
-        self.dirty |= self.state.toggle_failure(first + row);
-    }
-
-    /// The first row of the content a scrolling pane is currently showing.
-    fn scroll_first(&self, layout: &Layout, view: View, panel: noob_draw::Panel) -> usize {
-        let frame = self.frame(layout);
-        match view::scroll_extent(&frame, view, panel) {
-            Some((heights, rows)) => self.state.scrolls.window(view, &heights, rows).first,
-            None => 0,
         }
     }
 
@@ -3883,13 +3840,13 @@ mod tests {
 
         // And the marks follow, so the row says which way it will go next.
         assert_eq!(
-            menu.pick(menu.top + 8),
+            menu.pick(menu.top + 7),
             Some(Item::Widget(View::Files, false)),
-            "FILES is the ninth widget and it is back in the window"
+            "FILES is the eighth widget and it is back in the window"
         );
         toggle_view(&mut dock, &mut menu, View::Files);
         assert_eq!(
-            menu.pick(menu.top + 8),
+            menu.pick(menu.top + 7),
             Some(Item::Widget(View::Files, true))
         );
     }
@@ -3906,8 +3863,8 @@ mod tests {
         menu.toggle_widgets(&dock);
 
         // Another widget, either way round: the menu stays.
-        assert!(toggle_view(&mut dock, &mut menu, View::Debug).keep_open);
-        assert!(toggle_view(&mut dock, &mut menu, View::Debug).keep_open);
+        assert!(toggle_view(&mut dock, &mut menu, View::Hardware).keep_open);
+        assert!(toggle_view(&mut dock, &mut menu, View::Hardware).keep_open);
         // Its own, coming back in, is not its own going out.
         assert!(dock.hide(View::Plan));
         menu.relist(&dock);
@@ -4260,12 +4217,12 @@ mod tests {
         let bottom = cell(&dock, Space::BottomRight);
         let (landing, moved) = drop_at(
             &mut dock,
-            View::Debug,
+            View::Hardware,
             (bottom.x + bottom.w * 0.5, bottom.y + bottom.h * 0.5),
         );
         assert_eq!(landing, Landing::In(Space::BottomRight, None));
         assert!(moved);
-        assert_eq!(dock.slot(Space::BottomRight).views, vec![View::Debug]);
+        assert_eq!(dock.slot(Space::BottomRight).views, vec![View::Hardware]);
         assert_eq!(
             dock.cover()[Space::BottomRight.index()],
             Some(Space::BottomRight),
@@ -4445,145 +4402,6 @@ mod tests {
             spot(body.x + 1.0, body.y + 1.0),
             Some(select::Spot::new(0, 0))
         );
-    }
-
-    /// The whole pointer path for the debug pane: a pixel inside the pane
-    /// becomes a row, and that row becomes the failure whose arguments open.
-    ///
-    /// Both halves are the ones `App::open_failure_under_pointer` calls, driven
-    /// here without a window: `Layout::cell` for the row, `State::debug_rows` for
-    /// which failure that row belongs to.
-    #[test]
-    fn clicking_a_failed_call_opens_the_arguments_that_were_sent() {
-        let mut state = State::new();
-        for (id, name) in [("a", "bash"), ("b", "write")] {
-            state.apply(noob_proto::Event::ToolStart {
-                call_id: id.into(),
-                name: name.into(),
-                brief: format!("{name} something"),
-                args: noob_proto::Value::Object(
-                    [(String::from("which"), noob_proto::Value::String(id.into()))]
-                        .into_iter()
-                        .collect(),
-                ),
-            });
-            state.apply(noob_proto::Event::ToolEnd {
-                call_id: id.into(),
-                summary: "no".into(),
-                elapsed_ms: 1,
-                error: Some(noob_proto::ToolError {
-                    kind: "denied".into(),
-                    code: None,
-                    message: format!("{name} was refused"),
-                    detail: None,
-                    remedy: None,
-                }),
-            });
-        }
-
-        let mut dock = Dock::new();
-        assert!(dock.reveal(View::Debug));
-        let layout = laid_out(&dock, None, 0);
-        let body = layout.placed(Space::BottomRight).body;
-        let pane_size = Config::default().pane_font_size;
-        let line = noob_draw::Text::line_for(pane_size);
-        // The pane draws its rows from the top of its content box, so the second
-        // failure is the third row down.
-        let (x, y) = (body.x + 20.0, body.y + 9.0 + 2.5 * line);
-        let (space, row, _) = layout
-            .cell(x, y, pane_size, COLUMN)
-            .expect("the pointer is over a pane");
-        assert_eq!(space, Space::BottomRight);
-        assert_eq!(row, 2);
-
-        assert!(state.toggle_failure(row));
-        assert_eq!(state.open_failure, Some(1));
-        let rows: Vec<String> = state.debug_rows().into_iter().map(|r| r.text).collect();
-        assert!(
-            rows.iter().any(|text| text.contains("which = b")),
-            "the arguments of the second failure are not shown: {rows:?}"
-        );
-        // A press on the count at the top is not a failure and opens nothing.
-        let (_, row, _) = layout
-            .cell(x, body.y + 9.0, pane_size, COLUMN)
-            .expect("the first row");
-        assert_eq!(row, 0);
-        assert!(!state.toggle_failure(row));
-        assert_eq!(state.open_failure, Some(1), "and it left the open one alone");
-    }
-
-    /// The same path with the pane scrolled. The row under the pointer is a row
-    /// of the window, so which failure it opens depends on where the window
-    /// starts: `App::open_failure_under_pointer` adds that back, and without it a
-    /// scrolled pane expands a call nobody clicked.
-    #[test]
-    fn a_click_in_a_scrolled_debug_pane_opens_the_call_under_the_pointer() {
-        let mut state = State::new();
-        for i in 0..30 {
-            let id = format!("bad-{i:02}");
-            state.apply(noob_proto::Event::ToolStart {
-                call_id: id.clone(),
-                name: "bash".into(),
-                brief: format!("call {i:02}"),
-                args: noob_proto::Value::Object(
-                    [(String::from("which"), noob_proto::Value::String(id.clone()))]
-                        .into_iter()
-                        .collect(),
-                ),
-            });
-            state.apply(noob_proto::Event::ToolEnd {
-                call_id: id,
-                summary: "no".into(),
-                elapsed_ms: 1,
-                error: Some(noob_proto::ToolError {
-                    kind: "denied".into(),
-                    code: None,
-                    message: format!("boom {i:02}"),
-                    detail: None,
-                    remedy: None,
-                }),
-            });
-        }
-
-        let mut dock = Dock::new();
-        assert!(dock.reveal(View::Debug));
-        let layout = laid_out(&dock, None, 0);
-        let body = layout.placed(Space::BottomRight).body;
-        let pane_size = Config::default().pane_font_size;
-        let line = noob_draw::Text::line_for(pane_size);
-        // Every row is clipped to one row, which is what the pane's own extent
-        // reports for this list.
-        let heights = view::flat_heights(state.debug_rows().len());
-        let rows = layout.rows(body, pane_size);
-        assert!(heights.len() > rows, "{} rows in a box of {rows}", heights.len());
-
-        assert!(state.scrolls.scroll(View::Debug, 5, true, &heights, rows));
-        let first = state.scrolls.window(View::Debug, &heights, rows).first;
-        assert_eq!(first, 5, "the window starts five rows down");
-
-        // The third row of the pane, the same pixel arithmetic the window uses.
-        let (x, y) = (body.x + 20.0, body.y + 9.0 + 2.5 * line);
-        let (space, row, _) = layout
-            .cell(x, y, pane_size, COLUMN)
-            .expect("the pointer is over a pane");
-        assert_eq!((space, row), (Space::BottomRight, 2));
-
-        // The count is the first row of the list, so row seven is the seventh
-        // failure.
-        let under = state.debug_rows()[first + row].text.clone();
-        assert!(under.contains("boom 06"), "row {} reads {under:?}", first + row);
-        assert!(state.toggle_failure(first + row));
-        assert_eq!(state.open_failure, Some(6));
-        let list: Vec<String> = state.debug_rows().into_iter().map(|r| r.text).collect();
-        assert!(
-            list.iter().any(|text| text.contains("which = bad-06")),
-            "the arguments of the call under the pointer are not shown"
-        );
-        // Unscrolled, that same row is the second failure and nothing else.
-        state.open_failure = None;
-        assert!(state.scrolls.scroll(View::Debug, 999, false, &heights, rows));
-        assert!(state.toggle_failure(row));
-        assert_eq!(state.open_failure, Some(1));
     }
 
     /// The wheel and the page keys reach every pane. A view either keeps its own

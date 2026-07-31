@@ -1,9 +1,8 @@
 //! Where each pane that scrolls itself is scrolled to.
 //!
 //! One offset per view, in one array, indexed the way [`View::ALL`] is indexed.
-//! PLAN, AGENTS, DEBUG and the three monitors are built from lists rather than
-//! from a [`crate::state::Pane`], so they have no scrollback of their own to
-//! keep; before this they had nothing at all, and content past the bottom of the
+//! PLAN, AGENTS and the three monitors are built from lists rather than from a
+//! [`crate::state::Pane`], so they have no scrollback of their own to keep; before this they had nothing at all, and content past the bottom of the
 //! box was simply not drawn.
 //!
 //! Top-anchored, like the file explorer: a list is read from its first entry
@@ -123,15 +122,15 @@ mod tests {
     fn scrolling_clamps_at_both_ends() {
         let mut scrolls = Scrolls::default();
         let heights = flat(30);
-        assert!(scrolls.scroll(View::Debug, 999, true, &heights, 10));
-        assert_eq!(scrolls.first(View::Debug), 20, "30 rows in a box of 10");
+        assert!(scrolls.scroll(View::Agents, 999, true, &heights, 10));
+        assert_eq!(scrolls.first(View::Agents), 20, "30 rows in a box of 10");
         assert!(
-            !scrolls.scroll(View::Debug, 1, true, &heights, 10),
+            !scrolls.scroll(View::Agents, 1, true, &heights, 10),
             "the last row is already on screen"
         );
-        assert!(scrolls.scroll(View::Debug, 999, false, &heights, 10));
-        assert_eq!(scrolls.first(View::Debug), 0);
-        assert!(!scrolls.scroll(View::Debug, 1, false, &heights, 10));
+        assert!(scrolls.scroll(View::Agents, 999, false, &heights, 10));
+        assert_eq!(scrolls.first(View::Agents), 0);
+        assert!(!scrolls.scroll(View::Agents, 1, false, &heights, 10));
     }
 
     /// A pane scrolled to its end and then made shorter, or emptied, is the case
