@@ -14,7 +14,15 @@
 //! section's rows beside it, and each section is short enough to read at a
 //! glance. Four of them ([`AGENT`], [`SESSIONS`], [`SKILLS`], [`MCP`]) are the
 //! agent's own files rather than the window's; the last one ([`APPEARANCE`]) is
-//! everything in the window's own settings file, the palette included.
+//! the window's own settings file, the palette included, minus the keys the
+//! window itself already sets ([`OFF_PANEL`]).
+//!
+//! **A setting the window already sets is not a row.** Which panes are open and
+//! where the dividers sit were a section of their own and then a pair of groups
+//! under [`APPEARANCE`], and both are set by using the window: a closed widget
+//! comes back off the right click menu, and a divider is dragged and writes its
+//! own key on the way up. So the keys stayed and the rows went. Nothing on the
+//! panel offers a number for something a pointer already moved.
 //!
 //! **Two of those sections are two columns.** [`SKILLS`] and [`MCP`] were lists
 //! of text nothing could be done to. They are [`Row::Entry`] rows now: a name
@@ -90,21 +98,18 @@ pub const APPEARANCE: &str = "APPEARANCE";
 
 /// Every section name, in rail order.
 ///
-/// There were three more. PANES held the four settings that decide which views
-/// open and where the dividers sit, which is what the window looks like and so
-/// belongs under [`APPEARANCE`] with everything else that does; its rows moved
-/// there whole. ALL TIME read the counts of every session that ever ran, which
-/// answered a question nobody was asking on a settings panel, and went with the
-/// file behind it. COLOURS was the palette, which is also what the window looks
-/// like: it is the last block of [`APPEARANCE`] now, under its own headings.
+/// There were three more. PANES listed which views were open and where the
+/// dividers sat, both of which are already set by doing the thing itself, so the
+/// section went and its rows went with it (see [`OFF_PANEL`]). ALL TIME read the
+/// counts of every session that ever ran, which answered a question nobody was
+/// asking on a settings panel, and went with the file behind it. COLOURS was the
+/// palette, which is what the window looks like: it is the last block of
+/// [`APPEARANCE`] now, under its own headings.
 pub const SECTIONS: [&str; 5] = [AGENT, SESSIONS, SKILLS, MCP, APPEARANCE];
 
 /// What a setting holds, which is what decides how its row changes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind {
-    /// On or off. Enter flips it, and so does a nudge either way: there is
-    /// nowhere else for a flag to go.
-    Flag,
     /// One name out of a list, wrapping in both directions.
     Choice(&'static [&'static str]),
     /// A number, nudged by `step` and held between `low` and `high`.
@@ -379,9 +384,27 @@ const LOOKS: [(&str, Kind); 5] = [
     ),
 ];
 
-/// Which panes open.
-const PANE_SETTINGS: [(&str, Kind); 2] =
-    [("show_activity", Kind::Flag), ("show_files", Kind::Flag)];
+/// Keys the window's file carries that this panel deliberately does not list.
+///
+/// Both groups came off the panel with PANES. Which panes are open is the right
+/// click menu's job: it names every widget and reopens a closed one, which is
+/// where anyone already goes to get a pane back, and two rows saying the same
+/// thing in a form is the worse of the two. Where the dividers sit is set by
+/// dragging the lines, and the drag writes these keys itself, so the rows were
+/// a number to type for something a pointer already does.
+///
+/// The keys are alive: the parser reads them, a drag writes them, and a layout
+/// left somewhere survives a restart. Only the rows are gone.
+/// `the_panes_and_the_dividers_are_off_the_panel` fails if one comes back.
+pub const OFF_PANEL: [&str; 7] = [
+    "show_activity",
+    "show_files",
+    "left_width",
+    "left_width_bottom",
+    "top_height",
+    "top_height_right",
+    "settings_rail",
+];
 
 /// The two settings of the agent's own file that are numbers with a range, so
 /// the panel can offer them as tracks instead of asking for a number to be
@@ -409,64 +432,6 @@ const AGENT_SETTINGS: [(&str, Kind); 2] = [
             low: agent::TASK_CONCURRENCY_LOW,
             high: agent::TASK_CONCURRENCY_HIGH,
             places: 0,
-        },
-    ),
-];
-
-/// The numbers the dividers write when they are dragged. Here as well because a
-/// pointer is not the only way anyone works, and because a value that only a
-/// drag can reach is a value nobody can read off the window.
-///
-/// All four of the grid's, whichever way it is reading. One line always runs the
-/// whole way across, so one of them is not on screen as a line at any given
-/// moment; it is still the number that line will take when the grid turns round,
-/// and a row that disappeared and came back would read as a setting that comes
-/// and goes. The fifth is this panel's own rail, which is dragged the same way
-/// and held to a range of its own.
-const DIVIDERS: [(&str, Kind); 5] = [
-    (
-        "left_width",
-        Kind::Number {
-            step: 0.05,
-            low: config::SPLIT_LOW,
-            high: config::SPLIT_HIGH,
-            places: 2,
-        },
-    ),
-    (
-        "left_width_bottom",
-        Kind::Number {
-            step: 0.05,
-            low: config::SPLIT_LOW,
-            high: config::SPLIT_HIGH,
-            places: 2,
-        },
-    ),
-    (
-        "top_height",
-        Kind::Number {
-            step: 0.05,
-            low: config::SPLIT_LOW,
-            high: config::SPLIT_HIGH,
-            places: 2,
-        },
-    ),
-    (
-        "top_height_right",
-        Kind::Number {
-            step: 0.05,
-            low: config::SPLIT_LOW,
-            high: config::SPLIT_HIGH,
-            places: 2,
-        },
-    ),
-    (
-        "settings_rail",
-        Kind::Number {
-            step: 0.05,
-            low: config::RAIL_LOW,
-            high: config::RAIL_HIGH,
-            places: 2,
         },
     ),
 ];
@@ -921,19 +886,15 @@ impl Settings {
         rows
     }
 
-    /// Everything about what the window looks like: the sizes and the theme,
-    /// which panes open, where the dividers between them sit, and the palette.
+    /// Everything about what the window looks like: the sizes, the theme and
+    /// the palette.
     ///
-    /// Three of those groups were sections of their own. PANES held which views
-    /// are up and where the lines between them sit; COLOURS held the palette.
-    /// All three are what the window looks like, so they are groups under one
-    /// heading each here rather than rail entries anyone has to go and find.
+    /// COLOURS was a section of its own and is the last block here, under its
+    /// own headings, because a palette is what the window looks like. The two
+    /// groups PANES held are not here and are not anywhere: see [`OFF_PANEL`]
+    /// for which keys those were and what sets them instead.
     fn appearance_rows(&self, config: &Config) -> Vec<Row> {
         let mut rows = settings_rows(config, &LOOKS);
-        rows.push(Row::Heading("WHICH PANES OPEN"));
-        rows.extend(settings_rows(config, &PANE_SETTINGS));
-        rows.push(Row::Heading("WHERE THE DIVIDERS SIT"));
-        rows.extend(settings_rows(config, &DIVIDERS));
         rows.extend(self.colour_rows(config));
         rows
     }
@@ -1150,7 +1111,6 @@ impl Settings {
         }
         match self.row(self.cursor()) {
             Some(Row::Setting { kind, .. }) => match kind {
-                Kind::Flag => "enter or left and right turn it on and off",
                 Kind::Choice(_) => "left and right walk the presets",
                 Kind::Number { .. } => "left and right nudge it, or drag the slider",
             },
@@ -1219,13 +1179,6 @@ impl Settings {
             return None;
         };
         let next = match kind {
-            // Either direction, and Enter comes through here too. A flag has two
-            // states, so "the next one" and "the one before" are the same one.
-            Kind::Flag => match value.as_str() {
-                "on" => "off",
-                _ => "on",
-            }
-            .to_string(),
             Kind::Choice(names) => {
                 let at = names.iter().position(|name| name == value);
                 let next = match (at, forward) {
@@ -1725,9 +1678,16 @@ fn note(text: &str) -> Row {
 }
 
 /// The rows for a group of the window's own settings, read off the config.
+///
+/// A key on [`OFF_PANEL`] never becomes a row, whatever group it is written
+/// into. The list is the rule and not a note about one: putting `show_files`
+/// back in a table is not enough to put it back on the panel, which is what
+/// stops the removal being undone by a later edit that meant to add something
+/// else.
 fn settings_rows(config: &Config, group: &[(&'static str, Kind)]) -> Vec<Row> {
     group
         .iter()
+        .filter(|(key, _)| !OFF_PANEL.contains(key))
         .map(|(key, kind)| Row::Setting {
             key,
             value: value_of(config, key, *kind),
@@ -1861,22 +1821,14 @@ fn landing_from(rows: &[Row], from: usize, down: bool) -> Option<usize> {
 /// [`Settings::change`] reads to work out the next value: `on`/`off` for a flag
 /// and no trailing zeros on a whole number.
 fn value_of(config: &Config, key: &str, kind: Kind) -> String {
-    let flag = |on: bool| String::from(if on { "on" } else { "off" });
     match (key, kind) {
         ("theme", _) => theme_name(config).to_string(),
-        ("show_activity", _) => flag(config.show_activity),
-        ("show_files", _) => flag(config.show_files),
         ("prompt_rows", _) => config.prompt_rows.to_string(),
         (_, Kind::Number { places, .. }) => {
             let value = match key {
                 "opacity" => config.opacity,
                 "font_size" => config.font_size,
                 "pane_font_size" => config.pane_font_size,
-                "left_width" => config.left_width,
-                "left_width_bottom" => config.left_width_bottom,
-                "top_height" => config.top_height,
-                "top_height_right" => config.top_height_right,
-                "settings_rail" => config.settings_rail,
                 // Unreachable through the groups, and a number is the honest
                 // answer for a row that says it is one.
                 _ => 0.0,
@@ -2100,11 +2052,15 @@ mod tests {
     }
 
     /// Every key the file understands is on the panel exactly once, in one
-    /// section or another, as a row that changes or as a swatch.
+    /// section or another, as a row that changes or as a swatch, unless it is
+    /// one of the seven [`OFF_PANEL`] names.
     ///
     /// This is the test that stops the panel going stale. A setting added to
-    /// `config::keys` and in none of the sections is a line in everybody's file
-    /// with no way to reach it from the window, and nothing else would say so.
+    /// `config::keys` and in neither list is a line in everybody's file with no
+    /// way to reach it from the window, and nothing else would say so. The list
+    /// of exceptions is written out by hand for the same reason: a key drops off
+    /// the panel because somebody decided it should, never because a row was
+    /// forgotten.
     #[test]
     fn every_key_in_the_file_is_on_the_panel() {
         let config = Config::default();
@@ -2125,10 +2081,18 @@ mod tests {
                 _ => Vec::new(),
             })
             .collect();
-        let mut known = config::keys();
+        let mut known: Vec<&str> = config::keys()
+            .into_iter()
+            .filter(|key| !OFF_PANEL.contains(key))
+            .collect();
         on_panel.sort_unstable();
         known.sort_unstable();
         assert_eq!(on_panel, known);
+        // And every name in that list is a key the file really carries, so a
+        // typo there cannot quietly excuse a setting from the panel.
+        for off in OFF_PANEL {
+            assert!(config::keys().contains(&off), "{off} is not a key at all");
+        }
 
         // And the agent's own settings are exactly the two the CLI's bounds are
         // known for, so a third one added to the table without a range read off
@@ -2157,10 +2121,10 @@ mod tests {
             );
         }
 
-        // Every key in the window's file is an appearance now, colours included:
-        // the panes and the dividers came over when PANES was removed, and the
-        // palette came over when COLOURS did. The agent's two are on the agent's
-        // section, beside the file they are written into.
+        // Every key in the window's file that is on the panel at all is an
+        // appearance, colours included: the palette came over when COLOURS was
+        // removed. The agent's two are on the agent's section, beside the file
+        // they are written into.
         for (section, row) in panel.all_rows() {
             match row {
                 Row::Setting { key, file, .. } => {
@@ -2241,16 +2205,17 @@ mod tests {
             assert_eq!(down, up, "walking back up {name} visits other rows");
         }
 
-        // APPEARANCE stops on its own settings and nothing else: the sizes, the
-        // panes and the dividers. The headings between them are stepped over
-        // rather than landed on, and so is every row of the palette grid that
-        // follows them, which is the whole bottom half of the section.
+        // APPEARANCE stops on its own settings and nothing else, which is the
+        // sizes and the theme: every row of the palette grid under them is
+        // stepped over rather than landed on, and that is the whole rest of the
+        // section. The panes and the dividers used to be counted here too and
+        // are not rows any more.
         go_to(&mut panel, APPEARANCE);
         let mut looks = 1;
         while panel.step(true) {
             looks += 1;
         }
-        assert_eq!(looks, LOOKS.len() + PANE_SETTINGS.len() + DIVIDERS.len());
+        assert_eq!(looks, LOOKS.len());
 
         // A section of readings has nothing to land on and says so, rather than
         // drawing a band on a row nothing can be done to.
@@ -2263,27 +2228,35 @@ mod tests {
         assert!(!panel.on_row());
     }
 
-    /// A flag says on or off, flips either way, and Enter is a nudge forward.
+    /// No row on the panel is an on and off any more, and nothing changes from
+    /// the rail.
+    ///
+    /// This was `a_flag_flips_and_writes_what_the_file_reads`, which drove the
+    /// `show_files` row. The only two flags the window's file carries are the
+    /// two panes, and neither is a row now: a closed pane comes back off the
+    /// right click menu and the file goes on remembering which are open. What
+    /// survives of that test is its last half, which belongs to every row: the
+    /// arrow keys on the rail walk the sections and one of them must not also
+    /// write a setting.
     #[test]
-    fn a_flag_flips_and_writes_what_the_file_reads() {
-        let config = Config::default();
-        let mut panel = over(&config);
-        put_cursor(&mut panel, "show_files");
-        assert_eq!(value(&panel, "show_files"), "on");
-
-        let change = panel.change(true).expect("a flag changes");
-        assert_eq!(change.key, "show_files");
-        assert_eq!(change.value, "off");
-        // Both directions, because a flag has nowhere else to be.
-        assert_eq!(panel.change(false).expect("either way").value, "off");
-        // And the file agrees the value means what the row says.
+    fn no_row_is_an_on_and_off_and_the_rail_writes_nothing() {
+        let mut panel = over(&Config::default());
+        for (section, row) in panel.all_rows() {
+            let Row::Setting { key, value, .. } = row else {
+                continue;
+            };
+            assert!(
+                !matches!(value.as_str(), "on" | "off"),
+                "{key} in {section} is a flag"
+            );
+        }
+        // The file still carries both of them and still reads them, which is
+        // what keeps a closed pane closed across a restart.
         assert!(!Config::parse("show_files = off").show_files);
+        assert!(!Config::parse("show_activity = off").show_activity);
 
-        // The row still reads what the file says: nothing was applied here.
-        assert_eq!(value(&panel, "show_files"), "on");
-
-        // Nothing changes from the rail: the arrow keys there walk the sections,
-        // and one of them must not also write a setting.
+        put_cursor(&mut panel, "theme");
+        assert!(panel.change(true).is_some(), "a row that can change");
         panel.leave();
         assert_eq!(panel.change(true), None);
     }
@@ -2354,7 +2327,7 @@ mod tests {
     fn the_slider_maps_a_position_to_a_value_and_back() {
         for kind in LOOKS
             .iter()
-            .chain(DIVIDERS.iter())
+            .chain(AGENT_SETTINGS.iter())
             .map(|(_, kind)| *kind)
             .filter(|kind| matches!(kind, Kind::Number { .. }))
         {
@@ -2388,11 +2361,10 @@ mod tests {
             assert_eq!(kind.at(0.0), Some(format!("{low:.places$}")));
             assert_eq!(kind.at(1.0), Some(format!("{high:.places$}")));
         }
-        // Nothing else is a slider. A flag or a preset drawn as a track would be
-        // a control whose middle means nothing.
-        assert_eq!(Kind::Flag.at(0.5), None);
+        // Nothing else is a slider. A preset drawn as a track would be a control
+        // whose middle means nothing.
+        assert_eq!(Kind::Choice(&config::THEMES).at(0.5), None);
         assert_eq!(Kind::Choice(&config::THEMES).fraction(1.0), None);
-        assert_eq!(Kind::Flag.fraction(0.5), None);
     }
 
     /// The row goes on showing the file's value under a preview, and the button
@@ -2440,10 +2412,10 @@ mod tests {
         assert_eq!(panel.drop_slider(), None, "and there is nothing to drop");
 
         // A row that is not a number has no track at all.
-        put_cursor(&mut panel, "show_files");
+        put_cursor(&mut panel, "theme");
         assert!(!panel.slide(panel.cursor(), 0.5));
         assert_eq!(panel.fraction(panel.cursor()), None);
-        assert_eq!(panel.previewed(), None, "a flag is being dragged");
+        assert_eq!(panel.previewed(), None, "a preset is being dragged");
     }
 
     /// The window takes a dragged value while the pointer is still down. Only
@@ -2499,17 +2471,7 @@ mod tests {
     fn a_drag_cannot_show_a_value_the_file_would_clamp() {
         let was = Config::default();
         let mut panel = over(&was);
-        for key in [
-            "opacity",
-            "font_size",
-            "pane_font_size",
-            "prompt_rows",
-            "left_width",
-            "left_width_bottom",
-            "top_height",
-            "top_height_right",
-            "settings_rail",
-        ] {
+        for key in ["opacity", "font_size", "pane_font_size", "prompt_rows"] {
             put_cursor(&mut panel, key);
             let at = panel.cursor();
             // Past both ends as well as along the track: a pointer dragged out
@@ -2593,28 +2555,107 @@ mod tests {
         assert!(text.contains("no0b.conf"), "{text}");
     }
 
-    /// The two sections that came off are gone from the rail, and what they
-    /// carried went where it was said to go.
+    /// "PANES: remove, has no purpose." Neither group PANES held is anywhere on
+    /// the panel: not as a row, not as a heading, not as a reading, and not as a
+    /// word in any text the panel writes. The panel still opens on all five
+    /// sections and none of them is empty.
     ///
-    /// This was `the_all_time_block_reads_the_totals_it_was_handed`, which drove
-    /// an ALL TIME section that no longer exists. What survives of it is the
-    /// last assertion: a machine with no home directory still opens the panel
-    /// and says why nothing can be saved.
+    /// Removed, not moved. An earlier pass deleted the section name and pushed
+    /// its rows under APPEARANCE, so every row he was pointing at was still on
+    /// screen one heading lower. The keys themselves stay alive: a closed pane
+    /// is reopened from the right click menu, a divider is dragged, and both go
+    /// on being written and read. See [`OFF_PANEL`].
     #[test]
-    fn the_retired_sections_are_off_the_rail_and_their_settings_are_not() {
+    fn the_panes_and_the_dividers_are_off_the_panel() {
+        let panel = over(&Config::default());
+        for (section, row) in panel.all_rows() {
+            let named: Vec<&str> = match row {
+                Row::Setting { key, .. } | Row::Field { key, .. } => vec![key],
+                Row::Swatches(cells) => cells.iter().map(|cell| cell.key).collect(),
+                Row::Heading(name) => vec![*name],
+                Row::Reading { label, .. } => vec![label.as_str()],
+                Row::Note { text, .. } => vec![text.as_str()],
+                Row::Item(text) => vec![text.as_str()],
+                Row::Entry(entry) => vec![entry.name.as_str()],
+            };
+            for said in named {
+                for key in OFF_PANEL {
+                    assert!(!said.contains(key), "{section} still says {key}: {said:?}");
+                }
+            }
+            // The headings those rows sat under went with them: a heading with
+            // nothing under it is worse than the rows were.
+            if let Row::Heading(name) = row {
+                assert!(
+                    !name.contains("PANE") && !name.contains("DIVIDER"),
+                    "{name} is still a heading"
+                );
+            }
+        }
+
+        // The panel is unhurt: five sections, all of them with rows, and every
+        // one of them still lands the cursor somewhere or says why it cannot.
+        let mut panel = panel;
+        assert_eq!(panel.section_names(), SECTIONS.to_vec());
+        for name in SECTIONS {
+            go_to(&mut panel, name);
+            assert!(!panel.rows().is_empty(), "{name} has no rows at all");
+        }
+        // The list is the rule, not a note about one: a group that names one of
+        // them builds no row for it.
+        let config = Config::default();
+        let rows = settings_rows(
+            &config,
+            &[
+                ("font_size", Kind::Number { step: 1.0, low: 8.0, high: 40.0, places: 0 }),
+                ("show_files", Kind::Choice(&["on", "off"])),
+                ("left_width", Kind::Number { step: 0.05, low: 0.1, high: 0.9, places: 2 }),
+            ],
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(matches!(&rows[0], Row::Setting { key, .. } if *key == "font_size"));
+
+        // And APPEARANCE did not empty out with them: the sizes, the theme and
+        // the whole palette are what it was carrying before PANES ever got
+        // pushed into it.
+        go_to(&mut panel, APPEARANCE);
+        let settings = panel
+            .rows()
+            .iter()
+            .filter(|row| matches!(row, Row::Setting { .. }))
+            .count();
+        assert_eq!(settings, LOOKS.len());
+        assert!(
+            panel.rows().iter().any(|row| matches!(row, Row::Swatches(_))),
+            "the palette went with them"
+        );
+    }
+
+    /// The sections that came off are gone from the rail, and so is everything
+    /// they carried.
+    ///
+    /// This was `the_retired_sections_are_off_the_rail_and_their_settings_are
+    /// _not`, which asserted the panes and the dividers had landed on
+    /// APPEARANCE. That was the wrong half of the answer: PANES was to be
+    /// removed, not moved, so the assertion is inverted here and the rows are
+    /// gone. `the_panes_and_the_dividers_are_off_the_panel` is where the same
+    /// keys are chased through every kind of row.
+    #[test]
+    fn the_retired_sections_are_off_the_rail_and_so_are_their_settings() {
         let panel = over(&Config::default());
         let names = panel.section_names();
         for gone in ["PANES", "ALL TIME"] {
             assert!(!names.contains(&gone), "{gone} is still a section: {names:?}");
         }
-        // The four settings PANES held are on APPEARANCE now, and no reading
+        // Nothing PANES held came over with the section name, and no reading
         // anywhere on the panel is an all-time count.
-        for (key, _) in PANE_SETTINGS.iter().chain(DIVIDERS.iter()) {
-            let (section, _) = panel
-                .all_rows()
-                .find(|(_, row)| matches!(row, Row::Setting { key: name, .. } if name == key))
-                .unwrap_or_else(|| panic!("{key} is on no section at all"));
-            assert_eq!(section, APPEARANCE, "{key} did not land on APPEARANCE");
+        for key in OFF_PANEL {
+            assert!(
+                !panel
+                    .all_rows()
+                    .any(|(_, row)| matches!(row, Row::Setting { key: name, .. } if *name == key)),
+                "{key} is a row again"
+            );
         }
         for (_, row) in panel.all_rows() {
             let Row::Reading { label, .. } = row else {
@@ -2647,7 +2688,8 @@ mod tests {
     /// that decides which section the panel opens on.
     #[test]
     fn an_older_file_full_of_retired_keys_still_opens_the_panel() {
-        let mut text = String::from("show_activity = off\nshow_files = off\nleft_width = 0.4\n");
+        let mut text =
+            String::from("show_activity = off\nshow_files = off\nleft_width = 0.4\nfont_size = 18\n");
         for key in config::RETIRED {
             text.push_str(&format!("{key} = whatever it used to be\n"));
         }
@@ -2662,10 +2704,14 @@ mod tests {
                 "{name} opens on nothing"
             );
         }
-        // The live keys in that file still read, so a retired neighbour did not
+        // The live rows in that file still read, so a retired neighbour did not
         // take them down with it.
-        assert_eq!(value(&panel, "show_files"), "off");
-        assert_eq!(value(&panel, "left_width"), "0.40");
+        assert_eq!(value(&panel, "font_size"), "18");
+        // And the three keys that are off the panel are still read off the file
+        // and still carried, which is what a closed pane and a dragged layout
+        // survive a restart on. They are simply not rows.
+        assert!(!config.show_activity && !config.show_files);
+        assert_eq!(config.left_width, 0.4);
     }
 
     /// The round trip: what a change writes, the file reads back as, and the
@@ -2681,17 +2727,7 @@ mod tests {
         let mut config = Config::load_from(&path);
         let mut panel = Settings::open(&config, Some(&path), Agent::default());
 
-        for key in [
-            "opacity",
-            "font_size",
-            "pane_font_size",
-            "prompt_rows",
-            "left_width",
-            "left_width_bottom",
-            "top_height",
-            "top_height_right",
-            "settings_rail",
-        ] {
+        for key in ["opacity", "font_size", "pane_font_size", "prompt_rows"] {
             // Up first, then down from the top. `prompt_rows` ships at 1,
             // which is the bottom of its range, so a key walked down first has
             // nowhere to go and the walk would prove nothing about its bounds.
@@ -2720,22 +2756,27 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// A flag and a preset go through the same round trip, and the panel keeps
+    /// A number and a preset go through the same round trip, and the panel keeps
     /// its place across it.
+    ///
+    /// The first half of this used to be the `show_activity` flag, which is not
+    /// a row any more. A size is the same round trip: one nudge, one write, one
+    /// reread, and the cursor where it was.
     #[test]
     fn a_change_lands_in_the_file_and_the_cursor_stays_put() {
         let path = scratch("lands");
         let _ = std::fs::remove_file(&path);
         let mut config = Config::load_from(&path);
         let mut panel = Settings::open(&config, Some(&path), Agent::default());
-        put_cursor(&mut panel, "show_activity");
+        put_cursor(&mut panel, "pane_font_size");
         let was = (panel.chosen(), panel.cursor());
+        let bigger = format!("{}", config.pane_font_size as i32 + 1);
 
-        let change = panel.change(true).expect("a flag");
+        let change = panel.change(true).expect("a number");
         config = commit(&path, &change).expect("the file takes it");
-        assert!(!config.show_activity);
+        assert_eq!(format!("{}", config.pane_font_size as i32), bigger);
         panel.refresh(&config);
-        assert_eq!(value(&panel, "show_activity"), "off");
+        assert_eq!(value(&panel, "pane_font_size"), bigger);
         assert_eq!(
             (panel.chosen(), panel.cursor()),
             was,
@@ -2752,8 +2793,8 @@ mod tests {
             colours(&config),
             colours(&config::theme(&change.value).expect("a preset"))
         );
-        // And the flag written before it survived the second write.
-        assert_eq!(value(&panel, "show_activity"), "off");
+        // And the size written before it survived the second write.
+        assert_eq!(value(&panel, "pane_font_size"), bigger);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -2762,8 +2803,8 @@ mod tests {
     fn a_write_that_fails_leaves_the_row_alone() {
         let config = Config::default();
         let mut panel = over(&config);
-        put_cursor(&mut panel, "show_files");
-        let change = panel.change(true).expect("a flag");
+        put_cursor(&mut panel, "font_size");
+        let change = panel.change(true).expect("a number");
 
         // A directory where the file should be: the write cannot land.
         let path = scratch("refused");
@@ -2773,7 +2814,7 @@ mod tests {
 
         panel.say_trouble(String::from("cannot write it"));
         assert_eq!(panel.trouble(), Some("cannot write it"));
-        assert_eq!(value(&panel, "show_files"), "on", "the row moved anyway");
+        assert_eq!(value(&panel, "font_size"), "14", "the row moved anyway");
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2788,8 +2829,6 @@ mod tests {
         assert!(panel.hint().contains("presets"), "{}", panel.hint());
         put_cursor(&mut panel, "opacity");
         assert!(panel.hint().contains("slider"), "{}", panel.hint());
-        put_cursor(&mut panel, "show_files");
-        assert!(panel.hint().contains("on and off"), "{}", panel.hint());
     }
 
     /// A section's list scrolls like every other list in the window, and the
@@ -2856,7 +2895,9 @@ mod tests {
             .filter(|(_, row)| matches!(row, Row::Heading(_)))
             .map(|(at, _)| at)
             .collect();
-        assert!(headings.len() >= 5, "{headings:?}");
+        // The four groups of the palette, which are what is left of the
+        // headings now the panes and the dividers are off the section.
+        assert!(headings.len() >= 4, "{headings:?}");
         for at in &headings {
             assert_eq!(heights[*at], 2, "a heading is drawn larger than a row");
         }

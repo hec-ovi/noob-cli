@@ -434,22 +434,26 @@ anything else in there survives it. There is no uninstall here, because a server
 is a few lines somebody wrote by hand and turning it off already leaves them
 where they are.
 
-The fifth is the window's own settings file, and every key in it is on that one:
-APPEARANCE. It is the sizes and the theme, then `WHICH PANES OPEN` and `WHERE THE
-DIVIDERS SIT`, then the palette, each group under a heading of its own drawn
-larger than the rows under it, with a hairline between every row. Each row is the
+The fifth is the window's own settings file: APPEARANCE. It is the sizes and the
+theme, then the palette, each group of colours under a heading of its own drawn
+larger than the rows under it, with a hairline between every row. Two things the
+file carries are deliberately not rows: which panes are open, which is the right
+click menu's list, and where the four dividers and the settings rail sit, which
+is set by dragging the lines. Both are still written and read the same way, so a
+closed pane and a dragged layout come back at the next launch; there is just
+nothing on the panel to type them into. Each row is the
 key as the file spells it and the value as the file spells it, so the panel
 doubles as the reference for editing the file by hand, and anything that can be
 changed is drawn as a box with an outline round it: if it has an edge, it takes a
 press or a keystroke. A change is written straight away through
 the same writer `no0b --set` uses, so the comments stay, and then the whole file
-is read back and the window is restyled from it: the palette, both font sizes and
-the two panes that can be turned off all move without a restart. That read-back is
+is read back and the window is restyled from it: the palette and both font sizes
+move without a restart. That read-back is
 also why a row cannot show a value the file will not carry, since what you see is
 what the next launch reads.
 
-A setting with a range is a slider: opacity, both font sizes, how tall the prompt
-may grow, all four divider positions and the settings rail. Press the track and drag it, with the value beside it
+A setting with a range is a slider: opacity, both font sizes and how tall the
+prompt may grow. Press the track and drag it, with the value beside it
 and the arrow keys still nudging it one step. The window takes the value while
 you drag: the opacity you are dragging to is the only thing that tells you where
 to stop. The file is written when the button comes up rather than on every motion

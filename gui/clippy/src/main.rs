@@ -4284,6 +4284,144 @@ mod tests {
         );
     }
 
+    /// The settings the panel stopped listing still come out of the file and
+    /// still arrange the window: PANES was removed from the panel, not from the
+    /// window.
+    ///
+    /// Its rows were which panes are open and where the dividers sit. Both are
+    /// set by using the window (a closed pane comes back off the right click
+    /// menu, a line is dragged), and both are still written to and read from the
+    /// same keys, so an arrangement survives a restart with nothing on the panel
+    /// to type it into. This is the half of item D1 that must not have changed.
+    #[test]
+    fn the_layout_the_panel_stopped_listing_still_comes_out_of_the_file() {
+        let config = Config::parse(
+            "show_activity = off\nleft_width = 0.30\nleft_width_bottom = 0.70\ntop_height = 0.35\ntop_height_right = 0.65\nsettings_rail = 0.40\n",
+        );
+        // Every key the panel dropped is still a key the file understands, and
+        // the parser still read all six of these off it.
+        for key in settings::OFF_PANEL {
+            assert!(config::keys().contains(&key), "{key} left the file as well");
+        }
+        assert!(!config.show_activity && config.show_files);
+        assert_eq!(
+            [
+                config.left_width,
+                config.left_width_bottom,
+                config.top_height,
+                config.top_height_right,
+                config.settings_rail
+            ],
+            [0.30, 0.70, 0.35, 0.65, 0.40]
+        );
+
+        // The pane the file turns off is out of the window at launch, exactly
+        // the way `App::new` puts it out, and the right click menu is the way
+        // back in: that list is the affordance the settings rows duplicated.
+        let mut hidden = Vec::new();
+        if !config.show_activity {
+            hidden.push(View::Activity);
+        }
+        if !config.show_files {
+            hidden.push(View::Files);
+        }
+        let mut dock = Dock::hiding(&hidden);
+        assert!(dock.is_hidden(View::Activity));
+        assert!(!dock.is_hidden(View::Files));
+        let mut menu = Menu::for_widget((0.0, 0.0), View::Output, Space::TopLeft, false);
+        menu.toggle_widgets(&dock);
+        assert!(!toggle_view(&mut dock, &mut menu, View::Activity).hidden);
+        assert!(!dock.is_hidden(View::Activity), "the menu cannot reopen it");
+
+        // And the grid breaks where the file says it does. The line is drawn at
+        // the fraction the file carries, which is the same arithmetic a drag
+        // reads a pointer with, so what is on screen and what is written are one
+        // number.
+        let dock = Dock::new();
+        let shape = Shape {
+            shaded: false,
+            dock: &dock,
+            menu: None,
+            picker: None,
+            settings: None,
+            file_labels: Vec::new(),
+            file_first: 0,
+            column: COLUMN,
+            pane_size: config.pane_font_size,
+            pane_column: COLUMN,
+            input_h: view::input_height(
+                W,
+                COLUMN,
+                0,
+                noob_draw::Text::line_for(SIZE),
+                config.prompt_rows,
+            ),
+            left_width: [config.left_width, config.left_width_bottom],
+            top_height: [config.top_height, config.top_height_right],
+            settings_rail: config.settings_rail,
+            popup: None,
+        };
+        let layout = Layout::compute(W, H, &shape);
+        // One line cuts the grid in half and each half is cut by one of its own,
+        // and a line beside a space standing empty is not there at all, so which
+        // of the four are on screen is the dock's business. Every line that is
+        // there is at the fraction its own key carries: the same arithmetic a
+        // drag reads a pointer with, so what is on screen and what is written
+        // are one number.
+        let column_wants = [config.left_width, config.left_width_bottom];
+        let row_wants = [config.top_height, config.top_height_right];
+        let there = |band: noob_draw::Panel| band.w >= 1.0 && band.h >= 1.0;
+        let (mut columns, mut rows) = (0, 0);
+        for half in 0..2 {
+            let band = layout.column_divider[half].band;
+            if there(band) {
+                let (x, _) = middle(band);
+                assert!(
+                    (layout.column_ratio_at(half, x) - column_wants[half]).abs() < 0.01,
+                    "the {half} column line is not at {}",
+                    column_wants[half]
+                );
+                columns += 1;
+            }
+            let band = layout.row_divider[half].band;
+            if there(band) {
+                let (_, y) = middle(band);
+                assert!(
+                    (layout.row_ratio_at(half, y) - row_wants[half]).abs() < 0.01,
+                    "the {half} row line is not at {}",
+                    row_wants[half]
+                );
+                rows += 1;
+            }
+        }
+        assert!(columns >= 1 && rows >= 1, "the grid was cut by nothing at all");
+        // Where both halves of an axis are on screen they kept their own numbers
+        // rather than both taking one, which is the whole reason there are four
+        // keys and not two.
+        if there(layout.column_divider[0].band) && there(layout.column_divider[1].band) {
+            assert_ne!(
+                layout.column_divider[0].band.x,
+                layout.column_divider[1].band.x
+            );
+        }
+        if there(layout.row_divider[0].band) && there(layout.row_divider[1].band) {
+            assert_ne!(layout.row_divider[0].band.y, layout.row_divider[1].band.y);
+        }
+
+        // And dragging any of the five still writes its own key, which is what
+        // the panel rows were standing in for.
+        for (grip, key) in [
+            (Hit::ColumnDivider(0), "left_width"),
+            (Hit::ColumnDivider(1), "left_width_bottom"),
+            (Hit::RowDivider(0), "top_height"),
+            (Hit::RowDivider(1), "top_height_right"),
+            (Hit::SettingsRailDivider, "settings_rail"),
+        ] {
+            assert_eq!(divider_key(grip), Some(key));
+            assert!(settings::OFF_PANEL.contains(&key), "{key} is on the panel");
+        }
+    }
+
     /// The landing the cursor is driven from is the layout's own, so the shape
     /// the pointer takes and the move the release makes come from one answer.
     #[test]

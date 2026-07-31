@@ -4847,7 +4847,7 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
         let value_at = settings_control(*row, label_w, column);
         match entry {
             // A heading is the only thing on its row, and it gets the whole
-            // width: `WHERE THE DIVIDERS SIT` is longer than a label column.
+            // width: `THE HIGHLIGHTER` is longer than a label column.
             //
             // In the same green the showing tab's line is drawn in. It was the
             // ordinary text tint, which is what the settings under it are
@@ -13880,8 +13880,6 @@ mod tests {
         let panel = a_panel_on(&Config::default(), crate::settings::APPEARANCE);
         let out = render_settings(&panel, 1400.0, 1200.0, None);
         for heading in [
-            "WHICH PANES OPEN",
-            "WHERE THE DIVIDERS SIT",
             "THE WINDOW",
             "THE HIGHLIGHTER",
             "ONE PER TOOL",
@@ -13923,7 +13921,7 @@ mod tests {
             );
             found += 1;
         }
-        assert_eq!(found, 6);
+        assert_eq!(found, 4);
         // The same green the tab wears, and not the tint a setting's key is
         // written in, or the heading is another row of the list.
         assert_eq!(
@@ -14100,7 +14098,7 @@ mod tests {
             (crate::settings::MCP, "none configured"),
             (crate::settings::APPEARANCE, "theme"),
             (crate::settings::APPEARANCE, "opacity"),
-            (crate::settings::APPEARANCE, "show_files"),
+            (crate::settings::APPEARANCE, "pane_font_size"),
             // The palette is under APPEARANCE too now, and it is labelled with
             // what each colour colours rather than with its key.
             (crate::settings::APPEARANCE, "the accent"),
@@ -14112,6 +14110,16 @@ mod tests {
                 "{wanted:?} is not in {section}: {text}"
             );
         }
+        // And what it does not say: the pane toggles and the divider ratios are
+        // off the panel, so their names are nowhere in the text any section
+        // draws. `show_files` was on this list until PANES was really removed.
+        for section in crate::settings::SECTIONS {
+            let text = words(section);
+            for key in crate::settings::OFF_PANEL {
+                assert!(!text.contains(key), "{section} still draws {key}: {text}");
+            }
+        }
+
         // The panel says what it is and which section it is showing.
         assert!(words(crate::settings::MCP).contains("SETTINGS"));
 
