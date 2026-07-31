@@ -2404,6 +2404,67 @@ fn settings_cell(row: Panel, cell: usize, cells: usize) -> Panel {
     Panel::new(x + cell as f32 * width, row.y, width, row.h)
 }
 
+/// How wide the trash at the end of a saved conversation is, in columns of pane
+/// text.
+///
+/// Sized for the word the first press puts in it rather than for the mark, so
+/// pressing it once does not change the width of the thing that was just
+/// pressed and the second press lands on the same box.
+const SETTING_SESSION_TRASH_COLUMNS: usize = 7;
+
+/// Where every cell of the saved-conversations table sits inside one row.
+///
+/// One answer for the row that names the columns and for every row under it, so
+/// a cell cannot drift out from under its own header. The widths come from the
+/// model, [`crate::settings::SESSION_COLUMNS`]; the two written as zero there
+/// are the first message, which takes whatever is left, and the trash, which is
+/// a button pinned to the right end of the row.
+///
+/// Cell by cell rather than one space padded string, which is what the picker's
+/// list does: this table has a column that is a button and a line between every
+/// pair of columns, and both of those need each cell's own x.
+fn settings_session_cells(row: Panel, column: f32) -> Vec<Panel> {
+    let x = row.x + MARK_W + 3.0;
+    let right = row.x + row.w;
+    let trash =
+        (SETTING_SESSION_TRASH_COLUMNS as f32 * column).min(((right - x) * 0.5).floor().max(0.0));
+    let mut out = Vec::new();
+    let mut at = x;
+    for (_, wide) in crate::settings::SESSION_COLUMNS
+        .iter()
+        .take(crate::settings::SESSION_CELLS)
+    {
+        let room = (right - trash - at).max(0.0);
+        let want = match wide {
+            0 => room,
+            wide => *wide as f32 * column,
+        };
+        let w = want.min(room);
+        out.push(Panel::new(at, row.y, w, row.h));
+        at += w;
+    }
+    out.push(Panel::new(right - trash, row.y, trash, row.h));
+    out
+}
+
+/// The lines between the columns of the saved-conversations table.
+///
+/// One down the left edge of every column but the first, on the header and on
+/// every row under it, so the table reads as a grid rather than as words that
+/// happen to line up. The hairline along the bottom of a row is drawn by the
+/// list itself, the same way it is for every other row on the panel.
+fn settings_session_lines(scene: &mut Scene, cells: &[Panel], row: Panel, edge: [f32; 4]) {
+    if row.h < 2.0 {
+        return;
+    }
+    for at in cells.iter().skip(1) {
+        if at.w < 1.0 || at.x - 1.0 < row.x {
+            continue;
+        }
+        scene.rect(Panel::new(at.x - 1.0, row.y, 1.0, row.h).fill(edge));
+    }
+}
+
 /// Where a row's control sits: one column in from the label, the width a value
 /// needs and no more.
 ///
@@ -2655,6 +2716,18 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
             // way every value on the panel does. Nothing at all in a column too
             // narrow to hold them beside a name, since a button drawn over the
             // name it belongs to is a press nobody can aim.
+            // The trash at the end of a saved conversation, in the last column
+            // of the table. Placed from the same function that places the cells
+            // beside it, so the button is under its own header. Nothing at all
+            // in a row too narrow to hold it, since a button drawn over the
+            // words it belongs to is a press nobody can aim.
+            SettingRow::Session { .. } => {
+                if let Some(trash) = settings_session_cells(row, column).last()
+                    && trash.w >= column * 3.0
+                {
+                    removes.push((index, Panel::new(trash.x, row.y, trash.w, line)));
+                }
+            }
             SettingRow::Entry(entry) => {
                 let remove_w = match entry.removable {
                     true => SETTING_REMOVE_COLUMNS as f32 * column,
@@ -4811,9 +4884,9 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
     }
 
     // The rail. The chosen section carries the band and the mark every list in
-    // this window marks its current row with; the mark is the focus colour only
-    // while the keyboard is on the rail, so the panel says which half of itself
-    // the arrow keys are in.
+    // this window marks its current row with. The mark is always the focus
+    // colour now: the rail is pressed rather than walked, so there is no second
+    // state for it to be in.
     let list = layout.settings_list;
     let names = panel.section_names();
     for (index, at) in &layout.settings_rail {
@@ -4823,11 +4896,7 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
         let chosen = *index == panel.chosen();
         if chosen {
             scene.rect(at.fill(skin.strip));
-            let mark = match panel.focus() {
-                crate::settings::Focus::Rail => skin.edge_focus,
-                crate::settings::Focus::Content => skin.edge,
-            };
-            scene.rect(Panel::new(at.x, at.y, MARK_W, at.h).fill(mark));
+            scene.rect(Panel::new(at.x, at.y, MARK_W, at.h).fill(skin.edge_focus));
         }
         let tint = match (chosen, frame.hot == Some(Hit::SettingsSection(*index))) {
             (true, _) => skin.good,
@@ -4876,7 +4945,15 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
         // same thing.
         if on {
             if !matches!(entry, SettingRow::Paper(_)) {
-                scene.rect(row.fill(skin.strip));
+                // A list being picked from carries the solid band the folder
+                // picker's own session list carries; a form being read carries
+                // the quiet strip, which is enough to say which row the keys
+                // are on without shouting over the values beside it.
+                let band = match entry {
+                    SettingRow::Session { .. } => skin.picked,
+                    _ => skin.strip,
+                };
+                scene.rect(row.fill(band));
             }
             scene.rect(Panel::new(row.x, row.y, MARK_W, row.h).fill(skin.edge_focus));
         }
@@ -4953,14 +5030,85 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     tint,
                 );
             }
-            // One entry of a list off the disk. Also the whole width, because
-            // what identifies a session is the sentence somebody typed into it.
-            SettingRow::Item(text) => say(
-                scene,
-                vec![Run::tinted(clip(text, whole_cols), skin.body)],
-                whole,
-                skin.body,
-            ),
+            // The row that names the columns of the table under it, written in
+            // the same boxes the cells are written in: one function places both,
+            // so a name cannot end up over the wrong column.
+            SettingRow::Columns(names) => {
+                let cells = settings_session_cells(*row, column);
+                for (at, name) in cells.iter().zip(names) {
+                    if at.w < column {
+                        continue;
+                    }
+                    say(
+                        scene,
+                        vec![Run::tinted(
+                            clip(name, columns_in(at.w, column).saturating_sub(1)),
+                            skin.dim,
+                        )],
+                        Panel::new(at.x, row.y, at.w, line),
+                        skin.dim,
+                    );
+                }
+                settings_session_lines(scene, &cells, *row, skin.edge);
+            }
+            // One saved conversation, cell by cell under the header. The band
+            // under the cursor is the solid one the session list in the folder
+            // picker uses rather than the quiet strip the rest of the panel
+            // uses: this is a list being picked from, not a form being read.
+            SettingRow::Session { cells, .. } => {
+                let ink = match on {
+                    true => skin.picked_ink,
+                    false => skin.body,
+                };
+                let boxes = settings_session_cells(*row, column);
+                for (at, text) in boxes.iter().zip(cells) {
+                    if at.w < column {
+                        continue;
+                    }
+                    say(
+                        scene,
+                        vec![Run::tinted(
+                            clip(text, columns_in(at.w, column).saturating_sub(1)),
+                            ink,
+                        )],
+                        Panel::new(at.x, row.y, at.w, line),
+                        ink,
+                    );
+                }
+                settings_session_lines(scene, &boxes, *row, skin.edge);
+                // The trash. A mark rather than a word, in the colour this
+                // window uses for everything that throws work away; pressed
+                // once it says so and waits for the second press, and the
+                // footer says which conversation would go with it.
+                for (at, box_) in &layout.settings_removes {
+                    if at != index {
+                        continue;
+                    }
+                    let armed = panel.arming() == Some(*index);
+                    scene.rect(panel_fill(*box_, skin.input));
+                    if frame.hot == Some(Hit::SettingsRemove(*index)) {
+                        scene.rect(box_.fill(skin.hot));
+                    }
+                    scene.rect(panel_edge(
+                        *box_,
+                        match armed {
+                            true => skin.close_hot,
+                            false => skin.edge,
+                        },
+                    ));
+                    let room = Panel::new(
+                        box_.x + INPUT_PAD,
+                        box_.y,
+                        (box_.w - INPUT_PAD * 2.0).max(1.0),
+                        box_.h,
+                    );
+                    let run = match armed {
+                        true => Run::tinted("sure?", skin.bad),
+                        false => Run::icon(icons::TRASH.to_string(), skin.bad),
+                    };
+                    say(scene, vec![run], room, skin.bad);
+                }
+            }
             // A reading's value starts in the same column a control does and
             // runs to the end of the row rather than stopping where a value
             // would: most of them are paths, and a path in a value column is
@@ -13543,8 +13691,9 @@ mod tests {
         )
     }
 
-    /// The panel with one section chosen and the keyboard inside it, which is
-    /// what a click on the rail leaves behind.
+    /// The panel with one section chosen, which is what a press on the rail
+    /// leaves behind. The keyboard is on the rows of it either way: the rail is
+    /// pressed, never walked.
     fn a_panel_on(config: &Config, section: &str) -> Settings {
         let mut panel = a_settings_panel(config);
         let at = panel
@@ -13553,7 +13702,6 @@ mod tests {
             .position(|name| *name == section)
             .unwrap_or_else(|| panic!("{section} is not a section"));
         panel.choose(at);
-        panel.enter();
         panel
     }
 
@@ -13663,8 +13811,24 @@ mod tests {
                         assert_eq!(layout.hit(x, y), Some(hit), "{section}");
                         assert!(row.contains(x, y), "the control is outside its row");
                     }
-                    // A heading, a note, an item or a reading: the whole row is
-                    // the row, and a press on its right hand end changes nothing.
+                    // A saved conversation carries its own delete in the last
+                    // column of the table, so its right hand end is a button
+                    // rather than more of the row.
+                    (None, None)
+                        if matches!(
+                            panel.row(*index),
+                            Some(crate::settings::Row::Session { .. })
+                        ) =>
+                    {
+                        assert_eq!(
+                            layout.hit(row.x + row.w - 2.0, row.y + row.h * 0.5),
+                            Some(Hit::SettingsRemove(*index)),
+                            "{section}"
+                        );
+                    }
+                    // A heading, a note, a column name or a reading: the whole
+                    // row is the row, and a press on its right hand end changes
+                    // nothing.
                     (None, None) => assert_eq!(
                         layout.hit(row.x + row.w - 2.0, row.y + row.h * 0.5),
                         Some(Hit::SettingsRow(*index, *side)),
@@ -13806,7 +13970,6 @@ mod tests {
             .position(|name| *name == crate::settings::AGENT)
             .expect("the agent section");
         panel.choose(at);
-        panel.enter();
         panel.adopt_prompt(
             String::from("/home/hec/workspace/noob-cli"),
             Ok(vec![
@@ -13948,6 +14111,228 @@ mod tests {
         let out = render_settings(&panel, 520.0, 400.0, None);
         assert!(out.layout.settings_doc.w < 1.0, "{:?}", out.layout.settings_doc);
         assert!(!out.layout.settings_rows.is_empty(), "and the list is still there");
+    }
+
+    /// The panel opened on the saved conversations, with three of them to draw.
+    fn a_sessions_panel() -> Settings {
+        let now = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        let saved = |id: &str, ago: u64, folder: &str, said: &str| crate::sessions::Saved {
+            id: String::from(id),
+            when: now - std::time::Duration::from_secs(ago),
+            workspace: Some(std::path::PathBuf::from(folder)),
+            gone: false,
+            bytes: 12_000,
+            context: None,
+            opening: String::from(said),
+        };
+        let mut panel = Settings::open(
+            &Config::default(),
+            None,
+            crate::agent::Agent {
+                now,
+                sessions: crate::sessions::Listing {
+                    sessions: vec![
+                        saved("aaa", 60, "/home/hec/workspace/noob-cli", "fix the panel"),
+                        saved("bbb", 3_600, "/home/hec/workspace/anna", "read the map"),
+                        saved("ccc", 86_400, "/home/hec/notes", "what did we say"),
+                    ],
+                    skipped: Vec::new(),
+                },
+                ..crate::agent::Agent::default()
+            },
+        );
+        let at = panel
+            .section_names()
+            .iter()
+            .position(|name| *name == crate::settings::SESSIONS)
+            .expect("the sessions section");
+        panel.choose(at);
+        panel
+    }
+
+    /// Item E3: the saved conversations are a table. A row that read
+    /// "17h ago  noob-cli  283 B  -  fix the panel" said five things with
+    /// nothing naming any of them, so every cell sits in a column of its own
+    /// under a row that says what that column is, the row the cursor is on
+    /// carries a band across the whole of it rather than differently coloured
+    /// words, and the last column is a trash of its own.
+    #[test]
+    fn the_sessions_section_is_a_table_under_a_row_naming_its_columns() {
+        let panel = a_sessions_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let layout = &out.layout;
+        let column = 8.0;
+        let find = |want: fn(&crate::settings::Row) -> bool| -> Vec<(usize, Panel)> {
+            layout
+                .settings_rows
+                .iter()
+                .filter(|(index, _, _)| panel.row(*index).is_some_and(want))
+                .map(|(index, _, at)| (*index, *at))
+                .collect()
+        };
+        let header = find(|row| matches!(row, crate::settings::Row::Columns(_)));
+        assert_eq!(header.len(), 1, "one row names the columns");
+        let (_, header_at) = header[0];
+        let rows = find(|row| matches!(row, crate::settings::Row::Session { .. }));
+        assert_eq!(rows.len(), 3, "every saved conversation is drawn");
+
+        // Every column has its name over it, and the name starts exactly where
+        // the cells under it start.
+        let names = settings_session_cells(header_at, column);
+        assert_eq!(names.len(), crate::settings::SESSION_COLUMNS.len());
+        let text_at = |out: &Rendered, at: Panel| -> String {
+            out.scene
+                .texts
+                .iter()
+                .filter(|text| {
+                    (text.at.y - at.y).abs() < 0.01 && (text.at.x - at.x).abs() < 0.01
+                })
+                .flat_map(|text| text.runs.iter().map(|run| run.text.as_str()))
+                .collect()
+        };
+        for (step, (name, _)) in crate::settings::SESSION_COLUMNS.iter().enumerate() {
+            let said = text_at(&out, Panel::new(names[step].x, header_at.y, 1.0, 1.0));
+            assert!(said.starts_with(name), "column {step} is headed {said:?}");
+        }
+
+        // And every row writes its cells into those same columns, at the same x
+        // the header is drawn at.
+        for (index, row) in &rows {
+            let cells = match panel.row(*index) {
+                Some(crate::settings::Row::Session { cells, .. }) => cells.clone(),
+                other => panic!("not a session: {other:?}"),
+            };
+            let boxes = settings_session_cells(*row, column);
+            for (step, cell) in cells.iter().enumerate() {
+                assert!(
+                    (boxes[step].x - names[step].x).abs() < 0.01,
+                    "row {index} column {step} is not under its header"
+                );
+                let said = text_at(&out, Panel::new(boxes[step].x, row.y, 1.0, 1.0));
+                assert!(
+                    said.starts_with(&clip(cell, columns_in(boxes[step].w, column) - 1)),
+                    "row {index} column {step} says {said:?}, not {cell:?}"
+                );
+            }
+        }
+
+        // The row the cursor is on is a band across the whole row, in the solid
+        // colour the folder picker's own session list uses, not a tint on the
+        // words.
+        let (cursor, band) = rows
+            .iter()
+            .find(|(index, _)| *index == panel.cursor())
+            .copied()
+            .expect("the cursor is on a session");
+        let filled = |out: &Rendered, want: Panel, rgba: [f32; 4]| {
+            out.scene.rects.iter().any(|rect| {
+                let [x, y, w, h] = rect.xywh();
+                rect.rgba() == rgba
+                    && (x - want.x).abs() < 0.01
+                    && (y - want.y).abs() < 0.01
+                    && (w - want.w).abs() < 0.01
+                    && (h - want.h).abs() < 0.01
+            })
+        };
+        assert!(filled(&out, band, out.skin.picked), "no band on row {cursor}");
+        for (index, at) in &rows {
+            if index != &cursor {
+                assert!(!filled(&out, *at, out.skin.picked), "row {index} is banded too");
+            }
+        }
+
+        // The last column is a trash of its own: pressed where it is drawn, in
+        // the colour this window uses for everything that throws work away, and
+        // it is not the row, so a press on the words still moves the cursor.
+        let trash: Vec<(usize, Panel)> = layout
+            .settings_removes
+            .iter()
+            .filter(|(index, _)| rows.iter().any(|(row, _)| row == index))
+            .map(|(index, at)| (*index, *at))
+            .collect();
+        assert_eq!(trash.len(), 3, "every row can be deleted");
+        for (index, box_) in &trash {
+            let (x, y) = middle(*box_);
+            assert_eq!(layout.hit(x, y), Some(Hit::SettingsRemove(*index)));
+            let marks: Vec<&noob_draw::Run> = out
+                .scene
+                .texts
+                .iter()
+                .filter(|text| text.at.x >= box_.x && text.at.x < box_.x + box_.w)
+                .flat_map(|text| text.runs.iter())
+                .collect();
+            assert!(
+                marks
+                    .iter()
+                    .any(|run| {
+                        run.text.contains(icons::TRASH)
+                            && run.icon
+                            && run.color == Some(out.skin.bad)
+                    }),
+                "row {index} has no trash mark in the bad colour"
+            );
+            // In the last column of the table, under the name of it.
+            let row = rows
+                .iter()
+                .find(|(at, _)| at == index)
+                .map(|(_, at)| *at)
+                .expect("the row it belongs to");
+            let last = *settings_session_cells(row, column)
+                .last()
+                .expect("a last column");
+            assert!((box_.x - last.x).abs() < 0.01, "the trash is not the last column");
+            assert!(
+                (box_.x - names[names.len() - 1].x).abs() < 0.01,
+                "the trash is not under the name of its column"
+            );
+            assert!(row.contains(box_.x + 1.0, box_.y + 1.0), "the trash is outside its row");
+        }
+        let (_, first) = rows[0];
+        assert_eq!(
+            layout.hit(first.x + 2.0, first.y + first.h * 0.5),
+            Some(Hit::SettingsRow(rows[0].0, crate::settings::Side::Left)),
+            "the words of a row still put the cursor there"
+        );
+    }
+
+    /// The trash asks before it acts: pressed once it says so on the button and
+    /// on the footer, and nothing is drawn differently anywhere else.
+    #[test]
+    fn the_trash_on_a_session_says_sure_before_it_deletes() {
+        let mut panel = a_sessions_panel();
+        let row = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, crate::settings::Row::Session { .. }))
+            .expect("a session row");
+
+        let before = render_settings(&panel, 1400.0, 900.0, None);
+        assert!(!text_of(&before.scene).contains("sure?"));
+
+        assert_eq!(panel.uninstall(row), None, "the first press deleted it");
+        let after = render_settings(&panel, 1400.0, 900.0, None);
+        let text = text_of(&after.scene);
+        assert!(text.contains("sure?"), "the button does not ask: {text}");
+        assert!(text.contains("press delete again"), "the footer does not ask: {text}");
+
+        // The box says so with its edge as well, which is what makes it read as
+        // armed rather than as a word that changed.
+        let box_ = after
+            .layout
+            .settings_removes
+            .iter()
+            .find(|(index, _)| *index == row)
+            .map(|(_, at)| *at)
+            .expect("the trash is placed");
+        assert!(
+            after.scene.rects.iter().any(|rect| {
+                let [x, y, ..] = rect.xywh();
+                rect.rgba() == after.skin.close_hot
+                    && (x - box_.x).abs() < 2.0
+                    && (y - box_.y).abs() < 2.0
+            }),
+            "the armed trash looks exactly like the unarmed one"
+        );
     }
 
     /// The toggle and the uninstall on an entry are pressed where they are
@@ -14643,7 +15028,6 @@ mod tests {
             .position(|name| *name == crate::settings::AGENT)
             .expect("the agent section");
         panel.choose(at);
-        panel.enter();
 
         let out = render_settings(&panel, 1400.0, 1200.0, None);
         assert!(

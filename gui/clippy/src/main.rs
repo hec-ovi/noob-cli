@@ -1202,52 +1202,52 @@ impl App {
                 self.close_settings();
                 return;
             }
-            // On the rail these walk the sections; inside one they walk its rows.
+            // These walk the rows of whatever section is showing, and never the
+            // rail: the sections are pressed, so a list being read with the
+            // arrow keys cannot be swapped out from under the reader.
             Key::Named(NamedKey::ArrowUp) => self.dirty |= panel.step(false),
             Key::Named(NamedKey::ArrowDown) => self.dirty |= panel.step(true),
             Key::Named(NamedKey::PageUp) => self.dirty |= panel.page(rows, false),
             Key::Named(NamedKey::PageDown) => self.dirty |= panel.page(rows, true),
             Key::Named(NamedKey::Home) => self.dirty |= panel.jump(false),
             Key::Named(NamedKey::End) => self.dirty |= panel.jump(true),
-            // Left is the way back to the rail from a row that has nothing to
-            // nudge, and the nudge itself from a row that has. A section of
-            // readings would otherwise be a place the keyboard cannot leave
-            // without the pointer.
-            Key::Named(NamedKey::ArrowLeft) => match panel.on_row() {
-                true => match panel.at_cursor() {
-                    // An entry has two states, so either arrow means the other
-                    // one, the way a flag does.
-                    Some(settings::Row::Entry(_)) => flip = Some(panel.cursor()),
-                    _ => nudge = Some(false),
-                },
-                false => self.dirty |= panel.leave(),
-            },
-            // Right goes into the section from the rail, and nudges inside it.
-            // Enter is the same, except on the endpoint, where it starts typing,
-            // and on an entry, where it turns the thing on or off.
-            Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Enter) => {
-                if !panel.enter() {
+            // Left is the nudge on a row that has something to nudge, and
+            // nothing at all on one that has not: the rail is pressed, not
+            // walked, so there is nowhere for it to go back to.
+            Key::Named(NamedKey::ArrowLeft) => {
+                if panel.on_row() {
                     match panel.at_cursor() {
-                        Some(settings::Row::Field { .. }) => edit = true,
+                        // An entry has two states, so either arrow means the
+                        // other one, the way a flag does.
                         Some(settings::Row::Entry(_)) => flip = Some(panel.cursor()),
-                        // A block with nothing in it offers to write the file it
-                        // was looking for.
-                        Some(settings::Row::Paper(_)) => make = Some(panel.cursor()),
-                        _ => nudge = Some(true),
+                        Some(settings::Row::Session { .. }) => {}
+                        _ => nudge = Some(false),
                     }
+                }
+            }
+            // Right nudges. Enter is the same, except on the endpoint, where it
+            // starts typing, and on an entry, where it turns the thing on or
+            // off.
+            Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Enter) => {
+                match panel.at_cursor() {
+                    Some(settings::Row::Field { .. }) => edit = true,
+                    Some(settings::Row::Entry(_)) => flip = Some(panel.cursor()),
+                    // A block with nothing in it offers to write the file it
+                    // was looking for.
+                    Some(settings::Row::Paper(_)) => make = Some(panel.cursor()),
+                    // A conversation is deleted by its own trash and by nothing
+                    // else: enter on a list is the key that gets pressed by
+                    // accident.
+                    Some(settings::Row::Session { .. }) => {}
+                    _ => nudge = Some(true),
                 }
                 self.dirty = true;
             }
-            // Across a form row first, then between the rail and the rows. Left
-            // and right are the nudge on a control, so tab is the only key that
-            // can cross a form without also meaning something to what it lands
-            // on, which is what tab means on every other form there is.
-            Key::Named(NamedKey::Tab) => {
-                self.dirty |= match self.modifiers.shift_key() {
-                    true => panel.leave(),
-                    false => panel.swap() || panel.enter(),
-                }
-            }
+            // Across a form row. Left and right are the nudge on a control, so
+            // tab is the only key that can cross a form without also meaning
+            // something to what it lands on, which is what tab means on every
+            // other form there is.
+            Key::Named(NamedKey::Tab) => self.dirty |= panel.swap(),
             _ => {}
         }
         if edit {
@@ -1351,6 +1351,12 @@ impl App {
             // The path came off the block that offered it, which read it off the
             // agent's own config directory: nothing here spells one out.
             settings::Deed::StartInstructions { path } => agent::start_instructions(path),
+            // The same free function the picker's own delete goes through, so
+            // the transcript and the line about it in the note go together and
+            // the name is checked by the one path guard either route has.
+            settings::Deed::ForgetSession { id } => {
+                forget_session(sessions::dir(), sessions::index_path(), id)
+            }
         };
         match done {
             Ok(()) => {
@@ -4035,6 +4041,117 @@ mod tests {
         // And a window with no note file still deletes the transcript.
         assert_eq!(forget_session(Some(sessions_dir.clone()), None, "keep"), Ok(()));
         assert!(!sessions_dir.join("keep.jsonl").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The trash at the end of a saved conversation on the settings panel asks
+    /// before it acts, and the second press takes the transcript and the line
+    /// about it in the note.
+    ///
+    /// The panel decides and this file acts: the first press answers with
+    /// nothing and puts the question on the footer, the second answers with a
+    /// [`settings::Deed::ForgetSession`], and the deed carries the id the row
+    /// was built from rather than anything read back off what was drawn. The
+    /// deed is then run through the same free function the folder picker's own
+    /// delete goes through, which is what keeps one route from deleting more or
+    /// less than the other.
+    #[test]
+    fn the_panel_s_trash_asks_once_and_then_takes_the_file_and_its_line() {
+        let dir = std::env::temp_dir().join(format!("no0b-panel-forget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sessions_dir = dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("a sessions dir");
+        let note = dir.join("no0b.sessions");
+        for id in ["keep", "drop"] {
+            std::fs::write(
+                sessions_dir.join(format!("{id}.jsonl")),
+                format!(
+                    "{{\"t\":\"meta\",\"v\":1,\"id\":\"{id}\"}}\n{{\"t\":\"user\",\"text\":\"{id} said this\"}}\n"
+                ),
+            )
+            .expect("a transcript");
+        }
+        let index = sessions::Index::default()
+            .plus("keep", &dir)
+            .plus("drop", &dir);
+        sessions::save_index(&note, &index).expect("the note is writable");
+
+        let listing = sessions::read(&sessions_dir, &index, &picker::Disk);
+        assert_eq!(listing.sessions.len(), 2, "{listing:?}");
+        let agent = agent::Agent {
+            sessions: listing,
+            ..agent::Agent::default()
+        };
+        let mut panel = settings::Settings::open(&config::Config::default(), None, agent);
+        let at = panel
+            .section_names()
+            .iter()
+            .position(|name| *name == settings::SESSIONS)
+            .expect("the sessions section");
+        panel.choose(at);
+        let (row, id) = panel
+            .rows()
+            .iter()
+            .enumerate()
+            .find_map(|(row, entry)| match entry {
+                settings::Row::Session { id, .. } if id == "drop" => Some((row, id.clone())),
+                _ => None,
+            })
+            .expect("the row for the session about to go");
+
+        // Once: nothing happens, and the panel says what would.
+        assert_eq!(panel.uninstall(row), None, "the first press deleted it");
+        assert_eq!(panel.arming(), Some(row));
+        let asked = panel.says();
+        assert!(asked.contains("press delete again"), "{asked}");
+        assert!(asked.contains("leaves it alone"), "{asked}");
+        assert!(sessions_dir.join("drop.jsonl").exists(), "it went anyway");
+
+        // Anything else at all puts it back, so an armed trash cannot be left
+        // sitting there for the next pointer that goes past.
+        panel.step(true);
+        assert_eq!(panel.arming(), None);
+        assert_eq!(panel.uninstall(row), None, "it stayed armed");
+
+        // Twice on the same row: the deed, naming the session by its id.
+        let deed = panel.uninstall(row);
+        assert_eq!(deed, Some(settings::Deed::ForgetSession { id: id.clone() }));
+        assert_eq!(panel.arming(), None, "the button is still armed after it fired");
+
+        // And what the deed asks for, done: both halves, and nothing else.
+        assert_eq!(
+            forget_session(Some(sessions_dir.clone()), Some(note.clone()), &id),
+            Ok(())
+        );
+        assert!(!sessions_dir.join("drop.jsonl").exists());
+        assert!(sessions_dir.join("keep.jsonl").exists());
+        assert_eq!(
+            sessions::load_index(&note),
+            sessions::Index::default().plus("keep", &dir),
+            "the line about it is still in the note"
+        );
+
+        // The panel re-read off the disk has lost the row, which is what the
+        // window does with `adopt_agent` after every write.
+        let after = sessions::read(&sessions_dir, &sessions::load_index(&note), &picker::Disk);
+        panel.adopt_agent(
+            agent::Agent {
+                sessions: after,
+                ..agent::Agent::default()
+            },
+            &config::Config::default(),
+        );
+        panel.choose(at);
+        let left: Vec<String> = panel
+            .rows()
+            .iter()
+            .filter_map(|row| match row {
+                settings::Row::Session { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(left, vec![String::from("keep")]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

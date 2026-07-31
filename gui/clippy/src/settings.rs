@@ -17,6 +17,21 @@
 //! the window's own settings file, the palette included, minus the keys the
 //! window itself already sets ([`OFF_PANEL`]).
 //!
+//! **The rail is pressed, not walked.** Up and down used to move the rail
+//! whenever the keyboard was not inside a section, and in [`SESSIONS`] it never
+//! was, because every row of it was a reading nothing could land on. So the two
+//! keys anybody reaches for in a list of saved conversations swapped the whole
+//! right hand side of the panel out. A press on the rail is the only thing that
+//! chooses a section now, and the arrow keys are always the rows.
+//!
+//! **[`SESSIONS`] is a table.** One conversation to a row, its cells in columns
+//! under a [`Row::Columns`] that names each one, the row the cursor is on under
+//! a band across the whole of it, and a trash in the last column that takes two
+//! presses: the same two the uninstall on a skill takes, because it is the same
+//! kind of act. The row carries the session's id ([`Row::Session`]) so what a
+//! delete names is what the reader read, not a path parsed back out of the words
+//! on screen.
+//!
 //! **A setting the window already sets is not a row.** Which panes are open and
 //! where the dividers sit were a section of their own and then a pair of groups
 //! under [`APPEARANCE`], and both are set by using the window: a closed widget
@@ -128,6 +143,36 @@ pub const APPEARANCE: &str = "APPEARANCE";
 /// [`APPEARANCE`] now, under its own headings.
 pub const SECTIONS: [&str; 5] = [AGENT, SESSIONS, SKILLS, MCP, APPEARANCE];
 
+/// The columns of the saved-conversations table: what each one is called and
+/// how many characters wide it is.
+///
+/// Zero is a column with no width of its own. There are two of them: the first
+/// message takes whatever is left of the row, and the delete at the end is a
+/// button rather than text, so it is sized by the panel that draws it.
+///
+/// The names live here rather than in the drawing because they are what the
+/// section says about itself. The widths live here too so the header and the
+/// cells under it cannot come apart: one list, read by the row builder and by
+/// the layout.
+pub const SESSION_COLUMNS: [(&str, usize); 6] = [
+    ("when", 10),
+    ("folder", 20),
+    ("size", 9),
+    ("context", 9),
+    ("first message", 0),
+    ("delete", 0),
+];
+
+/// How many of [`SESSION_COLUMNS`] carry text. The last one is the trash.
+pub const SESSION_CELLS: usize = SESSION_COLUMNS.len() - 1;
+
+/// The name of the section's own list, said once at the top of it.
+///
+/// "SETTINGS SESSIONS" over a rail that also says SESSIONS over a row labelled
+/// "sessions" was the same word three times and never once said what the list
+/// underneath was.
+pub const SESSION_TITLE: &str = "SAVED CONVERSATIONS";
+
 /// What a setting holds, which is what decides how its row changes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind {
@@ -199,10 +244,14 @@ pub enum Row {
     /// Prose: what a section is, or why it is empty. `bad` when it is something
     /// wrong rather than something explained.
     Note { text: String, bad: bool },
-    /// One entry of a list read off the disk: a saved session, an installed
-    /// skill, a configured server. Its own row rather than a label and a value,
-    /// because what identifies one is a sentence and not a number.
-    Item(String),
+    /// The row that names the columns of the table under it. Not a row anything
+    /// can be done to: it says what the cells below it are, and a cursor that
+    /// could land on it would be a cursor sitting on a word.
+    Columns(Vec<&'static str>),
+    /// One saved conversation, as the cells of a table rather than as a
+    /// sentence. `id` is the name of its transcript on the disk, which is what
+    /// a delete needs and what a row of joined text threw away.
+    Session { id: String, cells: Vec<String> },
     /// Something read out rather than set: what the agent's own file says, and
     /// where the files behind all this live.
     Reading { label: String, value: String },
@@ -368,6 +417,10 @@ pub enum Deed {
     /// Write a starter `AGENTS.md` where the agent looks for one. Only ever
     /// asked for by a block that found nothing there.
     StartInstructions { path: PathBuf },
+    /// Delete one saved conversation: its transcript and the line about it in
+    /// the note beside them. Named by the id the row carries, which came off
+    /// the reader rather than off anything drawn.
+    ForgetSession { id: String },
 }
 
 /// One colour on the grid: the key the file writes it under, what it actually
@@ -428,15 +481,6 @@ pub struct Change {
     pub key: &'static str,
     pub value: String,
     pub file: File,
-}
-
-/// Which half of the panel the keyboard is in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Focus {
-    /// The rail: up and down choose a section, right goes into it.
-    Rail,
-    /// The chosen section's rows.
-    Content,
 }
 
 /// What the `theme` row says when the palette in the file is not one of the
@@ -714,8 +758,12 @@ pub enum Assembled {
 pub struct Settings {
     sections: Vec<Section>,
     /// Which section the rail is on, which is the one whose rows are beside it.
+    ///
+    /// Changed by a press on the rail and by nothing else. The arrow keys used
+    /// to walk it, which meant up and down in a list of saved sessions swapped
+    /// the whole right hand side out from under whoever was reading it. The
+    /// keyboard is always on the rows now.
     chosen: usize,
-    focus: Focus,
     /// What has been typed into the field being edited, or nothing when no field
     /// is being edited. The row itself keeps saying what the file says until the
     /// edit lands.
@@ -756,7 +804,6 @@ impl Settings {
         let mut panel = Settings {
             sections: Vec::new(),
             chosen: 0,
-            focus: Focus::Rail,
             editing: None,
             dragging: None,
             picked: None,
@@ -1067,18 +1114,31 @@ impl Settings {
     /// The conversations the agent has already written, read with the same
     /// reader the folder picker offers them with.
     fn session_rows(&self) -> Vec<Row> {
-        let mut rows = vec![Row::Reading {
-            label: String::from("sessions"),
-            value: match crate::sessions::dir() {
-                Some(dir) => dir.display().to_string(),
-                None => String::from("nowhere: no config directory"),
+        let mut rows = vec![
+            Row::Heading(SESSION_TITLE),
+            Row::Reading {
+                label: String::from("kept in"),
+                value: match crate::sessions::dir() {
+                    Some(dir) => dir.display().to_string(),
+                    None => String::from("nowhere: no config directory"),
+                },
             },
-        }];
+        ];
         if self.agent.sessions.sessions.is_empty() {
             rows.push(note("no saved sessions yet"));
+        } else {
+            rows.push(note(
+                "one row is one conversation the agent has already had",
+            ));
+            rows.push(Row::Columns(
+                SESSION_COLUMNS.iter().map(|(name, _)| *name).collect(),
+            ));
         }
         for saved in &self.agent.sessions.sessions {
-            rows.push(Row::Item(session_line(saved, self.agent.now)));
+            rows.push(Row::Session {
+                id: saved.id.clone(),
+                cells: session_cells(saved, self.agent.now).to_vec(),
+            });
         }
         for why in &self.agent.sessions.skipped {
             rows.push(Row::Note {
@@ -1267,10 +1327,6 @@ impl Settings {
         self.chosen
     }
 
-    pub fn focus(&self) -> Focus {
-        self.focus
-    }
-
     /// The section the rail is on.
     fn here(&self) -> &Section {
         &self.sections[self.chosen.min(self.sections.len() - 1)]
@@ -1348,7 +1404,7 @@ impl Settings {
     /// keys cannot do: left and right are the nudge. False when the cursor is
     /// not on a form, or when the other half of it is a reading.
     pub fn swap(&mut self) -> bool {
-        if self.focus == Focus::Rail || self.editing.is_some() {
+        if self.editing.is_some() {
             return false;
         }
         let side = self.side();
@@ -1368,7 +1424,7 @@ impl Settings {
     /// Whether the cursor is on a row at all: a section of readings has nothing
     /// to land on, and a band drawn on a row nothing can be done to is a lie.
     pub fn on_row(&self) -> bool {
-        self.focus == Focus::Content && self.row(self.cursor()).is_some_and(landable)
+        self.row(self.cursor()).is_some_and(landable)
     }
 
     /// Where the list is scrolled to, as a row of the section rather than a row
@@ -1455,6 +1511,16 @@ impl Settings {
         // An armed uninstall answers before anything else: it is the one press
         // on this panel that cannot be taken back, and what it would take with
         // it is the only thing worth reading at that moment.
+        // A saved conversation says which one, by the folder it belongs to and
+        // how long ago it was: the id is a name nobody typed and nobody would
+        // recognise on a footer.
+        if let Some(Row::Session { cells, .. }) = self.arming.and_then(|at| self.row(at)) {
+            let when = cells.first().map(String::as_str).unwrap_or("that session");
+            let folder = cells.get(1).map(String::as_str).unwrap_or_default();
+            return format!(
+                "press delete again to remove the {folder} conversation from {when}; anything else leaves it alone"
+            );
+        }
         if let Some(Row::Entry(entry)) = self.arming.and_then(|at| self.row(at)) {
             // Named by the thing that is about to go, and said as what would
             // actually happen to it. A skill goes by its directory, since the
@@ -1477,9 +1543,6 @@ impl Settings {
         if self.editing.is_some() {
             return "type it \u{2022} enter saves it \u{2022} esc leaves it alone";
         }
-        if self.focus == Focus::Rail {
-            return "up and down choose a section \u{2022} right goes in \u{2022} esc closes";
-        }
         // On a form row, the one thing the arrow keys cannot say is how to get
         // to the other half of it, because left and right are the nudge.
         let across = matches!(self.row(self.cursor()), Some(Row::Pair(_, _)))
@@ -1501,7 +1564,7 @@ impl Settings {
             Some(Row::Field { .. }) if across => {
                 "enter edits it \u{2022} tab crosses to the other column"
             }
-            Some(Row::Field { .. }) => "enter edits it \u{2022} left goes back to the sections",
+            Some(Row::Field { .. }) => "enter edits it \u{2022} esc closes",
             Some(Row::Entry(entry)) => match (entry.removable, &entry.what) {
                 (false, _) => "enter turns it on and off",
                 (true, Which::Skill { .. }) => {
@@ -1511,44 +1574,31 @@ impl Settings {
                     "enter turns it on and off in its file \u{2022} uninstall takes it out of that file"
                 }
             },
-            _ => "up and down move \u{2022} left goes back to the sections \u{2022} esc closes",
+            Some(Row::Session { .. }) => {
+                "up and down pick a session \u{2022} the trash deletes it \u{2022} click a section on the left"
+            }
+            _ => "up and down move \u{2022} click a section on the left \u{2022} esc closes",
         }
     }
 
-    /// Put the rail on one section, which is what a click on it does.
+    /// Put the rail on one section, which is what a click on it does and the
+    /// only thing that does it.
+    ///
+    /// The keyboard stays on the rows of whatever is chosen: a press on the
+    /// rail picks the section and the arrow keys go on walking the list beside
+    /// it, so up and down never swap the whole right hand side out.
     pub fn choose(&mut self, index: usize) -> bool {
         if index >= self.sections.len() {
             return false;
         }
-        let moved = index != self.chosen || self.focus != Focus::Rail;
+        let moved = index != self.chosen;
         self.chosen = index;
-        self.focus = Focus::Rail;
         self.editing = None;
         self.dragging = None;
         self.picked = None;
         self.arming = None;
         self.rewind_doc();
         moved
-    }
-
-    /// Into the chosen section, which is where the arrow keys act on rows.
-    /// False when it is already there.
-    pub fn enter(&mut self) -> bool {
-        if self.focus == Focus::Content {
-            return false;
-        }
-        self.focus = Focus::Content;
-        true
-    }
-
-    /// Back out to the rail, which is how the sections are walked again.
-    pub fn leave(&mut self) -> bool {
-        if self.focus == Focus::Rail {
-            return false;
-        }
-        self.focus = Focus::Rail;
-        self.editing = None;
-        true
     }
 
     /// What the row under the cursor becomes when it is nudged, or nothing when
@@ -1558,7 +1608,7 @@ impl Settings {
     /// back from the file, so a write that fails leaves the row reading what the
     /// file still says instead of the value it was asked for.
     pub fn change(&self, forward: bool) -> Option<Change> {
-        if self.focus == Focus::Rail || self.editing.is_some() {
+        if self.editing.is_some() {
             return None;
         }
         let Row::Setting {
@@ -1637,7 +1687,6 @@ impl Settings {
         let Some(next) = kind.at(fraction) else {
             return false;
         };
-        self.focus = Focus::Content;
         let section = self.here_mut();
         section.cursor = index;
         section.side = side;
@@ -1794,21 +1843,22 @@ impl Settings {
     /// two the footer says what is about to go, which is the whole of what a
     /// confirmation is for.
     pub fn uninstall(&mut self, index: usize) -> Option<Deed> {
-        let Some(Row::Entry(entry)) = self.row(index) else {
-            return None;
-        };
-        if !entry.removable {
-            return None;
-        }
-        let deed = match &entry.what {
-            Which::Skill { dir } => Deed::RemoveSkill {
-                dir: dir.clone(),
-                on: entry.on,
+        let deed = match self.row(index) {
+            Some(Row::Entry(entry)) if entry.removable => match &entry.what {
+                Which::Skill { dir } => Deed::RemoveSkill {
+                    dir: dir.clone(),
+                    on: entry.on,
+                },
+                Which::Server { project } => Deed::RemoveServer {
+                    name: entry.name.clone(),
+                    project: *project,
+                },
             },
-            Which::Server { project } => Deed::RemoveServer {
-                name: entry.name.clone(),
-                project: *project,
-            },
+            // The trash at the end of a saved conversation. The same two
+            // presses, because it is the same kind of act: the transcript is
+            // gone and nothing here can put it back.
+            Some(Row::Session { id, .. }) => Deed::ForgetSession { id: id.clone() },
+            _ => return None,
         };
         if self.arming == Some(index) {
             self.arming = None;
@@ -1904,9 +1954,11 @@ impl Settings {
         self.here_mut().doc_first = 0;
     }
 
-    /// Move the cursor one row, over anything it cannot land on, or the rail one
-    /// section. Clamped at both ends: a list that wraps under an arrow key held
-    /// down is a cursor that arrives somewhere nobody was looking.
+    /// Move the cursor one row of the chosen section, over anything it cannot
+    /// land on. Never the rail: which section is showing is a press on the rail
+    /// and nothing else. Clamped at both ends, since a list that wraps under an
+    /// arrow key held down is a cursor that arrives somewhere nobody was
+    /// looking.
     pub fn step(&mut self, down: bool) -> bool {
         // The footer goes back to saying what the keys do the moment a key is
         // pressed: a swatch that was pressed a screen ago is not what the
@@ -1916,15 +1968,6 @@ impl Settings {
         self.picked = None;
         self.arming = None;
         self.rewind_doc();
-        if self.focus == Focus::Rail {
-            let next = match down {
-                true => (self.chosen + 1).min(self.sections.len() - 1),
-                false => self.chosen.saturating_sub(1),
-            };
-            let moved = next != self.chosen;
-            self.chosen = next;
-            return moved;
-        }
         let section = self.here_mut();
         let Some(next) = next_landing(&section.rows, section.cursor, down) else {
             return false;
@@ -1939,9 +1982,6 @@ impl Settings {
         self.picked = None;
         self.arming = None;
         self.rewind_doc();
-        if self.focus == Focus::Rail {
-            return self.step(down);
-        }
         // A block of text is read with these keys rather than paged past. The
         // cursor is on it, up and down are still how it is left, and the rows
         // under it do not move while it is being read.
@@ -1971,15 +2011,6 @@ impl Settings {
         self.picked = None;
         self.arming = None;
         self.rewind_doc();
-        if self.focus == Focus::Rail {
-            let next = match last {
-                true => self.sections.len() - 1,
-                false => 0,
-            };
-            let moved = next != self.chosen;
-            self.chosen = next;
-            return moved;
-        }
         let section = self.here_mut();
         let edge = match last {
             true => section.rows.len().saturating_sub(1),
@@ -1993,9 +2024,8 @@ impl Settings {
         moved
     }
 
-    /// Put the cursor on the row under the pointer, when that row can hold it.
-    /// A click in the content is also a click into it, so the keyboard follows
-    /// the pointer instead of staying on the rail.
+    /// Put the cursor on the row under the pointer, when that row can hold it,
+    /// so the keyboard follows the pointer.
     ///
     /// `side` is which half of a form row was pressed. A press on the half that
     /// is a reading lands on the control beside it rather than on nothing, the
@@ -2018,12 +2048,11 @@ impl Settings {
             self.arming = None;
         }
         self.rewind_doc();
-        let was = (self.here().cursor, self.side(), self.focus);
-        self.focus = Focus::Content;
+        let was = (self.here().cursor, self.side());
         let section = self.here_mut();
         section.cursor = index;
         section.side = side;
-        (index, side, Focus::Content) != was
+        (index, side) != was
     }
 
     /// How many rows of text each row of the list takes, for the scroll window.
@@ -2176,7 +2205,10 @@ fn agent_default(key: &str) -> String {
 /// thing. Only the wording for a session with no folder differs, because the
 /// picker's row says where pressing it would resume and this panel resumes
 /// nothing.
-fn session_line(saved: &crate::sessions::Saved, now: std::time::SystemTime) -> String {
+fn session_cells(
+    saved: &crate::sessions::Saved,
+    now: std::time::SystemTime,
+) -> [String; SESSION_CELLS] {
     let folder = match (&saved.workspace, saved.gone) {
         (Some(path), true) => format!("{} (gone)", short_folder(path)),
         (Some(path), false) => short_folder(path),
@@ -2185,15 +2217,16 @@ fn session_line(saved: &crate::sessions::Saved, now: std::time::SystemTime) -> S
         (None, _) => String::from("no folder noted"),
     };
     let said = match saved.opening.is_empty() {
-        true => "nothing was said",
-        false => saved.opening.as_str(),
+        true => String::from("nothing was said"),
+        false => saved.opening.clone(),
     };
-    format!(
-        "{}  {folder}  {}  {}  {said}",
+    [
         crate::sessions::ago(saved.when, now),
+        folder,
         crate::picker::size_label(saved.bytes),
         crate::picker::context_label(saved.context),
-    )
+        said,
+    ]
 }
 
 /// The name of the folder and no more of the path, which is what the picker's
@@ -2248,7 +2281,14 @@ fn landable(row: &Row) -> bool {
         // changed: the page keys scroll the one the cursor is on, and a block
         // with nothing in it yet is where the press that writes the file is
         // aimed.
-        Row::Setting { .. } | Row::Field { .. } | Row::Entry(_) | Row::Paper(_) => true,
+        // A saved conversation holds it because there is something to do to
+        // one: the trash at the end of the row deletes it, and the arrow keys
+        // are how the row it is on is picked.
+        Row::Setting { .. }
+        | Row::Field { .. }
+        | Row::Entry(_)
+        | Row::Paper(_)
+        | Row::Session { .. } => true,
         Row::Pair(left, right) => landable(left) || landable(right),
         _ => false,
     }
@@ -2349,15 +2389,20 @@ mod tests {
         dir
     }
 
-    /// Walk the rail to a section and go into it, which is what the arrow keys
-    /// do: up to the top, down to the one wanted, right to go in.
+    /// Press a section on the rail, which is the only thing that chooses one.
+    ///
+    /// This used to walk the rail with the arrow keys. They move the cursor
+    /// down the rows of the chosen section now and never touch the rail, which
+    /// is the whole point of this round: up and down in a list of saved
+    /// conversations must not swap the list out.
     fn go_to(panel: &mut Settings, name: &str) {
-        panel.leave();
-        panel.jump(false);
-        while panel.here().name != name {
-            assert!(panel.step(true), "{name} is not on the rail");
-        }
-        panel.enter();
+        let at = panel
+            .section_names()
+            .iter()
+            .position(|section| *section == name)
+            .unwrap_or_else(|| panic!("{name} is not on the rail"));
+        panel.choose(at);
+        assert_eq!(panel.here().name, name);
     }
 
     fn setting<'a>(panel: &'a Settings, key: &str) -> &'a Row {
@@ -2428,7 +2473,9 @@ mod tests {
 
     fn says(row: &Row) -> String {
         match row {
-                Row::Note { text, .. } | Row::Item(text) => text.clone(),
+                Row::Note { text, .. } => text.clone(),
+                Row::Columns(names) => names.join(" "),
+                Row::Session { cells, .. } => cells.join("  "),
                 Row::Reading { label, value } => format!("{label} {value}"),
                 Row::Setting { key, value, .. } | Row::Field { key, value } => {
                     format!("{key} {value}")
@@ -2471,27 +2518,19 @@ mod tests {
         }
     }
 
-    /// Every section on the rail is reachable with the arrow keys, in both
-    /// directions, and every one of them has something on it.
+    /// Every section on the rail is reached by pressing it, and every one of
+    /// them has something on it.
+    ///
+    /// This used to walk the rail with `step`, and asserted the panel opened on
+    /// the rail and went in and out of it with `enter` and `leave`. None of
+    /// that exists any more: up and down are the rows of whatever is showing,
+    /// the rail is pressed, and the two keys can no longer take a list out from
+    /// under whoever is reading it.
     #[test]
     fn every_section_is_reachable() {
         let mut panel = over(&Config::default());
         assert_eq!(panel.section_names(), SECTIONS.to_vec());
-        assert_eq!(panel.focus(), Focus::Rail, "the panel opens on the rail");
-
-        let mut walked = vec![panel.here().name];
-        while panel.step(true) {
-            walked.push(panel.here().name);
-        }
-        assert_eq!(walked, SECTIONS.to_vec(), "walking down misses a section");
-        assert!(!panel.step(true), "the end of the rail is a stop");
-
-        let mut back = vec![panel.here().name];
-        while panel.step(false) {
-            back.push(panel.here().name);
-        }
-        back.reverse();
-        assert_eq!(back, SECTIONS.to_vec(), "walking up misses a section");
+        assert_eq!(panel.chosen(), 0, "the panel opens on the first section");
 
         // A rail entry that opens on nothing is a section that reads as broken.
         for (at, name) in SECTIONS.iter().enumerate() {
@@ -2500,14 +2539,25 @@ mod tests {
             assert!(!panel.rows().is_empty(), "{name} is empty");
         }
 
-        // In and out, and the pointer does the same thing the keys do.
-        assert!(panel.choose(0));
-        assert!(panel.enter());
-        assert_eq!(panel.focus(), Focus::Content);
-        assert!(!panel.enter(), "already in");
-        assert!(panel.leave());
-        assert_eq!(panel.focus(), Focus::Rail);
-        assert!(!panel.leave(), "already out");
+        // Pressing the section that is already showing changes nothing, and a
+        // press past the end of the rail is not a press.
+        assert!(!panel.choose(SECTIONS.len() - 1), "already there");
+        assert!(!panel.choose(SECTIONS.len()), "off the end of the rail");
+        assert_eq!(panel.here().name, SECTIONS[SECTIONS.len() - 1]);
+
+        // And the arrow keys never move it, in any section, in either
+        // direction, however long they are held down.
+        for (at, name) in SECTIONS.iter().enumerate() {
+            panel.choose(at);
+            for down in [true, false] {
+                for _ in 0..40 {
+                    panel.step(down);
+                    panel.page(8, down);
+                    panel.jump(down);
+                    assert_eq!(panel.chosen(), at, "a key walked off {name}");
+                }
+            }
+        }
     }
 
     /// Each section keeps its own cursor, so walking away and coming back does
@@ -2698,23 +2748,20 @@ mod tests {
         assert!(!panel.on_row());
         go_to(&mut panel, APPEARANCE);
         assert!(panel.on_row());
-        // And nothing lands while the keyboard is on the rail.
-        panel.leave();
-        assert!(!panel.on_row());
     }
 
-    /// No row on the panel is an on and off any more, and nothing changes from
-    /// the rail.
+    /// No row on the panel is an on and off any more, and a row that is not a
+    /// setting writes nothing.
     ///
     /// This was `a_flag_flips_and_writes_what_the_file_reads`, which drove the
     /// `show_files` row. The only two flags the window's file carries are the
     /// two panes, and neither is a row now: a closed pane comes back off the
     /// right click menu and the file goes on remembering which are open. What
-    /// survives of that test is its last half, which belongs to every row: the
-    /// arrow keys on the rail walk the sections and one of them must not also
-    /// write a setting.
+    /// survives of that test is its last half, which belongs to every row: a
+    /// nudge aimed at a row with nothing to nudge must not write a setting the
+    /// cursor happens to have been on before.
     #[test]
-    fn no_row_is_an_on_and_off_and_the_rail_writes_nothing() {
+    fn no_row_is_an_on_and_off_and_a_list_writes_nothing() {
         let mut panel = over(&Config::default());
         for (section, row) in panel.all_rows() {
             let Row::Setting { key, value, .. } = row else {
@@ -2732,8 +2779,8 @@ mod tests {
 
         put_cursor(&mut panel, "theme");
         assert!(panel.change(true).is_some(), "a row that can change");
-        panel.leave();
-        assert_eq!(panel.change(true), None);
+        go_to(&mut panel, MCP);
+        assert_eq!(panel.change(true), None, "a list is not a setting");
     }
 
     /// The theme row names the palette in hand, walks the presets in both
@@ -3050,7 +3097,8 @@ mod tests {
                 Row::Heading(name) => vec![*name],
                 Row::Reading { label, .. } => vec![label.as_str()],
                 Row::Note { text, .. } => vec![text.as_str()],
-                Row::Item(text) => vec![text.as_str()],
+                Row::Columns(names) => names.clone(),
+                Row::Session { cells, .. } => cells.iter().map(String::as_str).collect(),
                 Row::Entry(entry) => vec![entry.name.as_str()],
                 // A form is its halves here: `all_rows` hands those back
                 // instead of the pair they are in.
@@ -3297,17 +3345,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    /// The footer says what the keys will do where the keyboard is, which
-    /// differs by row and differs on the rail.
+    /// The footer says what the keys will do where the keyboard is, and never
+    /// says the arrow keys choose a section.
+    ///
+    /// It used to open with "up and down choose a section", which was the line
+    /// that told him the two keys did the one thing he did not want them to do.
+    /// They walk the rows now, so nothing on the panel may still say that.
     #[test]
     fn the_footer_says_what_the_keys_do_here() {
         let config = Config::default();
         let mut panel = over(&config);
-        assert!(panel.hint().contains("section"), "{}", panel.hint());
         put_cursor(&mut panel, "theme");
         assert!(panel.hint().contains("presets"), "{}", panel.hint());
         put_cursor(&mut panel, "opacity");
         assert!(panel.hint().contains("slider"), "{}", panel.hint());
+
+        // Every footer the panel can say, walking every row of every section.
+        for (at, name) in SECTIONS.iter().enumerate() {
+            panel.choose(at);
+            loop {
+                let said = panel.says();
+                for wrong in ["choose a section", "back to the sections", "right goes in"] {
+                    assert!(!said.contains(wrong), "{name}: {said}");
+                }
+                if !panel.step(true) {
+                    break;
+                }
+            }
+        }
+
+        // On a saved conversation it says what the two keys do here and what
+        // the column at the end of the row is for.
+        let mut panel = Settings::open(
+            &config,
+            None,
+            Agent {
+                now: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000),
+                sessions: crate::sessions::Listing {
+                    sessions: vec![a_session(
+                        "aaa",
+                        60,
+                        Some("/home/hec/workspace/noob-cli"),
+                        "fix the panel",
+                    )],
+                    skipped: Vec::new(),
+                },
+                ..Agent::default()
+            },
+        );
+        go_to(&mut panel, SESSIONS);
+        let said = panel.says();
+        assert!(said.contains("up and down pick a session"), "{said}");
+        assert!(said.contains("trash"), "{said}");
     }
 
     /// A section's list scrolls like every other list in the window, and the
@@ -3943,14 +4032,19 @@ mod tests {
         };
         let mut panel = Settings::open(&Config::default(), None, agent);
         go_to(&mut panel, SESSIONS);
-        let listed: Vec<String> = panel
+        let listed: Vec<(String, Vec<String>)> = panel
             .rows()
             .iter()
             .filter_map(|row| match row {
-                Row::Item(text) => Some(text.clone()),
+                Row::Session { id, cells } => Some((id.clone(), cells.clone())),
                 _ => None,
             })
             .collect();
+        assert_eq!(
+            listed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            vec!["aaa", "bbb"],
+            "a row must carry the name a delete needs"
+        );
 
         let mut picker = crate::picker::Picker::open(
             Box::new(crate::picker::Fixed(Vec::new())),
@@ -3958,26 +4052,59 @@ mod tests {
             Vec::new(),
         );
         picker.show_sessions_at(listing, now);
-        let offered: Vec<String> = picker
+        let offered: Vec<Vec<String>> = picker
             .rows()
             .iter()
-            .filter(|row| matches!(row, crate::picker::Row::Session(_)))
-            .map(|row| picker.label(row))
+            .filter_map(|row| match row {
+                crate::picker::Row::Session(saved) => Some(picker.session_cells(saved).to_vec()),
+                _ => None,
+            })
             .collect();
         assert_eq!(offered.len(), 2, "the picker offers both");
         assert_eq!(listed.len(), offered.len(), "{listed:?} against {offered:?}");
-        for (mine, theirs) in listed.iter().zip(&offered) {
-            // The picker says "this folder" for a session with no folder noted,
-            // because that is where pressing it would resume; this panel resumes
-            // nothing, so it says what it knows. Everything else is said the
-            // same way, in the same order.
-            let theirs = theirs.replace("this folder", "no folder noted");
-            assert_eq!(*mine, theirs);
+        // Cell by cell rather than as one joined string, which is what both
+        // lists were before either of them was a table.
+        for ((_, mine), theirs) in listed.iter().zip(&offered) {
+            assert_eq!(mine.len(), SESSION_CELLS);
+            assert_eq!(theirs.len(), SESSION_CELLS);
+            for (step, (mine, theirs)) in mine.iter().zip(theirs).enumerate() {
+                // The picker says "this folder" for a session with no folder
+                // noted, because that is where pressing it would resume; this
+                // panel resumes nothing, so it says what it knows. Every other
+                // cell is said the same way, in the same order.
+                let theirs = theirs.replace("this folder", "no folder noted");
+                assert_eq!(*mine, theirs, "column {step}");
+            }
         }
-        assert!(listed[0].contains("2m ago"), "{listed:?}");
-        assert!(listed[0].contains("noob-cli"), "{listed:?}");
-        assert!(listed[0].contains("fix the panel"), "{listed:?}");
-        assert!(listed[1].contains("nothing was said"), "{listed:?}");
+        assert_eq!(listed[0].1[0], "2m ago", "{listed:?}");
+        assert_eq!(listed[0].1[1], "noob-cli", "{listed:?}");
+        assert_eq!(listed[0].1[4], "fix the panel", "{listed:?}");
+        assert_eq!(listed[1].1[4], "nothing was said", "{listed:?}");
+
+        // Every column has a name over it, and the header is one row of the
+        // section rather than a word floated above the list.
+        let header = panel
+            .rows()
+            .iter()
+            .find_map(|row| match row {
+                Row::Columns(names) => Some(names.clone()),
+                _ => None,
+            })
+            .expect("a row naming the columns");
+        assert_eq!(
+            header,
+            SESSION_COLUMNS.iter().map(|(name, _)| *name).collect::<Vec<_>>()
+        );
+        assert_eq!(header.len(), SESSION_CELLS + 1, "the last column is the trash");
+        for name in &header {
+            assert!(!name.is_empty(), "a column with no name");
+        }
+
+        // And the section says what it is, once, in words that are not the word
+        // SESSIONS a third time.
+        let text = said(&panel);
+        assert!(text.contains(SESSION_TITLE), "{text}");
+        assert!(text.contains("kept in"), "{text}");
 
         // A file that could not be read is said rather than quietly missing.
         assert!(
@@ -3988,6 +4115,76 @@ mod tests {
             "{:?}",
             panel.rows()
         );
+    }
+
+    /// Item E3: up and down pick a saved conversation and leave the rail alone.
+    ///
+    /// They used to walk the rail whenever the keyboard was not inside a
+    /// section, and in this section it never was: every row of it was a reading
+    /// the cursor could not land on. So the two keys anybody reaches for in a
+    /// list swapped the whole right hand side of the panel out instead of
+    /// moving down it. The rail is pressed now and the keys are the rows.
+    #[test]
+    fn up_and_down_pick_a_session_and_leave_the_rail_where_it_is() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let mut panel = Settings::open(
+            &Config::default(),
+            None,
+            Agent {
+                now,
+                sessions: crate::sessions::Listing {
+                    sessions: vec![
+                        a_session("aaa", 60, Some("/home/hec/one"), "first"),
+                        a_session("bbb", 120, Some("/home/hec/two"), "second"),
+                        a_session("ccc", 180, Some("/home/hec/three"), "third"),
+                    ],
+                    skipped: Vec::new(),
+                },
+                ..Agent::default()
+            },
+        );
+        go_to(&mut panel, SESSIONS);
+        let rail = panel.chosen();
+        let at = |panel: &Settings| match panel.at_cursor() {
+            Some(Row::Session { id, .. }) => id.clone(),
+            other => panic!("the cursor is not on a session: {other:?}"),
+        };
+
+        // It opens on the first conversation rather than on the title or the
+        // path above it: a cursor on a row nothing can be done to is a dead
+        // stop, and the band drawn on one would be a lie.
+        assert_eq!(at(&panel), "aaa");
+        assert!(panel.on_row(), "there is nothing for the band to sit on");
+
+        assert!(panel.step(true));
+        assert_eq!(at(&panel), "bbb");
+        assert!(panel.step(true));
+        assert_eq!(at(&panel), "ccc");
+        assert!(!panel.step(true), "the end of the list is a stop");
+        assert!(panel.step(false));
+        assert_eq!(at(&panel), "bbb");
+        assert_eq!(panel.chosen(), rail, "a key moved the rail");
+
+        // Home and End and the page keys are the same list, not the rail.
+        assert!(panel.jump(true));
+        assert_eq!(at(&panel), "ccc");
+        assert!(panel.jump(false));
+        assert_eq!(at(&panel), "aaa");
+        panel.page(4, true);
+        assert_eq!(at(&panel), "ccc");
+        assert_eq!(panel.chosen(), rail, "a key moved the rail");
+
+        // The rail still answers a press, which is the one thing that moves it,
+        // and each section keeps its own cursor across the swap.
+        let looks = panel
+            .section_names()
+            .iter()
+            .position(|name| *name == APPEARANCE)
+            .expect("the appearance section");
+        assert!(panel.choose(looks));
+        assert_eq!(panel.here().name, APPEARANCE);
+        assert!(panel.choose(rail));
+        assert_eq!(at(&panel), "ccc", "the section lost where the cursor was");
     }
 
     /// The skills section lists what is on the disk: a row per skill, the

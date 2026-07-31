@@ -381,12 +381,12 @@ window too short for all eight the wheel scrolls it.
 
 **Settings opens the panel**, from a right click on any pane or tab. It takes the
 whole window under the title strip and it is five sections, named down a rail on
-the left with the chosen one beside it. Up and down on the rail walk the sections,
-right goes into one, left comes back out, and inside a section up and down walk
-its rows while left and right change the row the cursor is on. Enter flips a
+the left with the chosen one beside it. **Click a section to choose it.** The
+arrow keys never touch the rail: up and down walk the rows of whatever is
+showing, and left and right change the row the cursor is on. Enter flips a
 switch, turns a skill or a server on and off, and starts an edit on the
-endpoint, Tab crosses a form row and otherwise crosses between the rail and the
-rows, the wheel scrolls, and Esc puts the panel away. The panes are exactly where
+endpoint, Tab crosses a form row, the wheel scrolls, and Esc puts the panel
+away. The panes are exactly where
 they were when it closes, and the agent keeps working behind it. **Drag the line
 between the rail and the settings** to give one of them more room: the pointer
 takes a resize shape over it, neither side goes narrower than the longest section
@@ -430,9 +430,13 @@ with, so what it prints is the prompt the session sends and not a different one.
 command that failed puts the reason on the block. Both blocks are a fixed twelve
 lines tall and read with Page Up and Page Down, or the wheel over them.
 
-SESSIONS lists the saved
-conversations the folder picker offers, through the same reader, with when each
-one was, which folder it belongs to and the opening of what was first said in it.
+SESSIONS is a table of the saved conversations the folder picker offers, read
+through the same reader and headed by a row naming its columns: when each one
+was, which folder it belongs to, how big the transcript is, how full its context
+window was, and the opening of what was first said in it. Up and down pick a row
+and it carries a band across the whole of it. The last column is a trash: press
+it once and it says `sure?`, press it again and the transcript and the line about
+it in `no0b.sessions` both go.
 SKILLS and MCP are two columns: a list on the left and, beside it, whatever the
 row under the cursor is. In a window too narrow to hold both, the list keeps the
 width and the second column is not drawn.
