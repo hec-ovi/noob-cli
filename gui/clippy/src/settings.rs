@@ -129,24 +129,26 @@
 //! value into a field, and the one field this window has is the agent's
 //! endpoint; thirty seven of them is a form. So the palette is on the panel as
 //! swatches you can read, with the path of the file to edit beside them, and the
-//! four presets are one row away in `theme`.
+//! three presets are drawn by name over them.
 //!
 //! **The palette is a grid, not a list.** Thirty seven colours one to a row was
 //! a column of hex strings four screens long, and a hex string does not say what
-//! it colours. They are [`Row::Swatches`] rows now: several to a row, each one a
-//! block of the colour with a plain-words label beside it, grouped under the
-//! headings they belong to. Pressing one says which key in the file writes it,
-//! which is the only thing a hex string was there for.
+//! it colours. Each group is one [`Row::Palette`] card now: what it paints in
+//! the header, and its colours in the body, as many across as the card is wide
+//! enough for, each one a block of the colour with a plain-words label beside
+//! it. Pressing one says which key in the file writes it, which is the only
+//! thing a hex string was there for.
 //!
-//! **The palette block says where its colours came from.** "colors as theme
-//! groups i did not saw on the setup, i just sawe many colors, so i dont know":
-//! the grid opened as a wall of swatches with nothing on it saying what had set
-//! them. The `theme` row is the first row of the block now, directly over the
-//! colours it writes, with one line under it naming the theme those colours
-//! belong to and saying that a colour written in the file overrides it for that
-//! key alone. Each group is headed with what it paints rather than with the key
-//! it is stored under: the window's own tones, the code colours, the tool marks,
-//! the meters.
+//! **The palette says where its colours came from, and picking a theme really
+//! applies it.** "colors as theme groups i did not saw on the setup, i just
+//! sawe many colors, so i dont know", and then "themes are only 2 custom and
+//! noob". The grid opened as a wall of swatches with nothing saying what had set
+//! them, and the control itself was one box holding one word. All three presets
+//! are drawn by name on the first card of the palette now, with the line under
+//! them naming the one the colours belong to, and a pick comments out any colour
+//! line in the file that would override the preset before it writes the theme:
+//! an explicit colour beats the theme it belongs to, so a file carrying eight of
+//! them answered every theme change with the same window under a new name.
 
 use std::path::{Path, PathBuf};
 
