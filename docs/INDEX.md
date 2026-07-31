@@ -63,6 +63,9 @@ Boxes so far:
 - [`crates/noob-testkit`](../crates/noob-testkit/CONTRACT.md) - dev-only test
   rig: mock OpenAI and MCP servers with wire assertions, a pty driver, a
   terminal screen emulator.
+- [`crates/noob/src/emit`](../crates/noob/src/emit/CONTRACT.md) - the
+  `NOOB_EMIT` side channel: Event frames to a file beside the session, off by
+  default.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,
