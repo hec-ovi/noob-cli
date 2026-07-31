@@ -155,6 +155,42 @@ pub fn field_lines(hint: bool) -> f32 {
     TEXT_LINES + TIGHT + TEXT_LINES + hint
 }
 
+/// Where every field of a card body sits, in lines: the top of the band it
+/// stands in, and how tall that band is.
+///
+/// One band per row of fields, `across` of them to a band, [`STEP`] between one
+/// band and the next. A band is as tall as the tallest field in it, which is
+/// what a sentence under one of them costs: two fields side by side sit on the
+/// same lines, so their labels line up and the band under them is where the
+/// model counted it.
+///
+/// `hints` is one flag per field, in order, saying whether it carries a
+/// sentence. The model counts a card's height with this and the layout places
+/// the fields with it, which is what keeps the counted height and the drawn one
+/// the same height.
+pub fn field_slots(hints: &[bool], across: usize) -> Vec<(f32, f32)> {
+    let across = across.max(1);
+    let mut out = Vec::with_capacity(hints.len());
+    let mut top = 0.0;
+    for band in hints.chunks(across) {
+        let tall = field_lines(band.iter().any(|hint| *hint));
+        for _ in band {
+            out.push((top, tall));
+        }
+        top += tall + STEP;
+    }
+    out
+}
+
+/// How tall those fields come to, in lines, with nothing under them. Zero for a
+/// card with no fields at all, which is a card that is all sentence.
+pub fn fields_lines(hints: &[bool], across: usize) -> f32 {
+    field_slots(hints, across)
+        .last()
+        .map(|(top, tall)| top + tall)
+        .unwrap_or(0.0)
+}
+
 /// Columns a card's border and its two [`ROOM`] paddings take off the list it
 /// stands in.
 ///
@@ -253,6 +289,30 @@ mod tests {
                 "a footer costs nothing"
             );
         }
+    }
+
+    /// Two fields on one band sit on the same lines, a band with a sentence in
+    /// it is taller than one without, and the bands add up to what
+    /// [`fields_lines`] says the body is. A band measured at one height and
+    /// drawn at another is every press below it on the wrong field.
+    #[test]
+    fn the_fields_of_a_card_stand_in_bands_that_add_up_to_the_body() {
+        let hints = [false, true, false];
+        let across = field_slots(&hints, 2);
+        assert_eq!(across[0].0, across[1].0, "two across are not on one band");
+        assert_eq!(across[0].1, across[1].1, "two across are not one height");
+        assert_eq!(across[0].1, field_lines(true), "the sentence costs nothing");
+        assert!(across[2].0 >= across[0].0 + across[0].1 + STEP - 0.001);
+        assert_eq!(across[2].1, field_lines(false));
+        assert_eq!(fields_lines(&hints, 2), across[2].0 + across[2].1);
+
+        // Stacked, every field is its own band, and the whole is taller than it
+        // was two across.
+        let down = field_slots(&hints, 1);
+        assert_eq!(down.len(), 3);
+        assert!(down[1].1 > down[0].1, "the sentence is not a line taller");
+        assert!(fields_lines(&hints, 1) > fields_lines(&hints, 2));
+        assert_eq!(fields_lines(&[], 2), 0.0, "an empty body claims a band");
     }
 
     /// Two fields go across only while both keep their columns, and the flip is

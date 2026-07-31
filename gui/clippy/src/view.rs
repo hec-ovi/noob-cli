@@ -2661,18 +2661,24 @@ fn settings_card_parts(
 
 /// Where each field of a card sits inside its body: one band per row of them,
 /// [`design::STEP`] between the bands and between two fields side by side.
-fn settings_card_slots(body: Panel, line: f32, fields: usize, across: usize) -> Vec<Panel> {
+///
+/// `hints` is one flag per field, saying whether it carries a sentence, and it
+/// is the same list [`crate::settings::card_body_lines`] counted the card's
+/// height with: a band drawn taller than it was measured puts every press below
+/// it on another field.
+fn settings_card_slots(body: Panel, line: f32, hints: &[bool], across: usize) -> Vec<Panel> {
     let across = across.max(1);
     let step = design::step(line);
     let wide = ((body.w - step * (across - 1) as f32) / across as f32).max(1.0);
-    let tall = design::field_lines(false) * line;
-    (0..fields)
-        .map(|at| {
+    design::field_slots(hints, across)
+        .into_iter()
+        .enumerate()
+        .map(|(at, (top, tall))| {
             Panel::new(
                 body.x + (at % across) as f32 * (wide + step),
-                body.y + (at / across) as f32 * (tall + step),
+                body.y + top * line,
                 wide,
-                tall,
+                tall * line,
             )
         })
         .collect()
@@ -2688,6 +2694,207 @@ fn settings_field_boxes(slot: Panel, line: f32) -> (Panel, Panel) {
         Panel::new(slot.x, slot.y, slot.w, line),
         Panel::new(slot.x, slot.y + line + design::tight(line), slot.w, line),
     )
+}
+
+/// The sentence under a field, on the line under its input.
+///
+/// Drawn at the hint size and given a whole line of pane text, which is what
+/// [`design::field_lines`] claimed for it: the smaller line leaves a little
+/// slack under it rather than needing an arithmetic of its own.
+fn settings_hint_box(slot: Panel, line: f32, size: f32) -> Panel {
+    let (_, input) = settings_field_boxes(slot, line);
+    Panel::new(
+        slot.x,
+        input.y + line + design::tight(line),
+        slot.w,
+        Text::line_for(design::hint_size(size)).min(line),
+    )
+}
+
+/// One field of a card: its label, what it holds under that, and the sentence
+/// that says what it is for under that.
+///
+/// The one place a field is drawn, whatever it holds, so a reading, a line that
+/// is typed into and a number on a track are the same shape at the same left
+/// edge. `here` is whether the keys are on this field, which is what the focus
+/// edge says; the card's own border says they are on the card.
+#[allow(clippy::too_many_arguments)]
+fn settings_card_field(
+    scene: &mut Scene,
+    frame: &Frame,
+    panel: &Settings,
+    field: &crate::settings::CardField,
+    slot: Panel,
+    at: (usize, Side),
+    here: bool,
+    line: f32,
+) {
+    let (skin, size) = (frame.skin, frame.pane_size);
+    let column = frame.pane_column.max(1.0);
+    let (index, side) = at;
+    let (label_at, input_at) = settings_field_boxes(slot, line);
+    // The name of the field, in the quiet tint: a label as loud as its value is
+    // a label competing with the thing it names.
+    scene.text(Text::rich(
+        vec![Run::tinted(
+            clip(
+                &field.label,
+                columns_in(label_at.w, column).saturating_sub(1),
+            ),
+            skin.dim,
+        )],
+        label_at,
+        design::label_size(size),
+        skin.dim,
+    ));
+    let hot_value = frame.hot == Some(Hit::SettingsValue(index, side));
+    let typing = here.then(|| panel.editing()).flatten();
+    // The border is the whole of what says a value can be changed. A reading is
+    // the same shape without one, so the two are told apart without pressing
+    // either.
+    let boxed = field.editable();
+    if boxed {
+        scene.rect(panel_fill(input_at, skin.input));
+        if hot_value {
+            scene.rect(panel_fill(input_at, skin.hot));
+        }
+        scene.rect(panel_edge(
+            input_at,
+            match typing.is_some() || here {
+                true => skin.edge_focus,
+                false => skin.edge,
+            },
+        ));
+    }
+    let room = match boxed {
+        true => Panel::new(
+            input_at.x + INPUT_PAD,
+            input_at.y,
+            (input_at.w - INPUT_PAD * 2.0).max(1.0),
+            input_at.h,
+        ),
+        false => input_at,
+    };
+    let track = frame
+        .layout
+        .settings_tracks
+        .iter()
+        .find(|(row, half, _)| *row == index && *half == side)
+        .map(|(_, _, track)| *track);
+    let value = panel.preview(index, side).unwrap_or_else(|| field.value());
+    match (field.holds.as_ref(), track) {
+        // A number with a range is a position on a track, with the number it is
+        // at against the right edge of the same box.
+        (SettingRow::Setting { .. }, Some(track)) if track.w >= 1.0 => {
+            if frame.hot == Some(Hit::SettingsSlider(index, side)) {
+                scene.rect(track.fill(skin.hot));
+            }
+            let thick = (line * 0.3).floor().max(2.0);
+            let up = ((line - thick) * 0.5).floor();
+            let along = panel.fraction(index, side).unwrap_or(0.0);
+            scene.rect(Panel::new(track.x, track.y + up, track.w, thick).fill(skin.gauge_track));
+            scene.rect(
+                Panel::new(track.x, track.y + up, (track.w * along).floor(), thick)
+                    .fill(skin.gauge),
+            );
+            scene.rect(
+                Panel::new(
+                    track.x + ((track.w - CARET_W) * along).floor(),
+                    track.y + 1.0,
+                    CARET_W,
+                    (line - 2.0).max(1.0),
+                )
+                .fill(skin.edge_focus),
+            );
+            let number = Panel::new(
+                track.x + track.w,
+                input_at.y,
+                (input_at.x + input_at.w - INPUT_PAD - track.x - track.w).max(1.0),
+                input_at.h,
+            );
+            scene.text(Text::rich(
+                vec![Run::tinted(
+                    clip(value, SETTING_TRACK_VALUE_COLUMNS.saturating_sub(1)),
+                    skin.bright,
+                )],
+                number,
+                design::value_size(size),
+                skin.bright,
+            ));
+        }
+        // A line that is typed into: what has been typed with a caret after it
+        // while it is being typed, and the end of the value rather than the
+        // start when it is not, because what changes in an address is the port
+        // and the path.
+        (SettingRow::Field { .. }, _) => {
+            let (shown, ink) = match (typing, value.is_empty()) {
+                (Some(typed), _) => (String::from(typed), skin.bright),
+                (None, true) => (String::from(crate::settings::UNSET), skin.dim),
+                (None, false) => (String::from(value), skin.bright),
+            };
+            let shown = tail(&shown, columns_in(room.w, column).saturating_sub(1));
+            scene.text(Text::rich(
+                vec![Run::tinted(shown.clone(), ink)],
+                room,
+                design::value_size(size),
+                ink,
+            ));
+            if typing.is_some() {
+                scene.rect(
+                    Panel::new(
+                        room.x + shown.chars().count() as f32 * column,
+                        room.y,
+                        2.0,
+                        line,
+                    )
+                    .fill(skin.caret),
+                );
+            }
+        }
+        // Everything else is the value as it reads: a name out of a list inside
+        // its box, or a reading with no box at all. A field nobody has set is
+        // drawn in the quiet tint, so an empty one reads as empty rather than as
+        // a value somebody chose.
+        _ => {
+            let ink = match value == crate::settings::UNSET {
+                true => skin.dim,
+                false => skin.bright,
+            };
+            scene.text(Text::rich(
+                vec![Run::tinted(
+                    clip(value, columns_in(room.w, column).saturating_sub(1)),
+                    ink,
+                )],
+                room,
+                design::value_size(size),
+                ink,
+            ));
+        }
+    }
+    // The sentence under it, in the hint role: what this field decides, and
+    // which line of which file writes it. Half the rows of the agent's section
+    // said nothing at all about what they did.
+    let Some(hint) = &field.hint else {
+        return;
+    };
+    let small = design::hint_size(size);
+    let hint_at = settings_hint_box(slot, line, size);
+    if hint_at.y + hint_at.h > slot.y + slot.h + 0.01 {
+        return;
+    }
+    scene.text(Text::rich(
+        vec![Run::tinted(
+            clip(
+                hint,
+                columns_in(hint_at.w, design::column_for(column, size, design::HINT))
+                    .saturating_sub(1),
+            ),
+            skin.dim,
+        )],
+        hint_at,
+        small,
+        skin.dim,
+    ));
 }
 
 /// The three kinds of button on this window, and no others.
@@ -2890,22 +3097,6 @@ fn settings_label_w(list_w: f32, column: f32) -> f32 {
     (SETTING_LABEL_COLUMNS as f32 * column).min((list_w * 0.5).floor())
 }
 
-/// Where the two halves of a form row sit.
-///
-/// Half each, floored to a whole pixel so the line between them does not land on
-/// a half one, and the same split is asked for by the placement, the hit test
-/// and the drawing.
-fn settings_halves(row: Panel) -> [(Side, Panel); 2] {
-    let half = (row.w * 0.5).floor().max(1.0);
-    [
-        (Side::Left, Panel::new(row.x, row.y, half, row.h)),
-        (
-            Side::Right,
-            Panel::new(row.x + half, row.y, (row.w - half).max(1.0), row.h),
-        ),
-    ]
-}
-
 /// How much of a slider's row the number beside the track takes. The track gets
 /// the rest.
 ///
@@ -3066,37 +3257,29 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
         }
         let row = Panel::new(list.x, y, list.w, tall);
         y += tall;
-        // A form row is two boxes side by side and everything else is one. Each
-        // half is placed exactly the way a whole row is, with its own label
-        // column measured off its own width, so a control in one is drawn where
-        // the press that changes it is tested for.
-        let halves: Vec<(Side, Panel)> = match entry {
-            SettingRow::Pair(_, _) => settings_halves(row).into(),
-            _ => vec![(Side::Left, row)],
-        };
-        for (side, at) in &halves {
-            rows.push((index, *side, *at));
-            let cell = crate::settings::cell(entry, *side);
-            let label_w = settings_label_w(at.w, column);
-            let value_at = settings_control(*at, label_w, column);
-            // Only a row that carries a control gets one, and a control is
-            // either a value or a track. A heading or a reading with a click
-            // region over its value would answer a press with nothing.
-            match cell {
-                SettingRow::Setting { kind, .. } if kind.fraction(0.0).is_some() => {
-                    let number =
-                        (SETTING_TRACK_VALUE_COLUMNS as f32 * column).min(value_at.w * 0.5);
-                    tracks.push((
-                        index,
-                        *side,
-                        Panel::new(value_at.x, value_at.y, value_at.w - number, value_at.h),
-                    ));
-                }
-                SettingRow::Setting { .. } | SettingRow::Field { .. } => {
-                    values.push((index, *side, value_at));
-                }
-                _ => {}
+        // One box per row, always. It was two side by side on a form row, which
+        // is what the AGENT section was before it was cards: a card is what
+        // holds two settings side by side now, and it is one row with two fields
+        // in it rather than one row cut in half.
+        rows.push((index, Side::Left, row));
+        let label_w = settings_label_w(row.w, column);
+        let value_at = settings_control(row, label_w, column);
+        // Only a row that carries a control gets one, and a control is either a
+        // value or a track. A heading or a reading with a click region over its
+        // value would answer a press with nothing.
+        match entry {
+            SettingRow::Setting { kind, .. } if kind.fraction(0.0).is_some() => {
+                let number = (SETTING_TRACK_VALUE_COLUMNS as f32 * column).min(value_at.w * 0.5);
+                tracks.push((
+                    index,
+                    Side::Left,
+                    Panel::new(value_at.x, value_at.y, value_at.w - number, value_at.h),
+                ));
             }
+            SettingRow::Setting { .. } | SettingRow::Field { .. } => {
+                values.push((index, Side::Left, value_at));
+            }
+            _ => {}
         }
         match entry {
             // The whole row is controls: one cell per colour on it.
@@ -3181,15 +3364,38 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
                     false,
                 );
                 let across = design::across(card.fields.len(), design::card_cols(entry_cols));
-                let slots = settings_card_slots(parts.body, line, card.fields.len(), across);
+                let slots = settings_card_slots(
+                    parts.body,
+                    line,
+                    &crate::settings::card_hints(card),
+                    across,
+                );
                 for (at, slot) in slots.iter().enumerate() {
                     let side = match at {
                         0 => Side::Left,
                         1 => Side::Right,
                         _ => continue,
                     };
-                    if card.fields[at].editable {
-                        values.push((index, side, settings_field_boxes(*slot, line).1));
+                    let input = settings_field_boxes(*slot, line).1;
+                    // A number with a range is a track with its own number
+                    // beside it, inside the input box: the same slider the
+                    // panel has always had, in the room a field gives it.
+                    match card.fields[at].holds.as_ref() {
+                        SettingRow::Setting { kind, .. } if kind.fraction(0.0).is_some() => {
+                            let number =
+                                (SETTING_TRACK_VALUE_COLUMNS as f32 * column).min(input.w * 0.5);
+                            tracks.push((
+                                index,
+                                side,
+                                Panel::new(input.x, input.y, input.w - number, input.h),
+                            ));
+                        }
+                        SettingRow::Setting { .. } | SettingRow::Field { .. } => {
+                            values.push((index, side, input));
+                        }
+                        // A reading. No region at all: one over it would answer
+                        // a press with nothing.
+                        _ => {}
                     }
                 }
             }
@@ -5485,25 +5691,22 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
         let Some(whole_row) = panel.row(*index) else {
             continue;
         };
-        // A form row is drawn one half at a time, in the half's own box: what a
-        // cell is and where it goes come from the same two functions the
-        // placement and the hit test used.
-        let paired = matches!(whole_row, SettingRow::Pair(_, _));
-        let entry = crate::settings::cell(whole_row, *side);
+        let entry = whole_row;
         let label_w = settings_label_w(row.w, column);
         let label_cols = columns_in(label_w, column).saturating_sub(1);
-        let on = *index == panel.cursor() && panel.on_row() && (!paired || panel.side() == *side);
-        // The band is what says which half of a form the keyboard is in, so it
-        // is drawn on the half rather than across the row. Not on a block of
-        // text: a filled strip fourteen lines tall over a page of prose is a
-        // highlight nobody can read through, and the mark down its edge says the
-        // same thing.
-        let carded = matches!(entry, SettingRow::Card(_) | SettingRow::Entry(_));
+        let on = *index == panel.cursor() && panel.on_row();
+        // Not on a block of text: a filled strip fourteen lines tall over a page
+        // of prose is a highlight nobody can read through, and the mark down its
+        // edge says the same thing.
+        let carded = matches!(
+            entry,
+            SettingRow::Card(_) | SettingRow::Entry(_) | SettingRow::Paper(_)
+        );
         if on {
             // A card says the keys are on it with its own border and the mark
             // down its edge, drawn by the card itself. A band nine lines tall
             // over a box is a highlight nobody can read through.
-            if !matches!(entry, SettingRow::Paper(_)) && !carded {
+            if !carded {
                 // A list being picked from carries the solid band the folder
                 // picker's own session list carries; a form being read carries
                 // the quiet strip, which is enough to say which row the keys
@@ -5531,11 +5734,6 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
         // Before the hairline below, so the line still closes the band off.
         if matches!(entry, SettingRow::Columns(_)) {
             scene.rect(row.fill(skin.strip));
-        }
-        // The line between the two columns of a form, so the row reads as two
-        // things rather than as one sentence that happens to have a gap in it.
-        if paired && *side == Side::Right && row.h >= 2.0 {
-            scene.rect(Panel::new(row.x, row.y + 2.0, 1.0, (row.h - 4.0).max(1.0)).fill(skin.edge));
         }
         // There is no hairline under a row. There was one under every row on
         // the panel, which is a line between every two things on screen and
@@ -6060,59 +6258,46 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     size,
                     column,
                 );
+                let hints = crate::settings::card_hints(card);
                 let across = design::across(card.fields.len(), design::card_cols(list_cols));
-                let slots = settings_card_slots(parts.body, line, card.fields.len(), across);
-                let mut under = parts.body.y;
-                for (field, slot) in card.fields.iter().zip(&slots) {
+                let slots = settings_card_slots(parts.body, line, &hints, across);
+                for (at, (field, slot)) in card.fields.iter().zip(&slots).enumerate() {
                     if slot.y + slot.h > parts.body.y + parts.body.h + 0.01 {
                         continue;
                     }
-                    under = under.max(slot.y + slot.h);
-                    let (label_at, input_at) = settings_field_boxes(*slot, line);
-                    scene.text(Text::rich(
-                        vec![Run::tinted(
-                            clip(
-                                &field.label,
-                                columns_in(label_at.w, column).saturating_sub(1),
-                            ),
-                            skin.dim,
-                        )],
-                        label_at,
-                        design::label_size(size),
-                        skin.dim,
-                    ));
-                    // The border is the whole of what says a value can be typed
-                    // into. A reading is the same shape without one, so the two
-                    // are told apart without pressing either.
-                    let room = match field.editable {
-                        true => {
-                            scene.rect(panel_fill(input_at, skin.input));
-                            scene.rect(panel_edge(input_at, skin.edge));
-                            Panel::new(
-                                input_at.x + INPUT_PAD,
-                                input_at.y,
-                                (input_at.w - INPUT_PAD * 2.0).max(1.0),
-                                input_at.h,
-                            )
-                        }
-                        false => input_at,
+                    // Which slot the keys are in, so the field being changed is
+                    // the one wearing the focus edge. A card says the keys are
+                    // on it with its border; the field says which of its two
+                    // they are on.
+                    let slot_side = match at {
+                        0 => Side::Left,
+                        1 => Side::Right,
+                        _ => Side::Left,
                     };
-                    scene.text(Text::rich(
-                        vec![Run::tinted(
-                            clip(&field.value, columns_in(room.w, column)),
-                            skin.bright,
-                        )],
-                        room,
-                        design::value_size(size),
-                        skin.bright,
-                    ));
+                    let here = on && at < 2 && panel.side() == slot_side;
+                    settings_card_field(
+                        scene,
+                        frame,
+                        panel,
+                        field,
+                        *slot,
+                        (*index, slot_side),
+                        here,
+                        line,
+                    );
                 }
                 if let Some(hint) = &card.hint {
                     let small = design::hint_size(size);
                     let small_column = design::column_for(column, size, design::HINT);
+                    // Under the last band, at the height the model counted the
+                    // bands to rather than at the bottom of whatever was drawn:
+                    // a field cut off by the bottom of the list must not pull
+                    // the sentence up over the field above it.
                     let hint_at = Panel::new(
                         parts.body.x,
-                        under + design::step(line),
+                        parts.body.y
+                            + design::fields_lines(&hints, across) * line
+                            + design::step(line),
                         parts.body.w,
                         Text::line_for(small).min(line),
                     );
@@ -6139,62 +6324,91 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
             // file rather than the instructions.
             SettingRow::Paper(paper) => {
                 let held = crate::settings::PAPER_LINES;
-                say(
+                let box_ = settings_card(*row, line);
+                let parts = settings_card_parts(box_, line, size, column, list_cols, false);
+                settings_card_shell(
                     scene,
-                    vec![Run::tinted(clip(&paper.title, whole_cols), skin.good)],
-                    whole,
+                    box_,
+                    &parts,
+                    &paper.title,
                     skin.good,
+                    on,
+                    skin,
+                    size,
+                    column,
                 );
+                let body_cols = columns_in(parts.body.w, column).saturating_sub(1);
                 // How far down a block that is longer than its box has been
-                // read, on the title's own line: a page of prose with no way of
-                // telling how much of it is left is a box that reads as the whole
-                // thing.
+                // read, at the right end of the header: a page of prose with no
+                // way of telling how much of it is left is a box that reads as
+                // the whole thing.
                 if paper.body.len() > held {
                     let last = (paper.first + held).min(paper.body.len());
                     let counter = format!("{}-{} of {}", paper.first + 1, last, paper.body.len());
                     let wide = (counter.chars().count() as f32 + 1.0) * column;
-                    if wide < whole.w * 0.5 {
+                    if wide < parts.title.w * 0.5 {
                         say(
                             scene,
                             vec![Run::tinted(counter, skin.dim)],
-                            Panel::new(whole.x + whole.w - wide, whole.y, wide, line),
+                            Panel::new(
+                                parts.title.x + parts.title.w - wide,
+                                parts.title.y,
+                                wide,
+                                line.min(parts.title.h),
+                            ),
                             skin.dim,
                         );
                     }
                 }
+                // Where the text came from, in the hint role: a path under a
+                // title is the quietest thing a block carries, and drawing it at
+                // the size of the text made the two one run of words.
                 let under = match paper.bad {
                     true => skin.bad,
                     false => skin.dim,
                 };
-                if row.h >= line * 2.0 {
-                    say(
-                        scene,
-                        vec![Run::tinted(clip(&paper.under, whole_cols), under)],
-                        Panel::new(text_x, row.y + line, whole.w, line),
+                let small = design::hint_size(size);
+                let small_column = design::column_for(column, size, design::HINT);
+                scene.text(Text::rich(
+                    vec![Run::tinted(
+                        clip(
+                            &paper.under,
+                            columns_in(parts.body.w, small_column).saturating_sub(1),
+                        ),
                         under,
-                    );
-                }
+                    )],
+                    Panel::new(
+                        parts.body.x,
+                        parts.body.y,
+                        parts.body.w,
+                        Text::line_for(small).min(line),
+                    ),
+                    small,
+                    under,
+                ));
                 // Where the fences stand after everything scrolled off, so a
                 // block that starts inside a code block is drawn as code.
                 let mut fence = crate::markdown::fence_after(
                     paper.body.iter().take(paper.first).map(String::as_str),
                 );
+                let top = parts.body.y + line + design::tight(line);
                 for (step, text) in paper.body.iter().skip(paper.first).take(held).enumerate() {
-                    let at = Panel::new(text_x, row.y + (step as f32 + 2.0) * line, whole.w, line);
-                    // Cut off at the bottom of the row rather than drawn under
+                    let at = Panel::new(
+                        parts.body.x,
+                        top + step as f32 * line,
+                        parts.body.w,
+                        line,
+                    );
+                    // Cut off at the bottom of the card rather than drawn under
                     // it: the last block on a short list is clipped by the list.
-                    if at.y + line > row.y + row.h {
+                    if at.y + line > parts.body.y + parts.body.h + 0.01 {
                         break;
                     }
                     let mut runs = Vec::new();
-                    crate::markdown::line(&clip(text, whole_cols), &mut fence, skin, &mut runs);
+                    crate::markdown::line(&clip(text, body_cols), &mut fence, skin, &mut runs);
                     scene.text(Text::rich(runs, at, size, skin.body));
                 }
             }
-            // Never drawn: a half of a form is what is drawn, and `cell` hands
-            // one back rather than the pair it came out of. A pair inside a pair
-            // is the only way here, and nothing builds one.
-            SettingRow::Pair(_, _) => {}
         }
     }
     // The column beside that list: the entry under the cursor, rendered the way
@@ -14751,6 +14965,18 @@ mod tests {
         panel
     }
 
+    /// The end of the section that is showing, for a test about a row near the
+    /// bottom of a list longer than a window.
+    ///
+    /// A section of cards is taller than the panel: the AGENT section is five
+    /// cards and two blocks, and the blocks are the last two rows of it. The
+    /// window clamps whatever this asks for to the last screenful it can start
+    /// on, which is exactly what the wheel does.
+    fn scrolled_to_the_end(panel: &mut Settings) {
+        let rows = 8;
+        while panel.scroll(4, true, rows, 80) {}
+    }
+
     /// The panel is a takeover: while it is up there are no panes, no tabs and
     /// no prompt, and it answers for every point under the title strip. The
     /// strip itself still works, so the window can be moved and closed from it.
@@ -14920,15 +15146,16 @@ mod tests {
         }
     }
 
-    /// The AGENT section is a form: two rows of two, each half drawn in its own
-    /// column and pressed where it is drawn.
+    /// The AGENT section is cards: every field a label over its value with the
+    /// sentence that says what it is under that, and each one pressed where it
+    /// is drawn.
     ///
-    /// "put it like forms": the endpoint and the file the agent reads down the
-    /// left, the two numbers that decide what it gets down the right, with
-    /// nothing between them. Every half is its own box, so a press in one column
-    /// cannot land on the other.
+    /// "all text looks the same name, description, repo, find a way each thing
+    /// is different": a label, a value and a sentence are three sizes and three
+    /// tints here, and none of them is the raw environment key the row used to
+    /// be named with.
     #[test]
-    fn the_agent_form_draws_two_columns_that_are_pressed_apart() {
+    fn the_agent_cards_draw_a_labelled_field_for_everything_they_hold() {
         let mut panel = a_panel_on(&Config::default(), crate::settings::AGENT);
         panel.adopt_prompt(
             String::from("/home/hec/workspace/noob-cli"),
@@ -14937,65 +15164,103 @@ mod tests {
         );
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let layout = &out.layout;
+        let line = Text::line_for(PANE_TEXT.0);
+        let cols = layout.settings_entry_columns(PANE_TEXT.1);
         let list = layout.settings_list;
-        let form: Vec<(usize, Side, Panel)> = layout
+
+        // Every card is full width and stands in the row the model counted for
+        // it, with the space between two of them under the one above.
+        let cards: Vec<(usize, Panel)> = layout
             .settings_rows
             .iter()
-            .filter(|(index, _, _)| *index < 2)
-            .copied()
+            .filter(|(index, ..)| matches!(panel.row(*index), Some(SettingRow::Card(_))))
+            .map(|(index, _, at)| (*index, *at))
             .collect();
-        assert_eq!(form.len(), 4, "the form is not two rows of two: {form:?}");
-        for pair in form.chunks(2) {
-            let [(index, left_side, left), (_, right_side, right)] = pair else {
-                panic!("{pair:?}");
+        assert!(cards.len() >= 4, "the section is not cards: {cards:?}");
+        for (index, row) in &cards {
+            let Some(SettingRow::Card(card)) = panel.row(*index) else {
+                panic!("row {index} is not a card");
             };
-            assert_eq!((*left_side, *right_side), (Side::Left, Side::Right));
-            // Side by side, on the same lines, filling the row between them.
-            assert_eq!(left.y, right.y, "row {index} is not one row");
-            assert_eq!(left.h, right.h);
-            assert!((left.x - list.x).abs() < 0.01, "{left:?}");
-            assert!((left.x + left.w - right.x).abs() < 0.01, "{left:?} {right:?}");
+            assert!((row.x - list.x).abs() < 0.01, "a card is not full width");
+            assert!((row.w - list.w).abs() < 0.01, "a card is not full width");
+            let counted = crate::settings::lines(panel.row(*index).expect("the row"), cols);
             assert!(
-                (right.x + right.w - (list.x + list.w)).abs() < 0.01,
-                "{right:?} against {list:?}"
+                (row.h - counted as f32 * line).abs() < 0.01,
+                "card {index} is {row:?} and the model counted {counted} lines"
             );
-            // And each half answers for itself: a press in one column is that
-            // column's row, never the other's.
-            for (side, at) in [(Side::Left, left), (Side::Right, right)] {
-                let (x, y) = middle(*at);
-                assert!(
-                    matches!(layout.hit(x, y), Some(Hit::SettingsRow(row, half) | Hit::SettingsValue(row, half) | Hit::SettingsSlider(row, half)) if row == *index && half == side),
-                    "the {side:?} half of row {index} answers with {:?}",
-                    layout.hit(x, y)
+
+            // Every field: its label, its value under it, its sentence under
+            // that, and the whole of it inside the card.
+            let (box_, parts) = the_card(&out, *row, false);
+            let hints = crate::settings::card_hints(card);
+            let across = design::across(card.fields.len(), design::card_cols(cols));
+            let slots = settings_card_slots(parts.body, line, &hints, across);
+            for (field, slot) in card.fields.iter().zip(&slots) {
+                let (label_at, input_at) = settings_field_boxes(*slot, line);
+                assert_eq!(
+                    line_of(&out, label_at.x, label_at.y),
+                    field.label,
+                    "the label of a field is not on its own line"
                 );
+                assert!(
+                    input_at.y >= label_at.y + label_at.h - 0.01,
+                    "a value is beside its label rather than under it"
+                );
+                let Some(hint) = &field.hint else {
+                    continue;
+                };
+                let hint_at = settings_hint_box(*slot, line, PANE_TEXT.0);
+                // Clipped to what the field is wide enough for, so what is
+                // drawn is the head of the sentence and the mark that says so.
+                let said = line_of(&out, hint_at.x, hint_at.y);
+                let head = said.trim_end_matches('\u{2026}');
+                assert!(
+                    !head.is_empty() && hint.starts_with(head),
+                    "{said:?} is not the sentence under {}",
+                    field.label
+                );
+                // Smaller than the value it explains, and inside its own card.
+                assert!(hint_at.y + hint_at.h <= box_.y + box_.h + 0.01);
             }
         }
-        // The controls are in the halves they belong to: the endpoint is typed
-        // into on the left, the context window is dragged on the right.
-        let endpoint = layout
-            .settings_values
-            .iter()
-            .find(|(index, side, _)| *index == 0 && *side == Side::Left)
-            .map(|(_, _, at)| *at)
-            .expect("the endpoint's box");
-        let ctx = layout
-            .settings_tracks
-            .iter()
-            .find(|(index, side, _)| *index == 0 && *side == Side::Right)
-            .map(|(_, _, at)| *at)
-            .expect("the context window's track");
-        assert!(endpoint.x + endpoint.w <= ctx.x, "{endpoint:?} {ctx:?}");
-        assert!(form[0].2.contains(endpoint.x + 1.0, endpoint.y + 1.0));
-        assert!(form[1].2.contains(ctx.x + 1.0, ctx.y + 1.0));
 
-        // Both are drawn, both are labelled with the key that writes them, and
-        // the file the agent reads is on the row under the endpoint.
+        // The two things this section can change are drawn as controls, in the
+        // fields they belong to, and each is pressed where it is drawn: the
+        // endpoint is typed into, the context window is dragged.
+        let endpoint = *layout
+            .settings_values
+            .first()
+            .expect("the endpoint has a box");
+        let ctx = *layout
+            .settings_tracks
+            .first()
+            .expect("the context window has a track");
+        for (index, _, at) in [endpoint, ctx] {
+            let row = cards
+                .iter()
+                .find(|(card, _)| *card == index)
+                .map(|(_, row)| *row)
+                .unwrap_or_else(|| panic!("row {index} is not a card"));
+            assert!(row.contains(at.x + 1.0, at.y + 1.0), "{at:?} is outside {row:?}");
+        }
+        let (x, y) = middle(endpoint.2);
+        assert_eq!(
+            layout.hit(x, y),
+            Some(Hit::SettingsValue(endpoint.0, endpoint.1))
+        );
+        let (x, y) = middle(ctx.2);
+        assert_eq!(layout.hit(x, y), Some(Hit::SettingsSlider(ctx.0, ctx.1)));
+
+        // What is drawn: plain-words names, the values off the file, and the
+        // keys in the sentences under them rather than as the names.
         let text = text_of(&out.scene);
         for wanted in [
+            "endpoint",
+            "context window",
+            "the agent's file",
+            "http://localhost:8080/v1",
             crate::agent::ENDPOINT,
             crate::agent::CTX,
-            crate::agent::TASK_CONCURRENCY,
-            "main file",
         ] {
             assert!(text.contains(wanted), "{wanted} is not drawn: {text}");
         }
@@ -15025,6 +15290,9 @@ mod tests {
             ]),
             &Config::default(),
         );
+        // The blocks are the last two rows of a section of cards, so the list
+        // is wound to its end to look at them.
+        scrolled_to_the_end(&mut panel);
         let out = render_settings(&panel, 1400.0, 1200.0, None);
         let text = text_of(&out.scene);
 
@@ -15058,6 +15326,114 @@ mod tests {
         assert_eq!(title.color, Some(out.skin.good));
     }
 
+    /// A block of text is a card too, and it scrolls inside itself: its title
+    /// stays in the header, its border stays where it was, and the rows around
+    /// it do not move.
+    ///
+    /// Before it was a card the two documents were the one thing on a panel of
+    /// boxes with nothing round them: a bare title, a bare path and twelve lines
+    /// of prose reading as loose text between two cards.
+    #[test]
+    fn a_document_is_a_card_that_scrolls_inside_itself() {
+        let mut panel = a_panel_on(&Config::default(), crate::settings::AGENT);
+        let body: Vec<String> = (0..crate::settings::PAPER_LINES * 3)
+            .map(|at| format!("line {at} of the prompt"))
+            .collect();
+        panel.adopt_prompt(
+            String::from("/home/hec/workspace/noob-cli"),
+            Ok(body.clone()),
+            &Config::default(),
+        );
+        scrolled_to_the_end(&mut panel);
+        let out = render_settings(&panel, 1400.0, 1200.0, None);
+        let line = Text::line_for(PANE_TEXT.0);
+        let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
+
+        let at = panel
+            .rows()
+            .iter()
+            .position(|row| {
+                matches!(row, crate::settings::Row::Paper(paper) if paper.title.contains("PROMPT"))
+            })
+            .expect("the prompt block");
+        let row = out
+            .layout
+            .settings_rows
+            .iter()
+            .find(|(index, ..)| *index == at)
+            .map(|(_, _, row)| *row)
+            .expect("the block is on screen");
+
+        // It stands in the room the model counted, as a card with its title in
+        // the header and a border round the whole of it.
+        let counted = crate::settings::lines(panel.row(at).expect("the row"), cols);
+        assert_eq!(
+            counted,
+            design::card_row_lines(crate::settings::paper_body_lines(), false)
+        );
+        assert!((row.h - counted as f32 * line).abs() < 0.01, "{row:?}");
+        let (box_, parts) = the_card(&out, row, false);
+        assert!(
+            out.scene.rects.iter().any(|rect| {
+                let [x, y, w, h] = rect.xywh();
+                (x - box_.x).abs() < 0.01
+                    && (y - box_.y).abs() < 0.01
+                    && (w - box_.w).abs() < 0.01
+                    && (h - box_.h).abs() < 0.01
+                    && rect.extra()[3] >= 1.0
+            }),
+            "the block has no border round it"
+        );
+        let title = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| {
+                text.runs.iter().any(|run| run.text.contains("THE PROMPT"))
+            })
+            .expect("the title");
+        assert!(
+            (title.at.y - parts.title.y).abs() < 0.01,
+            "the title is not in the header: {:?}",
+            title.at
+        );
+
+        // Its text is inside the body, and the first line of it is the first
+        // line of the document.
+        let first = parts.body.y + line + design::tight(line);
+        assert_eq!(line_of(&out, parts.body.x, first), body[0]);
+        let last = parts.body.y + parts.body.h;
+        assert!(
+            first + crate::settings::PAPER_LINES as f32 * line <= last + 0.01,
+            "the twelve lines it holds do not fit its body"
+        );
+
+        // Paged, the text moves and the card does not: the same box, the same
+        // title, another twelve lines. A block that walked the list under it
+        // would take the rows below it with it.
+        assert!(panel.point_at(at, Side::Left));
+        assert!(panel.page(20, true), "the block did not scroll");
+        let after = render_settings(&panel, 1400.0, 1200.0, None);
+        let moved = after
+            .layout
+            .settings_rows
+            .iter()
+            .find(|(index, ..)| *index == at)
+            .map(|(_, _, row)| *row)
+            .expect("the block is still on screen");
+        assert_eq!(moved, row, "the card moved while its text was read");
+        assert_eq!(
+            line_of(&after, parts.body.x, first),
+            body[crate::settings::PAPER_LINES],
+            "the text did not scroll inside the card"
+        );
+        assert!(
+            text_of(&after.scene).contains("13-24 of 36"),
+            "the block does not say how far down it is: {}",
+            text_of(&after.scene)
+        );
+    }
+
     /// A file that is not there is an offer to write one, and a command that
     /// failed is the reason it failed. Neither is an empty box.
     #[test]
@@ -15068,6 +15444,7 @@ mod tests {
             Err(String::from("noob debug prompt failed: no such subcommand")),
             &Config::default(),
         );
+        scrolled_to_the_end(&mut panel);
         let out = render_settings(&panel, 1400.0, 1200.0, None);
         let text = text_of(&out.scene);
         // `an_agent` has no AGENTS.md at all, so the block says where one would
@@ -16835,7 +17212,12 @@ mod tests {
         };
         let (_, parts) = the_card(&out, row, false);
         let across = design::across(card.fields.len(), design::card_cols(cols));
-        let slots = settings_card_slots(parts.body, line, card.fields.len(), across);
+        let slots = settings_card_slots(
+            parts.body,
+            line,
+            &crate::settings::card_hints(card),
+            across,
+        );
         for (field, slot) in card.fields.iter().zip(&slots) {
             let (label_at, input_at) = settings_field_boxes(*slot, line);
             assert_eq!(
@@ -16853,13 +17235,13 @@ mod tests {
             );
             assert_eq!(
                 line_of(&out, input_at.x, input_at.y),
-                field.value,
+                field.value(),
                 "the value is not under its own label"
             );
             // A reading has no border and no fill, which is the whole of what
             // says it cannot be typed into. It has no press region either: a
             // region over a reading answers a press with nothing.
-            assert!(!field.editable);
+            assert!(!field.editable());
             for rgba in [out.skin.input, out.skin.edge] {
                 assert!(
                     !covered(&out, input_at, input_at.h, rgba),
@@ -16929,7 +17311,12 @@ mod tests {
         let places = |out: &Rendered, row: Panel, cols: usize| -> Vec<Panel> {
             let (_, parts) = the_card(out, row, false);
             let across = design::across(card.fields.len(), design::card_cols(cols));
-            settings_card_slots(parts.body, line, card.fields.len(), across)
+            settings_card_slots(
+                parts.body,
+                line,
+                &crate::settings::card_hints(card),
+                across,
+            )
         };
         let side_by_side = places(&wide, wide_row, wide_cols);
         assert_eq!(side_by_side[0].y, side_by_side[1].y, "not on one band");
@@ -17558,9 +17945,8 @@ mod tests {
         );
 
         // And both of them are tracks, so the maximum concurrency is a place to
-        // drop the pointer rather than a number to type. Both of them are in
-        // the right hand column of the form, which is where the two numbers
-        // that decide what the agent gets live.
+        // drop the pointer rather than a number to type. Both of them are
+        // fields of the one card that says what the agent gets.
         for key in crate::agent::OWNED {
             let (index, side) = panel
                 .rows()
@@ -17568,12 +17954,11 @@ mod tests {
                 .enumerate()
                 .find_map(|(at, row)| {
                     [Side::Left, Side::Right].into_iter().find_map(|side| {
-                        matches!(crate::settings::cell(row, side), crate::settings::Row::Setting { key: k, .. } if *k == key)
+                        matches!(crate::settings::control(row, side), Some(crate::settings::Row::Setting { key: k, .. }) if *k == key)
                             .then_some((at, side))
                     })
                 })
                 .unwrap_or_else(|| panic!("{key} is not on the agent section"));
-            assert_eq!(side, Side::Right, "{key} is not in the form's right column");
             assert!(
                 out.layout
                     .settings_tracks

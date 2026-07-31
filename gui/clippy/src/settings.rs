@@ -26,9 +26,9 @@
 //! the one before, wrapping at both ends ([`Settings::walk_section`]). Without
 //! it the rail was pointer-only, which made [`APPEARANCE`] unreachable from the
 //! keyboard, and [`APPEARANCE`] is where a font size raised too far is put back
-//! down. Tab used to cross a form row; that is Shift with the arrow that points
-//! at the half now ([`Settings::cross`]), since shift is what takes the nudge
-//! off left and right. Every line of the footer legend ends with the section
+//! down. Tab used to cross a two column form row; that is Shift with the arrow
+//! that points at the field now ([`Settings::cross`]), since shift is what takes
+//! the nudge off left and right. Every line of the footer legend ends with the section
 //! keys, because the legend is the only thing that says the arrows changed
 //! meaning.
 //!
@@ -78,14 +78,17 @@
 //! session cannot disagree. [`Deed`] is what a press asks for and `main` is
 //! what does it, the same way a [`Change`] is written there and not here.
 //!
-//! **The agent's section is a form, and it shows what the agent is really
+//! **The agent's section is cards, and it shows what the agent is really
 //! told.** Four things anybody opens it for were seven rows apart, with a
-//! heading and three notes standing between them: a section more than half
-//! prose. They are two rows of two now ([`Row::Pair`]), the endpoint and the
-//! file the CLI reads down one column and the two numbers that decide what the
-//! agent gets down the other, with the shifted arrow crossing between them
-//! because the plain arrow keys are the nudge. Under the form are two blocks
-//! ([`Row::Paper`]): the
+//! heading and three notes standing between them, and half of what was left
+//! was a raw environment key over a value with nothing saying what either
+//! meant. It is five cards now ([`Row::Card`]): where the model is, which model
+//! it asks for, what the agent gets, the file all of it is written in, and
+//! whatever else that file carries. Every field is a plain-words label over its
+//! value with the key and what it decides in one sentence under it, and the
+//! shifted arrow crosses between the two fields of a card because the plain
+//! arrow keys are the nudge. Under the cards are two blocks
+//! ([`Row::Paper`]), cards themselves: the
 //! global `AGENTS.md`, which the CLI already reads and puts at the top of every
 //! prompt, and the whole assembled prompt out of `noob debug prompt`. The file
 //! is one capped layer of that prompt, so it is named as the file and never as
@@ -332,14 +335,6 @@ pub enum Row {
     /// toggle that really turns it off, and an uninstall beside it. The row the
     /// column on the right belongs to.
     Entry(Entry),
-    /// Two rows side by side, each in half the width: a form rather than a
-    /// column of far apart lines.
-    ///
-    /// The AGENT section was one thing per row with prose between them, so the
-    /// four things anybody opens it to set were seven rows apart. They are two
-    /// rows of two now, which is what a form is. Never nested: a half is one of
-    /// the plain rows above, and [`cell`] is what reads one out.
-    Pair(Box<Row>, Box<Row>),
     /// A block of text under a title of its own: the agent's own instructions
     /// file, and the prompt it is a layer of. The one row that is more than a
     /// line or two of text.
@@ -351,14 +346,13 @@ pub enum Row {
     /// row at one text size with a hairline under it, so a group title, a field
     /// label and a value all read alike and nothing said where one group ended.
     ///
-    /// One card is one row, the way [`Row::Pair`] is one row, because the
-    /// scroll window counts rows and a card that spanned several of them could
-    /// not be counted. Never nested: a card holds fields, not cards.
+    /// One card is one row, because the scroll window counts rows and a card
+    /// that spanned several of them could not be counted. Never nested: a card holds fields, not cards.
     Card(Card),
 }
 
 /// A group of related settings, drawn in a box of its own.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Card {
     /// What the group is, in the title bar. Upper case, the way the rail's
     /// names are.
@@ -373,30 +367,144 @@ pub struct Card {
     pub hint: Option<String>,
 }
 
-/// One field of a card: its name, what it holds, and whether it can be typed
-/// into.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One field of a card: its name, what it holds, and the sentence that says
+/// what it is for.
+#[derive(Clone, Debug, PartialEq)]
 pub struct CardField {
     /// The name, on its own line above the value. Never beside it: a label and
     /// a value on one line read as one sentence, which is what made every value
     /// on this panel look like part of its label.
+    ///
+    /// Plain words rather than the key the file writes: `NOOB_TASK_CONCURRENCY`
+    /// says nothing to somebody who has not read the CLI. The key is in
+    /// [`CardField::hint`], where it is the answer to "which line do I edit".
     pub label: String,
-    pub value: String,
-    /// Whether the value is typed into rather than read out. A reading is drawn
-    /// in the same shape with no border and no fill, so what can be typed into
-    /// is obvious without pressing anything.
-    pub editable: bool,
+    /// The sentence under the input: what this field decides, and what happens
+    /// when it is not set. Nothing on a field whose label and value say it
+    /// themselves, rather than a line of prose under every one of them.
+    pub hint: Option<String>,
+    /// What the field holds, as the row that kind of value has always been:
+    /// [`Row::Reading`] for something read out, [`Row::Field`] for something
+    /// typed into, [`Row::Setting`] for a number on a track or a name from a
+    /// list.
+    ///
+    /// The same row rather than a second shape for the same thing, so a nudge, a
+    /// drag and an edit are the one code path they were when these were rows of
+    /// their own ([`control`] is what hands this to the keys).
+    pub holds: Box<Row>,
 }
 
 impl CardField {
     /// A field that is read out rather than set.
     pub fn reading(label: &str, value: String) -> CardField {
+        CardField::of(
+            label,
+            Row::Reading {
+                label: String::from(label),
+                value,
+            },
+        )
+    }
+
+    /// A field that is typed into. The one on this panel is the endpoint.
+    pub fn text(label: &str, key: &'static str, value: String) -> CardField {
+        CardField::of(label, Row::Field { key, value })
+    }
+
+    /// A field that is a number on a track, held to the bounds of whoever reads
+    /// the file it is written in.
+    pub fn number(
+        label: &str,
+        key: &'static str,
+        value: String,
+        kind: Kind,
+        file: File,
+    ) -> CardField {
+        CardField::of(
+            label,
+            Row::Setting {
+                key,
+                value,
+                kind,
+                file,
+            },
+        )
+    }
+
+    fn of(label: &str, holds: Row) -> CardField {
         CardField {
             label: String::from(label),
-            value,
-            editable: false,
+            hint: None,
+            holds: Box::new(holds),
         }
     }
+
+    /// The sentence under it. Written at the call site so the field and what it
+    /// means are one expression rather than two lists to keep in step.
+    pub fn saying(mut self, hint: &str) -> CardField {
+        self.hint = Some(String::from(hint));
+        self
+    }
+
+    /// What the field says right now, for whoever draws it.
+    pub fn value(&self) -> &str {
+        match self.holds.as_ref() {
+            Row::Reading { value, .. } | Row::Field { value, .. } | Row::Setting { value, .. } => {
+                value
+            }
+            // Nothing else is ever built into a field, and a field with nothing
+            // in it is drawn as the empty line it is rather than panicking a
+            // window that is already open.
+            _ => "",
+        }
+    }
+
+    /// Whether the value is changed here rather than read out. A reading is
+    /// drawn in the same shape with no border and no fill, so what can be typed
+    /// into is obvious without pressing anything.
+    pub fn editable(&self) -> bool {
+        landable(&self.holds)
+    }
+}
+
+/// Which field of a card one side names.
+///
+/// A press carries a [`Side`] and a side is one of two, so the fields a card
+/// lets anybody change are its first two. Everything after them is read out,
+/// and `a_cards_editable_fields_are_the_two_a_press_can_name` fails on a card
+/// built the other way round.
+pub fn card_slot(side: Side) -> usize {
+    match side {
+        Side::Left => 0,
+        Side::Right => 1,
+    }
+}
+
+/// The one field of a card a side names, or nothing when the card has none
+/// there.
+pub fn card_field(card: &Card, side: Side) -> Option<&CardField> {
+    card.fields.get(card_slot(side))
+}
+
+/// Whether every field of a card that can be changed is one a press can name.
+///
+/// Read by the test that walks every section: a card with a third field that
+/// can be changed is a control the pointer cannot reach and the keyboard cannot
+/// cross to.
+#[cfg(test)]
+pub fn card_is_reachable(card: &Card) -> bool {
+    !card.fields.iter().skip(2).any(CardField::editable)
+}
+
+/// One flag per field of a card, saying whether it carries a sentence.
+///
+/// The one list the height arithmetic runs on: [`card_body_lines`] counts with
+/// it and `view::settings_card_slots` places with it.
+pub fn card_hints(card: &Card) -> Vec<bool> {
+    card.fields
+        .iter()
+        .map(|field| field.hint.is_some())
+        .collect()
 }
 
 /// A block of text on the panel, with a title over it.
@@ -437,8 +545,12 @@ impl Paper {
 /// would put every click under it on another row.
 pub const PAPER_LINES: usize = 12;
 
-/// Which half of a [`Row::Pair`] something is in. Left for every row that is not
-/// one, so a press on an ordinary row is still a press on the row.
+/// Which field of a card something is in. Left for every row that is not one, so
+/// a press on an ordinary row is still a press on the row.
+///
+/// It was which half of a two column form row a press landed in. The form is
+/// gone: a card is what groups two settings side by side now, and this is which
+/// of its fields the press or the keys are on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
     Left,
@@ -454,15 +566,20 @@ impl Side {
     }
 }
 
-/// One half of a row, or the row itself when it is not a pair.
+/// What the keys and the pointer act on in one slot of a row: the field a card
+/// keeps there, or the row itself.
 ///
 /// Asked by the model, the layout and the drawing, so what a key changes, what a
-/// click lands on and what is drawn are the same thing.
-pub fn cell(row: &Row, side: Side) -> &Row {
-    match (row, side) {
-        (Row::Pair(left, _), Side::Left) => left,
-        (Row::Pair(_, right), Side::Right) => right,
-        (row, _) => row,
+/// click lands on and what is drawn are the same thing. Nothing when a card has
+/// no field in that slot, which is what stops the right hand side of a one field
+/// card reading as somewhere the cursor can go. The row it hands back is a
+/// [`Row::Setting`], a [`Row::Field`] or a [`Row::Reading`] whether it came out
+/// of a card or off the section, so a nudge, a drag and an edit are the one code
+/// path for both.
+pub fn control(row: &Row, side: Side) -> Option<&Row> {
+    match row {
+        Row::Card(card) => card_field(card, side).map(|field| field.holds.as_ref()),
+        row => Some(row),
     }
 }
 
@@ -583,13 +700,22 @@ pub fn lines(row: &Row, cols: usize) -> usize {
         // rows whatever the description said, and a description longer than the
         // column ended in an ellipsis with the rest of it unreadable.
         Row::Entry(entry) => crate::design::card_row_lines(entry_body_lines(entry, cols), true),
-        // As tall as the taller half, so the two columns of a form sit on the
-        // same lines and the rows under them do not move when one half changes.
-        Row::Pair(left, right) => lines(left, cols).max(lines(right, cols)),
-        // Its title, the line under it, and the text.
-        Row::Paper(_) => PAPER_LINES + 2,
+        // A block of text is a card too: its title in the header, where the
+        // text came from and the text itself in the body. It was a bare title,
+        // a bare line and twelve lines of prose with nothing round any of it,
+        // which on a panel of cards is the one thing on screen that reads as
+        // loose text.
+        Row::Paper(_) => crate::design::card_row_lines(paper_body_lines(), false),
         _ => 1,
     }
+}
+
+/// How tall a block of text is inside its card, in lines: where it came from,
+/// and the [`PAPER_LINES`] of the text itself under that.
+pub fn paper_body_lines() -> f32 {
+    crate::design::TEXT_LINES
+        + crate::design::TIGHT
+        + PAPER_LINES as f32 * crate::design::TEXT_LINES
 }
 
 /// How tall a card's body is, in lines, inside a list `cols` wide.
@@ -603,9 +729,7 @@ pub fn lines(row: &Row, cols: usize) -> usize {
 pub fn card_body_lines(card: &Card, cols: usize) -> f32 {
     let cols = crate::design::card_cols(cols);
     let across = crate::design::across(card.fields.len(), cols);
-    let bands = card.fields.len().div_ceil(across.max(1)).max(1);
-    let tall = bands as f32 * crate::design::field_lines(false)
-        + crate::design::STEP * bands.saturating_sub(1) as f32;
+    let tall = crate::design::fields_lines(&card_hints(card), across);
     match card.hint.is_some() {
         true => tall + crate::design::STEP + crate::design::TEXT_LINES,
         false => tall,
@@ -661,6 +785,77 @@ const CUSTOM: &str = "custom";
 /// What a field with nothing in it reads as. Drawn instead of an empty row,
 /// which reads as a value that failed to load rather than one nobody set.
 pub const UNSET: &str = "not set";
+
+/// What a credential reads as. Never the value: the panel says whether the key
+/// is there and nothing more.
+pub const SECRET: &str = "set, and not shown here";
+
+/// The keys of the agent's file this section draws a field of its own for: what
+/// to call each one in plain words, and the sentence under it.
+///
+/// The key is in the sentence rather than in the label. `NOOB_TASK_CONCURRENCY`
+/// over a number says nothing to somebody who has not read the CLI, and the
+/// whole complaint about this section was that half its rows said nothing about
+/// what they did; the sentence is also the answer to "which line do I edit",
+/// since three of these five are only editable in the file.
+///
+/// Every sentence here is read off the CLI: the bounds and the fallbacks are in
+/// [`crate::agent`], the two request shapes and the thinking switch are what
+/// `noob-provider` refuses anything else for, and the probe is what a missing
+/// base URL really does.
+const AGENT_FIELDS: [(&str, &str, &str); 7] = [
+    (
+        agent::ENDPOINT,
+        "endpoint",
+        "NOOB_BASE_URL. Left empty, noob probes the usual local ports",
+    ),
+    (
+        agent::API_KEY,
+        "api key",
+        "NOOB_API_KEY. Sent as the bearer token, and never shown here",
+    ),
+    (
+        agent::MODEL,
+        "model",
+        "NOOB_MODEL. Which model to ask that endpoint for, by its name",
+    ),
+    (
+        agent::API_STYLE,
+        "api style",
+        "NOOB_API_STYLE. chat or responses; unset, noob picks by the address",
+    ),
+    (
+        agent::REASONING,
+        "reasoning",
+        "NOOB_REASONING. on or off; unset, the server's own flags decide",
+    ),
+    (
+        agent::CTX,
+        "context window",
+        "NOOB_CTX. Tokens a session is budgeted before the CLI compacts it",
+    ),
+    (
+        agent::TASK_CONCURRENCY,
+        "tasks at once",
+        "NOOB_TASK_CONCURRENCY. Sub-agent tasks at once, capped at sixteen",
+    ),
+];
+
+/// What to call one of the agent's keys, and what to say under it. The key
+/// itself for anything not on [`AGENT_FIELDS`], which is the honest label for a
+/// line this window knows nothing about.
+fn agent_says(key: &str) -> (&str, &'static str) {
+    match AGENT_FIELDS.iter().find(|(known, ..)| *known == key) {
+        Some((_, label, hint)) => (label, hint),
+        None => (key, ""),
+    }
+}
+
+/// Whether the section already draws a field for a key, which is what keeps the
+/// last card the rest of the file rather than the whole of it twice.
+fn agent_has_a_field(key: &str) -> bool {
+    AGENT_FIELDS.iter().any(|(known, ..)| *known == key)
+}
 
 /// The key that picks a preset, named here because two places want it: the row
 /// is built with the rest of [`LOOKS`] and then drawn at the top of the palette
@@ -909,8 +1104,8 @@ pub struct Section {
     /// document. Its own number because the two columns scroll separately: the
     /// wheel over a skill's own text must not walk the list of skills.
     doc_first: usize,
-    /// Which half of a [`Row::Pair`] the keyboard is in. Kept while the cursor
-    /// walks rows, so going down a form column stays in that column.
+    /// Which field of a card the keyboard is in. Kept while the cursor walks
+    /// rows, so going down one column of cards stays in that column.
     side: Side,
 }
 
@@ -1128,91 +1323,145 @@ impl Settings {
 
     /// What the agent is pointed at, out of the file the CLI owns.
     ///
-    /// A form, not a column. The four things anybody opens this section to look
-    /// at were seven rows apart with a heading and three notes between them,
-    /// which is a section more than half prose. They are two rows of two now:
-    /// where the model is and which file says so on the left, how much the agent
-    /// gets on the right. What the notes were saying is either on the row itself
-    /// or gone, and the two blocks under the form are the instructions the agent
-    /// really receives.
+    /// Cards, in the order somebody meeting this window needs them: where the
+    /// model is, which model it is, how much the agent gets, the file all of it
+    /// is written in, and whatever else that file carries. Then the two
+    /// documents, which are cards as well.
+    ///
+    /// "actually is awful as is now, unclear because has too many lines
+    /// between". It was a two column form of raw environment keys with three
+    /// notes standing in the middle of it, and half its rows said nothing about
+    /// what they did: `NOOB_TASK_CONCURRENCY 4` is not a setting anybody can
+    /// act on. Every field is a plain-words label over its value now, with the
+    /// key and what it decides in one sentence under it, and the space between
+    /// them is the card rather than a line.
     fn agent_rows(&self) -> Vec<Row> {
         let mut unset = Vec::new();
         let mut numbers = Vec::new();
         for (key, kind) in AGENT_SETTINGS {
-            numbers.push(Row::Setting {
-                key,
-                value: match self.agent.setting(key) {
-                    Some(value) => value.to_string(),
-                    None => {
-                        unset.push(key);
-                        agent_default(key)
-                    }
-                },
-                kind,
-                file: File::Agent,
-            });
+            let value = match self.agent.setting(key) {
+                Some(value) => value.to_string(),
+                None => {
+                    unset.push(key);
+                    agent_default(key)
+                }
+            };
+            let (label, hint) = agent_says(key);
+            numbers.push(CardField::number(label, key, value, kind, File::Agent).saying(hint));
         }
         let tasks = numbers.pop().expect("both of the agent's numbers");
         let ctx = numbers.pop().expect("both of the agent's numbers");
         let mut rows = vec![
-            Row::Pair(
-                Box::new(Row::Field {
-                    key: agent::ENDPOINT,
-                    value: self.agent.endpoint().unwrap_or_default().to_string(),
-                }),
-                Box::new(ctx),
-            ),
-            Row::Pair(
-                Box::new(Row::Reading {
-                    label: String::from("main file"),
-                    value: match (&self.agent.env_path, self.agent.env_exists) {
-                        // Not there yet is worth saying: an agent configured
-                        // entirely by environment has no file at all, and the
-                        // first save writes one.
-                        (Some(path), false) => format!("{} (not there yet)", path.display()),
-                        (Some(path), true) => path.display().to_string(),
-                        (None, _) => String::from("nowhere: no config directory to read one in"),
-                    },
-                }),
-                Box::new(tasks),
-            ),
+            // The endpoint first, because an agent pointed at nothing is the
+            // one state this window cannot work in, and its credential beside
+            // it, because that is the other half of reaching a server.
+            Row::Card(Card {
+                title: String::from("WHERE THE MODEL IS"),
+                fields: vec![
+                    CardField::text(
+                        "endpoint",
+                        agent::ENDPOINT,
+                        self.agent.endpoint().unwrap_or_default().to_string(),
+                    )
+                    .saying(agent_says(agent::ENDPOINT).1),
+                    CardField::reading("api key", self.env_says(agent::API_KEY))
+                        .saying(agent_says(agent::API_KEY).1),
+                ],
+                hint: None,
+            }),
+            Row::Card(Card {
+                title: String::from("WHICH MODEL IT ASKS FOR"),
+                fields: [agent::MODEL, agent::API_STYLE, agent::REASONING]
+                    .into_iter()
+                    .map(|key| {
+                        let (label, hint) = agent_says(key);
+                        CardField::reading(label, self.env_says(key)).saying(hint)
+                    })
+                    .collect(),
+                // Said once, on the card, rather than three times under three
+                // fields that cannot be typed into.
+                hint: Some(String::from(
+                    "read out of the file: the endpoint is the one line this window types into",
+                )),
+            }),
+            Row::Card(Card {
+                title: String::from("WHAT THE AGENT GETS"),
+                fields: vec![ctx, tasks],
+                hint: match unset.is_empty() {
+                    true => None,
+                    // A slider showing a number nobody wrote, with nothing
+                    // saying so, is a window inventing a setting.
+                    false => Some(format!(
+                        "not in the file yet: {}. Until then these read what the CLI falls back to, and nudging one writes the line",
+                        unset.join(" and ")
+                    )),
+                },
+            }),
+            Row::Card(Card {
+                title: String::from("THE FILE ALL OF THIS IS IN"),
+                fields: vec![
+                    CardField::reading(
+                        "the agent's file",
+                        match (&self.agent.env_path, self.agent.env_exists) {
+                            // Not there yet is worth saying: an agent configured
+                            // entirely by environment has no file at all, and the
+                            // first save writes one.
+                            (Some(path), false) => format!("{} (not there yet)", path.display()),
+                            (Some(path), true) => path.display().to_string(),
+                            (None, _) => {
+                                String::from("nowhere: no config directory to read one in")
+                            }
+                        },
+                    )
+                    .saying("one KEY=value to a line; the CLI re-reads it on every request"),
+                ],
+                hint: None,
+            }),
         ];
-        if self.agent.endpoint().is_none() {
-            rows.push(note(
-                "with no endpoint set, noob probes the usual local ports and takes the first that answers",
-            ));
-        }
-        if !unset.is_empty() {
-            rows.push(note(&format!(
-                "not in the file yet: {}. Until then those rows read what the CLI falls back to, and nudging one writes the line",
-                unset.join(" and ")
-            )));
-        }
-        // The rest of what the file sets, with the form it belongs to. These
-        // used to come after the two blocks, which put them thirty-odd lines
-        // below the rows they read with and left the section going form, two
-        // documents, more form. A section reads as its form and then the
-        // documents under it, so every row off the file stays above the first
-        // block.
-        for (key, value) in &self.agent.env {
-            if key == agent::ENDPOINT || agent::OWNED.contains(&key.as_str()) {
-                continue;
-            }
-            rows.push(Row::Reading {
-                label: key.clone(),
+        // Whatever else the file carries, under one title rather than as loose
+        // rows: a key this window has never heard of is still a key the agent
+        // reads, and a section that dropped it would be a window claiming the
+        // file says less than it does.
+        let rest: Vec<CardField> = self
+            .agent
+            .env
+            .iter()
+            .filter(|(key, _)| !agent_has_a_field(key))
+            .map(|(key, _)| {
                 // A credential is reported as set and never as itself. The CLI
                 // keeps secrets out of settable config on purpose, and a window
                 // is a worse place for one than a terminal: it is on a screen
                 // somebody else can be standing behind.
-                value: match agent::is_secret(key) {
-                    true => String::from("set, and not shown here"),
-                    false => value.clone(),
-                },
-            });
+                CardField::reading(key, self.env_says(key))
+            })
+            .collect();
+        if !rest.is_empty() {
+            rows.push(Row::Card(Card {
+                title: String::from("THE REST OF THE FILE"),
+                fields: rest,
+                hint: Some(String::from(
+                    "keys the CLI reads that this window has no control for: edit them in the file",
+                )),
+            }));
         }
+        // The documents last, and nothing under them: they are a screenful
+        // each, and a field below one is a field nobody scrolls to.
         rows.push(Row::Paper(self.instructions_paper()));
         rows.push(Row::Paper(self.prompt_paper()));
         rows
+    }
+
+    /// What the agent's file says for one key, said the way this panel says it.
+    ///
+    /// A credential is `set, and not shown here`; a key the file does not carry
+    /// reads [`UNSET`], which is a field that says nobody has set it rather than
+    /// an empty line that reads as a value that failed to load.
+    fn env_says(&self, key: &str) -> String {
+        match self.agent.env.iter().find(|(known, _)| known == key) {
+            Some(_) if agent::is_secret(key) => String::from(SECRET),
+            Some((_, value)) => value.clone(),
+            None => String::from(UNSET),
+        }
     }
 
     /// The agent's global instructions, under a title naming the file they are
@@ -1588,12 +1837,16 @@ impl Settings {
     #[cfg(test)]
     pub fn all_rows(&self) -> impl Iterator<Item = (&'static str, &Row)> {
         self.sections.iter().flat_map(|section| {
-            section.rows.iter().flat_map(move |row| match row {
-                Row::Pair(left, right) => vec![
-                    (section.name, left.as_ref()),
-                    (section.name, right.as_ref()),
-                ],
-                row => vec![(section.name, row)],
+            section.rows.iter().flat_map(move |row| {
+                let mut out = vec![(section.name, row)];
+                if let Row::Card(card) = row {
+                    out.extend(
+                        card.fields
+                            .iter()
+                            .map(|field| (section.name, field.holds.as_ref())),
+                    );
+                }
+                out
             })
         })
     }
@@ -1622,24 +1875,24 @@ impl Settings {
         let Some(row) = here.rows.get(here.cursor) else {
             return Side::Left;
         };
-        if !matches!(row, Row::Pair(_, _)) {
+        if !two_sided(row) {
             return Side::Left;
         }
-        match landable(cell(row, here.side)) {
+        match landable_at(row, here.side) {
             true => here.side,
             false => here.side.other(),
         }
     }
 
     /// The half of the row under the cursor the keys act on, which is the row
-    /// itself everywhere but in a form.
+    /// itself everywhere but in a form or a card.
     pub fn at_cursor(&self) -> Option<&Row> {
-        Some(cell(self.row(self.cursor())?, self.side()))
+        control(self.row(self.cursor())?, self.side())
     }
 
-    /// One half of one row, for the layout and the drawing.
+    /// One slot of one row, for the layout and the drawing.
     pub fn cell(&self, index: usize, side: Side) -> Option<&Row> {
-        Some(cell(self.row(index)?, side))
+        control(self.row(index)?, side)
     }
 
     /// Move to one half of a form row, which is the one thing on this panel the
@@ -1659,10 +1912,10 @@ impl Settings {
             return false;
         }
         let here = self.here();
-        let Some(row @ Row::Pair(_, _)) = here.rows.get(here.cursor) else {
+        let Some(row) = here.rows.get(here.cursor).filter(|row| two_sided(row)) else {
             return false;
         };
-        if !landable(cell(row, to)) {
+        if !landable_at(row, to) {
             return false;
         }
         self.picked = None;
@@ -1821,12 +2074,14 @@ impl Settings {
         if self.editing.is_some() {
             return "type it \u{2022} enter saves it \u{2022} esc leaves it alone";
         }
-        // On a form row, the one thing the plain arrow keys cannot say is how to
-        // get to the other half of it, because left and right are the nudge.
-        let across = matches!(self.row(self.cursor()), Some(Row::Pair(_, _)))
-            && self.here().rows.get(self.cursor()).is_some_and(|row| {
-                landable(cell(row, Side::Left)) && landable(cell(row, Side::Right))
-            });
+        // On a card of two fields, the one thing the plain arrow keys cannot
+        // say is how to get to the other one, because left and right are the
+        // nudge.
+        let across = self.row(self.cursor()).is_some_and(|row| {
+            two_sided(row)
+                && landable_at(row, Side::Left)
+                && landable_at(row, Side::Right)
+        });
         match self.at_cursor() {
             Some(Row::Setting { kind, .. }) => match (kind, across) {
                 (Kind::Choice(_), _) => {
@@ -1836,7 +2091,7 @@ impl Settings {
                     "up and down move \u{2022} left and right nudge it, or drag the slider \u{2022} tab and shift-tab change section"
                 }
                 (Kind::Number { .. }, true) => {
-                    "left and right nudge it \u{2022} shift left and right cross the form \u{2022} tab and shift-tab change section"
+                    "left and right nudge it \u{2022} shift left and right cross the card \u{2022} tab and shift-tab change section"
                 }
             },
             Some(Row::Paper(paper)) => match paper.offer.is_some() {
@@ -1848,10 +2103,13 @@ impl Settings {
                 }
             },
             Some(Row::Field { .. }) if across => {
-                "enter edits it \u{2022} shift left and right cross the form \u{2022} tab and shift-tab change section"
+                "enter edits it \u{2022} shift left and right cross the card \u{2022} tab and shift-tab change section"
             }
+            // Naming the arrows on every row the cursor can land on is the
+            // legend's whole job: they are the rows now, and this row is the one
+            // the panel opens on.
             Some(Row::Field { .. }) => {
-                "enter edits it \u{2022} tab and shift-tab change section \u{2022} esc closes"
+                "up and down move \u{2022} enter edits it \u{2022} tab and shift-tab change section"
             }
             Some(Row::Entry(entry)) => match (entry.removable, &entry.what) {
                 (false, _) => {
@@ -2408,11 +2666,11 @@ impl Settings {
         let Some(row) = self.row(index) else {
             return false;
         };
-        let side = match landable(cell(row, side)) {
+        let side = match landable_at(row, side) {
             true => side,
             false => side.other(),
         };
-        if !landable(cell(row, side)) {
+        if !landable_at(row, side) {
             return false;
         }
         self.picked = None;
@@ -2659,9 +2917,29 @@ fn landable(row: &Row) -> bool {
         | Row::Entry(_)
         | Row::Paper(_)
         | Row::Session { .. } => true,
-        Row::Pair(left, right) => landable(left) || landable(right),
+        // A card of readings is read and never landed on; a card with something
+        // to set holds the cursor on whichever of its first two fields that is.
+        // Only those two, because a press carries a [`Side`]: a card that kept
+        // the cursor for a field nothing can name is a row the arrow keys stop
+        // on and no key changes.
+        Row::Card(card) => [Side::Left, Side::Right]
+            .into_iter()
+            .any(|side| card_field(card, side).is_some_and(CardField::editable)),
         _ => false,
     }
+}
+
+/// Whether one slot of a row can hold the cursor: the field a card keeps there,
+/// or the half of a form.
+fn landable_at(row: &Row, side: Side) -> bool {
+    control(row, side).is_some_and(landable)
+}
+
+/// Whether a row is read a slot at a time, which is what makes the shifted
+/// arrow keys mean something on it: a form of two halves, or a card whose
+/// fields are both set here.
+fn two_sided(row: &Row) -> bool {
+    matches!(row, Row::Card(_))
 }
 
 /// The next row in that direction the cursor can land on, not counting the one
@@ -2813,7 +3091,7 @@ mod tests {
                 [Side::Left, Side::Right]
                     .into_iter()
                     .find(|side| {
-                        matches!(cell(row, *side), Row::Setting { key: k, .. } if *k == key)
+                        matches!(control(row, *side), Some(Row::Setting { key: k, .. }) if *k == key)
                     })
                     .map(|side| (at, side))
             })
@@ -2872,20 +3150,19 @@ mod tests {
                         false => "off",
                     }
                 ),
-                // Both halves, the way both of them are on the panel.
-                Row::Pair(left, right) => format!("{}\n{}", says(left), says(right)),
                 Row::Paper(paper) => format!(
                     "{}\n{}\n{}",
                     paper.title,
                     paper.under,
                     paper.body.join("\n")
                 ),
-                // The title, then every field the way a reading is said, then
-                // the sentence under them.
+                // The title, then every field as its label, its value and the
+                // sentence under it, then the sentence under the card.
                 Row::Card(card) => {
                     let mut out = vec![card.title.clone()];
                     for field in &card.fields {
-                        out.push(format!("{} {}", field.label, field.value));
+                        out.push(format!("{} {}", field.label, field.value()));
+                        out.extend(field.hint.clone());
                     }
                     out.extend(card.hint.clone());
                     out.join("\n")
@@ -2903,6 +3180,55 @@ mod tests {
             context: None,
             opening: String::from(opening),
         }
+    }
+
+    /// Every card on the panel is a card a press can work: each field named,
+    /// and nothing that can be changed sitting where no press can name it.
+    ///
+    /// A press carries a [`Side`] and a side is one of two, so the two fields a
+    /// card can be changed through are its first two. A third one would draw as
+    /// a control and answer nothing.
+    #[test]
+    fn every_card_on_the_panel_is_named_and_reachable() {
+        let mut panel = over(&Config::default());
+        let dir = scratch_dir("cards");
+        std::fs::write(
+            dir.join(".env"),
+            "NOOB_BASE_URL=http://localhost:8080/v1\nNOOB_MODEL=laguna-s\nNOOB_SOMETHING=1\n",
+        )
+        .expect("a file");
+        panel.adopt_agent(
+            Agent::read(Some(&dir), None, crate::sessions::Listing::default()),
+            &Config::default(),
+        );
+        let mut cards = 0;
+        for (section, row) in panel.all_rows() {
+            let Row::Card(card) = row else {
+                continue;
+            };
+            cards += 1;
+            assert!(!card.title.is_empty(), "{section}: a card with no title");
+            assert!(
+                card_is_reachable(card),
+                "{section}: {} keeps a field that can be set where no press can name it",
+                card.title
+            );
+            for field in &card.fields {
+                assert!(
+                    !field.label.is_empty(),
+                    "{section}: {} has a field with no name",
+                    card.title
+                );
+                assert!(
+                    field.hint.is_some() || card.hint.is_some(),
+                    "{section}: {} says nothing about {}",
+                    card.title,
+                    field.label
+                );
+            }
+        }
+        assert!(cards >= 6, "only {cards} cards on the whole panel");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Every section on the rail is reached by pressing it, and every one of
@@ -3778,9 +4104,6 @@ mod tests {
                 Row::Columns(names) => names.clone(),
                 Row::Session { cells, .. } => cells.iter().map(String::as_str).collect(),
                 Row::Entry(entry) => vec![entry.name.as_str()],
-                // A form is its halves here: `all_rows` hands those back
-                // instead of the pair they are in.
-                Row::Pair(_, _) => Vec::new(),
                 Row::Paper(paper) => vec![paper.title.as_str(), paper.under.as_str()],
                 Row::Card(card) => {
                     let mut said = vec![card.title.as_str()];
@@ -4270,16 +4593,19 @@ mod tests {
             "the panel does not say where the file is: {text}"
         );
         assert!(text.contains("http://localhost:8080/v1"), "{text}");
-        assert!(text.contains("NOOB_CTX 262144"), "{text}");
+        // The number is under a name anybody can read, with the key that writes
+        // it in the sentence under it rather than standing in for the name.
+        assert!(text.contains("context window 262144"), "{text}");
+        assert!(text.contains("NOOB_CTX."), "{text}");
         assert!(!text.contains("sk-secret"), "a credential is on the panel: {text}");
-        assert!(text.contains("NOOB_API_KEY set, and not shown here"), "{text}");
+        assert!(text.contains(&format!("api key {SECRET}")), "{text}");
         assert_eq!(panel.agent_file(), Some(dir.join(".env").as_path()));
 
         // The endpoint is the one thing here that is typed into rather than
-        // nudged, and it is where the section opens: the left half of the first
-        // row of the form.
+        // nudged, and it is where the section opens: the first field of the
+        // first card.
         assert!(panel.on_row());
-        assert_eq!(panel.cursor(), 0, "the section does not open on the form");
+        assert_eq!(panel.cursor(), 0, "the section does not open on the endpoint");
         assert_eq!(panel.side(), Side::Left);
         assert!(
             matches!(panel.at_cursor(), Some(Row::Field { key, .. }) if *key == agent::ENDPOINT),
@@ -4443,16 +4769,17 @@ mod tests {
     }
 
     /// "actually is awful as is now, unclear because has too many lines
-    /// between": the four things this section is for are a form of two columns,
-    /// two rows tall, and the keyboard reaches every one of them.
+    /// between": the section is cards, every field of every one of them is a
+    /// label with a sentence under it, and the keyboard reaches everything that
+    /// can be set.
     ///
-    /// Left and right are the nudge on a control, so they cannot also be how a
-    /// form is crossed; tab is, which is what tab does on every other form. The
-    /// heading and the three notes that used to sit between these rows are gone,
-    /// so nothing that cannot be set stands between two things that can.
+    /// It was a two column form of raw environment keys with notes standing
+    /// between the rows. Left and right are the nudge on a control, so they
+    /// cannot also be how a card is crossed: the shifted arrow is, and it points
+    /// at the field it lands on.
     #[test]
-    fn the_agent_s_form_is_two_columns_the_keyboard_can_both_reach() {
-        let dir = scratch_dir("agent-form");
+    fn the_agent_is_cards_the_keyboard_can_walk() {
+        let dir = scratch_dir("agent-cards");
         std::fs::write(
             dir.join(".env"),
             "NOOB_BASE_URL=http://localhost:8080/v1\nNOOB_CTX=262144\nNOOB_TASK_CONCURRENCY=2\n",
@@ -4465,51 +4792,96 @@ mod tests {
         );
         go_to(&mut panel, AGENT);
 
-        // Two rows of two: where the model is and which file says so on the
-        // left, how much the agent gets on the right.
-        for (at, left, right) in [
-            (0usize, agent::ENDPOINT, agent::CTX),
-            (1, "main file", agent::TASK_CONCURRENCY),
-        ] {
-            let row = panel.row(at).expect("a row of the form");
-            assert!(matches!(row, Row::Pair(_, _)), "row {at} is {row:?}");
-            assert!(
-                says(cell(row, Side::Left)).contains(left),
-                "{:?}",
-                cell(row, Side::Left)
-            );
-            assert!(
-                says(cell(row, Side::Right)).contains(right),
-                "{:?}",
-                cell(row, Side::Right)
-            );
-            // Both halves on the same lines, so the two columns line up.
-            assert_eq!(lines(row, COLS), 1);
-        }
-        // Nothing that cannot be set stands between the two rows of the form.
-        assert!(
-            !panel.rows()[..2]
-                .iter()
-                .any(|row| matches!(row, Row::Note { .. } | Row::Heading(_))),
-            "{:?}",
-            panel.rows()
+        // Cards, in the order somebody needs them, and the two documents last.
+        let titles: Vec<String> = panel
+            .rows()
+            .iter()
+            .map(|row| match row {
+                Row::Card(card) => card.title.clone(),
+                Row::Paper(paper) => paper.title.clone(),
+                other => panic!("the section carries a loose row: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "WHERE THE MODEL IS",
+                "WHICH MODEL IT ASKS FOR",
+                "WHAT THE AGENT GETS",
+                "THE FILE ALL OF THIS IS IN",
+                "GLOBAL INSTRUCTIONS \u{2022} AGENTS.md",
+                "THE PROMPT THE AGENT GETS",
+            ],
+            "{titles:?}"
         );
 
-        // It opens on the endpoint, the shifted arrow crosses to the number
-        // beside it, and there the plain arrow keys still nudge that number
-        // rather than moving again. This asserted tab as the crossing: tab walks
-        // the rail now (`tab_walks_the_sections_and_the_arrows_walk_the_rows`)
-        // and the crossing is shift with the arrow that points at the half.
+        // Every field is a label nobody has to have read the CLI to understand,
+        // with the key and what it decides in one sentence under it. A row that
+        // says `NOOB_TASK_CONCURRENCY 4` and nothing else is the complaint.
+        for row in panel.rows() {
+            let Row::Card(card) = row else {
+                continue;
+            };
+            assert!(
+                card_is_reachable(card),
+                "{}: a field that can be set is past the two a press can name",
+                card.title
+            );
+            for field in &card.fields {
+                assert!(!field.label.is_empty(), "{}: a field has no name", card.title);
+                assert!(
+                    field.label.chars().all(|ch| !ch.is_ascii_uppercase()),
+                    "{}: {} is a key rather than a name",
+                    card.title,
+                    field.label
+                );
+                let hint = field.hint.clone().unwrap_or_default();
+                assert!(
+                    !hint.is_empty() || card.hint.is_some(),
+                    "{}: {} says nothing about what it is",
+                    card.title,
+                    field.label
+                );
+            }
+        }
+        // The three keys nobody could act on before are named in the sentences,
+        // so the field says which line of the file writes it.
+        let text = said(&panel);
+        for key in [
+            agent::ENDPOINT,
+            agent::API_KEY,
+            agent::MODEL,
+            agent::CTX,
+            agent::TASK_CONCURRENCY,
+        ] {
+            assert!(text.contains(key), "{key} is nowhere on the section: {text}");
+        }
+
+        // It opens on the endpoint, the shifted arrow crosses to the field
+        // beside it, and the plain arrow keys still nudge rather than moving on.
         assert_eq!((panel.cursor(), panel.side()), (0, Side::Left));
         assert!(matches!(panel.at_cursor(), Some(Row::Field { .. })));
+        assert!(panel.hint().contains("enter edits it"), "{}", panel.hint());
+        // The api key beside it is read out, so there is nowhere to cross to and
+        // the cursor stays where something can be done.
+        assert!(!panel.cross(Side::Right), "the cursor crossed onto a reading");
+
+        // Down to the card of numbers: two fields, both of them tracks, and the
+        // shifted arrow crosses between them.
+        let numbers = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, Row::Card(card) if card.title == "WHAT THE AGENT GETS"))
+            .expect("the card of numbers");
+        assert!(panel.point_at(numbers, Side::Left));
         assert!(
-            panel.hint().contains("shift left and right cross the form"),
+            matches!(panel.at_cursor(), Some(Row::Setting { key, .. }) if *key == agent::CTX)
+        );
+        assert!(
+            panel.hint().contains("shift left and right cross"),
             "{}",
             panel.hint()
         );
-        assert!(!panel.cross(Side::Left), "it is already in that half");
-        assert!(panel.cross(Side::Right));
-        assert_eq!((panel.cursor(), panel.side()), (0, Side::Right));
         assert_eq!(
             panel.change(true).expect("the context window nudges"),
             Change {
@@ -4518,33 +4890,52 @@ mod tests {
                 file: File::Agent,
             }
         );
-        // And down the right hand column: the half is kept while the cursor
-        // walks rows, so a form is read a column at a time.
-        assert!(panel.step(true));
-        assert_eq!((panel.cursor(), panel.side()), (1, Side::Right));
+        assert!(!panel.cross(Side::Left), "it is already in that field");
+        assert!(panel.cross(Side::Right));
         assert!(
             matches!(panel.at_cursor(), Some(Row::Setting { key, .. }) if *key == agent::TASK_CONCURRENCY)
         );
-        // The left half of that row is a reading, so the crossing has nowhere to
-        // go and the cursor stays where something can be done.
-        assert!(!panel.cross(Side::Left), "the cursor crossed onto a reading");
-        assert!(panel.step(false));
-        assert_eq!((panel.cursor(), panel.side()), (0, Side::Right));
-        assert!(panel.cross(Side::Left));
-        assert!(matches!(panel.at_cursor(), Some(Row::Field { .. })));
+
+        // And the cards of readings hold no cursor at all: a row the arrow keys
+        // stop on where no key does anything is a dead stop.
+        for (at, row) in panel.rows().iter().enumerate() {
+            let Row::Card(card) = row else {
+                continue;
+            };
+            let settable = card.fields.iter().any(CardField::editable);
+            assert_eq!(
+                landable(row),
+                settable,
+                "row {at}, {}, holds the cursor over nothing",
+                card.title
+            );
+        }
+
+        // Up and down walk the cards that can be set and the two documents, and
+        // every one of them is reachable from the top.
+        assert!(panel.jump(false));
+        let mut seen = vec![panel.cursor()];
+        while panel.step(true) {
+            seen.push(panel.cursor());
+        }
+        assert_eq!(
+            seen,
+            vec![0, numbers, numbers + 2, numbers + 3],
+            "the keyboard cannot walk the section: {seen:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Every row that reads the agent's file sits with the form, above the two
-    /// blocks.
+    /// Every key of the agent's file is on a card above the two blocks, the one
+    /// this window has no control for included.
     ///
     /// The rest of the environment used to be pushed on after the blocks, which
     /// left it about thirty lines under the rows it reads with: the section went
-    /// form, two documents, and then more form. It is the same complaint as the
-    /// headings and notes the form replaced, from the other side. Under the
-    /// first block there is nothing but the other block.
+    /// form, two documents, and then more form. Under the first block there is
+    /// nothing but the other block. A key the window has never heard of is still
+    /// a key the agent reads, so it is on the last card rather than dropped.
     #[test]
-    fn the_agent_form_keeps_its_rows_above_the_blocks() {
+    fn the_agent_cards_keep_every_key_above_the_blocks() {
         let dir = scratch_dir("agent-form-order");
         std::fs::write(
             dir.join(".env"),
@@ -4567,19 +4958,37 @@ mod tests {
             "the first block is not the instructions: {:?}",
             rows[first_block]
         );
+        // Every key in the file: the four with a field of their own by the name
+        // and the sentence that field carries, and the one nothing here knows
+        // about by its own key, on the card that holds the rest of the file.
         for key in ["NOOB_API_KEY", "NOOB_MODEL", "NOOB_TIMEOUT"] {
             let at = rows
                 .iter()
-                .position(|row| matches!(row, Row::Reading { label, .. } if label == key))
+                .position(|row| says(row).contains(key))
                 .unwrap_or_else(|| panic!("{key} is not on the section: {rows:?}"));
             assert!(
                 at < first_block,
                 "{key} is row {at}, under the block at {first_block}"
             );
         }
+        let rest = rows
+            .iter()
+            .find_map(|row| match row {
+                Row::Card(card) if card.title == "THE REST OF THE FILE" => Some(card),
+                _ => None,
+            })
+            .expect("the card that carries what this window has no control for");
+        assert_eq!(
+            rest.fields
+                .iter()
+                .map(|field| field.label.as_str())
+                .collect::<Vec<_>>(),
+            ["NOOB_TIMEOUT"],
+            "a key with a field of its own is listed twice"
+        );
         assert!(
             rows[first_block..].iter().all(|row| matches!(row, Row::Paper(_))),
-            "there is a form row under the blocks: {:?}",
+            "there is a card under the blocks: {:?}",
             &rows[first_block..]
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -4650,14 +5059,18 @@ mod tests {
         assert!(whole.under.contains("/home/hec/workspace/noob-cli"), "{}", whole.under);
 
         // A block is the same height whatever is in it, which is what keeps the
-        // rows under it where the clicks below them are tested for.
+        // rows under it where the clicks below them are tested for. It is a card
+        // like every other row of the section: its title in the header, where
+        // the text came from and the text itself in the body.
         let at = panel
             .rows()
             .iter()
             .position(|row| matches!(row, Row::Paper(paper) if paper.title.contains("PROMPT")))
             .expect("the prompt block");
-        assert_eq!(lines(panel.row(at).expect("the row"), COLS), PAPER_LINES + 2);
-        assert_eq!(panel.heights(COLS)[at], PAPER_LINES + 2, "the model and the window disagree");
+        let tall = crate::design::card_row_lines(paper_body_lines(), false);
+        assert!(tall > PAPER_LINES, "a block shows fewer lines than it holds");
+        assert_eq!(lines(panel.row(at).expect("the row"), COLS), tall);
+        assert_eq!(panel.heights(COLS)[at], tall, "the model and the window disagree");
 
         // And it is read with the page keys: the cursor is on it, the block
         // moves and the list under it does not.

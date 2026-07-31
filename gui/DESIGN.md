@@ -85,7 +85,9 @@ server are.
 - **Header**: the title in the card title role, then a divider the full width of
   the card. This is the one divider a card gets.
 - **Body**: fields, stacked. `STEP` between them, `TIGHT` between a label and its
-  input, hints directly under the input they explain.
+  input, hints directly under the input they explain. Two fields side by side
+  are one band and share its height, so their labels line up and the field under
+  them is where the model counted it.
 - **Footer**: only when the card has actions. The buttons sit at the bottom of
   the card, always, whatever the body's height. A card with no actions has no
   footer and no divider above where one would be.
@@ -93,12 +95,29 @@ server are.
   says where the group ends.
 - **Focus**: the card the keys are on carries `skin.edge_focus` on its own border
   and the mark down its left edge. Not a band: a filled block nine lines tall is
-  a highlight nobody can read through.
+  a highlight nobody can read through. Which of its fields the keys are on is
+  said by that field's own input wearing the focus edge.
+- **Two fields can be set per card.** A press carries a side and a side is one of
+  two, so the fields a card is changed through are its first two; everything
+  after them is read out. A third control would draw and answer nothing.
+- **A document is a card too.** A block of text (the global `AGENTS.md`, the
+  assembled prompt) is a card whose header is its title, whose body opens with
+  where the text came from, in the hint role, and whose text scrolls inside the
+  body while the card stays where it is.
 
 ## A field
 
 Label above, input below, hint under that. Never label and value side by side on
 one line: that is what made every value look like part of a sentence.
+
+- The **label** is plain words, not the key a file writes: `NOOB_TASK_CONCURRENCY`
+  over a number is not a setting anybody can act on. The key goes in the hint,
+  where it is also the answer to "which line do I edit".
+- The **hint** is one line, written to fit, and clipped with an ellipsis when the
+  field is too narrow for it. It is the one string on the panel deliberately not
+  wrapped: a sentence that grew a second line would change the height of the band
+  it is in, and the model counts that height before the layout knows the width.
+  Write hints short enough that the tail is not load bearing.
 
 - The input is a bordered box, `INPUT_PAD` inside, filled with `skin.input`.
 - A read-only reading uses the same shape with no border and no fill, so what can
@@ -174,6 +193,6 @@ hairline under every row, with buttons wherever the row happened to put them and
 values on the same line as their labels. If you are changing a section and it
 still looks like that, the section has not been done yet.
 
-SKILLS and MCP are built this way. AGENT, SESSIONS and APPEARANCE are not yet:
+AGENT, SKILLS and MCP are built this way. SESSIONS and APPEARANCE are not yet:
 their rows are the old flat ones, without the hairline, and they are what the
 next passes convert.

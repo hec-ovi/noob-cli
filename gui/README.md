@@ -425,23 +425,29 @@ reading does not. There is no hairline under a row any more: space and the
 card's own border say where one group ends, which is what a line between every
 two things on screen never did. Cards are full width and stack, and it is a
 card's contents that answer a narrow window: two fields go side by side while
-both keep their columns and stack when they cannot. SKILLS and MCP are the
-sections built this way so far; AGENT, SESSIONS and APPEARANCE are still the
-flat rows they were.
+both keep their columns and stack when they cannot. AGENT, SKILLS and MCP are
+the sections built this way so far; SESSIONS and APPEARANCE are still the flat
+rows they were.
 
 Four of the sections are the agent's own files rather than the window's. AGENT
-opens on a form of two columns, two rows tall: the endpoint and the file the CLI
-reads down the left, the two numbers that decide what the agent gets down the
-right. Shift with left or right crosses from one column to the other, and the
-plain arrow keys go on nudging whatever the cursor is on. The file is `~/.config/noob/.env`, which the CLI
-re-reads on every request; the endpoint can be typed over, and every other key
-that is set is listed under the form. The two numbers are `NOOB_CTX`, the context
+is five cards, in the order somebody meeting the window needs them: where the
+model is (the endpoint and the key it is called with), which model it asks for
+(`NOOB_MODEL`, `NOOB_API_STYLE`, `NOOB_REASONING`), what the agent gets, the file
+all of it is written in, and whatever else that file carries. Every field is a
+plain-words name over its value with one sentence under it naming the key and
+saying what it decides, because `NOOB_TASK_CONCURRENCY 4` on its own is not
+something anybody can act on. Shift with left or right crosses between the two
+fields of a card, and the plain arrow keys go on nudging whatever the cursor is
+on. The file is `~/.config/noob/.env`, which the CLI
+re-reads on every request; the endpoint is the one line the window types into,
+and every other key that is set is read out on a card of its own. The two numbers
+are `NOOB_CTX`, the context
 window the agent budgets against before it compacts, and `NOOB_TASK_CONCURRENCY`,
 how many sub-agent tasks it runs at once. Both are tracks held to the CLI's own bounds, so the context
 window starts at the 4096 below which the CLI stops reading it and the right end
 of the concurrency track is the 16 the CLI caps itself at: the maximum is a place
-to drop the pointer, not a number to guess. Until either is in the file the row
-reads what the CLI falls back to and the section says so. That write goes through
+to drop the pointer, not a number to guess. Until either is in the file the field
+reads what the CLI falls back to and the card says so. That write goes through
 a port of the CLI's own `.env` writer, so
 every other line and every comment survives it, and the file is read back
 afterwards. Nothing is passed to the agent on its command line, because `serve`
@@ -452,7 +458,9 @@ shown or written from here: a key, token, secret
 or password reads as `set, and not shown here`, which is the same line the CLI
 takes by keeping secrets out of settable config.
 
-Under that form are two blocks of text. The first is the agent's global
+Under those cards are two blocks of text, cards themselves: the title in the
+header, where the text came from under it, and the text scrolling inside the
+body. The first is the agent's global
 instructions, `<config dir>/AGENTS.md`: the CLI reads that file and puts it at the
 top of every prompt, before the project's own `AGENTS.md`, and the block names the
 path and shows what is in it. With no file there it says so and Enter writes a

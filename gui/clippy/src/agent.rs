@@ -70,6 +70,22 @@ const MCP_BYTES: u64 = 1024 * 1024;
 /// The key the panel lets anybody edit: where the model lives.
 pub const ENDPOINT: &str = "NOOB_BASE_URL";
 
+/// The credential the endpoint is called with. Never drawn: the panel says
+/// whether it is set ([`is_secret`] covers it by name as well).
+pub const API_KEY: &str = "NOOB_API_KEY";
+
+/// Which model the endpoint is asked for, by the name that endpoint knows it
+/// by.
+pub const MODEL: &str = "NOOB_MODEL";
+
+/// Which of the two request shapes the endpoint speaks, `chat` or `responses`.
+/// With nothing set the provider picks by the address.
+pub const API_STYLE: &str = "NOOB_API_STYLE";
+
+/// Whether the thinking switch is sent with a request, `on` or `off`. With
+/// nothing set the provider leaves it to the server's own flags.
+pub const REASONING: &str = "NOOB_REASONING";
+
 /// The context window the CLI budgets against before it compacts.
 pub const CTX: &str = "NOOB_CTX";
 
