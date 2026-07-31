@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Compaction replaced the transcript with this full new state",
+  "type": "object",
+  "properties": {
+    "t": { "const": "reset" },
+    "items": {
+      "type": "array",
+      "items": { "$ref": "transcript-item.json" }
+    }
+  },
+  "required": ["t", "items"],
+  "additionalProperties": false
+}

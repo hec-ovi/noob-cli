@@ -40,7 +40,7 @@ package, the binary and everything a user sees are `no0b`.
 | The wire protocol between agent and window | `crates/noob-proto/CONTRACT.md`, shapes in `crates/noob-proto/schema/` |
 | What the agent can do: tools and their schemas | `crates/noob/src/tools/` |
 | The system prompt and what goes into it | `crates/noob/src/agent/prompt.rs` |
-| Sessions on disk, resume | `crates/noob/src/session/` |
+| Sessions on disk, resume | `crates/noob/src/session/CONTRACT.md` |
 | Endpoint, keys, sandbox detection | `crates/noob/src/config/CONTRACT.md` |
 | Talking to a model server | `crates/noob-provider/CONTRACT.md` |
 | Skills | `crates/noob/src/skills/` |
@@ -69,6 +69,9 @@ Boxes so far:
 - [`crates/noob/src/config`](../crates/noob/src/config/CONTRACT.md) - config
   dir, the one settings lookup rule, validated atomic `.env` writes, sandbox
   mode, endpoint autodetect.
+- [`crates/noob/src/session`](../crates/noob/src/session/CONTRACT.md) -
+  append-only JSONL transcripts, resume with repair, token totals, shapes in
+  `schema/`.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,

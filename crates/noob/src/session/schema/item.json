@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "One transcript item appended",
+  "type": "object",
+  "properties": {
+    "t": { "const": "item" },
+    "item": { "$ref": "transcript-item.json" }
+  },
+  "required": ["t", "item"],
+  "additionalProperties": false
+}

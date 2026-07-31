@@ -586,6 +586,62 @@ mod tests {
         }
     }
 
+    /// The committed schema fixtures under `fixtures/valid` are what the
+    /// writer really produces: write the same content through the Session
+    /// API and compare, shape for shape. The python contract runner
+    /// validates the fixtures against `schema/`; this pins them to the
+    /// encoder, so neither can drift alone.
+    #[test]
+    fn the_committed_fixtures_match_the_writer() {
+        fn fixture(name: &str) -> Value {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/session/fixtures/valid")
+                .join(name);
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut s, _, _, _) = Session::open(tmp.path(), Some("t-fixtures")).unwrap();
+        s.log_item(&Item::User("hello".into())).unwrap();
+        s.log_item(&Item::Assistant {
+            text: "hi".into(),
+            tool_calls: vec![call()],
+            raw_items: vec![json!({"type": "message"})],
+        })
+        .unwrap();
+        s.log_item(&Item::ToolResult {
+            call_id: "call_1".into(),
+            content: "f lines".into(),
+        })
+        .unwrap();
+        s.log_usage(Usage {
+            prompt_tokens: 14,
+            cached_prompt_tokens: 4,
+            completion_tokens: 5,
+        })
+        .unwrap();
+        s.log_reset(&[Item::User("hello".into())]).unwrap();
+        drop(s);
+
+        let text =
+            std::fs::read_to_string(tmp.path().join("sessions/t-fixtures.jsonl")).unwrap();
+        let mut lines = text
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap());
+
+        // The meta line's id and stamp are per run; the shape is the promise.
+        let mut meta = lines.next().unwrap();
+        meta["id"] = fixture("meta.json")["id"].clone();
+        meta["created_ms"] = fixture("meta.json")["created_ms"].clone();
+        assert_eq!(meta, fixture("meta.json"));
+        assert_eq!(lines.next().unwrap(), fixture("item--user.json"));
+        assert_eq!(lines.next().unwrap(), fixture("item--assistant.json"));
+        assert_eq!(lines.next().unwrap(), fixture("item--tool.json"));
+        assert_eq!(lines.next().unwrap(), fixture("usage.json"));
+        assert_eq!(lines.next().unwrap(), fixture("reset.json"));
+        assert!(lines.next().is_none());
+    }
+
     #[test]
     fn round_trip_all_item_kinds() {
         let tmp = tempfile::tempdir().unwrap();

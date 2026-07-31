@@ -876,7 +876,7 @@ impl DockSession {
     ) {
         let color = ui.box_color();
         let reset = if color.is_empty() { "" } else { RESET };
-        let top = super::prompt::box_rule(plan, width, &ui.tokens().labels());
+        let top = super::prompt::box_rule(plan, width, &super::token_labels(&ui.tokens()));
         let bottom = super::prompt::box_rule(false, width, &[]);
         let mut s = format!("\r\x1b[2K{color}{top}{reset}");
         let mut rows_above_input = vec![visible_width(&top)];
@@ -2070,7 +2070,7 @@ impl DockSession {
             // The session readout rides the fill on this row too, so the number
             // is visible while it is actually growing and not only once the
             // turn is over.
-            let fill = super::prompt::rule_fill(width - fixed, &ui.tokens().labels());
+            let fill = super::prompt::rule_fill(width - fixed, &super::token_labels(&ui.tokens()));
             format!("{open}── {reset}{track}{open} {label} {fill}{reset}")
         } else {
             styled_rule(&label, width, &open)

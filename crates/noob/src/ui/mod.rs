@@ -251,21 +251,20 @@ pub struct Ui {
     pub forced_ask: Option<bool>,
 }
 
-impl SessionTokens {
-    /// Ways to say this in the top rule, widest first. The caller paints the
-    /// first one that fits and nothing at all if none do, so a narrow terminal
-    /// loses the readout rather than the frame.
-    pub(super) fn labels(&self) -> Vec<String> {
-        if self.is_zero() {
-            return Vec::new();
-        }
-        let (p, g) = (count(self.prefilled), count(self.generated));
-        vec![
-            format!("{p} prefilled · {g} generated"),
-            format!("{p} in · {g} out"),
-            format!("{p}·{g}"),
-        ]
+/// Ways to say the session totals in the top rule, widest first. The caller
+/// paints the first one that fits and nothing at all if none do, so a narrow
+/// terminal loses the readout rather than the frame. Display wording lives
+/// here: the session box keeps the counts, this box decides how they read.
+pub(super) fn token_labels(tokens: &SessionTokens) -> Vec<String> {
+    if tokens.is_zero() {
+        return Vec::new();
     }
+    let (p, g) = (count(tokens.prefilled), count(tokens.generated));
+    vec![
+        format!("{p} prefilled · {g} generated"),
+        format!("{p} in · {g} out"),
+        format!("{p}·{g}"),
+    ]
 }
 
 /// A token count a human reads at a glance: exact under a thousand, then one

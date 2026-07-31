@@ -215,7 +215,7 @@ impl Ui {
     pub(super) fn expand(&mut self, plan: bool, width: usize) {
         let color = self.box_color();
         let reset = if color.is_empty() { "" } else { RESET };
-        let top = box_rule(plan, width, &self.tokens.labels());
+        let top = box_rule(plan, width, &super::token_labels(&self.tokens));
         let bottom = box_rule(false, width, &[]);
         self.out(&format!(
             "\r\x1b[2K{color}{top}{reset}\r\n\r\n{color}{bottom}{reset}\x1b[1A"
@@ -239,7 +239,7 @@ impl Ui {
         self.erase_frame();
         let color = self.box_color();
         let reset = if color.is_empty() { "" } else { RESET };
-        let top = box_rule(plan, now, &self.tokens.labels());
+        let top = box_rule(plan, now, &super::token_labels(&self.tokens));
         let bottom = box_rule(false, now, &[]);
         self.out(&format!(
             "{color}{top}{reset}\r\n\r\n{color}{bottom}{reset}\x1b[1A"

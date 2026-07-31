@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "One transcript item as the session file encodes it",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "role": { "const": "user" },
+        "text": { "type": "string" }
+      },
+      "required": ["role", "text"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "role": { "const": "assistant" },
+        "text": { "type": "string" },
+        "calls": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "args": { "type": "string" }
+            },
+            "required": ["id", "name", "args"],
+            "additionalProperties": false
+          }
+        },
+        "raw": { "type": "array" }
+      },
+      "required": ["role", "text", "calls", "raw"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "role": { "const": "tool" },
+        "id": { "type": "string" },
+        "content": { "type": "string" }
+      },
+      "required": ["role", "id", "content"],
+      "additionalProperties": false
+    }
+  ]
+}
