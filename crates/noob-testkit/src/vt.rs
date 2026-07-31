@@ -1,11 +1,11 @@
-//! A tiny, test-only terminal SCREEN emulator, hand-rolled (zero new crates).
+//! A tiny terminal SCREEN emulator, hand-rolled (zero new crates).
 //!
 //! noob draws its bottom dock with RELATIVE cursor moves and never tracks the
-//! cursor row: it relies on the terminal to scroll on newline (see
-//! `ui/dock.rs`). The existing PTY tests only assert on the raw output BYTES,
-//! so a scroll-at-bottom cursor-math desync is invisible to them. This grid
-//! replays noob's exact captured bytes into a fixed rows x cols screen and
-//! lets a test inspect what a human would actually see, dock and all.
+//! cursor row: it relies on the terminal to scroll on newline. PTY tests that
+//! only assert on the raw output BYTES cannot see a scroll-at-bottom
+//! cursor-math desync. This grid replays the exact captured bytes into a
+//! fixed rows x cols screen and lets a test inspect what a human would
+//! actually see, dock and all.
 //!
 //! Scope: enough of xterm to render noob's own output faithfully, nothing more.
 //!  - printable UTF-8: one column per character (continuation bytes are free),
@@ -29,8 +29,6 @@
 //!    or `ESC ] ... ST`) is swallowed.
 //!
 //! `render()` returns the visible rows with trailing blanks trimmed.
-
-#![allow(dead_code)]
 
 pub struct Vt {
     rows: usize,

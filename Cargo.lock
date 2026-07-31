@@ -274,6 +274,7 @@ dependencies = [
 name = "noob-testkit"
 version = "0.9.0"
 dependencies = [
+ "libc",
  "serde_json",
 ]
 

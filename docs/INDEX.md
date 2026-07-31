@@ -60,8 +60,9 @@ Boxes so far:
   Event frames out, Command frames in, shapes in `schema/`.
 - [`crates/noob-provider`](../crates/noob-provider/CONTRACT.md) - transcript in,
   model events out, over both OpenAI wire shapes.
-- [`crates/noob-testkit`](../crates/noob-testkit/CONTRACT.md) - dev-only mock
-  OpenAI and MCP servers with wire assertions.
+- [`crates/noob-testkit`](../crates/noob-testkit/CONTRACT.md) - dev-only test
+  rig: mock OpenAI and MCP servers with wire assertions, a pty driver, a
+  terminal screen emulator.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,

@@ -1,12 +1,15 @@
 # noob-testkit
 
-contractVersion: 1.0.0
+contractVersion: 1.1.0
 
 ## Purpose
 
 A dev-only test rig: a scriptable mock OpenAI server and a scriptable mock MCP
 server that record every request and run the wire assertions automatically, so
-every e2e inherits the wire invariants without restating them.
+every e2e inherits the wire invariants without restating them; plus the
+interactive rig, a pty driver that spawns a compiled binary on a real
+pseudo-terminal and a screen emulator that replays the captured bytes into
+what a human would actually see.
 
 It is a `[dev-dependencies]` entry of `crates/noob` (the e2e suites) and
 `crates/noob-provider` (the transport tests), and of nothing else. The surface
@@ -107,6 +110,48 @@ Catalog helpers: `mcp::tool(name: &str, description: &str, schema: Value) ->
 Value` builds one tool definition; `mcp::echo_tools() -> Vec<Value>` is the
 default set, one `echo` tool with a required string arg.
 
+## Surface: the pty driver (unix only)
+
+`Pty` spawns a binary with all three stdio streams on a fresh pty slave, so
+`is_terminal()` is true and its raw-mode interactive path engages, then drives
+it byte-for-byte the way a keyboard would. The whole module is `#[cfg(unix)]`:
+it rides `openpty`.
+
+| Operation | Signature | Behavior |
+|---|---|---|
+| Spawn | `Pty::spawn(cmd: std::process::Command, size: Option<(u16, u16)>) -> Pty` | Runs `cmd` on the slave. `size` is (rows, cols) for the pty winsize, so small-screen behavior is reproducible. A watchdog SIGKILLs the child after 20 s so a wedged binary fails its test instead of hanging the suite. |
+| Type | `send(&mut self, bytes: &[u8])` | Writes to the master, exactly as a keyboard would deliver the bytes. |
+| Sync | `wait_for(&mut self, marker: &str)` | Reads until `marker` appears at or after the previous match, then consumes past it: successive calls sync to successive prompts. |
+| Drain | `drain(&mut self, budget: Duration)` | Reads whatever arrives within `budget` without blocking on a marker, for trailing animation repaints before a screen snapshot. |
+| Text view | `seen(&self) -> &str` | Everything read so far as lossy UTF-8, for substring assertions. |
+| Byte view | `raw(&self) -> &[u8]` | The exact bytes read, undecoded, for the emulator. |
+| Snapshot | `screen(&self, rows: u16, cols: u16) -> Vt` | Replays every captured byte into a fresh screen. |
+| Resize | `resize(&mut self, rows: u16, cols: u16)` | TIOCSWINSZ on the master plus an explicit SIGWINCH (the child is not a controlling-tty session leader, so the kernel does not deliver the signal on its own). |
+| Pid | `child_id(&self) -> u32` | The child's pid, for tests that signal it directly. |
+| Finish | `finish(&mut self) -> std::process::ExitStatus` | Waits for the child to exit and stops the watchdog. |
+
+## Surface: the screen emulator
+
+`Vt` is a rows x cols terminal screen, hand rolled: enough of xterm to render
+noob's own output faithfully and nothing more. Printable UTF-8 at one column
+per character, DECAWM deferred wrap (the latch a naive clamp would get wrong),
+LF treated as CR+LF (the pty slave runs OPOST|ONLCR), CSI cursor moves
+A/B/C/D/G/H/f, erases K and J, every other CSI and all OSC parsed to their end
+and ignored. `ED 2` archives the whole viewport into scrollback and `resize`
+reflows soft-wrapped logical lines with the cursor glued to its cell, both the
+way VTE-family terminals behave: that is what makes resize regressions (stale
+frame copies, blank gaps) visible to a test at all.
+
+| Operation | Signature | Behavior |
+|---|---|---|
+| New | `Vt::new(rows: usize, cols: usize) -> Vt` | A blank screen. |
+| Feed | `feed(&mut self, bytes: &[u8])` | Applies a run of bytes. Safe on any input; never panics. |
+| Resize | `resize(&mut self, rows: usize, cols: usize)` | VTE-style reflow; overflowing rows scroll into scrollback. |
+| Read | `render(&self) -> Vec<String>` | The visible rows, trailing blanks trimmed. |
+| Read bottom | `bottom(&self, n: usize) -> Vec<String>` | The last n rows (a bottom dock lives here). |
+| History | `scrollback(&self) -> &[String]` | Rows that left the top, oldest first, trailing blanks trimmed. |
+| Dump | `dump(&self, label: &str) -> String` | A framed dump for `--nocapture` inspection: every row inside a ruler so trailing spaces and blank rows are visible. |
+
 ## The automatic wire assertions
 
 Run on every OpenAI-mock request to `/chat/completions` or `/responses`,
@@ -152,6 +197,10 @@ The closed set, all of them deliberate test outcomes:
 - Panics: `start` on either server when the loopback bind fails,
   `load_fixture_chunks` when the fixture cannot be read, and `assert_clean`
   when violations were collected.
+- Pty panics: `spawn` when `openpty` or the process spawn fails, `wait_for`
+  when the pty closes or errors before its marker (the message carries
+  everything seen so far), `send`/`child_id`/`finish` on a dead or
+  already-finished child.
 
 Nothing else fails. Wire violations are never panicked from a server thread (a
 panic there would vanish); they wait for `assert_clean`.
@@ -159,10 +208,12 @@ panic there would vanish); they wait for `assert_clean`.
 ## Dependencies
 
 - Contracts: none. This box depends on no other box in the repo.
-- Crates: `serde_json` only; the servers are `std::net`.
+- Crates: `serde_json`, plus `libc` on unix for the pty driver; the servers
+  are `std::net`.
 - Protocol shapes it mirrors, not depends on: the OpenAI Chat Completions and
   Responses wire formats with their SSE framing as llama.cpp and OpenAI emit
-  it, and MCP Streamable HTTP `2025-11-25`.
+  it, MCP Streamable HTTP `2025-11-25`, and the xterm/VTE terminal behavior
+  the screen emulator models.
 
 ## Invariants
 
@@ -184,6 +235,15 @@ panic there would vanish); they wait for `assert_clean`.
 7. `scrub_noob_env` is the whole answer to env leakage: every `NOOB_*` name the
    binary reads is in `NOOB_ENV_VARS`, so a host-exported setting never reaches
    an assertion.
+8. The pty watchdog is the suite's hang ceiling: a wedged child is SIGKILLed
+   after 20 s, so a missed marker fails as a readable `wait_for` panic instead
+   of hanging the runner.
+9. `screen` and `raw` carry the exact bytes read, never the lossy text view:
+   a multi-byte glyph split across a read boundary still renders intact.
+10. The emulator's scope is fixed at what it documents: single-width
+    characters, deferred wrap, VTE-style `ED 2` and reflow. Widening the scope
+    is additive; changing existing semantics is a breaking change for every
+    screen assertion built on it.
 
 ## How to modify this blackbox safely
 

@@ -14,6 +14,13 @@
 //! vanish); tests must end with `assert_clean()`.
 
 pub mod mcp;
+#[cfg(unix)]
+pub mod pty;
+pub mod vt;
+
+#[cfg(unix)]
+pub use pty::Pty;
+pub use vt::Vt;
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};

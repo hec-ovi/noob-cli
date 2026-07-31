@@ -21,7 +21,7 @@ fn noob(config_dir: &std::path::Path, workspace: &std::path::Path) -> Command {
     cmd.env("NOOB_CONFIG_DIR", config_dir)
         .current_dir(workspace)
         // This suite validates plan semantics. Dock interaction and command
-        // queueing have dedicated PTY coverage in e2e_ui.
+        // queueing have dedicated PTY coverage in the ui_* suites.
         .env("NOOB_DOCK", "0")
         .env_remove("NOOB_BASE_URL")
         .env_remove("NOOB_MODEL")
