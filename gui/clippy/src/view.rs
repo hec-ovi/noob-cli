@@ -482,12 +482,12 @@ const CARET_W: f32 = 3.0;
 /// release.
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// What a button in the footer of the saved-conversations table asks for.
+/// What a button in a card's footer asks for.
 ///
-/// The three of them, in one enum, so a press is one hit with an answer on it
-/// rather than three regions the routing has to keep in the same order as the
-/// layout. Which is which is decided where they are placed, and read where they
-/// are drawn.
+/// All of them in one enum, so a press is one hit with an answer on it rather
+/// than a region per button that the routing has to keep in the same order as
+/// the layout. Which is which is decided where they are placed, and read where
+/// they are drawn.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Act {
     /// Mark every conversation on the list, not only the ones on screen.
@@ -497,6 +497,9 @@ pub enum Act {
     /// Delete what is marked, or the row the keys are on when nothing is. Two
     /// presses, like every other delete on this panel.
     Forget,
+    /// Install what has been typed into the card this button stands in. The one
+    /// action on the panel that starts something the window then waits for.
+    Install,
 }
 
 /// Something the pointer can land on. Returned by [`Layout::hit`] so every
@@ -2659,6 +2662,38 @@ fn settings_act_boxes(footer: Panel, line: f32, column: f32) -> Vec<(Act, Panel)
         .collect()
 }
 
+/// How wide a card's own action is, in columns of pane text.
+///
+/// Sized for its word and the padding on both sides of it, the way the two
+/// buttons on an entry are: a button whose width follows what it is holding
+/// moves under the pointer that is pressing it.
+const SETTING_DOING_COLUMNS: usize = 11;
+
+/// The one button in a card's own footer: at the bottom right, where a card's
+/// own action belongs.
+///
+/// Nothing at all in a footer too narrow for it, since a button drawn over the
+/// sentence beside it is a press nobody can aim.
+fn settings_doing_box(footer: Panel, column: f32) -> Option<Panel> {
+    let wide = SETTING_DOING_COLUMNS as f32 * column;
+    match footer.w >= wide && footer.h >= 1.0 {
+        true => Some(Panel::new(
+            footer.x + footer.w - wide,
+            footer.y,
+            wide,
+            footer.h,
+        )),
+        false => None,
+    }
+}
+
+/// What a card's action is, as the press the routing answers.
+fn settings_act_for(doing: crate::settings::Doing) -> Act {
+    match doing {
+        crate::settings::Doing::Install => Act::Install,
+    }
+}
+
 /// Where a cell's text is written inside the box its column gives it.
 ///
 /// Every cell used to start at its column's left edge, which left the two
@@ -3498,14 +3533,26 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
             // side is one of two; a card with more than two fields that can be
             // changed is a card that needs the hit to carry its slot.
             SettingRow::Card(card) => {
+                let box_ = settings_card(row, line);
                 let parts = settings_card_parts(
-                    settings_card(row, line),
+                    box_,
                     line,
                     shape.pane_size,
                     column,
                     entry_cols,
-                    false,
+                    card.does.is_some(),
                 );
+                // The card's own action, at the bottom right of it. Nothing
+                // when the card was cut off by the bottom of the list and has
+                // no footer left inside itself, the same rule the two buttons
+                // on an entry follow.
+                if let Some(doing) = card.does
+                    && parts.footer.y >= box_.y
+                    && parts.footer.y + parts.footer.h <= box_.y + box_.h + 0.01
+                    && let Some(at) = settings_doing_box(parts.footer, column)
+                {
+                    acts.push((index, settings_act_for(doing), at));
+                }
                 let across = design::across(card.fields.len(), design::card_cols(entry_cols));
                 let slots = settings_card_slots(
                     parts.body,
@@ -3563,37 +3610,59 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
         marks,
         acts,
         doc,
-        doc_text: settings_doc_text(doc, line),
+        doc_text: settings_doc_text(doc, line, shape.pane_size),
         close,
     }
 }
 
-/// Where the document's own text goes: inside the wrapper, off its border.
-fn settings_doc_text(doc: Panel, line: f32) -> Panel {
+/// Where the document's own text goes: the body of the card it is written in.
+fn settings_doc_text(doc: Panel, line: f32, size: f32) -> Panel {
     let box_ = settings_doc_box(doc, line);
     match box_.w >= 1.0 {
-        true => box_.inset(PAD),
+        true => settings_doc_parts(box_, line, size).body,
         false => nowhere(),
     }
 }
 
-/// The wrapper the document is written inside: the title takes the first line of
-/// the column and the outlined box under it takes the rest.
+/// The card the document is written in: the whole of the column beside the
+/// list.
 ///
 /// One function, so the box that is outlined, the columns the text wraps in and
 /// the rows the wheel pages by all come off the same rectangle. A column too
-/// short for a title and a line under it is no wrapper at all rather than a
-/// border with nothing inside it.
+/// short for a header and a line under it is no card at all rather than a border
+/// with nothing inside it.
 fn settings_doc_box(doc: Panel, line: f32) -> Panel {
-    if doc.w < PAD * 3.0 || doc.h < line + GAP + PAD * 2.0 + line {
+    let room = design::room(line);
+    let least = room + design::TITLE_LINES * line + room * 2.0 + line + room;
+    if doc.w < PAD * 3.0 || doc.h < least {
         return nowhere();
     }
-    Panel::new(
-        doc.x + PAD,
-        doc.y + line + GAP,
-        (doc.w - PAD).max(1.0),
-        (doc.h - line - GAP).max(1.0),
-    )
+    Panel::new(doc.x + PAD, doc.y, (doc.w - PAD).max(1.0), doc.h)
+}
+
+/// Where the document card's title, its divider and its text sit.
+///
+/// The same shape [`settings_card_parts`] gives every other card, with one
+/// difference: its body is as wide as the column it stands in rather than as
+/// wide as a card of the list, because this column has a width of its own and
+/// nothing in it is measured against the list's.
+fn settings_doc_parts(card: Panel, line: f32, size: f32) -> CardParts {
+    let room = design::room(line);
+    let title_h = Text::line_for(design::card_title_size(size)).min(design::TITLE_LINES * line);
+    let head = room + design::TITLE_LINES * line + room;
+    let body_y = card.y + head + room;
+    let wide = (card.w - room * 2.0).max(1.0);
+    CardParts {
+        title: Panel::new(card.x + room, card.y + room, wide, title_h),
+        rule: Panel::new(card.x, (card.y + head).floor(), card.w, 1.0),
+        body: Panel::new(
+            card.x + room,
+            body_y,
+            wide,
+            (card.y + card.h - room - body_y).max(0.0),
+        ),
+        footer: nowhere(),
+    }
 }
 
 /// One strip's tabs, and the arrows for reaching the ones that did not fit.
@@ -6087,6 +6156,9 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                                 (false, many) => format!("delete {many}"),
                             },
                         ),
+                        // A card's own action, which no table has one of. It
+                        // is drawn by the card it stands in.
+                        Act::Install => continue,
                     };
                     settings_button(
                         scene,
@@ -6470,7 +6542,8 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
             // narrow window.
             SettingRow::Card(card) => {
                 let at = settings_card(*row, line);
-                let parts = settings_card_parts(at, line, size, column, list_cols, false);
+                let parts =
+                    settings_card_parts(at, line, size, column, list_cols, card.does.is_some());
                 settings_card_shell(
                     scene,
                     at,
@@ -6538,6 +6611,26 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                             small,
                             skin.dim,
                         ));
+                    }
+                }
+                // The card's own action, filled, at the bottom right of its
+                // footer: it is the thing the card exists for, which is what a
+                // primary is.
+                if let Some(doing) = card.does {
+                    for (at, act, box_) in &layout.settings_acts {
+                        if at != index || *act != settings_act_for(doing) {
+                            continue;
+                        }
+                        settings_button(
+                            scene,
+                            *box_,
+                            ButtonKind::Primary,
+                            vec![Run::tinted(doing.word(), skin.bright)],
+                            skin.bright,
+                            frame.hot == Some(Hit::SettingsAct(*index, *act)),
+                            skin,
+                            size,
+                        );
                     }
                 }
             }
@@ -6643,29 +6736,26 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
     if doc.w >= 1.0 && doc.h >= 1.0 {
         scene.rect(Panel::new(doc.x - (GAP * 0.5).floor(), doc.y, 1.0, doc.h).fill(skin.edge));
         let entry = panel.showing();
-        // The title over the wrapper: what the text under it belongs to. The
-        // column was a page of Markdown with nothing saying whose it was, and a
-        // server's document had to open with its own name to make up for it.
-        let title = Panel::new(doc.x + PAD, doc.y, (doc.w - PAD).max(1.0), line);
-        if let Some(entry) = entry {
-            say(
-                scene,
-                vec![Run::tinted(
-                    clip(&entry.name, columns_in(title.w, column).saturating_sub(1)),
-                    skin.good,
-                )],
-                title,
-                skin.good,
-            );
-        }
-        // The wrapper itself, in the same outlined box every other block on this
-        // panel is written in, so the document reads as one thing rather than as
-        // text floating beside a list.
+        // The document is a card, the way everything else on this panel is: the
+        // name of whatever it belongs to in the header, the one divider under
+        // it, and the text in the body. It was a bare line of text over an
+        // outlined box, which on a panel of cards is the one thing beside the
+        // list that does not read as one.
         let box_ = settings_doc_box(doc, line);
         let inside = layout.settings_doc_text;
         if box_.w >= 1.0 && inside.w >= 1.0 {
-            scene.rect(panel_fill(box_, skin.input));
-            scene.rect(panel_edge(box_, skin.edge));
+            let parts = settings_doc_parts(box_, line, size);
+            settings_card_shell(
+                scene,
+                box_,
+                &parts,
+                entry.map(|entry| entry.name.as_str()).unwrap_or_default(),
+                skin.good,
+                false,
+                skin,
+                size,
+                column,
+            );
             let doc_cols = layout.settings_doc_columns(column);
             let doc_rows = layout.settings_doc_rows(size);
             if let Some(entry) = entry {
@@ -16787,11 +16877,14 @@ mod tests {
     /// read through. The border says the same thing and leaves the words alone.
     #[test]
     fn the_entry_under_the_cursor_is_the_card_with_the_focus_border() {
-        let panel = a_wordy_skills_panel();
+        let mut panel = a_wordy_skills_panel();
+        // Down one: the section opens on the card an install is typed into, and
+        // the skill is the row under it.
+        panel.step(true);
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let (index, row) = the_entry_row(&out, &panel);
         let (card, _) = the_card(&out, row, true);
-        assert_eq!(panel.cursor(), index, "the section opens on its first entry");
+        assert_eq!(panel.cursor(), index, "the cursor is not on the entry");
         assert!(
             covered(&out, card, card.h, out.skin.edge_focus),
             "the card is not outlined in the focus colour: {card:?}"
@@ -16816,12 +16909,145 @@ mod tests {
         );
     }
 
-    /// The column beside the list is a titled, outlined block of text, and the
-    /// text in it wraps. Every line of it used to be cut to the width of the
-    /// column and ended in an ellipsis, which is the left edge of a document
-    /// rather than a document.
+    /// A panel on MCP with one server configured, which the plain fixture has
+    /// none of.
+    fn a_servers_panel() -> Settings {
+        let mut agent = an_agent();
+        agent.mcp = crate::agent::Mcp {
+            global: Some(std::path::PathBuf::from("/home/hec/.config/noob/mcp.json")),
+            project: None,
+            any_file: true,
+            servers: vec![crate::agent::Server {
+                name: String::from("deepwiki"),
+                how: String::from("https://mcp.deepwiki.com/mcp"),
+                project: false,
+                on: true,
+                entry: String::from("{ \"url\": \"https://mcp.deepwiki.com/mcp\" }"),
+            }],
+            trouble: Vec::new(),
+        };
+        let mut panel = Settings::open(
+            &Config::default(),
+            Some(std::path::Path::new("/home/hec/.config/noob/no0b.conf")),
+            agent,
+        );
+        let at = panel
+            .section_names()
+            .iter()
+            .position(|name| *name == crate::settings::MCP)
+            .expect("MCP is a section");
+        panel.choose(at);
+        panel
+    }
+
+    /// A server's three strings are three roles too, at three sizes, the way a
+    /// skill's are: the two lists are drawn by the same arm, and a server is
+    /// the worse of the two to read when they all look alike, because its
+    /// address and the file it came out of are both paths.
     #[test]
-    fn the_document_is_titled_wrapped_and_boxed() {
+    fn a_server_says_its_name_its_address_and_its_file_in_three_roles() {
+        let panel = a_servers_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let line = Text::line_for(PANE_TEXT.0);
+        let (_, row) = the_entry_row(&out, &panel);
+        let (_, parts) = the_card(&out, row, true);
+
+        let title = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| (text.at.y - parts.title.y).abs() < 0.51)
+            .expect("the name");
+        assert_eq!(
+            title.runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+            "deepwiki"
+        );
+        assert_eq!(title.size, design::card_title_size(PANE_TEXT.0));
+        // The address in the body at the value size, and the file it is
+        // configured in under it at the hint size.
+        assert_eq!(
+            line_of(&out, parts.body.x, parts.body.y),
+            "https://mcp.deepwiki.com/mcp"
+        );
+        let under = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| {
+                (text.at.x - parts.body.x).abs() < 0.51
+                    && (text.at.y - (parts.body.y + line + design::tight(line))).abs() < 0.51
+            })
+            .expect("the file it came from");
+        assert!(
+            under
+                .runs
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>()
+                .contains("mcp.json"),
+            "{:?}",
+            under.runs
+        );
+        assert!(under.size < PANE_TEXT.0);
+        assert!(title.size > under.size);
+    }
+
+    /// The install card's button: filled, in its own footer, at the bottom
+    /// right of the card, and pressed where it is drawn.
+    #[test]
+    fn the_install_button_is_filled_and_stands_in_the_card_s_footer() {
+        let panel = a_wordy_skills_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let (index, row) = the_card_row(&out, &panel);
+        let (card, parts) = the_card(&out, row, true);
+        let (_, act, box_) = *out
+            .layout
+            .settings_acts
+            .iter()
+            .find(|(at, ..)| *at == index)
+            .expect("the install card has no button");
+        assert_eq!(act, Act::Install);
+
+        // In the footer, at the bottom right, and inside its own card.
+        assert!(
+            (box_.y - parts.footer.y).abs() < 0.01,
+            "{box_:?} is not on the footer {:?}",
+            parts.footer
+        );
+        assert!(box_.y >= parts.body.y + parts.body.h - 0.01, "over the body");
+        assert!(box_.x + box_.w <= parts.footer.x + parts.footer.w + 0.01);
+        assert!(box_.x > parts.footer.x + parts.footer.w * 0.5, "not at the right");
+        assert!(box_.y + box_.h <= card.y + card.h + 0.01, "outside the card");
+
+        // Filled, which is what a primary is, and holding the word.
+        assert!(
+            covered(&out, box_, box_.h, out.skin.button),
+            "the install button is not filled: {box_:?}"
+        );
+        assert!(
+            line_of(&out, box_.x + INPUT_PAD, box_.y).contains("install"),
+            "the button has no word in it"
+        );
+
+        // And a press inside it is that button and not the row under it.
+        let (x, y) = (box_.x + box_.w * 0.5, box_.y + box_.h * 0.5);
+        assert_eq!(
+            out.layout.hit(x, y),
+            Some(Hit::SettingsAct(index, Act::Install))
+        );
+    }
+
+    /// The column beside the list is a card of its own, and the text in it
+    /// wraps. Every line of it used to be cut to the width of the column and
+    /// ended in an ellipsis, which is the left edge of a document rather than a
+    /// document.
+    ///
+    /// This asserted a bare line of text over a filled, outlined box. That is
+    /// the shape everything on this panel was taken out of: the column is a
+    /// card now, with the skill's name in its header at the card title size,
+    /// one divider under it and the text in its body.
+    #[test]
+    fn the_document_is_a_card_whose_header_names_the_skill() {
         let panel = a_wordy_skills_panel();
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let layout = &out.layout;
@@ -16829,18 +17055,63 @@ mod tests {
         let doc = layout.settings_doc;
         assert!(doc.w >= 1.0, "there is no second column");
 
-        // A title over the block, in the accent, saying whose document it is.
-        assert_eq!(line_of(&out, doc.x + PAD, doc.y), "coding");
-
-        // The block itself: filled and outlined the way every other box on the
-        // panel is, with the text inside it rather than on its border.
         let box_ = settings_doc_box(doc, line);
-        assert!(box_.y >= doc.y + line, "the box is under the title: {box_:?}");
+        let parts = settings_doc_parts(box_, line, PANE_TEXT.0);
+        assert!(box_.y >= doc.y - 0.01, "the card is not the whole column");
         assert!(box_.y + box_.h <= doc.y + doc.h + 0.01);
-        assert!(covered(&out, box_, box_.h, out.skin.input), "no wrapper");
+
+        // The name in the header, at the card title size, the way an entry's own
+        // card carries its name.
+        let title = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| {
+                (text.at.x - parts.title.x).abs() < 0.51
+                    && (text.at.y - parts.title.y).abs() < 0.51
+            })
+            .expect("the header");
+        assert_eq!(
+            title.runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+            "coding"
+        );
+        assert_eq!(title.size, design::card_title_size(PANE_TEXT.0));
+
+        // The border, stroked and cut like every other card, and the one
+        // divider under the header.
+        let border = out
+            .scene
+            .rects
+            .iter()
+            .find(|rect| {
+                let [x, y, w, h] = rect.xywh();
+                rect.rgba() == out.skin.edge
+                    && (x - box_.x).abs() < 0.01
+                    && (y - box_.y).abs() < 0.01
+                    && (w - box_.w).abs() < 0.01
+                    && (h - box_.h).abs() < 0.01
+            })
+            .expect("the document card has no border");
+        assert!(border.extra()[1] > 0.0, "the border is filled, not stroked");
+        assert!(
+            out.scene.rects.iter().any(|rect| {
+                let [x, y, w, h] = rect.xywh();
+                rect.rgba() == out.skin.edge
+                    && h <= 1.01
+                    && (x - parts.rule.x).abs() < 0.01
+                    && (w - parts.rule.w).abs() < 0.01
+                    && (y - parts.rule.y).abs() < 1.01
+            }),
+            "no divider under the document's header"
+        );
+
+        // The text is in the body, off the border on every side.
         let inside = layout.settings_doc_text;
-        assert!(inside.x >= box_.x + PAD - 0.01 && inside.y >= box_.y + PAD - 0.01);
+        assert_eq!((inside.x, inside.y), (parts.body.x, parts.body.y));
+        assert!(inside.x >= box_.x + design::room(line) - 0.01);
+        assert!(inside.y >= parts.rule.y + design::room(line) - 0.01);
         assert!(inside.x + inside.w <= box_.x + box_.w + 0.01);
+        assert!(inside.y + inside.h <= box_.y + box_.h - design::room(line) + 0.01);
         assert!(inside.x >= layout.settings_list.x + layout.settings_list.w);
 
         // The text wraps at the columns the box holds, by the same rule the

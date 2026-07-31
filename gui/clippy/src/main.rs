@@ -26,6 +26,7 @@ mod config;
 mod design;
 mod dock;
 mod icons;
+mod install;
 mod link;
 mod markdown;
 mod menu;
@@ -938,6 +939,14 @@ struct App {
     /// reading it. Dropped as soon as it answers, so a panel opened twice does
     /// not take the first run's answer for the second one's.
     asking: Option<std::sync::mpsc::Receiver<link::Asked>>,
+    /// The thread installing a skill, while it is still installing it: the
+    /// source it was given, and the name it landed under or why it did not.
+    ///
+    /// Its own thread for the same reason the prompt has one, only more so: a
+    /// clone is given two minutes and the interface is one thread. Some, so a
+    /// second press while one is running is refused rather than starting a race
+    /// between two installs for one directory.
+    installing: Option<std::sync::mpsc::Receiver<(String, Result<String, String>)>>,
     /// Where the dividers are, as fractions: how much of the width the left
     /// column takes in each row, and how much of the height the top space takes
     /// in each column. Read out of the settings file at launch and written back
@@ -1056,6 +1065,7 @@ impl App {
             sizing: None,
             sliding: None,
             asking: None,
+            installing: None,
             selecting: false,
             prompt_selecting: false,
             clipboard: None,
@@ -1379,6 +1389,80 @@ impl App {
         self.dirty = true;
     }
 
+    /// Install what has been typed into the skills section, on a thread of its
+    /// own.
+    ///
+    /// Never through [`App::do_deed`], which is synchronous: a clone is given
+    /// two minutes and a window frozen for two minutes is a window that has
+    /// crashed as far as anybody watching it is concerned. The same shape the
+    /// prompt block runs in instead: a thread, a channel, and a wake of the
+    /// event loop when it answers.
+    fn start_install(&mut self) {
+        let already = self.installing.is_some();
+        let (source, skills_at) = match self.settings.as_mut() {
+            Some(panel) => (panel.take_source(), panel.skills_at().map(Path::to_path_buf)),
+            None => return,
+        };
+        self.dirty = true;
+        // Every refusal is said on the panel rather than dropped: a button that
+        // answers a press with nothing is a button that reads as broken.
+        let trouble = match (already, source.is_empty(), &skills_at) {
+            (true, ..) => Some(String::from(
+                "an install is already running: wait for it to answer",
+            )),
+            (_, true, _) => Some(String::from(
+                "type a repository, an owner/name or a path first",
+            )),
+            (_, _, None) => Some(String::from(
+                "there is no config directory to install a skill into",
+            )),
+            _ => None,
+        };
+        if let Some(why) = trouble {
+            if let Some(panel) = self.settings.as_mut() {
+                panel.say_trouble(why);
+            }
+            return;
+        }
+        let Some(skills_at) = skills_at else {
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.installing = Some(rx);
+        let proxy = self.proxy.clone();
+        let config = self.config.clone();
+        if let Some(panel) = self.settings.as_mut() {
+            panel.begin_install(source.clone(), &config);
+        }
+        std::thread::spawn(move || {
+            let answer = install::install(&source, &skills_at);
+            let _ = tx.send((source, answer));
+            let _ = proxy.send_event(Wake);
+        });
+    }
+
+    /// Take what that thread answered, if it has, and read the disk back with
+    /// it.
+    ///
+    /// The list is rebuilt from the reading and not from what the install said,
+    /// which is the rule every write on this panel goes through: a skill is on
+    /// the list because its directory is there.
+    fn take_install(&mut self) {
+        let Some(rx) = self.installing.as_ref() else {
+            return;
+        };
+        let Ok((source, answer)) = rx.try_recv() else {
+            return;
+        };
+        self.installing = None;
+        let agent = self.read_agent();
+        let config = self.config.clone();
+        if let Some(panel) = self.settings.as_mut() {
+            panel.adopt_install(source, answer, agent, &config);
+        }
+        self.dirty = true;
+    }
+
     /// What the agent's own files say right now: its `.env`, the skills beside
     /// it, its MCP servers and the sessions it has written.
     ///
@@ -1598,6 +1682,20 @@ impl App {
     /// shows next comes off the disk rather than out of what was typed. A file
     /// that refuses is said on the panel, where the edit is.
     fn save_endpoint(&mut self) {
+        // The install field is a field of the panel and not a line of any file,
+        // so Enter on it starts the install instead. Branched here rather than
+        // in the model, because this is the one place that turns a finished
+        // edit into a write: without it, the address typed into the skills
+        // section would be written into the agent's `.env` under a key nothing
+        // reads.
+        let installing = matches!(
+            self.settings.as_ref().and_then(Settings::at_cursor),
+            Some(settings::Row::Field { key, .. }) if *key == settings::SKILL_SOURCE
+        );
+        if installing {
+            self.start_install();
+            return;
+        }
         let Some(panel) = self.settings.as_mut() else {
             return;
         };
@@ -1832,9 +1930,31 @@ impl App {
                             None
                         }
                         view::Act::Forget => panel.uninstall(index),
+                        // The install card's own button. Not a deed: a deed is
+                        // done here and now, and this is a clone with two
+                        // minutes to answer in.
+                        view::Act::Install => {
+                            // An edit running on another row is dropped rather
+                            // than carried onto this one, the way Escape drops
+                            // it: the address that gets installed is the one in
+                            // this field and never half of somebody's endpoint.
+                            let elsewhere = !matches!(
+                                panel.at_cursor(),
+                                Some(settings::Row::Field { key, .. })
+                                    if *key == settings::SKILL_SOURCE
+                            );
+                            if elsewhere {
+                                panel.cancel_edit();
+                            }
+                            self.dirty |= panel.point_at(index, settings::Side::Left);
+                            None
+                        }
                     },
                     None => None,
                 };
+                if matches!(act, view::Act::Install) {
+                    self.start_install();
+                }
                 self.do_deed(deed);
             }
             // The panel's own margin. Swallowed: it covers the window, so a
@@ -2204,6 +2324,10 @@ impl App {
         // prompt is read whether or not a session is running, and the panel can
         // be open on a window that has no agent at all.
         self.take_prompt();
+        // The same, for the skill being installed: it answers on its own thread
+        // and wakes the loop, and a window with no agent running still has to
+        // pick the answer up.
+        self.take_install();
         let Some(link) = self.link.as_mut() else {
             return;
         };

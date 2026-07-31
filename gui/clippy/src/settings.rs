@@ -387,6 +387,32 @@ pub struct Card {
     /// there is nothing in them. Nothing at all when the fields say it
     /// themselves, rather than a row of prose padding out every card.
     pub hint: Option<String>,
+    /// The one action the card exists for, in a footer of its own, or nothing
+    /// on a card that is only read and nudged.
+    ///
+    /// One, and at the bottom right where a card's own action belongs. A card
+    /// with several would be a form with a toolbar in it.
+    pub does: Option<Doing>,
+}
+
+/// What the button in a card's footer does.
+///
+/// Named here rather than in the drawing, because it is what the card is for:
+/// the layout only has to know there is a footer with one button in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Doing {
+    /// Take what was typed into the card's first field and install it as a
+    /// skill.
+    Install,
+}
+
+impl Doing {
+    /// The word on the button.
+    pub fn word(self) -> &'static str {
+        match self {
+            Doing::Install => "install",
+        }
+    }
 }
 
 /// One field of a card: its name, what it holds, and the sentence that says
@@ -823,8 +849,11 @@ pub fn lines(row: &Row, cols: usize) -> usize {
         Row::Heading(_) => 2,
         // A card: its header, its body, the room around the body and the space
         // under the card itself, all counted by the one function the layout
-        // places it with.
-        Row::Card(card) => crate::design::card_row_lines(card_body_lines(card, cols), false),
+        // places it with. A footer only when it has an action, since a card
+        // with no button in it is a strip of empty space at the bottom.
+        Row::Card(card) => {
+            crate::design::card_row_lines(card_body_lines(card, cols), card.does.is_some())
+        }
         // One card per entry: the name in the header, what it is for and where
         // it is in the body, and its two buttons in the footer. The description
         // wraps, so an entry is as tall as its description needs: it was three
@@ -926,6 +955,34 @@ pub const UNSET: &str = "not set";
 /// What a credential reads as. Never the value: the panel says whether the key
 /// is there and nothing more.
 pub const SECRET: &str = "set, and not shown here";
+
+/// The key the install field carries.
+///
+/// Not a key of either file, deliberately: every other [`Row::Field`] on this
+/// panel is a line of the agent's `.env` and Enter on one writes that line, so
+/// a second field added without a key of its own would write whatever was typed
+/// into it under whatever key it was given. `main` branches on this before the
+/// write and starts an install instead.
+pub const SKILL_SOURCE: &str = "skill source";
+
+/// What the install of a skill is doing.
+///
+/// The same three states the assembled prompt has ([`Assembled`]), for the same
+/// reason: a clone is given two minutes, so the panel has to be able to say it
+/// is running, and a failure has to be readable rather than a window that did
+/// nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Installing {
+    /// It has been started and has not answered yet.
+    Running { source: String },
+    /// It finished. `said` is what it answered, a line at a time, and `bad` is
+    /// whether that is a failure.
+    Done {
+        source: String,
+        said: Vec<String>,
+        bad: bool,
+    },
+}
 
 /// The keys of the agent's file this section draws a field of its own for: what
 /// to call each one in plain words, and the sentence under it.
@@ -1333,6 +1390,13 @@ pub struct Settings {
     trouble: Option<String>,
     /// The whole prompt the agent is given, once the CLI has printed it.
     prompt: Assembled,
+    /// What has been typed into the install field, kept across a rebuild so an
+    /// install that failed leaves the address on screen to be corrected rather
+    /// than making it be typed again.
+    source: String,
+    /// The install that is running, or the last one that ran. Nothing until one
+    /// is asked for, which is what keeps the block off the section.
+    install: Option<Installing>,
 }
 
 impl Settings {
@@ -1352,9 +1416,111 @@ impl Settings {
             agent,
             trouble: None,
             prompt: Assembled::Waiting,
+            source: String::new(),
+            install: None,
         };
         panel.sections = panel.build(config);
         panel
+    }
+
+    /// What is in the install field right now. Only the tests want it on its
+    /// own: the window reads it off the field the row builder put it in.
+    #[cfg(test)]
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Take what the install field holds, ending the edit if one is running.
+    ///
+    /// One function for the two ways an install is asked for: Enter while
+    /// typing, and a press on the button with the caret still in the field. A
+    /// button that read the row instead would install the last thing that was
+    /// saved rather than the address on screen.
+    pub fn take_source(&mut self) -> String {
+        let typing = matches!(
+            self.at_cursor(),
+            Some(Row::Field { key, .. }) if *key == SKILL_SOURCE
+        );
+        if typing && let Some(typed) = self.editing.take() {
+            self.source = typed;
+        }
+        self.source = self.source.trim().to_string();
+        self.source.clone()
+    }
+
+    /// Say that an install has started, so the section says so while it runs.
+    ///
+    /// The rows are rebuilt rather than patched, the same as everything else
+    /// that arrives here.
+    pub fn begin_install(&mut self, source: String, config: &Config) {
+        self.source = source.clone();
+        self.install = Some(Installing::Running { source });
+        self.refresh(config);
+    }
+
+    /// Take what the install answered, with a fresh reading of the disk beside
+    /// it.
+    ///
+    /// The list comes back off that reading and not out of what the install
+    /// said: a skill is on the panel because its directory is there. The
+    /// message goes on the block above the list, whichever way it went, because
+    /// a git failure is several lines and a footer holds one.
+    pub fn adopt_install(
+        &mut self,
+        source: String,
+        answer: Result<String, String>,
+        agent: Agent,
+        config: &Config,
+    ) {
+        let (said, bad) = match answer {
+            Ok(name) => (
+                vec![
+                    format!("installed {name}"),
+                    String::new(),
+                    format!("it is in the list below, turned on. The agent picks it up on its next session."),
+                ],
+                false,
+            ),
+            Err(why) => (why.lines().map(str::to_string).collect(), true),
+        };
+        // What was typed is kept on a failure and cleared on the one that
+        // worked: an address that failed is one to correct, and one that landed
+        // is a field ready for the next skill.
+        if !bad {
+            self.source = String::new();
+        }
+        self.install = Some(Installing::Done { source, said, bad });
+        self.agent = agent;
+        self.refresh(config);
+    }
+
+    /// The block over the list saying what the last install did, or nothing at
+    /// all until one has been asked for.
+    fn install_paper(&self) -> Option<Paper> {
+        let title = String::from("THE LAST INSTALL");
+        Some(match self.install.as_ref()? {
+            Installing::Running { source } => Paper {
+                title,
+                under: format!("installing {source}\u{2026}"),
+                body: vec![String::from(
+                    "fetching it, reading its SKILL.md and putting it in place.",
+                )],
+                first: 0,
+                offer: None,
+                bad: false,
+            },
+            Installing::Done { source, said, bad } => Paper {
+                title,
+                under: match bad {
+                    true => format!("could not install {source}"),
+                    false => format!("from {source}"),
+                },
+                body: said.clone(),
+                first: 0,
+                offer: None,
+                bad: *bad,
+            },
+        })
     }
 
     /// Take what `noob debug prompt` answered, from the thread that ran it.
@@ -1535,6 +1701,7 @@ impl Settings {
             // one state this window cannot work in, and its credential beside
             // it, because that is the other half of reaching a server.
             Row::Card(Card {
+            does: None,
                 title: String::from("WHERE THE MODEL IS"),
                 fields: vec![
                     CardField::text(
@@ -1549,6 +1716,7 @@ impl Settings {
                 hint: None,
             }),
             Row::Card(Card {
+            does: None,
                 title: String::from("WHICH MODEL IT ASKS FOR"),
                 fields: [agent::MODEL, agent::API_STYLE, agent::REASONING]
                     .into_iter()
@@ -1564,6 +1732,7 @@ impl Settings {
                 )),
             }),
             Row::Card(Card {
+            does: None,
                 title: String::from("WHAT THE AGENT GETS"),
                 fields: vec![ctx, tasks],
                 hint: match unset.is_empty() {
@@ -1577,6 +1746,7 @@ impl Settings {
                 },
             }),
             Row::Card(Card {
+            does: None,
                 title: String::from("THE FILE ALL OF THIS IS IN"),
                 fields: vec![
                     CardField::reading(
@@ -1616,6 +1786,7 @@ impl Settings {
             .collect();
         if !rest.is_empty() {
             rows.push(Row::Card(Card {
+            does: None,
                 title: String::from("THE REST OF THE FILE"),
                 fields: rest,
                 hint: Some(String::from(
@@ -1755,6 +1926,7 @@ impl Settings {
     fn session_rows(&self) -> Vec<Row> {
         let empty = self.agent.sessions.sessions.is_empty();
         let mut rows = vec![Row::Card(Card {
+            does: None,
             title: String::from("WHERE CONVERSATIONS ARE KEPT"),
             fields: vec![CardField::reading(
                 "folder",
@@ -1795,29 +1967,43 @@ impl Settings {
         rows
     }
 
-    /// What is installed under the agent's `skills/`, and what has been turned
-    /// off into the sibling beside it.
+    /// What is installed under the agent's `skills/`, what has been turned off
+    /// into the sibling beside it, and the field one more is installed with.
     ///
     /// Two columns: these rows are the left one, and the skill under the cursor
     /// carries its own `SKILL.md` for the right one. Each row is the skill's
     /// name with the repository it records underneath, or, since nothing the
     /// CLI writes records where a skill came from, the directory it was found
     /// in instead.
+    ///
+    /// The card at the top is the one thing this section could not do: it could
+    /// list, turn off and delete, and installing one meant a terminal.
     fn skill_rows(&self) -> Vec<Row> {
         let mut rows = vec![Row::Card(Card {
-            title: String::from("WHERE SKILLS ARE INSTALLED"),
-            fields: vec![CardField::reading(
-                "skills",
-                match &self.agent.skills_at {
-                    Some(path) => path.display().to_string(),
-                    None => String::from("nowhere: no config directory"),
-                },
-            )],
+            // The action this card exists for, so it is a filled button at the
+            // bottom right of it rather than a key nothing on screen names.
+            does: Some(Doing::Install),
+            title: String::from("INSTALL A SKILL"),
+            fields: vec![
+                CardField::text("repository or folder", SKILL_SOURCE, self.source.clone())
+                    .saying("a git address, an owner/name, or a folder with a SKILL.md in it"),
+                CardField::reading(
+                    "installed in",
+                    match &self.agent.skills_at {
+                        Some(path) => path.display().to_string(),
+                        None => String::from("nowhere: no config directory"),
+                    },
+                )
+                .saying("the agent reads this folder in every project, not just this one"),
+            ],
             hint: Some(String::from(match self.agent.skills.is_empty() {
-                true => "none installed: a skill is a directory here with a SKILL.md in it",
-                false => "turning one off moves its directory beside the skills directory, where the agent does not look; uninstall deletes it",
+                true => "none installed yet: a skill is a directory in there with a SKILL.md in it",
+                false => "turning one off moves its directory beside that one, where the agent does not look; uninstall deletes it",
             })),
         })];
+        if let Some(paper) = self.install_paper() {
+            rows.push(Row::Paper(paper));
+        }
         for skill in &self.agent.skills {
             rows.push(Row::Entry(Entry {
                 name: skill.name.clone(),
@@ -1858,6 +2044,7 @@ impl Settings {
             (true, false) => "the project file wins for a server named in both; turning one off moves its entry to a key the CLI does not read, and uninstall takes the entry out of the file",
         };
         let mut rows = vec![Row::Card(Card {
+            does: None,
             title: String::from("WHERE SERVERS ARE READ FROM"),
             fields: vec![
                 CardField::reading(
@@ -2276,7 +2463,13 @@ impl Settings {
     /// far ends up with no way back to APPEARANCE.
     pub fn hint(&self) -> &'static str {
         if self.editing.is_some() {
-            return "type it \u{2022} enter saves it \u{2022} esc leaves it alone";
+            // The one field on the panel Enter does not write a file with.
+            return match self.at_cursor() {
+                Some(Row::Field { key, .. }) if *key == SKILL_SOURCE => {
+                    "type an address or a folder \u{2022} enter installs it \u{2022} esc leaves it alone"
+                }
+                _ => "type it \u{2022} enter saves it \u{2022} esc leaves it alone",
+            };
         }
         // On a card of two fields, the one thing the plain arrow keys cannot
         // say is how to get to the other one, because left and right are the
@@ -2306,6 +2499,12 @@ impl Settings {
                     "page up and page down read it \u{2022} up and down leave it \u{2022} tab and shift-tab change section"
                 }
             },
+            // The install field. Enter on it starts typing, and the sentence
+            // under the field already says what a source is, so the legend
+            // says what happens when the typing ends.
+            Some(Row::Field { key, .. }) if *key == SKILL_SOURCE => {
+                "up and down move \u{2022} enter types an address in, and enter again installs it \u{2022} tab and shift-tab change section"
+            }
             Some(Row::Field { .. }) if across => {
                 "enter edits it \u{2022} shift left and right cross the card \u{2022} tab and shift-tab change section"
             }
@@ -6005,8 +6204,15 @@ mod tests {
             "the panel does not say where they live"
         );
 
-        // The column beside the list is the skill under the cursor, and the
-        // section opens on the first one rather than on an empty column.
+        // The section opens on the field one more is installed with, which is
+        // the first thing on it anybody can act on.
+        assert!(
+            matches!(panel.at_cursor(), Some(Row::Field { key, .. }) if *key == SKILL_SOURCE),
+            "the section does not open on the install field"
+        );
+        // The column beside the list is the skill under the cursor, and it
+        // shows the first one rather than an empty column while the cursor is
+        // somewhere that is not an entry at all.
         let showing = panel.showing().expect("something to show");
         assert_eq!(showing.name, "coding");
         assert_eq!(
@@ -6018,6 +6224,8 @@ mod tests {
             ],
             "the front matter is not the document"
         );
+        assert!(panel.step(true), "the cursor walks the entries");
+        assert_eq!(panel.showing().expect("the first one").name, "coding");
         assert!(panel.step(true), "the cursor walks the entries");
         assert_eq!(panel.showing().expect("the next one").name, "noisy");
 
@@ -6044,6 +6252,172 @@ mod tests {
         let mut panel = Settings::open(&Config::default(), None, agent);
         go_to(&mut panel, SKILLS);
         panel
+    }
+
+    /// An agent whose skills directory holds the skills named.
+    fn a_skills_agent(names: &[&str]) -> Agent {
+        Agent {
+            skills_at: Some(PathBuf::from("/home/hec/.config/noob/skills")),
+            skills: names
+                .iter()
+                .map(|name| agent::Skill {
+                    dir: String::from(*name),
+                    name: String::from(*name),
+                    about: format!("What {name} is for."),
+                    repo: None,
+                    path: PathBuf::from("/home/hec/.config/noob/skills").join(name),
+                    on: true,
+                    doc: vec![format!("# {name}")],
+                })
+                .collect(),
+            ..Agent::default()
+        }
+    }
+
+    /// The one block of text in the skills section, which is there only once an
+    /// install has been asked for.
+    fn the_install_block(panel: &Settings) -> &Paper {
+        panel
+            .rows()
+            .iter()
+            .find_map(|row| match row {
+                Row::Paper(paper) => Some(paper),
+                _ => None,
+            })
+            .expect("the install block")
+    }
+
+    /// Every name on the list, in order.
+    fn the_skills(panel: &Settings) -> Vec<String> {
+        panel
+            .rows()
+            .iter()
+            .filter_map(|row| match row {
+                Row::Entry(entry) => Some(entry.name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The section opens on a card that installs one, with the address typed
+    /// into its first field and the button that runs it in its footer.
+    ///
+    /// "on skills allow to install more by command as well". The list could
+    /// show, turn off and delete, and the only way to add one was a terminal.
+    #[test]
+    fn a_skill_is_installed_from_a_field_at_the_top_of_the_section() {
+        let mut panel = a_panel_showing(vec![String::from("# coding")]);
+        let Some(Row::Card(card)) = panel.row(0) else {
+            panic!("the section does not open on a card: {:?}", panel.row(0));
+        };
+        assert_eq!(card.title, "INSTALL A SKILL");
+        assert_eq!(
+            card.does,
+            Some(Doing::Install),
+            "the card has no action, so its footer holds nothing"
+        );
+        assert_eq!(card.does.expect("an action").word(), "install");
+        // The field it is typed into, and the folder it lands in, which is the
+        // one the agent reads in every project.
+        assert!(card.fields[0].editable(), "the source cannot be typed into");
+        assert!(!card.fields[1].editable(), "the folder is not a reading");
+        assert!(
+            card.fields[1]
+                .value()
+                .contains("/home/hec/.config/noob/skills")
+        );
+        assert!(card_is_reachable(card), "a field nothing can reach");
+        // And the row claims the extra line its footer takes, or the button is
+        // drawn under the card it belongs to.
+        assert!(
+            lines(&Row::Card(card.clone()), 90)
+                > crate::design::card_row_lines(card_body_lines(card, 90), false),
+            "the footer costs the row nothing"
+        );
+
+        // What is typed is what is installed, whether the edit was ended with
+        // Enter or left running when the button was pressed.
+        assert!(matches!(panel.at_cursor(), Some(Row::Field { key, .. }) if *key == SKILL_SOURCE));
+        assert!(panel.edit());
+        assert!(panel.type_text("someone/writing"));
+        assert!(
+            panel.hint().contains("installs it"),
+            "the footer does not say what enter does: {}",
+            panel.hint()
+        );
+        assert_eq!(panel.take_source(), "someone/writing");
+        assert!(panel.editing().is_none(), "the edit is still running");
+        // Whitespace around it is not part of an address.
+        assert_eq!(panel.take_source(), "someone/writing");
+    }
+
+    /// What the section says while an install runs, when it fails, and when it
+    /// lands.
+    ///
+    /// Every one of the things that can go wrong is a message rather than a
+    /// button that answered a press with nothing: a git failure is several
+    /// lines, so it goes in a block over the list where all of it can be read.
+    #[test]
+    fn a_failed_install_says_why_and_a_good_one_brings_the_list_back_off_the_disk() {
+        let config = Config::default();
+        let mut panel = a_panel_showing(vec![String::from("# coding")]);
+        assert!(
+            !panel.rows().iter().any(|row| matches!(row, Row::Paper(_))),
+            "the block is on the section before anything has been installed"
+        );
+
+        panel.begin_install(String::from("someone/writing"), &config);
+        let block = the_install_block(&panel);
+        assert!(block.under.contains("installing someone/writing"), "{block:?}");
+        assert!(!block.bad);
+        assert_eq!(panel.source(), "someone/writing", "the field lost what was typed");
+
+        // A failure: every line of what it said, in the bad tint, with the
+        // address left on screen to be corrected.
+        panel.adopt_install(
+            String::from("someone/writing"),
+            Err(String::from(
+                "git clone failed: repository 'https://github.com/someone/writing.git' not found",
+            )),
+            a_skills_agent(&["coding"]),
+            &config,
+        );
+        let block = the_install_block(&panel);
+        assert!(block.bad, "a failed install is not marked as one");
+        assert!(block.under.contains("could not install"), "{block:?}");
+        assert_eq!(
+            block.body,
+            vec![String::from(
+                "git clone failed: repository 'https://github.com/someone/writing.git' not found"
+            )]
+        );
+        assert_eq!(panel.source(), "someone/writing");
+        assert_eq!(the_skills(&panel), ["coding"], "a failure changed the list");
+
+        // A clone that says several lines says all of them, since git writes
+        // its reason on one line and its advice on the next.
+        panel.adopt_install(
+            String::from("someone/writing"),
+            Err(String::from("could not read Username\nfatal: could not read")),
+            a_skills_agent(&["coding"]),
+            &config,
+        );
+        assert_eq!(the_install_block(&panel).body.len(), 2);
+
+        // And one that landed. The list comes off the reading handed in with it
+        // and not out of what the install said, and the field is empty for the
+        // next one.
+        panel.adopt_install(
+            String::from("someone/writing"),
+            Ok(String::from("writing")),
+            a_skills_agent(&["coding", "writing"]),
+            &config,
+        );
+        let block = the_install_block(&panel);
+        assert!(!block.bad);
+        assert!(block.body[0].contains("installed writing"), "{block:?}");
+        assert_eq!(the_skills(&panel), ["coding", "writing"]);
+        assert_eq!(panel.source(), "", "the field still holds the last address");
     }
 
     /// The column beside the list is counted in the rows it is drawn as, not in
@@ -6199,6 +6573,9 @@ mod tests {
         let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
         let mut panel = Settings::open(&Config::default(), None, read());
         go_to(&mut panel, SKILLS);
+        // Past the card the section opens on, which is the one an install is
+        // typed into, onto the skill itself.
+        assert!(panel.step(true));
         let at = panel.cursor();
         assert!(matches!(panel.row(at), Some(Row::Entry(entry)) if entry.on));
 
