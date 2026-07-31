@@ -3404,8 +3404,15 @@ fn menu_row(
         scene.over_rect(panel.fill(skin.hot));
     }
     // A row that cannot act says so by weight, the way a tab that is not
-    // showing does, rather than by being missing.
-    let tint = if row.enabled { skin.bright } else { skin.dim };
+    // showing does, rather than by being missing. A row waiting for a second
+    // press before it destroys something says so in the colour this window
+    // uses for everything that throws work away, which is the colour the
+    // settings panel's own trash asks the same question in.
+    let tint = match (row.enabled, row.item.warns()) {
+        (true, true) => skin.bad,
+        (true, false) => skin.bright,
+        (false, _) => skin.dim,
+    };
     let mut runs = Vec::new();
     match row.item.icon() {
         Some(icon) => runs.push(Run::icon(icon.to_string(), tint)),
@@ -14075,13 +14082,60 @@ mod tests {
             .collect();
         for label in [
             crate::menu::Item::OpenSession.label(),
-            crate::menu::Item::DeleteSession.label(),
+            crate::menu::Item::DeleteSession(false).label(),
         ] {
             assert!(rows.contains(label), "{label:?} is not on screen: {rows:?}");
         }
 
         // And it takes the press before the row it covers, which it always did.
         let (x, y) = middle(out.layout.menu_rows[1].1);
+        assert_eq!(out.layout.hit(x, y), Some(Hit::MenuRow(1)));
+    }
+
+    /// Pressed once, the Delete row reads "sure?" in the colour this window
+    /// gives everything that throws work away, and the box under it does not
+    /// move: the second press lands on the same pixels the first one did.
+    ///
+    /// The wording is the settings panel's, because the panel's trash asks the
+    /// same question and the two are one product.
+    #[test]
+    fn an_armed_delete_row_reads_sure_without_moving_the_menu() {
+        let picker = a_session_picker();
+        let row = {
+            let out = render_picker(&picker, 1205.0, 791.0, None);
+            out.layout.picker_rows[0].1
+        };
+        let mut menu = Menu::for_session(middle(row), 0, false);
+        let before = render_picker_menu(&picker, &menu, 1205.0, 791.0);
+        let (x, y) = middle(before.layout.menu_rows[1].1);
+
+        assert!(!menu.press_delete(1), "the first press was the delete");
+        let out = render_picker_menu(&picker, &menu, 1205.0, 791.0);
+        let armed: Vec<&Run> = out
+            .scene
+            .over_texts
+            .iter()
+            .flat_map(|text| text.runs.iter())
+            .filter(|run| run.text.contains("sure?"))
+            .collect();
+        assert_eq!(armed.len(), 1, "the row does not ask: {armed:?}");
+        assert_eq!(armed[0].color, Some(out.skin.bad));
+        let rows: String = out
+            .scene
+            .over_texts
+            .iter()
+            .flat_map(|text| text.runs.iter().map(|run| run.text.as_str()))
+            .collect();
+        assert!(
+            !rows.contains(crate::menu::Item::DeleteSession(false).label()),
+            "both wordings are on screen: {rows:?}"
+        );
+
+        // The same box, the same rows, and the same press: a menu that narrowed
+        // when it armed would slide out from under the pointer and cancel the
+        // press it just asked for.
+        assert_eq!(out.layout.menu, before.layout.menu);
+        assert_eq!(out.layout.menu_rows, before.layout.menu_rows);
         assert_eq!(out.layout.hit(x, y), Some(Hit::MenuRow(1)));
     }
 

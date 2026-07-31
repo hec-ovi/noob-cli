@@ -60,8 +60,13 @@ pub enum Item {
     /// says the row it does not have is the only thing you can do here.
     OpenSession,
     /// Delete that session's transcript, and the note saying which folder it
-    /// belonged to. The only row in this window that destroys anything.
-    DeleteSession,
+    /// belonged to. The only row in this window that destroys anything, which
+    /// is why it is the only row that is pressed twice.
+    ///
+    /// Carries whether the first press has been made. Armed, the row reads
+    /// "sure?" instead of "Delete" and the next press on it is the delete;
+    /// see [`Menu::press_delete`].
+    DeleteSession(bool),
 }
 
 impl Item {
@@ -76,8 +81,33 @@ impl Item {
             // The tab's own name, so the list reads as the tabs it is a list of.
             Item::Widget(view, _) => view.label(),
             Item::OpenSession => "Open",
-            Item::DeleteSession => "Delete",
+            Item::DeleteSession(false) => "Delete",
+            // The word the settings panel's own trash uses once it has been
+            // pressed once. The same act asked the same way, so the two read as
+            // one product rather than as two deletes with two manners.
+            Item::DeleteSession(true) => "sure?",
         }
+    }
+
+    /// The label the box is measured from: for a row that changes what it says
+    /// while the menu is open, the longest of its wordings.
+    ///
+    /// A menu that narrowed when the delete armed would slide its rows sideways
+    /// under a pointer that has not moved, and take the row out from under it:
+    /// the box is hit tested where it is drawn, so a row that shrank away from
+    /// the pointer reads as the pointer leaving the menu and disarms the very
+    /// press it just asked for.
+    fn sizing_label(self) -> &'static str {
+        match self {
+            Item::DeleteSession(_) => Item::DeleteSession(false).label(),
+            _ => self.label(),
+        }
+    }
+
+    /// Whether the row is waiting for a second press before it destroys
+    /// something. What the drawing puts it in the warning colour for.
+    pub fn warns(self) -> bool {
+        matches!(self, Item::DeleteSession(true))
     }
 
     /// The glyph in front of the label. Every row carries one now, so the type
@@ -114,7 +144,9 @@ impl Item {
             // The mark the picker's own Open button wears, because it is the
             // same act reached another way, and the bin for the row that is not.
             Item::OpenSession => Some(icons::CONFIRM),
-            Item::DeleteSession => Some(icons::TRASH),
+            // The bin either way. The gutter says what the row is, and what the
+            // row is does not change when it starts asking.
+            Item::DeleteSession(_) => Some(icons::TRASH),
         }
     }
 
@@ -249,6 +281,9 @@ impl Menu {
     /// greyed rather than missing, the way every other row that cannot act is:
     /// the menu is the same two rows either way, and Delete still works, which
     /// is the row that session is most likely to be right clicked for.
+    ///
+    /// Delete opens unarmed, and a menu is built fresh every right click, so
+    /// there is no way to open one that is already asking.
     pub fn for_session(at: (f32, f32), index: usize, gone: bool) -> Menu {
         let rows = vec![
             Row {
@@ -256,7 +291,7 @@ impl Menu {
                 enabled: !gone,
             },
             Row {
-                item: Item::DeleteSession,
+                item: Item::DeleteSession(false),
                 enabled: true,
             },
         ];
@@ -365,6 +400,58 @@ impl Menu {
         moved
     }
 
+    /// Press the delete row at `index`. `true` means delete it now.
+    ///
+    /// The first press only arms the row: it starts reading "sure?" and the
+    /// menu stays open under the pointer for the second one. Two presses
+    /// because a transcript is gone once it is deleted and nothing in this
+    /// window can put it back, which is the same reason the settings panel's
+    /// trash is pressed twice, and the same wording.
+    ///
+    /// Anything but a second press on that row leaves it alone: the pointer
+    /// moving off it disarms it through [`Menu::point_at`], and every way of
+    /// closing the menu takes the arming with it, because the arming is on the
+    /// menu and nowhere else.
+    pub fn press_delete(&mut self, index: usize) -> bool {
+        let Some(row) = self.rows.get_mut(index) else {
+            return false;
+        };
+        match row.item {
+            Item::DeleteSession(true) => {
+                row.item = Item::DeleteSession(false);
+                true
+            }
+            Item::DeleteSession(false) => {
+                row.item = Item::DeleteSession(true);
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// The pointer is over row `row`, or over none of them when it is `None`.
+    /// Returns whether anything changed, which is whether the menu needs
+    /// drawing again.
+    ///
+    /// An armed delete disarms as soon as the pointer is anywhere else. A menu
+    /// left sitting on "sure?" while the pointer has wandered to Open and back
+    /// would take what reads as a first press and delete on it.
+    pub fn point_at(&mut self, row: Option<usize>) -> bool {
+        let Some(armed) = self.arming() else {
+            return false;
+        };
+        if row == Some(armed) {
+            return false;
+        }
+        self.rows[armed].item = Item::DeleteSession(false);
+        true
+    }
+
+    /// Which row is asking for a second press.
+    pub fn arming(&self) -> Option<usize> {
+        self.rows.iter().position(|row| row.item.warns())
+    }
+
     /// What picking the row at `index` does, or nothing when that row is
     /// disabled or does not exist. The one place a pointer position becomes an
     /// action, so a greyed row cannot act by some other route.
@@ -394,7 +481,7 @@ impl Menu {
     fn widest(rows: &[Row]) -> usize {
         rows.iter()
             .map(|row| {
-                row.item.label().chars().count()
+                row.item.sizing_label().chars().count()
                     + match row.item.marker() {
                         Some(_) => MARKER_COLUMNS,
                         None => 0,
@@ -793,11 +880,14 @@ mod tests {
     #[test]
     fn a_saved_session_gets_an_open_row_and_a_delete_row() {
         let menu = Menu::for_session((40.0, 90.0), 3, false);
-        assert_eq!(items(&menu), vec![Item::OpenSession, Item::DeleteSession]);
+        assert_eq!(
+            items(&menu),
+            vec![Item::OpenSession, Item::DeleteSession(false)]
+        );
         assert_eq!(menu.target, Target::Session(3));
         assert_eq!(menu.at, (40.0, 90.0));
         assert_eq!(menu.pick(0), Some(Item::OpenSession));
-        assert_eq!(menu.pick(1), Some(Item::DeleteSession));
+        assert_eq!(menu.pick(1), Some(Item::DeleteSession(false)));
         assert_eq!(menu.pick(2), None, "there is no third row");
         assert_eq!(menu.widgets(), 0, "a session has no widget list");
         assert_eq!(menu.target_view(), None, "and it is not a widget");
@@ -808,15 +898,16 @@ mod tests {
         let dead = Menu::for_session((40.0, 90.0), 3, true);
         assert_eq!(items(&dead), items(&menu), "the shape changed");
         assert_eq!(dead.pick(0), None);
-        assert_eq!(dead.pick(1), Some(Item::DeleteSession));
+        assert_eq!(dead.pick(1), Some(Item::DeleteSession(false)));
 
         // Marked, like every other row, and not with a mark that already means
         // something else. Open wears the picker's own confirm glyph because it
         // is the same act reached another way.
         assert_eq!(Item::OpenSession.icon(), Some(icons::CONFIRM));
-        assert_eq!(Item::DeleteSession.icon(), Some(icons::TRASH));
+        assert_eq!(Item::DeleteSession(false).icon(), Some(icons::TRASH));
+        assert_eq!(Item::DeleteSession(true).icon(), Some(icons::TRASH));
         assert_ne!(icons::TRASH, icons::CLOSE_WIDGET, "delete is not close");
-        for item in [Item::OpenSession, Item::DeleteSession] {
+        for item in [Item::OpenSession, Item::DeleteSession(false)] {
             assert_eq!(item.marker(), None, "{item:?} does not fly out");
         }
         let dock = Dock::new();
@@ -824,7 +915,73 @@ mod tests {
         assert!(!menu.toggle_widgets(&dock), "there is no list to open");
         assert_eq!(
             menu.width_chars(),
-            Item::DeleteSession.label().chars().count()
+            Item::DeleteSession(false).label().chars().count()
+        );
+    }
+
+    /// The right click's Delete asks before it acts, the way the settings
+    /// panel's trash does. The first press only changes what the row says; the
+    /// second one on the same row is the delete.
+    ///
+    /// Before this the picker was the unguarded half of the pair: the panel
+    /// asked twice and the menu removed the transcript on the first press, so
+    /// somebody who had learned the panel's question lost a conversation to a
+    /// right click that never asked one.
+    #[test]
+    fn the_delete_row_asks_before_it_acts() {
+        let mut menu = Menu::for_session((40.0, 90.0), 3, false);
+        assert_eq!(menu.arming(), None, "it opened already asking");
+
+        // Once: the row is still there, it reads differently, and nothing was
+        // deleted, which the window reads off the `false`.
+        assert!(!menu.press_delete(1), "the first press was the delete");
+        assert_eq!(menu.arming(), Some(1));
+        assert_eq!(menu.pick(1), Some(Item::DeleteSession(true)));
+        assert_eq!(Item::DeleteSession(true).label(), "sure?");
+        assert!(Item::DeleteSession(true).warns());
+        assert!(!Item::DeleteSession(false).warns());
+
+        // Twice on the same row: the delete, and the row goes back to asking so
+        // a menu that somehow outlived it cannot fire again.
+        assert!(menu.press_delete(1), "the second press did nothing");
+        assert_eq!(menu.arming(), None);
+    }
+
+    /// What cancels: the pointer moving off the row, and the pointer leaving
+    /// the menu. Closing the menu needs nothing here, because the arming lives
+    /// on the menu and goes with it.
+    #[test]
+    fn moving_off_the_delete_row_takes_the_question_back() {
+        let mut menu = Menu::for_session((40.0, 90.0), 3, false);
+        assert!(!menu.press_delete(1));
+
+        // Staying on it is not moving away.
+        assert!(!menu.point_at(Some(1)), "it changed under a still pointer");
+        assert_eq!(menu.arming(), Some(1));
+
+        // The other row, and then off the menu altogether. Either one puts the
+        // question back, so the next press on Delete is a first press again.
+        assert!(menu.point_at(Some(0)));
+        assert_eq!(menu.arming(), None);
+        assert!(!menu.point_at(Some(0)), "nothing to change twice");
+        assert!(!menu.press_delete(1), "it was still armed");
+        assert!(menu.point_at(None));
+        assert_eq!(menu.arming(), None);
+        assert!(!menu.press_delete(1), "it was still armed");
+    }
+
+    /// The box does not resize when the row starts asking. It is hit tested
+    /// where it is drawn, so a narrower menu would slide out from under the
+    /// pointer and disarm the press it just asked for.
+    #[test]
+    fn arming_the_delete_does_not_move_the_menu_under_the_pointer() {
+        let mut menu = Menu::for_session((40.0, 90.0), 3, false);
+        let wide = menu.width_chars();
+        assert!(!menu.press_delete(1));
+        assert_eq!(menu.width_chars(), wide);
+        assert!(
+            Item::DeleteSession(true).label().chars().count() < wide,
+            "the wording is no longer the narrower of the two"
         );
     }
 

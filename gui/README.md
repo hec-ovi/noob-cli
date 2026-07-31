@@ -46,7 +46,10 @@ full its context window got, and the start of the first thing you asked in it.
 Up and down move the cursor, Enter carries the session on, which is
 `noob serve --resume <id>` in that folder, and a right click on a row offers the
 same Open plus Delete, which removes the transcript and its line from the note
-below. The ones belonging to the folder you are looking at come first.
+below. Delete is pressed twice: the first press turns the row into `sure?` and
+the second one does it, the same question the settings panel's trash asks.
+Moving off the row, or closing the menu with a key or a press anywhere else,
+puts the question back. The ones belonging to the folder you are looking at come first.
 Transcripts do not record which folder they happened in, so the window keeps
 that note itself in `~/.config/noob/no0b.sessions`, one `<id> <folder>` per
 line, with `ctx=<used>/<total>` in front of the folder once a window has watched

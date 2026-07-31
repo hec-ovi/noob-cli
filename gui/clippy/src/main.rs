@@ -2536,9 +2536,19 @@ impl App {
             // The same two things pressing the row and pressing Delete do, from
             // the menu the right button opened over it.
             (Item::OpenSession, Target::Session(index)) => self.open_session(index),
-            (Item::DeleteSession, Target::Session(index)) => self.delete_session(index),
+            // Delete is the one row here that is pressed twice. The first press
+            // only arms it, and the menu stays open under the pointer so the
+            // second press has something to land on; the rule is
+            // [`Menu::press_delete`], and the panel's trash asks the same
+            // question in the same words.
+            (Item::DeleteSession(_), Target::Session(session)) => {
+                match menu.press_delete(index) {
+                    true => self.delete_session(session),
+                    false => self.menu = Some(menu),
+                }
+            }
             // Neither row is on any menu but a session's.
-            (Item::OpenSession | Item::DeleteSession,
+            (Item::OpenSession | Item::DeleteSession(_),
                 Target::Input | Target::Widget(..) | Target::SettingsDoc) => {}
             // The row that opens the list beside itself, which is the thing the
             // row is for: closing the menu would take the list with it.
@@ -3496,6 +3506,15 @@ impl ApplicationHandler<Wake> for App {
                     self.hot = hot;
                     self.dirty = true;
                 }
+                // An armed Delete on an open menu is disarmed by the pointer
+                // leaving its row, so the second press can only be made by a
+                // pointer that is still on the row which asked for it.
+                if let Some(menu) = self.menu.as_mut() {
+                    self.dirty |= menu.point_at(match under {
+                        Some(Hit::MenuRow(row)) => Some(row),
+                        _ => None,
+                    });
+                }
                 // The pointer shape is the only thing telling a user that an
                 // undecorated window can be resized at all, and the only thing
                 // saying that a tab let go outside the window is closed.
@@ -3513,7 +3532,13 @@ impl ApplicationHandler<Wake> for App {
                 self.redraw();
             }
             WindowEvent::CursorLeft { .. } => {
-                if self.hot.take().is_some() {
+                let mut changed = self.hot.take().is_some();
+                // The pointer left the window, which is further away than the
+                // other rows: an armed Delete goes back to asking.
+                if let Some(menu) = self.menu.as_mut() {
+                    changed |= menu.point_at(None);
+                }
+                if changed {
                     self.dirty = true;
                     self.redraw();
                 }
@@ -4423,7 +4448,7 @@ mod tests {
         .expect("a session row has a menu");
         assert_eq!(menu.target, Target::Session(0));
         assert_eq!(menu.pick(0), Some(Item::OpenSession));
-        assert_eq!(menu.pick(1), Some(Item::DeleteSession));
+        assert_eq!(menu.pick(1), Some(Item::DeleteSession(false)));
 
         // The row whose folder has gone keeps both rows and cannot be opened.
         let dead = menu_for(
@@ -4437,7 +4462,7 @@ mod tests {
         .expect("that row has one too");
         assert_eq!(dead.rows.len(), menu.rows.len());
         assert_eq!(dead.pick(0), None, "it cannot be resumed anywhere");
-        assert_eq!(dead.pick(1), Some(Item::DeleteSession));
+        assert_eq!(dead.pick(1), Some(Item::DeleteSession(false)));
 
         // A row that is not there, and the rest of the picker.
         assert!(
@@ -4539,6 +4564,91 @@ mod tests {
         // And a window with no note file still deletes the transcript.
         assert_eq!(forget_session(Some(sessions_dir.clone()), None, "keep"), Ok(()));
         assert!(!sessions_dir.join("keep.jsonl").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The right click's Delete asks before it acts too, so the two routes to
+    /// the same transcript are guarded the same way.
+    ///
+    /// The menu decides and this file acts, which is how [`App::pick`] is
+    /// written: [`Menu::press_delete`] answers `false` for the first press and
+    /// the window puts the menu back rather than calling anything, and answers
+    /// `true` for the second, which is the only path to `forget_session` from
+    /// here. Before this the first press deleted the file, while the settings
+    /// panel two rooms away asked twice for the same act.
+    #[test]
+    fn the_picker_s_delete_row_asks_once_and_then_takes_the_file_and_its_line() {
+        let dir = std::env::temp_dir().join(format!("no0b-menu-forget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sessions_dir = dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("a sessions dir");
+        let note = dir.join("no0b.sessions");
+        for id in ["keep", "drop"] {
+            std::fs::write(
+                sessions_dir.join(format!("{id}.jsonl")),
+                format!("{{\"t\":\"meta\",\"v\":1,\"id\":\"{id}\"}}\n"),
+            )
+            .expect("a transcript");
+        }
+        sessions::save_index(
+            &note,
+            &sessions::Index::default()
+                .plus("keep", Path::new("/home/hec/one"))
+                .plus("drop", Path::new("/home/hec/two")),
+        )
+        .expect("the note is writable");
+
+        // What the window does with the answer, in one place, so the test
+        // cannot delete by a route the window does not have.
+        let press = |menu: &mut Menu, row: usize, id: &str| match menu.press_delete(row) {
+            true => Some(forget_session(
+                Some(sessions_dir.clone()),
+                Some(note.clone()),
+                id,
+            )),
+            false => None,
+        };
+
+        let mut menu = Menu::for_session((500.0, 400.0), 0, false);
+        assert_eq!(press(&mut menu, 1, "drop"), None, "the first press deleted it");
+        assert!(sessions_dir.join("drop.jsonl").exists(), "it went anyway");
+        assert_eq!(menu.arming(), Some(1), "the row is not asking");
+
+        // Moving off the row cancels, so the press after that is a first press
+        // again and still takes nothing.
+        assert!(menu.point_at(Some(0)));
+        assert_eq!(press(&mut menu, 1, "drop"), None);
+        assert!(sessions_dir.join("drop.jsonl").exists());
+
+        // And closing the menu cancels, which is what every key and every press
+        // off the menu does: the arming is on the menu and goes with it.
+        drop(menu);
+        let mut menu = Menu::for_session((500.0, 400.0), 0, false);
+        assert_eq!(press(&mut menu, 1, "drop"), None, "it reopened armed");
+        assert!(sessions_dir.join("drop.jsonl").exists());
+
+        // The second press on the row that asked: the transcript and its line
+        // in the note, and nothing else.
+        assert_eq!(press(&mut menu, 1, "drop"), Some(Ok(())));
+        assert!(!sessions_dir.join("drop.jsonl").exists());
+        assert!(sessions_dir.join("keep.jsonl").exists());
+        assert_eq!(
+            sessions::load_index(&note),
+            sessions::Index::default().plus("keep", Path::new("/home/hec/one"))
+        );
+
+        // The guard under both routes is untouched: a confirmed delete of a
+        // name that would reach out of the sessions directory is still refused,
+        // and the file it points at is still there.
+        let outside = dir.join("no0b.sessions");
+        let mut menu = Menu::for_session((500.0, 400.0), 0, false);
+        assert_eq!(press(&mut menu, 1, "../no0b.sessions"), None);
+        let why = press(&mut menu, 1, "../no0b.sessions")
+            .expect("the second press did nothing")
+            .expect_err("a path out of the directory was accepted");
+        assert!(why.starts_with("../no0b.sessions was not deleted"), "{why}");
+        assert!(outside.exists(), "it deleted a file outside the directory");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
