@@ -302,6 +302,11 @@ that end up on the clipboard. The blank a row broke at is on neither row, and it
 comes back when you copy a run that crosses the break. The prompt is the one box
 that still breaks on the column, because its caret is placed by counting them.
 
+The conversation is counted in the Markdown it draws. A bullet is measured,
+banded and copied as `• read a file`, not as the `- **read** a file` behind it:
+the marks are not on the screen, so there is nothing to point at and nothing to
+select. That is also why a copy off the transcript comes back without them.
+
 Routing is by tool name, and by file extension for syntax coloring. The agent is
 never told any of this exists: everything the window shows is derived from calls
 the model was already making, including the plan.

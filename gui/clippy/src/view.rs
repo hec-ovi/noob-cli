@@ -3550,7 +3550,9 @@ fn selection_band(scene: &mut Scene, frame: &Frame, panel: Panel, showing: Optio
         let Some(line) = pane.line(number) else {
             continue;
         };
-        let chars = line.text.chars().count();
+        // Counted in what is on screen: a Markdown line is drawn without its
+        // marks, and a band measured on the source runs past the glyphs.
+        let chars = line.shown().chars().count();
         let Some((from, to)) = selection.columns_on(number, chars) else {
             continue;
         };
@@ -8448,6 +8450,131 @@ mod tests {
         assert_eq!(
             broken, on_the_column,
             "a row broke inside a word that had a blank to break at"
+        );
+    }
+
+    /// The transcript is drawn as Markdown, and it is counted in the Markdown
+    /// it drew.
+    ///
+    /// `markdown::line` eats the stars, the backticks and the hashes and turns
+    /// `- ` into `• `, so the drawn line is shorter than the line the model
+    /// wrote. While the pane measured the source, the tail of every marked-up
+    /// line had no glyph to point at, and a wrapped one was out by however many
+    /// marks were consumed above the pointer. The pane renders the line as it
+    /// pushes it now, and its rows, its bands and its clipboard are all counted
+    /// in that, so this asserts the whole of it at once: what the renderer lays
+    /// out on a row is what a drag across that row would copy.
+    #[test]
+    fn the_transcript_is_counted_in_the_markdown_it_draws() {
+        let mut state = busy_state();
+        for text in [
+            "## Notable Features",
+            "- **read** a file, then `write` it back out again with __every__ \
+             mark it came with, which is a good few marks and a good few blanks \
+             and more than one row of any pane",
+            "plain prose with no marks in it at all, long enough to wrap over a \
+             row boundary and land some of itself on a second row",
+            "",
+            "1. a numbered item with `code` in it and a **bold** run near the end",
+        ] {
+            state.output.say(text, Tone::Body);
+        }
+
+        let dock = Dock::new();
+        let shape = shape(&dock, &["a.rs"]);
+        let layout = Layout::compute(1400.0, 900.0, &shape);
+        let panel = layout.placed(Space::TopLeft).body;
+        let cols = cols_of(panel, 8.0);
+        let skin = Skin::from(&Config::default());
+        let scene = build(&Frame {
+            state: &state,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &crate::prompt::Prompt::default(),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            clock: 0.0,
+            drag: None,
+            hot: None,
+            trouble: None,
+            selection: None,
+            menu: None,
+            picker: None,
+            settings: None,
+        });
+
+        let text = scene
+            .texts
+            .iter()
+            .find(|text| text.at == panel.inset(PAD))
+            .expect("the output pane draws its text");
+        assert_eq!(text.wrap_cols, Some(cols));
+        let laid: String = noob_draw::Run::wrapped(&text.runs, cols, text.wrap_break)
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect();
+        let drawn: Vec<Vec<char>> = laid.split('\n').map(|row| row.chars().collect()).collect();
+
+        let rows = layout.rows(panel, 14.0);
+        let skip = state.output.window(rows, cols).skip;
+        let mut checked = 0;
+        let mut marked = 0;
+        for row in 0..rows {
+            let Some((line, start)) = state.output.spot_in(rows, cols, row, 0) else {
+                break;
+            };
+            let (same, end) = state
+                .output
+                .spot_in(rows, cols, row, cols + 9)
+                .expect("the row a moment ago is still a row");
+            assert_eq!(same, line, "row {row} lands on two different lines");
+            let held = state.output.line(line).expect("a row of a line still held");
+            let source: Vec<char> = held.shown().chars().take(end).skip(start).collect();
+            assert_eq!(
+                drawn[row + skip], source,
+                "screen row {row} holds something other than what a selection there would copy"
+            );
+            if held.shown() != held.text {
+                marked += 1;
+            }
+            checked += 1;
+        }
+        assert!(checked > 6, "only {checked} rows were on screen");
+        assert!(marked > 2, "only {marked} rows came off a line with marks in it");
+
+        // And the row count of a marked-up line is the number of rows it is
+        // actually drawn as, which is what keeps every row below it in step.
+        let bullet = state.output.last() - 4;
+        let held = state.output.line(bullet).expect("the bullet is held");
+        assert!(held.shown() != held.text, "the bullet line had no marks");
+        let counted = state.output.rows_of_line(bullet, cols);
+        assert!(counted.len() > 1, "the bullet has to wrap");
+        let on_screen: Vec<&Vec<char>> = drawn
+            .iter()
+            .skip(
+                (0..rows)
+                    .find(|row| {
+                        state.output.spot_in(rows, cols, *row, 0).map(|(line, _)| line)
+                            == Some(bullet)
+                    })
+                    .expect("the bullet is on screen")
+                    + skip,
+            )
+            .take(counted.len())
+            .collect();
+        let rejoined: String = on_screen
+            .iter()
+            .map(|row| row.iter().collect::<String>())
+            .collect::<Vec<String>>()
+            .join(" ");
+        assert_eq!(
+            rejoined,
+            held.shown(),
+            "the rows drawn do not add back up to the line"
         );
     }
 

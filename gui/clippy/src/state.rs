@@ -145,6 +145,22 @@ pub struct Line {
     pub tone: Tone,
     /// The line this is in its file, for the gutter. Only file views set it.
     pub number: Option<u32>,
+    /// What this line looks like on screen, when that is not what was written.
+    ///
+    /// Only a Markdown pane sets it, and only for the lines whose marks it
+    /// eats. Everything measured about a line is measured on this: its rows,
+    /// the columns a selection on it holds, and the characters a copy returns.
+    /// A reader selects the glyphs he can see, so `- **read** a file` is
+    /// thirteen columns of `• read a file` and not seventeen of the source.
+    shown: Option<String>,
+    /// Where a fenced block stood in front of this line, so the pane can be
+    /// drawn from any row of it without rescanning everything above.
+    ///
+    /// Remembered rather than worked out again, which is also what keeps the
+    /// drawing and the measuring in step once the pane is full: the line that
+    /// opened a block can fall off the top while its body is still on screen,
+    /// and a scan of what is left would call that body prose.
+    fence: crate::markdown::Fence,
 }
 
 impl Line {
@@ -153,12 +169,20 @@ impl Line {
             text: text.into(),
             tone,
             number: None,
+            shown: None,
+            fence: crate::markdown::Fence::default(),
         }
     }
 
     pub fn at(mut self, number: u32) -> Line {
         self.number = Some(number);
         self
+    }
+
+    /// The text this line is drawn as, which is the text everything else about
+    /// it is counted in.
+    pub fn shown(&self) -> &str {
+        self.shown.as_deref().unwrap_or(&self.text)
     }
 }
 
@@ -180,6 +204,17 @@ pub struct Pane {
     dropped: usize,
     /// Wrapped heights for the width they were last asked for.
     heights: std::cell::RefCell<Heights>,
+    /// Whether the body lines of this pane are Markdown, drawn as the thing
+    /// they describe rather than as the marks that describe it.
+    rendered: bool,
+    /// Where a fenced block stands after the last line pushed, so the next one
+    /// knows whether it is prose or code. Carried rather than rescanned: a full
+    /// pane is thousands of lines and one arrives per token.
+    fence: crate::markdown::Fence,
+    /// The same, in front of the last line pushed. `stream` grows that line in
+    /// place, and a line that grew has to be drawn again from the state it
+    /// started in.
+    tail_fence: crate::markdown::Fence,
 }
 
 /// The wrapped height of every line, and what it was computed for.
@@ -188,6 +223,25 @@ struct Heights {
     rows: Vec<usize>,
     cols: usize,
     stale: bool,
+}
+
+/// What a line reaches the screen as, and `None` when that is the text itself.
+///
+/// Only the model's prose is Markdown: what the human typed and what the
+/// harness noted are shown as written, which is the same rule the drawing keeps
+/// and the same one the fence is carried by. Advances `fence` either way, since
+/// a fenced block runs across the lines rather than inside one and a pane that
+/// renders nothing still has to know where the blocks are.
+fn drawn(text: &str, tone: Tone, fence: &mut crate::markdown::Fence, render: bool) -> Option<String> {
+    if tone != Tone::Body {
+        return None;
+    }
+    if !render {
+        fence.toggle(text);
+        return None;
+    }
+    let shown = crate::markdown::shown(text, fence);
+    (shown != text).then_some(shown)
 }
 
 impl Pane {
@@ -203,10 +257,30 @@ impl Pane {
                 stale: true,
                 ..Heights::default()
             }),
+            rendered: false,
+            fence: crate::markdown::Fence::default(),
+            tail_fence: crate::markdown::Fence::default(),
         }
     }
 
-    pub fn push(&mut self, line: Line) {
+    /// A pane whose body lines are Markdown.
+    ///
+    /// It renders them as it pushes them, and everything it reports afterwards
+    /// is about the rendering: how many rows a line takes, which character a
+    /// row holds, and what a selection over it copies. The alternative was a
+    /// map from a drawn column back to a source column, threaded through the
+    /// hit test, the band and the clipboard, so that pointing at the last glyph
+    /// of a bullet copied the four asterisks around it. A reader selects what
+    /// he can see.
+    pub fn rendered(mut self) -> Pane {
+        self.rendered = true;
+        self
+    }
+
+    pub fn push(&mut self, mut line: Line) {
+        self.tail_fence = self.fence.clone();
+        line.fence = self.fence.clone();
+        line.shown = drawn(&line.text, line.tone, &mut self.fence, self.rendered);
         self.lines.push_back(line);
         while self.lines.len() > self.cap {
             self.lines.pop_front();
@@ -241,15 +315,38 @@ impl Pane {
             if i > 0 {
                 self.push(Line::new("", tone));
             }
-            match self.lines.back_mut() {
-                Some(last) if last.tone == tone => last.text.push_str(part),
-                _ => self.push(Line::new(part, tone)),
+            let grew = match self.lines.back_mut() {
+                Some(last) if last.tone == tone => {
+                    last.text.push_str(part);
+                    true
+                }
+                _ => false,
+            };
+            if grew {
+                self.redraw_tail();
+            } else {
+                self.push(Line::new(part, tone));
             }
         }
         // The tail line grew in place, which changes its wrapped height
         // without changing the line count.
         self.heights.borrow_mut().stale = true;
         self.scrollback = 0;
+    }
+
+    /// Draw the tail line again, from the fence state in front of it.
+    ///
+    /// A line that grew under `stream` is a line whose rendering moved with it:
+    /// a half-written `**bold` is prose until its closing pair arrives, at
+    /// which point four characters leave the screen.
+    fn redraw_tail(&mut self) {
+        let mut fence = self.tail_fence.clone();
+        let render = self.rendered;
+        if let Some(last) = self.lines.back_mut() {
+            let shown = drawn(&last.text, last.tone, &mut fence, render);
+            last.shown = shown;
+        }
+        self.fence = fence;
     }
 
     /// The wrapped height of every line held, for a box `cols` wide.
@@ -269,7 +366,7 @@ impl Pane {
                 // arrives.
                 let mut wrapped = Vec::new();
                 for line in &self.lines {
-                    text_geometry::rows_into(&line.text, cols, PANE_WRAP, &mut wrapped);
+                    text_geometry::rows_into(line.shown(), cols, PANE_WRAP, &mut wrapped);
                     cache.rows.push(wrapped.len());
                 }
                 cache.cols = cols;
@@ -318,9 +415,13 @@ impl Pane {
 
     /// The visual rows one line is drawn as, by the rule the renderer draws it
     /// by. Empty for a line that has been evicted.
+    ///
+    /// Counted in the text that reaches the screen, which in a Markdown pane is
+    /// shorter than the text that was written: a row of the source is not a row
+    /// anybody can point at.
     pub fn rows_of_line(&self, absolute: usize, cols: usize) -> Vec<text_geometry::Row> {
         self.line(absolute)
-            .map(|line| text_geometry::rows_in(&line.text, cols, PANE_WRAP))
+            .map(|line| text_geometry::rows_in(line.shown(), cols, PANE_WRAP))
             .unwrap_or_default()
     }
 
@@ -345,11 +446,15 @@ impl Pane {
     /// number.
     ///
     /// Only ever one single-byte character for another, and that is checked
-    /// rather than assumed, which is why no height has to be measured again: the
-    /// line is exactly as long as it was, so every cached wrapped height and
-    /// every selection column still holds. It exists for the parallel mark,
-    /// which is written into a row that was pushed before the window could know
-    /// anything ran beside it.
+    /// rather than assumed, which is why no height has to be measured again in
+    /// a plain pane: the line is exactly as long as it was, so every cached
+    /// wrapped height and every selection column still holds. It exists for the
+    /// parallel mark, which is written into a row that was pushed before the
+    /// window could know anything ran beside it.
+    ///
+    /// A Markdown pane is measured in what it draws, and a swapped character
+    /// can be a mark, so there the line is drawn again from the fence state it
+    /// carries and the heights go stale.
     fn mark(&mut self, absolute: usize, column: usize, glyph: char) {
         if !glyph.is_ascii() {
             return;
@@ -364,6 +469,13 @@ impl Pane {
             return;
         }
         line.text.replace_range(column..column + 1, glyph.encode_utf8(&mut [0u8; 4]));
+        if !self.rendered {
+            return;
+        }
+        let mut fence = line.fence.clone();
+        let shown = drawn(&line.text, line.tone, &mut fence, true);
+        line.shown = shown;
+        self.heights.borrow_mut().stale = true;
     }
 
     /// Scroll back by `rows`, stopping at the oldest row still held. Returns
@@ -390,16 +502,16 @@ impl Pane {
     /// Whether a fenced code block is open where this window starts.
     ///
     /// A transcript is drawn from a scrolling window, so a block that opened
-    /// above it would otherwise render as prose. Scanning the lines above is a
-    /// prefix check each, which is nothing next to shaping them.
+    /// above it would otherwise render as prose. Each line carries the state in
+    /// front of it, written down as it arrived: rescanning the lines above
+    /// costs a walk of the whole pane every frame, and once the pane is full it
+    /// gives a different answer from the one the line was measured with, since
+    /// the line that opened the block can have fallen off the top.
     pub fn fence_before(&self, rows: usize, cols: usize) -> crate::markdown::Fence {
         let start = self.window(rows, cols).first;
-        crate::markdown::fence_after(
-            self.lines
-                .range(..start)
-                .filter(|line| line.tone == Tone::Body)
-                .map(|line| line.text.as_str()),
-        )
+        self.lines
+            .get(start)
+            .map_or_else(|| self.fence.clone(), |line| line.fence.clone())
     }
 
     /// Where the thumb sits and how tall it is, as fractions of the track, or
@@ -969,7 +1081,9 @@ impl State {
             model: String::new(),
             workspace: String::new(),
             resumed: false,
-            output: Pane::new(6000),
+            // The one pane the model writes Markdown into, so the one pane that
+            // is measured, banded and copied in what it draws.
+            output: Pane::new(6000).rendered(),
             activity: Pane::new(4000),
             plan: Vec::new(),
             agents: Vec::new(),
@@ -2965,6 +3079,66 @@ mod tests {
         assert_eq!(
             pane.window(2, 20).skip, 3,
             "the tail line was remeasured after it grew"
+        );
+    }
+
+    /// A Markdown pane is measured in what it draws, and what it draws moves
+    /// while the line is still arriving: `**bold` is prose until the closing
+    /// pair lands, at which point four characters leave the screen. The tail is
+    /// drawn again on every chunk, so the rows and the columns move with it.
+    #[test]
+    fn a_streamed_markdown_line_is_measured_in_what_it_draws() {
+        let mut pane = Pane::new(100).rendered();
+        pane.stream("- **read", Tone::Body);
+        let held = pane.line(0).expect("the tail is held");
+        assert_eq!(held.shown(), "• **read", "an unclosed pair is text");
+        pane.stream("** a file", Tone::Body);
+        let held = pane.line(0).expect("the tail is held");
+        assert_eq!(held.shown(), "• read a file");
+        assert_eq!(pane.rows_of_line(0, 8).len(), 2, "measured in the thirteen drawn");
+        // Every row of it is reachable, the last character included.
+        assert_eq!(pane.spot_in(4, 8, 1, 99), Some((0, 13)));
+
+        // What the human typed is not Markdown and keeps its marks.
+        pane.stream("\n", Tone::Body);
+        pane.stream("- **read** a file", Tone::Bright);
+        let typed = pane.line(pane.last() - 1).expect("the typed line is held");
+        assert_eq!(typed.shown(), typed.text);
+    }
+
+    /// A fenced block runs across lines, so a line inside one is code and keeps
+    /// every mark in it, wherever the fence was opened.
+    #[test]
+    fn a_line_inside_a_fence_is_drawn_as_it_was_written() {
+        let mut pane = Pane::new(100).rendered();
+        for text in ["```python", "x = 1  # **not bold**", "```", "- **bold**"] {
+            pane.say(text, Tone::Body);
+        }
+        assert_eq!(pane.line(1).unwrap().shown(), "x = 1  # **not bold**");
+        assert_eq!(pane.line(3).unwrap().shown(), "• bold");
+        // The fence line itself is structure and is drawn as the block it opens.
+        assert_eq!(pane.line(0).unwrap().shown(), "── python ");
+    }
+
+    /// The line that opened a block can fall off the top while its body is
+    /// still on screen. The body is still code, so it still keeps its marks,
+    /// and the window still draws it as code: a pane that worked the fence out
+    /// again from the lines it has left would call it prose, and then measure
+    /// it as one thing and draw it as another.
+    #[test]
+    fn a_block_whose_fence_scrolled_away_is_still_code() {
+        let mut pane = Pane::new(3).rendered();
+        pane.say("```python", Tone::Body);
+        for n in 0..3 {
+            pane.say(format!("x = {n}  # **not bold**"), Tone::Body);
+        }
+        assert!(pane.line(0).is_none(), "the fence line has been evicted");
+        let held = pane.line(3).expect("the last line is held");
+        assert_eq!(held.shown(), "x = 2  # **not bold**");
+        assert_eq!(held.shown(), held.text);
+        assert!(
+            pane.fence_before(3, 200).0.is_some(),
+            "the window draws the block it is inside"
         );
     }
 

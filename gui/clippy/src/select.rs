@@ -93,6 +93,12 @@ impl Selection {
 
     /// What a copy would put on the clipboard.
     ///
+    /// The text as it is drawn, which in the transcript is not the text the
+    /// model wrote: a bullet copies as `• read a file`, the marks around the
+    /// bold gone the same way they are gone from the screen. Copying the source
+    /// instead would hand back characters that have no glyph to point at, and
+    /// the columns of the selection are counted in glyphs.
+    ///
     /// Lines that have scrolled out of the pane are skipped rather than
     /// guessed at, so a selection made before a flood of output copies what is
     /// still there instead of inventing the rest.
@@ -106,7 +112,7 @@ impl Selection {
             let Some(line) = pane.line(number) else {
                 continue;
             };
-            let chars: Vec<char> = line.text.chars().collect();
+            let chars: Vec<char> = line.shown().chars().collect();
             let from = if number == start.line { start.column } else { 0 };
             let to = if number == end.line {
                 end.column.min(chars.len())
@@ -131,6 +137,15 @@ mod tests {
 
     fn pane(lines: &[&str]) -> Pane {
         let mut pane = Pane::new(100);
+        for text in lines {
+            pane.push(Line::new(*text, Tone::Body));
+        }
+        pane
+    }
+
+    /// The transcript: a pane that renders what the model wrote.
+    fn rendered(lines: &[&str]) -> Pane {
+        let mut pane = Pane::new(100).rendered();
         for text in lines {
             pane.push(Line::new(*text, Tone::Body));
         }
@@ -245,6 +260,79 @@ mod tests {
         let across = drag((0, counted[0].end - 5), (0, counted[1].start + 5)).text(&pane);
         assert_eq!(across, "eople every");
         assert_eq!(across.matches(' ').count(), 1);
+    }
+
+    /// A transcript line is Markdown, and the marks are not on the screen. The
+    /// columns are counted in glyphs, so the last glyph is selectable and what
+    /// comes back is what was highlighted.
+    ///
+    /// The source is four characters longer than the rendering, and while the
+    /// pane was measured in the source those four had no glyph to point at: the
+    /// pointer ran out of line before the columns did, and a drag to the right
+    /// edge copied `- **read** a file with ` with the tail of it missing.
+    #[test]
+    fn a_markdown_line_is_selected_and_copied_as_it_is_drawn() {
+        let source = "- **read** a file with `cat`";
+        let pane = rendered(&[source]);
+        let drawn = pane.line(0).expect("the line is held").shown().to_string();
+        assert_eq!(drawn, "• read a file with cat");
+        assert!(drawn.chars().count() < source.chars().count());
+
+        // Every column of the drawn line is reachable, the last one included.
+        let last = drawn.chars().count();
+        let all = drag((0, 0), (0, last));
+        assert_eq!(all.text(&pane), drawn);
+        assert_eq!(drag((0, last - 1), (0, last)).text(&pane), "t");
+        assert!(
+            !all.text(&pane).contains('*') && !all.text(&pane).contains('`'),
+            "a marker that is nowhere on screen came back on the clipboard: {:?}",
+            all.text(&pane)
+        );
+        // And a run picked out of the middle is the glyphs under it.
+        assert_eq!(drag((0, 2), (0, 6)).text(&pane), "read");
+    }
+
+    /// A wrapped Markdown line breaks the text that is on screen: the rows the
+    /// pane counts are the rows the renderer lays out, and a drag across one
+    /// copies that row.
+    #[test]
+    fn a_wrapped_markdown_line_breaks_what_is_on_screen() {
+        let source = "- **read** a file, then `write` it back out again with \
+                      __every__ mark it came with";
+        let pane = rendered(&[source]);
+        let cols = 20;
+        let drawn = pane.line(0).expect("the line is held").shown().to_string();
+        // Ten marks left the line: two pairs of stars, one pair of underscores
+        // and a pair of backticks.
+        assert_eq!(drawn.chars().count() + 10, source.chars().count(), "{drawn:?}");
+
+        let counted = pane.rows_of_line(0, cols);
+        let laid = noob_draw::Run::wrapped(
+            &[noob_draw::Run::plain(&drawn)],
+            cols,
+            crate::state::PANE_WRAP,
+        )
+        .swap_remove(0)
+        .text;
+        let rows: Vec<&str> = laid.split('\n').collect();
+        assert!(rows.len() > 2, "the line has to wrap for this to prove anything");
+        assert_eq!(
+            rows.len(),
+            counted.len(),
+            "the pane budgets a different number of rows than are drawn"
+        );
+        for (row, shown) in rows.iter().enumerate() {
+            let span = counted[row];
+            assert_eq!(drag((0, span.start), (0, span.end)).text(&pane), *shown, "row {row}");
+        }
+        // The second row starts where the hit test says it starts, which is
+        // where the drawn row starts and not eight characters of consumed
+        // marks earlier.
+        assert_eq!(
+            pane.spot_in(rows.len(), cols, 1, 0),
+            Some((0, counted[1].start)),
+            "the second row of the line begins somewhere else"
+        );
     }
 
     /// The band drawn behind a run of lines covers each one past its last

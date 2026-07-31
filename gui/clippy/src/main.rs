@@ -610,7 +610,9 @@ fn spot_in_pane(
             0 => pane.last().saturating_sub(1),
             count => pane.showing_from(rows, cols) + count - 1,
         };
-        let end = pane.line(last).map_or(0, |l| l.text.chars().count());
+        // Counted in what is drawn: the last column of a Markdown line is the
+        // last glyph of it, not the last character the model wrote.
+        let end = pane.line(last).map_or(0, |l| l.shown().chars().count());
         return Some(select::Spot::new(last, end));
     };
     // The column is the character `at` columns into the row that was pointed

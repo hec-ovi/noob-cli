@@ -21,7 +21,7 @@ pub struct Fence(pub Option<String>);
 
 impl Fence {
     /// Toggle on a fence line, returning whether this line was one.
-    fn toggle(&mut self, line: &str) -> bool {
+    pub fn toggle(&mut self, line: &str) -> bool {
         let trimmed = line.trim_start();
         if !trimmed.starts_with("```") && !trimmed.starts_with("~~~") {
             return false;
@@ -112,6 +112,23 @@ pub fn line(text: &str, fence: &mut Fence, skin: &Skin, out: &mut Vec<Run>) {
 
     out.push(Run::tinted(indent, skin.body));
     inline(trimmed, skin.body, skin, out);
+}
+
+/// The text one line is drawn as, with its marks consumed.
+///
+/// Exactly what [`line`] lays out, read back as text. A pane measures its rows,
+/// bands its selection and copies from this rather than from what the model
+/// wrote, so a line cannot be counted as one thing and drawn as another: point
+/// at the last glyph of `- **read** a file` and what is under the pointer is
+/// the `e` of `file`, not the second `*` of a marker that is nowhere on screen.
+///
+/// It asks [`line`] for runs and keeps only their text, because the colour is
+/// what a run carries and the characters are what this is about. The palette it
+/// hands over is thrown away.
+pub fn shown(text: &str, fence: &mut Fence) -> String {
+    let mut runs = Vec::new();
+    line(text, fence, &Skin::default(), &mut runs);
+    runs.iter().map(|run| run.text.as_str()).collect()
 }
 
 /// `1. text` or `12) text`, returning the marker and the rest.
@@ -332,6 +349,42 @@ mod tests {
     fn indentation_is_kept_so_nested_lists_stay_nested() {
         let (text, _) = render("- top\n  - nested\n");
         assert!(text.contains("\n  • nested"), "{text:?}");
+    }
+
+    /// What a pane measures is what the window draws, so the text `shown`
+    /// reports has to be the text the runs carry, character for character. Two
+    /// walks that agree today and drift tomorrow is the whole class of bug this
+    /// change exists to close.
+    #[test]
+    fn the_text_shown_is_the_text_the_runs_carry() {
+        let skin = skin();
+        let corpus = [
+            "## Notable Features",
+            "- **read** a file",
+            "* another bullet",
+            "1. numbered, with `code`",
+            "> quoted **prose**",
+            "---",
+            "  - nested __bold__",
+            "plain prose with no marks",
+            "",
+            "   indented prose",
+            "héllo wörld 日本語 with **marks**",
+            "an unclosed `backtick here",
+            "```python",
+            "x = 1  # **not bold**",
+            "```",
+            "back to prose",
+        ];
+        let mut drawing = Fence::default();
+        let mut measuring = Fence::default();
+        for text in corpus {
+            let mut runs = Vec::new();
+            line(text, &mut drawing, &skin, &mut runs);
+            let drawn: String = runs.iter().map(|run| run.text.as_str()).collect();
+            assert_eq!(drawn, shown(text, &mut measuring), "{text:?}");
+            assert_eq!(drawing, measuring, "the fence moved differently: {text:?}");
+        }
     }
 
     /// A heading with nothing after the hashes is prose, not an empty heading.
