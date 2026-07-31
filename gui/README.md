@@ -430,6 +430,17 @@ card's contents that answer a narrow window: two fields go side by side while
 both keep their columns and stack when they cannot. Every section is built this
 way: AGENT, SESSIONS, SKILLS, MCP and APPEARANCE.
 
+Three things on the panel scroll and each one has a bar of its own. The list of
+cards keeps a gutter down its right that the cards stop short of, so its bar
+stands beside them instead of through them: it used to be painted at the right
+edge of the list, which is the right edge of every card in it, and since a
+rectangle cannot cover a glyph in this renderer the last letters of a
+description were drawn on top of the bar. A card that scrolls inside itself, a
+block of text or the table of conversations, draws its own bar down its own
+padding, beside the part of it that moves and not beside the header that does
+not. A region with nothing off screen draws no bar at all, so a bar means there
+is more.
+
 Four of the sections are the agent's own files rather than the window's. AGENT
 is five cards, in the order somebody meeting the window needs them: where the
 model is (the endpoint and the key it is called with), which model it asks for
@@ -473,7 +484,11 @@ the same two names cleared out of the environment the agent itself is started
 with, so what it prints is the prompt the session sends and not a different one.
 `AGENTS.md` is one capped layer of it, so it is never labelled as the prompt. A
 command that failed puts the reason on the block. Both blocks are a fixed twelve
-lines tall and read with Page Up and Page Down, or the wheel over them.
+lines tall and read with Page Up and Page Down, Home and End, or the wheel over
+them, and each carries its own bar down its own padding saying how much of it is
+still below. At the end of a block the wheel goes on to the section under it: a
+block claims most of the panel's height, and a wheel that stopped dead over one
+read as a window that had stopped answering.
 
 SESSIONS is one card holding a table of the saved conversations the folder
 picker offers, read through the same reader. The header says how many there are
@@ -486,7 +501,9 @@ says SAVED CONVERSATIONS rather than repeating the rail's word, which is the onl
 place the section is titled. Up and down pick a row and it carries a band across
 the whole of it; twelve rows are on screen at once and the rest scroll inside the
 card, with the wheel or Page Up and Page Down, so the header and the buttons stay
-where they are.
+where they are. A list longer than twelve carries its own bar beside those rows,
+reaching neither the names above them nor the buttons under them, since neither
+of those scrolls.
 
 Several conversations go in one press. Space or Enter marks the row the keys are
 on, a press on the box in the first column marks that row without moving the

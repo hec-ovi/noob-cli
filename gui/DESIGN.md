@@ -209,9 +209,39 @@ of rows are marked.
   never over its content and never over another region's bar.
 - A region that can scroll always shows its bar, so "can this scroll" is
   answerable without trying it. A region that cannot scroll draws no bar.
-- The wheel scrolls the region under the pointer, not the panel behind it.
+- The wheel scrolls the region under the pointer, not the panel behind it. At
+  either end of that region it goes on to what is behind it, because a region
+  that fills the window and answers nothing reads as a window that has stopped
+  answering.
+- Everything that scrolls with the wheel scrolls from the keyboard too: Page Up
+  and Page Down by a screenful of it, Home and End to its two ends.
 - The bar reports the real extent, so the thumb's size says how much is off
-  screen.
+  screen. It counts what is on screen, not what the region was measured for: a
+  card the bottom of the list cut short shows fewer lines and says so.
+
+**The pixels a bar is drawn in belong to nothing else.** A rectangle cannot cover
+a glyph in this renderer: every rectangle of a layer is painted before every
+glyph of it, so text drawn into a track is drawn on top of the track rather than
+hidden behind it. A bar therefore has to be given room no content is allowed
+into, and the two ways it gets that room are:
+
+- **The list of cards keeps a gutter.** The cards stop a `GAP` short of the
+  track, and the width they stop at is the width the model wraps their text in,
+  so the height a row was counted at is the height it is drawn at. The gutter is
+  there whether or not the list can scroll: a gutter that came and went would
+  change the wrap width, which changes the row heights, which changes whether the
+  list scrolls at all.
+- **A card that scrolls inside itself uses its own padding.** The track sits in
+  the `ROOM` between the body and the border, and it is only as tall as the part
+  that moves: a bar reaching up beside a header, or down into a footer, counts
+  rows that are not in it.
+
+A bar is handed a box exactly as wide as the track, because the drawing drops the
+head of a bar by the corner cut of the box it is given. That is right for a pane,
+whose track would otherwise start inside the cut; it is wrong for a list, which is
+not a box, and for a card's body, which starts well below the cut. Handed the
+whole width, every bar on this panel started eight unexplained pixels below the
+first row it counts.
 
 ## Resize
 
