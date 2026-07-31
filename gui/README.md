@@ -643,7 +643,7 @@ hand-tuned colour over a preset makes it.
 **Back to the defaults** is the last card of the section, in the colour this
 window keeps for anything that loses work, and it asks once before it acts: the
 first press says on the button and on the footer what is about to go, the second
-one does it. What it does is comment out every size, transparency and colour line
+one does it. The keys reach it like any other card, and Delete is the press. What it does is comment out every size, transparency and colour line
 in the settings file, so all of them fall back to what the window ships with. The
 lines stay in the file as comments, and the dividers, the pane flags, your own
 comments and any line this build has never heard of are left exactly as they

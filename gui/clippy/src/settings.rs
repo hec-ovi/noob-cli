@@ -2654,6 +2654,21 @@ impl Settings {
                 _ => "type it \u{2022} enter saves it \u{2022} esc leaves it alone",
             };
         }
+        // A card the keys are on for its button rather than for a field: the
+        // arrows do nothing there, so the line names the key that does.
+        if let Some(Row::Card(card)) = self.row(self.cursor())
+            && card.fields.iter().all(|field| !field.editable())
+            && let Some(doing) = card.does
+        {
+            return match doing.dangerous() {
+                true => {
+                    "up and down move \u{2022} delete puts every size, transparency and colour back to its default \u{2022} tab and shift-tab change section"
+                }
+                false => {
+                    "up and down move \u{2022} press what this card is for \u{2022} tab and shift-tab change section"
+                }
+            };
+        }
         // On a card of two fields, the one thing the plain arrow keys cannot
         // say is how to get to the other one, because left and right are the
         // nudge.
@@ -3675,9 +3690,16 @@ fn landable(row: &Row) -> bool {
         // Only those two, because a press carries a [`Side`]: a card that kept
         // the cursor for a field nothing can name is a row the arrow keys stop
         // on and no key changes.
-        Row::Card(card) => [Side::Left, Side::Right]
-            .into_iter()
-            .any(|side| card_field(card, side).is_some_and(CardField::editable)),
+        //
+        // A card whose own button does something holds it too, fields or not:
+        // the restore under the palette has no fields at all, and a card the
+        // keys cannot reach is a button only a pointer can press.
+        Row::Card(card) => {
+            card.does.is_some()
+                || [Side::Left, Side::Right]
+                    .into_iter()
+                    .any(|side| card_field(card, side).is_some_and(CardField::editable))
+        }
         _ => false,
     }
 }
@@ -4537,16 +4559,24 @@ mod tests {
             assert_eq!(down, up, "walking back up {name} visits other rows");
         }
 
-        // APPEARANCE stops on the cards that carry a setting and on nothing
-        // else: the palette's own cards, the one naming the file and the one
-        // that puts it all back are stepped over rather than landed on. Four
-        // cards carry the six settings, since two fields share a card twice.
+        // APPEARANCE stops on the cards that carry a setting and on the one
+        // whose own button does something: the palette's own cards and the one
+        // naming the file are stepped over rather than landed on. Four cards
+        // carry the six settings, since two fields share a card twice, and the
+        // fifth stop is the restore, which has no fields at all and would
+        // otherwise be a button only a pointer could reach.
         go_to(&mut panel, APPEARANCE);
         let mut cards = 1;
         while panel.step(true) {
             cards += 1;
         }
-        assert_eq!(cards, 4);
+        assert_eq!(cards, 5);
+        assert!(
+            matches!(panel.row(panel.cursor()), Some(Row::Card(card))
+                if card.does == Some(Doing::Restore)),
+            "the last stop is {:?}",
+            panel.row(panel.cursor())
+        );
         let held: Vec<&str> = panel
             .rows()
             .iter()
@@ -5309,6 +5339,13 @@ something_else = keep me
             .position(|row| matches!(row, Row::Card(card) if card.does == Some(Doing::Restore)))
             .expect("the card that puts it back");
 
+        // The keys reach it, fields or not, and the footer names the one key
+        // that acts on it: a button only a pointer can press is half a control.
+        while panel.cursor() != at && panel.step(true) {}
+        assert_eq!(panel.cursor(), at, "the keys cannot reach the restore");
+        assert!(panel.on_row());
+        assert!(panel.hint().contains("delete puts every size"), "{}", panel.hint());
+
         // The first press arms it and writes nothing; the footer says what
         // would go.
         assert!(panel.uninstall(at).is_none(), "one press restored it");
@@ -5517,15 +5554,22 @@ something_else = keep me
             "the cursor is above the window"
         );
 
-        // A page through the palette lands nowhere, because nothing there can
-        // hold the cursor, and does not stop dead on a heading either.
+        // A page through the palette stops on nothing inside it: the colours
+        // are read here and edited in the file, so the cursor goes over the
+        // grid to the card under it rather than landing on a swatch.
         go_to(&mut panel, APPEARANCE);
+        let mut stops = vec![panel.cursor()];
+        while panel.page(rows, true) {
+            stops.push(panel.cursor());
+        }
+        for at in &stops {
+            assert!(
+                !matches!(panel.row(*at), Some(Row::Palette(_))),
+                "the cursor stopped on row {at} of the palette"
+            );
+        }
         let (grid, _) = swatch_at(&panel, "gauge_10");
-        while panel.cursor() < grid && panel.page(rows, true) {}
-        assert!(
-            panel.cursor() < grid,
-            "the cursor walked into the palette grid"
-        );
+        assert!(stops.iter().any(|at| *at > grid), "the page never got past the grid");
     }
 
     /// The window is counted in rows of text and starts on a row, so a card
