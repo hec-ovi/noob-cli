@@ -262,7 +262,11 @@ tool. Grouping them by category was tried first and read as no colour at all,
 because most of a session is `read`, `ls` and `grep`.
 
 Files show a line-number gutter and a band behind each block header, so a write
-reads as a mark between two stretches of file rather than as part of one.
+reads as a mark between two stretches of file rather than as part of one. A line
+too long for the pane continues under its own text, indented past that gutter:
+the number is written once, on the first row, and every row of the line holds
+the same columns, which is what keeps the band, the caret and the clipboard on
+the characters you can see.
 
 The file list is a column down the left of the pane, one row per file with its
 type icon, the way an editor's explorer reads. It was a strip of tabs across the

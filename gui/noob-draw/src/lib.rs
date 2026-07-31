@@ -409,6 +409,30 @@ impl Run {
     /// boundaries are untouched, so what comes back shapes into the same
     /// spans it went in as.
     pub fn wrapped(runs: &[Run], cols: usize, at: text_geometry::Break) -> Vec<Run> {
+        Run::wrapped_under(runs, cols, at, 0)
+    }
+
+    /// The same, for a box that draws a fixed strip of chrome in front of every
+    /// line: the line-number gutter of the file view.
+    ///
+    /// `indent` is how many columns that chrome takes, and the first `indent`
+    /// characters of each logical line are it. They are never wrapped and never
+    /// counted as text; what follows them is broken into rows of `cols` by the
+    /// same [`text_geometry::rows_in`] call the window counts the line with, and
+    /// every row after the first starts with `indent` blanks so it lands under
+    /// the text rather than under the gutter.
+    ///
+    /// That is what makes every row of a line the same width. Wrapping the
+    /// gutter along with the text instead gave the first row `cols` characters
+    /// and every row under it `cols + indent`, so the band, the caret and the
+    /// clipboard were all four columns out from the second row of a file line
+    /// down.
+    pub fn wrapped_under(
+        runs: &[Run],
+        cols: usize,
+        at: text_geometry::Break,
+        indent: usize,
+    ) -> Vec<Run> {
         if cols == 0 {
             return runs.to_vec();
         }
@@ -425,21 +449,29 @@ impl Run {
         let mut rows = Vec::new();
         for segment in whole.split('\n') {
             let length = segment.chars().count();
+            // The chrome in front of the line, which is drawn as it is. A line
+            // shorter than its own gutter is all chrome and has nothing to
+            // wrap.
+            let head = indent.min(length);
+            let text = match segment.char_indices().nth(head) {
+                Some((byte, _)) => &segment[byte..],
+                None => "",
+            };
             let mut covered = 0;
-            text_geometry::rows_into(segment, cols, at, &mut rows);
+            text_geometry::rows_into(text, cols, at, &mut rows);
             for (index, row) in rows.iter().enumerate() {
                 if index > 0 {
-                    breaks[line + row.start] = true;
+                    breaks[line + head + row.start] = true;
                 }
                 // Whatever the rows leave out is a character the break was
                 // spent on, drawn on neither side of it.
                 for gap in covered..row.start {
-                    kept[line + gap] = false;
+                    kept[line + head + gap] = false;
                 }
                 covered = row.end;
             }
-            for gap in covered..length {
-                kept[line + gap] = false;
+            for gap in covered..length - head {
+                kept[line + head + gap] = false;
             }
             // Past the segment sits the newline that ended it, which is a
             // character of the box and stays exactly as it is.
@@ -452,6 +484,9 @@ impl Run {
                 for ch in run.text.chars() {
                     if breaks[at_char] {
                         text.push('\n');
+                        for _ in 0..indent {
+                            text.push(' ');
+                        }
                     }
                     if kept[at_char] {
                         text.push(ch);
@@ -529,6 +564,15 @@ pub struct Text {
     /// caret as `row * cols + column`, so it breaks on the column and takes the
     /// mid-word break that comes with it. Ignored unless `wrap_cols` is set.
     pub wrap_break: text_geometry::Break,
+    /// Columns of chrome drawn in front of every line, which the rows after the
+    /// first are indented past.
+    ///
+    /// The file view's line-number gutter, and nothing else so far. The number
+    /// is written once, on the first row of the line, and the rows it continues
+    /// onto start under the text rather than under the number, which is what
+    /// keeps every row of the line `wrap_cols` characters wide. Ignored unless
+    /// `wrap_cols` is set.
+    pub wrap_indent: usize,
 }
 
 impl Text {
@@ -546,6 +590,7 @@ impl Text {
             scroll_lines: 0.0,
             wrap_cols: None,
             wrap_break: text_geometry::Break::Word,
+            wrap_indent: 0,
         }
     }
 
@@ -562,6 +607,14 @@ impl Text {
     /// falls. For a box whose caret and whose click both count
     /// `row * cols + column`, which is the prompt: a row that ended early would
     /// put the caret a word away from the character it is on.
+    /// Keep `indent` columns in front of every line for chrome the box draws
+    /// itself, and start the rows a line continues onto under its text rather
+    /// than under that chrome. The file view's line-number gutter.
+    pub fn hanging(mut self, indent: usize) -> Text {
+        self.wrap_indent = indent;
+        self
+    }
+
     pub fn break_at(mut self, cols: usize) -> Text {
         self.wrap_cols = (cols > 0).then_some(cols);
         self.wrap_break = text_geometry::Break::Column;
@@ -1021,7 +1074,8 @@ impl Renderer {
                 let runs = match item.wrap_cols {
                     Some(cols) => {
                         buffer.set_wrap(Wrap::None);
-                        wrapped = Run::wrapped(&item.runs, cols, item.wrap_break);
+                        wrapped =
+                            Run::wrapped_under(&item.runs, cols, item.wrap_break, item.wrap_indent);
                         wrapped.as_slice()
                     }
                     None => item.runs.as_slice(),
@@ -1743,6 +1797,63 @@ fg", "no doubled break");
 fghij
 kl");
         assert_eq!(wrap("abcdef", 0), "abcdef", "a box with no columns is left alone");
+    }
+
+    /// A box with chrome in front of every line keeps that chrome out of the
+    /// wrap and puts the rows a line continues onto under its text.
+    ///
+    /// The file view's gutter. Wrapped along with the text it gave the first
+    /// row of a line four characters fewer than the rows under it, so the row
+    /// count, the caret and the band all disagreed with the screen from the
+    /// second row down.
+    #[test]
+    fn a_box_with_chrome_in_front_of_its_lines_indents_what_wraps_under_it() {
+        let cols = 10;
+        let gutter = 4;
+        let line = "aaa bbb ccc ddd eee";
+        let runs = vec![
+            Run::tinted("012 ", [1, 2, 3, 4]),
+            Run::plain(line),
+            Run::plain("\n"),
+            Run::tinted("013 ", [1, 2, 3, 4]),
+            Run::plain("short"),
+        ];
+        let out = Run::wrapped_under(&runs, cols, text_geometry::Break::Word, gutter);
+        let laid: String = out.iter().map(|r| r.text.as_str()).collect();
+        let rows: Vec<&str> = laid.split('\n').collect();
+
+        // The number is written once, and every row under it starts where the
+        // text of the first row started.
+        assert_eq!(
+            rows,
+            vec!["012 aaa bbb", "    ccc ddd", "    eee", "013 short"],
+            "{laid:?}"
+        );
+        // Which is the same as saying: every row holds the characters the
+        // window counted that line in, in the columns it counted them in.
+        let counted = text_geometry::rows_in(line, cols, text_geometry::Break::Word);
+        assert_eq!(counted.len(), 3);
+        let chars: Vec<char> = line.chars().collect();
+        for (row, span) in rows.iter().zip(&counted) {
+            let text: String = row.chars().skip(gutter).collect();
+            assert_eq!(text.chars().collect::<Vec<char>>(), chars[span.start..span.end]);
+            assert!(text.chars().count() <= cols, "{text:?} is wider than the box");
+        }
+        assert_eq!(
+            out.iter().map(|r| r.color).collect::<Vec<_>>(),
+            vec![Some([1, 2, 3, 4]), None, None, Some([1, 2, 3, 4]), None],
+            "the colors ride along unchanged"
+        );
+        // And with no chrome to keep, it is the plain wrap it always was.
+        let plain: Vec<String> = Run::wrapped(&runs, cols, text_geometry::Break::Word)
+            .iter()
+            .map(|run| run.text.clone())
+            .collect();
+        let none: Vec<String> = Run::wrapped_under(&runs, cols, text_geometry::Break::Word, 0)
+            .iter()
+            .map(|run| run.text.clone())
+            .collect();
+        assert_eq!(none, plain);
     }
 
     /// The count runs across the runs, not within each one: a syntax-colored

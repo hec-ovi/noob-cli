@@ -2227,9 +2227,15 @@ fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> PickerPlaces {
         true => line,
         false => 0.0,
     };
+    // Never past the room the box has for it: the head, the field and the
+    // button all want a height of their own, and in a window too short for
+    // them the list would otherwise start below the bottom of the box with the
+    // field above it sized as if that room were there.
     let list = Panel::new(
         content.x,
-        content.y + head + header,
+        (content.y + head + header)
+            .min(content.y + content.h - foot - GAP)
+            .max(content.y),
         content.w,
         (content.h - head - header - foot - GAP).max(0.0),
     );
@@ -2293,11 +2299,18 @@ fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> PickerPlaces {
     // The search field, under the two lines of writing and above the list. Its
     // own panel rather than a rectangle worked out where the text is drawn, so
     // the border, the icon and what has been typed all come off one shape.
+    //
+    // Its height is the room between the writing and the list, not the height a
+    // field would like to be: in a window short enough that the head has no
+    // room, a field taking its own height is drawn over the first rows of the
+    // list. It ends up at nothing at that size, which is a picker with no field
+    // rather than a field over the list.
+    let field_top = content.y + PICKER_HEAD_ROWS * line;
     let filter = Panel::new(
         content.x,
-        content.y + PICKER_HEAD_ROWS * line,
+        field_top,
         content.w,
-        picker_field_h(line).min(content.h),
+        picker_field_h(line).min((list.y - header - GAP - field_top).max(0.0)),
     );
     // The way back, at the left of the heading row, and only where there is a
     // list behind this one. On the folders it is nothing at all rather than a
@@ -3541,7 +3554,11 @@ fn selection_band(scene: &mut Scene, frame: &Frame, panel: Panel, showing: Optio
     let (size, column) = frame.metrics_of(view);
     let content = panel.inset(PAD);
     let rows = frame.layout.rows(panel, size);
-    let cols = cols_of(panel, column);
+    // The columns the text is in and the columns in front of it, from the one
+    // place that says so: the file view keeps four for its line numbers, and a
+    // band measured in the full width of the box was four columns wide of the
+    // glyphs on every row of a file.
+    let (cols, chrome) = text_columns(view, panel, column);
     let line_h = Text::line_for(size);
     let window = pane.window(rows, cols);
     let first = pane.showing_from(rows, cols);
@@ -3577,7 +3594,9 @@ fn selection_band(scene: &mut Scene, frame: &Frame, panel: Panel, showing: Optio
             if a >= b {
                 continue;
             }
-            let x = content.x + (a - row_start) as f32 * column;
+            // Past the chrome, which every row of the line carries: the gutter
+            // on the first row and the indent under it on the rest.
+            let x = content.x + (chrome + a - row_start) as f32 * column;
             let width = ((b - a) as f32 * column).min(content.x + content.w - x);
             let y = content.y + (top + i) as f32 * line_h;
             if width <= 0.0 || y + line_h > content.y + content.h {
@@ -4220,7 +4239,7 @@ fn files(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let line = Text::line_for(frame.pane_size);
     // Every row carries a four column gutter, so the text wraps in what is
     // left rather than in the full width of the box.
-    let (cols, _) = text_columns(View::Files, body, frame.pane_column);
+    let (cols, chrome) = text_columns(View::Files, body, frame.pane_column);
     let first = file.pane.showing_from(rows, cols);
     let shown = file.pane.visible(rows, cols);
     for (step, entry) in shown.iter().enumerate() {
@@ -4244,10 +4263,12 @@ fn files(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let mut runs = Vec::new();
     for entry in &shown {
         let base = skin.tone(entry.tone);
-        // The gutter, so a diff line says where in the file it landed.
+        // The gutter, so a diff line says where in the file it landed. Exactly
+        // `chrome` columns of it, on this row and on every row this line
+        // continues onto.
         match entry.number {
-            Some(number) => runs.push(Run::tinted(format!("{number:03} "), skin.comment)),
-            None if !entry.text.is_empty() => runs.push(Run::plain("    ")),
+            Some(number) => runs.push(Run::tinted(file_number(number, chrome), skin.comment)),
+            None if !entry.text.is_empty() => runs.push(Run::plain(" ".repeat(chrome))),
             None => {}
         }
         // A removed line reads as removed first, so only what is there now is
@@ -4263,7 +4284,16 @@ fn files(scene: &mut Scene, frame: &Frame, panel: Panel) {
         }
         runs.push(Run::plain("\n"));
     }
-    scene.text(Text::rich(runs, content, frame.pane_size, skin.body).wrap_at(cols_of(body, frame.pane_column)));
+    // Broken into rows by the same call the pane counts them with, in the
+    // columns that are left once the gutter has been paid for, and the rows a
+    // line continues onto are indented past that gutter. Wrapping the gutter
+    // along with the text is what put every continuation row four columns out
+    // from the band, the caret and the clipboard.
+    scene.text(
+        Text::rich(runs, content, frame.pane_size, skin.body)
+            .wrap_at(cols)
+            .hanging(chrome),
+    );
     scrollbar(scene, skin, body, file.pane.thumb(rows, cols));
 }
 
@@ -5523,6 +5553,30 @@ fn columns_in(width: f32, column: f32) -> usize {
 /// happen in what is left and a click has to have it taken off again. Both
 /// numbers come from here, because the wrapping and the hit testing being
 /// derived separately is what put file selection four columns out.
+/// One line number, in exactly `chrome` columns.
+///
+/// Fixed width because the wrap is: the text of a file line starts `chrome`
+/// columns in on its first row and on every row it continues onto, so a number
+/// that took one column more would push the first row one character out from
+/// the rows under it. Three digits and a blank is the usual answer; a file long
+/// enough spends the blank, and one longer still says it was cut rather than
+/// quietly showing a different line's number.
+fn file_number(number: u32, chrome: usize) -> String {
+    let digits = number.to_string();
+    let width = chrome.saturating_sub(1);
+    if digits.chars().count() <= width {
+        // Zero padded, so a column of numbers reads as a column, and a blank
+        // between the number and the text.
+        return format!("{digits:0>width$} ");
+    }
+    // A file past that spends the blank, and past that says it was cut. `clip`
+    // adds the mark on top of what it kept, so it is asked for one less.
+    match digits.chars().count() <= chrome {
+        true => digits,
+        false => clip(&digits, width),
+    }
+}
+
 pub fn text_columns(view: View, panel: Panel, column: f32) -> (usize, usize) {
     match view {
         View::Files => (cols_of(panel, column).saturating_sub(GUTTER).max(1), GUTTER),
@@ -6892,6 +6946,220 @@ mod tests {
         // A box narrower than the gutter still wraps in at least one column.
         let sliver = Panel::new(0.0, 0.0, 8.0 + 2.0 * PAD, 100.0);
         assert_eq!(text_columns(View::Files, sliver, 8.0).0, 1);
+    }
+
+    /// A file, open, holding lines long enough that the pane has to wrap them,
+    /// each with the line number a file's rows carry.
+    fn a_wrapped_file(lines: &[(u32, &str)]) -> (State, Vec<String>) {
+        let paths = ["src/main.rs"];
+        let mut state = touched(&paths);
+        for (number, text) in lines {
+            state.files[0]
+                .pane
+                .push(crate::state::Line::new(*text, Tone::Body).at(*number));
+        }
+        (state, labels(&paths))
+    }
+
+    /// The rows a file line wraps onto start under its text, not under its line
+    /// number.
+    ///
+    /// The gutter is four columns the text never gets, and it is written once,
+    /// on the first row of the line. The rows under it used to start at the
+    /// left edge of the box, so they held four characters more than the
+    /// arithmetic that counts the rows, places the caret and draws the band
+    /// budgets for, and everything below the first row of a wrapped file line
+    /// was four columns out. Every row is the same width now: the gutter, then
+    /// exactly the characters the pane says that row is showing.
+    #[test]
+    fn a_wrapped_file_line_continues_under_its_own_text() {
+        let long = "let total = numbers.iter().filter(|n| **n > 0).map(|n| n * 2).sum::<i64>(); \
+                    // and a comment on the end of it with plenty of blanks to break at";
+        let (state, names) = a_wrapped_file(&[(7, long), (8, "fn main() {}"), (9, "")]);
+        let out = render(
+            &state,
+            1400.0,
+            900.0,
+            &Dock::new(),
+            &names.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        let body = out.layout.file_diff;
+        let (cols, chrome) = text_columns(View::Files, body, 8.0);
+        let pane = &state.files[0].pane;
+        let rows = out.layout.rows(body, 13.0);
+        let window = pane.window(rows, cols);
+        assert_eq!(window.skip, 0, "the file is meant to fit in the pane");
+
+        let text = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| text.at == body.inset(PAD) && text.wrap_cols.is_some())
+            .expect("the file draws its text");
+        assert_eq!(text.wrap_cols, Some(cols), "the box wraps in the columns the pane counts");
+        assert_eq!(text.wrap_indent, chrome, "the box does not keep the gutter clear");
+
+        // The rows the renderer will lay out, which is what the reader sees.
+        let laid: String =
+            noob_draw::Run::wrapped_under(&text.runs, cols, text.wrap_break, text.wrap_indent)
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect();
+        let drawn: Vec<Vec<char>> = laid.split('\n').map(|row| row.chars().collect()).collect();
+
+        let mut wrapped = 0;
+        let mut previous = None;
+        for (row, on_screen) in drawn.iter().enumerate().take(rows) {
+            let Some((line, start)) = pane.spot_in(rows, cols, row, 0) else {
+                break;
+            };
+            let (same, end) = pane
+                .spot_in(rows, cols, row, cols + 9)
+                .expect("the row a moment ago is still a row");
+            assert_eq!(same, line, "row {row} lands on two different lines");
+            let source = pane.line(line).expect("a row of a line the pane holds");
+            let shown: Vec<char> = source.text.chars().take(end).skip(start).collect();
+
+            let (gutter, after) = on_screen.split_at(chrome.min(on_screen.len()));
+            assert_eq!(after, shown, "screen row {row} is not the characters the pane says");
+            assert!(
+                on_screen.len() <= chrome + cols,
+                "screen row {row} is wider than the box"
+            );
+            match previous == Some(line) {
+                // A row that continues a line is blank where the number was.
+                true => {
+                    assert!(
+                        gutter.iter().all(|ch| *ch == ' ') && gutter.len() == chrome,
+                        "row {row} continues line {line} under {gutter:?} instead of the text"
+                    );
+                    wrapped += 1;
+                }
+                // The first row of a line carries the number, once. A line the
+                // file did not number is blank there, and an empty line with
+                // no number has nothing on it at all.
+                false => {
+                    let head: String = gutter.iter().collect();
+                    let want = match (source.number, source.text.is_empty()) {
+                        (Some(number), _) => file_number(number, chrome),
+                        (None, false) => " ".repeat(chrome),
+                        (None, true) => String::new(),
+                    };
+                    assert_eq!(head, want, "row {row} of line {line} has the wrong gutter");
+                }
+            }
+            previous = Some(line);
+        }
+        assert!(wrapped >= 2, "only {wrapped} rows continued a wrapped line");
+    }
+
+    /// A number wider than the gutter is still exactly the gutter, because the
+    /// width of the gutter is what every row of the line is indented by.
+    #[test]
+    fn a_line_number_is_written_in_exactly_the_columns_the_gutter_has() {
+        assert_eq!(file_number(7, GUTTER), "007 ");
+        assert_eq!(file_number(120, GUTTER), "120 ");
+        // Past three digits the blank goes, and past four the number says it
+        // was cut rather than reading as another line's number.
+        assert_eq!(file_number(1204, GUTTER), "1204");
+        assert_eq!(file_number(12040, GUTTER), "120\u{2026}");
+        for number in [1u32, 9, 10, 999, 1000, 9999, 10_000, 999_999] {
+            assert_eq!(
+                file_number(number, GUTTER).chars().count(),
+                GUTTER,
+                "line {number} does not fill the gutter"
+            );
+        }
+    }
+
+    /// The band over a wrapped file line covers the glyphs on every row of it,
+    /// including the rows that continue it.
+    ///
+    /// The band was measured in the full width of the box while the text was
+    /// laid out in the width the gutter leaves, so it started four columns left
+    /// of the first character it was highlighting and, on a continuation row,
+    /// covered the indent instead of the text.
+    #[test]
+    fn the_band_over_a_wrapped_file_line_covers_the_glyphs() {
+        let long = "let total = numbers.iter().filter(|n| **n > 0).map(|n| n * 2).sum::<i64>(); \
+                    // and a comment on the end of it with plenty of blanks to break at";
+        let (mut state, names) = a_wrapped_file(&[(7, long)]);
+        let files = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let line = state.files[0].pane.last() - 1;
+        let chars = long.chars().count();
+        let selection = {
+            let mut selection =
+                crate::select::Selection::new(View::Files, crate::select::Spot::new(line, 0));
+            selection.extend(crate::select::Spot::new(line, chars));
+            selection
+        };
+        state.selection = Some(selection);
+
+        let dock = Dock::new();
+        let shape = shape(&dock, &files);
+        let layout = Layout::compute(1400.0, 900.0, &shape);
+        let skin = Skin::from(&Config::default());
+        let scene = build(&Frame {
+            state: &state,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &crate::prompt::Prompt::default(),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            clock: 0.0,
+            drag: None,
+            hot: None,
+            trouble: None,
+            selection: Some(selection),
+            menu: None,
+            picker: None,
+            settings: None,
+        });
+
+        let body = layout.file_diff;
+        let content = body.inset(PAD);
+        let (cols, chrome) = text_columns(View::Files, body, 8.0);
+        let pane = &state.files[0].pane;
+        let rows = layout.rows(body, 13.0);
+        let (top, height) = pane.band_of(rows, cols, line).expect("the line is on screen");
+        let spans = pane.rows_of_line(line, cols);
+        assert!(height > 1, "the line under test does not wrap");
+
+        let mut bands: Vec<[f32; 4]> = scene
+            .rects
+            .iter()
+            .filter(|rect| rect.rgba() == skin.select)
+            .map(|rect| rect.xywh())
+            .collect();
+        bands.sort_by(|a, b| a[1].partial_cmp(&b[1]).unwrap());
+        assert_eq!(bands.len(), height, "one band per row of the line: {bands:?}");
+
+        let line_h = Text::line_for(13.0);
+        for (i, band) in bands.iter().enumerate() {
+            let span = spans[i];
+            // Past the gutter on the first row and past the indent under it on
+            // the rest, and exactly as wide as the characters drawn there.
+            assert!(
+                (band[0] - (content.x + chrome as f32 * 8.0)).abs() < 0.01,
+                "row {i} of the band starts at {} and the text at {}",
+                band[0],
+                content.x + chrome as f32 * 8.0
+            );
+            assert!(
+                (band[2] - span.len() as f32 * 8.0).abs() < 0.01,
+                "row {i} of the band is {} wide over {} characters",
+                band[2],
+                span.len()
+            );
+            assert!(
+                (band[1] - (content.y + (top + i) as f32 * line_h)).abs() < 0.01,
+                "row {i} of the band is on the wrong row"
+            );
+        }
     }
 
     /// A name too long for the column loses its parent directory first and its
@@ -12562,6 +12830,68 @@ mod tests {
             .flat_map(|text| text.runs.iter().map(|run| run.text.as_str()))
             .collect();
         assert!(said.contains("cra"), "what was typed is not in the field: {said:?}");
+    }
+
+    /// The field keeps to the room above the list, whatever the window does.
+    ///
+    /// Its height was its own to choose while everything under it was measured
+    /// from the head the box could not give it, so in a window short enough
+    /// that the head has no room the field was drawn at full height out of the
+    /// bottom of the box and over the Open button. It takes the room that is
+    /// there now, down to none of it, which is a picker with no field rather
+    /// than a field over the list.
+    #[test]
+    fn the_picker_s_field_stays_out_of_its_list_in_a_short_window() {
+        for height in [100.0f32, 120.0, 160.0, 200.0, 240.0, 300.0, 420.0, 791.0] {
+            // Both lists: the sessions keep a row above themselves for the
+            // header, so the room over the list is not the same room.
+            for sessions in [false, true] {
+                let picker = match sessions {
+                    true => a_session_picker(),
+                    false => a_picker(&["gui", "crates", "docs"], &[]),
+                };
+                let out = render_picker(&picker, 900.0, height, None);
+                let (box_, field, list, open) = (
+                    out.layout.picker,
+                    out.layout.picker_filter,
+                    out.layout.picker_list,
+                    out.layout.picker_open,
+                );
+                let what = format!("{height} tall, sessions {sessions}");
+                assert!(
+                    list.h < 1.0 || field.y + field.h <= list.y + 0.01,
+                    "{what}: the field {field:?} runs into the list {list:?}"
+                );
+                assert!(
+                    field.y + field.h <= box_.y + box_.h + 0.01,
+                    "{what}: the field {field:?} runs out of the box {box_:?}"
+                );
+                assert!(
+                    field.h < 1.0 || field.y + field.h <= open.y + 0.01,
+                    "{what}: the field {field:?} is over the Open button {open:?}"
+                );
+                // And nothing is drawn as a field where there is no room for
+                // one: the rows of the list own that space.
+                if field.h < 1.0 {
+                    assert!(
+                        !out.scene.rects.iter().any(|rect| {
+                            let [x, y, w, _] = rect.xywh();
+                            (x - field.x).abs() < 0.01
+                                && (y - field.y).abs() < 0.01
+                                && (w - field.w).abs() < 0.01
+                        }),
+                        "{what}: a field with no room is still drawn"
+                    );
+                }
+            }
+        }
+        // With room to spare it is the field it always was.
+        let out = render_picker(&a_picker(&["gui"], &[]), 900.0, 791.0, None);
+        let field = out.layout.picker_filter;
+        assert!(
+            (field.h - picker_field_h(Text::line_for(13.0))).abs() < 0.01,
+            "{field:?} is not the height a field asks for"
+        );
     }
 
     /// Item A6: the sessions list carries an arrow back to the folders. The word

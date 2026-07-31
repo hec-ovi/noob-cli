@@ -4688,6 +4688,70 @@ mod tests {
         );
     }
 
+    /// A click on a row that continues a file line lands on the character under
+    /// the pointer.
+    ///
+    /// The file view spends four columns on its line numbers and the hit test
+    /// takes them off every row, which is only right if every row is drawn four
+    /// columns in. The number is written on the first row of a line and the
+    /// rows it wraps onto are indented under the text, so the four columns are
+    /// there to take off on all of them. While the continuation rows started at
+    /// the left edge, a click on one landed four characters along.
+    #[test]
+    fn a_click_on_a_row_that_continues_a_file_line_lands_on_the_character_under_it() {
+        let dock = Dock::new();
+        let layout = laid_out(&dock, None, 0);
+        let space = Space::ALL
+            .into_iter()
+            .find(|space| dock.slot(*space).active() == Some(View::Files))
+            .expect("the file view is in the window");
+        let body = layout.content(space);
+        let size = Config::default().pane_font_size;
+        let (cols, chrome) = view::text_columns(View::Files, body, COLUMN);
+        assert!(chrome > 0, "the file view has no gutter to take off");
+
+        let long: String = std::iter::repeat_n("a word of it ", cols / 4)
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        let mut pane = state::Pane::new(100);
+        pane.push(state::Line::new("fn main() {}", state::Tone::Body).at(6));
+        pane.push(state::Line::new(long.clone(), state::Tone::Body).at(7));
+
+        let rows = layout.rows(body, size);
+        let spans = pane.rows_of_line(1, cols);
+        assert!(spans.len() >= 3, "the line under test does not wrap far enough");
+        let inner = body.inset(9.0);
+        let line_h = noob_draw::Text::line_for(size);
+
+        // Row 0 is the short line, so the wrapped line starts on row 1 and every
+        // row after that continues it.
+        for (wrapped, span) in spans.iter().enumerate() {
+            let row = 1 + wrapped;
+            for at in [0usize, 1, span.len().saturating_sub(1)] {
+                let x = inner.x + (chrome + at) as f32 * COLUMN;
+                let y = inner.y + (row as f32 + 0.5) * line_h;
+                let spot = spot_in_pane(&layout, space, View::Files, &pane, x, y, size, COLUMN)
+                    .expect("a row of the file has a character under the pointer");
+                assert_eq!(
+                    spot,
+                    select::Spot::new(1, span.start + at),
+                    "row {row}, column {at}: the pointer is over {:?}",
+                    long.chars().nth(span.start + at)
+                );
+            }
+        }
+        assert!(rows > spans.len() + 1, "the file did not fit in the pane");
+
+        // And a press on the gutter itself is the first character of that row,
+        // not a character of the row above.
+        let last = spans.last().expect("the line has rows");
+        let y = inner.y + (spans.len() as f32 + 0.5) * line_h;
+        let spot = spot_in_pane(&layout, space, View::Files, &pane, inner.x, y, size, COLUMN)
+            .expect("a press on the gutter still selects");
+        assert_eq!(spot, select::Spot::new(1, last.start));
+    }
+
     /// The wheel and the page keys reach every pane. A view either keeps its own
     /// scrollback, which is a transcript counted back from the live end, or
     /// reports an extent, which is a list counted from the top. One that did
