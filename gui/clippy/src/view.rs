@@ -1943,7 +1943,7 @@ impl Layout {
     /// wheel and the scrollbar all count a row's height, and a height counted in
     /// a width the row was not drawn in scrolls the list past what is on screen.
     pub fn settings_entry_columns(&self, column: f32) -> usize {
-        settings_entry_cols(self.settings_list.w, column)
+        settings_entry_cols(settings_list_rows(self.settings_list).w, column)
     }
 
     /// How many rows of the document beside it are on screen, and how many
@@ -2628,6 +2628,22 @@ fn settings_table_parts(body: Panel, line: f32) -> (Panel, Vec<Panel>) {
         .filter(|at| at.y + at.h <= body.y + body.h + 0.01)
         .collect();
     (names, rows)
+}
+
+/// Where the text of a block sits inside the card's body: under the line saying
+/// where it came from, [`design::TIGHT`] below it, in whole lines.
+///
+/// Whole lines because it is what the counter in the header and the bar down
+/// the right padding both count in, and a box half a line taller than the last
+/// line drawn would have both of them saying there is a line on screen that is
+/// not. Never more than [`crate::settings::PAPER_LINES`], which is what
+/// [`crate::settings::paper_body_lines`] measured the card at; fewer only when
+/// the bottom of the list cut the card off.
+fn settings_paper_text(parts: &CardParts, line: f32) -> Panel {
+    let top = parts.body.y + line + design::tight(line);
+    let room = (parts.body.y + parts.body.h - top).max(0.0);
+    let held = ((room / line).floor() as usize).min(crate::settings::PAPER_LINES);
+    Panel::new(parts.body.x, top, parts.body.w, held as f32 * line)
 }
 
 /// How wide each button in the table's footer is, in columns of pane text.
@@ -3398,6 +3414,64 @@ fn settings_entry_cols(list_w: f32, column: f32) -> usize {
     columns_in((list_w - MARK_W - 3.0).max(1.0), column)
 }
 
+/// The strip down the right of the list that belongs to the list's own
+/// scrollbar, and to nothing else.
+///
+/// The bar used to be painted at the right edge of the list itself, which is
+/// the right edge of every card in it: the track ran through the last four
+/// pixels of every card border, through the buttons at the right of a footer,
+/// and through the tail of every wrapped description. A rectangle cannot cover
+/// a glyph on this layer, so the letters were drawn on top of the bar rather
+/// than the other way round, and a press in those pixels answered for whatever
+/// button was under them.
+///
+/// So the cards stop short of it. [`GAP`] of air, then the track and the
+/// [`SCROLL_GAP`] it already sits in from the right. Reserved whether or not
+/// the list can scroll, because a gutter that came and went with the scroll
+/// would change the width a description wraps in, which changes the height of
+/// the row it is in, which changes whether the list scrolls at all.
+const SETTING_GUTTER: f32 = GAP + SCROLL_W + SCROLL_GAP;
+
+/// The part of the list the rows are drawn in: everything left of the gutter.
+fn settings_list_rows(list: Panel) -> Panel {
+    Panel::new(list.x, list.y, (list.w - SETTING_GUTTER).max(1.0), list.h)
+}
+
+/// The gutter itself, which is the box the list's bar is drawn in.
+fn settings_list_bar(list: Panel) -> Panel {
+    settings_bar_box(list, list)
+}
+
+/// Where a card draws a bar for something that scrolls inside it: down the
+/// card's own right padding, beside the part of it that actually moves.
+///
+/// At the right edge of the card, so the track lands in the padding inside the
+/// border and clear of the body, and only as tall as `from`, so the head of the
+/// bar is not beside a header that does not scroll.
+fn settings_card_bar(card: Panel, from: Panel) -> Panel {
+    settings_bar_box(card, from)
+}
+
+/// The box a bar is drawn in: as wide as the track and the air to its right, at
+/// the right edge of `of`, and as tall as the `down` it counts.
+///
+/// A box that narrow on purpose. [`scrollbar`] drops the head of a bar by the
+/// corner cut of whatever box it is handed, because a track that started three
+/// pixels down a chamfered pane hung in the air outside it. Nothing here is
+/// chamfered at the point the bar starts: the list is not a box at all, and a
+/// card's bar starts beside its body rather than beside its cut corner. Handing
+/// the whole width in is what made the list's bar start eight unexplained
+/// pixels below the first row it counts.
+fn settings_bar_box(of: Panel, down: Panel) -> Panel {
+    let wide = SCROLL_W + SCROLL_GAP;
+    Panel::new(
+        of.x + of.w - wide,
+        down.y,
+        wide.min(of.w.max(1.0)),
+        down.h.max(1.0),
+    )
+}
+
 /// The least the column beside the entry list goes down to, in columns of pane
 /// text, and the least the list itself keeps.
 ///
@@ -3497,10 +3571,15 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
         false => list,
     };
     let rows_fit = Text::rows_for(shape.pane_size, list.h);
+    // The rows themselves stop short of the list's own scrollbar. Everything
+    // below is placed and measured in this box, never in `list`, or the bar is
+    // drawn through the right edge of every card again.
+    let cards = settings_list_rows(list);
     // The width a wrapped description is measured in, taken after the document
-    // column has been split off: a row is as tall as it wraps to in the list it
-    // is actually drawn in, not in the whole panel.
-    let entry_cols = settings_entry_cols(list.w, column);
+    // column has been split off and after the gutter has been taken away: a row
+    // is as tall as it wraps to in the box it is actually drawn in, not in the
+    // whole panel.
+    let entry_cols = settings_entry_cols(cards.w, column);
     let (first, count) = panel.window(rows_fit, entry_cols);
     let mut rows = Vec::new();
     let mut values = Vec::new();
@@ -3515,7 +3594,7 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
     // A running height rather than the row number times a line: a heading is two
     // rows of text tall and everything under it moves down by that much. The
     // heights come from the model, which is what the scroll window counts in.
-    let mut y = list.y;
+    let mut y = cards.y;
     for step in 0..count {
         let index = first + step;
         let Some(entry) = panel.row(index) else {
@@ -3524,11 +3603,11 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
         // Cut off at the bottom of the list rather than drawn over it: a list
         // one row tall that opens on a heading has room for one row of it.
         let tall =
-            (crate::settings::lines(entry, entry_cols) as f32 * line).min(list.y + list.h - y);
+            (crate::settings::lines(entry, entry_cols) as f32 * line).min(cards.y + cards.h - y);
         if tall < 1.0 {
             break;
         }
-        let row = Panel::new(list.x, y, list.w, tall);
+        let row = Panel::new(cards.x, y, cards.w, tall);
         y += tall;
         // One box per row, always. It was two side by side on a form row, which
         // is what the AGENT section was before it was cards: a card is what
@@ -6050,7 +6129,11 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
     // The width a card's body has, in columns, which is what the model counted
     // every card's height in. Read off the list the cards are drawn in, the same
     // way the placement reads it.
-    let list_cols = settings_entry_cols(list.w, column);
+    // The columns a card's text wraps in, off the box the rows are really drawn
+    // in rather than off the whole list: the gutter down the right of it belongs
+    // to the list's own bar, and text measured in a width it is not drawn in is
+    // a row measured at one height and drawn at another.
+    let list_cols = settings_entry_cols(settings_list_rows(list).w, column);
     for (index, side, row) in &layout.settings_rows {
         let Some(whole_row) = panel.row(*index) else {
             continue;
@@ -6248,6 +6331,26 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                             tint,
                         );
                     }
+                }
+                // Its own bar, down the card's right padding and only as far as
+                // the rows it counts: the header naming the columns and the
+                // buttons under them do not scroll. Nothing at all for a list
+                // that already fits in the body.
+                if let Some(first) = boxes.first()
+                    && let Some(last) = boxes.last()
+                {
+                    let rows = Panel::new(
+                        first.x,
+                        first.y,
+                        first.w,
+                        last.y + last.h - first.y,
+                    );
+                    scrollbar(
+                        scene,
+                        skin,
+                        settings_card_bar(card, rows),
+                        table.thumb(boxes.len()),
+                    );
                 }
                 // The buttons, centred in the footer: they act on the whole
                 // list, and a button pinned to one end of a footer reads as
@@ -6786,9 +6889,16 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
             // these are Markdown and printing the marks would be showing the
             // file rather than the instructions.
             SettingRow::Paper(paper) => {
-                let held = crate::settings::PAPER_LINES;
                 let box_ = settings_card(*row, line);
                 let parts = settings_card_parts(box_, line, size, column, list_cols, false);
+                // The text starts under the line saying where it came from, and
+                // runs to the bottom of the body. How many lines that really is
+                // rather than [`crate::settings::PAPER_LINES`], because a block
+                // the bottom of the list cut off shows fewer, and a counter or a
+                // bar reading twelve of a box showing four is the one readout
+                // there is saying something that is not on the screen.
+                let text = settings_paper_text(&parts, line);
+                let held = (text.h / line).round() as usize;
                 settings_card_shell(
                     scene,
                     box_,
@@ -6854,23 +6964,22 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 let mut fence = crate::markdown::fence_after(
                     paper.body.iter().take(paper.first).map(String::as_str),
                 );
-                let top = parts.body.y + line + design::tight(line);
-                for (step, text) in paper.body.iter().skip(paper.first).take(held).enumerate() {
-                    let at = Panel::new(
-                        parts.body.x,
-                        top + step as f32 * line,
-                        parts.body.w,
-                        line,
-                    );
-                    // Cut off at the bottom of the card rather than drawn under
-                    // it: the last block on a short list is clipped by the list.
-                    if at.y + line > parts.body.y + parts.body.h + 0.01 {
-                        break;
-                    }
+                for (step, at) in paper.body.iter().skip(paper.first).take(held).enumerate() {
+                    let box_ = Panel::new(text.x, text.y + step as f32 * line, text.w, line);
                     let mut runs = Vec::new();
-                    crate::markdown::line(&clip(text, body_cols), &mut fence, skin, &mut runs);
-                    scene.text(Text::rich(runs, at, size, skin.body));
+                    crate::markdown::line(&clip(at, body_cols), &mut fence, skin, &mut runs);
+                    scene.text(Text::rich(runs, box_, size, skin.body));
                 }
+                // Its own bar, down the card's right padding and only as far as
+                // the text it counts. Nothing at all for a block that is already
+                // all on screen, which is what makes a bar here mean there is
+                // more of it.
+                scrollbar(
+                    scene,
+                    skin,
+                    settings_card_bar(box_, text),
+                    paper.thumb(held),
+                );
             }
         }
     }
@@ -6967,16 +7076,19 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 scrollbar(
                     scene,
                     skin,
-                    Panel::new(box_.x, parts.body.y, box_.w, parts.body.h),
+                    settings_card_bar(box_, parts.body),
                     panel.doc_thumb(doc_cols, doc_rows),
                 );
             }
         }
     }
+    // The list's own bar, in the gutter the cards were kept out of. It used to
+    // be drawn on the list itself, which put it through the right edge of every
+    // card in it and through the buttons in their footers.
     scrollbar(
         scene,
         skin,
-        layout.settings_list,
+        settings_list_bar(layout.settings_list),
         panel.thumb(
             layout.settings_capacity(size),
             layout.settings_entry_columns(column),
@@ -15664,7 +15776,9 @@ mod tests {
         let layout = &out.layout;
         let line = Text::line_for(PANE_TEXT.0);
         let cols = layout.settings_entry_columns(PANE_TEXT.1);
-        let list = layout.settings_list;
+        // Full width is the width the rows are drawn in, which is the list less
+        // the gutter its own scrollbar stands in.
+        let list = settings_list_rows(layout.settings_list);
 
         // Every card is full width and stands in the row the model counted for
         // it, with the space between two of them under the one above.
@@ -16115,7 +16229,7 @@ mod tests {
             line,
             PANE_TEXT.0,
             column,
-            settings_entry_cols(layout.settings_list.w, column),
+            layout.settings_entry_columns(column),
             true,
         );
         let (names_at, boxes) = settings_table_parts(parts.body, line);
@@ -17371,6 +17485,352 @@ mod tests {
         assert!(track[0] > inside.x + inside.w, "the bar is over the text");
         assert!(track[0] + track[2] <= box_.x + box_.w, "outside the card");
         assert!(track[1] >= parts.body.y, "the bar reaches up past the header");
+    }
+
+    /// Every scrollbar the panel drew: the tracks, and the thumbs that stand in
+    /// them. Matched on the two colours nothing else in this window is painted
+    /// in.
+    fn bars_of(out: &Rendered) -> (Vec<Panel>, Vec<Panel>) {
+        let of = |want: [f32; 4]| -> Vec<Panel> {
+            out.scene
+                .rects
+                .iter()
+                .filter(|rect| rect.rgba() == want)
+                .map(|rect| {
+                    let [x, y, w, h] = rect.xywh();
+                    Panel::new(x, y, w, h)
+                })
+                .collect()
+        };
+        (of(out.skin.scroll_track), of(out.skin.scroll_thumb))
+    }
+
+    /// Whether two rectangles share a pixel.
+    fn overlap(a: Panel, b: Panel) -> bool {
+        a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+    }
+
+    /// Whether the whole of `inner` is inside `outer`.
+    fn within(inner: Panel, outer: Panel) -> bool {
+        inner.x >= outer.x - 0.01
+            && inner.y >= outer.y - 0.01
+            && inner.x + inner.w <= outer.x + outer.w + 0.01
+            && inner.y + inner.h <= outer.y + outer.h + 0.01
+    }
+
+    /// The AGENT section with a prompt long enough that both of its blocks
+    /// scroll, which is the section the overlap was reported on, scrolled to
+    /// the end so the blocks are the rows on screen.
+    fn a_wordy_agent_panel() -> Settings {
+        let mut panel = a_panel_on(&Config::default(), crate::settings::AGENT);
+        panel.adopt_prompt(
+            String::from("/home/hec/workspace/noob-cli"),
+            Ok((0..200).map(|at| format!("prompt line {at}")).collect()),
+            &Config::default(),
+        );
+        scrolled_to_the_end(&mut panel);
+        panel
+    }
+
+    /// The saved conversations, more of them than the table's body holds.
+    fn a_long_sessions_panel() -> Settings {
+        let now = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(9_000_000);
+        let sessions: Vec<crate::sessions::Saved> = (0..crate::settings::TABLE_ROWS * 3)
+            .map(|at| crate::sessions::Saved {
+                id: format!("id{at}"),
+                when: now - std::time::Duration::from_secs(60 * (at as u64 + 1)),
+                workspace: Some(std::path::PathBuf::from("/home/hec/workspace/noob-cli")),
+                gone: false,
+                bytes: 12_000,
+                context: None,
+                opening: format!("conversation {at}"),
+            })
+            .collect();
+        let mut panel = Settings::open(
+            &Config::default(),
+            None,
+            crate::agent::Agent {
+                now,
+                sessions: crate::sessions::Listing {
+                    sessions,
+                    skipped: Vec::new(),
+                },
+                ..crate::agent::Agent::default()
+            },
+        );
+        let at = panel
+            .section_names()
+            .iter()
+            .position(|name| *name == crate::settings::SESSIONS)
+            .expect("the sessions section");
+        panel.choose(at);
+        panel
+    }
+
+    /// Item H6: one bar per region and no two of them in the same pixels.
+    ///
+    /// The list's bar was painted at the right edge of the list, which is the
+    /// right edge of every card in it. It ran through the border of every card,
+    /// through the trash button at the end of every saved conversation, and
+    /// through the last glyph column of every wrapped description; a rectangle
+    /// cannot cover a glyph on this layer, so the letters were drawn on top of
+    /// the bar. Now the cards stop short of a gutter that belongs to the bar
+    /// and to nothing else.
+    #[test]
+    fn no_two_scrollbars_on_the_settings_panel_share_a_pixel() {
+        let panels = [
+            ("AGENT", a_wordy_agent_panel()),
+            ("SESSIONS", a_long_sessions_panel()),
+            ("SKILLS", a_wordy_skills_panel()),
+            (
+                "APPEARANCE",
+                a_panel_on(&Config::default(), crate::settings::APPEARANCE),
+            ),
+        ];
+        for (name, panel) in &panels {
+            for (w, h) in [(1400.0, 900.0), (980.0, 620.0), (760.0, 460.0)] {
+                let out = render_settings(panel, w, h, None);
+                let (tracks, thumbs) = bars_of(&out);
+                for (at, one) in tracks.iter().enumerate() {
+                    assert!(
+                        within(*one, out.layout.settings),
+                        "{name} at {w}x{h}: a bar outside the panel: {one:?}"
+                    );
+                    for other in tracks.iter().skip(at + 1) {
+                        assert!(
+                            !overlap(*one, *other),
+                            "{name} at {w}x{h}: {one:?} and {other:?} share pixels"
+                        );
+                    }
+                }
+                // Every thumb stands in exactly one track: a thumb outside one
+                // is a bar drawn somewhere its own track is not.
+                for thumb in &thumbs {
+                    let held = tracks.iter().filter(|track| within(*thumb, **track)).count();
+                    assert_eq!(held, 1, "{name} at {w}x{h}: {thumb:?} is in {held} tracks");
+                }
+                // And no bar is drawn over a card. The gutter is the list's, and
+                // a card's own bar stands in the card's padding, clear of the
+                // body its text is written in.
+                let line = Text::line_for(PANE_TEXT.0);
+                let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
+                for (index, _, row) in &out.layout.settings_rows {
+                    let card = settings_card(*row, line);
+                    let footer = matches!(
+                        panel.row(*index),
+                        Some(SettingRow::Entry(_) | SettingRow::Table(_))
+                    );
+                    let parts =
+                        settings_card_parts(card, line, PANE_TEXT.0, PANE_TEXT.1, cols, footer);
+                    for track in &tracks {
+                        assert!(
+                            !overlap(*track, parts.body),
+                            "{name} at {w}x{h}: {track:?} is over the body of row {index}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The list's own bar stands in the gutter beside the cards rather than in
+    /// the last four pixels of them, and it is still the bar that counts the
+    /// list: what it reports is the whole section, not one card of it.
+    #[test]
+    fn the_list_s_bar_stands_in_a_gutter_the_cards_are_kept_out_of() {
+        let panel = a_wordy_agent_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let list = out.layout.settings_list;
+        let cards = settings_list_rows(list);
+        let gutter = settings_list_bar(list);
+        assert!(cards.w < list.w, "the list reserved no gutter");
+        assert!(
+            (cards.x + cards.w + GAP - gutter.x).abs() < 0.01,
+            "the gutter does not start a gap after the cards: {cards:?} {gutter:?}"
+        );
+        for (index, _, row) in &out.layout.settings_rows {
+            assert!(
+                row.x + row.w <= gutter.x - GAP + 0.01,
+                "row {index} runs into the gutter: {row:?}"
+            );
+        }
+
+        // The list is longer than the panel, so it draws a bar, and that bar is
+        // in the gutter. It used to start eight pixels below the first row, on a
+        // chamfer the list does not have.
+        let (tracks, _) = bars_of(&out);
+        let track = tracks
+            .iter()
+            .find(|track| within(**track, gutter))
+            .unwrap_or_else(|| panic!("nothing in the gutter: {tracks:?} in {gutter:?}"));
+        assert!(
+            track.y - list.y <= 3.01,
+            "the bar starts {} pixels below the first row",
+            track.y - list.y
+        );
+    }
+
+    /// A block of text scrolls inside its own card, says so with a bar of its
+    /// own, and a block that is already all on screen draws none.
+    ///
+    /// The block had no bar at all. The nearest one belonged to the list, was
+    /// drawn immediately to its right, counted the block as the rows its card
+    /// claims rather than the hundreds of lines in it, and did not move when the
+    /// wheel over the block did. That is the "scroll overlaps the scroll" this
+    /// item exists for.
+    #[test]
+    fn a_block_of_text_carries_its_own_bar_and_a_short_one_carries_none() {
+        let mut panel = a_wordy_agent_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let line = Text::line_for(PANE_TEXT.0);
+        let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
+        let (index, _, row) = *out
+            .layout
+            .settings_rows
+            .iter()
+            .find(|(index, _, _)| {
+                matches!(panel.row(*index), Some(SettingRow::Paper(paper)) if paper.title.contains("PROMPT"))
+            })
+            .expect("the section carries the assembled prompt");
+        let card = settings_card(row, line);
+        let parts = settings_card_parts(card, line, PANE_TEXT.0, PANE_TEXT.1, cols, false);
+        let text = settings_paper_text(&parts, line);
+        assert_eq!(
+            (text.h / line).round() as usize,
+            crate::settings::PAPER_LINES,
+            "the block shows fewer lines than the model counted it at"
+        );
+
+        // Its bar: inside the card, down the padding right of the body, and only
+        // as tall as the text, so its head is not beside a header that does not
+        // scroll.
+        let (tracks, thumbs) = bars_of(&out);
+        let track = *tracks
+            .iter()
+            .find(|track| within(**track, card))
+            .unwrap_or_else(|| panic!("the block at row {index} drew no bar"));
+        assert!(track.x >= parts.body.x + parts.body.w, "the bar is over the text");
+        assert!((track.y - text.y).abs() < 3.01, "it reaches past the text");
+        let thumb = *thumbs
+            .iter()
+            .find(|thumb| within(**thumb, track))
+            .expect("the block's bar has no thumb");
+        assert!(
+            thumb.h < track.h * 0.5,
+            "the thumb says most of a 200 line block is on screen: {thumb:?} in {track:?}"
+        );
+
+        // The wheel over the block moves the block and leaves the panel behind
+        // it exactly where it was: two scrolls, two bars.
+        let was = out.layout.settings_rows[0];
+        let list_track = *tracks
+            .iter()
+            .find(|track| within(**track, settings_list_bar(out.layout.settings_list)))
+            .expect("the list drew no bar");
+        let list_thumb = *thumbs
+            .iter()
+            .find(|thumb| within(**thumb, list_track))
+            .expect("the list's bar has no thumb");
+        assert!(panel.scroll_paper(index, crate::settings::PAPER_LINES, true));
+        let after = render_settings(&panel, 1400.0, 900.0, None);
+        assert_eq!(after.layout.settings_rows[0], was, "the list moved with it");
+        let (after_tracks, after_thumbs) = bars_of(&after);
+        let moved = after_thumbs
+            .iter()
+            .find(|thumb| within(**thumb, track))
+            .expect("the block's bar went away");
+        assert!(moved.y > thumb.y, "the block's thumb did not move");
+        let still = after_thumbs
+            .iter()
+            .find(|thumb| within(**thumb, list_track))
+            .expect("the list's bar went away");
+        assert_eq!(still.y, list_thumb.y, "the list's thumb moved with the block");
+        assert_eq!(after_tracks.len(), tracks.len(), "a bar came or went");
+
+        // A block that fits its box draws nothing, so a bar here means there is
+        // more of it.
+        panel.adopt_prompt(
+            String::from("/home/hec/workspace/noob-cli"),
+            Ok(vec![String::from("the whole prompt, on one line")]),
+            &Config::default(),
+        );
+        let short = render_settings(&panel, 1400.0, 900.0, None);
+        let (tracks, _) = bars_of(&short);
+        let (_, row) = *short
+            .layout
+            .settings_rows
+            .iter()
+            .find(|(index, _, _)| {
+                matches!(panel.row(*index), Some(SettingRow::Paper(paper)) if paper.title.contains("PROMPT"))
+            })
+            .map(|(index, _, row)| (*index, *row))
+            .as_ref()
+            .expect("the block is still there");
+        let card = settings_card(row, line);
+        assert!(
+            !tracks.iter().any(|track| within(*track, card)),
+            "a block that fits its box drew a bar: {tracks:?}"
+        );
+    }
+
+    /// The table of saved conversations scrolls inside its own body, so it
+    /// carries its own bar too, and the bar stops at the rows: neither the
+    /// header naming the columns nor the buttons under them scroll.
+    #[test]
+    fn the_table_of_conversations_carries_its_own_bar_over_its_rows_only() {
+        let panel = a_long_sessions_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let line = Text::line_for(PANE_TEXT.0);
+        let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
+        let (index, _, row) = *out
+            .layout
+            .settings_rows
+            .iter()
+            .find(|(index, _, _)| matches!(panel.row(*index), Some(SettingRow::Table(_))))
+            .expect("the section carries a table");
+        let card = settings_card(row, line);
+        let parts = settings_card_parts(card, line, PANE_TEXT.0, PANE_TEXT.1, cols, true);
+        let (names, boxes) = settings_table_parts(parts.body, line);
+        let (tracks, thumbs) = bars_of(&out);
+        let track = *tracks
+            .iter()
+            .find(|track| within(**track, card))
+            .unwrap_or_else(|| panic!("the table at row {index} drew no bar"));
+        assert!(track.y >= names.y + names.h - 0.01, "the bar counts the header");
+        assert!(
+            track.y + track.h <= parts.footer.y + 0.01,
+            "the bar runs into the footer"
+        );
+        assert!(track.x >= parts.body.x + parts.body.w, "the bar is over the rows");
+        let thumb = *thumbs
+            .iter()
+            .find(|thumb| within(**thumb, track))
+            .expect("the table's bar has no thumb");
+        // A third of the list is on screen, so the thumb is about a third of the
+        // track: the bar reports the real extent.
+        let want = boxes.len() as f32 / (crate::settings::TABLE_ROWS * 3) as f32;
+        assert!(
+            (thumb.h / track.h - want).abs() < 0.06,
+            "the thumb is {} of its track and {want} of the list is on screen",
+            thumb.h / track.h
+        );
+
+        // Three conversations fit in a body that holds twelve, so that table
+        // draws no bar at all.
+        let few = render_settings(&a_sessions_panel(), 1400.0, 900.0, None);
+        let (_, row) = *few
+            .layout
+            .settings_rows
+            .iter()
+            .find(|(index, _, _)| matches!(panel.row(*index), Some(SettingRow::Table(_))))
+            .map(|(index, _, row)| (*index, *row))
+            .as_ref()
+            .expect("the short table is placed");
+        let (tracks, _) = bars_of(&few);
+        assert!(
+            !tracks.iter().any(|track| within(*track, settings_card(row, line))),
+            "a table that fits its body drew a bar: {tracks:?}"
+        );
     }
 
     /// The first line is Markdown, so what is on screen is four characters

@@ -599,6 +599,34 @@ impl Paper {
     fn most(&self) -> usize {
         self.body.len().saturating_sub(PAPER_LINES)
     }
+
+    /// How much of the block is on screen, for its own scrollbar, in a box
+    /// showing `rows` of it.
+    ///
+    /// `None` when the whole of it is already on screen, which is what draws no
+    /// bar at all: a bar that is always there and always full says nothing about
+    /// whether there is more to read.
+    ///
+    /// `rows` is what the layout really drew rather than [`PAPER_LINES`],
+    /// because a block cut off by the bottom of the list shows fewer, and a bar
+    /// counting lines that are not on screen is the readout lying about the one
+    /// thing it is for.
+    pub fn thumb(&self, rows: usize) -> Option<(f32, f32)> {
+        let heights = vec![1usize; self.body.len()];
+        let back = self.body.len().saturating_sub(rows).saturating_sub(self.first);
+        text_geometry::thumb(&heights, rows, back)
+    }
+
+    /// Take it to its first or its last screenful, for Home and End.
+    fn jump_to(&mut self, last: bool) -> bool {
+        let next = match last {
+            true => self.most(),
+            false => 0,
+        };
+        let moved = next != self.first;
+        self.first = next;
+        moved
+    }
 }
 
 /// How many lines of a [`Paper`] are on screen at once.
@@ -696,6 +724,15 @@ impl Table {
     /// The furthest down the body can start and still be full.
     pub fn most(&self) -> usize {
         self.rows.len().saturating_sub(TABLE_ROWS)
+    }
+
+    /// How much of the list is on screen, for the table's own scrollbar, in a
+    /// body showing `rows` of it. `None` when the whole list already fits,
+    /// which is what draws no bar.
+    pub fn thumb(&self, rows: usize) -> Option<(f32, f32)> {
+        let heights = vec![1usize; self.rows.len()];
+        let back = self.rows.len().saturating_sub(rows).saturating_sub(self.first);
+        text_geometry::thumb(&heights, rows, back)
     }
 
     /// Bring the row the keys are on back inside the body.
@@ -3436,6 +3473,17 @@ impl Settings {
         self.picked = None;
         self.arming = None;
         self.rewind_doc();
+        // The two ends of a block of text, when the cursor is on one. Page moves
+        // it a screenful and this takes it the whole way, which is the pair of
+        // keys every other scrolling thing in this window answers: a block whose
+        // only route was the wheel was a block nobody reading with the keyboard
+        // could reach the end of.
+        if matches!(self.at_cursor(), Some(Row::Paper(_))) {
+            let at = self.cursor();
+            if let Some(Row::Paper(paper)) = self.here_mut().rows.get_mut(at) {
+                return paper.jump_to(last);
+            }
+        }
         // The ends of the table, when the cursor is in one: the section has
         // nothing else the cursor can reach, and Home in a list of two hundred
         // conversations means the first conversation.
@@ -3569,6 +3617,35 @@ impl Settings {
         let above: usize = heights.iter().take(first).sum();
         let back = text_geometry::scrollback_for(&heights, rows, above);
         text_geometry::thumb(&heights, rows, back)
+    }
+
+    /// The wheel, with the pointer over row `over` of a list `rows` tall and
+    /// `cols` wide. `pages` is signed the way the window's wheel is: negative is
+    /// down the list.
+    ///
+    /// A block of text and a table scroll inside themselves, so the wheel over
+    /// one of them moves that and not the list behind it, each by its own body
+    /// rather than by a screenful of the panel. At either end of it the wheel
+    /// goes on to the list: a block claims nineteen rows of the panel, so over
+    /// the end of one the wheel used to do nothing at all, which reads as a
+    /// window that has stopped answering rather than as a block that is
+    /// finished.
+    ///
+    /// Here rather than in the window because it is the model that knows which
+    /// rows scroll inside themselves. The window knows only which row the
+    /// pointer is on.
+    pub fn wheel(&mut self, over: Option<usize>, pages: f32, rows: usize, cols: usize) -> bool {
+        let down = pages < 0.0;
+        let by = |lines: usize| ((lines as f32 * pages.abs()).round() as usize).max(1);
+        if let Some(index) = over {
+            if self.paper(index).is_some() && self.scroll_paper(index, by(PAPER_LINES), down) {
+                return true;
+            }
+            if self.table(index).is_some() && self.scroll_table(index, by(TABLE_ROWS), down) {
+                return true;
+            }
+        }
+        self.scroll(by(rows), down, rows, cols)
     }
 }
 
@@ -6215,6 +6292,151 @@ something_else = keep me
         assert!(panel.page(20, false));
         assert_eq!(panel.paper(at).expect("the block").first, 0);
         assert!(!panel.page(20, false), "it scrolled past its own first line");
+
+        // Home and End take it the whole way, which is the pair of keys every
+        // other scrolling thing in this window answers. The wheel used to be the
+        // only route to the end of a block.
+        assert!(panel.jump(true));
+        assert_eq!(
+            panel.paper(at).expect("the block").first,
+            body.len() - PAPER_LINES,
+            "End did not reach the last screenful"
+        );
+        assert_eq!(panel.first(), was, "reading the block scrolled the section");
+        assert!(!panel.jump(true), "it jumped past its own last screenful");
+        assert!(panel.jump(false));
+        assert_eq!(panel.paper(at).expect("the block").first, 0);
+        assert!(!panel.jump(false), "it jumped past its own first line");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The wheel over a block reads the block, leaves the section where it was,
+    /// and goes on to the section once the block has nothing left to show.
+    ///
+    /// The last part is the fix: a block claims nineteen rows of the panel, so a
+    /// wheel that stopped dead over one was most of the window answering
+    /// nothing once the block was at its end.
+    #[test]
+    fn the_wheel_over_a_block_reads_it_and_goes_on_to_the_list_at_its_end() {
+        let dir = scratch_dir("agent-block-wheel");
+        let mut panel = Settings::open(
+            &Config::default(),
+            None,
+            Agent::read(Some(&dir), None, crate::sessions::Listing::default()),
+        );
+        go_to(&mut panel, AGENT);
+        panel.adopt_prompt(
+            String::from("/home/hec/workspace/noob-cli"),
+            Ok((0..PAPER_LINES * 3).map(|at| format!("line {at}")).collect()),
+            &Config::default(),
+        );
+        go_to(&mut panel, AGENT);
+        let at = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, Row::Paper(paper) if paper.title.contains("PROMPT")))
+            .expect("the prompt block");
+        let (rows, cols) = (12, 80);
+
+        // Over the block: the block moves and the section does not.
+        let was = panel.first();
+        assert!(panel.wheel(Some(at), -1.0, rows, cols));
+        assert_eq!(panel.paper(at).expect("the block").first, PAPER_LINES);
+        assert_eq!(panel.first(), was, "the section moved with the block");
+
+        // Wheeled to the end of the block, the next notch moves the section
+        // instead of doing nothing at all.
+        while panel.paper(at).expect("the block").first
+            < panel.paper(at).expect("the block").body.len() - PAPER_LINES
+        {
+            assert!(panel.wheel(Some(at), -1.0, rows, cols));
+        }
+        assert!(panel.wheel(Some(at), -1.0, rows, cols), "the wheel went dead");
+        assert!(panel.first() > was, "the section did not take the wheel on");
+
+        // And nowhere near a block, the wheel is the section's, as it always
+        // was.
+        let was = panel.first();
+        assert!(panel.wheel(None, 1.0, rows, cols));
+        assert!(panel.first() < was);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A block longer than its box reports how much of it is off screen, and one
+    /// that fits reports nothing at all: a bar that is always there says nothing
+    /// about whether there is more to read.
+    ///
+    /// The block had no bar of any kind. The nearest one belonged to the section
+    /// list, counted the block as the nineteen rows its card claims rather than
+    /// the hundreds of lines in it, and did not move when the wheel over the
+    /// block did.
+    #[test]
+    fn a_block_says_how_much_of_it_is_off_screen_and_a_short_one_says_nothing() {
+        let dir = scratch_dir("agent-block-extent");
+        let mut panel = Settings::open(
+            &Config::default(),
+            None,
+            Agent::read(Some(&dir), None, crate::sessions::Listing::default()),
+        );
+        go_to(&mut panel, AGENT);
+        let body: Vec<String> = (0..PAPER_LINES * 4).map(|at| format!("line {at}")).collect();
+        panel.adopt_prompt(
+            String::from("/home/hec/workspace/noob-cli"),
+            Ok(body.clone()),
+            &Config::default(),
+        );
+        go_to(&mut panel, AGENT);
+        let at = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, Row::Paper(paper) if paper.title.contains("PROMPT")))
+            .expect("the prompt block");
+
+        // A quarter of it is on screen, so the thumb is a quarter of the track
+        // and it starts at the top.
+        let (top, size) = panel
+            .paper(at)
+            .expect("the block")
+            .thumb(PAPER_LINES)
+            .expect("a block four screenfuls long draws a bar");
+        assert!((size - 0.25).abs() < 0.01, "the thumb says {size} of it fits");
+        assert!(top.abs() < 0.01, "it is not at the top of its own track");
+
+        // Scrolled to the end, the thumb is at the foot of the track.
+        assert!(panel.scroll_paper(at, 9_999, true));
+        let (top, size) = panel
+            .paper(at)
+            .expect("the block")
+            .thumb(PAPER_LINES)
+            .expect("still a bar");
+        assert!(
+            (top + size - 1.0).abs() < 0.01,
+            "the thumb is at {top} rather than the foot of its track"
+        );
+
+        // A box showing fewer lines than the block was measured for, which is
+        // what the bottom of the list cuts a card down to, reports the lines it
+        // is really showing rather than twelve of them.
+        let (_, cut) = panel
+            .paper(at)
+            .expect("the block")
+            .thumb(PAPER_LINES / 2)
+            .expect("still a bar");
+        assert!(cut < size, "a shorter box says as much fits as a tall one");
+
+        // And a block that is already all on screen has no bar at all.
+        let short: Vec<String> = (0..PAPER_LINES - 2).map(|at| format!("line {at}")).collect();
+        panel.adopt_prompt(
+            String::from("/home/hec/workspace/noob-cli"),
+            Ok(short),
+            &Config::default(),
+        );
+        go_to(&mut panel, AGENT);
+        assert_eq!(
+            panel.paper(at).expect("the block").thumb(PAPER_LINES),
+            None,
+            "a block that fits its box drew a bar anyway"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

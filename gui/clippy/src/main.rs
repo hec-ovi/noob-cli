@@ -3470,41 +3470,20 @@ impl App {
         // And the same for the settings panel, which is the only thing on screen
         // while it is up.
         if self.settings.is_some() {
-            // Over a block of text, the wheel reads that block rather than
-            // walking the list under it. Same rule as the column beside the
-            // entry list: the pointer is on the thing being scrolled.
-            if let Some(Hit::SettingsRow(index, _)) =
-                layout.hit(self.cursor.x as f32, self.cursor.y as f32)
-                && self
-                    .settings
-                    .as_ref()
-                    .is_some_and(|panel| panel.paper(index).is_some())
-            {
-                let by = ((settings::PAPER_LINES as f32 * pages.abs()).round() as usize).max(1);
-                if let Some(panel) = self.settings.as_mut() {
-                    self.dirty |= panel.scroll_paper(index, by, pages < 0.0);
-                }
-                return;
-            }
-            // And the same over the table of saved conversations, which scrolls
-            // inside its own card: the rows move and the card stays where it is.
-            // Its rows and its mark answer with hits of their own, so the row
-            // under the pointer is asked for by all three.
-            let over = layout.hit(self.cursor.x as f32, self.cursor.y as f32);
-            if let Some(
-                Hit::SettingsRow(index, _) | Hit::SettingsPick(index, _) | Hit::SettingsMark(index, _),
-            ) = over
-                && self
-                    .settings
-                    .as_ref()
-                    .is_some_and(|panel| panel.table(index).is_some())
-            {
-                let by = ((settings::TABLE_ROWS as f32 * pages.abs()).round() as usize).max(1);
-                if let Some(panel) = self.settings.as_mut() {
-                    self.dirty |= panel.scroll_table(index, by, pages < 0.0);
-                }
-                return;
-            }
+            // Which row of the list the pointer is on, if any. A block of text
+            // and a table both scroll inside themselves and both answer for the
+            // rows in them, so all three hits name the row the wheel is over.
+            // Which of the three regions the wheel then moves is
+            // [`Settings::wheel`], because the choice is the model's and this is
+            // the only place in the window that knows where the pointer is.
+            let over = match layout.hit(self.cursor.x as f32, self.cursor.y as f32) {
+                Some(
+                    Hit::SettingsRow(index, _)
+                    | Hit::SettingsPick(index, _)
+                    | Hit::SettingsMark(index, _),
+                ) => Some(index),
+                _ => None,
+            };
             // Over the column beside the entry list, the wheel moves that
             // document rather than the list: the pointer is on the thing being
             // scrolled, which is what every two-column view in this window does.
@@ -3519,16 +3498,13 @@ impl App {
             let on_doc = doc.w >= 1.0
                 && doc_rows > 0
                 && doc.contains(self.cursor.x as f32, self.cursor.y as f32);
-            let rows = match on_doc {
-                true => doc_rows,
-                false => layout.settings_capacity(self.config.pane_font_size),
-            };
-            let by = ((rows as f32 * pages.abs()).round() as usize).max(1);
+            let rows = layout.settings_capacity(self.config.pane_font_size);
+            let by = ((doc_rows as f32 * pages.abs()).round() as usize).max(1);
             let list_cols = layout.settings_entry_columns(self.pane_column);
             if let Some(panel) = self.settings.as_mut() {
                 self.dirty |= match on_doc {
                     true => panel.scroll_doc(by, pages < 0.0, doc_cols, doc_rows),
-                    false => panel.scroll(by, pages < 0.0, rows, list_cols),
+                    false => panel.wheel(over, pages, rows, list_cols),
                 };
             }
             return;
