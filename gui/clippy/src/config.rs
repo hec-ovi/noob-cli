@@ -41,6 +41,11 @@ pub struct Config {
     /// time a line wrapped and put the box at a different size every time you
     /// looked at it. Three rows means three rows.
     ///
+    /// The one thing that overrides it is the window running out of height:
+    /// the panes keep a floor of their own, and a row count that would eat into
+    /// it takes what is left over instead. It goes back to the number here as
+    /// soon as the window is tall enough for it again.
+    ///
     /// Named `max_input_rows` until this build, which is where the confusion
     /// came from: it read as a ceiling and the window never obeyed it at all.
     /// The old name is retired rather than aliased, because the number beside it
@@ -924,7 +929,9 @@ pane_font_size = 13     # the activity, plan, agents and file panes
 # is the size you set rather than one that moves every time a line wraps. A
 # longer message scrolls inside it rather than taking room from the
 # conversation, and the row the caret is on is the row you see. Raise it if you
-# would rather see more of what you are typing at once.
+# would rather see more of what you are typing at once. On a window too short
+# for the number set here, the panes keep their floor and the prompt takes what
+# is left; it goes back to this number when there is room for it.
 prompt_rows = 1
 
 # Where the dividers sit, as fractions. One line runs the whole way across the

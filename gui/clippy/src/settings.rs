@@ -1062,8 +1062,12 @@ impl Settings {
                 unset.join(" and ")
             )));
         }
-        rows.push(Row::Paper(self.instructions_paper()));
-        rows.push(Row::Paper(self.prompt_paper()));
+        // The rest of what the file sets, with the form it belongs to. These
+        // used to come after the two blocks, which put them thirty-odd lines
+        // below the rows they read with and left the section going form, two
+        // documents, more form. A section reads as its form and then the
+        // documents under it, so every row off the file stays above the first
+        // block.
         for (key, value) in &self.agent.env {
             if key == agent::ENDPOINT || agent::OWNED.contains(&key.as_str()) {
                 continue;
@@ -1080,6 +1084,8 @@ impl Settings {
                 },
             });
         }
+        rows.push(Row::Paper(self.instructions_paper()));
+        rows.push(Row::Paper(self.prompt_paper()));
         rows
     }
 
@@ -4148,6 +4154,56 @@ mod tests {
         assert_eq!((panel.cursor(), panel.side()), (0, Side::Right));
         assert!(panel.cross(Side::Left));
         assert!(matches!(panel.at_cursor(), Some(Row::Field { .. })));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every row that reads the agent's file sits with the form, above the two
+    /// blocks.
+    ///
+    /// The rest of the environment used to be pushed on after the blocks, which
+    /// left it about thirty lines under the rows it reads with: the section went
+    /// form, two documents, and then more form. It is the same complaint as the
+    /// headings and notes the form replaced, from the other side. Under the
+    /// first block there is nothing but the other block.
+    #[test]
+    fn the_agent_form_keeps_its_rows_above_the_blocks() {
+        let dir = scratch_dir("agent-form-order");
+        std::fs::write(
+            dir.join(".env"),
+            "NOOB_BASE_URL=http://localhost:8080/v1\nNOOB_CTX=262144\nNOOB_API_KEY=sk-secret\nNOOB_MODEL=laguna-s\nNOOB_TIMEOUT=90\n",
+        )
+        .expect("a file");
+        let mut panel = Settings::open(
+            &Config::default(),
+            Some(Path::new("/tmp/no0b.conf")),
+            Agent::read(Some(&dir), None, crate::sessions::Listing::default()),
+        );
+        go_to(&mut panel, AGENT);
+        let rows = panel.rows().to_vec();
+        let first_block = rows
+            .iter()
+            .position(|row| matches!(row, Row::Paper(_)))
+            .unwrap_or_else(|| panic!("there is no block at all: {rows:?}"));
+        assert!(
+            matches!(&rows[first_block], Row::Paper(paper) if paper.title.contains("AGENTS.md")),
+            "the first block is not the instructions: {:?}",
+            rows[first_block]
+        );
+        for key in ["NOOB_API_KEY", "NOOB_MODEL", "NOOB_TIMEOUT"] {
+            let at = rows
+                .iter()
+                .position(|row| matches!(row, Row::Reading { label, .. } if label == key))
+                .unwrap_or_else(|| panic!("{key} is not on the section: {rows:?}"));
+            assert!(
+                at < first_block,
+                "{key} is row {at}, under the block at {first_block}"
+            );
+        }
+        assert!(
+            rows[first_block..].iter().all(|row| matches!(row, Row::Paper(_))),
+            "there is a form row under the blocks: {:?}",
+            &rows[first_block..]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -307,7 +307,10 @@ conversation every time a line wrapped. The key was called `max_input_rows` and
 the window never read it, so that name is retired: a file that still carries it
 opens at one row and says nothing. A message longer than the box scrolls inside
 it: the row the caret is on is the row you see, and typing off the bottom of it
-brings the text up rather than hiding it.
+brings the text up rather than hiding it. The panes keep a floor under them, so a
+row count the window is too short for takes what is left over instead of the last
+of the conversation, and goes back to the number you set as soon as there is room
+for it.
 Click anywhere in it to put the caret there, drag across it to
 select a span, Ctrl-A selects the whole line, and typing or backspace over a
 selection replaces it. Ctrl-V pastes; a pasted newline becomes a space, because

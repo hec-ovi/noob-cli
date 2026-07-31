@@ -237,6 +237,15 @@ const SPAN_BAND: f32 = 16.0;
 /// still reads as a block ([`DOT_ROWS`] rows of [`SMALL_DOT`]). Fifty-six pixels.
 const MIN_SPACE_H: f32 = TAB_H + PAD * 2.0 + DOT_ROWS as f32 * SMALL_DOT;
 
+/// The least room the panes keep, whatever the prompt was set to: one space at
+/// [`MIN_SPACE_H`] and the [`GAP`] the body is inset by on both sides. Sixty
+/// eight pixels.
+///
+/// The same floor a drag already refuses to go under, applied to the other thing
+/// that can take the room: `prompt_rows` is a fixed height now, so a big number
+/// on a short window would push the conversation off the bottom of it.
+const PANES_FLOOR: f32 = MIN_SPACE_H + GAP * 2.0;
+
 /// The least width a column can be dragged down to, for text drawn at `column`
 /// pixels a character: [`DIFF_MIN_COLUMNS`] of them, which is the floor the file
 /// view already refuses to go below (a line-number gutter and twenty columns of
@@ -1181,7 +1190,15 @@ impl Layout {
             };
         }
 
-        let (body, input) = rest.split_bottom(shape.input_h.max(INPUT_H).min(rest.h));
+        // The prompt is the height it was set to, and the conversation is what
+        // the window is for: a row count that would leave the panes under
+        // [`PANES_FLOOR`] takes what is left over instead of the last of it, so
+        // the strip gives room back rather than squeezing them away. Whenever
+        // the room is there the setting is honoured to the pixel. Under
+        // `PANES_FLOOR + INPUT_H` the window is too short for both and the strip
+        // keeps its own one-row height, which is the least it can be read in.
+        let room = (rest.h - PANES_FLOOR).max(INPUT_H.min(rest.h));
+        let (body, input) = rest.split_bottom(shape.input_h.max(INPUT_H).min(room));
         let body = body.inset(GAP);
 
         // The grid is the two ratios and nothing else: four cells, whether or
@@ -10967,6 +10984,55 @@ mod tests {
             .find(|text| text.runs.iter().any(|run| run.text == "hello"))
             .expect("the prompt is drawn");
         assert_eq!(drawn.scroll_lines, 0.0);
+    }
+
+    /// The prompt is the rows it was set to whenever the window has the room,
+    /// and never the last of it: the panes keep [`PANES_FLOOR`] and the strip
+    /// takes what is left over.
+    ///
+    /// A fixed height is what `prompt_rows` was asked to be, but nothing was
+    /// holding room back for the conversation: twenty rows on a short window
+    /// left the panes a few pixels tall, which is the window with nothing in it
+    /// but the box you type into.
+    #[test]
+    fn the_prompt_is_capped_at_what_the_panes_can_spare() {
+        let dock = Dock::new();
+        let line = Text::line_for(14.0);
+        for height in [900.0f32, 600.0, 400.0, 200.0] {
+            for rows in [1usize, 2, 4, 9, 40] {
+                let mut shape = shape(&dock, &[]);
+                shape.input_h = input_height(rows, line);
+                let layout = Layout::compute(1200.0, height, &shape);
+                // The strip around the box, which is what `input_height` is in.
+                let strip = layout.input.h + 2.0 * GAP;
+                let panes = height - TITLE_H - strip;
+                assert!(
+                    panes >= PANES_FLOOR - 0.01,
+                    "{rows} rows on a {height} window left the panes {panes}"
+                );
+                let want = input_height(rows, line);
+                let spare = height - TITLE_H - PANES_FLOOR;
+                match want <= spare {
+                    // Room for it, so it is the number the file asked for.
+                    true => assert!(
+                        (strip - want).abs() < 0.01,
+                        "{rows} rows fit in {height} and came out {strip} instead of {want}"
+                    ),
+                    // No room, so it is everything the panes could spare.
+                    false => assert!(
+                        (strip - spare).abs() < 0.01,
+                        "{rows} rows on a {height} window took {strip} of the {spare} spare"
+                    ),
+                }
+            }
+        }
+        // Shorter than the floor and one row together, the window cannot give
+        // both: the strip keeps the one row it takes to read, and the panes take
+        // what is under the floor rather than the strip disappearing.
+        let mut shape = shape(&dock, &[]);
+        shape.input_h = input_height(30, line);
+        let short = Layout::compute(1200.0, TITLE_H + PANES_FLOOR, &shape);
+        assert!((short.input.h + 2.0 * GAP - INPUT_H).abs() < 0.01, "{}", short.input.h);
     }
 
     /// Wherever the caret is, it is on a row the box is showing, and a click on
