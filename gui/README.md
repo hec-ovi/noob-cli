@@ -118,16 +118,22 @@ agent is working in, each pair separated by the same marker. It used to end on
 the commit the build was cut from; seven characters of hex is not something
 anyone reads off a title, and the room they took says where you are instead.
 
-The orb is the one animated thing in the window, and it is two objects rather
+The orb is the one animated thing in the window, and it is two formations rather
 than one: while a turn is running it is twelve tilted rings of dots around one
 centre with three runners chasing each ring, 516 discs a frame, and at rest it is
-a dotted globe, 112 square dots on a lattice of latitude and longitude. Both are
-ported from `thinking-orbs` and neither needs a shader, because a dot is one
-rectangle through the same rounded-rect distance field every panel is drawn
-with: corner radius at half the width for a disc, none at all for a square. Its
-clock is a 30 frames a second deadline that exists only while the agent is
-working; the resting globe reads no clock at all, so a window with nothing
-happening in it goes back to blocking until you touch it.
+a square, a filled 11 by 11 plate of 121 dots. The rings are ported from
+`thinking-orbs`; the square is this window's own. Neither needs a shader, because
+a dot is one rectangle through the same rounded-rect distance field every panel
+is drawn with: corner radius at half the width for a disc, none at all for a
+square.
+
+Starting a turn is not a swap between the two. Each dot of the plate is paired
+with a dot of the rings and travels to it over 300ms, rounding off from a square
+to a disc on the way, while the rings' other dots come up out of nothing behind
+them; ending a turn runs the same move backwards. Its clock is a 30 frames a
+second deadline that exists only while the agent is working or the orb is still
+on its way back, and the resting square reads no clock at all, so a window with
+nothing happening in it goes back to blocking until you touch it.
 
 While a turn runs, the prompt's marker is three dots taking turns rising, one up
 and two down, on the same deadline. At rest it is the chevron again and nothing

@@ -1,9 +1,11 @@
 # The thinking orb, ported
 
-Taken from the real source of `github.com/Jakubantalik/thinking-orbs` (MIT),
-`src/engine/{core,orbits,lattice,profiles}.ts` and `src/presets.ts`, read rather
-than guessed. This file exists so the Rust port matches the animation instead of
-approximating it.
+The working frame is taken from the real source of
+`github.com/Jakubantalik/thinking-orbs` (MIT), `src/engine/core.ts`,
+`src/engine/orbits.ts`, `src/engine/profiles.ts` and `src/presets.ts`, read
+rather than guessed. This file exists so the Rust port matches the animation
+instead of approximating it. The resting frame is not upstream's any more (see
+below) and the move between the two is NO0B's own.
 
 ## Why it needs no shader
 
@@ -11,45 +13,37 @@ Every frame is a list of z-sorted dots. NO0B already draws a clean
 antialiased disc with `Panel::fill(rgba).radius(w / 2)` through the existing
 rounded-rect SDF, and the same rect with no corner radius is a hard square. So
 the whole animation is arithmetic that emits rects: no second pipeline, no WGSL,
-no texture. The working state is drawn as discs and the idle state as squares.
+no texture. The working state is drawn as discs and the idle state as squares,
+and the corner radius is what says which: it travels with the move, so a dot
+rounds off as it leaves the plate and squares up again as it settles.
 
 At 64px the `working` state emits **516 discs** per frame (12 orbits, each 40
 ghost dots plus 3 particles). That is well inside the rect buffer, which grows
 by powers of two from 256.
 
-## The states we need
+## The two formations
 
-`STATE_TO_MODE` maps six states onto six modes. Two of them are ported: `working`
-onto `orbits`, and the idle state onto `globe`, which upstream is what `searching`
-uses. There is no third, and the ASCII face loop that was going to fill the idle
-state is dropped (decision 3).
-
-The idle state was the `orbits` frame frozen at `t = 0`, and it was wrong: twelve
-tilted ellipses standing still read as scattered dots, not as an object. `globe`
-is a latitude and longitude lattice on one sphere, so it closes a silhouette and
-holds a ball in the corner while nothing is running. Upstream sweeps a scan
-meridian across it, which is the only moving part of that mode and is left out
-here: idle does not animate, and without the scan there is no clock term in the
-frame at all, so the window still stops redrawing when a turn ends and still
-holds no wakeup deadline while it rests.
+One state is ported: `working` onto upstream's `orbits`. There is no third, and
+the ASCII face loop that was going to fill the idle state is dropped (decision 3).
 
 Preset at size 64, `orbits`: `speed 1.885`, `count 1`, `size 1`, so the base
 profile is used unscaled.
 
-Preset at size 64, `globe`: `count 0.42`, `size 1.15`. `scaleCounts` takes the
-square root of the count multiplier for a lattice pair, so the TOTAL dot count
-scales by 0.42 and each side by 0.648: `latRings` 17 becomes 11 and `lonDensity`
-44 becomes 29. `scaleRadii` multiplies every radius key by 1.15, so `rBase` 0.6
-becomes 0.69 and `rDepth` 1.7 becomes 1.955. The `speed`, `scanMul` and `dimBase`
-of that preset belong to the scan and are not ported. The 20 point preset was
-tried at the strip's real 30px and is sparser (54 dots to 204); the denser one
-reads as an object sooner, which is the whole point of the mode.
+The idle formation is NO0B's own and has been three things. It was the `orbits`
+frame frozen at `t = 0`, which is twelve tilted ellipses standing still and reads
+as scattered dots. It was then upstream's `globe`, a latitude and longitude
+lattice on one sphere, thinned to 112 square dots. It is now a **square**: a
+filled 11 by 11 plate of dots across the block, which is the mark this window
+carries everywhere else, and flat and still in a way a ball is not.
 
-The idle dots are squares here rather than discs, and a square of side 2r sits
-heavier than a disc of radius r, so the lattice is thinned once more by the same
-rule: the square root of 0.55, taking 11 and 29 to 8 and 22, and 204 dots to 112.
-The gap between the dots is what that buys. The working state is untouched by it:
-the two modes share no counts.
+Nothing about the plate reads the clock, so a resting window redraws the same
+picture however long it has been up and still holds no wakeup deadline while it
+rests.
+
+The two radius keys the plate uses, 0.69 and 1.955, are what is left of the
+`globe` preset at size 64 (`size 1.15` applied to `rBase` 0.6 and `rDepth` 1.7).
+They are kept because they were tuned against this strip at this size, not
+because the mode they came from is still here.
 
 ## Base profile (orbits)
 
@@ -65,21 +59,21 @@ the two modes share no counts.
 | `rsPow` | 0.6 | radius scaling exponent |
 | `rMin` | 0.3 | smallest radius drawn |
 
-## Base profile (globe)
+## Profile (the resting plate)
 
 | Name | Value | Meaning |
 |---|---|---|
-| `latRings` | 17 | rings of latitude, pole to pole |
-| `lonDensity` | 44 | dots around the widest ring |
-| `rBase` | 0.6 | dot radius at the back of the sphere |
-| `rDepth` | 1.7 | how much a dot grows as it comes forward |
-| `inkFar` | 0.62 | ink at the back |
-| `inkSpan` | 0.54 | how much darker it gets coming forward |
+| `side` | 11 | dots per side of the filled grid, so 121 in all |
+| `rBase` | 0.69 | dot radius at the edge of the plate |
+| `rDepth` | 1.955 | how much a dot grows towards the middle |
+| `inkFar` | 0.62 | ink at the edge |
+| `inkSpan` | 0.54 | how much darker it gets towards the middle |
 | `rsPow` | 0.6 | radius scaling exponent |
 | `rMin` | 0.3 | smallest radius drawn |
 
-`rBoost`, and the `scanMul` and `dimBase` of the preset, are the scan meridian
-and are not ported.
+Eleven a side is what the strip has room for: the plate spans 24.6px at the
+strip's 30, so the pitch is 2.46px against dots drawn 0.6px to 1.33px wide. Ten
+leaves the middle sparse and twelve closes the gaps up.
 
 `radiusScale(size, pow) = (size / 300).powf(pow)`, so at 64px the multiplier is
 `(64/300)^0.6`. The radii were tuned for a 300pt frame and scale sub-linearly so
@@ -138,29 +132,61 @@ alpha  = 1
 ink    = 0.3 - 0.22 * depth
 ```
 
-The globe uses the same projection with `yaw = 0` (it does not turn) and
-`tilt = 0.4`, which is the middle of the tilt upstream wobbles by 0.06 over time.
-The points go in on the unit sphere and the projection scales them by `R`, so the
-depth that comes back is already `-1..1`:
+The plate does not go through the projection at all: a square seen at a tilt is a
+rhombus, and the point of the formation is that it is square. `R` is its half
+side, so its edges land where the circles' widest reach does. For `i, j` in
+`0..side`:
 
 ```
-lat = -pi/2 + (li / latRings) * pi                for li in 0..=latRings
-lonCount = max(1, round(abs(cos(lat)) * lonDensity))
-lon = (lj / lonCount) * 2pi                        for lj in 0..lonCount
-point  = (cos(lat) * cos(lon), sin(lat), cos(lat) * sin(lon))
-depth  = (z + 1) / 2
+u = -1 + 2 * i / (side - 1)
+v = -1 + 2 * j / (side - 1)
+screen = (cx + u * R, cy + v * R)
+depth  = 1 - max(abs(u), abs(v))
+z      = (2 * depth - 1) * R
 radius = (0.69 + 1.955 * depth) * rs
 alpha  = 1
 ink    = 0.62 - 0.54 * depth
 ```
 
-A ring's dot count follows the cosine of its latitude, so spacing along a ring
-matches spacing between rings and the poles come out as one dot each. With
-`latRings` 8 and `lonDensity` 22, at 30px that is 112 dots.
+A flat plate has no depth of its own, so one is made from how far out a dot is,
+by the larger of the two distances rather than the straight line between them:
+that falls away in squares, so the shape of the brightness is the shape of the
+formation. `z` is that spread back over the plate's own width, in pixels like the
+orbits' own, so a dot travelling between the two can be sorted against one that
+stayed where it was. At 30px the plate is 121 dots.
 
 Then sort every dot by `z` ascending (far to near) and draw in that order,
 skipping any with alpha below 0.02 and clamping radius to at least `rMin`. The
-globe's dots are drawn square (no corner radius) and the orbits' round.
+corner radius is `radius * morph`, so the plate's dots are hard squares and the
+orbits' are discs.
+
+## The move between them
+
+A turn starting does not swap one frame for the other. `morph` is how far along
+the move a frame is, 0 at the plate and 1 at the circles, and the two ends are
+the two formations exactly: `morph == 0` builds the plate alone and `morph == 1`
+builds the circles alone, so the resting frame stays clock-free and the working
+frame is the arithmetic it always was.
+
+In between, both are built and paired. Each of the 121 plate dots takes the
+working dot at `index * 516 / 121` in the circles' own emission order, which is
+deterministic, so a dot keeps the same partner every frame with nothing
+remembered between them, and the stride spreads the plate across all twelve
+circles rather than pouring it into the first three. Position, depth, radius,
+alpha and ink are all linear between the pair. The 395 working dots left over
+ride their own place with `alpha * morph`, so they come up out of nothing as the
+plate opens out. The whole frame's fade goes `0.6` to `1` over the same move.
+
+The move runs 300ms, nine frames at the orb's own 33ms deadline, in both
+directions. Leaving is the direction that costs something: `orb_deadline` would
+otherwise return `None` the instant the turn ended and leave the orb frozen
+halfway back to its square, so it takes an `animating` flag that is the running
+turn OR the orb still travelling. That is finite by construction, since the
+transition steps to exactly zero and stops. `Morph` in `main.rs` measures from
+the moment the turn started or ended rather than stepping by however long the
+last wake took: an idle window blocks indefinitely, so a wake can be an hour
+after the one before it, and stepping by that would arrive at the far end on the
+first frame.
 
 ## Ink, and what it means here
 
@@ -178,19 +204,23 @@ end of the title strip. That square is `view::ORB_W`, which is the strip's heigh
 strip reads `[orb] NO0B \u{25b8} version` left to right. `radiusScale(size, pow)`
 is passed that real size rather than a 64px result scaled down.
 
-At 30px the working state is 516 discs a frame and the resting state 112 squares,
-which the rectangle buffer holds by growing once to 1024.
+At 30px the working state is 516 discs a frame and the resting state 121 squares,
+which the rectangle buffer holds by growing once to 1024. A frame partway through
+the move is never more than the working count, because the plate's dots travel
+into the circles rather than being drawn beside them.
 
 **It must not free-run.** `noob-gpu` records that a previous version rendered
 static text at 3,500 fps and spent a third of the graphics pipe doing it. So
 `about_to_wait` holds a `WaitUntil` deadline (`orb_deadline`, 30 frames a second)
-that exists only while `State::phase.busy()`, and it is composed with the
-monitor's sampling deadline by `soonest` rather than replacing it. Never
-`ControlFlow::Poll`.
+that exists only while `State::phase.busy()` or the orb is still travelling back
+from a turn, and it is composed with the monitor's sampling deadline by `soonest`
+rather than replacing it. Never `ControlFlow::Poll`.
 
 The clock is `App::epoch`, passed into the scene as `Frame::clock` in seconds
 rather than read inside it, so the same clock builds the same frame twice. `t` in
-the formulas above is that multiplied by the preset speed of 1.885.
+the formulas above is that multiplied by the preset speed of 1.885. The move's
+own progress goes the same way, as `Frame::orb_morph`, which is `None` whenever
+the orb is settled and the phase says at which end.
 
 ## Cost to watch
 

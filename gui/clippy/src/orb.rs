@@ -1,27 +1,34 @@
 //! The thinking orb: the one animated thing in the window.
 //!
-//! A port of two modes of `thinking-orbs` (MIT), following `docs/ORB-SPEC.md`,
-//! which was written off that source rather than guessed. Both are lists of
-//! dots projected orthographically and sorted far to near. Depth is carried by
-//! how big a dot is and how much weight its colour has, never by blur.
+//! The turning frame is a port of one mode of `thinking-orbs` (MIT), following
+//! `docs/ORB-SPEC.md`, which was written off that source rather than guessed.
+//! Every frame is a list of dots projected orthographically and sorted far to
+//! near. Depth is carried by how big a dot is and how much weight its colour
+//! has, never by blur.
 //!
 //! It needs no shader and no second pipeline. A dot is one rectangle through the
 //! rounded-rect distance field the window already draws every panel with: with
 //! the corner radius at half the width it is a disc, and with no corner radius at
 //! all it is a square. Painter's order is the order rectangles are pushed.
 //!
-//! Two states, and no third, and they are two different objects. While a turn is
-//! running it is `orbits`: twelve tilted circles of path dots sharing one spin,
-//! with three runners chasing each circle, drawn as discs. At rest it is `globe`:
-//! one sphere of dots on a latitude and longitude lattice, drawn as squares, once
-//! and never again. The resting state used to be the orbits frame frozen at zero,
-//! which is twelve ellipses standing still and reads as scattered dots rather
-//! than as an object; a lattice closes a silhouette, so the corner holds a ball
-//! while nothing is running.
+//! Two formations, and no third. While a turn is running it is `orbits`: twelve
+//! tilted circles of path dots sharing one spin, with three runners chasing each
+//! circle, drawn as discs. At rest it is `square`: a filled eleven by eleven
+//! plate of dots across the block, drawn as squares, once and never again. The
+//! resting formation was a dotted globe before, and before that the orbits frame
+//! frozen at zero; a square is the mark the corner of this window carries
+//! everywhere else, and it is flat and still in a way a ball is not.
+//!
+//! The two are not swapped for one another. Between them is one move: each
+//! resting dot is paired with a dot of the turning frame and travels to it,
+//! rounding off from a square to a disc on the way, while the turning dots
+//! nobody was paired with come up out of nothing. `morph` is how far along that
+//! move a frame is, 0 at the plate and 1 at the orbits, and the two ends are the
+//! two formations exactly.
 //!
 //! The maths is here and the drawing is in [`crate::view`], so a frame can be
 //! asserted without a GPU: [`discs`] is a pure function of the block it is given,
-//! the clock, and whether there is a turn to animate.
+//! the clock, and how far the move has got.
 
 use noob_draw::{Panel, Rect};
 
@@ -57,43 +64,29 @@ const PART_R_DEPTH: f32 = 1.6;
 const PART_INK: f32 = 0.3;
 const PART_INK_DEPTH: f32 = 0.22;
 
-/// The resting sphere's lattice: rings of latitude from pole to pole, and how
-/// many dots a ring of longitude gets at its widest. A ring nearer a pole is
-/// shorter and takes proportionally fewer, so the dots keep their spacing
-/// instead of crowding into the poles.
+/// The resting plate's side, in dots. It is filled, so the count is the square
+/// of this.
 ///
-/// The reference's base profile is 17 and 44, and its 64 point preset scales
-/// both by the square root of 0.42 so that the total count scales by 0.42.
-/// These are that already worked out, the way [`GHOSTS`] is the orbits profile
-/// at its own preset of 1, and then thinned once more by the same rule: the
-/// square root of 0.55, taking 11 and 29 to 8 and 22.
-///
-/// The thinning is the resting dots being squares. A square of side 2r sits
-/// heavier than a disc of radius r, and at the strip's real size a dot is under
-/// a pixel and a half across, so 204 of them closed into a field rather than
-/// reading as separate marks. Fewer dots is the gap between them: the cosine
-/// rule below keeps the spacing along a ring equal to the spacing between rings,
-/// so one multiplier widens both at once.
-const LAT_RINGS: usize = 8;
-const LON_DENSITY: f32 = 22.0;
+/// Eleven is what the strip has room for. The plate spans 24.6 pixels at the
+/// title strip's 30, so eleven a side is a 2.46 pixel pitch against dots that
+/// are drawn between 0.6 and 1.33 pixels wide: the gaps stay open and it reads
+/// as dots rather than as a filled box. Ten leaves the middle looking sparse at
+/// a 2.73 pitch, and twelve closes the gaps up at 2.24.
+const SIDE: usize = 11;
 
-/// A lattice dot's radius at the back of the sphere and how much it gains coming
-/// forward, before scaling. The reference's 0.6 and 1.7 at its 64 point preset's
-/// size multiplier of 1.15.
-const GLOBE_R: f32 = 0.69;
-const GLOBE_R_DEPTH: f32 = 1.955;
+/// A resting dot's radius at the edge of the plate and how much it gains coming
+/// in towards the middle, before scaling. Carried over from the globe the plate
+/// replaced, which took them from the reference's 0.6 and 1.7 at its 64 point
+/// preset's size multiplier of 1.15.
+const REST_R: f32 = 0.69;
+const REST_R_DEPTH: f32 = 1.955;
 
-/// A lattice dot's ink at the back of the sphere, and how much darker (so, here,
-/// brighter) it gets coming forward. Unlike a path dot, whose ink is flat, every
-/// dot here is on the one surface, so ink is the whole of what says which side of
-/// it a dot is on.
-const GLOBE_INK_FAR: f32 = 0.62;
-const GLOBE_INK_SPAN: f32 = 0.54;
-
-/// The tilt the resting sphere is seen at. The reference wobbles this by a
-/// twentieth over time to keep a still image alive; nothing here moves at rest,
-/// so it is the middle of that wobble.
-const GLOBE_TILT: f32 = 0.4;
+/// A resting dot's ink at the edge of the plate, and how much darker (so, here,
+/// brighter) it gets coming in. Unlike a path dot, whose ink is flat, every dot
+/// here is on the one surface, so ink is the whole of what gives the plate a
+/// middle to look at.
+const REST_INK_FAR: f32 = 0.62;
+const REST_INK_SPAN: f32 = 0.54;
 
 /// The frame the radii were tuned on, and the exponent they scale by.
 ///
@@ -109,7 +102,10 @@ const RS_POW: f32 = 0.6;
 const R_MIN: f32 = 0.3;
 const ALPHA_FLOOR: f32 = 0.02;
 
-/// How much of the block the sphere spans, as a fraction of half its size.
+/// How much of the block the arrangement spans, as a fraction of half its size.
+/// It is the sphere the circles are laid out in, and it is the plate's half
+/// side, so the plate's edges land where the circles' widest reach does and the
+/// two formations are the same size on screen.
 const FILL: f32 = 0.82;
 
 /// The shared spin, per unit of clock, and the one tilt the whole arrangement is
@@ -121,10 +117,11 @@ const TILT: f32 = 0.3;
 /// formulas use.
 const SPEED: f32 = 1.885;
 
-/// How much of itself the resting sphere keeps.
+/// How much of itself the resting plate keeps.
 ///
 /// Not from the reference, which has no resting state: it is the step down that
-/// says nothing is running without leaving the corner blank.
+/// says nothing is running without leaving the corner blank. The move between
+/// the two formations brings it back up to the full.
 const RESTING: f32 = 0.6;
 
 /// The smallest block worth drawing in.
@@ -144,10 +141,10 @@ const MIN_BLOCK: f32 = 8.0;
 struct Dot {
     x: f32,
     y: f32,
-    /// Depth after the tilt, and what the list is sorted by. In whatever units
-    /// the mode did its arithmetic in, which is pixels for the orbits and halves
-    /// of the sphere for the lattice: one frame is one mode, so nothing ever
-    /// sorts one against the other.
+    /// Depth after the tilt, and what the list is sorted by. In pixels in both
+    /// formations, so a frame partway between them sorts a travelling dot
+    /// against a dot that stayed where it was and gets an answer that means
+    /// something.
     z: f32,
     radius: f32,
     alpha: f32,
@@ -193,13 +190,13 @@ fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 /// Where a point lands on screen, and how deep it is.
 ///
 /// Orthographic, and the spin and the tilt are shared by every dot of a frame,
-/// which is what makes twelve circles read as one solid and a lattice read as
-/// one ball. Screen y grows downward, so the projected height is subtracted.
+/// which is what makes twelve circles read as one solid rather than as twelve
+/// circles. Screen y grows downward, so the projected height is subtracted.
 ///
 /// `scale` is what the point is measured in: the orbits hand it points already
-/// in pixels and scale them by one, the lattice hands it points on the unit
-/// sphere and scales them by the sphere's radius. The depth that comes back is
-/// in the same units the point went in as.
+/// in pixels and scale them by one. The depth that comes back is in the same
+/// units the point went in as. The resting plate does not come through here at
+/// all, because a square seen at a tilt is a rhombus.
 fn project(p: [f32; 3], yaw: f32, tilt: f32, centre: (f32, f32), scale: f32) -> (f32, f32, f32) {
     let (sy, cy) = (yaw.sin(), yaw.cos());
     let (st, ct) = (tilt.sin(), tilt.cos());
@@ -224,23 +221,48 @@ fn place(a: f32, orbit: &Orbit, yaw: f32, centre: (f32, f32)) -> (f32, f32, f32,
     (x, y, z, depth)
 }
 
-/// Every dot of one frame, sorted far to near.
+/// One value on the way to another.
+fn mix(from: f32, to: f32, morph: f32) -> f32 {
+    from + (to - from) * morph
+}
+
+/// What a block is worth: how much a dot is scaled by, how wide the arrangement
+/// is from its middle, and where that middle is. `None` for a block too small to
+/// draw anything readable in.
 ///
-/// `seconds` is time since the window opened; the formulas run on it multiplied
-/// by the preset speed. At rest the clock is not read at all: the lattice has no
-/// term in it, so a resting window redraws the same picture however long it has
-/// been up, which is what lets the window stop redrawing entirely.
-fn dots(block: Panel, seconds: f32, working: bool) -> Vec<Dot> {
+/// The three numbers both formations are laid out from, taken in one place so
+/// they cannot be taken two ways.
+fn scale(block: Panel) -> Option<(f32, f32, (f32, f32))> {
     let size = block.w.min(block.h);
     if size < MIN_BLOCK {
-        return Vec::new();
+        return None;
     }
     let rs = (size / RS_FRAME).powf(RS_POW);
     let sphere = size * 0.5 * FILL;
     let centre = (block.x + block.w * 0.5, block.y + block.h * 0.5);
-    let mut out = match working {
-        true => orbits(seconds * SPEED, rs, sphere, centre),
-        false => lattice(rs, sphere, centre),
+    Some((rs, sphere, centre))
+}
+
+/// Every dot of one frame, sorted far to near.
+///
+/// `seconds` is time since the window opened; the formulas run on it multiplied
+/// by the preset speed. At rest the clock is not read at all: the plate has no
+/// term in it, so a resting window redraws the same picture however long it has
+/// been up, which is what lets the window stop redrawing entirely.
+///
+/// The two ends are their own formations and nothing else, which is what keeps
+/// the resting frame clock-free and the turning frame the arithmetic it always
+/// was. Only a frame strictly between them pays for both.
+fn dots(block: Panel, seconds: f32, morph: f32) -> Vec<Dot> {
+    let Some((rs, sphere, centre)) = scale(block) else {
+        return Vec::new();
+    };
+    let mut out = if morph <= 0.0 {
+        square(rs, sphere, centre)
+    } else if morph >= 1.0 {
+        orbits(seconds * SPEED, rs, sphere, centre)
+    } else {
+        between(seconds * SPEED, rs, sphere, centre, morph)
     };
     // Far to near, so a near dot covers the path behind it. Rectangles inside a
     // layer are painted in the order they are pushed, so this sort IS the depth
@@ -300,35 +322,73 @@ fn orbits(t: f32, rs: f32, sphere: f32, centre: (f32, f32)) -> Vec<Dot> {
     out
 }
 
-/// The resting frame: one sphere of dots, on rings of latitude, with no clock in
-/// it anywhere.
+/// The resting frame: a filled square of dots, with no clock in it anywhere.
 ///
-/// A ring's dot count follows the cosine of its latitude, so the spacing along a
-/// ring is the spacing between rings and the poles do not become knots. Both
-/// poles come out as a single dot, which is what the reference's `max(1, ...)`
-/// is for.
-fn lattice(rs: f32, sphere: f32, centre: (f32, f32)) -> Vec<Dot> {
-    let mut out = Vec::with_capacity(LAT_RINGS * LON_DENSITY as usize);
-    for ring in 0..=LAT_RINGS {
-        let lat = -TAU * 0.25 + (ring as f32 / LAT_RINGS as f32) * TAU * 0.5;
-        let (sin_lat, cos_lat) = (lat.sin(), lat.cos());
-        let count = (cos_lat.abs() * LON_DENSITY).round().max(1.0);
-        for step in 0..count as usize {
-            let lon = (step as f32 / count) * TAU;
-            let p = [cos_lat * lon.cos(), sin_lat, cos_lat * lon.sin()];
-            // On the unit sphere, so the depth that comes back is already the
-            // near-to-far reading the radius and the ink are written against.
-            let (x, y, z) = project(p, 0.0, GLOBE_TILT, centre, sphere);
-            let depth = ((z + 1.0) * 0.5).clamp(0.0, 1.0);
+/// `sphere` is the square's half side, so the plate's edges land where the
+/// circles' widest reach does and it fits the block on the same terms. There is
+/// no projection: a square seen at a tilt is a rhombus, and the point of this
+/// formation is that it is square.
+///
+/// A flat plate has no depth of its own, so one is made out of how far from the
+/// middle a dot is, by the larger of the two distances rather than by the
+/// straight line between them. That is itself a square, so a dot's size and
+/// weight fall away in rings that are the shape of the formation. Depth is then
+/// spread back over the plate's own width as the sort key, so a travelling dot
+/// can be sorted against a turning one.
+fn square(rs: f32, sphere: f32, centre: (f32, f32)) -> Vec<Dot> {
+    let mut out = Vec::with_capacity(SIDE * SIDE);
+    let last = (SIDE - 1) as f32;
+    for row in 0..SIDE {
+        for column in 0..SIDE {
+            let u = -1.0 + 2.0 * column as f32 / last;
+            let v = -1.0 + 2.0 * row as f32 / last;
+            let depth = 1.0 - u.abs().max(v.abs());
             out.push(Dot {
-                x,
-                y,
-                z,
-                radius: (GLOBE_R + GLOBE_R_DEPTH * depth) * rs,
+                x: centre.0 + u * sphere,
+                y: centre.1 + v * sphere,
+                z: (depth * 2.0 - 1.0) * sphere,
+                radius: (REST_R + REST_R_DEPTH * depth) * rs,
                 alpha: 1.0,
-                ink: GLOBE_INK_FAR - GLOBE_INK_SPAN * depth,
+                ink: REST_INK_FAR - REST_INK_SPAN * depth,
             });
         }
+    }
+    out
+}
+
+/// The frame partway through the move between the two formations.
+///
+/// Not one picture fading into another: every dot of the plate is paired with
+/// one dot of the turning frame and travels to it, so the plate opens out into
+/// the circles. The pairing is a stride through the turning frame's own emission
+/// order, which is deterministic and the same every frame, so a dot keeps the
+/// partner it had last frame without anything being remembered between them. The
+/// stride is what spreads the plate across all twelve circles: paired in order
+/// instead, the whole plate would pour into the first three.
+///
+/// The turning dots left over, which is most of them, stay where they belong and
+/// come up out of nothing as the move runs.
+fn between(t: f32, rs: f32, sphere: f32, centre: (f32, f32), morph: f32) -> Vec<Dot> {
+    let work = orbits(t, rs, sphere, centre);
+    let rest = square(rs, sphere, centre);
+    let mut out: Vec<Dot> = work
+        .iter()
+        .map(|dot| Dot {
+            alpha: dot.alpha * morph,
+            ..*dot
+        })
+        .collect();
+    for (index, from) in rest.iter().enumerate() {
+        let landing = index * work.len() / rest.len();
+        let to = work[landing];
+        out[landing] = Dot {
+            x: mix(from.x, to.x, morph),
+            y: mix(from.y, to.y, morph),
+            z: mix(from.z, to.z, morph),
+            radius: mix(from.radius, to.radius, morph),
+            alpha: mix(from.alpha, to.alpha, morph),
+            ink: mix(from.ink, to.ink, morph),
+        };
     }
     out
 }
@@ -336,25 +396,29 @@ fn lattice(rs: f32, sphere: f32, centre: (f32, f32)) -> Vec<Dot> {
 /// The frame to draw, in painter's order.
 ///
 /// `block` is the square the title strip keeps for it, `seconds` is the clock,
-/// and `working` is whether there is a turn to animate. Every dot lands inside
-/// `block`, so the caller does not have to clip.
+/// and `morph` is how far the orb is between its two formations: 0 is the
+/// resting plate, 1 is the turning orbits, and anything between is the move from
+/// one to the other. Every dot lands inside `block`, so the caller does not have
+/// to clip.
 ///
-/// Shape is the one thing the two states are drawn with differently, and it is
-/// decided here rather than in the maths: a turning dot is a disc, corner radius
-/// at half its width, and a resting dot is a square, no corner radius at all.
-/// Both are the same rectangle through the same distance field. The turning orb
-/// is round because it is moving and a moving square strobes at this size; the
+/// Shape is decided here rather than in the maths, and it travels with the move:
+/// a corner radius of half the width is a disc and none at all is a square, both
+/// the same rectangle through the same distance field, so a dot rounds off as it
+/// leaves the plate and squares up again as it comes back. The turning orb is
+/// round because it is moving and a moving square strobes at this size; the
 /// resting one is square because it is one still frame, where a hard mark reads
 /// as a mark instead of as a smudge.
 ///
 /// The ink is mirrored and tinted here rather than in the maths: the reference is
 /// greyscale on paper, where 0 is the darkest mark, and this is a dark window, so
 /// a dot's weight is `1 - ink` and it is that much of the theme's accent. Alpha
-/// stays the reference's, scaled down as a whole while the window rests.
-pub fn discs(block: Panel, seconds: f32, working: bool, skin: &Skin) -> Vec<Rect> {
-    let fade = if working { 1.0 } else { RESTING };
+/// stays the reference's, scaled down as a whole while the window rests and
+/// brought back up over the move.
+pub fn discs(block: Panel, seconds: f32, morph: f32, skin: &Skin) -> Vec<Rect> {
+    let morph = morph.clamp(0.0, 1.0);
+    let fade = mix(RESTING, 1.0, morph);
     let [r, g, b, _] = skin.orb;
-    dots(block, seconds, working)
+    dots(block, seconds, morph)
         .into_iter()
         .filter_map(|dot| {
             let alpha = dot.alpha * fade;
@@ -366,10 +430,7 @@ pub fn discs(block: Panel, seconds: f32, working: bool, skin: &Skin) -> Vec<Rect
             let fill = [r * weight, g * weight, b * weight, alpha];
             let mark = Panel::new(dot.x - radius, dot.y - radius, radius * 2.0, radius * 2.0)
                 .fill(fill);
-            Some(match working {
-                true => mark.radius(radius),
-                false => mark,
-            })
+            Some(mark.radius(radius * morph))
         })
         .collect()
 }
@@ -397,15 +458,21 @@ mod tests {
             .collect()
     }
 
+    /// The turning frame is the working formation, and the resting one is the
+    /// plate. Named rather than written as bare numbers, because `1.0` and `0.0`
+    /// at the third argument of [`discs`] say nothing on their own.
+    const TURNING: f32 = 1.0;
+    const RESTING_FRAME: f32 = 0.0;
+
     /// Every dot is laid out from a hash of its orbit's index, so the same
-    /// moment has to draw the same picture. If it did not, the sphere would
-    /// rearrange itself between two redraws of the same frame.
+    /// moment has to draw the same picture. If it did not, the orbits would
+    /// rearrange themselves between two redraws of the same frame.
     #[test]
     fn the_same_moment_draws_the_same_orb() {
         let (skin, block) = (skin(), block());
         for seconds in [0.0, 0.4, 7.25, 613.5] {
-            let once = discs(block, seconds, true, &skin);
-            let twice = discs(block, seconds, true, &skin);
+            let once = discs(block, seconds, TURNING, &skin);
+            let twice = discs(block, seconds, TURNING, &skin);
             assert_eq!(frozen(&once), frozen(&twice), "at {seconds}s");
         }
     }
@@ -415,8 +482,8 @@ mod tests {
     #[test]
     fn a_turn_actually_turns() {
         let (skin, block) = (skin(), block());
-        let first = discs(block, 0.0, true, &skin);
-        let later = discs(block, 0.5, true, &skin);
+        let first = discs(block, 0.0, TURNING, &skin);
+        let later = discs(block, 0.5, TURNING, &skin);
         assert_ne!(frozen(&first), frozen(&later));
     }
 
@@ -426,7 +493,7 @@ mod tests {
     #[test]
     fn the_dots_are_ordered_far_to_near() {
         for seconds in [0.0, 1.5, 96.0] {
-            let dots = dots(block(), seconds, true);
+            let dots = dots(block(), seconds, TURNING);
             assert!(dots.len() > 1);
             for pair in dots.windows(2) {
                 assert!(pair[0].z <= pair[1].z, "{:?} then {:?}", pair[0], pair[1]);
@@ -436,14 +503,14 @@ mod tests {
 
     /// Neither floor may be crossed by anything that reaches the screen: a dot
     /// under a third of a pixel is not a dot, and one under two percent alpha is
-    /// not a colour. And each state is drawn in its own shape: the turning orb is
-    /// discs, the resting one is squares.
+    /// not a colour. And each formation is drawn in its own shape: the turning
+    /// orb is discs, the resting one is squares.
     #[test]
     fn nothing_drawn_is_fainter_or_smaller_than_the_floor() {
         let skin = skin();
-        for working in [true, false] {
+        for (morph, working) in [(TURNING, true), (RESTING_FRAME, false)] {
             for seconds in [0.0, 2.75, 41.0] {
-                for disc in discs(block(), seconds, working, &skin) {
+                for disc in discs(block(), seconds, morph, &skin) {
                     let [_, _, w, h] = disc.xywh();
                     assert!(w / 2.0 >= R_MIN - 1e-6, "radius {}", w / 2.0);
                     assert!((w - h).abs() < 1e-6, "a dot's box is square: {w}x{h}");
@@ -462,8 +529,13 @@ mod tests {
     }
 
     /// The block is the strip's height and the strip's text starts after it, so
-    /// a disc outside the block is a disc on the window's name. The sphere is
-    /// sized to fit rather than clipped, and this is what says so.
+    /// a disc outside the block is a disc on the window's name. Both formations
+    /// are sized to fit rather than clipped, and this is what says so.
+    ///
+    /// Partway through the move as well, which is not free: a dot in there is at
+    /// a place neither formation put it. It holds because both its place and its
+    /// radius are the same mix of two dots that each fit, and a mix of two
+    /// numbers inside the block is inside the block.
     #[test]
     fn every_disc_lands_inside_its_block() {
         let skin = skin();
@@ -474,8 +546,8 @@ mod tests {
             Panel::new(0.0, 0.0, 64.0, 64.0),
             Panel::new(0.0, 0.0, MIN_BLOCK, MIN_BLOCK),
         ] {
-            for working in [true, false] {
-                let discs = discs(panel, 3.5, working, &skin);
+            for morph in [RESTING_FRAME, 0.15, 0.5, 0.9, TURNING] {
+                let discs = discs(panel, 3.5, morph, &skin);
                 assert!(!discs.is_empty(), "{panel:?} draws nothing");
                 for disc in discs {
                     let [x, y, w, h] = disc.xywh();
@@ -494,44 +566,45 @@ mod tests {
     fn a_block_too_small_to_read_draws_nothing() {
         let skin = skin();
         for size in [0.0, 1.0, MIN_BLOCK - 0.5] {
-            assert!(discs(Panel::new(0.0, 0.0, ORB_W, size), 1.0, true, &skin).is_empty());
-            assert!(discs(Panel::new(0.0, 0.0, size, TITLE_H), 1.0, true, &skin).is_empty());
+            assert!(discs(Panel::new(0.0, 0.0, ORB_W, size), 1.0, TURNING, &skin).is_empty());
+            assert!(discs(Panel::new(0.0, 0.0, size, TITLE_H), 1.0, TURNING, &skin).is_empty());
         }
     }
 
-    /// Both profiles' own numbers, pinned. Working is twelve circles of forty
+    /// Both formations' own numbers, pinned. Working is twelve circles of forty
     /// path dots with three runners each, so 516 discs a frame; resting is the
-    /// lattice, which is 112 squares and has nothing to do with the circles.
+    /// plate, which is eleven by eleven and has nothing to do with the circles.
+    /// A frame partway between them is somewhere in between and never more than
+    /// the working count: the plate's dots travel into the circles rather than
+    /// being drawn alongside them, and the circles' own dots are only there once
+    /// they are bright enough to be worth a rectangle.
     ///
     /// It also says what the rectangle buffer has to hold. It grows by powers of
     /// two from 256, so 516 discs plus a window's worth of panels takes it to
-    /// 1024 once and never again.
+    /// 1024 once and never again, and the move never asks for more than that.
     #[test]
-    fn each_state_draws_the_whole_of_its_own_profile() {
+    fn each_formation_draws_the_whole_of_its_own_profile() {
         let skin = skin();
-        let working = discs(block(), 1.0, true, &skin);
-        let resting = discs(block(), 1.0, false, &skin);
+        let working = discs(block(), 1.0, TURNING, &skin);
+        let resting = discs(block(), 1.0, RESTING_FRAME, &skin);
         assert_eq!(working.len(), ORBITS * (GHOSTS + PARTICLES));
         assert_eq!(working.len(), 516);
-        // Every ring of the lattice, from one pole to the other, at the count a
-        // ring that far up the sphere earns. Both poles are one dot.
-        let rings: usize = (0..=LAT_RINGS)
-            .map(|ring| {
-                let lat = -TAU * 0.25 + (ring as f32 / LAT_RINGS as f32) * TAU * 0.5;
-                (lat.cos().abs() * LON_DENSITY).round().max(1.0) as usize
-            })
-            .sum();
-        assert_eq!(resting.len(), rings);
-        assert_eq!(resting.len(), 112);
+        assert_eq!(resting.len(), SIDE * SIDE);
+        assert_eq!(resting.len(), 121);
+        for morph in [0.02, 0.1, 0.5, 0.8, 0.99] {
+            let moving = discs(block(), 1.0, morph, &skin).len();
+            assert!((SIDE * SIDE..=516).contains(&moving), "{moving} discs at {morph}");
+        }
     }
 
-    /// The resting lattice was thinned and turned square; the turning orb is the
-    /// frame it always was, to the last decimal.
+    /// The resting formation has been three different objects; the turning orb
+    /// is the frame it always was, to the last decimal.
     ///
-    /// Pinned against numbers taken off the build before that change rather than
-    /// off this one: the count, the sum of every field of every disc, and three
-    /// discs read out in full. The two states share a projection and a scale, so
-    /// a constant edited one line too far up the file lands here.
+    /// Pinned against numbers taken off the build before the first of those
+    /// changes rather than off this one: the count, the sum of every field of
+    /// every disc, and three discs read out in full. The two formations share a
+    /// scale and a block, and the move puts a multiply in front of every fade
+    /// and every corner, so anything that moves the turning frame lands here.
     #[test]
     fn the_turning_orb_is_the_frame_it_was_before_the_resting_one_changed() {
         let (skin, block) = (skin(), block());
@@ -559,7 +632,7 @@ mod tests {
                 [13.430822, 14.404611, 0.6, 0.6],
             ),
         ] {
-            let frame = discs(block, seconds, true, &skin);
+            let frame = discs(block, seconds, TURNING, &skin);
             assert_eq!(frame.len(), 516, "at {seconds}s");
             let total: f64 = frame
                 .iter()
@@ -588,48 +661,67 @@ mod tests {
     #[test]
     fn resting_is_the_same_frame_at_every_moment() {
         let (skin, block) = (skin(), block());
-        let first = discs(block, 0.0, false, &skin);
+        let first = discs(block, 0.0, RESTING_FRAME, &skin);
         for seconds in [0.016, 9.5, 3600.0] {
             assert_eq!(
                 frozen(&first),
-                frozen(&discs(block, seconds, false, &skin)),
+                frozen(&discs(block, seconds, RESTING_FRAME, &skin)),
                 "at {seconds}s"
             );
         }
     }
 
-    /// The resting orb is a sphere, not the turning one standing still.
+    /// How far out the furthest dot of a frame sits in each of twelve wedges
+    /// around the middle of the block, as a fraction of the arrangement's own
+    /// half width. A silhouette read off the drawn discs, so it is the outline
+    /// somebody looking at the strip sees rather than the numbers behind it.
+    fn rim(panel: Panel, morph: f32, skin: &Skin) -> [f32; 12] {
+        let size = panel.w.min(panel.h);
+        let sphere = size * 0.5 * FILL;
+        let centre = (panel.x + panel.w * 0.5, panel.y + panel.h * 0.5);
+        let mut out = [0.0f32; 12];
+        for disc in discs(panel, 1.0, morph, skin) {
+            let [x, y, w, h] = disc.xywh();
+            let (dx, dy) = (x + w * 0.5 - centre.0, y + h * 0.5 - centre.1);
+            let wedge = ((dy.atan2(dx) + TAU) / TAU * 12.0) as usize % 12;
+            out[wedge] = out[wedge].max(dx.hypot(dy) / sphere);
+        }
+        out
+    }
+
+    /// The resting orb is a square, and the assertion is on the silhouette
+    /// rather than on the dots: a plate of round dots is still a square and a
+    /// grid of square dots arranged in a ball is not, so the shape of one dot
+    /// says nothing about the shape of the formation.
     ///
-    /// What makes a heap of dots read as an object is its outline, so that is
-    /// what is asserted: cut the block into twelve wedges around its middle and
-    /// every one of them has a dot out at the sphere's own edge. The lattice
-    /// closes that outline because its rings run right around the silhouette;
-    /// the twelve circles cannot, because the widest of them stops short of the
-    /// sphere and the wedges between them are empty, which is the scattered dots
-    /// this replaced.
+    /// Cut the block into twelve wedges around its middle. Every one of them
+    /// holds a dot out at the edge, so the outline is closed and there is no gap
+    /// in it. Four of them, the ones the diagonals run through, reach half again
+    /// as far as the rest, because that is what a corner is; the other eight
+    /// stop at the flat of a side. A circle of any radius reaches the same
+    /// distance in all twelve, which is what this rejects.
+    ///
+    /// The turning orb closes no outline at all: the widest of its circles stops
+    /// short of the edge and the wedges between them are empty.
     #[test]
-    fn the_resting_orb_closes_a_silhouette_and_the_turning_one_does_not() {
+    fn the_resting_orb_is_a_square_and_the_turning_one_is_no_shape_at_all() {
         let skin = skin();
         for panel in [block(), Panel::new(12.0, 40.0, 300.0, 300.0)] {
-            let size = panel.w.min(panel.h);
-            let sphere = size * 0.5 * FILL;
-            let centre = (panel.x + panel.w * 0.5, panel.y + panel.h * 0.5);
-            let rim = |working: bool| {
-                let mut out = [0.0f32; 12];
-                for disc in discs(panel, 1.0, working, &skin) {
-                    let [x, y, w, h] = disc.xywh();
-                    let (dx, dy) = (x + w * 0.5 - centre.0, y + h * 0.5 - centre.1);
-                    let wedge = ((dy.atan2(dx) + TAU) / TAU * 12.0) as usize % 12;
-                    out[wedge] = out[wedge].max(dx.hypot(dy) / sphere);
-                }
-                out
-            };
-            let resting = rim(false);
+            let resting = rim(panel, RESTING_FRAME, &skin);
             assert!(
                 resting.iter().all(|reach| *reach > 0.97),
                 "the resting orb has a gap in its edge: {resting:?} in {panel:?}"
             );
-            let working = rim(true);
+            // The diagonals are wedges 1, 4, 7 and 10: a wedge spans thirty
+            // degrees from zero, so forty-five lands inside the second of them.
+            for (wedge, reach) in resting.iter().enumerate() {
+                match wedge % 3 {
+                    1 => assert!(*reach > 1.3, "wedge {wedge} has no corner: {resting:?}"),
+                    _ => assert!(*reach < 1.15, "wedge {wedge} is not a flat side: {resting:?}"),
+                }
+            }
+
+            let working = rim(panel, TURNING, &skin);
             assert!(
                 working.iter().all(|reach| *reach < 0.97),
                 "the turning orb reached the edge: {working:?} in {panel:?}"
@@ -637,21 +729,45 @@ mod tests {
         }
     }
 
+    /// And it is a filled plate rather than an outline: eleven evenly spaced
+    /// columns of eleven dots, one at every crossing, spanning the block's own
+    /// middle. The silhouette above cannot tell those apart, since an outline
+    /// has the same rim.
+    #[test]
+    fn the_resting_orb_is_a_filled_grid_of_dots() {
+        let skin = skin();
+        let panel = Panel::new(0.0, 0.0, 300.0, 300.0);
+        let sphere = 300.0 * 0.5 * FILL;
+        let pitch = 2.0 * sphere / (SIDE - 1) as f32;
+        let mut seen = vec![vec![false; SIDE]; SIDE];
+        for disc in discs(panel, 1.0, RESTING_FRAME, &skin) {
+            let [x, y, w, h] = disc.xywh();
+            let (dx, dy) = (x + w * 0.5 - 150.0 + sphere, y + h * 0.5 - 150.0 + sphere);
+            let (column, row) = ((dx / pitch).round(), (dy / pitch).round());
+            assert!((dx - column * pitch).abs() < 1e-3, "{dx} is off the grid");
+            assert!((dy - row * pitch).abs() < 1e-3, "{dy} is off the grid");
+            let cell = &mut seen[row as usize][column as usize];
+            assert!(!*cell, "two dots at row {row} column {column}");
+            *cell = true;
+        }
+        assert!(seen.iter().flatten().all(|filled| *filled), "the plate has a hole: {seen:?}");
+    }
+
     /// The runners are the brightest thing in the turning orb and the paths are
     /// faint behind them, which is the mirrored ink working: a near runner's ink
     /// is the darkest mark on paper and the brightest dot on a dark window.
     ///
-    /// The resting sphere carries the same reading in its own way: a dot on the
-    /// near side of it is brighter than one on the far side, which is the only
-    /// thing telling a ball from a ring of dots once it stops turning.
+    /// The resting plate carries the same reading in its own way: a dot in the
+    /// middle of it is brighter and bigger than one out at a corner, which is
+    /// the only thing giving a flat grid of dots somewhere to look.
     #[test]
-    fn depth_is_carried_by_weight_in_both_states() {
+    fn depth_is_carried_by_weight_in_both_formations() {
         let skin = skin();
         let weight = |rect: &Rect| {
             let [r, g, b, a] = rect.rgba();
             (r + g + b) * a
         };
-        let working = discs(block(), 1.0, true, &skin);
+        let working = discs(block(), 1.0, TURNING, &skin);
         // A runner is at full alpha and a path dot never is, so the two are
         // separable without knowing where any of them landed.
         let heaviest = |rects: &[Rect], runner: bool| {
@@ -666,12 +782,12 @@ mod tests {
             "the runners do not stand out from the paths"
         );
 
-        let resting = discs(block(), 1.0, false, &skin);
-        // The list arrives far to near, so the last disc is the nearest one and
-        // the first is the furthest.
+        let resting = discs(block(), 1.0, RESTING_FRAME, &skin);
+        // The list arrives far to near, so the last disc is the middle of the
+        // plate and the first is a corner of it.
         assert!(
-            weight(resting.last().expect("a sphere")) > weight(&resting[0]) * 2.0,
-            "the near side is not brighter than the far side"
+            weight(resting.last().expect("a plate")) > weight(&resting[0]) * 2.0,
+            "the middle of the plate is not brighter than its corners"
         );
         // And every dot is the accent's hue turned down, never a colour of its
         // own: no channel may be over the accent's.
@@ -687,12 +803,109 @@ mod tests {
     #[test]
     fn a_bigger_block_holds_the_same_arrangement_with_bigger_dots() {
         let skin = skin();
-        let small = discs(Panel::new(0.0, 0.0, 30.0, 30.0), 2.0, true, &skin);
-        let large = discs(Panel::new(0.0, 0.0, 120.0, 120.0), 2.0, true, &skin);
+        let small = discs(Panel::new(0.0, 0.0, 30.0, 30.0), 2.0, TURNING, &skin);
+        let large = discs(Panel::new(0.0, 0.0, 120.0, 120.0), 2.0, TURNING, &skin);
         assert_eq!(small.len(), large.len());
         let widest = |rects: &[Rect]| rects.iter().map(|r| r.xywh()[2]).fold(0.0f32, f32::max);
         assert!(widest(&large) > widest(&small), "the dots grow");
         // Sub-linear: four times the block is nowhere near four times the dot.
         assert!(widest(&large) < widest(&small) * 4.0, "and not by the full factor");
+    }
+
+    /// The move is a move: a dot of the plate leaves the place the plate put it,
+    /// travels in a straight line to the place its partner in the circles holds,
+    /// and arrives there. It does not fade out while something else fades in
+    /// over it, which is what "the dots accommodate" rules out.
+    ///
+    /// Asserted on the dots rather than on the drawn rectangles, because the
+    /// frame is sorted by depth before it is drawn and a travelling dot changes
+    /// its place in that order as it goes.
+    #[test]
+    fn a_resting_dot_travels_to_the_orbit_it_is_paired_with() {
+        let (rs, sphere, centre) = scale(block()).expect("the strip's own block");
+        let t = 1.0 * SPEED;
+        let (rest, work) = (
+            square(rs, sphere, centre),
+            orbits(t, rs, sphere, centre),
+        );
+        for index in [0usize, 37, 60, 99, 120] {
+            let landing = index * work.len() / rest.len();
+            let (from, to) = (rest[index], work[landing]);
+            let span = (to.x - from.x).hypot(to.y - from.y);
+            assert!(span > 1.0, "dot {index} is paired with where it already is");
+
+            let mut travelled = 0.0f32;
+            for morph in [0.0f32, 0.1, 0.35, 0.6, 0.85, 1.0] {
+                let dot = between(t, rs, sphere, centre, morph)[landing];
+                let gone = (dot.x - from.x).hypot(dot.y - from.y);
+                let left = (to.x - dot.x).hypot(to.y - dot.y);
+                // On the line between the two, since the two legs add up to the
+                // whole of it, and that far along it.
+                assert!((gone + left - span).abs() < 1e-3, "dot {index} left the line");
+                assert!((gone - span * morph).abs() < 1e-3, "dot {index} at {morph}");
+                assert!(gone >= travelled, "dot {index} went back at {morph}");
+                travelled = gone;
+            }
+            assert!((travelled - span).abs() < 1e-3, "dot {index} stopped short");
+        }
+    }
+
+    /// At the two ends of the move, `between` is not asked at all: the plate and
+    /// the circles are their own formations, which is what keeps the resting
+    /// frame free of the clock and the turning frame the arithmetic that is
+    /// pinned above. Anything past either end is that end.
+    #[test]
+    fn the_ends_of_the_move_are_the_two_formations_themselves() {
+        let (skin, block) = (skin(), block());
+        for (morph, end) in [(-2.0, RESTING_FRAME), (1.4, TURNING)] {
+            assert_eq!(
+                frozen(&discs(block, 3.0, morph, &skin)),
+                frozen(&discs(block, 3.0, end, &skin)),
+                "at {morph}"
+            );
+        }
+    }
+
+    /// The corners come off as the dots take up the orbit, and go back on as
+    /// they settle: one rectangle through one distance field, so the shape is
+    /// the corner radius and nothing else. Half the width is a disc.
+    #[test]
+    fn the_dots_round_off_over_the_move() {
+        let skin = skin();
+        for morph in [0.0f32, 0.2, 0.5, 0.75, 1.0] {
+            for disc in discs(block(), 2.0, morph, &skin) {
+                let corner = disc.extra()[0];
+                let round = corner / (disc.xywh()[2] * 0.5);
+                assert!((round - morph).abs() < 1e-5, "{round} round at {morph}");
+            }
+        }
+    }
+
+    /// The circles' own dots are not there at the start of the move and are all
+    /// the way there at the end of it, so the plate opens out into them instead
+    /// of the frame filling up in one step. Read off the whole frame's weight,
+    /// which climbs the whole way.
+    #[test]
+    fn the_turning_dots_come_up_out_of_nothing() {
+        let skin = skin();
+        let ink = |morph: f32| {
+            discs(block(), 2.0, morph, &skin)
+                .iter()
+                .map(|disc| {
+                    let [r, g, b, a] = disc.rgba();
+                    (r + g + b) * a
+                })
+                .sum::<f32>()
+        };
+        let mut last = ink(RESTING_FRAME);
+        for morph in [0.1f32, 0.3, 0.5, 0.7, 0.9, 1.0] {
+            let now = ink(morph);
+            assert!(now > last, "the frame lost weight at {morph}: {now} after {last}");
+            last = now;
+        }
+        // Twice the plate's own weight by the end. The circles are four times
+        // the dots but most of them are faint paths, and the plate is drawn at
+        // full alpha at its own dimmer fade.
+        assert!(last > ink(RESTING_FRAME) * 1.9, "the circles never arrived");
     }
 }

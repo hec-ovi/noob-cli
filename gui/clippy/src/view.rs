@@ -3062,6 +3062,13 @@ pub struct Frame<'a> {
     /// given, so the same clock builds the same scene twice, which is the only
     /// way an animation is testable without a screen.
     pub clock: f32,
+    /// How far the orb is through the move between its resting square and its
+    /// turning circles, while it is moving.
+    ///
+    /// `None` is settled, and the phase says at which end: a turn running is the
+    /// circles and no turn is the square. Every frame outside a transition is
+    /// `None`, including every frame the window drew before there was one.
+    pub orb_morph: Option<f32>,
 }
 
 impl Frame<'_> {
@@ -3078,6 +3085,16 @@ impl Frame<'_> {
             View::Output => (self.body_size, self.column),
             _ => (self.pane_size, self.pane_column),
         }
+    }
+
+    /// How far the orb is between its two formations, as [`crate::orb`] wants
+    /// it: the transition's own progress while there is one, and the end the
+    /// phase names when there is not.
+    fn morph(&self) -> f32 {
+        self.orb_morph.unwrap_or(match self.state.phase.busy() {
+            true => 1.0,
+            false => 0.0,
+        })
     }
 }
 
@@ -3378,7 +3395,8 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
     }
 
     // The orb, in the square the strip keeps for it: turning while there is a
-    // turn to animate, one frozen dimmer frame otherwise. The base layer is
+    // turn to animate, one frozen dimmer square of dots otherwise, and on its
+    // way between the two while a turn is starting or ending. The base layer is
     // enough for it, unlike the menu, because [`ORB_W`] is reserved and no glyph
     // in the window starts inside it, so there is nothing here for a disc to be
     // painted under. It also costs a draw call fewer that way, and there are
@@ -3389,7 +3407,7 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
         ORB_W.min(layout.title.w),
         layout.title.h,
     );
-    for disc in crate::orb::discs(block, frame.clock, state.phase.busy(), skin) {
+    for disc in crate::orb::discs(block, frame.clock, frame.morph(), skin) {
         scene.rect(disc);
     }
 
@@ -6435,11 +6453,19 @@ mod tests {
             .collect()
     }
 
-    /// One frame at a given moment on the orb's clock.
+    /// One frame at a given moment on the orb's clock, with the orb settled at
+    /// whichever formation the state names.
     ///
     /// Its own helper rather than another argument to [`render_with`], which is
     /// already at the argument count clippy allows.
     fn render_at(state: &State, clock: f32) -> Rendered {
+        render_moving(state, clock, None)
+    }
+
+    /// The same with the orb partway through the move between its two
+    /// formations, which is what the window draws for [`ORB_MORPH`] either side
+    /// of a turn.
+    fn render_moving(state: &State, clock: f32, orb_morph: Option<f32>) -> Rendered {
         let dock = Dock::new();
         let shape = shape(&dock, &[]);
         let layout = Layout::compute(1400.0, 900.0, &shape);
@@ -6456,6 +6482,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock,
+            orb_morph,
             drag: None,
             hot: None,
             trouble: None,
@@ -6513,6 +6540,41 @@ mod tests {
         );
     }
 
+    /// A turn starting is not a swap. For the length of the move the strip draws
+    /// a frame that is neither formation: the resting dots are on their way to
+    /// the circles, so they are somewhere else than either end put them, and
+    /// they are part of the way round from a square to a disc.
+    ///
+    /// The state is the resting one, which is the point: what the orb draws
+    /// during the move comes from the transition and not from the phase, or the
+    /// window would cut to the far end the moment the turn started.
+    #[test]
+    fn the_orb_draws_the_move_rather_than_cutting_between_the_two_formations() {
+        let quiet = State::new();
+        let boxes = |out: &Rendered| -> Vec<[f32; 4]> {
+            discs_of(&out.scene).iter().map(|disc| disc.xywh()).collect()
+        };
+        let settled = boxes(&render_moving(&quiet, 3.0, None));
+        let turning = boxes(&render_moving(&quiet, 3.0, Some(1.0)));
+
+        let moving = render_moving(&quiet, 3.0, Some(0.5));
+        let halfway = boxes(&moving);
+        assert_ne!(halfway, settled, "the orb has not left its square");
+        assert_ne!(halfway, turning, "the orb cut straight to the circles");
+        assert!(halfway.len() > settled.len(), "no circles are coming up");
+        assert!(halfway.len() <= turning.len(), "the move draws more than the circles");
+
+        // Halfway round as well as halfway there: a square dot has no corner
+        // radius and a disc has half its width.
+        for disc in discs_of(&moving.scene) {
+            let [_, _, w, _] = disc.xywh();
+            assert!(
+                (disc.extra()[0] - w * 0.25).abs() < 1e-4,
+                "{disc:?} is not halfway between a square and a disc"
+            );
+        }
+    }
+
     /// Shaded, the strip is the whole window, so the orb is the only thing in it
     /// besides the headline. It is drawn there too: the strip is the same strip.
     #[test]
@@ -6535,6 +6597,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock: 2.0,
+            orb_morph: None,
             drag: None,
             hot: None,
             trouble: None,
@@ -6739,6 +6802,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock: 0.0,
+            orb_morph: None,
             drag,
             hot: None,
             trouble: None,
@@ -7709,6 +7773,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock: 0.0,
+            orb_morph: None,
             drag: None,
             hot: None,
             trouble: None,
@@ -9104,6 +9169,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock: 0.0,
+            orb_morph: None,
             drag: None,
             hot: None,
             trouble: None,
@@ -9217,6 +9283,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock: 0.0,
+            orb_morph: None,
             drag: None,
             hot: None,
             trouble: None,
@@ -9416,6 +9483,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock: 0.0,
+            orb_morph: None,
             drag: None,
             hot: None,
             trouble: None,
@@ -9527,6 +9595,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock: 0.0,
+            orb_morph: None,
             drag: None,
             hot: None,
             trouble: None,
@@ -9785,6 +9854,7 @@ mod tests {
                 body_size: 14.0,
                 pane_size: 13.0,
                 clock: 0.0,
+                orb_morph: None,
                 drag: None,
                 hot: None,
                 trouble: None,
@@ -9884,6 +9954,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock: 0.0,
+            orb_morph: None,
             drag: None,
             hot: None,
             trouble: None,
@@ -10366,6 +10437,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock: 0.0,
+            orb_morph: None,
             drag: None,
             hot: None,
             trouble: None,
@@ -10570,6 +10642,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock,
+            orb_morph: None,
             drag: None,
             hot: None,
             trouble: None,
@@ -11099,6 +11172,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock: 0.0,
+            orb_morph: None,
             drag: None,
             hot: None,
             trouble: None,
@@ -11769,6 +11843,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock: 0.0,
+            orb_morph: None,
             drag: None,
             hot,
             trouble: None,
@@ -12333,6 +12408,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock: 0.0,
+            orb_morph: None,
             drag: None,
             hot: None,
             trouble: None,
@@ -12546,6 +12622,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock: 0.0,
+            orb_morph: None,
             drag: None,
             hot: None,
             trouble: None,
@@ -12687,6 +12764,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock: 0.0,
+            orb_morph: None,
             drag: None,
             hot,
             trouble: None,
@@ -13738,6 +13816,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock: 0.0,
+            orb_morph: None,
             drag: None,
             hot: None,
             trouble: None,
@@ -13987,6 +14066,7 @@ mod tests {
             body_size: 14.0,
             pane_size: 13.0,
             clock: 0.0,
+            orb_morph: None,
             drag: None,
             hot,
             trouble: None,

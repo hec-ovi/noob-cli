@@ -273,22 +273,105 @@ fn title_click(double: bool) -> TitleClick {
 
 /// When the orb wants its next frame, given the deadline it is already holding.
 ///
-/// `None` is the point of this function: the clock exists only while there is a
-/// turn to animate and disappears the moment the turn ends. An earlier version of
-/// this window free-ran at 3,500 frames a second drawing text that was not
+/// `None` is the point of this function: the clock exists only while the orb has
+/// something to animate and disappears as soon as it does not. An earlier version
+/// of this window free-ran at 3,500 frames a second drawing text that was not
 /// changing and spent a third of the graphics pipe on it, which is what
 /// `noob-gpu` warns about and why nothing here ever asks for `ControlFlow::Poll`.
 ///
+/// `animating` is a running turn or the orb still on its way back from one. The
+/// way back is finite by construction: [`Morph`] steps to exactly zero and stops
+/// there, and the clock goes with it.
+///
 /// Pure so the rule can be tested without a window: an animation deadline is not
 /// something to find out about by watching a fan.
-fn orb_deadline(now: Instant, busy: bool, pending: Option<Instant>) -> Option<Instant> {
-    if !busy {
+fn orb_deadline(now: Instant, animating: bool, pending: Option<Instant>) -> Option<Instant> {
+    if !animating {
         return None;
     }
     match pending {
         // Still waiting on the frame that was asked for.
         Some(at) if now < at => Some(at),
         _ => Some(now + ORB_EVERY),
+    }
+}
+
+/// How long the orb takes to travel between its resting square and its turning
+/// circles.
+///
+/// Nine frames at [`ORB_EVERY`]: long enough to see the dots move into place and
+/// short enough that the first thing the agent says does not arrive halfway
+/// through it.
+const ORB_MORPH: Duration = Duration::from_millis(300);
+
+/// Where the orb is between its two formations, and what it is travelling from.
+///
+/// It lives here rather than in the state model: it is a property of the
+/// window's clock, not of the conversation, and nothing the agent says depends
+/// on it.
+///
+/// Measured from the moment the turn started or ended rather than stepped by
+/// however long the last wake took. A window that sat idle for an hour and then
+/// got a prompt would step by an hour and arrive at the far end on the first
+/// frame, which is the cut this replaces.
+#[derive(Clone, Copy, Debug)]
+struct Morph {
+    /// Where it is now: 0 is the resting square, 1 is the turning circles.
+    at: f32,
+    /// Where it stood when the turn last started or ended, so a turn that ends
+    /// mid-move turns the orb around from where it had got to rather than from
+    /// the end it never reached.
+    from: f32,
+    since: Instant,
+    /// Whether a turn was running at that moment.
+    busy: bool,
+}
+
+impl Morph {
+    fn new(now: Instant) -> Self {
+        Morph {
+            at: 0.0,
+            from: 0.0,
+            since: now,
+            busy: false,
+        }
+    }
+
+    /// Where the orb is after `since` has passed, travelling towards the end
+    /// `busy` names. Clamped at both ends, which is what makes the clock this
+    /// holds open finite.
+    fn travelled(from: f32, busy: bool, since: Duration) -> f32 {
+        let gone = since.as_secs_f32() / ORB_MORPH.as_secs_f32();
+        match busy {
+            true => (from + gone).min(1.0),
+            false => (from - gone).max(0.0),
+        }
+    }
+
+    fn step(&mut self, busy: bool, now: Instant) {
+        if busy != self.busy {
+            self.from = self.at;
+            self.since = now;
+            self.busy = busy;
+        }
+        self.at = Self::travelled(self.from, busy, now.saturating_duration_since(self.since));
+    }
+
+    /// What the scene is handed: the progress while the orb is moving, and
+    /// `None` once it has arrived, which is every frame outside a transition and
+    /// so nearly every frame the window draws.
+    fn showing(&self) -> Option<f32> {
+        let settled = match self.busy {
+            true => 1.0,
+            false => 0.0,
+        };
+        (self.at != settled).then_some(self.at)
+    }
+
+    /// Whether the orb still wants frames with no turn to animate. Only true on
+    /// the way back from one, and only until it gets there.
+    fn moving(&self) -> bool {
+        self.at > 0.0
     }
 }
 
@@ -716,9 +799,12 @@ struct App {
     /// When the orb wants its next frame, and `None` whenever it is still.
     ///
     /// The one animation clock in the window. It exists only while a turn is
-    /// running, which is what keeps a window nobody is talking to at zero frames
-    /// a second. See [`orb_deadline`].
+    /// running or the orb is still travelling back from one, which is what keeps
+    /// a window nobody is talking to at zero frames a second. See
+    /// [`orb_deadline`].
     next_orb: Option<Instant>,
+    /// How far the orb is between its resting square and its turning circles.
+    orb: Morph,
     skin: Skin,
     link: Option<Link>,
     trouble: Option<String>,
@@ -870,6 +956,7 @@ impl App {
             monitor: Monitor::new(),
             next_sample: None,
             next_orb: None,
+            orb: Morph::new(epoch),
             skin,
             link: None,
             trouble: None,
@@ -3095,9 +3182,11 @@ impl App {
             menu: self.menu.as_ref(),
             picker: self.picker.as_ref(),
             settings: self.settings.as_ref(),
-            // The orb's clock. Read here rather than inside the scene, so a
+            // The orb's clock, and how far it is through the move between its
+            // two formations. Read here rather than inside the scene, so a
             // frame stays a function of what it is handed.
             clock: self.epoch.elapsed().as_secs_f32(),
+            orb_morph: self.orb.showing(),
         }
     }
 
@@ -3427,7 +3516,14 @@ impl ApplicationHandler<Wake> for App {
         // The orb. A deadline that was not there before is a frame that is due
         // now, so it is also what marks the window dirty; the same one coming
         // back means the frame is still waiting and nothing is redrawn.
-        let next = orb_deadline(Instant::now(), self.state.phase.busy(), self.next_orb);
+        //
+        // The move between the two formations is stepped first, because the
+        // clock outlives the turn by exactly as long as the orb takes to travel
+        // back to its square: the frames it needs on the way out are already
+        // there, since the turn is running the whole time.
+        let now = Instant::now();
+        self.orb.step(self.state.phase.busy(), now);
+        let next = orb_deadline(now, self.state.phase.busy() || self.orb.moving(), self.next_orb);
         self.dirty |= next.is_some() && next != self.next_orb;
         self.next_orb = next;
         self.redraw();
@@ -3755,9 +3851,10 @@ mod tests {
         assert_eq!(asked.width, 1180, "shading keeps the width it had");
     }
 
-    /// The animation clock exists while a turn is running and at no other time.
-    /// A deadline that outlives the turn is a window animating with nothing to
-    /// animate, which is the 3,500 frames a second `noob-gpu` warns about.
+    /// The animation clock exists while the orb has something to animate and at
+    /// no other time. A deadline that outlives that is a window animating with
+    /// nothing to animate, which is the 3,500 frames a second `noob-gpu` warns
+    /// about.
     #[test]
     fn the_orb_clock_exists_only_while_a_turn_is_running() {
         let now = Instant::now();
@@ -3831,6 +3928,105 @@ mod tests {
         assert_eq!(soonest([None, Some(sample)]), Some(sample));
         assert_eq!(soonest([Some(orb), None]), Some(orb));
         assert_eq!(soonest([None, None]), None, "an idle window blocks");
+    }
+
+    /// The orb travels between its two formations over [`ORB_MORPH`] and is
+    /// settled at both ends. Settled is `None` to the scene, which is what keeps
+    /// every frame outside a transition the frame it always was.
+    #[test]
+    fn the_orb_travels_between_its_two_formations_over_the_move() {
+        let now = Instant::now();
+        let mut orb = Morph::new(now);
+        assert_eq!(orb.showing(), None, "a window opens settled on its square");
+        assert!(!orb.moving());
+
+        // The turn starts: at the square still, and travelling.
+        orb.step(true, now);
+        assert_eq!(orb.showing(), Some(0.0));
+        orb.step(true, now + ORB_MORPH / 3);
+        assert!((orb.showing().expect("moving") - 1.0 / 3.0).abs() < 1e-5);
+        orb.step(true, now + ORB_MORPH / 2);
+        assert!((orb.showing().expect("moving") - 0.5).abs() < 1e-5);
+        // Arrived, and it stays arrived however long the turn runs for.
+        orb.step(true, now + ORB_MORPH);
+        assert_eq!(orb.showing(), None, "the move did not finish");
+        orb.step(true, now + Duration::from_secs(90));
+        assert_eq!(orb.showing(), None);
+
+        // And back, which is the direction that costs a clock: the turn is over
+        // and the window would otherwise have stopped redrawing.
+        let ended = now + Duration::from_secs(90);
+        orb.step(false, ended);
+        assert_eq!(orb.showing(), Some(1.0), "the turn ending is not a cut");
+        assert!(orb.moving());
+        orb.step(false, ended + ORB_MORPH / 2);
+        assert!((orb.showing().expect("moving") - 0.5).abs() < 1e-5);
+        orb.step(false, ended + ORB_MORPH);
+        assert_eq!(orb.showing(), None, "the orb never settled back");
+        assert!(!orb.moving(), "the clock would be held open forever");
+    }
+
+    /// The move is measured from the moment the turn started, not from the last
+    /// wake. An idle window blocks indefinitely, so the wake that starts a turn
+    /// can be an hour after the one before it, and stepping by that would put
+    /// the orb at the far end on the first frame, which is the cut this is here
+    /// to replace.
+    #[test]
+    fn a_window_that_sat_idle_still_gets_the_whole_move() {
+        let now = Instant::now();
+        let mut orb = Morph::new(now);
+        let hour = now + Duration::from_secs(3600);
+        orb.step(false, hour);
+        orb.step(true, hour);
+        assert_eq!(orb.showing(), Some(0.0), "the move was skipped");
+        orb.step(true, hour + ORB_MORPH / 2);
+        assert!((orb.showing().expect("moving") - 0.5).abs() < 1e-5);
+    }
+
+    /// A turn that ends mid-move turns the orb around from where it had got to,
+    /// rather than from the end it never reached. Otherwise a turn one frame
+    /// long makes the orb jump out to the circles to come back from them.
+    #[test]
+    fn a_turn_ending_mid_move_turns_the_orb_around_where_it_stands() {
+        let now = Instant::now();
+        let mut orb = Morph::new(now);
+        orb.step(true, now);
+        orb.step(true, now + ORB_MORPH / 2);
+        let half = orb.showing().expect("moving");
+
+        let ended = now + ORB_MORPH / 2;
+        orb.step(false, ended);
+        assert!((orb.showing().expect("moving") - half).abs() < 1e-5, "it jumped");
+        orb.step(false, ended + ORB_MORPH / 4);
+        assert!(orb.showing().expect("moving") < half, "it did not turn around");
+        orb.step(false, ended + ORB_MORPH);
+        assert_eq!(orb.showing(), None);
+    }
+
+    /// The clock outlives the turn by exactly the move and then goes, which is
+    /// the one place the "no turn, no frames" rule gives way. The way out costs
+    /// nothing: the turn is running the whole time, so the clock is already
+    /// there.
+    #[test]
+    fn the_orb_clock_outlives_a_turn_by_the_length_of_the_move() {
+        let now = Instant::now();
+        let mut orb = Morph::new(now);
+        orb.step(true, now);
+        orb.step(true, now + ORB_MORPH);
+
+        let ended = now + ORB_MORPH;
+        orb.step(false, ended);
+        let animating = |orb: &Morph, busy: bool| busy || orb.moving();
+        assert!(
+            orb_deadline(ended, animating(&orb, false), None).is_some(),
+            "the orb is left halfway to its square with no clock to finish on"
+        );
+        orb.step(false, ended + ORB_MORPH);
+        assert_eq!(
+            orb_deadline(ended + ORB_MORPH, animating(&orb, false), None),
+            None,
+            "the clock outlived the move"
+        );
     }
 
     const W: f32 = 1400.0;
@@ -5385,6 +5581,7 @@ mod tests {
             picker: None,
             settings: None,
             clock: 0.0,
+            orb_morph: None,
         };
         let panel = layout.placed(Space::TopRight).body;
         for view in View::ALL {
