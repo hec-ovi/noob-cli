@@ -422,7 +422,7 @@ fn menu_for(
         Hit::Picker
         | Hit::PickerMark(_)
         | Hit::PickerOpen
-        | Hit::PickerBack
+        | Hit::PickerFolders
         | Hit::PickerSessions => None,
         // Neither is the settings panel. A Settings row on a menu opened over
         // the settings panel would be a row that opens what is already open,
@@ -958,22 +958,42 @@ impl App {
         self.connect(chosen);
     }
 
-    /// The button beside Open: the saved sessions, or back to the folders.
+    /// Ctrl-R: the saved sessions, or back to the folders.
+    ///
+    /// A toggle because it is one key. The two buttons in the picker's head are
+    /// not toggles: each of them names the list it puts there, so pressing the
+    /// one already showing has to do nothing.
+    fn toggle_sessions(&mut self) {
+        match self.picker.as_ref().is_some_and(Picker::on_sessions) {
+            true => self.show_folders_now(),
+            false => self.show_sessions_now(),
+        }
+    }
+
+    /// The Sessions button: the saved sessions, whatever is showing now.
     ///
     /// The reading happens here rather than in the picker because this is the
     /// half of the window that is allowed to touch the disk, and it happens on
     /// the press rather than when the window opens: a machine with a year of
-    /// sessions on it should not pay for the list nobody asked to see.
-    fn toggle_sessions(&mut self) {
-        let showing = self.picker.as_ref().is_some_and(Picker::on_sessions);
-        let listing = (!showing).then(|| self.saved_sessions());
+    /// sessions on it should not pay for the list nobody asked to see. Already
+    /// on them, nothing is read at all: the press is a no-op, not a reload.
+    fn show_sessions_now(&mut self) {
+        if self.picker.as_ref().is_some_and(Picker::on_sessions) {
+            return;
+        }
+        let listing = self.saved_sessions();
         if let Some(picker) = self.picker.as_mut() {
-            match listing {
-                Some(listing) => picker.show_sessions(listing),
-                None => {
-                    picker.show_folders();
-                }
-            }
+            picker.show_sessions(listing);
+        }
+        self.dirty = true;
+        self.reveal_picker_cursor();
+    }
+
+    /// The Folders button, and what Escape falls back to. Nothing is read off
+    /// the disk to go back: the tree is still in the picker.
+    fn show_folders_now(&mut self) {
+        if let Some(picker) = self.picker.as_mut() {
+            picker.show_folders();
         }
         self.dirty = true;
         self.reveal_picker_cursor();
@@ -1625,13 +1645,16 @@ impl App {
     }
 
     /// A press inside the picker: a row, the mark that opens one, or one of the
-    /// two buttons.
+    /// three buttons in its head.
     fn click_in_picker(&mut self, hit: Hit, double: bool) {
-        // Before the picker is borrowed, because swapping the list reads the
-        // disk and that is the window's job rather than the model's.
-        if hit == Hit::PickerSessions {
-            self.toggle_sessions();
-            return;
+        // Both mode buttons before the picker is borrowed, because putting the
+        // sessions up reads the disk and that is the window's job rather than
+        // the model's. Folders does not, and goes through the same pair so the
+        // two presses cannot drift apart.
+        match hit {
+            Hit::PickerSessions => return self.show_sessions_now(),
+            Hit::PickerFolders => return self.show_folders_now(),
+            _ => {}
         }
         let mut chosen = None;
         if let Some(picker) = self.picker.as_mut() {
@@ -1641,10 +1664,6 @@ impl App {
                 // and answering by also selecting it would make every look a
                 // choice.
                 Hit::PickerMark(index) => picker.toggle(index),
-                // The way back out of the session list. Nothing is read off
-                // the disk to go back, which is why this one does not need the
-                // pre-borrow the swap button above takes.
-                Hit::PickerBack => picker.show_folders(),
                 Hit::PickerRow(index) if double => {
                     chosen = picker.double(index);
                     true
@@ -2025,7 +2044,7 @@ impl App {
             Hit::PickerRow(_)
             | Hit::PickerMark(_)
             | Hit::PickerOpen
-            | Hit::PickerBack
+            | Hit::PickerFolders
             | Hit::PickerSessions
             | Hit::Picker => {}
             // The same for the nine the settings panel owns.
@@ -3036,7 +3055,8 @@ impl ApplicationHandler<Wake> for App {
                         | Hit::Minimize
                         | Hit::MenuRow(_)
                         | Hit::PickerOpen
-                        | Hit::PickerBack
+                        | Hit::PickerFolders
+                        | Hit::PickerSessions
                         | Hit::PickerMark(_)
                         | Hit::SettingsClose
                         | Hit::SettingsSection(_)
@@ -3834,7 +3854,7 @@ mod tests {
             Hit::Picker,
             Hit::PickerMark(0),
             Hit::PickerOpen,
-            Hit::PickerBack,
+            Hit::PickerFolders,
             Hit::PickerSessions,
         ] {
             assert!(

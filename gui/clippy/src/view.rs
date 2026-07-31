@@ -295,12 +295,6 @@ const PICKER_ROW_PAD: f32 = 5.0;
 /// plus in front of them standing out of the ones without.
 const PICKER_MARK_COLUMNS: usize = 2;
 const PICKER_INDENT_COLUMNS: usize = 2;
-/// Columns the back arrow in the heading row takes, the arrow and a column
-/// either side of it, and how far the heading is pushed along to clear it.
-///
-/// Three, which is what a tab spends on padding around its label: an arrow one
-/// glyph wide is a target the size of a character.
-const PICKER_BACK_COLUMNS: usize = 3;
 /// The columns a row keeps for what it says, however deep it sits. Past this the
 /// indent stops growing: a name at depth twelve pushed off the right of the box
 /// is a row that says nothing.
@@ -380,17 +374,27 @@ fn session_line(cells: &[String], room: usize) -> String {
     out
 }
 
-/// What the picker says on its button, and the whole of what it says.
+/// What the picker calls itself, in both of its lists.
+///
+/// One string rather than a heading that swapped between OPEN A FOLDER and OPEN
+/// A SESSION. The title says what the box is for; which of the two lists is in
+/// front of you is said by the pair of buttons under it, and a title that also
+/// said it was a second thing to read for an answer already on screen.
+const PICKER_TITLE: &str = "OPEN FOLDER OR CONTINUE SESSION";
+
+/// What the picker says on the button that opens the row the cursor is on.
 ///
 /// It used to spell out the folder that would be opened, which made the button
 /// as wide as a path and made it change width every time the cursor moved. The
-/// path is already written above the list.
-const PICKER_OPEN_LABEL: &str = "Open";
+/// path is already written above the list. "selected" rather than the folder or
+/// the session, because one button opens whichever of the two the cursor is on.
+const PICKER_OPEN_LABEL: &str = "Open selected";
 
-/// What the button beside it says, in each of the two lists it swaps between.
+/// The two buttons that choose which list is showing.
 ///
-/// Both are drawn in a box sized for the longer of the two, so pressing it does
-/// not change the width of the thing that was just pressed.
+/// Both are drawn in a box sized for the longer of the two, so the pair does not
+/// shuffle sideways when the list swaps, and the one whose list is showing is
+/// filled in the colour the chosen row is filled in.
 const PICKER_SESSIONS_LABEL: &str = "Sessions";
 const PICKER_FOLDERS_LABEL: &str = "Folders";
 
@@ -423,21 +427,26 @@ fn picker_field_h(line: f32) -> f32 {
     line + PICKER_FIELD_PAD * 2.0
 }
 
-/// What the picker keeps above its list: [`PICKER_HEAD_ROWS`] of writing, the
-/// search field, and a gap between that field and the first row.
+/// What the picker keeps above its list: the row of buttons, a gap,
+/// [`PICKER_HEAD_ROWS`] of writing, the search field, and a gap between that
+/// field and the first row.
 ///
 /// One answer, the way [`picker_foot`] is one answer for the bottom, and it does
 /// not read the picker: the head is the same height on the folder list and on
 /// the session list, so swapping between the two cannot move the box.
+///
+/// The buttons moved up here from the foot and the foot kept the line of keys,
+/// so this is the same total as before and the list holds the same number of
+/// rows it always did.
 fn picker_head_h(line: f32) -> f32 {
-    PICKER_HEAD_ROWS * line + picker_field_h(line) + GAP
+    picker_open_h(line) + GAP + PICKER_HEAD_ROWS * line + picker_field_h(line) + GAP
 }
 
-/// What the picker keeps below its list: the line of keys, a gap, and the
-/// button. One answer, so the box that is measured and the rows that are drawn
-/// into it cannot disagree about where the bottom is.
+/// What the picker keeps below its list: the line of keys. One answer, so the
+/// box that is measured and the rows that are drawn into it cannot disagree
+/// about where the bottom is.
 fn picker_foot(line: f32) -> f32 {
-    line + GAP + picker_open_h(line)
+    line
 }
 
 /// How wide the mark down the left of the selected row is. A tab's accent runs
@@ -501,17 +510,15 @@ pub enum Hit {
     /// it: pressing the mark opens the folder, pressing the row selects it, and
     /// one region for both would make every press do both things.
     PickerMark(usize),
-    /// The button that confirms the row the cursor is on, which is how the
-    /// mouse chooses a folder without a keyboard.
+    /// The button at the right of the picker's head, which confirms the row the
+    /// cursor is on: a folder while the folders are showing, a session while the
+    /// sessions are. How the mouse chooses without a keyboard.
     PickerOpen,
-    /// The button beside it, which swaps the list between the folders and the
-    /// sessions the agent has already written. The only way in to a past
-    /// conversation from a window that has just opened.
+    /// The two buttons at the left of that head, which say which list is
+    /// showing and put the other one there. Neither is a toggle: pressing the
+    /// one already lit does nothing.
+    PickerFolders,
     PickerSessions,
-    /// The arrow in the picker's heading row, which goes back from the sessions
-    /// to the folders. Only there while the sessions are showing, because there
-    /// is nothing behind the folder list to go back to.
-    PickerBack,
     /// The picker's box, away from any row. Swallowed, so a press on its margin
     /// does not read as a press on the window behind it.
     Picker,
@@ -725,12 +732,10 @@ pub struct Layout {
     /// rather than a rectangle worked out where it is drawn, so the border and
     /// the writing inside it come off one shape.
     pub picker_filter: Panel,
-    /// The back arrow in its heading row. Empty on the folder list, so the
-    /// region cannot be pressed where there is nothing to go back to.
-    pub picker_back: Panel,
-    /// The button beside it, which swaps the list between folders and saved
-    /// sessions. Empty when there is no room for it beside Open, which is the
+    /// The two buttons at the left of the head that choose the list. Both empty
+    /// when the box is too narrow to hold them and the Open button, which is the
     /// only reason a button in this box ever goes away.
+    pub picker_folders: Panel,
     pub picker_sessions: Panel,
 
     /// True while the settings panel is up, which is the third shape of its own:
@@ -1009,7 +1014,7 @@ impl Layout {
                 picker_marks: Vec::new(),
                 picker_open: nowhere(),
                 picker_filter: nowhere(),
-                picker_back: nowhere(),
+                picker_folders: nowhere(),
                 picker_sessions: nowhere(),
                 in_settings: false,
                 settings: nowhere(),
@@ -1068,7 +1073,7 @@ impl Layout {
                 picker_marks: places.marks,
                 picker_open: places.open,
                 picker_filter: places.filter,
-                picker_back: places.back,
+                picker_folders: places.folders,
                 picker_sessions: places.sessions,
                 in_settings: false,
                 settings: nowhere(),
@@ -1128,7 +1133,7 @@ impl Layout {
                 picker_marks: Vec::new(),
                 picker_open: nowhere(),
                 picker_filter: nowhere(),
-                picker_back: nowhere(),
+                picker_folders: nowhere(),
                 picker_sessions: nowhere(),
                 in_settings: true,
                 settings: places.box_,
@@ -1371,7 +1376,7 @@ impl Layout {
             picker_marks: Vec::new(),
             picker_open: nowhere(),
             picker_filter: nowhere(),
-            picker_back: nowhere(),
+            picker_folders: nowhere(),
             picker_sessions: nowhere(),
             in_settings: false,
             settings: nowhere(),
@@ -1451,10 +1456,17 @@ impl Layout {
         // Nothing else exists while the picker is up, so this answers for the
         // whole window below the title strip.
         if self.picking {
-            // In the heading, above every row, and empty unless the sessions
-            // are showing.
-            if self.picker_back.w >= 1.0 && self.picker_back.contains(x, y) {
-                return Some(Hit::PickerBack);
+            // The three buttons in the head, above every row. Each is empty in
+            // a box with no room for it, and an empty panel answers for
+            // nothing rather than for the point it collapsed onto.
+            if self.picker_folders.w >= 1.0 && self.picker_folders.contains(x, y) {
+                return Some(Hit::PickerFolders);
+            }
+            if self.picker_sessions.w >= 1.0 && self.picker_sessions.contains(x, y) {
+                return Some(Hit::PickerSessions);
+            }
+            if self.picker_open.w >= 1.0 && self.picker_open.contains(x, y) {
+                return Some(Hit::PickerOpen);
             }
             // The mark before the row it sits in, because it sits inside it.
             // The other way round the mark could never be pressed.
@@ -1467,12 +1479,6 @@ impl Layout {
                 if panel.contains(x, y) {
                     return Some(Hit::PickerRow(*index));
                 }
-            }
-            if self.picker_open.w >= 1.0 && self.picker_open.contains(x, y) {
-                return Some(Hit::PickerOpen);
-            }
-            if self.picker_sessions.w >= 1.0 && self.picker_sessions.contains(x, y) {
-                return Some(Hit::PickerSessions);
             }
             if self.picker.w >= 1.0 && self.picker.contains(x, y) {
                 return Some(Hit::Picker);
@@ -2120,7 +2126,7 @@ struct PickerPlaces {
     marks: Vec<(usize, Panel)>,
     open: Panel,
     filter: Panel,
-    back: Panel,
+    folders: Panel,
     sessions: Panel,
 }
 
@@ -2198,7 +2204,7 @@ fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> PickerPlaces {
             marks: Vec::new(),
             open: nowhere(),
             filter: nowhere(),
-            back: nowhere(),
+            folders: nowhere(),
             sessions: nowhere(),
         };
     }
@@ -2269,25 +2275,33 @@ fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> PickerPlaces {
             Some((*index, Panel::new(row.x + indent, row.y, wide, row.h)))
         })
         .collect();
-    // Exactly as wide as what it says, and what it says is one fixed word: the
-    // confirm glyph, the space after it, [`PICKER_OPEN_LABEL`], a column of
-    // indent on the left and two on the right so the cut corner never reaches
-    // the text.
+    // The three buttons, all on the head's first row and all the same height.
+    //
+    // Open sits at the right limit of the box and the two that choose the list
+    // sit at the left, so the button that acts on the row the cursor is on is
+    // the furthest thing on the row from the two that only change what is being
+    // listed. It used to be the other way round, with Open and the swap side by
+    // side in the bottom left corner, which put a button that starts a session
+    // one gap away from a button that does not.
+    let button_h = picker_open_h(line).min(content.h);
+    // Exactly as wide as what it says: the confirm glyph, the space after it,
+    // [`PICKER_OPEN_LABEL`], a column of indent on the left and two on the right
+    // so the cut corner never reaches the text.
     let open_w = ((ROW_ICON_COLUMNS + 1 + PICKER_OPEN_LABEL.chars().count() + 3) as f32 * column)
         .min(content.w);
-    let open_h = picker_open_h(line).min(content.h);
     let open = Panel::new(
-        content.x,
-        content.y + content.h - open_h,
+        content.x + content.w - open_w,
+        content.y,
         open_w,
-        open_h,
+        button_h,
     );
-    // The list swap, beside it. Sized for the longer of the two words it can
-    // say, so pressing it does not change the width of what was pressed, and
-    // clipped to what is left of the row rather than allowed out of the box: in
-    // a window too narrow for both there is no button rather than a button
-    // sticking out of the picker.
-    let toggle_w = ((ROW_ICON_COLUMNS
+    // The pair at the left, both sized for the longer of the two words, so
+    // swapping the list does not move either of them, and both clipped to what
+    // is left of the row once Open and a gap on either side of the pair have
+    // been taken off: in a box too narrow for all three there are no mode
+    // buttons rather than buttons sticking out of the picker.
+    let mode_room = (content.w - open_w - GAP * 2.0).max(0.0);
+    let mode_w = ((ROW_ICON_COLUMNS
         + 1
         + PICKER_SESSIONS_LABEL
             .chars()
@@ -2295,37 +2309,35 @@ fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> PickerPlaces {
             .max(PICKER_FOLDERS_LABEL.chars().count())
         + 3) as f32
         * column)
-        .min((content.w - open.w - GAP).max(0.0));
-    let sessions = Panel::new(open.x + open.w + GAP, open.y, toggle_w, open_h);
-    // The search field, under the two lines of writing and above the list. Its
-    // own panel rather than a rectangle worked out where the text is drawn, so
-    // the border, the icon and what has been typed all come off one shape.
+        .min(((mode_room - GAP) * 0.5).max(0.0));
+    let (folders, sessions) = match mode_w >= 1.0 {
+        true => (
+            Panel::new(content.x, content.y, mode_w, button_h),
+            Panel::new(content.x + mode_w + GAP, content.y, mode_w, button_h),
+        ),
+        false => (nowhere(), nowhere()),
+    };
+    // The search field, under the buttons and the two lines of writing and above
+    // the list. Its own panel rather than a rectangle worked out where the text
+    // is drawn, so the border, the icon and what has been typed all come off one
+    // shape.
     //
     // Its height is the room between the writing and the list, not the height a
     // field would like to be: in a window short enough that the head has no
     // room, a field taking its own height is drawn over the first rows of the
     // list. It ends up at nothing at that size, which is a picker with no field
-    // rather than a field over the list.
-    let field_top = content.y + PICKER_HEAD_ROWS * line;
+    // rather than a field over the list. Its top is held inside the box for the
+    // same reason: a field with no height still has a position, and a position
+    // below the box is one the head of a short window would otherwise hand it.
+    let field_top = (content.y + button_h + GAP + PICKER_HEAD_ROWS * line)
+        .min(content.y + content.h)
+        .max(content.y);
     let filter = Panel::new(
         content.x,
         field_top,
         content.w,
         picker_field_h(line).min((list.y - header - GAP - field_top).max(0.0)),
     );
-    // The way back, at the left of the heading row, and only where there is a
-    // list behind this one. On the folders it is nothing at all rather than a
-    // greyed button: the picker opens on that list, so back from it is out of
-    // the window, which is what the key legend already says Escape does.
-    let back_button = match picker.on_sessions() {
-        true => Panel::new(
-            content.x,
-            content.y,
-            (PICKER_BACK_COLUMNS as f32 * column).min(content.w),
-            line,
-        ),
-        false => nowhere(),
-    };
     PickerPlaces {
         box_,
         list,
@@ -2333,7 +2345,7 @@ fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> PickerPlaces {
         marks,
         open,
         filter,
-        back: back_button,
+        folders,
         sessions,
     }
 }
@@ -4388,58 +4400,81 @@ fn folder_picker(scene: &mut Scene, frame: &Frame) {
         scene.text(Text::rich(runs, at, size, tint));
     };
 
-    let heading = match picker.on_sessions() {
-        true => "OPEN A SESSION",
-        false => "OPEN A FOLDER",
-    };
-    // The way back out of the session list, at the left of the heading, drawn
-    // as the two buttons at the foot are: a surface, the window's cut corner,
-    // and it lights under the pointer. The word on the foot button already
-    // swaps to Folders, but it is a word in the corner furthest from the list
-    // it acts on, and it carries a clock rather than an arrow.
-    let back = layout.picker_back;
-    let mut heading_at = content.x;
-    let mut heading_room = cols;
-    if back.w >= 1.0 && back.h >= 1.0 {
-        let face = match frame.hot == Some(Hit::PickerBack) {
-            true => skin.button_hot,
-            false => skin.button,
+    // The three buttons, on the row above the writing: the two that choose the
+    // list at the left, the one that opens the row the cursor is on at the right
+    // limit of the box.
+    //
+    // The pair carries a third face on top of the idle and the hot one every
+    // button here has, and the one whose list is showing wears it: the band the
+    // chosen row is drawn in, written over in the same dark ink. Two buttons
+    // drawn identically are two buttons that do not say which list is in front
+    // of you, and that answer used to be carried by the heading alone.
+    let on_sessions = picker.on_sessions();
+    for (panel, hit, icon, label) in [
+        (
+            layout.picker_folders,
+            Hit::PickerFolders,
+            icons::FOLDER,
+            PICKER_FOLDERS_LABEL,
+        ),
+        (
+            layout.picker_sessions,
+            Hit::PickerSessions,
+            icons::RECENT,
+            PICKER_SESSIONS_LABEL,
+        ),
+        (
+            layout.picker_open,
+            Hit::PickerOpen,
+            icons::CONFIRM,
+            PICKER_OPEN_LABEL,
+        ),
+    ] {
+        if panel.w < 1.0 || panel.h < 1.0 {
+            continue;
+        }
+        let showing = match hit {
+            Hit::PickerFolders => !on_sessions,
+            Hit::PickerSessions => on_sessions,
+            _ => false,
         };
-        scene.rect(panel_fill(back, face));
-        scene.rect(panel_edge(back, skin.edge_focus));
+        // The showing mode keeps its band under the pointer. Pressing it does
+        // nothing, so lighting it would promise a change that never comes.
+        let (face, ink) = match (showing, frame.hot == Some(hit)) {
+            (true, _) => (skin.picked, skin.picked_ink),
+            (false, true) => (skin.button_hot, skin.bright),
+            (false, false) => (skin.button, skin.bright),
+        };
+        scene.rect(panel_fill(panel, face));
+        scene.rect(panel_edge(panel, skin.edge_focus));
         say(
             scene,
-            vec![Run::icon(icons::BACK.to_string(), skin.bright)],
+            vec![
+                Run::icon(icon.to_string(), ink),
+                Run::tinted(format!(" {label}"), ink),
+            ],
             Panel::new(
-                back.x + frame.pane_column,
-                back.y,
-                (back.w - frame.pane_column).max(1.0),
+                panel.x + frame.pane_column,
+                panel.y + PICKER_OPEN_PAD,
+                (panel.w - frame.pane_column).max(1.0),
                 line,
             ),
-            skin.bright,
+            ink,
         );
-        // Past the arrow and one column clear of it, so the heading is beside
-        // the button rather than written over the end of it.
-        let step = (PICKER_BACK_COLUMNS + 1) as f32 * frame.pane_column;
-        heading_at += step;
-        heading_room = cols.saturating_sub(PICKER_BACK_COLUMNS + 1);
     }
-    // The heading, and what the session list says about itself: how many there
-    // are, and how many files in the directory could not be described.
-    let mut head = vec![Run::tinted(heading, skin.bright)];
+    // The title, one string in both lists, and what the session list says about
+    // itself beside it: how many there are, and how many files in the directory
+    // could not be described.
+    let writing = layout.picker_open.y + layout.picker_open.h + GAP;
+    let mut head = vec![Run::tinted(PICKER_TITLE, skin.bright)];
     if let Some(note) = picker.note() {
-        let room = heading_room.saturating_sub(heading.chars().count() + 2);
+        let room = cols.saturating_sub(PICKER_TITLE.chars().count() + 2);
         head.push(Run::tinted(format!("  {}", clip(note, room)), skin.dim));
     }
     say(
         scene,
         head,
-        Panel::new(
-            heading_at,
-            content.y,
-            (content.w - (heading_at - content.x)).max(1.0),
-            line,
-        ),
+        Panel::new(content.x, writing, content.w, line),
         skin.bright,
     );
     // The folder being listed, in full. The rows under it are names, so this is
@@ -4452,7 +4487,7 @@ fn folder_picker(scene: &mut Scene, frame: &Frame) {
             clip(&picker.at().display().to_string(), cols),
             skin.body,
         )],
-        Panel::new(content.x, content.y + line, content.w, line),
+        Panel::new(content.x, writing + line, content.w, line),
         skin.body,
     );
     // What has been typed, why the list is empty when it is empty for a reason,
@@ -4643,13 +4678,13 @@ fn folder_picker(scene: &mut Scene, frame: &Frame) {
         picker.thumb(layout.picker_capacity(size)),
     );
 
-    // The keys, spelled out. Nothing else in this window needs them written
-    // down, but this is the first thing a new install shows and it is the one
-    // place where there is no pane to experiment in.
+    // The keys, spelled out, on the last line of the box. Nothing else in this
+    // window needs them written down, but this is the first thing a new install
+    // shows and it is the one place where there is no pane to experiment in.
     //
-    // Placed off the button rather than off the bottom of the box, so the two
-    // cannot end up on top of each other when the button's height changes.
-    let open = layout.picker_open;
+    // It is the whole of the foot now that the buttons are in the head, so it is
+    // placed off the bottom of the box, which is where [`picker_foot`] says the
+    // one line it keeps down there is.
     say(
         scene,
         vec![Run::tinted(
@@ -4659,53 +4694,14 @@ fn folder_picker(scene: &mut Scene, frame: &Frame) {
             ),
             skin.dim,
         )],
-        Panel::new(content.x, open.y - GAP - line, content.w, line),
+        Panel::new(
+            content.x,
+            (content.y + content.h - line).max(content.y),
+            content.w,
+            line,
+        ),
         skin.dim,
     );
-    // A surface of its own, a cut corner and an accent edge, so the two things
-    // here that are buttons read as buttons. They used to be `tab_idle` with a
-    // hairline, which is the quietest surface in the palette.
-    //
-    // The second one swaps the list. Its word says what pressing it gets you,
-    // not what is on screen, which is the only reading of a button that does
-    // not need a caption to go with it.
-    let toggle = match picker.on_sessions() {
-        true => PICKER_FOLDERS_LABEL,
-        false => PICKER_SESSIONS_LABEL,
-    };
-    for (panel, hit, icon, label) in [
-        (open, Hit::PickerOpen, icons::CONFIRM, PICKER_OPEN_LABEL),
-        (
-            layout.picker_sessions,
-            Hit::PickerSessions,
-            icons::RECENT,
-            toggle,
-        ),
-    ] {
-        if panel.w < 1.0 || panel.h < 1.0 {
-            continue;
-        }
-        let face = match frame.hot == Some(hit) {
-            true => skin.button_hot,
-            false => skin.button,
-        };
-        scene.rect(panel_fill(panel, face));
-        scene.rect(panel_edge(panel, skin.edge_focus));
-        say(
-            scene,
-            vec![
-                Run::icon(icon.to_string(), skin.bright),
-                Run::tinted(format!(" {label}"), skin.bright),
-            ],
-            Panel::new(
-                panel.x + frame.pane_column,
-                panel.y + PICKER_OPEN_PAD,
-                (panel.w - frame.pane_column).max(1.0),
-                line,
-            ),
-            skin.bright,
-        );
-    }
 }
 
 /// The settings panel: the whole surface under the title strip while it is up.
@@ -12214,7 +12210,7 @@ mod tests {
         // folder, the names inside, and the button.
         let text = text_of(&out.scene);
         for wanted in [
-            "OPEN A FOLDER",
+            PICKER_TITLE,
             "/home/hec",
             "/home/hec/workspace/noob-cli",
             "gui",
@@ -12274,13 +12270,12 @@ mod tests {
         }
     }
 
-    /// The button says one word, carries the cut corner every panel in this
-    /// window carries, sits on a surface of its own and lights up under the
-    /// pointer. It is the only thing in the picker a mouse can press that is not
-    /// a row, and before this round it was drawn in the quietest fill in the
-    /// palette with a hairline round it, which read as a label.
+    /// Item E1: the button that opens the row the cursor is on sits at the right
+    /// limit of the picker's head, says Open selected, carries the cut corner
+    /// every panel in this window carries, sits on a surface of its own and
+    /// lights up under the pointer.
     #[test]
-    fn the_open_button_says_one_word_and_reads_as_a_button() {
+    fn the_open_button_sits_at_the_right_limit_and_reads_as_a_button() {
         let picker = a_picker(&["gui"], &["/home/hec/workspace/noob-cli"]);
         let cold = render_picker(&picker, 1205.0, 791.0, None);
         let warm = render_picker(&picker, 1205.0, 791.0, Some(Hit::PickerOpen));
@@ -12319,9 +12314,21 @@ mod tests {
             "one of the two is the outline"
         );
 
-        // It says "Open" and nothing else. The folder it would open is written
-        // above the list, and spelling it out here made the button as wide as a
-        // path and a different width every time the cursor moved.
+        // At the right limit of the box's content, in its head, not at the foot
+        // where it used to be beside the button that swapped the list.
+        let box_ = cold.layout.picker;
+        assert!(
+            (button.x + button.w - (box_.x + box_.w - PAD)).abs() < 0.01,
+            "{button:?} is not at the right limit of {box_:?}"
+        );
+        assert!(
+            button.y < cold.layout.picker_filter.y,
+            "{button:?} is not in the head"
+        );
+
+        // It says "Open selected" and nothing else. The folder it would open is
+        // written above the list, and spelling it out here made the button as
+        // wide as a path and a different width every time the cursor moved.
         let inside: String = warm
             .scene
             .texts
@@ -12352,42 +12359,92 @@ mod tests {
         );
     }
 
-    /// Item 2: a window that has just opened has to offer the sessions that came
-    /// before it, not only a fresh one. A second button beside Open swaps the
-    /// list, and everything else about the box stays where it was.
+    /// Item E1: the picker's head is one title and three buttons. Folders and
+    /// Sessions at the left choose which list is showing, and the one whose list
+    /// is in front of you is filled in the band the chosen row wears, because two
+    /// buttons drawn the same way say nothing about where you are.
     #[test]
-    fn the_button_beside_open_swaps_the_list_for_the_saved_sessions() {
+    fn the_head_s_two_buttons_choose_the_list_and_say_which_one_is_showing() {
         let mut picker = a_picker(&["gui"], &[]);
         let cold = render_picker(&picker, 1205.0, 791.0, None);
-        let warm = render_picker(&picker, 1205.0, 791.0, Some(Hit::PickerSessions));
-        let (open, button) = (cold.layout.picker_open, cold.layout.picker_sessions);
+        let open = cold.layout.picker_open;
+        let (folders, sessions) = (cold.layout.picker_folders, cold.layout.picker_sessions);
 
-        // Beside Open, on the same line, inside the box, and its own target.
-        assert!(button.x >= open.x + open.w, "{open:?} then {button:?}");
-        assert!((button.y - open.y).abs() < 0.01 && (button.h - open.h).abs() < 0.01);
-        assert!(button.x + button.w <= cold.layout.picker.x + cold.layout.picker.w + 0.01);
-        let (x, y) = middle(button);
+        // Both there, the same size, side by side at the left of the head, on
+        // the same row as Open and clear of it.
+        assert!(folders.w > 1.0 && folders.h > 1.0, "there is no Folders button");
+        assert!(sessions.w > 1.0 && sessions.h > 1.0, "there is no Sessions button");
+        assert!(
+            (folders.w - sessions.w).abs() < 0.01 && (folders.h - sessions.h).abs() < 0.01,
+            "the pair is not one size: {folders:?} then {sessions:?}"
+        );
+        assert!((folders.y - open.y).abs() < 0.01 && (sessions.y - open.y).abs() < 0.01);
+        assert!((folders.x - (cold.layout.picker.x + PAD)).abs() < 0.01, "{folders:?}");
+        assert!(sessions.x >= folders.x + folders.w, "{folders:?} then {sessions:?}");
+        assert!(open.x >= sessions.x + sessions.w, "{sessions:?} then {open:?}");
+
+        // Each is its own target, and none of the three answers for another.
+        let (fx, fy) = middle(folders);
+        let (x, y) = middle(sessions);
+        assert_eq!(cold.layout.hit(fx, fy), Some(Hit::PickerFolders));
         assert_eq!(cold.layout.hit(x, y), Some(Hit::PickerSessions));
         assert_eq!(
             cold.layout.hit(middle(open).0, middle(open).1),
-            Some(Hit::PickerOpen),
-            "and the two do not overlap"
+            Some(Hit::PickerOpen)
         );
 
-        // The same surface Open sits on, and it lights up under the pointer.
-        assert!(covered(&cold, button, button.h, cold.skin.button));
-        assert!(covered(&warm, button, button.h, warm.skin.button_hot));
+        // The folders are showing, so Folders wears the band and Sessions is a
+        // plain button. The two fills are not the same colour, or the state
+        // would be a state nobody can see.
+        assert_ne!(cold.skin.picked, cold.skin.button);
+        assert!(
+            covered(&cold, folders, folders.h, cold.skin.picked),
+            "the showing mode has no band"
+        );
+        assert!(
+            covered(&cold, sessions, sessions.h, cold.skin.button),
+            "the mode that is not showing wears the band"
+        );
+        assert!(!covered(&cold, sessions, sessions.h, cold.skin.picked));
+        // And it is written in the ink that reads on that band.
+        let ink: Vec<Option<[u8; 4]>> = cold
+            .scene
+            .texts
+            .iter()
+            .filter(|text| {
+                text.at.x >= folders.x
+                    && text.at.x < folders.x + folders.w
+                    && text.at.y >= folders.y
+                    && text.at.y < folders.y + folders.h
+            })
+            .flat_map(|text| text.runs.iter().map(|run| run.color))
+            .collect();
+        assert!(!ink.is_empty(), "the showing mode says nothing");
+        for tint in ink {
+            assert_eq!(tint, Some(cold.skin.picked_ink), "not the dark ink");
+        }
+
+        // The pointer lights the mode that is not showing, and nothing else.
+        let warm = render_picker(&picker, 1205.0, 791.0, Some(Hit::PickerSessions));
+        assert!(covered(&warm, sessions, sessions.h, warm.skin.button_hot));
         assert!(
             covered(&warm, open, open.h, warm.skin.button),
             "the pointer on one button must not light the other"
         );
+        assert!(
+            covered(&warm, folders, folders.h, warm.skin.picked),
+            "the showing mode changed under a pointer that is not on it"
+        );
 
+        // One title, and both words are on screen at once: the head says what
+        // the box is for, the pair says which list is in it.
         let text = text_of(&cold.scene);
-        assert!(text.contains("OPEN A FOLDER"));
+        assert!(text.contains(PICKER_TITLE), "{text}");
+        assert!(text.contains(PICKER_FOLDERS_LABEL), "{text}");
         assert!(text.contains(PICKER_SESSIONS_LABEL), "{text}");
 
-        // Pressed, the same box lists the sessions instead: same rectangle,
-        // same rows, same button, and the word on it now says the way back.
+        // Pressed, the same box lists the sessions instead: same rectangle, same
+        // buttons in the same places, same title, and the band has moved.
         let now = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
         let mut gone = a_saved("old", Some("/home/hec/deleted"), "the one before", 86_400);
         gone.gone = true;
@@ -12403,14 +12460,28 @@ mod tests {
         );
         let after = render_picker(&picker, 1205.0, 791.0, None);
         assert_eq!(
-            (after.layout.picker, after.layout.picker_open, after.layout.picker_sessions),
-            (cold.layout.picker, open, button),
+            (
+                after.layout.picker,
+                after.layout.picker_open,
+                after.layout.picker_folders,
+                after.layout.picker_sessions,
+                after.layout.picker_filter,
+            ),
+            (cold.layout.picker, open, folders, sessions, cold.layout.picker_filter),
             "swapping the list moved the box"
         );
         assert_eq!(after.layout.picker_rows.len(), 2);
+        assert!(
+            covered(&after, sessions, sessions.h, after.skin.picked),
+            "the sessions are showing and their button has no band"
+        );
+        assert!(
+            covered(&after, folders, folders.h, after.skin.button),
+            "the folder button kept the band after the list swapped"
+        );
         let text = text_of(&after.scene);
         for wanted in [
-            "OPEN A SESSION",
+            PICKER_TITLE,
             "2 saved sessions",
             "10m ago",
             "carry this on",
@@ -12419,13 +12490,16 @@ mod tests {
             // that never noted one would be resumed in.
             "/home/hec",
             PICKER_FOLDERS_LABEL,
+            PICKER_SESSIONS_LABEL,
         ] {
             assert!(text.contains(wanted), "{wanted:?} is not on screen: {text}");
         }
-        assert!(
-            !text.contains(PICKER_SESSIONS_LABEL),
-            "the button still offers the list that is already showing"
-        );
+        // The title is the one string in both lists: neither of the two it
+        // replaced is anywhere in the window.
+        for gone in ["OPEN A FOLDER", "OPEN A SESSION"] {
+            assert!(!text.contains(gone), "{gone:?} is still drawn");
+            assert!(!text_of(&cold.scene).contains(gone), "{gone:?} is still drawn");
+        }
 
         // The row that cannot be opened is written in the colour every other
         // thing that cannot be opened is written in.
@@ -12443,8 +12517,8 @@ mod tests {
             "a session whose folder has gone reads like any other row"
         );
 
-        // And it goes with the picker. A button left behind by a shape change
-        // is a press that lands on something nobody can see.
+        // And all three go with the picker. A button left behind by a shape
+        // change is a press that lands on something nobody can see.
         let dock = Dock::new();
         let panel = a_settings_panel(&Config::default());
         for (what, shape) in [
@@ -12452,7 +12526,10 @@ mod tests {
             ("settings", Shape { settings: Some(&panel), ..shape(&dock, &[]) }),
         ] {
             let layout = Layout::compute(1205.0, 791.0, &shape);
+            assert_eq!(layout.picker_folders.w, 0.0, "{what}");
             assert_eq!(layout.picker_sessions.w, 0.0, "{what}");
+            assert_eq!(layout.picker_open.w, 0.0, "{what}");
+            assert_ne!(layout.hit(fx, fy), Some(Hit::PickerFolders), "{what}");
             assert_ne!(layout.hit(x, y), Some(Hit::PickerSessions), "{what}");
         }
     }
@@ -12928,7 +13005,7 @@ mod tests {
                     "{what}: the field {field:?} runs out of the box {box_:?}"
                 );
                 assert!(
-                    field.h < 1.0 || field.y + field.h <= open.y + 0.01,
+                    field.h < 1.0 || field.y >= open.y + open.h - 0.01,
                     "{what}: the field {field:?} is over the Open button {open:?}"
                 );
                 // And nothing is drawn as a field where there is no room for
@@ -12955,76 +13032,62 @@ mod tests {
         );
     }
 
-    /// Item A6: the sessions list carries an arrow back to the folders. The word
-    /// on the button at the foot already swaps to Folders, but it is in the
-    /// corner furthest from the list and it wears a clock.
+    /// Item E1: Open selected is one route for both lists. On the folders it
+    /// opens the folder the cursor is on, on the sessions it carries the session
+    /// the cursor is on, and it is the same button in the same place either way.
+    ///
+    /// The picker used to have four affordances for these two acts: an Open
+    /// button and a Folders/Sessions swap at the foot, and an arrow back to the
+    /// folders in the heading. The arrow and the foot swap are gone.
     #[test]
-    fn the_session_list_carries_an_arrow_back_to_the_folders() {
-        let mut picker = a_session_picker();
-        let out = render_picker(&picker, 1205.0, 791.0, None);
-        let back = out.layout.picker_back;
+    fn open_selected_opens_a_folder_on_one_list_and_a_session_on_the_other() {
+        // The folder list, cursor moved onto the folder inside it.
+        let mut folders = a_picker(&["gui"], &[]);
+        let on_folders = render_picker(&folders, 1205.0, 791.0, None);
+        let button = on_folders.layout.picker_open;
+        let (x, y) = middle(button);
+        assert_eq!(on_folders.layout.hit(x, y), Some(Hit::PickerOpen));
+        // Past this folder and past the way out of it, onto the one inside.
+        assert!(folders.step(true) && folders.step(true));
+        let chosen = folders.confirm().expect("Open selected chose nothing");
+        assert_eq!(chosen.workspace, std::path::PathBuf::from("/home/hec/gui"));
+        assert_eq!(chosen.session, None, "a folder is a fresh session");
 
-        // In the heading row, at the left of the box, and its own target.
-        assert!(back.w > 1.0 && back.h > 1.0, "there is no back arrow");
-        assert!(
-            back.y >= out.layout.picker.y && back.y + back.h <= out.layout.picker_filter.y,
-            "{back:?} is not in the heading row"
-        );
-        let (x, y) = middle(back);
-        assert_eq!(out.layout.hit(x, y), Some(Hit::PickerBack));
-
-        // It is drawn where it answers: a surface, the cut corner, the arrow,
-        // and it lights up under the pointer the way the two buttons do.
-        let warm = render_picker(&picker, 1205.0, 791.0, Some(Hit::PickerBack));
-        assert!(covered(&out, back, back.h, out.skin.button));
-        assert!(covered(&warm, back, back.h, warm.skin.button_hot));
-        let arrow: String = out
-            .scene
-            .texts
-            .iter()
-            .filter(|text| (text.at.y - back.y).abs() < 0.01 && text.at.x < back.x + back.w)
-            .flat_map(|text| text.runs.iter().map(|run| run.text.as_str()))
-            .collect();
-        assert_eq!(arrow, icons::BACK.to_string());
-        // And the heading has moved along to clear it rather than being written
-        // under the arrow.
-        let heading = out
-            .scene
-            .texts
-            .iter()
-            .find(|text| text.runs.iter().any(|run| run.text.contains("OPEN A SESSION")))
-            .expect("the heading is drawn");
-        assert!(
-            heading.at.x >= back.x + back.w,
-            "the heading is written over the arrow"
+        // The session list, in the same window: the same button, in the same
+        // place, and it answers for the same point.
+        let mut sessions = a_session_picker();
+        let on_sessions = render_picker(&sessions, 1205.0, 791.0, None);
+        assert_eq!(on_sessions.layout.picker_open, button, "the button moved");
+        assert_eq!(on_sessions.layout.hit(x, y), Some(Hit::PickerOpen));
+        let chosen = sessions.confirm().expect("Open selected chose nothing");
+        assert_eq!(chosen.workspace, std::path::PathBuf::from("/home/hec"));
+        assert_eq!(
+            chosen.session.as_deref(),
+            Some("live"),
+            "the session under the cursor is not the one that was opened"
         );
 
-        // Pressing it is what Escape does: back to the folders, and then there
-        // is nothing there to press.
-        assert!(picker.show_folders());
-        assert!(!picker.on_sessions());
-        let folders = render_picker(&picker, 1205.0, 791.0, None);
-        assert_eq!(folders.layout.picker_back.w, 0.0, "the arrow outlived the list");
-        assert_ne!(folders.layout.hit(x, y), Some(Hit::PickerBack));
-        let heading = text_of(&folders.scene);
-        assert!(heading.contains("OPEN A FOLDER"));
-        assert!(
-            !heading.contains(icons::BACK.to_string().as_str()),
-            "the arrow is still drawn on the folder list"
-        );
-
-        // And it goes with the picker, like every other region in this box.
-        let dock = Dock::new();
-        let panel = a_settings_panel(&Config::default());
-        for (what, shape) in [
-            ("shaded", Shape { shaded: true, ..shape(&dock, &[]) }),
-            ("settings", Shape { settings: Some(&panel), ..shape(&dock, &[]) }),
-        ] {
-            let layout = Layout::compute(1205.0, 791.0, &shape);
-            assert_eq!(layout.picker_back.w, 0.0, "{what}");
-            assert_eq!(layout.picker_filter.w, 0.0, "{what}");
-            assert_ne!(layout.hit(x, y), Some(Hit::PickerBack), "{what}");
+        // Nothing that was retired is still drawn or still answers: no arrow in
+        // the heading, and no second button at the foot of the box.
+        let box_ = on_sessions.layout.picker;
+        let foot = Panel::new(box_.x, box_.y + box_.h - picker_open_h(Text::line_for(13.0)), box_.w, picker_open_h(Text::line_for(13.0)));
+        for out in [&on_folders, &on_sessions] {
+            assert!(
+                !text_of(&out.scene).contains('\u{ea9b}'),
+                "the back arrow is still drawn"
+            );
+            assert!(
+                !out.scene.rects.iter().any(|rect| {
+                    let [rx, ry, _, _] = rect.xywh();
+                    rect.rgba() == out.skin.button && foot.contains(rx + 1.0, ry + 1.0)
+                }),
+                "there is still a button at the foot of the box"
+            );
         }
+        // The one thing left down there is the line of keys, and Escape is still
+        // on it.
+        let keys = text_of(&on_sessions.scene);
+        assert!(keys.contains("esc quits"), "{keys}");
     }
 
     /// Everything drawn at this line, left to right, as one string.

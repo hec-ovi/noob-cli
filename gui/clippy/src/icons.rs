@@ -72,11 +72,6 @@ pub const RECENT: char = '\u{ea82}';
 /// the funnel that was here before: the field it sits in is typed into, and a
 /// funnel says the list has been filtered rather than saying type here.
 pub const SEARCH: char = '\u{ea6d}';
-/// On the button that takes the picker back from the sessions to the folders.
-///
-/// A full arrow, not the chevron the tab strip walks with: a chevron means one
-/// step along a row of tabs, and this is the way out of a list.
-pub const BACK: char = '\u{ea9b}';
 /// On the button that confirms a choice, and on the menu row that opens the
 /// session under the pointer: the same act, so the same mark.
 pub const CONFIRM: char = '\u{eab2}';
@@ -170,7 +165,6 @@ mod tests {
             LOCKED,
             RECENT,
             SEARCH,
-            BACK,
             CONFIRM,
             TRASH,
         ]

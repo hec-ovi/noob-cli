@@ -20,7 +20,8 @@ the search field above the list, a bordered box with a magnifier in it and the
 same cut corner as everything else here. Typing dims every folder that does not
 carry what you typed rather than taking it off the list, and the arrows then walk
 the ones that do. The mouse does the same: click a row, dim
-or not, double-click to walk in, and the Open button at the foot confirms. The
+or not, double-click to walk in, and the Open selected button at the right of
+the head confirms. The
 list is a tree: the plus in front of a folder puts what is inside it under that
 folder without leaving the one you are in, and the minus takes it back out. Both
 are a small green box with nothing filled in, drawn out of rectangles rather than
@@ -33,10 +34,13 @@ the list, so the second launch is Enter. They live in
 `~/.config/noob/no0b.recent`, one path per line, newest first; delete a line
 to forget it and delete the file to forget them all.
 
-The Sessions button beside Open, or Ctrl-R, lists the conversations the agent
-has already saved, in the same box with the same keys. An arrow at the left of
-the heading goes back to the folders, and so do the button at the foot, which
-then says Folders, and Esc. The list is a table under a row that names its
+The head is one title, OPEN FOLDER OR CONTINUE SESSION, and three buttons:
+Folders and Sessions at the left, and Open selected at the right. The pair
+chooses which list is in the box, and the one whose list is showing wears the
+same green band the chosen row wears, so the buttons say where you are. Sessions,
+or Ctrl-R, lists the conversations the agent has already saved, in the same box
+with the same keys; Folders, Ctrl-R again, or Esc goes back to the tree. The
+list is a table under a row that names its
 columns: when it was, the folder it belongs to, how big the transcript is, how
 full its context window got, and the start of the first thing you asked in it.
 Up and down move the cursor, Enter carries the session on, which is
