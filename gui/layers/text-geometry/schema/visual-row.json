@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Visual row",
+  "description": "Which logical line a visual row belongs to and which of that line's own rows it is, or null when the row is past the last line. The row number is fed to the rows operation to reach the characters on it, which is what a hit test does with the line's text in hand.",
+  "oneOf": [
+    {
+      "type": "null"
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "line",
+        "row"
+      ],
+      "properties": {
+        "line": {
+          "description": "Index of the line, absolute rather than relative to the window.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "row": {
+          "description": "Which of that line's rows this is, counted from the first row of the line.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  ]
+}

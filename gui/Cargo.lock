@@ -1035,6 +1035,7 @@ dependencies = [
  "glyphon",
  "naga",
  "noob-gpu",
+ "text-geometry",
  "wgpu",
 ]
 

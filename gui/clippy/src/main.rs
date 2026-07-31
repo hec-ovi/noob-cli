@@ -599,7 +599,7 @@ fn spot_in_pane(
     // character it is over.
     let (cols, chrome) = view::text_columns(view, body, column);
     let at = at.saturating_sub(chrome);
-    let Some((line, offset)) = pane.spot_in(rows, cols, row) else {
+    let Some((line, column)) = pane.spot_in(rows, cols, row, at) else {
         // Below the last line on screen the selection runs to the end of the
         // text that is on screen. The end of the whole ring would be wrong
         // whenever the pane is scrolled back: sweeping to the bottom of a pane
@@ -613,12 +613,13 @@ fn spot_in_pane(
         let end = pane.line(last).map_or(0, |l| l.text.chars().count());
         return Some(select::Spot::new(last, end));
     };
-    // `offset` is where this visual row starts inside its logical line, so a
-    // click on the second row of a wrapped line lands past the wrap. The
-    // column is not clamped to the line's own length: a drag that ran off the
-    // right of a short line has to reach that line's last character, and
-    // `Selection::text` is what trims the overshoot.
-    Some(select::Spot::new(line, offset + at))
+    // The column is the character `at` columns into the row that was pointed
+    // at, which on the second row of a wrapped line is past the wrap and, since
+    // the pane breaks at blanks, is not `row * cols` characters in. A pointer
+    // out past the end of the row takes that row's last character: the pane
+    // clamps it, so a drag off the right of a short line still reaches its end
+    // without running into the row below.
+    Some(select::Spot::new(line, column))
 }
 
 struct App {

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Rows request",
+  "description": "One logical line, the width of the box it is drawn in, and where a row is allowed to end.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "text",
+    "cols",
+    "break"
+  ],
+  "properties": {
+    "text": {
+      "description": "One logical line. A newline inside it is an ordinary character, not a row boundary: a caller holding several lines splits them first.",
+      "type": "string"
+    },
+    "cols": {
+      "description": "Width of the box in monospace columns. Zero is legal and means a window mid-resize; the whole line then reports one row.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "break": {
+      "description": "column: every row holds exactly cols characters, mid-word or not, which is what a caret placed as row * cols + column needs. word: a row ends at the last break opportunity that fits, and only a word wider than the whole box breaks on the column.",
+      "type": "string",
+      "enum": [
+        "column",
+        "word"
+      ]
+    }
+  }
+}

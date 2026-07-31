@@ -392,33 +392,71 @@ pub struct Run {
 }
 
 impl Run {
-    /// The same runs with a line break put in every `cols` characters, so the
-    /// shaper has nothing left to wrap.
+    /// The same runs, broken into rows the way `text-geometry` says they break,
+    /// so the shaper has nothing left to wrap.
     ///
-    /// The count runs across the runs, not within each one: a row of a
-    /// syntax-colored file is a dozen runs and it is still one row. A break
-    /// that a newline already provides is not doubled, and a break is only ever
-    /// inserted in front of a character that exists, so a line of exactly `cols`
-    /// characters stays one row rather than gaining an empty one.
-    pub fn hard_wrapped(runs: &[Run], cols: usize) -> Vec<Run> {
+    /// The rule itself is not here and must not be: the window counts the rows
+    /// of a line to place a selection, a caret and a scrollbar, and a second
+    /// version of the rule living in the renderer is what put the highlight on
+    /// different characters from the ones on screen. This walks the runs,
+    /// hands each logical line to [`text_geometry::rows_in`], and lays the
+    /// answer out: a newline between the rows, and the one character a row
+    /// broke at dropped, since it is drawn on neither row.
+    ///
+    /// The rows run across the runs, not within each one: a row of a
+    /// syntax-colored file is a dozen runs and it is still one row. Counting
+    /// per run would break after every token. Colors, icon flags and the run
+    /// boundaries are untouched, so what comes back shapes into the same
+    /// spans it went in as.
+    pub fn wrapped(runs: &[Run], cols: usize, at: text_geometry::Break) -> Vec<Run> {
         if cols == 0 {
             return runs.to_vec();
         }
-        let mut column = 0usize;
+        // One pass to lay the whole box out, because a row can start in one run
+        // and end in another and a break opportunity can sit either side of a
+        // boundary.
+        let whole: String = runs.iter().map(|run| run.text.as_str()).collect();
+        let count = whole.chars().count();
+        // For every character of the box: whether it is drawn, and whether a
+        // row starts in front of it.
+        let mut kept = vec![true; count];
+        let mut breaks = vec![false; count];
+        let mut line = 0usize;
+        let mut rows = Vec::new();
+        for segment in whole.split('\n') {
+            let length = segment.chars().count();
+            let mut covered = 0;
+            text_geometry::rows_into(segment, cols, at, &mut rows);
+            for (index, row) in rows.iter().enumerate() {
+                if index > 0 {
+                    breaks[line + row.start] = true;
+                }
+                // Whatever the rows leave out is a character the break was
+                // spent on, drawn on neither side of it.
+                for gap in covered..row.start {
+                    kept[line + gap] = false;
+                }
+                covered = row.end;
+            }
+            for gap in covered..length {
+                kept[line + gap] = false;
+            }
+            // Past the segment sits the newline that ended it, which is a
+            // character of the box and stays exactly as it is.
+            line += length + 1;
+        }
+        let mut at_char = 0;
         runs.iter()
             .map(|run| {
                 let mut text = String::with_capacity(run.text.len());
                 for ch in run.text.chars() {
-                    if ch == '\n' {
-                        column = 0;
-                    } else {
-                        if column == cols {
-                            text.push('\n');
-                            column = 0;
-                        }
-                        column += 1;
+                    if breaks[at_char] {
+                        text.push('\n');
                     }
-                    text.push(ch);
+                    if kept[at_char] {
+                        text.push(ch);
+                    }
+                    at_char += 1;
                 }
                 Run {
                     text,
@@ -470,22 +508,27 @@ pub struct Text {
     /// Lines scrolled off the top. A pane showing the tail of a long stream
     /// sets this to `lines - visible` and pays for the visible rows only.
     pub scroll_lines: f32,
-    /// Break every row at exactly this many characters, rather than letting the
+    /// Lay this box out in rows of this many columns, rather than letting the
     /// shaper decide where a row ends.
     ///
     /// What a monospace pane needs. Everything around one of these boxes counts
-    /// characters: the row a line occupies is `chars / cols`, the column a
-    /// pointer is over is `x / column_width`, and the character a caret sits on
-    /// is `row * cols + column`. None of that is true unless the rows really do
-    /// hold `cols` characters each, and no shaper wraps that way on its own:
-    /// word wrap breaks at the last blank that fits, and even character wrap
-    /// lets a blank sitting on the boundary hang over the edge, so the row
-    /// below starts one character further along than the arithmetic says. One
-    /// swallowed blank per break is what put a space nobody could see into a
-    /// copied selection, and it only showed up once the window was narrow
-    /// enough to wrap. The break is inserted here instead, so the row the
-    /// shaper lays out is the row the arithmetic named.
+    /// characters: how many rows a line takes, which row a pointer is over, and
+    /// which characters a selection on that row is holding. None of that is
+    /// true unless the rows the shaper lays out are the rows the window
+    /// counted, and no shaper wraps the way the window counts on its own: it
+    /// swallows the blank at each break, so the row below starts one character
+    /// further along than the arithmetic says. One swallowed blank per break is
+    /// what put a space nobody could see into a copied selection, and it only
+    /// showed up once the window was narrow enough to wrap. A box that names
+    /// its column count is broken into rows before shaping instead, by the same
+    /// `text-geometry` call the window counts with.
     pub wrap_cols: Option<usize>,
+    /// Where those rows are allowed to end.
+    ///
+    /// Prose reads in words, so a pane breaks at a blank. The prompt places its
+    /// caret as `row * cols + column`, so it breaks on the column and takes the
+    /// mid-word break that comes with it. Ignored unless `wrap_cols` is set.
+    pub wrap_break: text_geometry::Break,
 }
 
 impl Text {
@@ -502,13 +545,26 @@ impl Text {
             color,
             scroll_lines: 0.0,
             wrap_cols: None,
+            wrap_break: text_geometry::Break::Word,
         }
     }
 
-    /// Lay this box out `cols` characters to the row. Ignored when `cols` is
-    /// zero, which is what a box too narrow for one column reports.
+    /// Lay this box out in rows `cols` columns wide, breaking at a blank so
+    /// words stay whole. Ignored when `cols` is zero, which is what a box too
+    /// narrow for one column reports.
     pub fn wrap_at(mut self, cols: usize) -> Text {
         self.wrap_cols = (cols > 0).then_some(cols);
+        self.wrap_break = text_geometry::Break::Word;
+        self
+    }
+
+    /// Lay this box out in rows of exactly `cols` characters, wherever that
+    /// falls. For a box whose caret and whose click both count
+    /// `row * cols + column`, which is the prompt: a row that ended early would
+    /// put the caret a word away from the character it is on.
+    pub fn break_at(mut self, cols: usize) -> Text {
+        self.wrap_cols = (cols > 0).then_some(cols);
+        self.wrap_break = text_geometry::Break::Column;
         self
     }
 
@@ -965,7 +1021,7 @@ impl Renderer {
                 let runs = match item.wrap_cols {
                     Some(cols) => {
                         buffer.set_wrap(Wrap::None);
-                        wrapped = Run::hard_wrapped(&item.runs, cols);
+                        wrapped = Run::wrapped(&item.runs, cols, item.wrap_break);
                         wrapped.as_slice()
                     }
                     None => item.runs.as_slice(),
@@ -1519,22 +1575,26 @@ mod tests {
 
     /// The characters each visual row really ends up holding, laid out the way
     /// [`Renderer::shape`] lays a box out: `wrap` is what a box with no column
-    /// count gets, and `Some(cols)` is the hard break `Text::wrap_at` asks for.
-    fn rows_on_screen(text: &str, cols: usize, hard: bool, wrap: Wrap) -> Vec<String> {
+    /// count gets, and `named` is the rule a box that names its columns is
+    /// broken by before the shaper sees it.
+    fn rows_on_screen(
+        text: &str,
+        cols: usize,
+        named: Option<text_geometry::Break>,
+        wrap: Wrap,
+    ) -> Vec<String> {
         let size = 14.0;
         let mut fonts = icon_fonts();
         let column = column_of(&mut fonts, size);
-        let laid = match hard {
-            true => Run::hard_wrapped(&[Run::plain(text)], cols)
-                .swap_remove(0)
-                .text,
-            false => text.to_string(),
+        let laid = match named {
+            Some(at) => Run::wrapped(&[Run::plain(text)], cols, at).swap_remove(0).text,
+            None => text.to_string(),
         };
         let mut buffer = Buffer::new(&mut fonts, Metrics::new(size, Text::line_for(size)));
         // Half a column of slack, so `cols` glyphs fit and `cols + 1` do not
         // whichever way the float rounds.
         buffer.set_size(Some(cols as f32 * column + column * 0.5), Some(4096.0));
-        buffer.set_wrap(if hard { Wrap::None } else { wrap });
+        buffer.set_wrap(if named.is_some() { Wrap::None } else { wrap });
         buffer.set_text(
             &laid,
             &Attrs::new().family(Family::Monospace),
@@ -1556,53 +1616,63 @@ mod tests {
             .collect()
     }
 
-    /// Everything around a pane counts characters: a line takes `chars / cols`
-    /// rows, and the character under a pointer is `row * cols + column`. That
-    /// is only true if a row really holds `cols` characters.
+    /// A box that names its columns is drawn in the rows `text-geometry` says
+    /// it has, character for character.
     ///
-    /// Neither wrap mode the shaper offers does that. Word wrap breaks at the
-    /// last blank that fits, and character wrap still lets a blank sitting on
-    /// the boundary hang over the edge, so the row below starts one character
-    /// late. One swallowed blank per break is the space that turned up in a
+    /// This used to assert that a named box always broke on the column, blank
+    /// or not, which is how the rows were made to match the arithmetic in the
+    /// first place: it was exact, and it broke prose in the middle of words.
+    /// Now the arithmetic breaks at the blank as well, so the assertion is that
+    /// the rows on screen are the rows the layer named, whichever rule the box
+    /// asked for.
+    ///
+    /// Neither wrap mode the shaper offers can be trusted with this on its own.
+    /// Word wrap drops the blank at the break off the screen entirely, and
+    /// character wrap lets a blank sitting on the boundary hang over the edge,
+    /// so the row below starts one character further along than any count of it
+    /// says. One swallowed blank per break is the space that turned up in a
     /// copied selection with nothing on screen to explain it.
     #[test]
-    fn a_box_that_names_its_columns_holds_exactly_that_many_per_row() {
+    fn a_box_that_names_its_columns_is_drawn_in_the_rows_it_was_counted_in() {
         let cols = 20;
         // The blank at index 20 is the one both shaper modes swallow.
         let prose = "hello worldly people everywhere now";
         assert_eq!(prose.chars().count(), 35);
         assert_eq!(prose.chars().nth(20), Some(' '));
-
-        let hard = rows_on_screen(prose, cols, true, Wrap::None);
-        assert_eq!(
-            hard,
-            vec!["hello worldly people", " everywhere now"],
-            "a named box breaks on the column, blank or not"
-        );
-        // Which is to say: row r holds the characters starting at r * cols.
         let chars: Vec<char> = prose.chars().collect();
-        for (r, row) in hard.iter().enumerate() {
-            let from = r * cols;
-            let to = (from + cols).min(chars.len());
-            assert_eq!(row.chars().collect::<Vec<char>>(), chars[from..to], "row {r}");
-        }
 
-        // What the two shaper modes do with the same box, and why neither is
-        // enough on its own.
-        let glyph = rows_on_screen(prose, cols, false, Wrap::Glyph);
+        for at in [text_geometry::Break::Word, text_geometry::Break::Column] {
+            let on_screen = rows_on_screen(prose, cols, Some(at), Wrap::None);
+            let counted = text_geometry::rows_in(prose, cols, at);
+            assert_eq!(on_screen.len(), counted.len(), "{at:?} drew a different number of rows");
+            for (row, span) in on_screen.iter().zip(counted) {
+                assert_eq!(
+                    row.chars().collect::<Vec<char>>(),
+                    chars[span.start..span.end],
+                    "{at:?}: {row:?} is not the characters {span:?} names"
+                );
+            }
+        }
+        assert_eq!(
+            rows_on_screen(prose, cols, Some(text_geometry::Break::Word), Wrap::None),
+            vec!["hello worldly people", "everywhere now"],
+            "the blank at the break is on neither row"
+        );
+        assert_eq!(
+            rows_on_screen(prose, cols, Some(text_geometry::Break::Column), Wrap::None),
+            vec!["hello worldly people", " everywhere now"],
+            "a box breaking on the column keeps every character it was given"
+        );
+
+        // What the two shaper modes do with the same box, left to themselves.
+        let glyph = rows_on_screen(prose, cols, None, Wrap::Glyph);
         assert_eq!(
             glyph,
             vec!["hello worldly people ", "everywhere now"],
             "character wrap lets the blank on the boundary hang over"
         );
-        let word = rows_on_screen(prose, cols, false, Wrap::WordOrGlyph);
+        let word = rows_on_screen(prose, cols, None, Wrap::WordOrGlyph);
         assert_eq!(word, vec!["hello worldly people", "everywhere now"]);
-        assert!(
-            word.concat().chars().count() < prose.chars().count(),
-            "word wrap drops the blank at the break off the screen entirely, \
-             so the row below starts a character further along than the \
-             arithmetic says: {word:?}"
-        );
     }
 
     /// Blanks at the very start of a box keep their columns.
@@ -1649,11 +1719,11 @@ mod tests {
     /// The break is put in front of a character that exists, so a line of
     /// exactly `cols` characters is one row and not one row plus an empty one,
     /// and a newline that is already there is not doubled. That is what keeps
-    /// the drawn row count equal to `chars / cols` rounded up.
+    /// the drawn row count equal to the row count the box was measured by.
     #[test]
     fn a_hard_break_is_only_inserted_where_a_row_really_overflows() {
         let wrap = |text: &str, cols: usize| {
-            Run::hard_wrapped(&[Run::plain(text)], cols)
+            Run::wrapped(&[Run::plain(text)], cols, text_geometry::Break::Column)
                 .swap_remove(0)
                 .text
         };
@@ -1685,7 +1755,7 @@ kl");
             Run::tinted("def", [1, 2, 3, 4]),
             Run::plain("ghi"),
         ];
-        let out = Run::hard_wrapped(&runs, 4);
+        let out = Run::wrapped(&runs, 4, text_geometry::Break::Column);
         let text: String = out.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(text, "abcd
 efgh

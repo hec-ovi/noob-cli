@@ -128,6 +128,17 @@ impl Kind {
     }
 }
 
+/// How every pane of text in the window breaks its rows.
+///
+/// Prose is read in words, so a row ends at a blank and not in the middle of
+/// one. The rule itself is `text-geometry`'s and is written down once there:
+/// the heights a pane is scrolled by, the row a pointer lands on, the band that
+/// is painted and the rows the renderer draws all pass this same value, which
+/// is what makes the characters on a row and the characters a selection there
+/// copies the same characters. The prompt is the one box that does not use it,
+/// because its caret is placed by counting `row * cols + column`.
+pub const PANE_WRAP: text_geometry::Break = text_geometry::Break::Word;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Line {
     pub text: String,
@@ -253,9 +264,14 @@ impl Pane {
             let mut cache = self.heights.borrow_mut();
             if cache.cols != cols || cache.stale {
                 cache.rows.clear();
-                cache
-                    .rows
-                    .extend(self.lines.iter().map(|l| text_geometry::rows_of(l.text.chars().count(), cols)));
+                // One buffer down the whole pane rather than one per line: a
+                // full pane is thousands of lines and this runs whenever one
+                // arrives.
+                let mut wrapped = Vec::new();
+                for line in &self.lines {
+                    text_geometry::rows_into(&line.text, cols, PANE_WRAP, &mut wrapped);
+                    cache.rows.push(wrapped.len());
+                }
                 cache.cols = cols;
                 cache.stale = false;
             }
@@ -281,12 +297,31 @@ impl Pane {
         self.dropped + self.window(rows, cols).first
     }
 
-    /// Which line a visual row is showing, and the character offset that row
-    /// starts at within it. `None` for a row below the last line.
-    pub fn spot_in(&self, rows: usize, cols: usize, row: usize) -> Option<(usize, usize)> {
+    /// Which line a visual row is showing, and which character of it sits
+    /// `at` columns into that row. `None` for a row below the last line.
+    ///
+    /// A row does not start at `row * cols` characters into its line, because
+    /// the pane wraps at blanks: the row a reader is pointing at starts
+    /// wherever the words let it. Both halves come from `text-geometry`, the
+    /// row from the cached heights and the characters on it from the line's own
+    /// text, so this cannot drift from what the renderer drew.
+    ///
+    /// `at` is clamped to the row it landed on, so a pointer out in the empty
+    /// space to the right of a short row takes that row's last character rather
+    /// than reaching into the row below it.
+    pub fn spot_in(&self, rows: usize, cols: usize, row: usize, at: usize) -> Option<(usize, usize)> {
         let w = self.window(rows, cols);
-        let (line, offset) = text_geometry::line_at(&self.heights(cols), w, cols, row)?;
-        Some((self.dropped + line, offset))
+        let (line, wrapped) = text_geometry::row_at(&self.heights(cols), w, row)?;
+        let span = *self.rows_of_line(self.dropped + line, cols).get(wrapped)?;
+        Some((self.dropped + line, span.start + at.min(span.len())))
+    }
+
+    /// The visual rows one line is drawn as, by the rule the renderer draws it
+    /// by. Empty for a line that has been evicted.
+    pub fn rows_of_line(&self, absolute: usize, cols: usize) -> Vec<text_geometry::Row> {
+        self.line(absolute)
+            .map(|line| text_geometry::rows_in(&line.text, cols, PANE_WRAP))
+            .unwrap_or_default()
     }
 
     /// The rows one line occupies on screen, clipped to the viewport.
@@ -1003,9 +1038,9 @@ impl State {
     ///
     /// The mark is written into the text rather than drawn beside it because
     /// every row count, scroll window and selection column in that pane is
-    /// `chars / cols` arithmetic: a run added at draw time would put the drawn
-    /// rows and the measured ones a character apart. It replaces a space with a
-    /// bar, so the line is the length it always was.
+    /// measured off the stored line: a run added at draw time would put the
+    /// drawn rows and the measured ones a character apart. It replaces a space
+    /// with a bar, so the line is the length it always was.
     fn mark_parallel(&mut self, ordinal: usize) {
         let Some(index) = ordinal.checked_sub(self.calls_dropped) else {
             return;
@@ -2069,9 +2104,9 @@ mod tests {
     /// row is exactly as long as an unmarked one.
     ///
     /// Every row count, scroll window and selection column in that pane is
-    /// `chars / cols` arithmetic. A mark that made a row one character longer
-    /// would put the rows that are drawn and the rows that are measured out of
-    /// step for the rest of the session.
+    /// measured off the stored line. A mark that made a row one character
+    /// longer would put the rows that are drawn and the rows that are measured
+    /// out of step for the rest of the session.
     #[test]
     fn the_parallel_mark_costs_the_row_no_width() {
         let mut plain = State::new();
@@ -2854,18 +2889,47 @@ mod tests {
         let mut pane = Pane::new(100);
         pane.say("x".repeat(120), Tone::Body);
         let (rows, cols) = (3, 50);
-        assert_eq!(pane.spot_in(rows, cols, 0), Some((0, 0)));
+        assert_eq!(pane.spot_in(rows, cols, 0, 0), Some((0, 0)));
         assert_eq!(
-            pane.spot_in(rows, cols, 1),
+            pane.spot_in(rows, cols, 1, 0),
             Some((0, 50)),
             "the second row starts fifty characters in"
         );
-        assert_eq!(pane.spot_in(rows, cols, 2), Some((0, 100)));
+        assert_eq!(pane.spot_in(rows, cols, 2, 0), Some((0, 100)));
         assert_eq!(
-            pane.spot_in(rows, cols, 3),
+            pane.spot_in(rows, cols, 3, 0),
             None,
             "and below the text is nothing, not the last character"
         );
+    }
+
+    /// The same line with blanks in it: the pane breaks at the blank, so the
+    /// row below starts where the words let it and not fifty characters in.
+    /// The column is counted from the start of that row.
+    #[test]
+    fn a_row_of_a_line_wrapped_at_a_blank_starts_where_the_words_end() {
+        let mut pane = Pane::new(100);
+        // Two words of forty, so the break is at the blank at index 40 rather
+        // than mid-word at fifty.
+        let prose = format!("{} {}", "a".repeat(40), "b".repeat(40));
+        pane.say(prose.clone(), Tone::Body);
+        let (rows, cols) = (3, 50);
+        assert_eq!(pane.spot_in(rows, cols, 0, 0), Some((0, 0)));
+        assert_eq!(
+            pane.spot_in(rows, cols, 1, 0),
+            Some((0, 41)),
+            "the second row starts past the blank the first one broke at"
+        );
+        assert_eq!(
+            prose.chars().nth(41),
+            Some('b'),
+            "and that is the first character of the second word"
+        );
+        // A pointer out past the end of a row takes that row's last character,
+        // not one from the row below it.
+        assert_eq!(pane.spot_in(rows, cols, 0, 49), Some((0, 40)));
+        assert_eq!(pane.spot_in(rows, cols, 1, 49), Some((0, 81)));
+        assert_eq!(prose.chars().count(), 81);
     }
 
     /// The thumb has to know the pane is overflowing. Counting lines, four

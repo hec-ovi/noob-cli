@@ -2025,7 +2025,7 @@ fn place_popup(call: &crate::state::Call, column: f32, size: f32, width: f32, he
     let rows: usize = call
         .popup_lines()
         .iter()
-        .map(|(text, _)| text_geometry::rows_of(text.chars().count(), cols))
+        .map(|(text, _)| text_geometry::rows_in(text, cols, crate::state::PANE_WRAP).len())
         .sum();
     let w = (cols as f32 * column + POPUP_PAD * 2.0).min(width);
     let h = (rows as f32 * line + POPUP_PAD * 2.0)
@@ -3560,11 +3560,16 @@ fn selection_band(scene: &mut Scene, frame: &Frame, panel: Panel, showing: Optio
         // A wrapped line needs one rectangle per visual row, each covering only
         // the part of the selection that lands on that row. The first line in
         // the window may start partway down, which is what `skip` records.
+        // Which characters a row holds comes from the pane, which is the same
+        // answer the renderer breaks the rows by: a band drawn on its own
+        // arithmetic is a highlight over text the clipboard does not have.
         let from_row = if step == 0 { window.skip } else { 0 };
+        let spans = pane.rows_of_line(number, cols);
         for i in 0..height {
-            let wrapped = from_row + i;
-            let row_start = wrapped * cols;
-            let row_end = (row_start + cols).min(chars.max(row_start));
+            let Some(span) = spans.get(from_row + i) else {
+                continue;
+            };
+            let (row_start, row_end) = (span.start, span.end);
             let a = from.max(row_start);
             let b = to.min(row_end);
             if a >= b {
@@ -3606,10 +3611,10 @@ fn output(scene: &mut Scene, frame: &Frame, panel: Panel) {
     // The window may start partway down a wrapped line rather than dropping
     // it, so the shaped buffer is scrolled by the rows that sit above.
     //
-    // Wrapped by character, not by word: every row count, every scroll window
-    // and every selection column in this pane is `chars / cols` arithmetic, so
-    // the renderer has to break in the same places or the columns drift by one
-    // per blank the word wrap swallowed at a break.
+    // The box names its column count, so the renderer breaks the rows with the
+    // same `text-geometry` call the pane was measured with rather than wrapping
+    // them itself. Left to the shaper the columns drift by one per blank it
+    // swallows at a break, and the selection lands on the wrong glyphs.
     scene.text(
         Text::rich(runs, panel.inset(PAD), frame.body_size, frame.skin.body)
             .scrolled(state.output.window(rows, cols).skip as f32)
@@ -3709,21 +3714,28 @@ fn agent_rows(state: &State, skin: &Skin) -> Vec<ListRow> {
     rows
 }
 
-/// One logical line of a list pane: the runs that draw it, and how long it is in
-/// characters.
+/// One logical line of a list pane: the runs that draw it, and the text they
+/// draw.
 ///
-/// The length is counted off the runs rather than passed in beside them. It is
-/// what the scroll window is measured from, and a length that disagreed with what
-/// was drawn is a pane that scrolls by a different number of rows than it has.
+/// The text is taken off the runs rather than passed in beside them, and the
+/// height is measured from it by the same call the renderer breaks the rows
+/// with. A row counted one way and drawn another is a pane that scrolls by a
+/// different number of rows than it has, and a row of prose with blanks in it
+/// wraps at a different place from a row of the same length without them.
 struct ListRow {
     runs: Vec<Run>,
-    chars: usize,
+    text: String,
 }
 
 impl ListRow {
     fn new(runs: Vec<Run>) -> ListRow {
-        let chars = runs.iter().map(|run| run.text.chars().count()).sum();
-        ListRow { runs, chars }
+        let text = runs.iter().map(|run| run.text.as_str()).collect();
+        ListRow { runs, text }
+    }
+
+    /// How many rows this takes in a box `cols` wide.
+    fn rows(&self, cols: usize) -> usize {
+        text_geometry::rows_in(&self.text, cols, crate::state::PANE_WRAP).len()
     }
 }
 
@@ -3742,7 +3754,7 @@ fn list_pane(scene: &mut Scene, frame: &Frame, panel: Panel, view: View, rows: V
     let size = frame.pane_size;
     let fit = frame.layout.rows(panel, size);
     let cols = cols_of(panel, frame.pane_column);
-    let heights = text_geometry::heights(rows.iter().map(|row| row.chars), cols);
+    let heights: Vec<usize> = rows.iter().map(|row| row.rows(cols)).collect();
     let scrolls = &frame.state.scrolls;
     let window = scrolls.window(view, &heights, fit);
     let mut runs = Vec::new();
@@ -3783,10 +3795,7 @@ pub fn scroll_extent(frame: &Frame, view: View, panel: Panel) -> Option<(Vec<usi
     let fit = frame.layout.rows(panel, frame.pane_size);
     let cols = cols_of(panel, frame.pane_column);
     let lines = |rows: Vec<ListRow>| {
-        Some((
-            text_geometry::heights(rows.iter().map(|row| row.chars), cols),
-            fit,
-        ))
+        Some((rows.iter().map(|row| row.rows(cols)).collect(), fit))
     };
     match view {
         View::Plan => lines(plan_rows(frame.state, frame.skin)),
@@ -5397,11 +5406,13 @@ fn input_row(scene: &mut Scene, frame: &Frame) {
             frame.body_size,
             skin.bright,
         )
-        // Broken at the same column count the caret is placed by, so counting
-        // columns lands on the glyph that is really there. Word wrap would put
-        // the caret a word away on every long line, and character wrap would
-        // still swallow a blank that fell on the boundary.
-        .wrap_at(columns)
+        // Broken on the column the caret is placed by, so counting columns
+        // lands on the glyph that is really there. This is the one box in the
+        // window that is not wrapped at blanks: a row that ended early would
+        // put the caret a word away from the character it is on, since
+        // everything here is `row * columns + column`. The panes wrap at
+        // blanks, and their rows are counted the same way they are drawn.
+        .break_at(columns)
         // The rows above the window are paid for and not drawn, the way a pane
         // showing the tail of a long stream is. Without this a prompt longer
         // than its allowance goes on being typed into a box that shows only its
@@ -8274,35 +8285,32 @@ mod tests {
 
     /// A pane is drawn in exactly the columns its selection is counted in.
     ///
-    /// Everything from the pointer to the clipboard is `row * cols + column`
-    /// arithmetic over the stored text, and that is only true if the rows on
-    /// screen really hold `cols` characters each. No shaper wraps that way on
-    /// its own, so the box names its column count and the rows are broken
-    /// before shaping. The panes used to be word wrapped: the blank at each
-    /// break was dropped from the screen, so every row below one began a
-    /// character further along than the arithmetic said and a selection made
-    /// there picked up spaces that were nowhere on screen. It only showed up
-    /// once the window was narrow enough to wrap, which is why resizing looked
-    /// like the trigger.
+    /// Everything from the pointer to the clipboard runs over the stored text
+    /// by character index, and that is only true if the row on screen holds the
+    /// characters the pane says it does. No shaper wraps the way anything else
+    /// counts, so the box names its column count and the rows are broken before
+    /// shaping, by the same `text-geometry` call that measured them. Left to
+    /// the shaper, the blank at each break was dropped from the screen, so
+    /// every row below one began a character further along than the arithmetic
+    /// said and a selection made there picked up spaces that were nowhere on
+    /// screen. It only showed up once the window was narrow enough to wrap,
+    /// which is why resizing looked like the trigger.
     ///
-    /// Prose with blanks, deliberately: every wrapped-pane test in this repo
-    /// used `"x".repeat(n)`, which has no blank to swallow and so wraps the
-    /// same way whatever the mode is. That is why the whole corpus stayed green
-    /// over the bug.
+    /// The first version of this fix made both sides break on the column, which
+    /// held the property and broke prose in the middle of words. Both sides
+    /// break at the blank now, so the assertion is no longer `row * cols`: it
+    /// is that the row a hit test lands on starts where the drawn row starts,
+    /// that the drawn row runs to where the next one begins, and that the only
+    /// thing between two rows is the single blank the break was spent on.
+    ///
+    /// Prose with blanks, deliberately, plus a word wider than the pane, a run
+    /// of blanks and an empty line: every wrapped-pane test in this repo used
+    /// `"x".repeat(n)`, which has no blank to break at and so wraps the same
+    /// way whatever the rule is. That is why the whole corpus stayed green over
+    /// the bug.
     #[test]
     fn a_pane_is_drawn_in_the_columns_its_selection_is_counted_in() {
         let mut state = busy_state();
-        for text in [
-            "hello worldly people everywhere now and then and again and again \
-             and once more for luck, with blanks all the way along it so the \
-             wrap has plenty of chances to eat one of them on a boundary",
-            "a second line of prose with a good few blanks in it to break on, \
-             long enough that it takes three rows of this pane to show and so \
-             crosses two wrap points on the way down",
-        ] {
-            state.activity.say(text, Tone::Body);
-        }
-
         let dock = Dock::new();
         let space = Space::ALL
             .into_iter()
@@ -8310,6 +8318,24 @@ mod tests {
             .expect("the activity pane is in the window");
         let shape = shape(&dock, &["a.rs"]);
         let layout = Layout::compute(1400.0, 900.0, &shape);
+        let panel = layout.placed(space).body;
+        let cols = cols_of(panel, 8.0);
+        for text in [
+            "hello worldly people everywhere now and then and again and again \
+             and once more for luck, with blanks all the way along it so the \
+             wrap has plenty of chances to eat one of them on a boundary"
+                .to_string(),
+            "a second line of prose with a good few blanks in it to break on, \
+             long enough that it takes three rows of this pane to show and so \
+             crosses two wrap points on the way down"
+                .to_string(),
+            String::new(),
+            // A word with nowhere to break in it, wider than the pane whatever
+            // the pane turns out to be, and a run of blanks either side.
+            format!("a word   with   runs   of   blanks   {}   and no room to break it", "z".repeat(cols + 5)),
+        ] {
+            state.activity.say(text, Tone::Body);
+        }
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state: &state,
@@ -8332,8 +8358,6 @@ mod tests {
             settings: None,
         });
 
-        let panel = layout.placed(space).body;
-        let cols = cols_of(panel, 8.0);
         let text = scene
             .texts
             .iter()
@@ -8346,43 +8370,84 @@ mod tests {
         );
 
         // The rows the renderer will lay out, which is what the reader sees.
-        let laid: String = noob_draw::Run::hard_wrapped(&text.runs, cols)
+        let laid: String = noob_draw::Run::wrapped(&text.runs, cols, text.wrap_break)
             .iter()
             .map(|run| run.text.as_str())
             .collect();
         let drawn: Vec<Vec<char>> = laid.split('\n').map(|row| row.chars().collect()).collect();
 
-        // And the characters the hit test believes each row is showing.
+        // And the characters the hit test believes each row is showing. Both
+        // ends of the row come out of the hit test itself: column zero is where
+        // a drag from the left edge of the row starts, and a column past the
+        // right edge is where a drag off the end of the row stops.
         let rows = layout.rows(panel, 13.0);
         let skip = state.activity.window(rows, cols).skip;
         let mut checked = 0;
+        let mut wrapped = 0;
+        let mut on_the_column = 0;
+        let mut previous: Option<(usize, usize)> = None;
         for row in 0..rows {
-            let Some((line, offset)) = state.activity.spot_in(rows, cols, row) else {
+            let Some((line, start)) = state.activity.spot_in(rows, cols, row, 0) else {
                 break;
             };
-            let source: Vec<char> = state
+            let (same, end) = state
+                .activity
+                .spot_in(rows, cols, row, cols + 9)
+                .expect("the row a moment ago is still a row");
+            assert_eq!(same, line, "row {row} lands on two different lines");
+            let text = &state
                 .activity
                 .line(line)
                 .expect("a row of a line the pane still holds")
-                .text
-                .chars()
-                .skip(offset)
-                .take(cols)
-                .collect();
+                .text;
+            let source: Vec<char> = text.chars().take(end).skip(start).collect();
+            assert!(end - start <= cols, "row {row} is wider than the pane");
             assert_eq!(
                 drawn[row + skip], source,
                 "screen row {row} holds something other than what a selection there would copy"
             );
+            // Nothing falls between two rows of one line but the single blank
+            // the break was spent on, and nothing is on both.
+            if let Some((before, was)) = previous.filter(|(_, was)| *was == line) {
+                match start - before {
+                    0 => {}
+                    1 => assert_eq!(
+                        text.chars().nth(before),
+                        Some(' '),
+                        "row {row} of line {was} skipped a character that is not a blank"
+                    ),
+                    gap => panic!("row {row} of line {was} starts {gap} characters past the row above"),
+                }
+                wrapped += 1;
+            }
+            if end - start == cols && !source.contains(&' ') {
+                on_the_column += 1;
+            }
+            previous = Some((end, line));
             checked += 1;
         }
         assert!(checked > 3, "only {checked} rows were on screen");
-        // And at least one of them really is a continuation of a wrapped line,
-        // or this proved nothing.
+        assert!(wrapped > 2, "only {wrapped} rows continued a wrapped line");
         assert!(
-            (0..rows)
-                .filter_map(|row| state.activity.spot_in(rows, cols, row))
-                .any(|(_, offset)| offset > 0),
-            "nothing wrapped, so the wrap was never exercised"
+            on_the_column > 0,
+            "no row broke on the column, so the word wider than the pane was never drawn"
+        );
+        // The words really are whole: no row of prose ends mid-word with the
+        // next one carrying on from it, unless the word had nowhere to break.
+        let broken: usize = (0..rows)
+            .filter_map(|row| {
+                let (line, start) = state.activity.spot_in(rows, cols, row, 0)?;
+                let (_, end) = state.activity.spot_in(rows, cols, row, cols + 9)?;
+                let text = &state.activity.line(line)?.text;
+                let after = text.chars().nth(end);
+                Some(usize::from(
+                    end > start && after.is_some_and(|ch| ch != ' ') && end - start == cols,
+                ))
+            })
+            .sum();
+        assert_eq!(
+            broken, on_the_column,
+            "a row broke inside a word that had a blank to break at"
         );
     }
 

@@ -294,6 +294,14 @@ would mean guessing at a layout that does not exist.
 A selection holds line numbers rather than screen positions, so output arriving
 underneath it does not slide it onto different text mid-drag.
 
+The panes wrap at blanks, so words stay whole, and a word wider than the pane
+breaks on the column because there is nowhere else to break it. The rule is
+written once, in `text-geometry`, and both the renderer and the selection ask it
+the same question: the characters on the row you point at are the characters
+that end up on the clipboard. The blank a row broke at is on neither row, and it
+comes back when you copy a run that crosses the break. The prompt is the one box
+that still breaks on the column, because its caret is placed by counting them.
+
 Routing is by tool name, and by file extension for syntax coloring. The agent is
 never told any of this exists: everything the window shows is derived from calls
 the model was already making, including the plan.

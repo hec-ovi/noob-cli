@@ -187,19 +187,23 @@ mod tests {
         assert_eq!(drag((0, 0), (1, 40)).text(&pane), "ab\nlonger line");
     }
 
-    /// A run taken off one row of a soft-wrapped line is exactly the row that
-    /// is on screen: no space is inserted at the break, and none is picked up
-    /// from one either.
+    /// A run taken off one row of a wrapped line is exactly the row that is on
+    /// screen: no space is inserted at the break, and none is picked up from
+    /// one either.
     ///
     /// The wrap is invisible to the copy by construction, because this slices
     /// the whole logical line and only '\n' is ever pushed. What was not
     /// guaranteed is that the row the reader points at holds the characters the
-    /// columns say it does. It does now, because the pane names its column
-    /// count and the renderer breaks the rows itself, which is what
-    /// `Run::hard_wrapped` is asserted against here. Left to the shaper, the
-    /// blank at each break was swallowed, so a drag starting at the left edge
-    /// of a wrapped row began one character early and copied a space that was
-    /// nowhere on the screen.
+    /// columns say it does. It does now, because the pane and the renderer
+    /// break the rows with the same `text-geometry` call, asserted against
+    /// here. Left to the shaper, the blank at each break was swallowed, so a
+    /// drag starting at the left edge of a wrapped row began one character
+    /// early and copied a space that was nowhere on the screen.
+    ///
+    /// This used to assert rows of exactly `cols` characters, which was that
+    /// same guarantee bought by breaking prose in the middle of words. The
+    /// guarantee is the same now and the words are whole, so the rows are read
+    /// off the pane rather than multiplied out.
     #[test]
     fn a_run_taken_off_a_wrapped_row_is_the_row_that_is_on_screen() {
         let prose = "hello worldly people everywhere now and then";
@@ -207,30 +211,40 @@ mod tests {
         let cols = 20;
 
         // The rows the renderer lays this line out as.
-        let laid = noob_draw::Run::hard_wrapped(&[noob_draw::Run::plain(prose)], cols)
-            .swap_remove(0)
-            .text;
+        let laid = noob_draw::Run::wrapped(
+            &[noob_draw::Run::plain(prose)],
+            cols,
+            crate::state::PANE_WRAP,
+        )
+        .swap_remove(0)
+        .text;
         let drawn: Vec<&str> = laid.split('\n').collect();
+        let counted = pane.rows_of_line(0, cols);
         assert_eq!(
             drawn.len(),
-            text_geometry::rows_of(prose.chars().count(), cols),
+            counted.len(),
             "the pane budgets a different number of rows than are drawn"
         );
         assert!(drawn.len() > 2, "the line has to wrap for this to prove anything");
-        assert_eq!(
-            drawn.concat(),
-            prose,
-            "a break neither adds a character nor drops one"
+        assert!(
+            drawn.iter().all(|row| !row.starts_with(' ') && !row.ends_with(' ')),
+            "a break leaves its blank on neither row: {drawn:?}"
         );
 
         // And a drag across the whole of each row copies that row.
         for (row, shown) in drawn.iter().enumerate() {
-            let from = row * cols;
-            let to = from + shown.chars().count();
-            assert_eq!(drag((0, from), (0, to)).text(&pane), *shown, "row {row}");
+            let span = counted[row];
+            assert_eq!(
+                drag((0, span.start), (0, span.end)).text(&pane),
+                *shown,
+                "row {row}"
+            );
         }
-        // Including the last one, which ends at the last character of the line.
-        assert!(!drawn[drawn.len() - 1].ends_with(' '));
+        // A run that crosses a break gets the blank back, exactly once: it is
+        // still a character of the line, it is only on no row.
+        let across = drag((0, counted[0].end - 5), (0, counted[1].start + 5)).text(&pane);
+        assert_eq!(across, "eople every");
+        assert_eq!(across.matches(' ').count(), 1);
     }
 
     /// The band drawn behind a run of lines covers each one past its last
