@@ -6812,10 +6812,18 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                         skin.dim,
                     );
                 }
-                // Its own bar, in its own box. The list's used to be painted
-                // against the right edge of the whole panel, which is over this
-                // column rather than beside the list it counts.
-                scrollbar(scene, skin, box_, panel.doc_thumb(doc_cols, doc_rows));
+                // Its own bar, down the card's right padding and only as far as
+                // the body it counts: a bar that ran the whole height of the
+                // card would have its head beside the header, which is not part
+                // of what scrolls. The list's used to be painted against the
+                // right edge of the whole panel, which is over this column
+                // rather than beside the list it counts.
+                scrollbar(
+                    scene,
+                    skin,
+                    Panel::new(box_.x, parts.body.y, box_.w, parts.body.h),
+                    panel.doc_thumb(doc_cols, doc_rows),
+                );
             }
         }
     }
@@ -17174,6 +17182,23 @@ mod tests {
         assert!(!written.contains("line 0 of it"), "{written:?}");
         // The list did not move with it: the two columns are two scrolls.
         assert_eq!(after.layout.settings_rows[0], first_row);
+
+        // And the bar that says how far down it is: inside the card, down its
+        // right padding, and beside the body rather than beside the header,
+        // which is not part of what scrolls.
+        let line = Text::line_for(PANE_TEXT.0);
+        let box_ = settings_doc_box(after.layout.settings_doc, line);
+        let parts = settings_doc_parts(box_, line, PANE_TEXT.0);
+        let track = after
+            .scene
+            .rects
+            .iter()
+            .find(|rect| rect.rgba() == after.skin.scroll_track)
+            .map(|rect| rect.xywh())
+            .expect("the document has no bar");
+        assert!(track[0] > inside.x + inside.w, "the bar is over the text");
+        assert!(track[0] + track[2] <= box_.x + box_.w, "outside the card");
+        assert!(track[1] >= parts.body.y, "the bar reaches up past the header");
     }
 
     /// The first line is Markdown, so what is on screen is four characters
