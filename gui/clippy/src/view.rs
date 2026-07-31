@@ -24,7 +24,7 @@ use crate::icons;
 use crate::menu::{MARKER_COLUMNS, Menu};
 use crate::monitor::{Gauge, Monitor};
 use crate::picker::{Picker, Row as PickerRow};
-use crate::settings::{Kind, Row as SettingRow, Settings};
+use crate::settings::{Row as SettingRow, Settings};
 use crate::skin::Skin;
 use crate::state::{State, TodoState, Tone};
 
@@ -528,6 +528,10 @@ pub enum Hit {
     /// dragged, the way a divider is: what it means is where the pointer is,
     /// and it is written when the button comes up.
     SettingsSlider(usize),
+    /// One cell of the palette grid, as the row it is on and the column along
+    /// it. A grid row is several controls wide, so the row on its own cannot say
+    /// which colour the pointer is over.
+    SettingsSwatch(usize, usize),
     /// The mark that closes the panel, for a pointer with no Escape key handy.
     SettingsClose,
     /// The panel's box, away from any row. Swallowed, like the picker's.
@@ -724,12 +728,17 @@ pub struct Layout {
     /// A row's control is either a value (a flag, a preset, the endpoint) or a
     /// track (anything with a range), never both: what a press means has to be
     /// one thing.
+    ///
+    /// A row of the palette grid carries neither and is split into cells
+    /// instead, one per colour on it, each one carrying its row and its place
+    /// along that row.
     pub settings: Panel,
     pub settings_rail: Vec<(usize, Panel)>,
     pub settings_list: Panel,
     pub settings_rows: Vec<(usize, Panel)>,
     pub settings_values: Vec<(usize, Panel)>,
     pub settings_tracks: Vec<(usize, Panel)>,
+    pub settings_cells: Vec<(usize, usize, Panel)>,
     pub settings_close: Panel,
 
     /// The floating layer. The open menu's box, and one panel per row on
@@ -953,6 +962,7 @@ impl Layout {
                 settings_rows: Vec::new(),
                 settings_values: Vec::new(),
                 settings_tracks: Vec::new(),
+                settings_cells: Vec::new(),
                 settings_close: nowhere(),
                 menu,
                 menu_rows,
@@ -1006,6 +1016,7 @@ impl Layout {
                 settings_rows: Vec::new(),
                 settings_values: Vec::new(),
                 settings_tracks: Vec::new(),
+                settings_cells: Vec::new(),
                 settings_close: nowhere(),
                 menu,
                 menu_rows,
@@ -1060,6 +1071,7 @@ impl Layout {
                 settings_rows: places.rows,
                 settings_values: places.values,
                 settings_tracks: places.tracks,
+                settings_cells: places.cells,
                 settings_close: places.close,
                 menu,
                 menu_rows,
@@ -1297,6 +1309,7 @@ impl Layout {
             settings_rows: Vec::new(),
             settings_values: Vec::new(),
             settings_tracks: Vec::new(),
+            settings_cells: Vec::new(),
             settings_close: nowhere(),
             menu,
             menu_rows,
@@ -1399,6 +1412,14 @@ impl Layout {
             for (index, panel) in &self.settings_values {
                 if panel.contains(x, y) {
                     return Some(Hit::SettingsValue(*index));
+                }
+            }
+            // A cell before its row, for the same reason: it sits inside it, and
+            // a grid row that answered as a row would make every colour on it
+            // the same press.
+            for (index, cell, panel) in &self.settings_cells {
+                if panel.contains(x, y) {
+                    return Some(Hit::SettingsSwatch(*index, *cell));
                 }
             }
             for (index, panel) in &self.settings_rail {
@@ -2148,7 +2169,32 @@ struct SettingsPlaces {
     rows: Vec<(usize, Panel)>,
     values: Vec<(usize, Panel)>,
     tracks: Vec<(usize, Panel)>,
+    cells: Vec<(usize, usize, Panel)>,
     close: Panel,
+}
+
+/// How much larger a group heading is than the rows under it.
+///
+/// A list whose groups are the same size as their contents is one list. The
+/// heading takes two rows of the small text so the larger line has room and the
+/// group has air above it, and [`crate::settings::lines`] says the same number
+/// to the scroll window: a heading measured at one height and drawn at another
+/// puts every click below it on the wrong row.
+const SETTING_HEADING_SCALE: f32 = 1.35;
+
+fn settings_heading_size(size: f32) -> f32 {
+    (size * SETTING_HEADING_SCALE).round().max(size)
+}
+
+/// Where one cell of the palette grid sits inside its row.
+///
+/// Asked by the placement and by the drawing, the same way [`settings_control`]
+/// is, so a swatch is drawn exactly where the press that names it is tested for.
+fn settings_cell(row: Panel, cell: usize, cells: usize) -> Panel {
+    let x = row.x + MARK_W + 3.0;
+    let room = (row.x + row.w - x).max(1.0);
+    let width = room / cells.max(1) as f32;
+    Panel::new(x + cell as f32 * width, row.y, width, row.h)
 }
 
 /// Where a row's control sits: one column in from the label, the width a value
@@ -2210,6 +2256,7 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
             rows: Vec::new(),
             values: Vec::new(),
             tracks: Vec::new(),
+            cells: Vec::new(),
             close: nowhere(),
         };
     }
@@ -2244,33 +2291,52 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
         body.h,
     );
     let rows_fit = Text::rows_for(shape.pane_size, list.h);
-    let heights = panel.heights();
-    let back = text_geometry::scrollback_for(&heights, rows_fit, panel.first());
-    let window = text_geometry::window(&heights, rows_fit, back);
+    let (first, count) = panel.window(rows_fit);
     let label_w = settings_label_w(list.w, column);
     let mut rows = Vec::new();
     let mut values = Vec::new();
     let mut tracks = Vec::new();
-    for step in 0..window.count {
-        let index = window.first + step;
-        let row = Panel::new(list.x, list.y + step as f32 * line, list.w, line);
+    let mut cells = Vec::new();
+    // A running height rather than the row number times a line: a heading is two
+    // rows of text tall and everything under it moves down by that much. The
+    // heights come from the model, which is what the scroll window counts in.
+    let mut y = list.y;
+    for step in 0..count {
+        let index = first + step;
+        let Some(entry) = panel.row(index) else {
+            break;
+        };
+        // Cut off at the bottom of the list rather than drawn over it: a list
+        // one row tall that opens on a heading has room for one row of it.
+        let tall = (crate::settings::lines(entry) as f32 * line).min(list.y + list.h - y);
+        if tall < 1.0 {
+            break;
+        }
+        let row = Panel::new(list.x, y, list.w, tall);
+        y += tall;
         rows.push((index, row));
         let value_at = settings_control(row, label_w, column);
         // Only a row that carries a control gets one, and a control is either a
         // value or a track. A heading or a reading with a click region over its
         // value would answer a press with nothing.
-        match panel.row(index) {
-            Some(SettingRow::Setting { kind, .. }) if kind.fraction(0.0).is_some() => {
+        match entry {
+            SettingRow::Setting { kind, .. } if kind.fraction(0.0).is_some() => {
                 let number = (SETTING_TRACK_VALUE_COLUMNS as f32 * column).min(value_at.w * 0.5);
                 tracks.push((
                     index,
                     Panel::new(value_at.x, value_at.y, value_at.w - number, value_at.h),
                 ));
             }
-            Some(SettingRow::Setting { kind, .. }) if kind.changes() => {
+            SettingRow::Setting { .. } => {
                 values.push((index, value_at));
             }
-            Some(SettingRow::Field { .. }) => values.push((index, value_at)),
+            SettingRow::Field { .. } => values.push((index, value_at)),
+            // The whole row is controls: one cell per colour on it.
+            SettingRow::Swatches(swatches) => {
+                for cell in 0..swatches.len() {
+                    cells.push((index, cell, settings_cell(row, cell, swatches.len())));
+                }
+            }
             _ => {}
         }
     }
@@ -2284,6 +2350,7 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
         rows,
         values,
         tracks,
+        cells,
         close,
     }
 }
@@ -4375,6 +4442,7 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
 
     let label_w = settings_label_w(list.w, column);
     let label_cols = columns_in(label_w, column).saturating_sub(1);
+    let last_drawn = layout.settings_rows.last().map(|(index, _)| *index);
     for (index, row) in &layout.settings_rows {
         let Some(entry) = panel.row(*index) else {
             continue;
@@ -4383,6 +4451,17 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
         if on {
             scene.rect(row.fill(skin.strip));
             scene.rect(Panel::new(row.x, row.y, MARK_W, row.h).fill(skin.edge_focus));
+        }
+        // A hairline under every row but the last one on screen. A settings
+        // panel is a form, and a form with nothing between its rows is one block
+        // of text where a key belongs to whichever value it happens to be beside.
+        // Not under the last: a line along the bottom of the list reads as the
+        // edge of a box that is not there. Not under a heading either: the line
+        // above a heading is what separates one group from the last, and a
+        // second one under it would cut the heading off from its own group.
+        let ruled = !matches!(entry, SettingRow::Heading(_));
+        if ruled && last_drawn != Some(*index) && row.h >= 2.0 {
+            scene.rect(Panel::new(row.x, row.y + row.h - 1.0, row.w, 1.0).fill(skin.edge));
         }
         let text_x = row.x + MARK_W + 3.0;
         let whole = Panel::new(text_x, row.y, (row.w - MARK_W - 3.0).max(1.0), line);
@@ -4400,12 +4479,33 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
             // ordinary text tint, which is what the settings under it are
             // written in, so the groups of a long list did not separate from
             // their contents at a glance.
-            SettingRow::Heading(name) => say(
-                scene,
-                vec![Run::tinted(clip(name, whole_cols), skin.good)],
-                whole,
-                skin.good,
-            ),
+            //
+            // Larger than the rows under it, and given the room for it by the
+            // model: `settings::lines` says a heading is two rows of the small
+            // text, which is what `place_settings` laid it out with and what the
+            // scroll window counted. Its own column width, or a bigger font
+            // clipped by the small text's columns would lose the end of a
+            // heading that fits.
+            SettingRow::Heading(name) => {
+                let big = settings_heading_size(size);
+                let big_line = Text::line_for(big);
+                let big_column = column * big / size.max(1.0);
+                let room = Panel::new(
+                    text_x,
+                    row.y + ((row.h - big_line) * 0.5).floor().max(0.0),
+                    whole.w,
+                    big_line.min(row.h),
+                );
+                scene.text(Text::rich(
+                    vec![Run::tinted(
+                        clip(name, columns_in(room.w, big_column).saturating_sub(1)),
+                        skin.good,
+                    )],
+                    room,
+                    big,
+                    skin.good,
+                ));
+            }
             // Prose, and the one row that can be trouble. The whole width: a
             // sentence in a label column is two words and three dots.
             SettingRow::Note { text, bad } => {
@@ -4471,28 +4571,42 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     (None, true) => (String::from(crate::settings::UNSET), skin.dim),
                     (None, false) => (value.clone(), skin.bright),
                 };
+                // The box a field is typed into, drawn as a box: the prompt's
+                // own fill and an outline round it. Without one an editable row
+                // looked exactly like a reading, and the only way to find out
+                // which was which was to press one.
+                scene.rect(panel_fill(value_at, skin.input));
                 if frame.hot == Some(Hit::SettingsValue(*index)) {
                     scene.rect(value_at.fill(skin.hot));
                 }
+                scene.rect(panel_edge(
+                    value_at,
+                    match typing.is_some() || on {
+                        true => skin.edge_focus,
+                        false => skin.edge,
+                    },
+                ));
                 // The end of it rather than the start: what changes in an
                 // endpoint is the port and the path, and a URL clipped from the
-                // left keeps the half being typed on screen. One column short of
-                // the box, so the caret after it is inside the row.
-                let shown = tail(&shown, SETTING_VALUE_COLUMNS.saturating_sub(1));
-                say(
-                    scene,
-                    vec![Run::tinted(shown.clone(), ink)],
-                    value_at,
-                    ink,
+                // left keeps the half being typed on screen. Inside the box
+                // rather than on its stroke, and two columns short of it, so the
+                // caret after the text is inside the box as well.
+                let inside = Panel::new(
+                    value_at.x + INPUT_PAD,
+                    value_at.y,
+                    (value_at.w - INPUT_PAD * 2.0).max(1.0),
+                    value_at.h,
                 );
+                let shown = tail(&shown, SETTING_VALUE_COLUMNS.saturating_sub(2));
+                say(scene, vec![Run::tinted(shown.clone(), ink)], inside, ink);
                 // The same caret the prompt draws, in the same colour: a block
                 // character would be a glyph that can be missing, and a missing
                 // glyph draws as nothing at all.
                 if typing.is_some() {
                     scene.rect(
                         Panel::new(
-                            value_at.x + shown.chars().count() as f32 * column,
-                            value_at.y,
+                            inside.x + shown.chars().count() as f32 * column,
+                            inside.y,
                             2.0,
                             line,
                         )
@@ -4500,7 +4614,7 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     );
                 }
             }
-            SettingRow::Setting { key, value, kind } => {
+            SettingRow::Setting { key, value, .. } => {
                 let tint = if on { skin.bright } else { skin.body };
                 say(
                     scene,
@@ -4514,32 +4628,11 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     .find(|(at, _)| at == index)
                     .map(|(_, track)| *track);
                 let value = panel.preview(*index).unwrap_or(value);
-                match (kind, track) {
-                    // A colour is drawn as itself. A hex string is not a colour
-                    // to anyone reading a palette, and this is the panel where
-                    // the palette is read.
-                    (Kind::Colour(rgb), _) => {
-                        let side = (line * 0.6).floor().max(2.0);
-                        let up = ((line - side) * 0.5).floor();
-                        scene.rect(
-                            Panel::new(value_at.x, value_at.y + up, side, side).fill(swatch(*rgb)),
-                        );
-                        say(
-                            scene,
-                            vec![Run::tinted(clip(value, SETTING_VALUE_COLUMNS), skin.dim)],
-                            Panel::new(
-                                value_at.x + side + column,
-                                value_at.y,
-                                (value_at.w - side - column).max(1.0),
-                                line,
-                            ),
-                            skin.dim,
-                        );
-                    }
+                match track {
                     // A setting with a range is a position on a track, with the
                     // number it is at beside it. Nineteen presses of an arrow
                     // key from one end of opacity to the other is not a control.
-                    (_, Some(track)) if track.w >= 1.0 => {
+                    Some(track) if track.w >= 1.0 => {
                         if frame.hot == Some(Hit::SettingsSlider(*index)) {
                             scene.rect(track.fill(skin.hot));
                         }
@@ -4582,22 +4675,84 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                         );
                     }
                     // The value of a setting that can change is drawn as the
-                    // control it is: accent tinted, and lit under the pointer
-                    // the way a window button is.
+                    // control it is: a box with an outline round it, accent
+                    // tinted, and lit under the pointer the way a window button
+                    // is. The same box the field gets, because they answer the
+                    // same press: anything with an outline here can be changed.
                     _ => {
+                        scene.rect(panel_fill(value_at, skin.input));
                         if frame.hot == Some(Hit::SettingsValue(*index)) {
                             scene.rect(value_at.fill(skin.hot));
                         }
+                        scene.rect(panel_edge(
+                            value_at,
+                            match on {
+                                true => skin.edge_focus,
+                                false => skin.edge,
+                            },
+                        ));
                         say(
                             scene,
                             vec![Run::tinted(
-                                clip(value, SETTING_VALUE_COLUMNS),
+                                clip(value, SETTING_VALUE_COLUMNS.saturating_sub(2)),
                                 skin.bright,
                             )],
-                            value_at,
+                            Panel::new(
+                                value_at.x + INPUT_PAD,
+                                value_at.y,
+                                (value_at.w - INPUT_PAD * 2.0).max(1.0),
+                                value_at.h,
+                            ),
                             skin.bright,
                         );
                     }
+                }
+            }
+            // One row of the palette grid: a block of each colour with what it
+            // colours written beside it, and a hairline between the cells so the
+            // row reads as three things and not as one sentence.
+            SettingRow::Swatches(cells) => {
+                for (cell, colour) in cells.iter().enumerate() {
+                    let at = settings_cell(*row, cell, cells.len());
+                    let held = panel.picked() == Some((*index, cell));
+                    if held {
+                        scene.rect(at.fill(skin.strip));
+                    }
+                    if frame.hot == Some(Hit::SettingsSwatch(*index, cell)) {
+                        scene.rect(at.fill(skin.hot));
+                    }
+                    if cell > 0 {
+                        scene.rect(
+                            Panel::new(at.x, at.y + 2.0, 1.0, (at.h - 4.0).max(1.0))
+                                .fill(skin.edge),
+                        );
+                    }
+                    let side = (line * 0.6).floor().max(2.0);
+                    let up = ((at.h - side) * 0.5).floor().max(0.0);
+                    let block = Panel::new(at.x + INPUT_PAD, at.y + up, side, side);
+                    scene.rect(block.fill(swatch(colour.rgb)));
+                    // An outline round the block as well: a swatch of the
+                    // panel's own colour on the panel would have no edges at all.
+                    scene.rect(block.fill(skin.edge).stroke(1.0));
+                    let words = Panel::new(
+                        block.x + side + column,
+                        at.y,
+                        (at.x + at.w - block.x - side - column).max(1.0),
+                        line.min(at.h),
+                    );
+                    let ink = match held {
+                        true => skin.bright,
+                        false => skin.body,
+                    };
+                    say(
+                        scene,
+                        vec![Run::tinted(
+                            clip(colour.about, columns_in(words.w, column).saturating_sub(1)),
+                            ink,
+                        )],
+                        words,
+                        ink,
+                    );
                 }
             }
         }
@@ -4609,11 +4764,12 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
         panel.thumb(layout.settings_capacity(size)),
     );
 
-    // What the keys do to the row under the cursor, or why the last change did
-    // not land. A panel that writes a file has to say when the file refused.
+    // What the keys do to the row under the cursor, which swatch was pressed, or
+    // why the last change did not land. A panel that writes a file has to say
+    // when the file refused.
     let (foot, tint) = match panel.trouble() {
         Some(why) => (clip(why, cols), skin.bad),
-        None => (clip(panel.hint(), cols), skin.dim),
+        None => (clip(&panel.says(), cols), skin.dim),
     };
     say(
         scene,
@@ -11863,15 +12019,34 @@ mod tests {
                 // What a row carries: a track when its setting has a range, a
                 // value when it is a flag, a preset or the endpoint, and nothing
                 // at all when there is nothing to press.
+                // A row of the palette grid is all controls: one cell per colour
+                // on it, each one hit where its block is drawn.
+                if let Some(crate::settings::Row::Swatches(swatches)) = panel.row(*index) {
+                    let cells: Vec<(usize, Panel)> = layout
+                        .settings_cells
+                        .iter()
+                        .filter(|(at, ..)| at == index)
+                        .map(|(_, cell, panel)| (*cell, *panel))
+                        .collect();
+                    assert_eq!(cells.len(), swatches.len(), "row {index} of {section}");
+                    for (cell, at) in cells {
+                        let (x, y) = middle(at);
+                        assert_eq!(
+                            layout.hit(x, y),
+                            Some(Hit::SettingsSwatch(*index, cell)),
+                            "{section}"
+                        );
+                        assert!(row.contains(x, y), "cell {cell} is outside its row");
+                    }
+                    continue;
+                }
                 let wanted = match panel.row(*index) {
                     Some(crate::settings::Row::Setting { kind, .. })
                         if kind.fraction(0.0).is_some() =>
                     {
                         Some(Hit::SettingsSlider(*index))
                     }
-                    Some(crate::settings::Row::Setting { kind, .. }) if kind.changes() => {
-                        Some(Hit::SettingsValue(*index))
-                    }
+                    Some(crate::settings::Row::Setting { .. }) => Some(Hit::SettingsValue(*index)),
                     Some(crate::settings::Row::Field { .. }) => Some(Hit::SettingsValue(*index)),
                     _ => None,
                 };
@@ -11887,9 +12062,8 @@ mod tests {
                         assert_eq!(layout.hit(x, y), Some(hit), "{section}");
                         assert!(row.contains(x, y), "the control is outside its row");
                     }
-                    // A heading, a note, an item, a reading or a colour: the
-                    // whole row is the row, and a press on its right hand end
-                    // changes nothing.
+                    // A heading, a note, an item or a reading: the whole row is
+                    // the row, and a press on its right hand end changes nothing.
                     (None, None) => assert_eq!(
                         layout.hit(row.x + row.w - 2.0, row.y + row.h * 0.5),
                         Some(Hit::SettingsRow(*index)),
@@ -11950,22 +12124,22 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} is not drawn"))
         };
         assert_eq!(tint_of(&out, "AGENT"), out.skin.good);
-        assert_ne!(tint_of(&out, "COLOURS"), out.skin.good);
+        assert_ne!(tint_of(&out, "APPEARANCE"), out.skin.good);
 
         // Pressing one changes what the list shows, which is the whole point of
         // a rail: the same panel, a different screen.
-        let colours = layout
+        let looks = layout
             .settings_rail
             .iter()
-            .find(|(index, _)| panel.section_names()[*index] == crate::settings::COLOURS)
+            .find(|(index, _)| panel.section_names()[*index] == crate::settings::APPEARANCE)
             .map(|(index, _)| *index)
-            .expect("the colours are on the rail");
-        panel.choose(colours);
+            .expect("the appearance is on the rail");
+        panel.choose(looks);
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let text = text_of(&out.scene);
         assert!(text.contains("THE WINDOW"), "{text}");
         assert!(!text.contains("api keys"), "the agent section is still up");
-        assert_eq!(tint_of(&out, "COLOURS"), out.skin.good);
+        assert_eq!(tint_of(&out, "APPEARANCE"), out.skin.good);
     }
 
     /// The slider is a track a pointer can be anywhere along, and where it is
@@ -12080,43 +12254,64 @@ mod tests {
     }
 
     /// Every group heading inside a section is the same green the showing tab's
-    /// line is, and none of them is the tint the settings under it are written
-    /// in.
+    /// line is, is drawn larger than the settings under it, and is given the room
+    /// for that by the row it was laid out in.
     ///
-    /// A list is unreadable if its groups do not separate from their contents,
-    /// and the heading was in the ordinary text tint.
+    /// A list is unreadable if its groups do not separate from their contents.
+    /// The heading was in the ordinary text tint, and then it was the accent
+    /// green at the same size as everything else; a heading measured at one
+    /// height and drawn at another would put every click below it on the wrong
+    /// row, which is why the size and the row's height are asserted together.
     #[test]
-    fn the_settings_headings_are_the_accent_green() {
+    fn the_settings_headings_are_the_accent_green_and_the_size_they_were_measured_at() {
         let mut found = 0;
-        let out = render_settings(
-            &a_panel_on(&Config::default(), crate::settings::APPEARANCE),
-            1400.0,
-            1200.0,
-            None,
-        );
-        let colours = render_settings(
-            &a_panel_on(&Config::default(), crate::settings::COLOURS),
-            1400.0,
-            1200.0,
-            None,
-        );
-        for (rendered, heading) in [
-            (&out, "WHICH PANES OPEN"),
-            (&out, "WHERE THE DIVIDERS SIT"),
-            (&colours, "THE WINDOW"),
-            (&colours, "THE HIGHLIGHTER"),
+        let panel = a_panel_on(&Config::default(), crate::settings::APPEARANCE);
+        let out = render_settings(&panel, 1400.0, 1200.0, None);
+        for heading in [
+            "WHICH PANES OPEN",
+            "WHERE THE DIVIDERS SIT",
+            "THE WINDOW",
+            "THE HIGHLIGHTER",
+            "ONE PER TOOL",
+            "ONE PER GAUGE",
         ] {
-            let run = rendered
+            let text = out
                 .scene
                 .texts
                 .iter()
-                .flat_map(|text| text.runs.iter())
-                .find(|run| run.text.trim() == heading)
+                .find(|text| text.runs.iter().any(|run| run.text.trim() == heading))
                 .unwrap_or_else(|| panic!("{heading} is not on the panel"));
-            assert_eq!(run.color, Some(rendered.skin.good), "{heading}");
+            let run = text
+                .runs
+                .iter()
+                .find(|run| run.text.trim() == heading)
+                .expect("the run that was just found");
+            assert_eq!(run.color, Some(out.skin.good), "{heading}");
+            // Larger than the rows under it, and inside the row it was measured
+            // into: 13pt is what everything else on the panel is drawn at.
+            assert!(text.size > 13.0, "{heading} is drawn at {}", text.size);
+            let row = out
+                .layout
+                .settings_rows
+                .iter()
+                .find(|(_, row)| row.contains(text.at.x + 1.0, text.at.y + 1.0))
+                .map(|(index, row)| (*index, *row))
+                .unwrap_or_else(|| panic!("{heading} is drawn on no row at all"));
+            assert!(
+                matches!(panel.row(row.0), Some(crate::settings::Row::Heading(name)) if *name == heading),
+                "{heading} is drawn on row {}, which is {:?}",
+                row.0,
+                panel.row(row.0)
+            );
+            assert!(
+                text.at.y + noob_draw::Text::line_for(text.size) <= row.1.y + row.1.h + 0.01,
+                "{heading} is taller than the row it was laid out in: {:?} in {:?}",
+                text.at,
+                row.1
+            );
             found += 1;
         }
-        assert_eq!(found, 4);
+        assert_eq!(found, 6);
         // The same green the tab wears, and not the tint a setting's key is
         // written in, or the heading is another row of the list.
         assert_eq!(
@@ -12130,6 +12325,114 @@ mod tests {
         );
         assert_ne!(out.skin.good, out.skin.body);
         assert_ne!(out.skin.good, out.skin.title);
+    }
+
+    /// Every row but the last one on screen has a hairline under it, so a row
+    /// reads as its own thing rather than as one more line of a block of text.
+    #[test]
+    fn a_settings_row_is_ruled_off_from_the_one_under_it() {
+        let panel = a_panel_on(&Config::default(), crate::settings::APPEARANCE);
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let rows = &out.layout.settings_rows;
+        assert!(rows.len() > 3, "not enough rows to rule off: {}", rows.len());
+        let rule = |row: &Panel| {
+            out.scene.rects.iter().any(|rect| {
+                let [x, y, w, h] = rect.xywh();
+                rect.rgba() == out.skin.edge
+                    && h <= 1.01
+                    && (x - row.x).abs() < 0.01
+                    && (w - row.w).abs() < 0.01
+                    && (y - (row.y + row.h - 1.0)).abs() < 0.01
+            })
+        };
+        let mut ruled = 0;
+        for (index, row) in &rows[..rows.len() - 1] {
+            // A heading keeps the group under it: the line above it is what
+            // separates that group from the one before.
+            if matches!(panel.row(*index), Some(crate::settings::Row::Heading(_))) {
+                assert!(!rule(row), "the heading on row {index} is cut off from its group");
+                continue;
+            }
+            assert!(rule(row), "row {index} runs into the one under it");
+            ruled += 1;
+        }
+        assert!(ruled > 3, "hardly anything is ruled off: {ruled}");
+        // Not under the last one: a line along the bottom of the list reads as
+        // the edge of a box that is not there.
+        let (_, last) = rows.last().expect("a last row");
+        assert!(!rule(last), "the list is closed off at the bottom");
+    }
+
+    /// Anything that can be typed into or pressed to change is drawn as a box
+    /// with an outline round it. Without one an editable row looked exactly like
+    /// a reading, and the only way to tell one from the other was to press it.
+    #[test]
+    fn an_editable_row_is_drawn_as_a_box_with_an_edge() {
+        // The endpoint, which is the one row on the panel that is typed into,
+        // and the presets and flags, which are pressed to change.
+        for section in [crate::settings::AGENT, crate::settings::APPEARANCE] {
+            let panel = a_panel_on(&Config::default(), section);
+            let out = render_settings(&panel, 1400.0, 900.0, None);
+            let boxes = &out.layout.settings_values;
+            assert!(!boxes.is_empty(), "{section} has no control on it");
+            for (index, at) in boxes {
+                let over = |rect: &noob_draw::Rect| {
+                    let [x, y, w, h] = rect.xywh();
+                    (x - at.x).abs() < 0.01
+                        && (y - at.y).abs() < 0.01
+                        && (w - at.w).abs() < 0.01
+                        && (h - at.h).abs() < 0.01
+                };
+                assert!(
+                    out.scene
+                        .rects
+                        .iter()
+                        .any(|rect| over(rect) && rect.extra()[3] >= 1.0),
+                    "the control on row {index} of {section} has no outline"
+                );
+                assert!(
+                    out.scene
+                        .rects
+                        .iter()
+                        .any(|rect| over(rect) && rect.rgba() == out.skin.input),
+                    "the control on row {index} of {section} has no box under it"
+                );
+            }
+        }
+
+        // The endpoint's text sits inside its box rather than on the stroke, and
+        // so does the caret while it is being typed into.
+        let mut panel = a_panel_on(&Config::default(), crate::settings::AGENT);
+        while !matches!(
+            panel.row(panel.cursor()),
+            Some(crate::settings::Row::Field { .. })
+        ) {
+            assert!(panel.step(true), "the agent section has no field on it");
+        }
+        assert!(panel.edit());
+        assert!(panel.type_text("http://localhost:9/v1"));
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let (_, at) = out
+            .layout
+            .settings_values
+            .iter()
+            .find(|(index, _)| *index == panel.cursor())
+            .expect("the endpoint's box");
+        let caret = out
+            .scene
+            .rects
+            .iter()
+            .filter(|rect| rect.rgba() == out.skin.caret && rect.extra()[3] == 0.0)
+            .find(|rect| {
+                let [x, y, w, _] = rect.xywh();
+                w <= 3.0 && (y - at.y).abs() < 0.01 && x >= at.x && x <= at.x + at.w
+            })
+            .unwrap_or_else(|| panic!("no caret inside {at:?} while typing"));
+        let [x, _, w, _] = caret.xywh();
+        assert!(
+            x > at.x && x + w <= at.x + at.w,
+            "the caret is on the border: {caret:?} in {at:?}"
+        );
     }
 
     /// Nothing the panel draws leaves it, at any size. A rectangle outside a
@@ -12186,8 +12489,10 @@ mod tests {
             (crate::settings::APPEARANCE, "theme"),
             (crate::settings::APPEARANCE, "opacity"),
             (crate::settings::APPEARANCE, "show_files"),
-            (crate::settings::COLOURS, "accent"),
-            (crate::settings::COLOURS, "#123456"),
+            // The palette is under APPEARANCE too now, and it is labelled with
+            // what each colour colours rather than with its key.
+            (crate::settings::APPEARANCE, "the accent"),
+            (crate::settings::APPEARANCE, "the title bar"),
         ] {
             let text = words(section);
             assert!(
@@ -12198,9 +12503,10 @@ mod tests {
         // The panel says what it is and which section it is showing.
         assert!(words(crate::settings::MCP).contains("SETTINGS"));
 
-        // The colour is drawn as a swatch of itself, not only as a hex string.
+        // The colour is drawn as a block of itself, which is the only way a
+        // palette can be read.
         let out = render_settings(
-            &a_panel_on(&config, crate::settings::COLOURS),
+            &a_panel_on(&config, crate::settings::APPEARANCE),
             1400.0,
             1200.0,
             None,
@@ -12239,6 +12545,137 @@ mod tests {
         );
     }
 
+    /// The palette is a grid: more than one colour to a row, each one hit where
+    /// its own block is drawn, and a press on the second column is that colour
+    /// and not the first one on the row.
+    ///
+    /// It was one colour per row, so the row index was the colour. Nothing else
+    /// on the panel is more than one control wide, which is why the cells carry
+    /// their place along the row as well as the row.
+    #[test]
+    fn a_press_on_the_grid_lands_on_the_colour_under_it() {
+        let config = Config::parse("accent = #123456");
+        let mut panel = a_panel_on(&config, crate::settings::APPEARANCE);
+        let out = render_settings(&panel, 1400.0, 1200.0, None);
+        let layout = &out.layout;
+
+        // The row the accent is on carries more than one colour, which is the
+        // whole of what makes this a grid.
+        let row = layout
+            .settings_cells
+            .iter()
+            .find(|(row, cell, _)| {
+                panel.swatch(*row, *cell).is_some_and(|it| it.key == "accent")
+            })
+            .map(|(row, ..)| *row)
+            .expect("the accent is on the grid");
+        let on_the_row: Vec<(usize, Panel)> = layout
+            .settings_cells
+            .iter()
+            .filter(|(at, ..)| *at == row)
+            .map(|(_, cell, panel)| (*cell, *panel))
+            .collect();
+        assert!(
+            on_the_row.len() > 1,
+            "one swatch to a row is the list again: {on_the_row:?}"
+        );
+        // Side by side, left to right, and none of them overlapping.
+        for pair in on_the_row.windows(2) {
+            assert!(
+                pair[0].1.x + pair[0].1.w <= pair[1].1.x + 0.01,
+                "{pair:?} share a column"
+            );
+            assert!((pair[0].1.y - pair[1].1.y).abs() < 0.01, "{pair:?}");
+        }
+
+        // The second column is the second colour, not the first: this is the
+        // press a full width row per colour got wrong.
+        let (first, second) = (on_the_row[0], on_the_row[1]);
+        let (x, y) = middle(second.1);
+        assert_eq!(layout.hit(x, y), Some(Hit::SettingsSwatch(row, second.0)));
+        assert_ne!(
+            layout.hit(x, y),
+            Some(Hit::SettingsSwatch(row, first.0)),
+            "the second column answers as the first"
+        );
+        assert!(panel.pick(row, second.0));
+        let wanted = panel.swatch(row, second.0).expect("the second colour").key;
+        let says = panel.says();
+        assert!(says.contains(wanted), "the footer says {says}");
+        let out = render_settings(&panel, 1400.0, 1200.0, None);
+        assert!(
+            text_of(&out.scene).contains(wanted),
+            "the panel never says which key writes the pressed colour"
+        );
+
+        // Each cell draws a block of its own colour inside itself.
+        for (cell, at) in &on_the_row {
+            let colour = panel.swatch(row, *cell).expect("a colour");
+            let block = out
+                .scene
+                .rects
+                .iter()
+                .find(|rect| rect.rgba() == swatch(colour.rgb))
+                .unwrap_or_else(|| panic!("{} is not drawn as itself", colour.key));
+            let [x, y, ..] = block.xywh();
+            assert!(at.contains(x + 0.5, y + 0.5), "{block:?} is outside {at:?}");
+        }
+    }
+
+    /// Scrolling the panel moves the cells with the rows they are on. A hit
+    /// region left where the row used to be is a press that changes the wrong
+    /// colour, and the grid is the one place a row is more than one control.
+    #[test]
+    fn the_grid_cells_follow_the_list_when_it_scrolls() {
+        let mut panel = a_panel_on(&Config::default(), crate::settings::APPEARANCE);
+        // A short window, so the palette is off the bottom until it is scrolled
+        // to and the rows on screen change as it moves.
+        let (w, h) = (1400.0, 520.0);
+        let rows = render_settings(&panel, w, h, None)
+            .layout
+            .settings_capacity(13.0);
+        assert!(rows > 2, "the list is too short to scroll: {rows}");
+        let mut seen = 0;
+        for _ in 0..40 {
+            let out = render_settings(&panel, w, h, None);
+            let layout = &out.layout;
+            for (row, cell, at) in &layout.settings_cells {
+                // Where it is drawn: the block of colour is inside the cell.
+                let colour = panel
+                    .swatch(*row, *cell)
+                    .unwrap_or_else(|| panic!("no colour at {row}/{cell}"));
+                let block = out
+                    .scene
+                    .rects
+                    .iter()
+                    .find(|rect| {
+                        rect.rgba() == swatch(colour.rgb)
+                            && at.contains(rect.xywh()[0] + 0.5, rect.xywh()[1] + 0.5)
+                    })
+                    .unwrap_or_else(|| panic!("{} is not drawn in its cell", colour.key));
+                assert!(
+                    layout
+                        .settings_list
+                        .contains(block.xywh()[0], block.xywh()[1]),
+                    "{} is drawn outside the list",
+                    colour.key
+                );
+                // And where it is pressed: the same cell answers for it.
+                let (x, y) = middle(*at);
+                assert_eq!(
+                    layout.hit(x, y),
+                    Some(Hit::SettingsSwatch(*row, *cell)),
+                    "the cell moved out from under its own colour"
+                );
+                seen += 1;
+            }
+            if !panel.scroll(1, true, rows) {
+                break;
+            }
+        }
+        assert!(seen > 20, "the palette never came into view: {seen}");
+    }
+
     /// The footer says what the keys will do to the row under the cursor, and
     /// says a refused write instead when there is one. A panel that writes a
     /// file has to say when the file said no.
@@ -12247,7 +12684,7 @@ mod tests {
         let config = Config::default();
         let mut panel = a_settings_panel(&config);
         let out = render_settings(&panel, 1400.0, 900.0, None);
-        assert!(text_of(&out.scene).contains(panel.hint()), "{}", panel.hint());
+        assert!(text_of(&out.scene).contains(&panel.says()), "{}", panel.says());
 
         panel.say_trouble(String::from("cannot write it"));
         let out = render_settings(&panel, 1400.0, 900.0, None);

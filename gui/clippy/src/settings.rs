@@ -1,4 +1,4 @@
-//! The settings panel: six sections, what each one carries, and what changing
+//! The settings panel: five sections, what each one carries, and what changing
 //! a row writes back.
 //!
 //! A full screen takeover rather than a popup or a second OS window. A second
@@ -13,8 +13,8 @@
 //! is a front end for. It is a rail of section names now, with the chosen
 //! section's rows beside it, and each section is short enough to read at a
 //! glance. Four of them ([`AGENT`], [`SESSIONS`], [`SKILLS`], [`MCP`]) are the
-//! agent's own files rather than the window's, read through [`crate::agent`];
-//! the other two ([`APPEARANCE`], [`COLOURS`]) are the window's settings file.
+//! agent's own files rather than the window's; the last one ([`APPEARANCE`]) is
+//! everything in the window's own settings file, the palette included.
 //!
 //! Nothing here draws and only [`commit`] and [`write_endpoint`] touch a disk.
 //! [`crate::view`] turns these rows into rectangles and `main` routes keys and
@@ -32,9 +32,16 @@
 //!
 //! The colours are listed and not editable here. Changing one means typing a hex
 //! value into a field, and the one field this window has is the agent's
-//! endpoint; forty six of them is a form. So the palette is on the panel as
+//! endpoint; thirty seven of them is a form. So the palette is on the panel as
 //! swatches you can read, with the path of the file to edit beside them, and the
 //! four presets are one row away in `theme`.
+//!
+//! **The palette is a grid, not a list.** Thirty seven colours one to a row was
+//! a column of hex strings four screens long, and a hex string does not say what
+//! it colours. They are [`Row::Swatches`] rows now: several to a row, each one a
+//! block of the colour with a plain-words label beside it, grouped under the
+//! headings they belong to. Pressing one says which key in the file writes it,
+//! which is the only thing a hex string was there for.
 
 use std::path::{Path, PathBuf};
 
@@ -48,17 +55,17 @@ pub const SESSIONS: &str = "SESSIONS";
 pub const SKILLS: &str = "SKILLS";
 pub const MCP: &str = "MCP";
 pub const APPEARANCE: &str = "APPEARANCE";
-pub const COLOURS: &str = "COLOURS";
 
 /// Every section name, in rail order.
 ///
-/// There were two more. PANES held the four settings that decide which views
+/// There were three more. PANES held the four settings that decide which views
 /// open and where the dividers sit, which is what the window looks like and so
 /// belongs under [`APPEARANCE`] with everything else that does; its rows moved
 /// there whole. ALL TIME read the counts of every session that ever ran, which
 /// answered a question nobody was asking on a settings panel, and went with the
-/// file behind it.
-pub const SECTIONS: [&str; 6] = [AGENT, SESSIONS, SKILLS, MCP, APPEARANCE, COLOURS];
+/// file behind it. COLOURS was the palette, which is also what the window looks
+/// like: it is the last block of [`APPEARANCE`] now, under its own headings.
+pub const SECTIONS: [&str; 5] = [AGENT, SESSIONS, SKILLS, MCP, APPEARANCE];
 
 /// What a setting holds, which is what decides how its row changes.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -83,18 +90,9 @@ pub enum Kind {
         /// Decimals to write. Zero, so `font_size` is `14` rather than `14.0`.
         places: usize,
     },
-    /// A colour, carried so the row can draw a swatch of it. Read only here.
-    Colour([u8; 3]),
 }
 
 impl Kind {
-    /// Whether a row of this kind can be changed from the panel, which is also
-    /// whether the cursor stops on it. A cursor that lands where nothing can
-    /// happen is a dead stop the arrow keys have to be pressed through.
-    pub fn changes(self) -> bool {
-        !matches!(self, Kind::Colour(_))
-    }
-
     /// Where along a track a value sits, 0 at the low end and 1 at the high.
     /// Nothing for a kind that has no range, which is what stops anything else
     /// being drawn as a slider.
@@ -160,6 +158,42 @@ pub enum Row {
     /// nothing else: it is the one setting here whose value is not a number, a
     /// flag or a name from a list.
     Field { key: &'static str, value: String },
+    /// One row of the palette grid: several colours side by side, each one a
+    /// block of the colour and a plain-words label. Up to [`SWATCH_COLUMNS`] of
+    /// them, so the row is always as wide as every other row and the list is
+    /// still one panel per row index.
+    Swatches(Vec<Swatch>),
+}
+
+/// One colour on the grid: the key the file writes it under, what it actually
+/// colours said in words, and the colour itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Swatch {
+    pub key: &'static str,
+    pub about: &'static str,
+    pub rgb: [u8; 3],
+}
+
+/// How many colours share a row.
+///
+/// Three rather than as many as fit: the layout would have to hand the model a
+/// width for that, and a grid that reflows as the window is resized is a grid
+/// whose rows change height while it is being read. Three holds the longest
+/// label there is at the width the list has on a window this runs on, and a
+/// narrow window clips a label rather than moving it.
+pub const SWATCH_COLUMNS: usize = 3;
+
+/// How many rows of text one row of the panel takes.
+///
+/// A heading is two, because it is drawn larger than the settings under it: a
+/// heading measured at one height and drawn at another puts every click below it
+/// on the wrong row. [`Settings::heights`] and `view::place_settings` both read
+/// this, which is what keeps the two agreeing.
+pub fn lines(row: &Row) -> usize {
+    match row {
+        Row::Heading(_) => 2,
+        _ => 1,
+    }
 }
 
 /// What a nudge on the row under the cursor should write.
@@ -321,6 +355,61 @@ pub fn colours(config: &Config) -> Vec<(&'static str, [u8; 3])> {
 const WINDOW_TONES: usize = 8;
 const SYNTAX_TONES: usize = 5;
 
+/// What a colour actually colours, in words.
+///
+/// The key is what the file wants and says nothing on its own: `bar`, `dim` and
+/// `gauge_7` are three things nobody can pick out of a palette. The grid is
+/// labelled with these and says the key only for the swatch that was pressed,
+/// which is when the key is the thing being asked for.
+///
+/// Every key in [`colours`] is answered here.
+/// `every_colour_says_what_it_colours` fails on one that is not.
+fn about(key: &str) -> &'static str {
+    match key {
+        "accent" => "the accent",
+        "text" => "ordinary text",
+        "dim" => "quiet text",
+        "bright" => "loud text",
+        "good" => "it worked",
+        "bad" => "it failed",
+        "panel" => "behind everything",
+        "bar" => "the title bar",
+        "syntax_comment" => "comments",
+        "syntax_string" => "strings",
+        "syntax_number" => "numbers",
+        "syntax_keyword" => "keywords",
+        "syntax_markup" => "markup",
+        "tool_bash" => "running a command",
+        "tool_read" => "reading a file",
+        "tool_ls" => "listing a folder",
+        "tool_glob" => "finding files",
+        "tool_grep" => "searching in files",
+        "tool_context" => "reading the context",
+        "tool_write" => "writing a file",
+        "tool_edit" => "editing a file",
+        "tool_web" => "searching the web",
+        "tool_skill" => "running a skill",
+        "tool_mcp" => "an mcp server",
+        "tool_agent" => "a subagent",
+        "tool_plan" => "planning",
+        "tool_other" => "anything else",
+        "gauge_1" => "reading 1",
+        "gauge_2" => "reading 2",
+        "gauge_3" => "reading 3",
+        "gauge_4" => "reading 4",
+        "gauge_5" => "reading 5",
+        "gauge_6" => "reading 6",
+        "gauge_7" => "reading 7",
+        "gauge_8" => "reading 8",
+        "gauge_9" => "reading 9",
+        "gauge_10" => "reading 10",
+        // A colour added to the file and not to this list. Said rather than
+        // left blank, and `every_colour_says_what_it_colours` fails on it so it
+        // is not a label anybody sees.
+        _ => "a colour of its own",
+    }
+}
+
 /// Which preset the file is carrying, or [`CUSTOM`] when it is carrying a
 /// palette nobody named.
 ///
@@ -372,6 +461,10 @@ pub struct Settings {
     /// The row a slider is being dragged on and the value it is being dragged
     /// to. Nothing is written until the button comes up.
     dragging: Option<(usize, String)>,
+    /// The swatch that was last pressed, as the row it is on and the cell along
+    /// it. Nothing is changed by it: the footer says which key in the file
+    /// writes that colour, which is what a grid of blocks cannot say on its own.
+    picked: Option<(usize, usize)>,
     /// The settings file, or nothing when there is no home directory to put one
     /// in. Kept so [`Settings::refresh`] does not have to be handed it again.
     file: Option<PathBuf>,
@@ -394,6 +487,7 @@ impl Settings {
             focus: Focus::Rail,
             editing: None,
             dragging: None,
+            picked: None,
             file: file.map(PathBuf::from),
             agent,
             trouble: None,
@@ -413,6 +507,7 @@ impl Settings {
         self.sections = self.build(config);
         self.trouble = None;
         self.dragging = None;
+        self.picked = None;
         for (section, (cursor, first)) in self.sections.iter_mut().zip(places) {
             let last = section.rows.len().saturating_sub(1);
             section.first = first.min(last);
@@ -445,8 +540,7 @@ impl Settings {
                     SESSIONS => self.session_rows(),
                     SKILLS => self.skill_rows(),
                     MCP => self.mcp_rows(),
-                    APPEARANCE => appearance_rows(config),
-                    COLOURS => self.colour_rows(config),
+                    APPEARANCE => self.appearance_rows(config),
                     // A name on the rail with no builder behind it opens on
                     // nothing, which `every_section_is_reachable` fails on. The
                     // arm this replaced was a catch-all that built the ALL TIME
@@ -591,6 +685,30 @@ impl Settings {
         rows
     }
 
+    /// Everything about what the window looks like: the sizes and the theme,
+    /// which panes open, where the dividers between them sit, and the palette.
+    ///
+    /// Three of those groups were sections of their own. PANES held which views
+    /// are up and where the lines between them sit; COLOURS held the palette.
+    /// All three are what the window looks like, so they are groups under one
+    /// heading each here rather than rail entries anyone has to go and find.
+    fn appearance_rows(&self, config: &Config) -> Vec<Row> {
+        let mut rows = settings_rows(config, &LOOKS);
+        rows.push(Row::Heading("WHICH PANES OPEN"));
+        rows.extend(settings_rows(config, &PANE_SETTINGS));
+        rows.push(Row::Heading("WHERE THE DIVIDERS SIT"));
+        rows.extend(settings_rows(config, &DIVIDERS));
+        rows.extend(self.colour_rows(config));
+        rows
+    }
+
+    /// The palette, as a grid: one heading per group and then that group's
+    /// colours [`SWATCH_COLUMNS`] to a row.
+    ///
+    /// It was one colour per row, thirty seven rows of hex string. That is four
+    /// screens of a column half of which is empty, and no row said what it
+    /// coloured. Grouped blocks of labelled blocks read as a palette, which is
+    /// what this is.
     fn colour_rows(&self, config: &Config) -> Vec<Row> {
         let all = colours(config);
         let mut rows = Vec::new();
@@ -602,17 +720,25 @@ impl Settings {
             ("ONE PER GAUGE", config::GAUGE_KEYS.len()),
         ] {
             rows.push(Row::Heading(heading));
-            for (key, rgb) in all.iter().skip(at).take(count) {
-                rows.push(Row::Setting {
-                    key,
-                    value: hex(*rgb),
-                    kind: Kind::Colour(*rgb),
-                });
+            // Chunked inside the group rather than across the whole palette, so
+            // a row never carries the end of one group and the start of the
+            // next: a grid whose blocks run into each other is the list again.
+            for chunk in all[at..at + count].chunks(SWATCH_COLUMNS) {
+                rows.push(Row::Swatches(
+                    chunk
+                        .iter()
+                        .map(|(key, rgb)| Swatch {
+                            key,
+                            about: about(key),
+                            rgb: *rgb,
+                        })
+                        .collect(),
+                ));
             }
             at += count;
         }
         rows.push(note(
-            "colours are read here and edited in the file: a hex value needs a keyboard this window has nowhere to put",
+            "press a colour to see which key writes it: colours are edited in the file, since a hex value needs a keyboard this window has nowhere to put",
         ));
         rows.push(Row::Reading {
             label: String::from("settings"),
@@ -679,6 +805,10 @@ impl Settings {
         self.focus == Focus::Content && self.row(self.cursor()).is_some_and(landable)
     }
 
+    /// Where the list is scrolled to, as a row of the section rather than a row
+    /// of text. Only the tests want it on its own: what the window asks for is
+    /// [`Settings::window`], which is that row and everything that fits under it.
+    #[cfg(test)]
     pub fn first(&self) -> usize {
         self.here().first
     }
@@ -707,9 +837,59 @@ impl Settings {
             .map(|(_, value)| value.as_str())
     }
 
+    /// The swatch at a place on the grid, or nothing when that row is not a
+    /// grid row or has no such cell.
+    pub fn swatch(&self, row: usize, cell: usize) -> Option<&Swatch> {
+        let Row::Swatches(cells) = self.row(row)? else {
+            return None;
+        };
+        cells.get(cell)
+    }
+
+    /// Press one swatch: which colour it is stays on the footer until something
+    /// else is pressed.
+    ///
+    /// Nothing is changed by it. A block of colour cannot say which line of the
+    /// file writes it, and that line is the whole of what somebody looking at
+    /// the palette wants next.
+    pub fn pick(&mut self, row: usize, cell: usize) -> bool {
+        if self.swatch(row, cell).is_none() {
+            return false;
+        }
+        let moved = self.picked != Some((row, cell));
+        self.picked = Some((row, cell));
+        moved
+    }
+
+    /// Which swatch is pressed, for the block the grid draws around it.
+    pub fn picked(&self) -> Option<(usize, usize)> {
+        self.picked
+    }
+
+    /// What the footer says about the pressed swatch: the key that writes it and
+    /// the value it is carrying.
+    fn picked_says(&self) -> Option<String> {
+        let (row, cell) = self.picked?;
+        let swatch = self.swatch(row, cell)?;
+        Some(format!(
+            "{}: the settings file writes it as {} = {}",
+            swatch.about,
+            swatch.key,
+            hex(swatch.rgb)
+        ))
+    }
+
     /// What the keys under the cursor do, spelled out for the footer. The panel
     /// is the one surface in this window where there is nothing to experiment on
     /// safely, so it says what a key will do before it is pressed.
+    ///
+    /// A pressed swatch answers instead, because a press that said nothing at
+    /// all would read as a grid that does not answer the pointer.
+    pub fn says(&self) -> String {
+        self.picked_says()
+            .unwrap_or_else(|| String::from(self.hint()))
+    }
+
     pub fn hint(&self) -> &'static str {
         if self.editing.is_some() {
             return "type it \u{2022} enter saves it \u{2022} esc leaves it alone";
@@ -722,7 +902,6 @@ impl Settings {
                 Kind::Flag => "enter or left and right turn it on and off",
                 Kind::Choice(_) => "left and right walk the presets",
                 Kind::Number { .. } => "left and right nudge it, or drag the slider",
-                Kind::Colour(_) => "colours are edited in the file",
             },
             Some(Row::Field { .. }) => "enter edits it \u{2022} left goes back to the sections",
             _ => "up and down move \u{2022} left goes back to the sections \u{2022} esc closes",
@@ -739,6 +918,7 @@ impl Settings {
         self.focus = Focus::Rail;
         self.editing = None;
         self.dragging = None;
+        self.picked = None;
         moved
     }
 
@@ -776,7 +956,6 @@ impl Settings {
             return None;
         };
         let next = match kind {
-            Kind::Colour(_) => return None,
             // Either direction, and Enter comes through here too. A flag has two
             // states, so "the next one" and "the one before" are the same one.
             Kind::Flag => match value.as_str() {
@@ -927,6 +1106,10 @@ impl Settings {
     /// section. Clamped at both ends: a list that wraps under an arrow key held
     /// down is a cursor that arrives somewhere nobody was looking.
     pub fn step(&mut self, down: bool) -> bool {
+        // The footer goes back to saying what the keys do the moment a key is
+        // pressed: a swatch that was pressed a screen ago is not what the
+        // keyboard is on.
+        self.picked = None;
         if self.focus == Focus::Rail {
             let next = match down {
                 true => (self.chosen + 1).min(self.sections.len() - 1),
@@ -947,6 +1130,7 @@ impl Settings {
 
     /// A screenful, then the nearest row that can hold the cursor.
     pub fn page(&mut self, rows: usize, down: bool) -> bool {
+        self.picked = None;
         if self.focus == Focus::Rail {
             return self.step(down);
         }
@@ -969,6 +1153,7 @@ impl Settings {
 
     /// The first or last row anything can be done to.
     pub fn jump(&mut self, last: bool) -> bool {
+        self.picked = None;
         if self.focus == Focus::Rail {
             let next = match last {
                 true => self.sections.len() - 1,
@@ -998,17 +1183,49 @@ impl Settings {
         if !self.row(index).is_some_and(landable) {
             return false;
         }
+        self.picked = None;
         let was = (self.here().cursor, self.focus);
         self.focus = Focus::Content;
         self.here_mut().cursor = index;
         (index, Focus::Content) != was
     }
 
-    /// One row per entry, for the scroll window. Every row is one row: a value
-    /// too long for the panel is clipped rather than wrapped, so a click cannot
-    /// resolve to a setting other than the one under the pointer.
+    /// How many rows of text each row of the list takes, for the scroll window.
+    ///
+    /// Not one each any more: a heading is drawn larger than the settings under
+    /// it and takes two ([`lines`]). A value too long for the panel is still
+    /// clipped rather than wrapped, so a click still cannot resolve to a setting
+    /// other than the one under the pointer.
     pub fn heights(&self) -> Vec<usize> {
-        text_geometry::heights(self.here().rows.iter().map(|_| 0), 1)
+        text_geometry::heights(self.here().rows.iter().map(lines), 1)
+    }
+
+    /// Which rows are on screen in a list `rows` tall: the first one, and how
+    /// many fit under it.
+    ///
+    /// Anchored on a row rather than on a row of text, so the top of the list is
+    /// always the top of a row. Half a heading at the top of the list is a
+    /// heading nobody can read whose click region starts off the screen, and
+    /// every hit region below it would be a row out of step with what is drawn.
+    /// A row that does not fit whole is left for the next screenful, except when
+    /// it is the only one there is room to start with.
+    pub fn window(&self, rows: usize) -> (usize, usize) {
+        let heights = self.heights();
+        if rows == 0 || heights.is_empty() {
+            return (0, 0);
+        }
+        let first = self.here().first.min(last_top(&heights, rows));
+        let mut used = 0;
+        let mut count = 0;
+        while first + count < heights.len() {
+            let height = heights[first + count];
+            if count > 0 && used + height > rows {
+                break;
+            }
+            used += height;
+            count += 1;
+        }
+        (first, count)
     }
 
     /// Bring the cursor on screen, for a `rows` tall list.
@@ -1016,11 +1233,15 @@ impl Settings {
         if rows == 0 || self.here().rows.is_empty() {
             return false;
         }
-        let most = text_geometry::max_scrollback(&self.heights(), rows);
+        let heights = self.heights();
+        let most = last_top(&heights, rows);
         let section = self.here_mut();
-        let mut next = section.first.min(section.cursor);
-        if section.cursor + 1 > next + rows {
-            next = section.cursor + 1 - rows;
+        let cursor = section.cursor.min(heights.len() - 1);
+        let mut next = section.first.min(cursor);
+        // Down one row at a time until the cursor's own row fits under the top,
+        // which is the same walk `window` does and cannot disagree with it.
+        while next < cursor && heights[next..=cursor].iter().sum::<usize>() > rows {
+            next += 1;
         }
         let next = next.min(most);
         let moved = next != section.first;
@@ -1030,7 +1251,7 @@ impl Settings {
 
     /// Move the window without moving the cursor, for the wheel.
     pub fn scroll(&mut self, by: usize, down: bool, rows: usize) -> bool {
-        let most = text_geometry::max_scrollback(&self.heights(), rows);
+        let most = last_top(&self.heights(), rows);
         let section = self.here_mut();
         let next = match down {
             true => (section.first + by).min(most),
@@ -1044,9 +1265,27 @@ impl Settings {
     /// How much of the list is on screen, for the scrollbar.
     pub fn thumb(&self, rows: usize) -> Option<(f32, f32)> {
         let heights = self.heights();
-        let back = text_geometry::scrollback_for(&heights, rows, self.here().first);
+        let (first, _) = self.window(rows);
+        // The scrollbar counts rows of text, so the row the list starts on has
+        // to be turned into the row of text it starts on first.
+        let above: usize = heights.iter().take(first).sum();
+        let back = text_geometry::scrollback_for(&heights, rows, above);
         text_geometry::thumb(&heights, rows, back)
     }
+}
+
+/// The furthest down the list can start and still fill the last screenful.
+///
+/// In rows rather than in rows of text, because the list starts on a row.
+fn last_top(heights: &[usize], rows: usize) -> usize {
+    let mut used = 0;
+    for (index, height) in heights.iter().enumerate().rev() {
+        used += height;
+        if used > rows {
+            return (index + 1).min(heights.len().saturating_sub(1));
+        }
+    }
+    0
 }
 
 fn note(text: &str) -> Row {
@@ -1068,21 +1307,6 @@ fn settings_rows(config: &Config, group: &[(&'static str, Kind)]) -> Vec<Row> {
         .collect()
 }
 
-/// Everything about what the window looks like: the sizes and the theme, which
-/// panes open, and where the dividers between them sit.
-///
-/// The last two groups were a section of their own called PANES. Which views
-/// are up and where the lines between them sit is what the window looks like,
-/// so they read as appearance and are grouped under headings here rather than
-/// hidden behind a rail entry of their own.
-fn appearance_rows(config: &Config) -> Vec<Row> {
-    let mut rows = settings_rows(config, &LOOKS);
-    rows.push(Row::Heading("WHICH PANES OPEN"));
-    rows.extend(settings_rows(config, &PANE_SETTINGS));
-    rows.push(Row::Heading("WHERE THE DIVIDERS SIT"));
-    rows.extend(settings_rows(config, &DIVIDERS));
-    rows
-}
 
 /// What a session row says: when it was, which folder it belongs to, how big
 /// the transcript is, how full its context window was, and the opening of the
@@ -1139,12 +1363,12 @@ fn server_line(server: &agent::Server) -> String {
     format!("{}  {}  ({where_})", server.name, server.how)
 }
 
+/// Whether the cursor stops on a row. A cursor that lands where nothing can
+/// happen is a dead stop the arrow keys have to be pressed through, so it stops
+/// on the settings and the one field and on nothing else. A swatch is a colour
+/// to read: the keys cannot change one, and the file is where they are edited.
 fn landable(row: &Row) -> bool {
-    match row {
-        Row::Setting { kind, .. } => kind.changes(),
-        Row::Field { .. } => true,
-        _ => false,
-    }
+    matches!(row, Row::Setting { .. } | Row::Field { .. })
 }
 
 /// The next row in that direction the cursor can land on, not counting the one
@@ -1194,7 +1418,6 @@ fn value_of(config: &Config, key: &str, kind: Kind) -> String {
             };
             format!("{value:.places$}")
         }
-        (_, Kind::Colour(rgb)) => hex(rgb),
         // Same: every key in the groups is answered above.
         _ => String::new(),
     }
@@ -1294,6 +1517,23 @@ mod tests {
         );
     }
 
+    /// Where one colour sits on the grid of the section that is showing: the row
+    /// it is on and the cell along it.
+    fn swatch_at(panel: &Settings, key: &str) -> (usize, usize) {
+        panel
+            .rows()
+            .iter()
+            .enumerate()
+            .find_map(|(at, row)| match row {
+                Row::Swatches(cells) => cells
+                    .iter()
+                    .position(|cell| cell.key == key)
+                    .map(|cell| (at, cell)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{key} is not on the grid"))
+    }
+
     /// Everything a section says, as one string, for the tests that care what is
     /// on it rather than which row it is on.
     fn said(panel: &Settings) -> String {
@@ -1307,6 +1547,11 @@ mod tests {
                     format!("{key} {value}")
                 }
                 Row::Heading(name) => String::from(*name),
+                Row::Swatches(cells) => cells
+                    .iter()
+                    .map(|cell| format!("{} {} {}", cell.key, cell.about, hex(cell.rgb)))
+                    .collect::<Vec<_>>()
+                    .join("  "),
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -1373,7 +1618,7 @@ mod tests {
         assert!(panel.step(true));
         let was = panel.cursor();
         assert_eq!(was, 2);
-        go_to(&mut panel, COLOURS);
+        go_to(&mut panel, SESSIONS);
         assert_ne!(panel.cursor(), was, "the two sections share a cursor");
         go_to(&mut panel, APPEARANCE);
         assert_eq!(panel.cursor(), was);
@@ -1391,9 +1636,11 @@ mod tests {
         let panel = over(&config);
         let mut on_panel: Vec<&str> = panel
             .all_rows()
-            .filter_map(|(_, row)| match row {
-                Row::Setting { key, .. } => Some(*key),
-                _ => None,
+            .flat_map(|(_, row)| match row {
+                Row::Setting { key, .. } => vec![*key],
+                // A colour is a cell of a grid row now, not a row of its own.
+                Row::Swatches(cells) => cells.iter().map(|cell| cell.key).collect(),
+                _ => Vec::new(),
             })
             .collect();
         let mut known = config::keys();
@@ -1411,20 +1658,49 @@ mod tests {
             );
         }
 
-        // The colours are all in one section instead of in the middle of
-        // everything else, and each setting is in the section that names it.
+        // Every key in the file is an appearance now, colours included: the
+        // panes and the dividers came over when PANES was removed, and the
+        // palette came over when COLOURS did.
         for (section, row) in panel.all_rows() {
-            let Row::Setting { key, kind, .. } = row else {
+            match row {
+                Row::Setting { key, .. } => {
+                    assert_eq!(section, APPEARANCE, "{key} is in the wrong section")
+                }
+                Row::Swatches(cells) => {
+                    let keys: Vec<&str> = cells.iter().map(|cell| cell.key).collect();
+                    assert_eq!(section, APPEARANCE, "{keys:?} are in the wrong section");
+                    assert!(
+                        cells.len() <= SWATCH_COLUMNS,
+                        "{keys:?} is more than a row of the grid holds"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Every colour on the grid says what it colours in words. A block of colour
+    /// labelled `gauge_7` is a block of colour.
+    #[test]
+    fn every_colour_says_what_it_colours() {
+        let panel = over(&Config::default());
+        let mut said = 0;
+        for (_, row) in panel.all_rows() {
+            let Row::Swatches(cells) = row else {
                 continue;
             };
-            // Every setting that is not a colour is an appearance now: the
-            // panes and the dividers came over when PANES was removed.
-            let wanted = match kind {
-                Kind::Colour(_) => COLOURS,
-                _ => APPEARANCE,
-            };
-            assert_eq!(section, wanted, "{key} is in the wrong section");
+            for cell in cells {
+                assert_ne!(
+                    cell.about, "a colour of its own",
+                    "{} has no plain words to go with it",
+                    cell.key
+                );
+                assert!(!cell.about.is_empty(), "{} is labelled with nothing", cell.key);
+                assert_ne!(cell.about, cell.key, "{} only repeats its key", cell.key);
+                said += 1;
+            }
         }
+        assert_eq!(said, colours(&Config::default()).len());
     }
 
     /// The cursor only stops where something can happen: not on a heading, not
@@ -1461,9 +1737,10 @@ mod tests {
             assert_eq!(down, up, "walking back up {name} visits other rows");
         }
 
-        // APPEARANCE stops on its own settings and nothing else, which is all
-        // three groups now: the sizes, the panes and the dividers. The two
-        // headings between them are stepped over rather than landed on.
+        // APPEARANCE stops on its own settings and nothing else: the sizes, the
+        // panes and the dividers. The headings between them are stepped over
+        // rather than landed on, and so is every row of the palette grid that
+        // follows them, which is the whole bottom half of the section.
         go_to(&mut panel, APPEARANCE);
         let mut looks = 1;
         while panel.step(true) {
@@ -1473,7 +1750,7 @@ mod tests {
 
         // A section of readings has nothing to land on and says so, rather than
         // drawing a band on a row nothing can be done to.
-        go_to(&mut panel, COLOURS);
+        go_to(&mut panel, MCP);
         assert!(!panel.on_row());
         go_to(&mut panel, APPEARANCE);
         assert!(panel.on_row());
@@ -1611,7 +1888,7 @@ mod tests {
         // a control whose middle means nothing.
         assert_eq!(Kind::Flag.at(0.5), None);
         assert_eq!(Kind::Choice(&config::THEMES).fraction(1.0), None);
-        assert_eq!(Kind::Colour([1, 2, 3]).at(0.5), None);
+        assert_eq!(Kind::Flag.fraction(0.5), None);
     }
 
     /// A drag holds its value until the button comes up, and only then says what
@@ -1658,28 +1935,55 @@ mod tests {
     }
 
     /// A colour is on the panel to be read, and reading is all.
+    ///
+    /// This was `a_colour_row_carries_its_swatch_and_cannot_be_changed`, which
+    /// asserted the same thing about a `Row::Setting` of its own. A colour is a
+    /// cell of a grid row now, so what it is asserted about moved with it: the
+    /// grid still cannot hold the cursor and the file is still where a colour is
+    /// edited. What is new is the press, which says which key writes it.
     #[test]
-    fn a_colour_row_carries_its_swatch_and_cannot_be_changed() {
+    fn a_swatch_carries_its_colour_and_says_which_key_writes_it() {
         let config = Config::parse("accent = #123456");
         let mut panel = over(&config);
+        go_to(&mut panel, APPEARANCE);
+        let (at, cell) = swatch_at(&panel, "accent");
         assert_eq!(
-            *setting(&panel, "accent"),
-            Row::Setting {
+            *panel.swatch(at, cell).expect("the accent swatch"),
+            Swatch {
                 key: "accent",
-                value: String::from("#123456"),
-                kind: Kind::Colour([0x12, 0x34, 0x56]),
+                about: "the accent",
+                rgb: [0x12, 0x34, 0x56],
             }
         );
+        // More than one to a row, which is what makes it a grid.
+        let count = match panel.row(at) {
+            Some(Row::Swatches(cells)) => cells.len(),
+            other => panic!("the accent is not on a grid row: {other:?}"),
+        };
+        assert!(count > 1, "one swatch to a row is the list again");
+
         // The cursor cannot get there, so no change can be aimed at it.
-        go_to(&mut panel, COLOURS);
-        let at = panel
-            .rows()
-            .iter()
-            .position(|row| matches!(row, Row::Setting { key, .. } if *key == "accent"))
-            .expect("the accent row");
         assert!(!panel.point_at(at));
         assert_ne!(panel.cursor(), at);
-        // And the section says why, with the file to edit instead.
+
+        // Pressing one says which line of the file writes it, which is the one
+        // thing a block of colour cannot say for itself.
+        assert!(panel.pick(at, cell));
+        assert_eq!(panel.picked(), Some((at, cell)));
+        let says = panel.says();
+        assert!(says.contains("accent"), "{says}");
+        assert!(says.contains("#123456"), "{says}");
+        assert!(says.contains("the accent"), "{says}");
+        // And it goes away the moment the keyboard is used again.
+        panel.step(true);
+        assert_eq!(panel.picked(), None);
+        assert_eq!(panel.says(), panel.hint());
+        // A cell nobody drew is not a press.
+        assert!(!panel.pick(at, count));
+        assert!(!panel.pick(0, 0), "the first row of the section is not a grid");
+
+        // And the section says where a colour is edited, with the file to do it
+        // in beside it.
         let text = said(&panel);
         assert!(text.contains("edited in the file"), "{text}");
         assert!(text.contains("no0b.conf"), "{text}");
@@ -1886,7 +2190,7 @@ mod tests {
     fn the_list_scrolls_and_the_cursor_is_kept_on_screen() {
         let config = Config::default();
         let mut panel = over(&config);
-        go_to(&mut panel, COLOURS);
+        go_to(&mut panel, APPEARANCE);
         let rows = 10;
         assert!(panel.rows().len() > rows, "the longest section is one screenful");
         assert_eq!(panel.first(), 0);
@@ -1915,11 +2219,62 @@ mod tests {
             "the cursor is above the window"
         );
 
-        // A page through the colours lands nowhere, because nothing there can
+        // A page through the palette lands nowhere, because nothing there can
         // hold the cursor, and does not stop dead on a heading either.
-        go_to(&mut panel, COLOURS);
-        panel.page(rows, true);
-        assert!(!panel.on_row(), "the colours hold no cursor at all");
+        go_to(&mut panel, APPEARANCE);
+        let (grid, _) = swatch_at(&panel, "gauge_10");
+        while panel.cursor() < grid && panel.page(rows, true) {}
+        assert!(
+            panel.cursor() < grid,
+            "the cursor walked into the palette grid"
+        );
+    }
+
+    /// The window is counted in rows of text and starts on a row, so a heading
+    /// two rows tall never sits half on and half off the top of the list.
+    ///
+    /// The list was every row exactly one row tall, which the headings are not
+    /// any more. If [`Settings::heights`] and the window ever disagree, the rows
+    /// the panel draws are not the rows it hit tests.
+    #[test]
+    fn the_window_counts_a_heading_as_the_two_rows_it_takes() {
+        let mut panel = over(&Config::default());
+        go_to(&mut panel, APPEARANCE);
+        let heights = panel.heights();
+        let headings: Vec<usize> = panel
+            .rows()
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row, Row::Heading(_)))
+            .map(|(at, _)| at)
+            .collect();
+        assert!(headings.len() >= 5, "{headings:?}");
+        for at in &headings {
+            assert_eq!(heights[*at], 2, "a heading is drawn larger than a row");
+        }
+        for (at, row) in panel.rows().iter().enumerate() {
+            assert_eq!(heights[at], lines(row), "the model and the window disagree");
+        }
+
+        // Whatever it is scrolled to, the rows on screen start at the top of a
+        // row and take no more room than the list has.
+        let rows = 12;
+        for _ in 0..40 {
+            let (first, count) = panel.window(rows);
+            let used: usize = heights[first..first + count].iter().sum();
+            assert!(count > 0, "the list showed nothing at {first}");
+            assert!(
+                used <= rows || count == 1,
+                "{count} rows from {first} take {used} of {rows}"
+            );
+            if !panel.scroll(1, true, rows) {
+                break;
+            }
+        }
+        // The end of the list is reachable and stops there.
+        let (first, count) = panel.window(rows);
+        assert_eq!(first + count, panel.rows().len(), "the last row is off screen");
+        assert!(!panel.scroll(1, true, rows), "the list scrolled past its end");
     }
 
     /// The agent section reads the CLI's own file: where it is, what it points

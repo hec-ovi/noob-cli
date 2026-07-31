@@ -428,6 +428,7 @@ fn menu_for(
         | Hit::SettingsRow(_)
         | Hit::SettingsValue(_)
         | Hit::SettingsSlider(_)
+        | Hit::SettingsSwatch(_, _)
         | Hit::SettingsClose => None,
         // A divider is the gap between two widgets and belongs to neither of
         // them, so there is no one widget for a menu opened here to act on.
@@ -1205,6 +1206,14 @@ impl App {
                 self.sliding = Some(index);
                 self.drag_slider();
             }
+            // A colour on the grid. Nothing is written: the panel says which key
+            // in the settings file writes that colour, which is the one thing a
+            // block of colour cannot say for itself.
+            Hit::SettingsSwatch(index, cell) => {
+                if let Some(panel) = self.settings.as_mut() {
+                    self.dirty |= panel.pick(index, cell);
+                }
+            }
             // The panel's own margin. Swallowed: it covers the window, so a
             // press here has nothing behind it to reach.
             _ => {}
@@ -1813,6 +1822,7 @@ impl App {
             | Hit::SettingsRow(_)
             | Hit::SettingsValue(_)
             | Hit::SettingsSlider(_)
+            | Hit::SettingsSwatch(_, _)
             | Hit::SettingsClose
             | Hit::Settings => {}
             Hit::Input => {
@@ -2776,6 +2786,7 @@ impl ApplicationHandler<Wake> for App {
                         | Hit::SettingsClose
                         | Hit::SettingsSection(_)
                         | Hit::SettingsSlider(_)
+                        | Hit::SettingsSwatch(_, _)
                         | Hit::SettingsValue(_)),
                     ) => Some(hit),
                     _ => None,

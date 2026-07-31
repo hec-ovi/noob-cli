@@ -303,7 +303,7 @@ window too short for all nine the wheel scrolls it.
 ## Settings
 
 **Settings opens the panel**, from a right click on any pane or tab. It takes the
-whole window under the title strip and it is six sections, named down a rail on
+whole window under the title strip and it is five sections, named down a rail on
 the left with the chosen one beside it. Up and down on the rail walk the sections,
 right goes into one, left comes back out, and inside a section up and down walk
 its rows while left and right change the row the cursor is on. Enter flips a
@@ -328,12 +328,14 @@ MCP names both files the CLI merges, `<config>/mcp.json` and
 rather than showing an empty list that reads as broken; a malformed one is a line
 saying so, and the servers from the file that did parse are still listed.
 
-The other two are the window's own settings file, and every key in it is on one
-of them: APPEARANCE and COLOURS. APPEARANCE is the sizes and the theme, then
-`WHICH PANES OPEN` and `WHERE THE DIVIDERS SIT` under headings of their own.
-Each row is the key as the file
-spells it and the value as the file spells it, so the panel doubles as the
-reference for editing the file by hand. A change is written straight away through
+The fifth is the window's own settings file, and every key in it is on that one:
+APPEARANCE. It is the sizes and the theme, then `WHICH PANES OPEN` and `WHERE THE
+DIVIDERS SIT`, then the palette, each group under a heading of its own drawn
+larger than the rows under it, with a hairline between every row. Each row is the
+key as the file spells it and the value as the file spells it, so the panel
+doubles as the reference for editing the file by hand, and anything that can be
+changed is drawn as a box with an outline round it: if it has an edge, it takes a
+press or a keystroke. A change is written straight away through
 the same writer `no0b --set` uses, so the comments stay, and then the whole file
 is read back and the window is restyled from it: the palette, both font sizes and
 the two panes that can be turned off all move without a restart. That read-back is
@@ -346,15 +348,18 @@ and the arrow keys still nudging it one step. The file is written when the butto
 comes up rather than on every motion event, which would be hundreds of writes for
 one decision, and the panel carries the value it is being dragged to until then.
 
-The palette is its own section, as swatches to read rather than fields to edit,
-with the path of the file beside them. Changing a colour means typing a hex value,
-and the one field this window has is the endpoint. `theme` is one section away and
+The palette is the last block of APPEARANCE, laid out as a grid: three colours to
+a row under `THE WINDOW`, `THE HIGHLIGHTER`, `ONE PER TOOL` and `ONE PER GAUGE`,
+each one a block of the colour with what it colours written beside it in words.
+Pressing a swatch says which key in the file writes it, on the line at the foot of
+the panel; they are swatches to read rather than fields to edit, since changing
+one means typing a hex value and the one field this window has is the endpoint. `theme` is a few rows up and
 repaints the window in a preset; a file carrying a palette that is not one of the
 four exactly reads as `custom`, which is what one hand-tuned colour over a preset
 makes it.
 
 `~/.config/noob/no0b.conf`, written with the defaults on first run and
-commented. Opacity, both font sizes, how tall the prompt may grow, where the two
+commented. Opacity, both font sizes, how tall the prompt may grow, where the
 dividers sit, which panes exist, and the whole palette: the eight base colors, one per tool,
 ten gauge slots a monitor reading picks from, and the five the highlighter uses
 for code. A key it does not recognise is reported in the ACTIVITY pane rather
