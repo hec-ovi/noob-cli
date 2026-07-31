@@ -223,7 +223,7 @@ fn check_llama_slots(config_dir: &Path, ep: &noob_provider::types::Endpoint) -> 
         return Vec::new();
     };
 
-    let children = config::task_concurrency(config_dir) as u64;
+    let children = config::task_concurrency(config_dir, crate::subagent::DEFAULT_CONCURRENCY) as u64;
     let needed = children + 1;
     let mut checks = Vec::new();
     if props.slots >= needed {

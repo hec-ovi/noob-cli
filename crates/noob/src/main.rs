@@ -136,7 +136,8 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
     let workspace = std::env::current_dir()
         .and_then(|d| d.canonicalize())
         .map_err(|e| format!("cannot resolve the working directory: {e}"))?;
-    let (sandbox, sandbox_label) = config::detect_sandbox(&config_dir, boot.yolo);
+    let (sandbox_mode, sandbox_label) = config::detect_sandbox(&config_dir, boot.yolo);
+    let sandbox = tools::guard::Sandbox::from(sandbox_mode);
 
     // The env-block model label follows the same precedence as the real
     // request (flag > env > .env) but is independent of base-url resolution,
@@ -211,7 +212,11 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
     // know which tree the paths in every later frame are relative to.
     let workspace_label = workspace.to_string_lossy().into_owned();
     let mut tool_ctx = ToolCtx::new(workspace, sandbox);
-    tool_ctx.caps = config::tool_caps(&config_dir);
+    tool_ctx.caps = if config::tool_caps_lifted(&config_dir) {
+        tools::truncate::Caps::uncapped()
+    } else {
+        tools::truncate::Caps::default()
+    };
     tool_ctx.read_dedup = config::read_dedup(&config_dir);
     tool_ctx.skills = discovered;
     tool_ctx.websearch = websearch;
@@ -221,9 +226,9 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
     if with_task {
         tool_ctx.task = Some(subagent::TaskCfg {
             depth,
-            concurrency: config::task_concurrency(&config_dir),
-            max_turns: config::task_max_turns(&config_dir),
-            wall_clock: config::task_wall_clock(&config_dir),
+            concurrency: config::task_concurrency(&config_dir, subagent::DEFAULT_CONCURRENCY),
+            max_turns: config::task_max_turns(&config_dir, subagent::DEFAULT_MAX_TURNS),
+            wall_clock: config::task_wall_clock(&config_dir, subagent::DEFAULT_WALL_CLOCK_S),
             verbose: boot.verbose,
             overrides: ov.clone(),
             yolo: boot.yolo,
@@ -1489,7 +1494,7 @@ fn cmd_child() -> ExitCode {
     );
     // Both sides enforce the turn cap: the parent clamped its request; the
     // child clamps that against its own environment's ceiling.
-    let env_cap = config::task_max_turns(&agent.config_dir);
+    let env_cap = config::task_max_turns(&agent.config_dir, subagent::DEFAULT_MAX_TURNS);
     agent.max_rounds = task_obj
         .get("max_turns")
         .and_then(serde_json::Value::as_u64)

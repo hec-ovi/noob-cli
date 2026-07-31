@@ -11,8 +11,6 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-use crate::tools::guard::Sandbox;
-
 /// User-facing `/config` names. Secrets are deliberately absent: putting an
 /// API key in terminal history is not an acceptable configuration flow.
 pub const EDITABLE: &[(&str, &str)] = &[
@@ -266,33 +264,34 @@ pub fn ctx_tokens(config_dir: &Path) -> u64 {
 }
 
 /// NOOB_TASK_CONCURRENCY: concurrent sub-agent cap (P6). Bounded: every
-/// child is a full agent hitting the same endpoint.
-pub fn task_concurrency(config_dir: &Path) -> usize {
+/// child is a full agent hitting the same endpoint. The caller passes its
+/// shipped default; this box owns only the parse and the ceiling.
+pub fn task_concurrency(config_dir: &Path, default: usize) -> usize {
     setting(config_dir, "NOOB_TASK_CONCURRENCY")
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|&n| n >= 1)
-        .unwrap_or(crate::subagent::DEFAULT_CONCURRENCY)
+        .unwrap_or(default)
         .min(16)
 }
 
 /// NOOB_TASK_MAX_TURNS: per-child inference-round cap (P6). A loop budget,
-/// never an output-token cap.
-pub fn task_max_turns(config_dir: &Path) -> u32 {
+/// never an output-token cap. The caller passes its shipped default.
+pub fn task_max_turns(config_dir: &Path, default: u32) -> u32 {
     setting(config_dir, "NOOB_TASK_MAX_TURNS")
         .and_then(|v| v.trim().parse::<u32>().ok())
         .filter(|&n| n >= 1)
-        .unwrap_or(crate::subagent::DEFAULT_MAX_TURNS)
+        .unwrap_or(default)
         .min(50)
 }
 
 /// NOOB_TASK_WALL_CLOCK_S: per-child wall clock before the parent kills the
-/// process group. 0 (the default) disables the limit entirely; any positive
-/// value caps the child at that many seconds (tests use this to avoid long
-/// waits).
-pub fn task_wall_clock(config_dir: &Path) -> std::time::Duration {
+/// process group. 0 disables the limit entirely; any positive value caps the
+/// child at that many seconds (tests use this to avoid long waits). The
+/// caller passes its shipped default.
+pub fn task_wall_clock(config_dir: &Path, default_s: u64) -> std::time::Duration {
     let secs = setting(config_dir, "NOOB_TASK_WALL_CLOCK_S")
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(crate::subagent::DEFAULT_WALL_CLOCK_S)
+        .unwrap_or(default_s)
         .min(3_600);
     std::time::Duration::from_secs(secs)
 }
@@ -318,39 +317,45 @@ pub fn read_dedup(config_dir: &Path) -> bool {
     })
 }
 
-/// NOOB_TOOL_CAPS: the tool-result truncation policy. 0/off/false/no lifts
-/// every cap (read, bash, grep, glob/ls, skill, and MCP results flow through
-/// whole, so no truncation marker ever renders); anything else, or unset,
-/// keeps the shipped defaults. Resolved once at bootstrap.
-pub fn tool_caps(config_dir: &Path) -> crate::tools::truncate::Caps {
-    let off = setting(config_dir, "NOOB_TOOL_CAPS").is_some_and(|value| {
+/// NOOB_TOOL_CAPS: the tool-result truncation switch. True (0/off/false/no)
+/// means every cap is lifted: read, bash, grep, glob/ls, skill, and MCP
+/// results flow through whole, so no truncation marker ever renders.
+/// Anything else, or unset, keeps the shipped caps. The tools box builds its
+/// cap table from this answer, once at bootstrap.
+pub fn tool_caps_lifted(config_dir: &Path) -> bool {
+    setting(config_dir, "NOOB_TOOL_CAPS").is_some_and(|value| {
         matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "0" | "off" | "false" | "no"
         )
-    });
-    if off {
-        crate::tools::truncate::Caps::uncapped()
-    } else {
-        crate::tools::truncate::Caps::default()
-    }
+    })
+}
+
+/// The two sandbox states, as a configuration fact. The tools box maps this
+/// onto its write policy; this box only answers "which one, and why".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SandboxMode {
+    /// Inside a container (or `--yolo`): the container is the wall.
+    Container,
+    /// Outside a container: writes stay inside the workspace.
+    Workspace,
 }
 
 /// Two states, no permission DSL: the container is the wall. An explicit
 /// NOOB_SANDBOX setting wins; otherwise /.dockerenv decides. `--yolo` lifts
 /// the workspace restriction entirely.
-pub fn detect_sandbox(config_dir: &Path, yolo: bool) -> (Sandbox, String) {
+pub fn detect_sandbox(config_dir: &Path, yolo: bool) -> (SandboxMode, String) {
     if yolo {
-        return (Sandbox::Container, "off (--yolo)".to_string());
+        return (SandboxMode::Container, "off (--yolo)".to_string());
     }
     match setting(config_dir, "NOOB_SANDBOX").as_deref() {
-        Some("container") => (Sandbox::Container, "container".to_string()),
-        Some(_) => (Sandbox::Workspace, "workspace".to_string()),
+        Some("container") => (SandboxMode::Container, "container".to_string()),
+        Some(_) => (SandboxMode::Workspace, "workspace".to_string()),
         None => {
             if Path::new("/.dockerenv").exists() {
-                (Sandbox::Container, "container".to_string())
+                (SandboxMode::Container, "container".to_string())
             } else {
-                (Sandbox::Workspace, "workspace".to_string())
+                (SandboxMode::Workspace, "workspace".to_string())
             }
         }
     }
@@ -571,19 +576,17 @@ mod tests {
 
     #[test]
     fn tool_caps_zero_or_off_lifts_every_cap() {
-        use crate::tools::truncate::Caps;
-
         let tmp = tempfile::tempdir().unwrap();
-        // Unset: the shipped defaults.
-        assert_eq!(tool_caps(tmp.path()), Caps::default());
+        // Unset: the shipped caps stay.
+        assert!(!tool_caps_lifted(tmp.path()));
         for off in ["0", "off", "false", "no", " OFF "] {
             std::fs::write(tmp.path().join(".env"), format!("NOOB_TOOL_CAPS={off}\n")).unwrap();
-            assert_eq!(tool_caps(tmp.path()), Caps::uncapped(), "{off}");
+            assert!(tool_caps_lifted(tmp.path()), "{off}");
         }
-        // Anything else (on, 1, junk) keeps the defaults.
+        // Anything else (on, 1, junk) keeps the caps.
         for on in ["1", "on", "true", "yes", "potato"] {
             std::fs::write(tmp.path().join(".env"), format!("NOOB_TOOL_CAPS={on}\n")).unwrap();
-            assert_eq!(tool_caps(tmp.path()), Caps::default(), "{on}");
+            assert!(!tool_caps_lifted(tmp.path()), "{on}");
         }
         // The /config alias validates like the other switches.
         assert!(write_setting(tmp.path(), "tool-caps", Some("off")).is_ok());
@@ -615,15 +618,18 @@ mod tests {
         );
     }
 
-    /// The wall clock ships off: a sub-agent that researches for twenty
-    /// minutes is working, not wedged, and killing it throws away work the
-    /// parent has to pay to redo. A configured value still caps it, and the
-    /// one-hour ceiling still holds.
+    /// A configured wall clock caps the child, the one-hour ceiling holds,
+    /// and unset or unparseable values fall back to the caller's default,
+    /// not to some arbitrary cap the user never asked for.
     #[test]
-    fn the_wall_clock_ships_disabled_and_still_honors_a_configured_cap() {
+    fn the_wall_clock_honors_the_default_the_value_and_the_ceiling() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join(".env"), "").unwrap();
-        assert_eq!(task_wall_clock(tmp.path()), std::time::Duration::ZERO);
+        assert_eq!(task_wall_clock(tmp.path(), 0), std::time::Duration::ZERO);
+        assert_eq!(
+            task_wall_clock(tmp.path(), 30),
+            std::time::Duration::from_secs(30)
+        );
         for (set, want) in [("0", 0), ("45", 45), ("99999", 3_600)] {
             std::fs::write(
                 tmp.path().join(".env"),
@@ -631,15 +637,13 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                task_wall_clock(tmp.path()),
+                task_wall_clock(tmp.path(), 0),
                 std::time::Duration::from_secs(want),
                 "{set}"
             );
         }
-        // An unparseable value falls back to the default, not to some
-        // arbitrary cap the user never asked for.
         std::fs::write(tmp.path().join(".env"), "NOOB_TASK_WALL_CLOCK_S=soon\n").unwrap();
-        assert_eq!(task_wall_clock(tmp.path()), std::time::Duration::ZERO);
+        assert_eq!(task_wall_clock(tmp.path(), 7), std::time::Duration::from_secs(7));
     }
 
     #[test]
@@ -647,10 +651,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join(".env"), "NOOB_SANDBOX=workspace\n").unwrap();
         let (mode, label) = detect_sandbox(tmp.path(), false);
-        assert_eq!(mode, Sandbox::Workspace);
+        assert_eq!(mode, SandboxMode::Workspace);
         assert_eq!(label, "workspace");
         let (mode, label) = detect_sandbox(tmp.path(), true);
-        assert_eq!(mode, Sandbox::Container);
+        assert_eq!(mode, SandboxMode::Container);
         assert_eq!(label, "off (--yolo)");
     }
 

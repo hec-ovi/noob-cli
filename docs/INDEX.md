@@ -41,7 +41,7 @@ package, the binary and everything a user sees are `no0b`.
 | What the agent can do: tools and their schemas | `crates/noob/src/tools/` |
 | The system prompt and what goes into it | `crates/noob/src/agent/prompt.rs` |
 | Sessions on disk, resume | `crates/noob/src/session/` |
-| Endpoint, keys, sandbox detection | `crates/noob/src/config/` |
+| Endpoint, keys, sandbox detection | `crates/noob/src/config/CONTRACT.md` |
 | Talking to a model server | `crates/noob-provider/CONTRACT.md` |
 | Skills | `crates/noob/src/skills/` |
 | The `serve` subcommand the window drives | `crates/noob/src/main.rs` |
@@ -66,6 +66,9 @@ Boxes so far:
 - [`crates/noob/src/emit`](../crates/noob/src/emit/CONTRACT.md) - the
   `NOOB_EMIT` side channel: Event frames to a file beside the session, off by
   default.
+- [`crates/noob/src/config`](../crates/noob/src/config/CONTRACT.md) - config
+  dir, the one settings lookup rule, validated atomic `.env` writes, sandbox
+  mode, endpoint autodetect.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,

@@ -50,6 +50,16 @@ pub enum Sandbox {
     Workspace,
 }
 
+/// The config box answers "which mode"; this policy type enforces it.
+impl From<crate::config::SandboxMode> for Sandbox {
+    fn from(mode: crate::config::SandboxMode) -> Sandbox {
+        match mode {
+            crate::config::SandboxMode::Container => Sandbox::Container,
+            crate::config::SandboxMode::Workspace => Sandbox::Workspace,
+        }
+    }
+}
+
 /// Held across one write/edit call. Locking the workspace directory inode
 /// works across the parent and child processes, and across containers sharing
 /// the same bind mount, without adding lock files to the user's project.
