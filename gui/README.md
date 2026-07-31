@@ -402,8 +402,9 @@ is showing, and left and right change the row the cursor is on. Tab moves on to
 the next section and Shift-Tab back to the one before, wrapping at both ends, and
 the footer legend says so on every row. Enter flips a switch, turns a skill or a
 server on and off, starts an edit on the endpoint and on the field a skill is
-installed from, and ends that edit by installing what was typed, Shift with left or right
-crosses a form row, the wheel scrolls, Ctrl-C copies what is
+installed from, and ends that edit by installing what was typed, Delete arms the
+two presses a saved conversation and the restore under the palette take, Shift
+with left or right crosses a card, the wheel scrolls, Ctrl-C copies what is
 selected in the document column, and Esc puts the panel
 away. The rail never hides a name: when the window is too short to list the
 sections down one column, they wrap into a second one rather than falling off the
@@ -426,9 +427,8 @@ reading does not. There is no hairline under a row any more: space and the
 card's own border say where one group ends, which is what a line between every
 two things on screen never did. Cards are full width and stack, and it is a
 card's contents that answer a narrow window: two fields go side by side while
-both keep their columns and stack when they cannot. AGENT, SESSIONS, SKILLS and
-MCP are the sections built this way so far; APPEARANCE is still the flat rows it
-was.
+both keep their columns and stack when they cannot. Every section is built this
+way: AGENT, SESSIONS, SKILLS, MCP and APPEARANCE.
 
 Four of the sections are the agent's own files rather than the window's. AGENT
 is five cards, in the order somebody meeting the window needs them: where the
@@ -583,18 +583,19 @@ through and more than one line of text. Add one with `/mcp add <name> <url>` in
 the CLI, or write it into either file, and it is on this list next time the
 panel opens.
 
-The fifth is the window's own settings file: APPEARANCE. It is the sizes and the
-theme, then the palette, each group of colours under a heading of its own drawn
-larger than the rows under it. Two things the
+The fifth is the window's own settings file: APPEARANCE. Three cards of
+settings, then the palette: how big the text is (the conversation and the
+panes), how solid the window is (the panels, and the empty space around them),
+and how tall the prompt is. Two things the
 file carries are deliberately not rows: which panes are open, which is the right
 click menu's list, and where the four dividers and the settings rail sit, which
 is set by dragging the lines. Both are still written and read the same way, so a
 closed pane and a dragged layout come back at the next launch; there is just
-nothing on the panel to type them into. Each row is the
-key as the file spells it and the value as the file spells it, so the panel
-doubles as the reference for editing the file by hand, and anything that can be
-changed is drawn as a box with an outline round it: if it has an edge, it takes a
-press or a keystroke. The box lights up under the pointer and keeps its cut
+nothing on the panel to type them into. Every field is a plain-words name over
+its value with the key of the file in the sentence under it, so the panel says
+what a setting does and still answers "which line do I edit", and anything that
+can be changed is drawn as a box with an outline round it: if it has an edge, it
+takes a press or a keystroke. The box lights up under the pointer and keeps its cut
 corner while it is lit, the way every other surface in the window does. A change is written straight away through
 the same writer `no0b --set` uses, so the comments stay, and then the whole file
 is read back and the window is restyled from it: the palette and both font sizes
@@ -602,8 +603,8 @@ move without a restart. That read-back is
 also why a row cannot show a value the file will not carry, since what you see is
 what the next launch reads.
 
-A setting with a range is a slider: opacity, both font sizes and how tall the
-prompt is. Press the track and drag it, with the value beside it
+A setting with a range is a slider: the two opacities, both font sizes and how
+tall the prompt is. Press the track and drag it, with the value beside it
 and the arrow keys still nudging it one step. The window takes the value while
 you drag: the opacity you are dragging to is the only thing that tells you where
 to stop. The file is written when the button comes up rather than on every motion
@@ -611,22 +612,45 @@ event, which would be hundreds of writes for one decision, and the live value
 goes through the same clamps the file is read with, so what you drag to is what
 the next launch reads.
 
-The palette is the last block of APPEARANCE, under `THE PALETTE`, and it opens
-with the control that writes it: `theme` is the first row of the block, and the
-line under it names the theme those colours came from and says that a colour
-written in the file overrides it for that key. Then the grid, three colours to a
-row under `THE WINDOW'S OWN TONES`, `THE CODE COLOURS`, `THE TOOL MARKS` and
-`THE METERS`, each one a block of the colour with what it paints written beside
-it in words: the meters say which readings wear them, so `gauge_7` reads as `ram
-and prefilled`. Pressing a swatch says which key in the file writes it, on the
-line at the foot of the panel; they are swatches to read rather than fields to
-edit, since changing one means typing a hex value and the one field this window
-has is the endpoint. A file carrying a palette that is not one of the three
-exactly reads as `custom`, which is what one hand-tuned colour over a preset
-makes it.
+**Two transparencies, not one.** `opacity` is the panes, the bars and the menus:
+everything with words on it. `window_opacity` is the window itself, the empty
+space around and between the panes, which was pinned at 55% of the other one
+until this release. So the gaps can go to glass while the text you are reading
+stays solid. Both are on the same card, both say which surface they move, and
+they open at 90% and 50%, which is what that ratio came to, so the window opens
+looking as it always did.
+
+The palette is the rest of APPEARANCE and it opens with the control that writes
+it: `THE PALETTE` is a card whose field is the theme, drawn as all three
+names side by side with the one the window is wearing filled in, so picking one
+is one press and there is nothing to discover by pressing twice. The sentence
+under the card names the theme those colours came from. **Picking a theme
+applies it**: the pick comments out any colour line in your file that would
+override the preset, then writes `theme = <name>`, because an explicit colour
+beats the theme it belongs to and a file carrying eight of them answered every
+theme change with the same window under a new name. Nothing else in the file is
+touched. Then the groups, one card each: `THE WINDOW'S OWN TONES`, `THE CODE
+COLOURS`, `THE TOOL MARKS` and `THE METERS`, with the colours inside reflowing
+to as many across as the card is wide enough for, each one a block of the colour
+with what it paints written beside it in words. The meters say which readings
+wear them, so `gauge_7` reads as `ram and prefilled`. Pressing a swatch says
+which key in the file writes it, on the line at the foot of the panel; they are
+swatches to read rather than fields to edit, since changing one means typing a
+hex value and the one field this window has is the endpoint. A file carrying a
+palette that is not one of the three exactly reads as `custom`, which is what one
+hand-tuned colour over a preset makes it.
+
+**Back to the defaults** is the last card of the section, in the colour this
+window keeps for anything that loses work, and it asks once before it acts: the
+first press says on the button and on the footer what is about to go, the second
+one does it. What it does is comment out every size, transparency and colour line
+in the settings file, so all of them fall back to what the window ships with. The
+lines stay in the file as comments, and the dividers, the pane flags, your own
+comments and any line this build has never heard of are left exactly as they
+were.
 
 `~/.config/noob/no0b.conf`, written with the defaults on first run and
-commented. Opacity, both font sizes, how tall the prompt is, where the
+commented. Both opacities, both font sizes, how tall the prompt is, where the
 dividers sit, how wide the settings rail is, which panes exist, and the whole palette: the eight base colors, one per tool,
 ten gauge slots a monitor reading picks from, and the five the highlighter uses
 for code. A key it does not recognise is reported in the ACTIVITY pane rather
@@ -644,8 +668,10 @@ and ten warm ones in noob-red, still ten you can tell apart as a column. The
 twelve tool colors are the exception: they name the tool rather than the window,
 so a theme leaves them where they are. The colors ship as commented defaults so
 the theme has something to set, so uncomment one line to keep the theme and
-override that single color. `no0b --set theme=noob-red` makes the same edit from
-a terminal without touching the comments. The names were `noob`, `amber`, `ice`
+override that single color, and know that picking a theme on the panel comments
+that line back out. `no0b --set theme=noob-red` writes the theme line from a
+terminal without touching the comments; it does not clear an overriding colour,
+which the panel does. The names were `noob`, `amber`, `ice`
 and `plum` up to 0.7.1; a file still carrying one of those opens on the closest
 of the three rather than being told it is a typo.
 
@@ -655,9 +681,11 @@ The window shipped as CLIppy up to 0.6.0 and wrote `clippy.conf` and
 A file that already exists under the new name wins and the old one is left
 alone.
 
-Opacity defaults to 90%. Lower it to see more of your desktop through the
-reading surface; below about 60% a busy wallpaper starts competing with the
-text, which is a taste call rather than a bug.
+Opacity defaults to 90% and window opacity to 50%. Lower the first to see more
+of your desktop through the reading surface; below about 60% a busy wallpaper
+starts competing with the text, which is a taste call rather than a bug. Lower
+the second, which is the empty space around the panes, as far as you like: there
+is nothing written on it.
 
 The panels are drawn dark under green text, not green under green: two greens
 fight, and turning the opacity down to see your desktop made the text worse

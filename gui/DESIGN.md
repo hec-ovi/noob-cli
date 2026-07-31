@@ -108,9 +108,17 @@ server are.
   to in the header, the text in the body, and its own bar down its own right
   padding.
 - **A card's own action is one button, bottom right of its footer.** The card
-  exists for it, so it is the primary kind. Several buttons in one card's footer
-  is a toolbar, which is a different thing: the group that acts on a whole list
-  is centred (see below), and a card's own action is not a group.
+  exists for it, so it is the primary kind, unless it loses something and then
+  it is the danger kind and asks once before it acts. Several buttons in one
+  card's footer is a toolbar, which is a different thing: the group that acts on
+  a whole list is centred (see below), and a card's own action is not a group.
+- **A grid is a card too.** One group of the palette is a card whose header says
+  what that group paints and whose body is its colours, as many across as the
+  card is wide enough for one to keep its columns
+  (`design::swatch_across`). Nothing in it holds the cursor: a colour is read
+  here and edited in the file. The width comes from the list the card stands in,
+  which the model is handed and the layout reads off the same list, so the rows
+  the grid is counted at and the rows it is drawn at are the same rows.
 - **A table is a card too, and it is the one card with a list in it.** The saved
   conversations are a card whose header says how many there are and how many are
   chosen, whose body is the column names on a band with the rows under them, and
@@ -145,9 +153,13 @@ one line: that is what made every value look like part of a sentence.
   be typed into is obvious at a glance.
 - A slider is the input box with the track inside it and the number at the right
   end of the same box.
-- A choice with a small number of options is drawn as all of the options, with
-  the current one banded. A choice the user cannot see the options of is a choice
-  they will not know they have.
+- A choice with a small number of options is drawn as all of the options, side
+  by side in the field's own box, sharing its width: the one that is set is
+  filled the way a primary button is and the rest carry a secondary's outline,
+  since a row of identical boxes says nothing about what is set. Every option is
+  its own press, and the arrow keys still walk them. A choice the user cannot see
+  the options of is a choice they will not know they have, which is what one box
+  holding one word was.
 
 ## A button
 
@@ -222,6 +234,7 @@ hairline under every row, with buttons wherever the row happened to put them and
 values on the same line as their labels. If you are changing a section and it
 still looks like that, the section has not been done yet.
 
-AGENT, SESSIONS, SKILLS and MCP are built this way. APPEARANCE is not yet: its
-rows are the old flat ones, without the hairline, and it is what the next pass
-converts.
+Every section is built this way: AGENT, SESSIONS, SKILLS, MCP and APPEARANCE.
+There are no headings left on the panel at all, because a heading is not a group
+and a card is. The one row that is not in a card is a line of trouble, which is
+what a section says when something on the disk could not be read.
