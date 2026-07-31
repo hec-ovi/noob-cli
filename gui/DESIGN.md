@@ -213,8 +213,11 @@ of rows are marked.
   either end of that region it goes on to what is behind it, because a region
   that fills the window and answers nothing reads as a window that has stopped
   answering.
-- Everything that scrolls with the wheel scrolls from the keyboard too: Page Up
-  and Page Down by a screenful of it, Home and End to its two ends.
+- A region the cursor can land on scrolls from the keyboard as well as from the
+  wheel: Page Up and Page Down by a screenful of it, Home and End to its two
+  ends. The document column beside a list is the one region with no keyboard
+  route, because the cursor is on the list and the keys walk that; reaching the
+  column would need a second focus, which the panel does not have.
 - The bar reports the real extent, so the thumb's size says how much is off
   screen. It counts what is on screen, not what the region was measured for: a
   card the bottom of the list cut short shows fewer lines and says so.
