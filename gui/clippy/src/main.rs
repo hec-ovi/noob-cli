@@ -2838,17 +2838,25 @@ impl App {
             // Over the column beside the entry list, the wheel moves that
             // document rather than the list: the pointer is on the thing being
             // scrolled, which is what every two-column view in this window does.
+            // The document is counted in the rows and columns it is drawn in,
+            // which is the box inside its wrapper rather than the whole column:
+            // a page that moved the text by more rows than the box shows skips
+            // lines nobody read. A column too short to hold a row of text is not
+            // scrolled at all, since nothing in it is on screen to scroll.
             let doc = layout.settings_doc;
+            let doc_rows = layout.settings_doc_rows(self.config.pane_font_size);
+            let doc_cols = layout.settings_doc_columns(self.pane_column);
             let on_doc = doc.w >= 1.0
+                && doc_rows > 0
                 && doc.contains(self.cursor.x as f32, self.cursor.y as f32);
             let rows = match on_doc {
-                true => layout.rows(doc, self.config.pane_font_size),
+                true => doc_rows,
                 false => layout.settings_capacity(self.config.pane_font_size),
             };
             let by = ((rows as f32 * pages.abs()).round() as usize).max(1);
             if let Some(panel) = self.settings.as_mut() {
                 self.dirty |= match on_doc {
-                    true => panel.scroll_doc(by, pages < 0.0, rows),
+                    true => panel.scroll_doc(by, pages < 0.0, doc_cols, doc_rows),
                     false => panel.scroll(by, pages < 0.0, rows),
                 };
             }

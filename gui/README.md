@@ -437,17 +437,25 @@ window was, and the opening of what was first said in it. Up and down pick a row
 and it carries a band across the whole of it. The last column is a trash: press
 it once and it says `sure?`, press it again and the transcript and the line about
 it in `no0b.sessions` both go.
+
 SKILLS and MCP are two columns: a list on the left and, beside it, whatever the
 row under the cursor is. In a window too narrow to hold both, the list keeps the
-width and the second column is not drawn.
+width and the second column is not drawn. A row of the list is three lines, name,
+what it is for, and where it is, each in its own place, with the toggle and the
+uninstall a gap in from the right edge rather than against it. The row under the
+cursor carries a band across the whole of it, the same solid one the folder
+picker marks its rows with. The column beside the list is titled with the name of
+whatever it belongs to and the text sits in a box of its own, wrapped at whatever
+width the column has, by the same rule the panes wrap prose at. Both sides
+scroll, each in its own box: the wheel moves whichever one the pointer is over.
 
 SKILLS lists the directories under `~/.config/noob/skills`, named and described
 from each `SKILL.md`'s front matter and by the directory name when it has none.
-Under each name is the repository the skill records, or, since nothing the CLI
-writes down records where an installed skill came from, the directory it was
+Under the description is the repository the skill records, or, since nothing the
+CLI writes down records where an installed skill came from, the directory it was
 found in. The column beside the list is that skill's own `SKILL.md`, rendered
-the way the transcript renders what the model writes; the wheel over it scrolls
-the document rather than the list. Every row carries a toggle and an uninstall.
+the way the transcript renders what the model writes. Every row carries a toggle
+and an uninstall.
 The toggle really turns the skill off: there is no enabled flag anywhere in the
 CLI, so off means the directory is moved to `~/.config/noob/skills.off`, which is
 none of the four places the agent looks, and on moves it back. Nothing is
@@ -461,8 +469,9 @@ MCP names both files the CLI merges, `<config>/mcp.json` and
 `<workspace>/.noob/mcp.json`, and says `none configured` when neither is there
 rather than showing an empty list that reads as broken; a malformed one is a line
 saying so, and the servers from the file that did parse are still listed. Each
-server is a row with its URL or command line under it and its entry out of the
-file beside it, and the same toggle and uninstall a skill has. Off moves the
+server is a row with its URL or command line under the name, the file it came
+from under that, and its entry out of that file beside it, and the same toggle
+and uninstall a skill has. Off moves the
 entry into a `disabled` object in the same file, which the CLI's loader does not
 read, and on moves it back. Uninstall takes the entry out of the file for good,
 out of whichever of the two objects it is in, and takes the same two presses:

@@ -273,7 +273,7 @@ pub enum Row {
     /// them, so the row is always as wide as every other row and the list is
     /// still one panel per row index.
     Swatches(Vec<Swatch>),
-    /// One installed skill or one configured server: two lines of text, a
+    /// One installed skill or one configured server: three lines of text, a
     /// toggle that really turns it off, and an uninstall beside it. The row the
     /// column on the right belongs to.
     Entry(Entry),
@@ -366,10 +366,17 @@ pub fn cell(row: &Row, side: Side) -> &Row {
 /// so what the toggle shows is what the next session will do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
+    /// What it is called, and nothing else. The description used to be glued to
+    /// the end of this with two spaces, which made the name and what it is one
+    /// run of text competing for one line with two buttons on the end of it.
     pub name: String,
-    /// The line under the name: the repository a skill records, or the
-    /// directory it was found in when it records none; the address or the
-    /// command line for a server, and which file it came from.
+    /// What it is for, on its own line under the name: a skill's own
+    /// description, or the address or command line a server is started with.
+    /// Empty when there is none to read.
+    pub about: String,
+    /// The line under that: the repository a skill records, or the directory it
+    /// was found in when it records none; for a server, the file its entry
+    /// lives in.
     pub under: String,
     pub on: bool,
     /// What turning it on and off means on the disk.
@@ -449,9 +456,12 @@ pub const SWATCH_COLUMNS: usize = 3;
 /// this, which is what keeps the two agreeing.
 pub fn lines(row: &Row) -> usize {
     match row {
-        // A heading is drawn larger; an entry is a name with what it is
-        // underneath, which is two lines of the ordinary text.
-        Row::Heading(_) | Row::Entry(_) => 2,
+        // A heading is drawn larger, which is two lines of the ordinary text.
+        Row::Heading(_) => 2,
+        // A name, what it is for, and where it is: three things that were two
+        // lines with the first two sharing one, so the description was the end
+        // of the name and was cut by whatever the buttons left of the row.
+        Row::Entry(_) => 3,
         // As tall as the taller half, so the two columns of a form sit on the
         // same lines and the rows under them do not move when one half changes.
         Row::Pair(left, right) => lines(left).max(lines(right)),
@@ -706,7 +716,7 @@ pub struct Section {
     rows: Vec<Row>,
     cursor: usize,
     first: usize,
-    /// Where the column beside the list is scrolled to, in lines of that
+    /// Where the column beside the list is scrolled to, as a wrapped row of that
     /// document. Its own number because the two columns scroll separately: the
     /// wheel over a skill's own text must not walk the list of skills.
     doc_first: usize,
@@ -1176,7 +1186,8 @@ impl Settings {
         }
         for skill in &self.agent.skills {
             rows.push(Row::Entry(Entry {
-                name: skill_line(skill),
+                name: skill.name.clone(),
+                about: skill.about.clone(),
                 under: match &skill.repo {
                     Some(repo) => repo.clone(),
                     // Nothing on disk records the repository of an installed
@@ -1226,7 +1237,8 @@ impl Settings {
         for server in &mcp.servers {
             rows.push(Row::Entry(Entry {
                 name: server.name.clone(),
-                under: server_line(server),
+                about: server.how.clone(),
+                under: server_under(server, self.mcp_file(server.project)),
                 on: server.on,
                 what: Which::Server {
                     project: server.project,
@@ -1237,7 +1249,7 @@ impl Settings {
                 // through the same rename, so a press that fails leaves the
                 // file exactly as it was.
                 removable: true,
-                doc: server_doc(server, self.mcp_file(server.project)),
+                doc: server_doc(server),
             }));
         }
         for why in &mcp.trouble {
@@ -1923,21 +1935,66 @@ impl Settings {
         }
     }
 
-    /// Which line of that document the column starts on, in a column `rows`
-    /// tall. Clamped here rather than where it is set, so a document that got
-    /// shorter cannot leave the column showing nothing.
-    pub fn doc_first(&self, rows: usize) -> usize {
-        let lines = self.showing().map(|entry| entry.doc.len()).unwrap_or(0);
-        self.here().doc_first.min(lines.saturating_sub(rows))
+    /// How many rows of a `cols` wide column each line of the showing document
+    /// takes, which is what everything about that column is counted in.
+    ///
+    /// Measured on what is drawn rather than on the source: the formatter eats
+    /// the marks and puts structure in front of a line (`▌ `, `• `, `│ `), so a
+    /// line counted as its own text and drawn as the rendered one drifts by a
+    /// row as soon as it is near the width of the column.
+    pub fn doc_heights(&self, cols: usize) -> Vec<usize> {
+        let Some(entry) = self.showing() else {
+            return Vec::new();
+        };
+        let mut fence = crate::markdown::Fence::default();
+        entry
+            .doc
+            .iter()
+            .map(|line| {
+                let shown = crate::markdown::shown(line, &mut fence);
+                text_geometry::rows_in(&shown, cols, crate::state::PANE_WRAP).len()
+            })
+            .collect()
+    }
+
+    /// Which row of that document the column starts on, given its heights.
+    ///
+    /// A wrapped row, not a line of the file: a line of a `SKILL.md` is as many
+    /// rows as the column is narrow, and a scroll counted in lines would step
+    /// over a paragraph at a time and run off the end of a document that fits.
+    /// Clamped here rather than where it is set, so a column that got narrower
+    /// or an entry whose document is shorter cannot be left showing nothing.
+    fn doc_at(&self, heights: &[usize], rows: usize) -> usize {
+        self.here()
+            .doc_first
+            .min(text_geometry::max_scrollback(heights, rows))
+    }
+
+    /// The same, in a box `cols` wide and `rows` tall. Only the tests want the
+    /// number on its own: what the drawing asks for is [`Settings::doc_window`].
+    #[cfg(test)]
+    pub fn doc_first(&self, cols: usize, rows: usize) -> usize {
+        self.doc_at(&self.doc_heights(cols), rows)
+    }
+
+    /// Which lines of it to draw, and how much of the first one is above the
+    /// box, for a column `cols` wide and `rows` tall.
+    pub fn doc_window(&self, cols: usize, rows: usize) -> text_geometry::Window {
+        let heights = self.doc_heights(cols);
+        let back = text_geometry::scrollback_for(&heights, rows, self.doc_at(&heights, rows));
+        text_geometry::window(&heights, rows, back)
+    }
+
+    /// How much of that document is on screen, for its own scrollbar.
+    pub fn doc_thumb(&self, cols: usize, rows: usize) -> Option<(f32, f32)> {
+        let heights = self.doc_heights(cols);
+        let back = text_geometry::scrollback_for(&heights, rows, self.doc_at(&heights, rows));
+        text_geometry::thumb(&heights, rows, back)
     }
 
     /// Move that column, for a wheel with the pointer over it.
-    pub fn scroll_doc(&mut self, by: usize, down: bool, rows: usize) -> bool {
-        let most = self
-            .showing()
-            .map(|entry| entry.doc.len())
-            .unwrap_or(0)
-            .saturating_sub(rows);
+    pub fn scroll_doc(&mut self, by: usize, down: bool, cols: usize, rows: usize) -> bool {
+        let most = text_geometry::max_scrollback(&self.doc_heights(cols), rows);
         let section = self.here_mut();
         let next = match down {
             true => (section.doc_first + by).min(most),
@@ -2238,19 +2295,17 @@ fn short_folder(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn skill_line(skill: &agent::Skill) -> String {
-    match skill.about.is_empty() {
-        true => skill.name.clone(),
-        false => format!("{}  {}", skill.name, skill.about),
-    }
-}
-
-fn server_line(server: &agent::Server) -> String {
+/// The third line of a server's row: which of the two files its entry is in,
+/// and where that file is. The same place a skill's row says where it was found.
+fn server_under(server: &agent::Server, file: Option<&Path>) -> String {
     let where_ = match server.project {
         true => "project",
         false => "global",
     };
-    format!("{}  {}  ({where_})", server.name, server.how)
+    match file {
+        Some(path) => format!("{where_}: {}", path.display()),
+        None => format!("{where_} file"),
+    }
 }
 
 /// What the column beside the list shows for a server: its entry out of the
@@ -2258,16 +2313,12 @@ fn server_line(server: &agent::Server) -> String {
 ///
 /// Fenced as JSON so the highlighter reads it the way it reads any other code
 /// block: the whole column is Markdown, and a skill's own document is the thing
-/// it was built for.
-fn server_doc(server: &agent::Server, file: Option<&Path>) -> Vec<String> {
-    let mut out = vec![format!("# {}", server.name), String::new()];
-    out.push(String::from("```json"));
+/// it was built for. No heading of its own: the column is titled with the name
+/// now, and a document that opened with the same name said it twice.
+fn server_doc(server: &agent::Server) -> Vec<String> {
+    let mut out = vec![String::from("```json")];
     out.extend(server.entry.lines().map(str::to_string));
     out.push(String::from("```"));
-    if let Some(path) = file {
-        out.push(String::new());
-        out.push(format!("in {}", path.display()));
-    }
     out
 }
 
@@ -2487,8 +2538,9 @@ mod tests {
                     .collect::<Vec<_>>()
                     .join("  "),
                 Row::Entry(entry) => format!(
-                    "{} {} {}",
+                    "{} {} {} {}",
                     entry.name,
+                    entry.about,
                     entry.under,
                     match entry.on {
                         true => "on",
@@ -3995,8 +4047,11 @@ mod tests {
         assert!(
             rows.iter().any(|row| matches!(row, Row::Entry(entry)
                 if entry.name == "docs"
-                    && entry.under.contains("http://localhost:9000/mcp")
+                    // The name, what it is and where it came from, each on a
+                    // line of its own rather than one run of text.
+                    && entry.about == "http://localhost:9000/mcp"
                     && entry.under.contains("project")
+                    && entry.under.contains("mcp.json")
                     && entry.on)),
             "{rows:?}"
         );
@@ -4230,15 +4285,18 @@ mod tests {
                 _ => None,
             })
             .collect();
+        // The name is the name and the description is its own line: the two
+        // used to be one run of text joined by two spaces, which is what put the
+        // description on the name's line for the buttons to cut off.
         assert_eq!(
             listed
                 .iter()
-                .map(|entry| (entry.name.as_str(), entry.on))
+                .map(|entry| (entry.name.as_str(), entry.about.as_str(), entry.on))
                 .collect::<Vec<_>>(),
             vec![
-                ("coding  Changing code that already exists.", true),
-                ("noisy  Talks too much.", false),
-                ("web-search  Search the web.", true),
+                ("coding", "Changing code that already exists.", true),
+                ("noisy", "Talks too much.", false),
+                ("web-search", "Search the web.", true),
             ]
         );
         // Nothing the CLI writes records a repository, so a skill that names one
@@ -4259,7 +4317,7 @@ mod tests {
         // The column beside the list is the skill under the cursor, and the
         // section opens on the first one rather than on an empty column.
         let showing = panel.showing().expect("something to show");
-        assert_eq!(showing.name, "coding  Changing code that already exists.");
+        assert_eq!(showing.name, "coding");
         assert_eq!(
             showing.doc,
             vec![
@@ -4270,9 +4328,122 @@ mod tests {
             "the front matter is not the document"
         );
         assert!(panel.step(true), "the cursor walks the entries");
-        assert_eq!(panel.showing().expect("the next one").name, "noisy  Talks too much.");
+        assert_eq!(panel.showing().expect("the next one").name, "noisy");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The skills section with one skill on it whose document is whatever the
+    /// test needs. No disk: what is being tested is the arithmetic over the
+    /// document, not where it was read from.
+    fn a_panel_showing(doc: Vec<String>) -> Settings {
+        let agent = Agent {
+            skills_at: Some(PathBuf::from("/home/hec/.config/noob/skills")),
+            skills: vec![agent::Skill {
+                dir: String::from("coding"),
+                name: String::from("coding"),
+                about: String::from("Changing code that already exists."),
+                repo: None,
+                path: PathBuf::from("/home/hec/.config/noob/skills/coding"),
+                on: true,
+                doc,
+            }],
+            ..Agent::default()
+        };
+        let mut panel = Settings::open(&Config::default(), None, agent);
+        go_to(&mut panel, SKILLS);
+        panel
+    }
+
+    /// The column beside the list is counted in the rows it is drawn as, not in
+    /// the lines the file has: one long paragraph is many rows in a narrow
+    /// column, and it used to be one line that was cut off at the edge.
+    #[test]
+    fn a_long_document_line_is_as_many_rows_as_it_wraps_to() {
+        let long = "the whole point of a document column is that a sentence in it can be read to the end of itself";
+        let panel = a_panel_showing(vec![String::from(long), String::from("short")]);
+        let heights = panel.doc_heights(20);
+        assert_eq!(
+            heights.len(),
+            2,
+            "one height per line of the file, whatever it wraps to"
+        );
+        assert!(heights[0] >= 5, "a 95 character line in 20 columns: {heights:?}");
+        assert_eq!(heights[1], 1);
+        // Wider is fewer rows, which is what makes the column worth widening.
+        assert!(panel.doc_heights(80)[0] < heights[0]);
+
+        // Counted on what is drawn rather than on the source: the formatter puts
+        // a bullet in front of an item and eats the marker that asked for it, so
+        // a line measured raw is measured two characters short.
+        let marked = a_panel_showing(vec![format!("- **{long}**")]);
+        assert_eq!(
+            marked.doc_heights(20),
+            vec![text_geometry::rows_in(
+                &format!("• {long}"),
+                20,
+                crate::state::PANE_WRAP
+            )
+            .len()]
+        );
+    }
+
+    /// The two columns of a two-column section scroll apart: the wheel over the
+    /// document moves the document and leaves the list where it was, and the
+    /// wheel over the list moves the list and leaves the document where it was.
+    #[test]
+    fn the_list_and_the_document_scroll_apart() {
+        let doc: Vec<String> = (0..40).map(|n| format!("line {n} of it")).collect();
+        let mut panel = a_panel_showing(doc);
+        let (cols, rows) = (30, 8);
+        // The list is three rows long here, so it is asked for a window it does
+        // not all fit in; the document is asked for the eight the column holds.
+        let list_rows = 2;
+        assert_eq!(panel.doc_first(cols, rows), 0);
+        let list_was = panel.window(list_rows);
+
+        assert!(panel.scroll_doc(5, true, cols, rows), "the document moves");
+        assert_eq!(panel.doc_first(cols, rows), 5);
+        assert_eq!(panel.doc_window(cols, rows).first, 5);
+        assert_eq!(panel.window(list_rows), list_was, "the list moved with it");
+
+        assert!(panel.scroll(1, true, list_rows), "the list moves");
+        assert_ne!(panel.window(list_rows), list_was);
+        assert_eq!(
+            panel.doc_first(cols, rows),
+            5,
+            "the list took the document with it"
+        );
+
+        // And neither runs off its own end: the last screenful is the last one.
+        assert!(panel.scroll_doc(500, true, cols, rows));
+        assert_eq!(
+            panel.doc_first(cols, rows),
+            40 - rows,
+            "40 lines that each fit on one row, 8 at a time"
+        );
+        assert!(!panel.scroll_doc(500, true, cols, rows), "already at the end");
+
+        // In rows of the column rather than lines of the file: the same document
+        // in half the width is twice as far to scroll.
+        assert!(panel.scroll_doc(500, true, 8, rows));
+        assert!(
+            panel.doc_first(8, rows) > 40 - rows,
+            "a wrapped document scrolls further than it has lines: {}",
+            panel.doc_first(8, rows)
+        );
+    }
+
+    /// Moving the cursor to another entry takes the column back to the top of
+    /// that entry's own document.
+    #[test]
+    fn the_document_rewinds_when_the_cursor_leaves_the_entry() {
+        let doc: Vec<String> = (0..40).map(|n| format!("line {n}")).collect();
+        let mut panel = a_panel_showing(doc);
+        assert!(panel.scroll_doc(4, true, 30, 8));
+        assert_eq!(panel.doc_first(30, 8), 4);
+        panel.step(true);
+        assert_eq!(panel.doc_first(30, 8), 0);
     }
 
     /// The toggle on a skill's row is a move on the disk and back, and what the

@@ -780,6 +780,9 @@ pub struct Layout {
     /// every section that has no entries, which is what leaves those sections
     /// one column wide.
     pub settings_doc: Panel,
+    /// The box the document's own text is written in, inside the outlined
+    /// wrapper and under the title over it. Empty wherever `settings_doc` is.
+    pub settings_doc_text: Panel,
     pub settings_close: Panel,
 
     /// The floating layer. The open menu's box, and one panel per row on
@@ -1032,6 +1035,7 @@ impl Layout {
                 settings_toggles: Vec::new(),
                 settings_removes: Vec::new(),
                 settings_doc: nowhere(),
+                settings_doc_text: nowhere(),
                 settings_close: nowhere(),
                 menu,
                 menu_rows,
@@ -1091,6 +1095,7 @@ impl Layout {
                 settings_toggles: Vec::new(),
                 settings_removes: Vec::new(),
                 settings_doc: nowhere(),
+                settings_doc_text: nowhere(),
                 settings_close: nowhere(),
                 menu,
                 menu_rows,
@@ -1151,6 +1156,7 @@ impl Layout {
                 settings_toggles: places.toggles,
                 settings_removes: places.removes,
                 settings_doc: places.doc,
+                settings_doc_text: places.doc_text,
                 settings_close: places.close,
                 menu,
                 menu_rows,
@@ -1394,6 +1400,7 @@ impl Layout {
             settings_toggles: Vec::new(),
             settings_removes: Vec::new(),
             settings_doc: nowhere(),
+            settings_doc_text: nowhere(),
             settings_close: nowhere(),
             menu,
             menu_rows,
@@ -1797,6 +1804,24 @@ impl Layout {
     /// How many rows the settings panel's list can show, on the same terms.
     pub fn settings_capacity(&self, size: f32) -> usize {
         Text::rows_for(size, self.settings_list.h)
+    }
+
+    /// How many rows of the document beside it are on screen, and how many
+    /// columns it wraps in.
+    ///
+    /// One answer for the drawing, for the wheel and for the scrollbar. They
+    /// were three: the column was drawn in `rows_for` of a box with no padding
+    /// and paged by `rows` of the same box inset by [`PAD`], so a wheel moved
+    /// the text by a row or two more than it showed.
+    pub fn settings_doc_rows(&self, size: f32) -> usize {
+        Text::rows_for(size, self.settings_doc_text.h)
+    }
+
+    pub fn settings_doc_columns(&self, column: f32) -> usize {
+        match self.settings_doc_text.w >= 1.0 {
+            true => columns_in(self.settings_doc_text.w, column),
+            false => 0,
+        }
     }
 
     /// Where along one row's track a pointer sits, 0 at the low end and 1 at the
@@ -2377,6 +2402,11 @@ struct SettingsPlaces {
     toggles: Vec<(usize, Panel)>,
     removes: Vec<(usize, Panel)>,
     doc: Panel,
+    /// The box the document itself is written in: inside the outlined wrapper,
+    /// under the title over it. What the wheel counts a page in and what the
+    /// wrapping is measured in, so the rows counted and the rows drawn are one
+    /// number.
+    doc_text: Panel,
     close: Panel,
 }
 
@@ -2543,8 +2573,22 @@ const SETTING_TRACK_VALUE_COLUMNS: usize = 8;
 /// Both are boxes with a word in them, sized for the longer of the two words
 /// they can hold, so pressing one does not change the width of the thing that
 /// was just pressed.
+///
+/// The uninstall holds `uninstall` and the padding on both sides of it. Eleven
+/// columns was nine glyphs, [`INPUT_PAD`] twice and a column and a half of
+/// slack, and a column here is measured on a digit: the moment the real letter
+/// advance ran past it the shaper's own bounds took the last `l` off, so the
+/// button read `uninstal`.
 const SETTING_TOGGLE_COLUMNS: usize = 5;
-const SETTING_REMOVE_COLUMNS: usize = 11;
+const SETTING_REMOVE_COLUMNS: usize = 13;
+
+/// How far in from the right edge of the entry list the controls stop.
+///
+/// They were pinned to the edge itself, which is a gap short of the hairline
+/// down the document column: the uninstall ended three pixels from another
+/// column's border and read as a button that had been cut off. A gap of its own
+/// puts the same air on the right of the row that the list has on its left.
+const SETTING_ENTRY_INSET: f32 = GAP;
 
 /// The least the column beside the entry list goes down to, in columns of pane
 /// text, and the least the list itself keeps.
@@ -2572,6 +2616,7 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
             toggles: Vec::new(),
             removes: Vec::new(),
             doc: nowhere(),
+            doc_text: nowhere(),
             close: nowhere(),
         };
     }
@@ -2738,7 +2783,7 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
                     true => column,
                     false => 0.0,
                 };
-                let x = row.x + row.w - remove_w - gap - toggle_w;
+                let x = row.x + row.w - SETTING_ENTRY_INSET - remove_w - gap - toggle_w;
                 if x > row.x + MARK_W + 3.0 + column * 8.0 {
                     toggles.push((index, Panel::new(x, row.y, toggle_w, line)));
                     if entry.removable {
@@ -2767,8 +2812,37 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
         toggles,
         removes,
         doc,
+        doc_text: settings_doc_text(doc, line),
         close,
     }
+}
+
+/// Where the document's own text goes: inside the wrapper, off its border.
+fn settings_doc_text(doc: Panel, line: f32) -> Panel {
+    let box_ = settings_doc_box(doc, line);
+    match box_.w >= 1.0 {
+        true => box_.inset(PAD),
+        false => nowhere(),
+    }
+}
+
+/// The wrapper the document is written inside: the title takes the first line of
+/// the column and the outlined box under it takes the rest.
+///
+/// One function, so the box that is outlined, the columns the text wraps in and
+/// the rows the wheel pages by all come off the same rectangle. A column too
+/// short for a title and a line under it is no wrapper at all rather than a
+/// border with nothing inside it.
+fn settings_doc_box(doc: Panel, line: f32) -> Panel {
+    if doc.w < PAD * 3.0 || doc.h < line + GAP + PAD * 2.0 + line {
+        return nowhere();
+    }
+    Panel::new(
+        doc.x + PAD,
+        doc.y + line + GAP,
+        (doc.w - PAD).max(1.0),
+        (doc.h - line - GAP).max(1.0),
+    )
 }
 
 /// One strip's tabs, and the arrows for reaching the ones that did not fit.
@@ -4949,8 +5023,13 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 // picker's own session list carries; a form being read carries
                 // the quiet strip, which is enough to say which row the keys
                 // are on without shouting over the values beside it.
+                //
+                // A skill and a server are picked from too: the row under the
+                // cursor is the one the whole column beside the list belongs to,
+                // and the strip it used to wear is the panel's own colour at a
+                // tenth more alpha, which over a dark desktop is no band at all.
                 let band = match entry {
-                    SettingRow::Session { .. } => skin.picked,
+                    SettingRow::Session { .. } | SettingRow::Entry(_) => skin.picked,
                     _ => skin.strip,
                 };
                 scene.rect(row.fill(band));
@@ -5342,13 +5421,17 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
             // ones the agent will actually load without anything having to be
             // read.
             SettingRow::Entry(entry) => {
+                // Under the solid band the row wears when the cursor is on it,
+                // the ink is the band's own, the way a picked session's is.
                 let tint = match (entry.on, on) {
-                    (true, true) => skin.bright,
+                    (_, true) => skin.picked_ink,
                     (true, false) => skin.body,
-                    (false, _) => skin.dim,
+                    (false, false) => skin.dim,
                 };
                 // The name stops a column short of the controls: a name drawn
-                // under the toggle is a name whose end nobody can read.
+                // under the toggle is a name whose end nobody can read. Only the
+                // name: the description and the path have lines of their own
+                // now and run the whole width of the row under the buttons.
                 let controls = layout
                     .settings_toggles
                     .iter()
@@ -5369,13 +5452,30 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     Panel::new(text_x, row.y, name_w, line),
                     tint,
                 );
-                if row.h >= line * 2.0 {
-                    say(
-                        scene,
-                        vec![Run::tinted(clip(&entry.under, whole_cols), skin.dim)],
-                        Panel::new(text_x, row.y + line, whole.w, line),
-                        skin.dim,
-                    );
+                // What it is for, in the ordinary tone, and where it is, in the
+                // quiet one: three things on three lines rather than a name with
+                // its description glued to the end of it and cut by whatever the
+                // buttons left over.
+                let about = match (on, entry.on) {
+                    (true, _) => skin.picked_ink,
+                    (false, true) => skin.body,
+                    // Turned off, and the whole row says so rather than only its
+                    // name: what is off is not what the eye should land on.
+                    (false, false) => skin.dim,
+                };
+                let under = match on {
+                    true => skin.picked_ink,
+                    false => skin.dim,
+                };
+                for (step, (text, ink)) in [(&entry.about, about), (&entry.under, under)]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let at = Panel::new(text_x, row.y + (step as f32 + 1.0) * line, whole.w, line);
+                    if text.is_empty() || at.y + line > row.y + row.h {
+                        continue;
+                    }
+                    say(scene, vec![Run::tinted(clip(text, whole_cols), ink)], at, ink);
                 }
                 for (at, box_) in &layout.settings_toggles {
                     if at != index {
@@ -5525,42 +5625,75 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
     let doc = layout.settings_doc;
     if doc.w >= 1.0 && doc.h >= 1.0 {
         scene.rect(Panel::new(doc.x - (GAP * 0.5).floor(), doc.y, 1.0, doc.h).fill(skin.edge));
-        let inside = Panel::new(doc.x + PAD, doc.y, (doc.w - PAD).max(1.0), doc.h);
-        let doc_cols = columns_in(inside.w, column).saturating_sub(1);
-        let doc_rows = Text::rows_for(size, inside.h);
-        if let Some(entry) = panel.showing() {
-            let first = panel.doc_first(doc_rows);
-            // Where the fences stand after everything scrolled off, so a column
-            // that starts inside a code block is drawn as code.
-            let mut fence =
-                crate::markdown::fence_after(entry.doc.iter().take(first).map(String::as_str));
-            for (step, text) in entry.doc.iter().skip(first).take(doc_rows).enumerate() {
-                let mut runs = Vec::new();
-                crate::markdown::line(&clip(text, doc_cols), &mut fence, skin, &mut runs);
-                scene.text(Text::rich(
-                    runs,
-                    Panel::new(inside.x, inside.y + step as f32 * line, inside.w, line),
-                    size,
-                    skin.body,
-                ));
-            }
-            if entry.doc.is_empty() {
-                say(
-                    scene,
-                    vec![Run::tinted(
-                        clip("nothing to show: this one has no SKILL.md", doc_cols),
-                        skin.dim,
-                    )],
-                    Panel::new(inside.x, inside.y, inside.w, line),
-                    skin.dim,
+        let entry = panel.showing();
+        // The title over the wrapper: what the text under it belongs to. The
+        // column was a page of Markdown with nothing saying whose it was, and a
+        // server's document had to open with its own name to make up for it.
+        let title = Panel::new(doc.x + PAD, doc.y, (doc.w - PAD).max(1.0), line);
+        if let Some(entry) = entry {
+            say(
+                scene,
+                vec![Run::tinted(
+                    clip(&entry.name, columns_in(title.w, column).saturating_sub(1)),
+                    skin.good,
+                )],
+                title,
+                skin.good,
+            );
+        }
+        // The wrapper itself, in the same outlined box every other block on this
+        // panel is written in, so the document reads as one thing rather than as
+        // text floating beside a list.
+        let box_ = settings_doc_box(doc, line);
+        let inside = layout.settings_doc_text;
+        if box_.w >= 1.0 && inside.w >= 1.0 {
+            scene.rect(panel_fill(box_, skin.input));
+            scene.rect(panel_edge(box_, skin.edge));
+            let doc_cols = layout.settings_doc_columns(column);
+            let doc_rows = layout.settings_doc_rows(size);
+            if let Some(entry) = entry {
+                // Wrapped rather than clipped: a line of a `SKILL.md` is a
+                // sentence, and a column that ended every one of them in an
+                // ellipsis was showing the left edge of a document. The rows
+                // come from the same wrap rule the panes use, counted on what
+                // the formatter draws, and the renderer breaks the box with that
+                // rule rather than with one of its own.
+                let window = panel.doc_window(doc_cols, doc_rows);
+                let mut fence = crate::markdown::fence_after(
+                    entry.doc.iter().take(window.first).map(String::as_str),
                 );
+                let mut runs = Vec::new();
+                for text in entry.doc.iter().skip(window.first).take(window.count) {
+                    crate::markdown::line(text, &mut fence, skin, &mut runs);
+                    runs.push(Run::plain("\n"));
+                }
+                scene.text(
+                    Text::rich(runs, inside, size, skin.body)
+                        .scrolled(window.skip as f32)
+                        .wrap_at(doc_cols),
+                );
+                if entry.doc.is_empty() {
+                    say(
+                        scene,
+                        vec![Run::tinted(
+                            clip("nothing to show: this one has no SKILL.md", doc_cols),
+                            skin.dim,
+                        )],
+                        Panel::new(inside.x, inside.y, inside.w, line),
+                        skin.dim,
+                    );
+                }
+                // Its own bar, in its own box. The list's used to be painted
+                // against the right edge of the whole panel, which is over this
+                // column rather than beside the list it counts.
+                scrollbar(scene, skin, box_, panel.doc_thumb(doc_cols, doc_rows));
             }
         }
     }
     scrollbar(
         scene,
         skin,
-        layout.settings,
+        layout.settings_list,
         panel.thumb(layout.settings_capacity(size)),
     );
 
@@ -14402,6 +14535,266 @@ mod tests {
         );
         assert!(plain.layout.settings_toggles.is_empty());
         assert!(plain.layout.settings_removes.is_empty());
+    }
+
+    /// A description long enough that it used to be cut off where the buttons
+    /// started, and a document line long enough that it used to be cut off at
+    /// the edge of its column.
+    const A_LONG_ABOUT: &str =
+        "reads the file before it writes one, and says which file it read";
+    const A_LONG_DOC_LINE: &str = "the whole point of a column beside the list is that a sentence written in it can be read all the way to the end of itself rather than stopping in three dots";
+
+    /// The skills section with one skill whose description and whose document
+    /// are both longer than the room they are given.
+    fn a_wordy_skills_panel() -> Settings {
+        let mut agent = an_agent();
+        agent.skills[0].about = String::from(A_LONG_ABOUT);
+        agent.skills[0].doc = vec![String::from(A_LONG_DOC_LINE)];
+        let mut panel = Settings::open(
+            &Config::default(),
+            Some(std::path::Path::new("/home/hec/.config/noob/no0b.conf")),
+            agent,
+        );
+        let at = panel
+            .section_names()
+            .iter()
+            .position(|name| *name == crate::settings::SKILLS)
+            .expect("SKILLS is a section");
+        panel.choose(at);
+        panel
+    }
+
+    /// Everything drawn on one line of the panel, as one string.
+    fn line_of(out: &Rendered, x: f32, y: f32) -> String {
+        out.scene
+            .texts
+            .iter()
+            .filter(|text| (text.at.x - x).abs() < 0.51 && (text.at.y - y).abs() < 0.51)
+            .flat_map(|text| text.runs.iter())
+            .map(|run| run.text.as_str())
+            .collect()
+    }
+
+    /// The one entry row, and the entry itself, out of a rendered skills panel.
+    fn the_entry_row(out: &Rendered, panel: &Settings) -> (usize, Panel) {
+        let (index, _, row) = *out
+            .layout
+            .settings_rows
+            .iter()
+            .find(|(index, _, _)| {
+                matches!(panel.row(*index), Some(crate::settings::Row::Entry(_)))
+            })
+            .expect("an entry row");
+        (index, row)
+    }
+
+    /// An entry is a table row, not a sentence: the name on its own line, the
+    /// description under it and the path under that, each in its own place. The
+    /// name and the description used to share one line, with the description cut
+    /// off wherever the buttons at the end of the row began.
+    #[test]
+    fn an_entry_puts_its_name_its_description_and_its_path_on_three_lines() {
+        let panel = a_wordy_skills_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let line = Text::line_for(13.0);
+        let (index, row) = the_entry_row(&out, &panel);
+        assert!(
+            row.h >= line * 3.0 - 0.01,
+            "three lines of room: {row:?} at {line}"
+        );
+        let text_x = row.x + MARK_W + 3.0;
+        assert_eq!(line_of(&out, text_x, row.y), "coding");
+        assert_eq!(line_of(&out, text_x, row.y + line), A_LONG_ABOUT);
+        assert_eq!(
+            line_of(&out, text_x, row.y + line * 2.0),
+            "https://github.com/someone/coding"
+        );
+
+        // The description is written whole. It runs the width of the row, under
+        // the buttons rather than up against them: beside the name there is not
+        // room for it, which is exactly what used to end it in an ellipsis.
+        let toggle = out
+            .layout
+            .settings_toggles
+            .iter()
+            .find(|(at, _)| *at == index)
+            .map(|(_, at)| *at)
+            .expect("a toggle");
+        let beside_the_name = ((toggle.x - 8.0 - text_x) / 8.0).floor() as usize;
+        assert!(
+            A_LONG_ABOUT.chars().count() > beside_the_name,
+            "the description would have fitted beside the name, so this proves nothing"
+        );
+        // And every line of it stays in the left column: nothing an entry says
+        // is drawn over the document beside it.
+        for step in 0..3 {
+            let at = out
+                .scene
+                .texts
+                .iter()
+                .find(|text| {
+                    (text.at.x - text_x).abs() < 0.51
+                        && (text.at.y - (row.y + step as f32 * line)).abs() < 0.51
+                })
+                .map(|text| text.at)
+                .expect("a line of the entry");
+            assert!(
+                at.x + at.w <= out.layout.settings_doc.x + 0.01,
+                "line {step} runs into the document: {at:?}"
+            );
+        }
+    }
+
+    /// The uninstall is a button with a word in it, and both of them fit: it
+    /// ended exactly on the edge of the column, three pixels from the document's
+    /// own border, in a box a column and a half wider than the word it holds, so
+    /// the shaper's bounds took the last letter off it.
+    #[test]
+    fn the_uninstall_sits_inside_the_row_with_room_for_its_word() {
+        let panel = a_wordy_skills_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let (index, row) = the_entry_row(&out, &panel);
+        let remove = out
+            .layout
+            .settings_removes
+            .iter()
+            .find(|(at, _)| *at == index)
+            .map(|(_, at)| *at)
+            .expect("an uninstall");
+        assert!(
+            remove.x + remove.w <= row.x + row.w - SETTING_ENTRY_INSET + 0.01,
+            "the uninstall is against the edge of the column: {remove:?} in {row:?}"
+        );
+        assert!(
+            remove.x + remove.w <= out.layout.settings_doc.x,
+            "it reaches into the document: {remove:?}"
+        );
+        // The word inside it is written in the box the button leaves after its
+        // own padding, and that box holds every letter of it.
+        let word = "uninstall";
+        let room = remove.w - INPUT_PAD * 2.0;
+        assert!(
+            room >= word.chars().count() as f32 * 8.0,
+            "{word} needs {} pixels and has {room}",
+            word.chars().count() as f32 * 8.0
+        );
+        assert!(text_of(&out.scene).contains(word));
+    }
+
+    /// The entry the cursor is on wears the solid band the folder picker's list
+    /// wears, across the whole row. It wore the panel's own colour at a tenth
+    /// more alpha, which over a dark desktop is not a band at all.
+    #[test]
+    fn the_entry_under_the_cursor_wears_a_band() {
+        let panel = a_wordy_skills_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let (index, row) = the_entry_row(&out, &panel);
+        assert_eq!(panel.cursor(), index, "the section opens on its first entry");
+        assert!(
+            covered(&out, row, row.h, out.skin.picked),
+            "no band across the row: {row:?}"
+        );
+        assert_ne!(out.skin.picked, out.skin.strip);
+        // And the words on it are the band's own ink rather than the tint they
+        // wear off it, which is what makes them readable on top of it.
+        let name = out
+            .scene
+            .texts
+            .iter()
+            .filter(|text| (text.at.y - row.y).abs() < 0.51)
+            .flat_map(|text| text.runs.iter())
+            .find(|run| run.text == "coding")
+            .expect("the name");
+        assert_eq!(name.color, Some(out.skin.picked_ink));
+    }
+
+    /// The column beside the list is a titled, outlined block of text, and the
+    /// text in it wraps. Every line of it used to be cut to the width of the
+    /// column and ended in an ellipsis, which is the left edge of a document
+    /// rather than a document.
+    #[test]
+    fn the_document_is_titled_wrapped_and_boxed() {
+        let panel = a_wordy_skills_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let layout = &out.layout;
+        let line = Text::line_for(13.0);
+        let doc = layout.settings_doc;
+        assert!(doc.w >= 1.0, "there is no second column");
+
+        // A title over the block, in the accent, saying whose document it is.
+        assert_eq!(line_of(&out, doc.x + PAD, doc.y), "coding");
+
+        // The block itself: filled and outlined the way every other box on the
+        // panel is, with the text inside it rather than on its border.
+        let box_ = settings_doc_box(doc, line);
+        assert!(box_.y >= doc.y + line, "the box is under the title: {box_:?}");
+        assert!(box_.y + box_.h <= doc.y + doc.h + 0.01);
+        assert!(covered(&out, box_, box_.h, out.skin.input), "no wrapper");
+        let inside = layout.settings_doc_text;
+        assert!(inside.x >= box_.x + PAD - 0.01 && inside.y >= box_.y + PAD - 0.01);
+        assert!(inside.x + inside.w <= box_.x + box_.w + 0.01);
+        assert!(inside.x >= layout.settings_list.x + layout.settings_list.w);
+
+        // The text wraps at the columns the box holds, by the same rule the
+        // panes wrap at, and the long line is written whole.
+        let cols = layout.settings_doc_columns(8.0);
+        assert!(cols > 0);
+        assert!(
+            A_LONG_DOC_LINE.chars().count() > cols,
+            "the line fits, so this proves nothing"
+        );
+        let text = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| {
+                (text.at.x - inside.x).abs() < 0.01 && (text.at.y - inside.y).abs() < 0.01
+            })
+            .expect("the document");
+        assert_eq!(text.wrap_cols, Some(cols));
+        assert_eq!(text.wrap_break, text_geometry::Break::Word);
+        let written: String = text.runs.iter().map(|run| run.text.as_str()).collect();
+        assert!(
+            written.contains(A_LONG_DOC_LINE),
+            "the line is not written whole: {written:?}"
+        );
+        assert!(!written.contains('\u{2026}'), "it is still clipped: {written:?}");
+    }
+
+    /// Both columns scroll, each in its own box: the document is drawn from
+    /// wherever it was scrolled to, in rows of the box it is drawn in, and the
+    /// list stays where it was.
+    #[test]
+    fn the_document_scrolls_inside_its_own_box() {
+        let mut panel = a_wordy_skills_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let cols = out.layout.settings_doc_columns(8.0);
+        let rows = out.layout.settings_doc_rows(13.0);
+        assert!(rows > 1, "the box holds more than a line");
+        let first_row = out.layout.settings_rows[0];
+
+        // A document longer than any window, scrolled past its first screenful.
+        let long: Vec<String> = (0..200).map(|n| format!("line {n} of it")).collect();
+        let mut agent = an_agent();
+        agent.skills[0].doc = long;
+        panel.adopt_agent(agent, &Config::default());
+        assert!(panel.scroll_doc(3, true, cols, rows), "the wheel moves it");
+        let after = render_settings(&panel, 1400.0, 900.0, None);
+        let inside = after.layout.settings_doc_text;
+        let written: String = after
+            .scene
+            .texts
+            .iter()
+            .filter(|text| {
+                (text.at.x - inside.x).abs() < 0.01 && (text.at.y - inside.y).abs() < 0.01
+            })
+            .flat_map(|text| text.runs.iter())
+            .map(|run| run.text.as_str())
+            .collect();
+        assert!(written.contains("line 3 of it"), "{written:?}");
+        assert!(!written.contains("line 0 of it"), "{written:?}");
+        // The list did not move with it: the two columns are two scrolls.
+        assert_eq!(after.layout.settings_rows[0], first_row);
     }
 
     /// Every section is on the rail, is hit where its name is drawn, and picking
