@@ -156,7 +156,9 @@ impl Space {
 pub struct Slot {
     pub views: Vec<View>,
     active: usize,
-    /// Collapsed to its tab strip.
+    /// Collapsed to its tab strip. Nothing sets it any more: the click that did
+    /// is parked in the window as `App::fold` and no gesture reaches it, so the
+    /// layout and the drawing below keep the capability without a way in.
     pub folded: bool,
     /// Which of its tabs the strip starts at, when the strip is too narrow to
     /// hold them all. Kept here rather than in the layout because it outlives a

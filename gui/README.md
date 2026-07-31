@@ -348,7 +348,7 @@ own tabs, PageUp and PageDown scroll whatever the pointer is over, the wheel
 does the same, Ctrl-C cancels, Ctrl-Q quits.
 
 Mouse: drag the title bar to move, drag an edge to resize, click a tab to switch
-to it, and click the tab already showing to fold that space away. **Drag a tab
+to it. No click collapses a pane; the divider is how a pane gets smaller. **Drag a tab
 into a cell** to move it there, **onto the line between two cells** to give its pane
 both of them, onto a tab strip to put it at that place in the strip, or **off the
 window** to close that widget. A green box says which room the drop would take

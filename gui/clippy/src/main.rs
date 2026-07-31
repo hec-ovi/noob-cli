@@ -271,6 +271,39 @@ fn title_click(double: bool) -> TitleClick {
     }
 }
 
+/// What letting go of a held tab turned out to be. See [`click_tab`].
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum TabClick {
+    /// A tab that was not the one on screen: it is now.
+    Show,
+    /// The tab that was already showing. Nothing happens on it.
+    Nothing,
+}
+
+/// What a click on a tab does to its space.
+///
+/// Showing that tab, and only that. Clicking the tab already showing used to
+/// fold the space away to its strip; that path is still in this file, in
+/// [`App::fold`], and no gesture reaches it any more.
+///
+/// A free function over the slot because [`App::release`] needs a live window
+/// and cannot be driven in a test, the same reason [`title_click`] and
+/// [`began_move`] are out here.
+fn click_tab(slot: &mut dock::Slot, view: View) -> TabClick {
+    let showing = slot.active() == Some(view);
+    if !showing {
+        slot.show(view);
+    }
+    // Belt and braces. Nothing sets this any more, so it only ever holds it at
+    // false; it stays so a space can never be left stuck at its strip.
+    slot.folded = false;
+    if showing {
+        TabClick::Nothing
+    } else {
+        TabClick::Show
+    }
+}
+
 /// When the orb wants its next frame, given the deadline it is already holding.
 ///
 /// `None` is the point of this function: the clock exists only while the orb has
@@ -2086,6 +2119,20 @@ impl App {
         self.dirty = true;
     }
 
+    /// Collapse a space to its tab strip, or open it again. The strip keeps its
+    /// tabs, so a folded pane is still a place to click rather than a gone one.
+    ///
+    /// Unreachable, kept whole: it was the click on the tab already showing, and
+    /// no gesture collapses a pane any more. Everything the layout and the
+    /// drawing need for a folded space is still here and still tested, so
+    /// putting it back is one call from [`App::release`].
+    #[allow(dead_code)]
+    fn fold(&mut self, space: Space) {
+        let slot = self.dock.slot_mut(space);
+        slot.folded = !slot.folded;
+        self.dirty = true;
+    }
+
     /// Collapse the window to its title bar, or restore it. The bar keeps
     /// showing what the agent is doing, so a shaded window is still a status
     /// light rather than a hidden one.
@@ -2751,15 +2798,7 @@ impl App {
             return;
         }
         if let Some((view, space, _)) = self.holding.take() {
-            let slot = self.dock.slot_mut(space);
-            // Clicking the tab already showing folds its space away, which is
-            // how a pane gets out of the way without a second control.
-            if slot.active() == Some(view) {
-                slot.folded = !slot.folded;
-            } else {
-                slot.show(view);
-                slot.folded = false;
-            }
+            click_tab(self.dock.slot_mut(space), view);
             self.dirty = true;
         }
     }
@@ -3802,6 +3841,77 @@ mod tests {
             TitleClick::ArmMove,
             "and one click on its own only arms a move for the pointer to decide"
         );
+    }
+
+    /// A tab click shows that tab and nothing else.
+    ///
+    /// Clicking the tab already showing used to fold the space away to its
+    /// strip. It does not any more: no gesture collapses a pane, so the second
+    /// click of a pair on the same tab has to be as inert as the first.
+    #[test]
+    fn a_click_on_the_tab_already_showing_does_nothing_and_never_folds() {
+        let mut slot = dock::Slot::default();
+        slot.views = vec![View::Output, View::Files];
+        assert_eq!(slot.active(), Some(View::Output));
+        // Once, then again fast enough to be a double click, then a third time.
+        for _ in 0..3 {
+            assert_eq!(
+                click_tab(&mut slot, View::Output),
+                TabClick::Nothing,
+                "the tab on screen is already the tab on screen"
+            );
+            assert_eq!(slot.active(), Some(View::Output));
+            assert!(!slot.folded, "no click folds a space");
+        }
+        assert_eq!(
+            click_tab(&mut slot, View::Files),
+            TabClick::Show,
+            "the other tab is the part he is keeping"
+        );
+        assert_eq!(slot.active(), Some(View::Files));
+        assert!(!slot.folded);
+    }
+
+    /// Every tab of every space, clicked twice: the flag never comes on.
+    ///
+    /// The rule the item is really about. `folded` still exists and the layout
+    /// still honours it, so what has to hold is that no input path writes it,
+    /// and `click_tab` is the only one that ever did.
+    #[test]
+    fn no_tab_click_anywhere_in_the_dock_folds_a_space() {
+        let mut dock = Dock::new();
+        for space in Space::ALL {
+            let views = dock.slot(space).views.clone();
+            for view in views {
+                for _ in 0..2 {
+                    click_tab(dock.slot_mut(space), view);
+                    assert_eq!(dock.slot(space).active(), Some(view));
+                }
+            }
+        }
+        for space in Space::ALL {
+            assert!(
+                !dock.slot(space).folded,
+                "{space:?} folded from a tab click"
+            );
+        }
+    }
+
+    /// And a space that somehow arrived folded opens on the next tab click.
+    ///
+    /// Nothing sets the flag any more and it is never written to the settings
+    /// file, so this cannot happen; the clearing line stays because a pane stuck
+    /// at its strip with no way out is the one failure worth being sure of.
+    #[test]
+    fn a_folded_space_opens_again_on_a_tab_click() {
+        let mut slot = dock::Slot::default();
+        slot.views = vec![View::Output, View::Files];
+        slot.folded = true;
+        assert_eq!(click_tab(&mut slot, View::Output), TabClick::Nothing);
+        assert!(!slot.folded, "the tab on screen still opens it");
+        slot.folded = true;
+        assert_eq!(click_tab(&mut slot, View::Files), TabClick::Show);
+        assert!(!slot.folded, "and so does the other one");
     }
 
     /// The title bar waits before it hands the compositor a move.
