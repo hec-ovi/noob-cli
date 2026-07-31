@@ -448,8 +448,12 @@ lines tall and read with Page Up and Page Down, or the wheel over them.
 SESSIONS is a table of the saved conversations the folder picker offers, read
 through the same reader and headed by a row naming its columns: when each one
 was, which folder it belongs to, how big the transcript is, how full its context
-window was, and the opening of what was first said in it. Up and down pick a row
-and it carries a band across the whole of it. The last column is a trash: press
+window was, and the opening of what was first said in it. The header sits on a
+filled band, and the two number columns are written against their right edge so
+they can be read down. The heading at the top of the panel says SAVED
+CONVERSATIONS rather than repeating the rail's word, which is the only place the
+section is titled. Up and down pick a row and it carries a band across the whole
+of it. The last column is a trash: press
 it once and it says `sure?`, press it again and the transcript and the line about
 it in `no0b.sessions` both go.
 

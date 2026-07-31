@@ -2502,7 +2502,7 @@ fn settings_session_cells(row: Panel, column: f32) -> Vec<Panel> {
         (SETTING_SESSION_TRASH_COLUMNS as f32 * column).min(((right - x) * 0.5).floor().max(0.0));
     let mut out = Vec::new();
     let mut at = x;
-    for (_, wide) in crate::settings::SESSION_COLUMNS
+    for (_, wide, _) in crate::settings::SESSION_COLUMNS
         .iter()
         .take(crate::settings::SESSION_CELLS)
     {
@@ -2517,6 +2517,30 @@ fn settings_session_cells(row: Panel, column: f32) -> Vec<Panel> {
     }
     out.push(Panel::new(right - trash, row.y, trash, row.h));
     out
+}
+
+/// Where a cell's text is written inside the box its column gives it.
+///
+/// Every cell used to start at its column's left edge, which left the two
+/// columns of numbers ragged: `283 B` under `1.2 MB` puts the digits in a
+/// different place on every row, and a column of numbers nobody can compare down
+/// is a column nobody reads. The model says which columns are numbers
+/// ([`crate::settings::Align`]) and those are written against the right edge of
+/// their box instead. The header takes the same treatment, so a name still sits
+/// over its own cells.
+///
+/// Takes the text after it has been clipped to what the box holds, because what
+/// the right edge is measured back from is what is really drawn.
+fn settings_session_ink(at: Panel, step: usize, shown: &str, column: f32) -> Panel {
+    let right = matches!(
+        crate::settings::SESSION_COLUMNS.get(step),
+        Some((_, _, crate::settings::Align::Right))
+    );
+    if !right {
+        return at;
+    }
+    let wide = (shown.chars().count() as f32 * column).min(at.w);
+    Panel::new(at.x + at.w - wide, at.y, wide, at.h)
 }
 
 /// The lines between the columns of the saved-conversations table.
@@ -5052,11 +5076,12 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
     // The heading, and which section it is showing. The rail says that as well,
     // in the column below; this is the one line at the top that reads as a
     // sentence, so a window photographed mid-thought says where it was.
-    let here = panel
-        .section_names()
-        .get(panel.chosen())
-        .copied()
-        .unwrap_or_default();
+    //
+    // The section's title rather than the rail's word for it, because on
+    // SESSIONS the two are not the same thing: SETTINGS SESSIONS over a rail
+    // already marked SESSIONS said the panel twice and the list under it not at
+    // all. `Settings::title` is where that mapping lives.
+    let here = panel.title();
     say(
         scene,
         vec![
@@ -5169,6 +5194,15 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
             }
             scene.rect(Panel::new(row.x, row.y, MARK_W, row.h).fill(skin.edge_focus));
         }
+        // The row naming the columns of the table stands on a band of its own.
+        // Column rules and a hairline under it were the whole of it, which drew
+        // the names as one more row of the list with smaller words in it; a
+        // filled strip is what separates a header from the data under it, and
+        // it is the same surface the file view puts behind a block header.
+        // Before the hairline below, so the line still closes the band off.
+        if matches!(entry, SettingRow::Columns(_)) {
+            scene.rect(row.fill(skin.strip));
+        }
         // The line between the two columns of a form, so the row reads as two
         // things rather than as one sentence that happens to have a gap in it.
         if paired && *side == Side::Right && row.h >= 2.0 {
@@ -5247,17 +5281,16 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
             // so a name cannot end up over the wrong column.
             SettingRow::Columns(names) => {
                 let cells = settings_session_cells(*row, column);
-                for (at, name) in cells.iter().zip(names) {
+                for (step, (at, name)) in cells.iter().zip(names).enumerate() {
                     if at.w < column {
                         continue;
                     }
+                    let shown = clip(name, columns_in(at.w, column).saturating_sub(1));
+                    let ink = settings_session_ink(*at, step, &shown, column);
                     say(
                         scene,
-                        vec![Run::tinted(
-                            clip(name, columns_in(at.w, column).saturating_sub(1)),
-                            skin.dim,
-                        )],
-                        Panel::new(at.x, row.y, at.w, line),
+                        vec![Run::tinted(shown, skin.dim)],
+                        Panel::new(ink.x, row.y, ink.w, line),
                         skin.dim,
                     );
                 }
@@ -5273,17 +5306,16 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     false => skin.body,
                 };
                 let boxes = settings_session_cells(*row, column);
-                for (at, text) in boxes.iter().zip(cells) {
+                for (step, (at, text)) in boxes.iter().zip(cells).enumerate() {
                     if at.w < column {
                         continue;
                     }
+                    let shown = clip(text, columns_in(at.w, column).saturating_sub(1));
+                    let room = settings_session_ink(*at, step, &shown, column);
                     say(
                         scene,
-                        vec![Run::tinted(
-                            clip(text, columns_in(at.w, column).saturating_sub(1)),
-                            ink,
-                        )],
-                        Panel::new(at.x, row.y, at.w, line),
+                        vec![Run::tinted(shown, ink)],
+                        Panel::new(room.x, row.y, room.w, line),
                         ink,
                     );
                 }
@@ -14703,13 +14735,26 @@ mod tests {
                 .flat_map(|text| text.runs.iter().map(|run| run.text.as_str()))
                 .collect()
         };
-        for (step, (name, _)) in crate::settings::SESSION_COLUMNS.iter().enumerate() {
-            let said = text_at(&out, Panel::new(names[step].x, header_at.y, 1.0, 1.0));
-            assert!(said.starts_with(name), "column {step} is headed {said:?}");
+        // Where a cell of this column is written: against the left edge of its
+        // box for a word, against the right edge for a number. This asserted
+        // every cell at its box's left edge, which is what left the size and the
+        // context ragged; it asserts the edge the column says it takes now.
+        let written_at = |at: Panel, step: usize, text: &str| -> f32 {
+            let wide = text.chars().count() as f32 * column;
+            match crate::settings::SESSION_COLUMNS[step].2 {
+                crate::settings::Align::Left => at.x,
+                crate::settings::Align::Right => at.x + at.w - wide.min(at.w),
+            }
+        };
+        for (step, (name, _, _)) in crate::settings::SESSION_COLUMNS.iter().enumerate() {
+            let shown = clip(name, columns_in(names[step].w, column).saturating_sub(1));
+            let x = written_at(names[step], step, &shown);
+            let said = text_at(&out, Panel::new(x, header_at.y, 1.0, 1.0));
+            assert!(said.starts_with(&shown), "column {step} is headed {said:?}");
         }
 
-        // And every row writes its cells into those same columns, at the same x
-        // the header is drawn at.
+        // And every row writes its cells into those same columns, against the
+        // same edge the name above it is written against.
         for (index, row) in &rows {
             let cells = match panel.row(*index) {
                 Some(crate::settings::Row::Session { cells, .. }) => cells.clone(),
@@ -14721,13 +14766,64 @@ mod tests {
                     (boxes[step].x - names[step].x).abs() < 0.01,
                     "row {index} column {step} is not under its header"
                 );
-                let said = text_at(&out, Panel::new(boxes[step].x, row.y, 1.0, 1.0));
+                let shown = clip(cell, columns_in(boxes[step].w, column) - 1);
+                let x = written_at(boxes[step], step, &shown);
+                let said = text_at(&out, Panel::new(x, row.y, 1.0, 1.0));
                 assert!(
-                    said.starts_with(&clip(cell, columns_in(boxes[step].w, column) - 1)),
+                    said.starts_with(&shown),
                     "row {index} column {step} says {said:?}, not {cell:?}"
                 );
             }
         }
+
+        // A number ends at the right edge of its column and a word starts at
+        // the left edge of its own, which is the whole of what makes a column
+        // of sizes scannable. Read off the scene rather than off the helper: the
+        // panel is what has to have drawn it there.
+        let (a_row, at) = rows[0];
+        let cells = match panel.row(a_row) {
+            Some(crate::settings::Row::Session { cells, .. }) => cells.clone(),
+            other => panic!("not a session: {other:?}"),
+        };
+        let boxes = settings_session_cells(at, column);
+        let drawn = |text: &str| -> Vec<f32> {
+            out.scene
+                .texts
+                .iter()
+                .filter(|drawn| {
+                    (drawn.at.y - at.y).abs() < 0.01
+                        && drawn.runs.iter().any(|run| run.text == text)
+                })
+                .map(|drawn| drawn.at.x)
+                .collect()
+        };
+        for (step, (_, _, align)) in crate::settings::SESSION_COLUMNS
+            .iter()
+            .enumerate()
+            .take(crate::settings::SESSION_CELLS)
+        {
+            let shown = clip(&cells[step], columns_in(boxes[step].w, column) - 1);
+            let places = drawn(&shown);
+            let wide = shown.chars().count() as f32 * column;
+            let want = match align {
+                crate::settings::Align::Left => boxes[step].x,
+                crate::settings::Align::Right => boxes[step].x + boxes[step].w - wide,
+            };
+            assert!(
+                places.iter().any(|x| (x - want).abs() < 0.01),
+                "column {step} ({shown:?}) is drawn at {places:?}, not {want} ({align:?})"
+            );
+        }
+        assert!(
+            matches!(
+                crate::settings::SESSION_COLUMNS[2].2,
+                crate::settings::Align::Right
+            ) && matches!(
+                crate::settings::SESSION_COLUMNS[3].2,
+                crate::settings::Align::Right
+            ),
+            "the size and the context are the numeric columns"
+        );
 
         // The row the cursor is on is a band across the whole row, in the solid
         // colour the folder picker's own session list uses, not a tint on the
@@ -14753,6 +14849,34 @@ mod tests {
                 assert!(!filled(&out, *at, out.skin.picked), "row {index} is banded too");
             }
         }
+
+        // And the row naming the columns stands on a filled band of its own,
+        // across the whole row, in the surface this window puts behind a block
+        // header. Rules between the columns and a hairline under it were all it
+        // had, which read as one more row of the list.
+        assert!(
+            filled(&out, header_at, out.skin.strip),
+            "the header has no band: {header_at:?}"
+        );
+
+        // The heading at the top of the panel names what this section lists. It
+        // said SETTINGS SESSIONS: the rail's own word, over a rail already
+        // marked with it, saying nothing about what was underneath.
+        let heading = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| text.runs.iter().any(|run| run.text == " SETTINGS "))
+            .expect("the panel says what it is");
+        let said: String = heading.runs.iter().map(|run| run.text.as_str()).collect();
+        assert!(
+            said.ends_with(crate::settings::SESSION_TITLE),
+            "the heading is {said:?}"
+        );
+        assert!(
+            !said.ends_with(crate::settings::SESSIONS),
+            "the heading is still the rail's word: {said:?}"
+        );
 
         // The last column is a trash of its own: pressed where it is drawn, in
         // the colour this window uses for everything that throws work away, and

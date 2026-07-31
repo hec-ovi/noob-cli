@@ -38,7 +38,14 @@
 //! presses: the same two the uninstall on a skill takes, because it is the same
 //! kind of act. The row carries the session's id ([`Row::Session`]) so what a
 //! delete names is what the reader read, not a path parsed back out of the words
-//! on screen.
+//! on screen. The header stands on a filled band rather than on rules alone, so
+//! it separates from the data instead of reading as one more row of it, and the
+//! two columns of numbers are written against their right edge
+//! ([`SESSION_COLUMNS`], [`Align`]): sizes and context counts started at the
+//! left like the words did, which is a column of digits nobody can compare
+//! down. What the section is called is said once, by the panel's own heading
+//! ([`SESSION_TITLE`], [`Settings::title`]), because the heading is the line
+//! that has to say where you are.
 //!
 //! **A setting the window already sets is not a row.** Which panes are open and
 //! where the dividers sit were a section of their own and then a pair of groups
@@ -152,35 +159,64 @@ pub const APPEARANCE: &str = "APPEARANCE";
 /// [`APPEARANCE`] now, under its own headings.
 pub const SECTIONS: [&str; 5] = [AGENT, SESSIONS, SKILLS, MCP, APPEARANCE];
 
-/// The columns of the saved-conversations table: what each one is called and
-/// how many characters wide it is.
+/// Which edge of its column a cell is written against.
+///
+/// A table is read down its columns, and a number is read down its last digit:
+/// `283 B` and `1.2 MB` written from the left put the digits that matter in a
+/// different place on every row, so a column of them cannot be compared at a
+/// glance. The numbers are written against the right edge of their column
+/// instead, which is what makes them line up; words stay on the left, where a
+/// word is read from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Align {
+    Left,
+    Right,
+}
+
+/// The columns of the saved-conversations table: what each one is called, how
+/// many characters wide it is, and which edge its cells are written against.
 ///
 /// Zero is a column with no width of its own. There are two of them: the first
 /// message takes whatever is left of the row, and the delete at the end is a
 /// button rather than text, so it is sized by the panel that draws it.
 ///
 /// The names live here rather than in the drawing because they are what the
-/// section says about itself. The widths live here too so the header and the
-/// cells under it cannot come apart: one list, read by the row builder and by
-/// the layout.
-pub const SESSION_COLUMNS: [(&str, usize); 6] = [
-    ("when", 10),
-    ("folder", 20),
-    ("size", 9),
-    ("context", 9),
-    ("first message", 0),
-    ("delete", 0),
+/// section says about itself. The widths and the alignment live here too so the
+/// header and the cells under it cannot come apart: one list, read by the row
+/// builder and by the layout.
+pub const SESSION_COLUMNS: [(&str, usize, Align); 6] = [
+    ("when", 10, Align::Left),
+    ("folder", 20, Align::Left),
+    ("size", 9, Align::Right),
+    ("context", 9, Align::Right),
+    ("first message", 0, Align::Left),
+    ("delete", 0, Align::Left),
 ];
 
 /// How many of [`SESSION_COLUMNS`] carry text. The last one is the trash.
 pub const SESSION_CELLS: usize = SESSION_COLUMNS.len() - 1;
 
-/// The name of the section's own list, said once at the top of it.
+/// The name of the section's list, said once, in the panel's own heading.
 ///
 /// "SETTINGS SESSIONS" over a rail that also says SESSIONS over a row labelled
 /// "sessions" was the same word three times and never once said what the list
-/// underneath was.
+/// underneath was. The heading at the top of the panel takes this instead of
+/// the rail's word ([`Settings::title`]), so the one line that says where you
+/// are says what is listed; the section under it no longer carries a title row
+/// of its own, because a title said twice on one screen is the trouble the rail
+/// word was.
 pub const SESSION_TITLE: &str = "SAVED CONVERSATIONS";
+
+/// What the panel's own heading calls a section.
+///
+/// The rail's word for every section but [`SESSIONS`], whose rail word says the
+/// panel's subject twice and the list's subject not at all.
+pub fn section_title(name: &'static str) -> &'static str {
+    match name {
+        SESSIONS => SESSION_TITLE,
+        other => other,
+    }
+}
 
 /// What a setting holds, which is what decides how its row changes.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1135,7 +1171,9 @@ impl Settings {
     /// reader the folder picker offers them with.
     fn session_rows(&self) -> Vec<Row> {
         let mut rows = vec![
-            Row::Heading(SESSION_TITLE),
+            // No title row: the panel's own heading says SAVED CONVERSATIONS
+            // ([`SESSION_TITLE`]), and a section that repeats its heading two
+            // lines under it is the same noise the rail's word was.
             Row::Reading {
                 label: String::from("kept in"),
                 value: match crate::sessions::dir() {
@@ -1151,7 +1189,7 @@ impl Settings {
                 "one row is one conversation the agent has already had",
             ));
             rows.push(Row::Columns(
-                SESSION_COLUMNS.iter().map(|(name, _)| *name).collect(),
+                SESSION_COLUMNS.iter().map(|(name, ..)| *name).collect(),
             ));
         }
         for saved in &self.agent.sessions.sessions {
@@ -1343,6 +1381,13 @@ impl Settings {
     /// Every section's name, in rail order.
     pub fn section_names(&self) -> Vec<&'static str> {
         self.sections.iter().map(|section| section.name).collect()
+    }
+
+    /// What the heading at the top of the panel calls the section it is
+    /// showing, which is not always the word the rail marks it with
+    /// ([`section_title`]).
+    pub fn title(&self) -> &'static str {
+        section_title(self.here().name)
     }
 
     pub fn chosen(&self) -> usize {
@@ -4349,18 +4394,32 @@ mod tests {
             .expect("a row naming the columns");
         assert_eq!(
             header,
-            SESSION_COLUMNS.iter().map(|(name, _)| *name).collect::<Vec<_>>()
+            SESSION_COLUMNS.iter().map(|(name, ..)| *name).collect::<Vec<_>>()
         );
         assert_eq!(header.len(), SESSION_CELLS + 1, "the last column is the trash");
         for name in &header {
             assert!(!name.is_empty(), "a column with no name");
         }
 
-        // And the section says what it is, once, in words that are not the word
-        // SESSIONS a third time.
+        // And what the section is is said once, in words that are not the word
+        // SESSIONS a third time, by the heading at the top of the panel. This
+        // asserted the title as a row of the section; the section carried it
+        // and the heading above it said SETTINGS SESSIONS, which named the list
+        // nowhere and the panel twice, so the title moved up to the heading and
+        // the row went with it.
+        assert_eq!(panel.title(), SESSION_TITLE);
+        assert_eq!(section_title(SESSIONS), SESSION_TITLE);
         let text = said(&panel);
-        assert!(text.contains(SESSION_TITLE), "{text}");
+        assert!(!text.contains(SESSION_TITLE), "the title is said twice: {text}");
         assert!(text.contains("kept in"), "{text}");
+        // Every other section is headed by the word the rail marks it with:
+        // only this one lists something its rail word does not name.
+        for name in SECTIONS {
+            if name == SESSIONS {
+                continue;
+            }
+            assert_eq!(section_title(name), name);
+        }
 
         // A file that could not be read is said rather than quietly missing.
         assert!(
