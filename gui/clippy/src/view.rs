@@ -10046,7 +10046,7 @@ mod tests {
     /// Past its allowance the prompt scrolls inside itself instead of growing,
     /// and what it scrolls to is the row the caret is on.
     ///
-    /// The other half of `max_input_rows`. The strip stopped growing at the row
+    /// The other half of `prompt_rows`. The strip stopped growing at the row
     /// count all along, but the text was drawn from its first row whatever the
     /// caret was doing, so everything past the allowance was typed into a box
     /// that could not show it: a setting of one row read as a setting that did

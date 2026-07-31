@@ -831,7 +831,7 @@ impl App {
             self.column,
             self.prompt.len(),
             noob_draw::Text::line_for(self.config.font_size),
-            self.config.max_input_rows,
+            self.config.prompt_rows,
         )
     }
 
@@ -3561,7 +3561,7 @@ mod tests {
                 COLUMN,
                 chars,
                 noob_draw::Text::line_for(SIZE),
-                Config::default().max_input_rows,
+                Config::default().prompt_rows,
             ),
             left_width: [Config::default().left_width; 2],
             top_height: [Config::default().top_height; 2],
@@ -4546,7 +4546,7 @@ mod tests {
                 COLUMN,
                 0,
                 noob_draw::Text::line_for(SIZE),
-                Config::default().max_input_rows,
+                Config::default().prompt_rows,
             ),
             left_width: [Config::default().left_width; 2],
             top_height: [Config::default().top_height; 2],

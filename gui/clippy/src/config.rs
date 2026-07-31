@@ -30,12 +30,19 @@ pub struct Config {
     pub opacity: f32,
     pub font_size: f32,
     pub pane_font_size: f32,
-    /// The tallest the prompt grows before it scrolls inside itself, in rows.
+    /// How tall the prompt is, in rows.
     ///
     /// One by default: the prompt is one line of the window until you say
     /// otherwise, and a longer prompt scrolls inside that line rather than
     /// pushing the conversation up as you type.
-    pub max_input_rows: usize,
+    ///
+    /// Named `max_input_rows` until this build, which is where the confusion
+    /// came from: it reads as a ceiling the prompt is allowed to reach, and it
+    /// is the height the strip is drawn at once there is enough typed to fill
+    /// it. The old name is retired rather than aliased, because the number
+    /// beside it was never a choice anybody made: the key did nothing at all
+    /// while it was being written into everybody's file.
+    pub prompt_rows: usize,
     /// Where the dividers were left, so the arrangement survives a restart the
     /// way every other preference in this window does.
     ///
@@ -93,7 +100,7 @@ impl Default for Config {
             opacity: 0.88,
             font_size: 14.0,
             pane_font_size: 13.0,
-            max_input_rows: 1,
+            prompt_rows: 1,
             left_width: crate::view::LEFT_WIDTH,
             left_width_bottom: crate::view::LEFT_WIDTH,
             top_height: crate::view::TOP_HEIGHT,
@@ -305,7 +312,7 @@ pub fn keys() -> Vec<&'static str> {
         "opacity",
         "font_size",
         "pane_font_size",
-        "max_input_rows",
+        "prompt_rows",
         "left_width",
         "left_width_bottom",
         "top_height",
@@ -361,7 +368,13 @@ pub fn keys() -> Vec<&'static str> {
 ///   no per-view colour left for any of these to set. `view_avatar` and
 ///   `view_llm` were already dead when the views they named went; `view_talk`
 ///   and `view_overall` were the two the renames aliased.
-pub const RETIRED: [&str; 15] = [
+/// * `max_input_rows`: the prompt's height, under a name that read like a
+///   ceiling, and the window never read it. Now that it is read, it is
+///   `prompt_rows` and it starts at 1. Retired rather than aliased on purpose:
+///   every file written before this build carries a number that nothing obeyed
+///   when it was written, so carrying it forward would answer a request for a
+///   one row prompt with whatever the file happened to say.
+pub const RETIRED: [&str; 16] = [
     "show_avatar",
     "avatar",
     "view_avatar",
@@ -377,6 +390,7 @@ pub const RETIRED: [&str; 15] = [
     "view_session",
     "view_debug",
     "view_files",
+    "max_input_rows",
 ];
 
 /// Names an earlier build wrote that this one reads under a different name.
@@ -537,8 +551,8 @@ impl Config {
             ),
             // A prompt taller than the window is not a prompt, and one of
             // zero rows has nowhere to put the caret.
-            "max_input_rows" => set(
-                &mut self.max_input_rows,
+            "prompt_rows" => set(
+                &mut self.prompt_rows,
                 value.parse::<usize>().ok().map(|rows| rows.clamp(1, 24)),
             ),
             "left_width" => set(
@@ -887,10 +901,11 @@ opacity = 88%
 font_size = 14          # the conversation
 pane_font_size = 13     # the activity, plan, agents and file panes
 
-# How tall the prompt is allowed to grow, in rows. Past this it scrolls inside
-# itself rather than taking more of the conversation, and the row the caret is
-# on is the row you see.
-max_input_rows = 1
+# How tall the prompt is, in rows. One line of the window, and a longer message
+# scrolls inside it rather than taking room from the conversation; the row the
+# caret is on is the row you see. Raise it if you would rather see more of what
+# you are typing at once.
+prompt_rows = 1
 
 # Where the dividers sit, as fractions. One line runs the whole way across the
 # grid and each half of it is then cut by a line of its own, so the left column
@@ -983,11 +998,67 @@ mod tests {
     /// The prompt is one row until somebody asks for more, in the struct and in
     /// the file both. Eight rows of prompt on a window nobody has typed into is
     /// eight rows of conversation nobody can see.
+    ///
+    /// Written against `max_input_rows`, which is the name this build retired.
+    /// The three assertions are the same three; the key they name is the one the
+    /// window now reads.
     #[test]
     fn the_prompt_is_one_row_until_it_is_asked_for_more() {
-        assert_eq!(Config::default().max_input_rows, 1);
-        assert_eq!(Config::parse(DEFAULT_FILE).max_input_rows, 1);
-        assert_eq!(Config::parse("max_input_rows = 6").max_input_rows, 6);
+        assert_eq!(Config::default().prompt_rows, 1);
+        assert_eq!(Config::parse(DEFAULT_FILE).prompt_rows, 1);
+        assert_eq!(Config::parse("prompt_rows = 6").prompt_rows, 6);
+    }
+
+    /// A settings file written before the prompt's height was read starts at one
+    /// row, and says nothing on the way in.
+    ///
+    /// The hole this closes: `max_input_rows` sat in every file that was ever
+    /// written, the window ignored it, and the first build to read it would have
+    /// obeyed a number nobody chose. Hector's own file says 2. So the name is
+    /// retired, which is the same treatment a dropped key gets: no unknown-key
+    /// report, no value carried over, and the rest of the file read as usual.
+    #[test]
+    fn an_old_file_asking_for_more_input_rows_still_opens_at_one() {
+        let old = "opacity = 70%\nmax_input_rows = 2\nshow_files = off\n";
+        let config = Config::parse(old);
+        assert_eq!(config.prompt_rows, 1, "a number nobody chose was obeyed");
+        assert!(config.unknown.is_empty(), "{:?}", config.unknown);
+        // The lines around it are read, which is what separates a retired key
+        // from a file the parser gave up on.
+        assert_eq!(config.opacity, 0.7);
+        assert!(!config.show_files);
+        assert!(RETIRED.contains(&"max_input_rows"), "it has to stay retired");
+        assert!(!keys().contains(&"max_input_rows"), "and it is not a live key");
+        // Whatever it was left carrying, including the value the new key would
+        // have taken.
+        for value in ["", "2", "8", "24", "nonsense"] {
+            let config = Config::parse(&format!("max_input_rows = {value}"));
+            assert_eq!(config.prompt_rows, 1, "max_input_rows = {value:?} was obeyed");
+            assert!(config.unknown.is_empty(), "{:?}", config.unknown);
+        }
+    }
+
+    /// The writer never puts the old name back. A file it touches after this
+    /// build carries `prompt_rows` and nothing else about the prompt's height.
+    #[test]
+    fn the_retired_input_row_name_never_reappears_in_a_written_file() {
+        let scratch = Scratch::new("prompt-rows");
+        let path = scratch.conf();
+        std::fs::write(&path, "opacity = 70%\nmax_input_rows = 2\n").expect("the file");
+        assert_eq!(
+            write_setting(&path, "max_input_rows", Some("2")),
+            Err("max_input_rows is no longer a setting".to_string())
+        );
+        write_setting(&path, "prompt_rows", Some("4")).expect("the new name is written");
+        let text = std::fs::read_to_string(&path).expect("the file");
+        assert!(text.contains("prompt_rows = 4"), "{text}");
+        // The dead line is left exactly as it was: rewriting somebody's file
+        // around it is not the writer's job, and the reader passes over it.
+        assert_eq!(text.matches("max_input_rows").count(), 1, "{text}");
+        assert_eq!(Config::parse(&text).prompt_rows, 4);
+        // And a fresh file names only the new key.
+        assert!(!DEFAULT_FILE.contains("max_input_rows"), "the shipped file teaches it");
+        assert!(DEFAULT_FILE.contains("prompt_rows = 1"));
     }
 
     /// A value applied while a slider is dragged and the same value read out of
@@ -1006,9 +1077,9 @@ mod tests {
             ("font_size", "400"),
             ("font_size", "2"),
             ("pane_font_size", "9"),
-            ("max_input_rows", "99"),
-            ("max_input_rows", "0"),
-            ("max_input_rows", "3"),
+            ("prompt_rows", "99"),
+            ("prompt_rows", "0"),
+            ("prompt_rows", "3"),
             ("left_width", "0.99"),
             ("left_width_bottom", "0.01"),
             ("top_height", "0.99"),

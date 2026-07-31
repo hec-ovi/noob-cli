@@ -278,8 +278,10 @@ directory rows and nothing to expand. The column is narrow, so a name that does
 not fit loses its parent directory first and its own tail second, and the list
 never grows past the width that leaves the file beside it readable.
 
-The prompt is one line and grows as you type, up to whatever `max_input_rows` in
+The prompt is one line and grows as you type, up to whatever `prompt_rows` in
 the settings says (one by default, so it stays a line until you ask for more).
+The key was called `max_input_rows` and the window never read it, so that name
+is retired: a file that still carries it opens at one row and says nothing.
 Past that it scrolls inside itself: the row the caret is on is the row you see,
 and typing off the bottom of it brings the text up rather than hiding it.
 Click anywhere in it to put the caret there, drag across it to

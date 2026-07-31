@@ -369,7 +369,7 @@ const LOOKS: [(&str, Kind); 5] = [
         },
     ),
     (
-        "max_input_rows",
+        "prompt_rows",
         Kind::Number {
             step: 1.0,
             low: 1.0,
@@ -1866,7 +1866,7 @@ fn value_of(config: &Config, key: &str, kind: Kind) -> String {
         ("theme", _) => theme_name(config).to_string(),
         ("show_activity", _) => flag(config.show_activity),
         ("show_files", _) => flag(config.show_files),
-        ("max_input_rows", _) => config.max_input_rows.to_string(),
+        ("prompt_rows", _) => config.prompt_rows.to_string(),
         (_, Kind::Number { places, .. }) => {
             let value = match key {
                 "opacity" => config.opacity,
@@ -2503,7 +2503,7 @@ mod tests {
             "opacity",
             "font_size",
             "pane_font_size",
-            "max_input_rows",
+            "prompt_rows",
             "left_width",
             "left_width_bottom",
             "top_height",
@@ -2685,14 +2685,14 @@ mod tests {
             "opacity",
             "font_size",
             "pane_font_size",
-            "max_input_rows",
+            "prompt_rows",
             "left_width",
             "left_width_bottom",
             "top_height",
             "top_height_right",
             "settings_rail",
         ] {
-            // Up first, then down from the top. `max_input_rows` ships at 1,
+            // Up first, then down from the top. `prompt_rows` ships at 1,
             // which is the bottom of its range, so a key walked down first has
             // nowhere to go and the walk would prove nothing about its bounds.
             for forward in [true, false] {
