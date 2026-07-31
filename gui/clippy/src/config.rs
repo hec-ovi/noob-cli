@@ -31,6 +31,10 @@ pub struct Config {
     pub font_size: f32,
     pub pane_font_size: f32,
     /// The tallest the prompt grows before it scrolls inside itself, in rows.
+    ///
+    /// One by default: the prompt is one line of the window until you say
+    /// otherwise, and a longer prompt scrolls inside that line rather than
+    /// pushing the conversation up as you type.
     pub max_input_rows: usize,
     /// Where the dividers were left, so the arrangement survives a restart the
     /// way every other preference in this window does.
@@ -89,7 +93,7 @@ impl Default for Config {
             opacity: 0.88,
             font_size: 14.0,
             pane_font_size: 13.0,
-            max_input_rows: 8,
+            max_input_rows: 1,
             left_width: crate::view::LEFT_WIDTH,
             left_width_bottom: crate::view::LEFT_WIDTH,
             top_height: crate::view::TOP_HEIGHT,
@@ -502,66 +506,7 @@ impl Config {
                 // Already applied above. Resolving it again here is how a name
                 // this build does not have gets reported instead of ignored.
                 "theme" => theme(&value).is_some(),
-                "opacity" => set(&mut config.opacity, number(&value).map(|n| n.clamp(0.05, 1.0))),
-                "font_size" => set(&mut config.font_size, number(&value).map(|n| n.clamp(8.0, 40.0))),
-                "pane_font_size" => set(
-                    &mut config.pane_font_size,
-                    number(&value).map(|n| n.clamp(8.0, 40.0)),
-                ),
-                // A prompt taller than the window is not a prompt, and one of
-                // zero rows has nowhere to put the caret.
-                "max_input_rows" => set(
-                    &mut config.max_input_rows,
-                    value.parse::<usize>().ok().map(|rows| rows.clamp(1, 24)),
-                ),
-                "left_width" => set(
-                    &mut config.left_width,
-                    number(&value).map(|n| n.clamp(SPLIT_LOW, SPLIT_HIGH)),
-                ),
-                "left_width_bottom" => set(
-                    &mut config.left_width_bottom,
-                    number(&value).map(|n| n.clamp(SPLIT_LOW, SPLIT_HIGH)),
-                ),
-                "top_height" => set(
-                    &mut config.top_height,
-                    number(&value).map(|n| n.clamp(SPLIT_LOW, SPLIT_HIGH)),
-                ),
-                "top_height_right" => set(
-                    &mut config.top_height_right,
-                    number(&value).map(|n| n.clamp(SPLIT_LOW, SPLIT_HIGH)),
-                ),
-                "settings_rail" => set(
-                    &mut config.settings_rail,
-                    number(&value).map(|n| n.clamp(RAIL_LOW, RAIL_HIGH)),
-                ),
-                "accent" => set(&mut config.accent, color(&value)),
-                "text" => set(&mut config.text, color(&value)),
-                "dim" => set(&mut config.dim, color(&value)),
-                "bright" => set(&mut config.bright, color(&value)),
-                "good" => set(&mut config.good, color(&value)),
-                "bad" => set(&mut config.bad, color(&value)),
-                "panel" => set(&mut config.panel, color(&value)),
-                "bar" => set(&mut config.bar, color(&value)),
-                "syntax_comment" => set(&mut config.syntax_comment, color(&value)),
-                "syntax_string" => set(&mut config.syntax_string, color(&value)),
-                "syntax_number" => set(&mut config.syntax_number, color(&value)),
-                "syntax_keyword" => set(&mut config.syntax_keyword, color(&value)),
-                "syntax_markup" => set(&mut config.syntax_markup, color(&value)),
-                _ if name.starts_with("tool_") => {
-                    match TOOL_KEYS.iter().position(|known| *known == name) {
-                        Some(at) => set(&mut config.tools[at], color(&value)),
-                        None => false,
-                    }
-                }
-                _ if name.starts_with("gauge_") => {
-                    match GAUGE_KEYS.iter().position(|known| *known == name) {
-                        Some(at) => set(&mut config.gauges[at], color(&value)),
-                        None => false,
-                    }
-                }
-                "show_activity" => set(&mut config.show_activity, boolean(&value)),
-                "show_files" => set(&mut config.show_files, boolean(&value)),
-                _ => false,
+                _ => config.apply(name, &value),
             };
             if !known {
                 // Reported the way the file spells it, alias or not, so the
@@ -570,6 +515,83 @@ impl Config {
             }
         }
         config
+    }
+
+    /// Put one `key = value` into this config, held to the same bounds the file
+    /// is read with, and say whether the key was one this build knows.
+    ///
+    /// The whole of [`Config::parse`] except the theme, which is resolved before
+    /// the loop so an explicit colour lands on top of it. It is a method rather
+    /// than an arm of the loop because a slider being dragged applies its value
+    /// to the live config on every motion event and only writes the file when
+    /// the button comes up: both paths clamp here, so the window cannot show a
+    /// value the file would refuse to carry.
+    pub fn apply(&mut self, key: &str, value: &str) -> bool {
+        let name = canonical(key);
+        match name {
+            "opacity" => set(&mut self.opacity, number(value).map(|n| n.clamp(0.05, 1.0))),
+            "font_size" => set(&mut self.font_size, number(value).map(|n| n.clamp(8.0, 40.0))),
+            "pane_font_size" => set(
+                &mut self.pane_font_size,
+                number(value).map(|n| n.clamp(8.0, 40.0)),
+            ),
+            // A prompt taller than the window is not a prompt, and one of
+            // zero rows has nowhere to put the caret.
+            "max_input_rows" => set(
+                &mut self.max_input_rows,
+                value.parse::<usize>().ok().map(|rows| rows.clamp(1, 24)),
+            ),
+            "left_width" => set(
+                &mut self.left_width,
+                number(value).map(|n| n.clamp(SPLIT_LOW, SPLIT_HIGH)),
+            ),
+            "left_width_bottom" => set(
+                &mut self.left_width_bottom,
+                number(value).map(|n| n.clamp(SPLIT_LOW, SPLIT_HIGH)),
+            ),
+            "top_height" => set(
+                &mut self.top_height,
+                number(value).map(|n| n.clamp(SPLIT_LOW, SPLIT_HIGH)),
+            ),
+            "top_height_right" => set(
+                &mut self.top_height_right,
+                number(value).map(|n| n.clamp(SPLIT_LOW, SPLIT_HIGH)),
+            ),
+            "settings_rail" => set(
+                &mut self.settings_rail,
+                number(value).map(|n| n.clamp(RAIL_LOW, RAIL_HIGH)),
+            ),
+            "accent" => set(&mut self.accent, color(value)),
+            "text" => set(&mut self.text, color(value)),
+            "dim" => set(&mut self.dim, color(value)),
+            "bright" => set(&mut self.bright, color(value)),
+            "good" => set(&mut self.good, color(value)),
+            "bad" => set(&mut self.bad, color(value)),
+            "panel" => set(&mut self.panel, color(value)),
+            "bar" => set(&mut self.bar, color(value)),
+            "syntax_comment" => set(&mut self.syntax_comment, color(value)),
+            "syntax_string" => set(&mut self.syntax_string, color(value)),
+            "syntax_number" => set(&mut self.syntax_number, color(value)),
+            "syntax_keyword" => set(&mut self.syntax_keyword, color(value)),
+            "syntax_markup" => set(&mut self.syntax_markup, color(value)),
+            _ if name.starts_with("tool_") => {
+                match TOOL_KEYS.iter().position(|known| *known == name) {
+                    Some(at) => set(&mut self.tools[at], color(value)),
+                    None => false,
+                }
+            }
+            _ if name.starts_with("gauge_") => {
+                match GAUGE_KEYS.iter().position(|known| *known == name) {
+                    Some(at) => set(&mut self.gauges[at], color(value)),
+                    None => false,
+                }
+            }
+            "show_activity" => set(&mut self.show_activity, boolean(value)),
+            "show_files" => set(&mut self.show_files, boolean(value)),
+            // Including `theme`, which is not a slot: it is a whole palette,
+            // resolved by [`Config::parse`] before any line lands on top of it.
+            _ => false,
+        }
     }
 }
 
@@ -866,8 +888,9 @@ font_size = 14          # the conversation
 pane_font_size = 13     # the activity, plan, agents and file panes
 
 # How tall the prompt is allowed to grow, in rows. Past this it scrolls inside
-# itself rather than taking more of the conversation.
-max_input_rows = 8
+# itself rather than taking more of the conversation, and the row the caret is
+# on is the row you see.
+max_input_rows = 1
 
 # Where the dividers sit, as fractions. One line runs the whole way across the
 # grid and each half of it is then cut by a line of its own, so the left column
@@ -955,6 +978,59 @@ mod tests {
         let parsed = Config::parse(DEFAULT_FILE);
         assert_eq!(parsed, Config::default());
         assert!(parsed.unknown.is_empty(), "{:?}", parsed.unknown);
+    }
+
+    /// The prompt is one row until somebody asks for more, in the struct and in
+    /// the file both. Eight rows of prompt on a window nobody has typed into is
+    /// eight rows of conversation nobody can see.
+    #[test]
+    fn the_prompt_is_one_row_until_it_is_asked_for_more() {
+        assert_eq!(Config::default().max_input_rows, 1);
+        assert_eq!(Config::parse(DEFAULT_FILE).max_input_rows, 1);
+        assert_eq!(Config::parse("max_input_rows = 6").max_input_rows, 6);
+    }
+
+    /// A value applied while a slider is dragged and the same value read out of
+    /// the file land in the same place.
+    ///
+    /// [`Config::apply`] is the setter [`Config::parse`] uses, and this is what
+    /// holds it there: a drag applies its value to the live window without
+    /// writing anything, so a second copy of the clamps would let the window
+    /// show a number the next launch pulls back.
+    #[test]
+    fn the_live_setter_holds_a_value_where_the_file_reader_does() {
+        for (key, value) in [
+            ("opacity", "5"),
+            ("opacity", "0"),
+            ("opacity", "0.62"),
+            ("font_size", "400"),
+            ("font_size", "2"),
+            ("pane_font_size", "9"),
+            ("max_input_rows", "99"),
+            ("max_input_rows", "0"),
+            ("max_input_rows", "3"),
+            ("left_width", "0.99"),
+            ("left_width_bottom", "0.01"),
+            ("top_height", "0.99"),
+            ("top_height_right", "0.42"),
+            ("settings_rail", "0.99"),
+            ("accent", "#123456"),
+            ("show_files", "off"),
+        ] {
+            let mut live = Config::default();
+            assert!(live.apply(key, value), "{key} is not a key this build knows");
+            assert_eq!(
+                live,
+                Config::parse(&format!("{key} = {value}")),
+                "{key} = {value} means one thing live and another in the file"
+            );
+        }
+        // A name nothing knows changes nothing and says so, which is how the
+        // file reader turns it into a reported typo.
+        let mut live = Config::default();
+        assert!(!live.apply("no_such_setting", "1"));
+        assert!(!live.apply("opacity", "green"), "an unreadable value is not a value");
+        assert_eq!(live, Config::default());
     }
 
     /// Every key the file names, live or as a commented default. A commented

@@ -1231,11 +1231,15 @@ impl App {
         self.reveal_settings_cursor();
     }
 
-    /// Move the slider under the button to where the pointer is now.
+    /// Move the slider under the button to where the pointer is now, and take
+    /// its value while it moves.
     ///
-    /// Nothing is written here. A drag across the window is hundreds of motion
-    /// events, and the panel carries the value it is being dragged to until the
-    /// button comes up, the same way a divider does.
+    /// Nothing is written here, the same way a divider writes nothing while it
+    /// is being dragged: a drag across the window is hundreds of motion events
+    /// and the file is rewritten once, when the button comes up. What the window
+    /// looks like is not deferred with it. A slider that only moves the window
+    /// on release is a control you cannot aim: the opacity you are dragging to
+    /// is the one thing that would tell you where to stop.
     fn drag_slider(&mut self) {
         let Some(index) = self.sliding else {
             return;
@@ -1247,6 +1251,27 @@ impl App {
         if let Some(panel) = self.settings.as_mut() {
             self.dirty |= panel.slide(index, at);
         }
+        self.preview_setting();
+    }
+
+    /// Apply what a slider is being dragged to, without writing the file.
+    ///
+    /// Through [`Config::apply`], which is the setter [`Config::parse`] reads
+    /// the file with, so the live value is held to the bounds the file holds it
+    /// to and a drag cannot show the window a value the next launch would
+    /// refuse. Then through [`App::adopt`], so the palette, the column widths
+    /// and the divider ratios all follow, exactly as they do when the value is
+    /// written on the way up.
+    fn preview_setting(&mut self) {
+        let Some(change) = self.settings.as_ref().and_then(Settings::previewed) else {
+            return;
+        };
+        let mut config = self.config.clone();
+        if !config.apply(change.key, &change.value) || config == self.config {
+            return;
+        }
+        self.adopt(config);
+        self.dirty = true;
     }
 
     /// The button came up on a slider: write where it was left, once.
@@ -1869,6 +1894,7 @@ impl App {
             self.config.font_size,
             self.column,
             self.prompt.len(),
+            self.prompt.caret(),
         )
     }
 
@@ -4222,7 +4248,7 @@ mod tests {
         let layout = laid_out(&dock, None, prompt.len());
         let y = layout.input.y + layout.input.h * 0.5;
         let chars = prompt.len();
-        let caret = |x: f32| layout.input_caret(x, y, SIZE, COLUMN, chars);
+        let caret = |x: f32| layout.input_caret(x, y, SIZE, COLUMN, chars, 0);
         // The pixel that resolves to a given offset, found by asking the layout
         // rather than by working out where the prompt marker ends.
         let x_of = |want: usize| {

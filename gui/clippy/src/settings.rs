@@ -26,9 +26,16 @@
 //! the whole file back, and [`Settings::refresh`] rebuilds these rows from that.
 //! So a value the parser clamps, or spells differently than it was typed, is the
 //! value on the panel a frame later instead of the panel and the next launch
-//! quietly disagreeing. A slider being dragged is the one exception and says so:
-//! it carries a preview until the button comes up, because writing the file on
-//! every motion event is hundreds of writes for one decision.
+//! quietly disagreeing.
+//!
+//! **A slider moves the window while it is being dragged.** It used to hold its
+//! value until the button came up, which read as a control that did nothing:
+//! you drag the opacity and the window sits there until you let go. So the file
+//! is still written once, on the way up, and the value the drag is holding is
+//! applied to the live config on every motion event through [`Config::apply`],
+//! which is the same setter and the same clamps the file is read with. The panel
+//! itself still shows the file's value under a preview, so what a row says and
+//! what the file carries cannot drift.
 //!
 //! The colours are listed and not editable here. Changing one means typing a hex
 //! value into a field, and the one field this window has is the agent's
@@ -1022,9 +1029,12 @@ impl Settings {
     ///
     /// The value is held here and not written: a drag across a window is
     /// hundreds of motion events, and writing the settings file at each one is
-    /// hundreds of rename-over-the-file writes for one decision. The cursor
-    /// follows the drag, so letting go and pressing an arrow key carries on from
-    /// where the slider was left.
+    /// hundreds of rename-over-the-file writes for one decision. What the drag
+    /// is holding is applied to the window on every one of those events
+    /// ([`Settings::previewed`] is what `main` reads it back with); it is only
+    /// the file that waits for the button. The cursor follows the drag, so
+    /// letting go and pressing an arrow key carries on from where the slider was
+    /// left.
     pub fn slide(&mut self, index: usize, fraction: f32) -> bool {
         let Some(Row::Setting { kind, .. }) = self.row(index) else {
             return false;
@@ -1037,6 +1047,25 @@ impl Settings {
         let moved = self.preview(index) != Some(next.as_str());
         self.dragging = Some((index, next));
         moved
+    }
+
+    /// What the slider under the button is being dragged to, while it is still
+    /// being dragged.
+    ///
+    /// The same change [`Settings::drop_slider`] returns, without ending the
+    /// drag, so the window can take the value while the pointer moves and the
+    /// file can still be written once. Nothing when no slider is down; the
+    /// change is returned even when it matches the file, since a drag that went
+    /// away and came back has to put the window back too.
+    pub fn previewed(&self) -> Option<Change> {
+        let (index, value) = self.dragging.as_ref()?;
+        let Some(Row::Setting { key, .. }) = self.row(*index) else {
+            return None;
+        };
+        Some(Change {
+            key,
+            value: value.clone(),
+        })
     }
 
     /// The button came up: what the drag decided, or nothing when it decided
@@ -1902,8 +1931,15 @@ mod tests {
         assert_eq!(Kind::Flag.fraction(0.5), None);
     }
 
-    /// A drag holds its value until the button comes up, and only then says what
-    /// to write. A drag that ended where it started writes nothing.
+    /// The row goes on showing the file's value under a preview, and the button
+    /// coming up is what says to write. A drag that ended where it started
+    /// writes nothing.
+    ///
+    /// This used to be titled "a drag holds its value until the button comes
+    /// up", which is now only half true and was the half that read as a broken
+    /// control: the file still waits for the button, and the window does not.
+    /// What the drag is holding is on [`Settings::previewed`] from the first
+    /// motion event, which is what `main` applies live.
     #[test]
     fn a_drag_writes_once_when_it_ends() {
         let config = Config::parse("opacity = 0.50");
@@ -1943,6 +1979,99 @@ mod tests {
         put_cursor(&mut panel, "show_files");
         assert!(!panel.slide(panel.cursor(), 0.5));
         assert_eq!(panel.fraction(panel.cursor()), None);
+        assert_eq!(panel.previewed(), None, "a flag is being dragged");
+    }
+
+    /// The window takes a dragged value while the pointer is still down. Only
+    /// the file waits for the button.
+    ///
+    /// "the scrolls are not instant, i have to release": a slider you have to
+    /// let go of before anything happens is a slider you cannot aim, because the
+    /// thing it changes is the thing that would tell you where to stop.
+    #[test]
+    fn a_drag_moves_the_window_before_the_button_comes_up() {
+        let path = scratch("live-drag");
+        let _ = std::fs::remove_file(&path);
+        let was = Config::load_from(&path);
+        let mut panel = Settings::open(&was, Some(&path), Agent::default());
+        put_cursor(&mut panel, "opacity");
+        let at = panel.cursor();
+
+        assert!(panel.slide(at, 0.0));
+        let live = panel.previewed().expect("the drag is holding a value");
+        assert_eq!(live.key, "opacity");
+        assert_eq!(live.value, "0.05");
+        // What `App::preview_setting` does with it: the same setter the file is
+        // read with, so the window cannot show a value the file would refuse.
+        let mut showing = was.clone();
+        assert!(showing.apply(live.key, &live.value));
+        assert!((showing.opacity - 0.05).abs() < 0.001, "{}", showing.opacity);
+        assert_ne!(showing.opacity, was.opacity, "the window did not move");
+        // And nothing has been written: the file still says what it said.
+        assert_eq!(Config::load_from(&path).opacity, was.opacity);
+
+        // The pointer keeps moving. Every position is on the panel at once.
+        assert!(panel.slide(at, 1.0));
+        let live = panel.previewed().expect("still dragging");
+        assert_eq!(live.value, "1.00");
+        assert_eq!(Config::load_from(&path).opacity, was.opacity, "written mid-drag");
+
+        // The button comes up: one write, and it says what the window already
+        // showed.
+        let change = panel.drop_slider().expect("the drag decided something");
+        let now = commit(&path, &change).expect("the file takes it");
+        assert_eq!(now.opacity, 1.0);
+        assert_eq!(panel.previewed(), None, "the drag outlived the button");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Every position on every track is a value the file carries unchanged.
+    ///
+    /// The live half of the round trip in `a_number_reads_back_as_what_the_panel
+    /// _showed`: a drag applies its value to the window without going through
+    /// the file, so a track whose ends ran past the parser's clamps would put a
+    /// number on screen that the next launch quietly pulls back.
+    #[test]
+    fn a_drag_cannot_show_a_value_the_file_would_clamp() {
+        let was = Config::default();
+        let mut panel = over(&was);
+        for key in [
+            "opacity",
+            "font_size",
+            "pane_font_size",
+            "max_input_rows",
+            "left_width",
+            "left_width_bottom",
+            "top_height",
+            "top_height_right",
+            "settings_rail",
+        ] {
+            put_cursor(&mut panel, key);
+            let at = panel.cursor();
+            // Past both ends as well as along the track: a pointer dragged out
+            // of the window is a fraction outside 0..1.
+            for fraction in [-3.0, 0.0, 0.25, 0.5, 0.75, 1.0, 4.0] {
+                panel.slide(at, fraction);
+                let live = panel.previewed().expect("the drag is holding a value");
+                assert_eq!(live.key, key);
+                let mut showing = was.clone();
+                assert!(showing.apply(live.key, &live.value), "{key} is not applied");
+                // The panel rebuilt from what the window is now says the same
+                // number, which is the check: the setter clamped nothing.
+                assert_eq!(
+                    value(&over(&showing), key),
+                    live.value,
+                    "{key} at {fraction} was pulled back by the parser's bounds"
+                );
+                // And a file line carrying it reads back the same way.
+                assert_eq!(
+                    Config::parse(&format!("{key} = {}", live.value)),
+                    showing,
+                    "{key} at {fraction} means one thing live and another in the file"
+                );
+            }
+            panel.drop_slider();
+        }
     }
 
     /// A colour is on the panel to be read, and reading is all.
@@ -2099,7 +2228,10 @@ mod tests {
             "top_height_right",
             "settings_rail",
         ] {
-            for forward in [false, true] {
+            // Up first, then down from the top. `max_input_rows` ships at 1,
+            // which is the bottom of its range, so a key walked down first has
+            // nowhere to go and the walk would prove nothing about its bounds.
+            for forward in [true, false] {
                 put_cursor(&mut panel, key);
                 // Walk to the end of the range, which is where a bound that
                 // disagreed with the parser would show up.

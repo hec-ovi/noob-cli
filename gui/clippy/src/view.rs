@@ -1810,15 +1810,25 @@ impl Layout {
     /// The inverse of the arithmetic [`input_row`] draws the caret with, off
     /// the same box, so the caret lands under the pointer instead of near it.
     /// A click past the end of the text lands at the end, which is why `chars`
-    /// is passed in.
-    pub fn input_caret(&self, x: f32, y: f32, size: f32, column: f32, chars: usize) -> usize {
+    /// is passed in, and it lands on the row that is on screen rather than on
+    /// the row that would be there unscrolled, which is why `caret` is.
+    pub fn input_caret(
+        &self,
+        x: f32,
+        y: f32,
+        size: f32,
+        column: f32,
+        chars: usize,
+        caret: usize,
+    ) -> usize {
         if column <= 0.0 {
             return chars;
         }
         let line = Text::line_for(size);
         let box_ = input_box(self.input, line);
         let columns = columns_in(box_.w, column);
-        let row = ((y - box_.y) / line).floor().max(0.0) as usize;
+        let skip = prompt_skip(caret, columns, rows_in(box_, line));
+        let row = skip + (((y - box_.y) / line).floor().max(0.0) as usize);
         // Rounded, not floored, so pressing on the right half of a character
         // puts the caret after it, the way a text cursor behaves everywhere.
         let at = ((((x - box_.x) / column).round().max(0.0)) as usize).min(columns);
@@ -4930,6 +4940,12 @@ fn input_row(scene: &mut Scene, frame: &Frame) {
     let line = Text::line_for(frame.body_size);
     let box_ = input_box(layout.input, line);
     let columns = columns_in(box_.w, frame.column);
+    // What the box can hold and how much of the prompt is above it. Everything
+    // below is drawn from `top`, which is the first row's y whether or not that
+    // row is on screen, so the rows that are on screen land where the caret
+    // arithmetic and the click arithmetic both say they do.
+    let skip = prompt_skip(frame.prompt.caret(), columns, rows_in(box_, line));
+    let top = box_.y - skip as f32 * line;
     // Under the glyphs, like the band in a pane, so selected text stays
     // readable rather than being painted over.
     if let Some((from, to)) = frame.prompt.selection() {
@@ -4942,11 +4958,11 @@ fn input_row(scene: &mut Scene, frame: &Frame) {
             let stop = end.min((row + 1) * columns);
             let band = Panel::new(
                 box_.x + (at % columns) as f32 * frame.column,
-                box_.y + row as f32 * line,
+                top + row as f32 * line,
                 (stop - at) as f32 * frame.column,
                 line,
             );
-            if band.y + band.h <= box_.y + box_.h + 0.5 {
+            if band.y >= box_.y - 0.5 && band.y + band.h <= box_.y + box_.h + 0.5 {
                 scene.rect(band.fill(skin.select));
             }
             at = stop;
@@ -4972,14 +4988,22 @@ fn input_row(scene: &mut Scene, frame: &Frame) {
         // columns lands on the glyph that is really there. Word wrap would put
         // the caret a word away on every long line, and character wrap would
         // still swallow a blank that fell on the boundary.
-        .wrap_at(columns),
+        .wrap_at(columns)
+        // The rows above the window are paid for and not drawn, the way a pane
+        // showing the tail of a long stream is. Without this a prompt longer
+        // than its allowance goes on being typed into a box that shows only its
+        // first rows, which is a setting that appears to do nothing.
+        .scrolled(skip as f32),
     );
     // The dots, on the first row of the box, in the marker's own two columns.
     // Round, because they stand in for three round glyphs and because the orb in
     // the strip is round for exactly as long as they are on screen. Pushed
     // before the caret so the caret is still the last thin rectangle in the row,
     // which is how the tests find it.
-    if busy {
+    // Skipped once the first row has scrolled off the top: the marker's two
+    // blank columns went with it, and three dots over somebody's text is not a
+    // marker, it is three dots in the way.
+    if busy && skip == 0 {
         let span = 3.0 * PROMPT_DOT + 2.0 * PROMPT_DOT_GAP;
         let slack = (PROMPT_COLUMNS as f32 * frame.column - span).max(0.0) * 0.5;
         let rest = box_.y + (line - PROMPT_DOT) * 0.5;
@@ -4997,13 +5021,33 @@ fn input_row(scene: &mut Scene, frame: &Frame) {
     let (row, column) = (at / columns, at % columns);
     let caret = Panel::new(
         box_.x + column as f32 * frame.column,
-        box_.y + row as f32 * line,
+        top + row as f32 * line,
         2.0,
         line,
     );
-    if caret.y + caret.h <= box_.y + box_.h + 0.5 {
+    // Always true, since the box is scrolled to the caret's row; the check is
+    // what makes that a fact rather than an assumption.
+    if caret.y >= box_.y - 0.5 && caret.y + caret.h <= box_.y + box_.h + 0.5 {
         scene.rect(caret.fill(skin.caret));
     }
+}
+
+/// How many whole rows of text a box holds. One at the least: a box too short
+/// for a line still has a line in it, clipped, rather than dividing by nothing.
+fn rows_in(box_: Panel, line: f32) -> usize {
+    ((box_.h / line.max(1.0)).floor() as usize).max(1)
+}
+
+/// How many of the prompt's rows have scrolled off the top of its box.
+///
+/// As few as it takes to keep the caret's row inside the box: nothing while the
+/// prompt fits, and then one row per row typed past the allowance, so what you
+/// are typing is on screen and what you typed earlier is above it. Drawing and
+/// hit testing both come through here, or a click would land a row off on
+/// anything that had scrolled.
+fn prompt_skip(caret: usize, columns: usize, rows: usize) -> usize {
+    let row = (caret + PROMPT_COLUMNS) / columns.max(1);
+    row.saturating_sub(rows.max(1) - 1)
 }
 
 /// How far each of the prompt's three dots is off its rest line, in pixels.
@@ -9017,7 +9061,7 @@ mod tests {
             let x = box_.x + column as f32 * 8.0 + 3.0;
             let y = box_.y + row as f32 * line + line * 0.5;
             assert_eq!(
-                layout.input_caret(x, y, 14.0, 8.0, prompt.len()),
+                layout.input_caret(x, y, 14.0, 8.0, prompt.len(), prompt.caret()),
                 at,
                 "row {row} column {column}"
             );
@@ -9025,7 +9069,14 @@ mod tests {
         // Past the end of the text, and past the end of a row.
         let below = box_.y + box_.h - 1.0;
         assert_eq!(
-            layout.input_caret(box_.x + box_.w - 1.0, below, 14.0, 8.0, prompt.len()),
+            layout.input_caret(
+                box_.x + box_.w - 1.0,
+                below,
+                14.0,
+                8.0,
+                prompt.len(),
+                prompt.caret(),
+            ),
             prompt.len()
         );
         // And the caret the click asks for is where the frame draws it.
@@ -9043,9 +9094,111 @@ mod tests {
         assert_ne!(caret(&scene), caret(&after));
         let placed = caret(&after);
         assert_eq!(
-            layout.input_caret(placed[0] + 1.0, placed[1] + 1.0, 14.0, 8.0, moved.len()),
+            layout.input_caret(
+                placed[0] + 1.0,
+                placed[1] + 1.0,
+                14.0,
+                8.0,
+                moved.len(),
+                moved.caret(),
+            ),
             columns + 3
         );
+    }
+
+    /// Past its allowance the prompt scrolls inside itself instead of growing,
+    /// and what it scrolls to is the row the caret is on.
+    ///
+    /// The other half of `max_input_rows`. The strip stopped growing at the row
+    /// count all along, but the text was drawn from its first row whatever the
+    /// caret was doing, so everything past the allowance was typed into a box
+    /// that could not show it: a setting of one row read as a setting that did
+    /// nothing at all.
+    #[test]
+    fn a_prompt_past_its_allowance_scrolls_instead_of_growing() {
+        let line = Text::line_for(14.0);
+        let typed = "x".repeat(600);
+        let long = typed_prompt(&typed, 600);
+        let (strip, _, scene) = render_prompt(&long, 1);
+        // One row and the padding around it, which is the whole point.
+        assert!((strip.h - (line + 2.0 * INPUT_PAD)).abs() < 0.01, "{}", strip.h);
+        let box_ = input_box(strip, line);
+        let columns = columns_in(box_.w, 8.0);
+        let rows = (600 + PROMPT_COLUMNS + 1).div_ceil(columns);
+        assert!(rows > 1, "600 characters fit on one row at this width");
+        let drawn = scene
+            .texts
+            .iter()
+            .find(|text| text.runs.iter().any(|run| run.text == typed))
+            .expect("the prompt is drawn");
+        assert_eq!(
+            drawn.scroll_lines,
+            (rows - 1) as f32,
+            "the box is not scrolled to the caret's row"
+        );
+        // The caret is on screen, on the last row the box can show.
+        let caret = scene
+            .rects
+            .iter()
+            .map(|r| r.xywh())
+            .rfind(|[x, y, w, _]| *w <= 3.0 && strip.contains(*x, *y))
+            .expect("the caret is drawn");
+        assert!(caret[1] >= box_.y - 0.5, "the caret is above the box: {caret:?}");
+        assert!(
+            caret[1] + caret[3] <= box_.y + box_.h + 0.5,
+            "the caret is below the box: {caret:?}"
+        );
+        // A prompt that fits is not scrolled at all.
+        let (_, _, short) = render_prompt(&typed_prompt("hello", 5), 1);
+        let drawn = short
+            .texts
+            .iter()
+            .find(|text| text.runs.iter().any(|run| run.text == "hello"))
+            .expect("the prompt is drawn");
+        assert_eq!(drawn.scroll_lines, 0.0);
+    }
+
+    /// Wherever the caret is, it is on a row the box is showing, and a click on
+    /// it reads back as the character it is on.
+    ///
+    /// Typing is the caret moving one character at a time, so a caret that goes
+    /// off the bottom of a one-row prompt is the prompt going blind halfway
+    /// through a sentence. The click half is here too because the scroll offset
+    /// has to be in the drawing and in the hit testing or a press lands a row
+    /// off on anything that has scrolled.
+    #[test]
+    fn the_caret_stays_on_a_visible_row_however_far_the_prompt_runs() {
+        let line = Text::line_for(14.0);
+        let typed = "0123456789".repeat(60);
+        for max_rows in [1usize, 2, 5] {
+            for at in [0usize, 1, 137, 299, 480, 600] {
+                let prompt = typed_prompt(&typed, at);
+                let (strip, layout, scene) = render_prompt(&prompt, max_rows);
+                let box_ = input_box(strip, line);
+                let caret = scene
+                    .rects
+                    .iter()
+                    .map(|r| r.xywh())
+                    .rfind(|[x, y, w, _]| *w <= 3.0 && strip.contains(*x, *y))
+                    .unwrap_or_else(|| panic!("no caret at {at} in {max_rows} rows"));
+                assert!(
+                    caret[1] >= box_.y - 0.5 && caret[1] + caret[3] <= box_.y + box_.h + 0.5,
+                    "the caret left the box at {at} in {max_rows} rows: {caret:?} in {box_:?}"
+                );
+                assert_eq!(
+                    layout.input_caret(
+                        caret[0] + 1.0,
+                        caret[1] + 1.0,
+                        14.0,
+                        8.0,
+                        prompt.len(),
+                        prompt.caret(),
+                    ),
+                    prompt.caret(),
+                    "a click on the caret at {at} in {max_rows} rows means somewhere else"
+                );
+            }
+        }
     }
 
     /// Select-all bands every row the text covers, and nothing outside the

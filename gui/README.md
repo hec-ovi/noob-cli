@@ -236,8 +236,11 @@ directory rows and nothing to expand. The column is narrow, so a name that does
 not fit loses its parent directory first and its own tail second, and the list
 never grows past the width that leaves the file beside it readable.
 
-The prompt grows as you type, up to eight lines or whatever `max_input_rows` in
-the settings says. Click anywhere in it to put the caret there, drag across it to
+The prompt is one line and grows as you type, up to whatever `max_input_rows` in
+the settings says (one by default, so it stays a line until you ask for more).
+Past that it scrolls inside itself: the row the caret is on is the row you see,
+and typing off the bottom of it brings the text up rather than hiding it.
+Click anywhere in it to put the caret there, drag across it to
 select a span, Ctrl-A selects the whole line, and typing or backspace over a
 selection replaces it. Ctrl-V pastes; a pasted newline becomes a space, because
 the prompt is one wrapped line and Enter is what sends it.
@@ -348,9 +351,12 @@ what the next launch reads.
 
 A setting with a range is a slider: opacity, both font sizes, how tall the prompt
 may grow, all four divider positions and the settings rail. Press the track and drag it, with the value beside it
-and the arrow keys still nudging it one step. The file is written when the button
-comes up rather than on every motion event, which would be hundreds of writes for
-one decision, and the panel carries the value it is being dragged to until then.
+and the arrow keys still nudging it one step. The window takes the value while
+you drag: the opacity you are dragging to is the only thing that tells you where
+to stop. The file is written when the button comes up rather than on every motion
+event, which would be hundreds of writes for one decision, and the live value
+goes through the same clamps the file is read with, so what you drag to is what
+the next launch reads.
 
 The palette is the last block of APPEARANCE, laid out as a grid: three colours to
 a row under `THE WINDOW`, `THE HIGHLIGHTER`, `ONE PER TOOL` and `ONE PER GAUGE`,
