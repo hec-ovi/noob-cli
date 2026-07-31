@@ -40,10 +40,16 @@ pub const CLOSE_WIDGET: char = '\u{ea76}';
 pub const TABS_LEFT: char = '\u{eab5}';
 pub const TABS_RIGHT: char = '\u{eab6}';
 
-/// At the right end of a menu row whose list flies out to the side. The same
-/// chevron the tab strip walks with, on purpose: one mark in the window means
-/// there is more of this over here.
+/// At the right end of a menu row that opens a group of rows underneath it.
+///
+/// Two, because the rows appear in the same column as the header rather than
+/// out to the side: the chevron points right while the group is shut and turns
+/// down while it is open, which is what every tree on the desktop says and the
+/// only thing on the row that says what pressing it will do. The shut one is
+/// the same chevron the tab strip walks with, on purpose: one mark in the
+/// window means there is more of this that way.
 pub const SUBMENU: char = '\u{eab6}';
+pub const SUBMENU_OPEN: char = '\u{eab4}';
 
 /// The two states of a row that is a switch rather than a destination: the
 /// widget is in the window, or it is out. Boxed rather than a bare tick, so the
@@ -156,6 +162,7 @@ mod tests {
             TABS_LEFT,
             TABS_RIGHT,
             SUBMENU,
+            SUBMENU_OPEN,
             CHECKED,
             UNCHECKED,
             FILE,

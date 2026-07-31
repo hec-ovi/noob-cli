@@ -380,17 +380,25 @@ leaving a hole. Every row carries its own icon in front of its label: two sheets
 for a copy, a clipboard for a paste, a gear for Settings, a cross for Close this
 widget and a grid of frames for Widgets.
 
-**Widgets** is the way back, and the way out. It is the last row, marked in front
-with that grid and with a `>` at its end, and it opens a list of all eight in a
-box beside itself, right by default and left when the menu is near the right edge
-of the window. Every row
-of the list is a switch: a ticked box means the widget is in the window and
-picking it takes the widget out, an empty box means it is closed and picking it
-puts it back in the space it opens in by default. The menu stays open over the
-list so you can switch a second widget without opening it again, unless what you
-switched off is the widget the menu was opened over, which takes the rest of its
-rows with it. The list is clamped into the window like the menu itself, and in a
-window too short for all eight the wheel scrolls it.
+**Two of those rows are groups rather than acts**, and they say so: a chevron at
+the end of the row, pointing right while the group is shut and down while it is
+open, and a brighter label than the rows that act. Pressing one opens its rows
+in the same box, under the header and one step in from it. Settings holds the
+five sections of the panel and picking one opens the panel on that section.
+Widgets holds all eight views, and every row of it is a switch: a ticked box
+means the widget is in the window and picking it takes the widget out, an empty
+box means it is closed and picking it puts it back in the space it opens in by
+default. The menu stays open over a group so you can switch a second widget or
+read the section names without opening it again, unless what you switched off is
+the widget the menu was opened over, which takes the rest of its rows with it.
+
+**The menu takes the keyboard too.** Up and down walk the rows that can act,
+right opens the group under the cursor and steps into one already open, left
+shuts it or steps out to the header of the group you are inside, Enter presses
+the row, and anything else puts the menu away. The menu is clamped into the
+window, and with both groups out it is taller than a short window: it shows what
+there is room for and the wheel scrolls the rest, rather than dropping the rows
+past the bottom.
 
 ## Settings
 
@@ -605,7 +613,7 @@ settings, then the palette: how big the text is (the conversation and the
 panes), how solid the window is (the panels, and the empty space around them),
 and how tall the prompt is. Two things the
 file carries are deliberately not rows: which panes are open, which is the right
-click menu's list, and where the four dividers and the settings rail sit, which
+click menu's Widgets group, and where the four dividers and the settings rail sit, which
 is set by dragging the lines. Both are still written and read the same way, so a
 closed pane and a dragged layout come back at the next launch; there is just
 nothing on the panel to type them into. Every field is a plain-words name over

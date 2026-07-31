@@ -203,6 +203,54 @@ band says which row the keys are on and the mark in the first column says which
 rows are chosen, and the two are different things: one row is banded, any number
 of rows are marked.
 
+## A menu
+
+The right click menu is not a panel and has no cards, but it obeys the same two
+rules everything else here does: one number owns each measurement, and a thing
+that opens says so before it is pressed.
+
+- **One box.** A group opens its rows into the same box, under its own header
+  and one step in (`menu::INDENT_COLUMNS`), rather than flying out to the side.
+  Two boxes could hold exactly one submenu between them, because there was one
+  split point and one anchor; one box holds any number of groups. The cost is
+  that opening a group moves the rows under it, which is why a group is marked
+  and why the keyboard walks the menu.
+- **A row that opens and a row that acts do not read alike.** The header wears a
+  chevron at the end of its row, pointing right while it is shut and down while
+  it is open, and its label is written in the brighter of the two inks. A row
+  that acts wears no chevron and the body ink. A row that cannot act is dim, and
+  does not light up under the pointer: a highlight promises something will
+  happen when the button comes down.
+- **The gutter is spent on every row.** One mark per row, always, in a fixed two
+  columns in front of the label, so the labels line up down a column instead of
+  stepping in and out with whichever rows happen to be marked.
+- **The box is measured in the size its rows are written at.** One font owns the
+  geometry. Measured in the title bar's column and drawn at the menu's, every
+  row ended short of its own box and the chevron floated most of an inch past
+  the end of its label.
+- **A row is 24 pixels**, two more than a tab, because a tab is read and a menu
+  row is aimed at. Every row's text clears the border by `MENU_PAD` on both
+  sides.
+- **A highlight is exactly its row**, less the two hairlines the border stands
+  in, and less the corner the box does not have. A highlight that spanned the
+  border brightened it for the height of the pointer, which reads as the outline
+  coming apart.
+- **The border is painted after the rows**, so nothing a row draws can break it.
+- **The cut is not the menu.** The notch in the top right corner is cut out of
+  the fill and out of the border, so the pane behind it is what is on screen
+  there and what a press reaches. It is the one hit region in the window that
+  subtracts its corner, because it is the one surface that takes the click
+  before everything under it. Every rectangle drawn inside the box either stops
+  short of the notch or carries the same diagonal.
+- **A popup's diagonal is a hairline.** A pane and a tab draw their cut at twice
+  the weight of their straight sides, because that edge is what says what shape
+  the box is; a menu, a flyout, the call popup, the prompt and the picker all go
+  through `panel_edge` and stroke it at one pixel. That is the popup convention,
+  not an oversight: a box on screen for a second does not need its shape
+  announced.
+- **A menu too tall for the window scrolls**, from the wheel and from the
+  keyboard's own cursor, rather than dropping the rows past the bottom.
+
 ## Scrolling
 
 - One scrollbar per scrollable region, drawn inside that region's right padding,

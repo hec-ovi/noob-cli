@@ -592,7 +592,7 @@ fn menu_for(
     }
 }
 
-/// What picking a row of the menu's widget list does, and what becomes of the
+/// What picking a row of the menu's Widgets group does, and what becomes of the
 /// menu afterwards.
 struct Toggled {
     /// The widget went out of the window rather than coming back into it.
@@ -993,6 +993,9 @@ struct App {
     moving: Option<PhysicalPosition<f64>>,
     column: f32,
     pane_column: f32,
+    /// One column at the size a menu's rows are written at, which is not the
+    /// size anything else in the window is written at. See [`view::MENU_SIZE`].
+    menu_column: f32,
 
     cursor: PhysicalPosition<f64>,
     hot: Option<Hit>,
@@ -1078,6 +1081,7 @@ impl App {
             moving: None,
             column: 8.0,
             pane_column: 8.0,
+            menu_column: 7.0,
             cursor: PhysicalPosition::new(0.0, 0.0),
             hot: None,
             last_click: None,
@@ -1109,6 +1113,7 @@ impl App {
                 .collect(),
             file_first: self.state.file_scroll,
             column: self.column,
+            menu_column: self.menu_column,
             pane_size: self.config.pane_font_size,
             pane_column: self.pane_column,
             input_h: self.input_height(),
@@ -2201,6 +2206,7 @@ impl App {
         if let Some(renderer) = self.renderer.as_mut() {
             self.column = renderer.column_width(self.config.font_size);
             self.pane_column = renderer.column_width(self.config.pane_font_size);
+            self.menu_column = renderer.column_width(view::MENU_SIZE);
         }
         self.dirty = true;
     }
@@ -2847,7 +2853,20 @@ impl App {
                 self.copy_prompt();
             }
             (Item::Paste, _) => self.paste(),
-            (Item::Settings, _) => self.open_settings(),
+            // A group header: the rows it holds go in under it and the menu
+            // stays open over them, which is the whole of what the row is for.
+            (Item::Settings(_) | Item::Widgets(_), _) => {
+                menu.fold(index, &self.dock);
+                self.menu = Some(menu);
+            }
+            // One section of the panel, which opens the panel on that section.
+            // The panel is a takeover, so the menu goes with the press.
+            (Item::Section(at), _) => {
+                self.open_settings();
+                if let Some(settings) = self.settings.as_mut() {
+                    settings.choose(at);
+                }
+            }
             (Item::CopySelection, _) => {
                 self.copy_selection();
             }
@@ -2873,12 +2892,6 @@ impl App {
             // Neither row is on any menu but a session's.
             (Item::OpenSession | Item::DeleteSession(_),
                 Target::Input | Target::Widget(..) | Target::SettingsDoc) => {}
-            // The row that opens the list beside itself, which is the thing the
-            // row is for: closing the menu would take the list with it.
-            (Item::Widgets(_), _) => {
-                menu.toggle_widgets(&self.dock);
-                self.menu = Some(menu);
-            }
             // A switch rather than a destination, so the menu stays open over it
             // and can be switched again. See [`toggle_view`] for the one case
             // where it cannot.
@@ -2896,7 +2909,7 @@ impl App {
 
     /// Take a widget out of the window.
     ///
-    /// The way back is the widget list on the same menu, and the two settings
+    /// The way back is the Widgets group on the same menu, and the two settings
     /// that carry a pane of their own. The arrangement survives a close because
     /// a space with no tabs gives its room to its neighbour rather than leaving
     /// a hole; see `Layout::compute`.
@@ -3296,15 +3309,75 @@ impl App {
         self.dirty = true;
     }
 
+    /// The keys an open menu answers, and whether this was one of them.
+    ///
+    /// The menu shipped with no keyboard route at all: any key put it away. A
+    /// menu whose rows open groups needs one, because opening a group with the
+    /// pointer moves the rows under the pointer, and because a row that opens
+    /// and a row that acts are two different presses and only the keyboard can
+    /// say which without aiming.
+    ///
+    /// Up and down walk the rows that can act. Right opens the group the cursor
+    /// is on and steps into one already open; left shuts it, or steps out to
+    /// the header of the group the cursor is inside. Enter presses the row.
+    /// Everything else falls through and puts the menu away.
+    fn menu_key(&mut self, event: &winit::event::KeyEvent) -> bool {
+        let rows = self.layout().menu_capacity();
+        let Some(menu) = self.menu.as_mut() else {
+            return false;
+        };
+        let dock = &self.dock;
+        let mut act = None;
+        let answered = match event.logical_key.as_ref() {
+            Key::Named(NamedKey::ArrowDown) => {
+                menu.walk(true, rows);
+                true
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                menu.walk(false, rows);
+                true
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                menu.unfold_here(dock, rows);
+                true
+            }
+            Key::Named(NamedKey::ArrowLeft) => {
+                menu.fold_here(dock, rows);
+                true
+            }
+            Key::Named(NamedKey::Enter | NamedKey::Space) => {
+                act = menu.cursor;
+                act.is_some()
+            }
+            _ => false,
+        };
+        if !answered {
+            return false;
+        }
+        // The keys are saying which row is next now, so the pointer's own
+        // highlight goes out. Two lit rows in one menu is two answers to the
+        // question Enter is about to ask.
+        self.hot = None;
+        self.dirty = true;
+        if let Some(index) = act {
+            self.pick(index);
+        }
+        true
+    }
+
     fn key(&mut self, event: winit::event::KeyEvent, event_loop: &ActiveEventLoop) {
         if event.state != ElementState::Pressed {
             return;
         }
-        // A menu was opened for a pointer, and a keystroke means the pointer
-        // has been left behind. Leaving it floating over text being typed under
-        // it is worse than losing it. Escape stops here rather than falling
-        // through, so putting a menu away does not also drop a selection or a
-        // half typed line.
+        // An open menu takes the keys it can use before anything else does, the
+        // same way it takes the click: it is above the window. Everything else
+        // puts it away, because a menu left floating over text being typed
+        // under it is worse than losing it, and Escape stops there rather than
+        // falling through, so putting it away does not also drop a selection or
+        // a half typed line.
+        if self.menu.is_some() && self.menu_key(&event) {
+            return;
+        }
         if self.menu.take().is_some() {
             self.dirty = true;
             if matches!(event.logical_key.as_ref(), Key::Named(NamedKey::Escape)) {
@@ -3444,8 +3517,8 @@ impl App {
     fn scroll_hovered(&mut self, pages: f32) {
         let layout = self.layout();
         // A menu floats above the window, so while the pointer is on one the
-        // wheel moves its widget list rather than the pane the menu covers.
-        // First, for the same reason the menu is hit tested first.
+        // wheel moves the menu rather than the pane it covers. First, for the
+        // same reason the menu is hit tested first.
         if matches!(
             layout.hit(self.cursor.x as f32, self.cursor.y as f32),
             Some(Hit::Menu | Hit::MenuRow(_))
@@ -3736,6 +3809,7 @@ impl ApplicationHandler<Wake> for App {
                 let mut renderer = noob_draw::Renderer::new(&gpu);
                 self.column = renderer.column_width(self.config.font_size);
                 self.pane_column = renderer.column_width(self.config.pane_font_size);
+                self.menu_column = renderer.column_width(view::MENU_SIZE);
                 self.renderer = Some(renderer);
                 self.gpu = Some(gpu);
             }
@@ -4553,6 +4627,7 @@ mod tests {
             file_labels: Vec::new(),
             file_first: 0,
             column: COLUMN,
+            menu_column: COLUMN,
             pane_size: Config::default().pane_font_size,
             pane_column: COLUMN,
             input_h: view::input_height(
@@ -5395,7 +5470,7 @@ mod tests {
     fn picking_a_widget_takes_it_out_of_the_window_or_puts_it_back() {
         let mut dock = Dock::new();
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
-        menu.toggle_widgets(&dock);
+        menu.fold(3, &dock);
 
         // In the window, and out: no tab, no space, nothing walks to it. Dragged
         // somewhere else first, so where it comes back to says something.
@@ -5426,13 +5501,13 @@ mod tests {
 
         // And the marks follow, so the row says which way it will go next.
         assert_eq!(
-            menu.pick(menu.top + 7),
+            menu.pick(4 + 7),
             Some(Item::Widget(View::Files, false)),
             "FILES is the eighth widget and it is back in the window"
         );
         toggle_view(&mut dock, &mut menu, View::Files);
         assert_eq!(
-            menu.pick(menu.top + 7),
+            menu.pick(4 + 7),
             Some(Item::Widget(View::Files, true))
         );
     }
@@ -5446,7 +5521,7 @@ mod tests {
     fn the_menu_stays_open_over_the_list_unless_its_own_widget_goes_out() {
         let mut dock = Dock::new();
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
-        menu.toggle_widgets(&dock);
+        menu.fold(3, &dock);
 
         // Another widget, either way round: the menu stays.
         assert!(toggle_view(&mut dock, &mut menu, View::Hardware).keep_open);
@@ -5472,7 +5547,7 @@ mod tests {
     fn switching_every_widget_off_and_back_on_keeps_the_dock_sound() {
         let mut dock = Dock::new();
         let mut menu = Menu::for_widget((0.0, 0.0), View::Output, Space::TopLeft, false);
-        menu.toggle_widgets(&dock);
+        menu.fold(3, &dock);
         for view in View::ALL {
             assert!(toggle_view(&mut dock, &mut menu, view).hidden);
             assert!(dock.is_sound(), "after {view:?} went out: {dock:?}");
@@ -5490,7 +5565,7 @@ mod tests {
         // Every row of the list says the widget is in the window again.
         for (step, view) in View::ALL.into_iter().enumerate() {
             assert_eq!(
-                menu.pick(menu.top + step),
+                menu.pick(4 + step),
                 Some(Item::Widget(view, false)),
                 "{view:?}"
             );
@@ -5748,7 +5823,7 @@ mod tests {
         assert!(dock.is_hidden(View::Activity));
         assert!(!dock.is_hidden(View::Files));
         let mut menu = Menu::for_widget((0.0, 0.0), View::Output, Space::TopLeft, false);
-        menu.toggle_widgets(&dock);
+        menu.fold(3, &dock);
         assert!(!toggle_view(&mut dock, &mut menu, View::Activity).hidden);
         assert!(!dock.is_hidden(View::Activity), "the menu cannot reopen it");
 
@@ -5766,6 +5841,7 @@ mod tests {
             file_labels: Vec::new(),
             file_first: 0,
             column: COLUMN,
+            menu_column: COLUMN,
             pane_size: config.pane_font_size,
             pane_column: COLUMN,
             input_h: view::input_height(config.prompt_rows, noob_draw::Text::line_for(SIZE)),
@@ -6090,6 +6166,7 @@ mod tests {
             file_labels: Vec::new(),
             file_first: 0,
             column: COLUMN,
+            menu_column: COLUMN,
             pane_size: Config::default().pane_font_size,
             pane_column: COLUMN,
             input_h: view::input_height(
