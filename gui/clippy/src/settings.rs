@@ -273,16 +273,17 @@ const LOOKS: [(&str, Kind); 5] = [
 const PANE_SETTINGS: [(&str, Kind); 2] =
     [("show_activity", Kind::Flag), ("show_files", Kind::Flag)];
 
-/// The same four numbers the dividers write when they are dragged. Here as well
-/// because a pointer is not the only way anyone works, and because a value that
-/// only a drag can reach is a value nobody can read off the window.
+/// The numbers the dividers write when they are dragged. Here as well because a
+/// pointer is not the only way anyone works, and because a value that only a
+/// drag can reach is a value nobody can read off the window.
 ///
-/// All four whichever way the grid is reading. One line always runs the whole
-/// way across, so one of these is not on screen as a line at any given moment;
-/// it is still the number that line will take when the grid turns round, and a
-/// row that disappeared and came back would read as a setting that comes and
-/// goes.
-const DIVIDERS: [(&str, Kind); 4] = [
+/// All four of the grid's, whichever way it is reading. One line always runs the
+/// whole way across, so one of them is not on screen as a line at any given
+/// moment; it is still the number that line will take when the grid turns round,
+/// and a row that disappeared and came back would read as a setting that comes
+/// and goes. The fifth is this panel's own rail, which is dragged the same way
+/// and held to a range of its own.
+const DIVIDERS: [(&str, Kind); 5] = [
     (
         "left_width",
         Kind::Number {
@@ -316,6 +317,15 @@ const DIVIDERS: [(&str, Kind); 4] = [
             step: 0.05,
             low: config::SPLIT_LOW,
             high: config::SPLIT_HIGH,
+            places: 2,
+        },
+    ),
+    (
+        "settings_rail",
+        Kind::Number {
+            step: 0.05,
+            low: config::RAIL_LOW,
+            high: config::RAIL_HIGH,
             places: 2,
         },
     ),
@@ -1412,6 +1422,7 @@ fn value_of(config: &Config, key: &str, kind: Kind) -> String {
                 "left_width_bottom" => config.left_width_bottom,
                 "top_height" => config.top_height,
                 "top_height_right" => config.top_height_right,
+                "settings_rail" => config.settings_rail,
                 // Unreachable through the groups, and a number is the honest
                 // answer for a row that says it is one.
                 _ => 0.0,
@@ -2086,6 +2097,7 @@ mod tests {
             "left_width_bottom",
             "top_height",
             "top_height_right",
+            "settings_rail",
         ] {
             for forward in [false, true] {
                 put_cursor(&mut panel, key);

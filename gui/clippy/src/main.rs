@@ -432,7 +432,7 @@ fn menu_for(
         | Hit::SettingsClose => None,
         // A divider is the gap between two widgets and belongs to neither of
         // them, so there is no one widget for a menu opened here to act on.
-        Hit::ColumnDivider(_) | Hit::RowDivider(_) => None,
+        Hit::ColumnDivider(_) | Hit::RowDivider(_) | Hit::SettingsRailDivider => None,
     }
 }
 
@@ -684,6 +684,10 @@ struct App {
     /// grid round finds it again.
     left_width: [f32; 2],
     top_height: [f32; 2],
+    /// The same for the settings panel's rail: how much of the panel the column
+    /// of section names takes, dragged while the panel is up and written back
+    /// when the drag ends.
+    settings_rail: f32,
     /// True while the button is down inside a pane, so pointer motion extends
     /// the selection instead of merely moving the cursor.
     selecting: bool,
@@ -743,6 +747,7 @@ impl App {
             dock: Dock::hiding(&hidden),
             left_width: [config.left_width, config.left_width_bottom],
             top_height: [config.top_height, config.top_height_right],
+            settings_rail: config.settings_rail,
             window: None,
             gpu: None,
             renderer: None,
@@ -805,6 +810,7 @@ impl App {
             input_h: self.input_height(width),
             left_width: self.left_width,
             top_height: self.top_height,
+            settings_rail: self.settings_rail,
         }
     }
 
@@ -1206,6 +1212,10 @@ impl App {
                 self.sliding = Some(index);
                 self.drag_slider();
             }
+            // Pressed, not clicked, the way a pane divider is: the rail follows
+            // the pointer while the button is down and the fraction it was left
+            // at is written when the button comes up.
+            Hit::SettingsRailDivider => self.sizing = Some(hit),
             // A colour on the grid. Nothing is written: the panel says which key
             // in the settings file writes that colour, which is the one thing a
             // block of colour cannot say for itself.
@@ -1306,6 +1316,7 @@ impl App {
         // it the way it takes a colour: the file is what both of them read.
         self.left_width = [self.config.left_width, self.config.left_width_bottom];
         self.top_height = [self.config.top_height, self.config.top_height_right];
+        self.settings_rail = self.config.settings_rail;
         self.restyle();
         for (view, wanted) in panes {
             match wanted {
@@ -1817,12 +1828,13 @@ impl App {
             | Hit::PickerBack
             | Hit::PickerSessions
             | Hit::Picker => {}
-            // The same for the six the settings panel owns.
+            // The same for the seven the settings panel owns.
             Hit::SettingsSection(_)
             | Hit::SettingsRow(_)
             | Hit::SettingsValue(_)
             | Hit::SettingsSlider(_)
             | Hit::SettingsSwatch(_, _)
+            | Hit::SettingsRailDivider
             | Hit::SettingsClose
             | Hit::Settings => {}
             Hit::Input => {
@@ -2244,7 +2256,12 @@ impl App {
                 &mut self.left_width[half],
                 layout.column_ratio_at(half, x),
             ),
-            // `sizing` is only ever one of the two.
+            // The settings panel's rail, which is dragged by the same three
+            // steps: live while the pointer moves, written on the way up.
+            Hit::SettingsRailDivider => {
+                (&mut self.settings_rail, layout.settings_rail_ratio_at(x))
+            }
+            // `sizing` is only ever one of the three.
             _ => return,
         };
         if (*slot - next).abs() < f32::EPSILON {
@@ -2259,6 +2276,7 @@ impl App {
         match grip {
             Hit::ColumnDivider(half) => self.left_width.get(half).copied(),
             Hit::RowDivider(half) => self.top_height.get(half).copied(),
+            Hit::SettingsRailDivider => Some(self.settings_rail),
             _ => None,
         }
     }
@@ -2272,17 +2290,28 @@ impl App {
         let (Some(key), Some(ratio)) = (divider_key(grip), self.divider_ratio(grip)) else {
             return;
         };
-        let Some(path) = config::path() else {
-            return;
-        };
         // Three places is finer than a pixel on any window this can be dragged
         // in, so what is written and what is on screen are the same arrangement.
         let value = format!("{ratio:.3}");
+        // The panel's own rail goes through the panel, because it is the one
+        // line that can be dragged while the panel is up: the row that carries
+        // the same key has to read back as where the drag left it, and a write
+        // that failed has to be said on the panel rather than in the activity
+        // pane behind it.
+        if grip == Hit::SettingsRailDivider {
+            self.write_setting(&settings::Change { key, value });
+            return;
+        }
+        let Some(path) = config::path() else {
+            return;
+        };
         match config::write_setting(&path, key, Some(&value)) {
             Ok(()) => match key {
                 "left_width" => self.config.left_width = ratio,
                 "left_width_bottom" => self.config.left_width_bottom = ratio,
                 "top_height" => self.config.top_height = ratio,
+                // The rail is written above, so the fourth grid line is all
+                // that is left to be.
                 _ => self.config.top_height_right = ratio,
             },
             Err(why) => self
@@ -2955,6 +2984,7 @@ fn divider_key(grip: Hit) -> Option<&'static str> {
         Hit::ColumnDivider(_) => Some("left_width_bottom"),
         Hit::RowDivider(0) => Some("top_height"),
         Hit::RowDivider(_) => Some("top_height_right"),
+        Hit::SettingsRailDivider => Some("settings_rail"),
         _ => None,
     }
 }
@@ -2972,7 +3002,7 @@ fn cursor_for(
         };
     }
     match over {
-        Some(Hit::ColumnDivider(_)) => return CursorIcon::ColResize,
+        Some(Hit::ColumnDivider(_) | Hit::SettingsRailDivider) => return CursorIcon::ColResize,
         Some(Hit::RowDivider(_)) => return CursorIcon::RowResize,
         _ => {}
     }
@@ -3344,6 +3374,7 @@ mod tests {
             ),
             left_width: [Config::default().left_width; 2],
             top_height: [Config::default().top_height; 2],
+            settings_rail: Config::default().settings_rail,
         };
         Layout::compute(w, h, &shape)
     }
@@ -4030,6 +4061,35 @@ mod tests {
         // And nothing that is not a divider writes one of them.
         assert_eq!(divider_key(Hit::Body(Space::TopLeft)), None);
         assert_eq!(divider_key(Hit::TitleBar), None);
+    }
+
+    /// The settings panel's rail is dragged, remembered and pointed at the way
+    /// the lines between panes are, and it writes a key of its own: a drag of it
+    /// must not come back at the next launch as a column.
+    #[test]
+    fn the_settings_rail_is_a_divider_with_a_key_of_its_own() {
+        let key = divider_key(Hit::SettingsRailDivider).expect("the rail writes nothing");
+        assert_eq!(key, "settings_rail");
+        assert!(config::keys().contains(&key), "{key} is not in the file");
+        for grip in [
+            Hit::ColumnDivider(0),
+            Hit::ColumnDivider(1),
+            Hit::RowDivider(0),
+            Hit::RowDivider(1),
+        ] {
+            assert_ne!(divider_key(grip), Some(key), "{grip:?} writes the rail");
+        }
+        // And the pointer says it can be dragged at all, which is the only thing
+        // that says so: the line itself is a hairline six pixels wide.
+        assert_eq!(
+            cursor_for(
+                false,
+                Landing::Nowhere,
+                None,
+                Some(Hit::SettingsRailDivider)
+            ),
+            CursorIcon::ColResize
+        );
     }
 
     /// The landing the cursor is driven from is the layout's own, so the shape

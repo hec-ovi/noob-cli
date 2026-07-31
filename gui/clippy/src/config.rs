@@ -45,6 +45,10 @@ pub struct Config {
     pub left_width_bottom: f32,
     pub top_height: f32,
     pub top_height_right: f32,
+    /// How much of the settings panel the rail of section names takes, as a
+    /// fraction of the panel's width. Dragged by the line between the rail and
+    /// the settings beside it, and held to [`RAIL_LOW`]..[`RAIL_HIGH`].
+    pub settings_rail: f32,
 
     pub accent: [u8; 3],
     pub text: [u8; 3],
@@ -90,6 +94,7 @@ impl Default for Config {
             left_width_bottom: crate::view::LEFT_WIDTH,
             top_height: crate::view::TOP_HEIGHT,
             top_height_right: crate::view::TOP_HEIGHT,
+            settings_rail: crate::view::SETTINGS_RAIL,
             accent: [0x7c, 0xd8, 0x94],
             text: [0x9a, 0xd6, 0xac],
             dim: [0x58, 0x96, 0x6e],
@@ -205,6 +210,16 @@ pub const THEMES: [&str; 4] = ["noob", "amber", "ice", "plum"];
 pub const SPLIT_LOW: f32 = 0.15;
 pub const SPLIT_HIGH: f32 = 0.85;
 
+/// The same for the settings panel's rail, which is held to a range of its own.
+///
+/// It goes narrower than a pane divider because a column of section names needs
+/// far less room than a pane, and it stops at half the panel because past that
+/// the names have more room than the settings they name. The layout clamps again
+/// against the window it has, so neither side is ever narrower than the longest
+/// section name.
+pub const RAIL_LOW: f32 = 0.05;
+pub const RAIL_HIGH: f32 = 0.5;
+
 /// A named palette, as a whole `Config`. Resolved before the rest of the file
 /// is read, so an explicit key still wins over the theme that set it.
 ///
@@ -291,6 +306,7 @@ pub fn keys() -> Vec<&'static str> {
         "left_width_bottom",
         "top_height",
         "top_height_right",
+        "settings_rail",
         "theme",
         "accent",
         "text",
@@ -513,6 +529,10 @@ impl Config {
                 "top_height_right" => set(
                     &mut config.top_height_right,
                     number(&value).map(|n| n.clamp(SPLIT_LOW, SPLIT_HIGH)),
+                ),
+                "settings_rail" => set(
+                    &mut config.settings_rail,
+                    number(&value).map(|n| n.clamp(RAIL_LOW, RAIL_HIGH)),
                 ),
                 "accent" => set(&mut config.accent, color(&value)),
                 "text" => set(&mut config.text, color(&value)),
@@ -862,6 +882,11 @@ left_width_bottom = 0.54
 top_height = 0.46
 top_height_right = 0.46
 
+# How much of the settings panel goes to the rail of section names down its
+# left, as a fraction of the panel's width. Dragging the line between the rail
+# and the settings beside it writes it back here.
+settings_rail = 0.10
+
 # The whole palette, by name: noob, amber, ice, plum.
 theme = noob
 
@@ -952,7 +977,7 @@ mod tests {
         for key in keys() {
             assert!(named.contains(&key.to_string()), "{key} is undocumented");
         }
-        assert_eq!(keys().len(), 48, "a new key needs a line in the file");
+        assert_eq!(keys().len(), 49, "a new key needs a line in the file");
     }
 
     /// The commented colors are the noob theme spelled out. A stale hex there
@@ -1058,6 +1083,32 @@ mod tests {
         assert_eq!(far.top_height_right, SPLIT_HIGH);
         // And the file the drag wrote through still documents itself.
         assert!(scratch.read().contains("# Where the dividers sit"), "{}", scratch.read());
+    }
+
+    /// The settings panel's rail is remembered the same way, through a range of
+    /// its own: a column of names is narrower than a pane and stops at half the
+    /// panel.
+    #[test]
+    fn the_settings_rail_is_read_and_written_like_a_divider() {
+        assert_eq!(Config::default().settings_rail, crate::view::SETTINGS_RAIL);
+        assert_eq!(Config::parse("settings_rail = 0.22").settings_rail, 0.22);
+        assert_eq!(Config::parse("settings_rail = 0").settings_rail, RAIL_LOW);
+        assert_eq!(Config::parse("settings_rail = 9").settings_rail, RAIL_HIGH);
+        // Narrower than a pane divider is allowed to be, which is the point of
+        // the second pair of bounds.
+        const { assert!(RAIL_LOW < SPLIT_LOW && RAIL_HIGH < SPLIT_HIGH) };
+
+        // Through the writer and back, which is the round trip a drag of it
+        // makes, and it comes back as the value the drag left.
+        let scratch = Scratch::new("rail");
+        let _ = Config::load_from(&scratch.conf());
+        write_setting(&scratch.conf(), "settings_rail", Some("0.283")).unwrap();
+        assert_eq!(Config::load_from(&scratch.conf()).settings_rail, 0.283);
+        assert!(
+            scratch.read().contains("settings_rail = 0.283"),
+            "{}",
+            scratch.read()
+        );
     }
 
     /// A typo must be visible. Silently ignoring it is how a setting someone

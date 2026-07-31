@@ -205,6 +205,13 @@ const PICKER_COLUMNS: usize = 96;
 /// on [`Shape`], and the settings file remembers where they were left.
 pub const LEFT_WIDTH: f32 = 0.54;
 pub const TOP_HEIGHT: f32 = 0.46;
+/// The same for the settings panel's rail: how much of the panel the column of
+/// section names takes before anyone drags it.
+///
+/// A tenth, which is about fourteen columns of pane text on the window this is
+/// usually opened in and is held up to the longest section name on a narrower
+/// one.
+pub const SETTINGS_RAIL: f32 = 0.10;
 /// How far either side of the gap between two panes the pointer still counts as
 /// being on the divider between them.
 ///
@@ -532,6 +539,13 @@ pub enum Hit {
     /// it. A grid row is several controls wide, so the row on its own cannot say
     /// which colour the pointer is over.
     SettingsSwatch(usize, usize),
+    /// The line between the rail of section names and the settings beside it.
+    /// Dragging it decides how much of the panel each of the two takes.
+    ///
+    /// Its own hit rather than a [`Hit::ColumnDivider`]: the panel is a takeover,
+    /// so while it is up there are no panes and no grid for a column divider to
+    /// mean anything about.
+    SettingsRailDivider,
     /// The mark that closes the panel, for a pointer with no Escape key handy.
     SettingsClose,
     /// The panel's box, away from any row. Swallowed, like the picker's.
@@ -734,6 +748,10 @@ pub struct Layout {
     /// along that row.
     pub settings: Panel,
     pub settings_rail: Vec<(usize, Panel)>,
+    /// The line between the rail and the list, and the band it is grabbed by.
+    /// Empty in every shape but the panel's, the way a pane divider is empty in
+    /// every shape with no panes.
+    pub settings_rail_divider: Divider,
     pub settings_list: Panel,
     pub settings_rows: Vec<(usize, Panel)>,
     pub settings_values: Vec<(usize, Panel)>,
@@ -804,6 +822,10 @@ pub struct Shape<'a> {
     /// inside what the window can actually draw, so neither a file with a silly
     /// number in it nor a drag thrown past the edge can collapse a space.
     pub top_height: [f32; 2],
+    /// How much of the settings panel's width the rail of section names takes.
+    /// An input for the same reason the pane ratios are: it is dragged while the
+    /// panel is up and read back out of the settings file at the next launch.
+    pub settings_rail: f32,
 }
 
 fn nowhere() -> Panel {
@@ -958,6 +980,7 @@ impl Layout {
                 in_settings: false,
                 settings: nowhere(),
                 settings_rail: Vec::new(),
+                settings_rail_divider: Divider::none(),
                 settings_list: nowhere(),
                 settings_rows: Vec::new(),
                 settings_values: Vec::new(),
@@ -1012,6 +1035,7 @@ impl Layout {
                 in_settings: false,
                 settings: nowhere(),
                 settings_rail: Vec::new(),
+                settings_rail_divider: Divider::none(),
                 settings_list: nowhere(),
                 settings_rows: Vec::new(),
                 settings_values: Vec::new(),
@@ -1067,6 +1091,7 @@ impl Layout {
                 in_settings: true,
                 settings: places.box_,
                 settings_rail: places.rail,
+                settings_rail_divider: places.divider,
                 settings_list: places.list,
                 settings_rows: places.rows,
                 settings_values: places.values,
@@ -1305,6 +1330,7 @@ impl Layout {
             in_settings: false,
             settings: nowhere(),
             settings_rail: Vec::new(),
+            settings_rail_divider: Divider::none(),
             settings_list: nowhere(),
             settings_rows: Vec::new(),
             settings_values: Vec::new(),
@@ -1421,6 +1447,13 @@ impl Layout {
                 if panel.contains(x, y) {
                     return Some(Hit::SettingsSwatch(*index, *cell));
                 }
+            }
+            // The line between the rail and the list, before either of them: the
+            // band is wider than the gap it stands in, so it reaches a little
+            // way into the rail, and the more particular thing there is to do at
+            // the edge of a name is to move the edge.
+            if self.settings_rail_divider.live() && self.settings_rail_divider.band.contains(x, y) {
+                return Some(Hit::SettingsRailDivider);
             }
             for (index, panel) in &self.settings_rail {
                 if panel.contains(x, y) {
@@ -1642,6 +1675,20 @@ impl Layout {
     /// alone and the other half keeps the fraction it was left at.
     pub fn column_ratio_at(&self, half: usize, x: f32) -> f32 {
         let divider = self.column_divider[half];
+        let track = divider.track;
+        let room = (track.w - GAP).max(1.0);
+        held((x - track.x - GAP * 0.5) / room, room, divider.floor)
+    }
+
+    /// The same for the settings panel's rail: where a pointer at `x` puts the
+    /// line between the names and the settings, as the fraction
+    /// [`Shape::settings_rail`] is.
+    ///
+    /// The same arithmetic off the same box the panel is laid out with, and held
+    /// by the same floor, so the line lands under the pointer and a drag thrown
+    /// off either end of the panel stops where the names still fit.
+    pub fn settings_rail_ratio_at(&self, x: f32) -> f32 {
+        let divider = self.settings_rail_divider;
         let track = divider.track;
         let room = (track.w - GAP).max(1.0);
         held((x - track.x - GAP * 0.5) / room, room, divider.floor)
@@ -2165,6 +2212,7 @@ fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> PickerPlaces {
 struct SettingsPlaces {
     box_: Panel,
     rail: Vec<(usize, Panel)>,
+    divider: Divider,
     list: Panel,
     rows: Vec<(usize, Panel)>,
     values: Vec<(usize, Panel)>,
@@ -2219,18 +2267,19 @@ fn settings_control(row: Panel, label_w: f32, column: f32) -> Panel {
     )
 }
 
-/// How wide the rail of section names is, and how wide the label column of a row
-/// is, both in columns of pane text.
+/// The least the rail of section names goes down to, and how wide the label
+/// column of a row is, both in columns of pane text.
 ///
 /// The rail holds the longest section name with room for its mark; the label
-/// column holds the longest key in the settings file. Both are capped against
-/// the room there is, so a narrow window keeps a list rather than losing it to
-/// two columns of chrome.
+/// column holds the longest key in the settings file. The rail's number is a
+/// floor rather than its width, because the rail is dragged: it is the room the
+/// names need, and the settings beside them are held to the same floor, so
+/// neither side of the drag can be squeezed away.
 const SETTING_RAIL_COLUMNS: usize = 14;
 const SETTING_LABEL_COLUMNS: usize = 24;
 
-fn settings_rail_w(area_w: f32, column: f32) -> f32 {
-    (SETTING_RAIL_COLUMNS as f32 * column).min((area_w * 0.33).floor())
+fn settings_rail_floor(column: f32) -> f32 {
+    SETTING_RAIL_COLUMNS as f32 * column.max(1.0)
 }
 
 /// Where a row's value starts when it is a reading rather than a control: after
@@ -2252,6 +2301,7 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
         return SettingsPlaces {
             box_: nowhere(),
             rail: Vec::new(),
+            divider: Divider::none(),
             list: nowhere(),
             rows: Vec::new(),
             values: Vec::new(),
@@ -2272,7 +2322,13 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
         content.w,
         (content.h - head - foot - GAP * 2.0).max(0.0),
     );
-    let rail_w = settings_rail_w(body.w, column);
+    // The rail takes its share of the body the way a column of panes takes its
+    // share of the grid: a fraction off the settings file, held so neither the
+    // names nor the settings beside them are squeezed below the room the names
+    // need. Floored to a whole pixel so the line does not sit on a half one.
+    let room = (body.w - GAP).max(1.0);
+    let rail_floor = settings_rail_floor(column);
+    let rail_w = (room * held(shape.settings_rail, room, rail_floor)).floor();
     let mut rail = Vec::new();
     for (index, _) in panel.section_names().iter().enumerate() {
         let y = body.y + index as f32 * line;
@@ -2290,6 +2346,15 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
         (body.w - rail_w - GAP).max(0.0),
         body.h,
     );
+    // What the rail is dragged by. The gap between the two, plus [`GRAB`] on the
+    // rail's side of it and a single pixel on the list's: the list's rows start
+    // at its own left edge, and a band that reached into them would take the
+    // press that puts the cursor on a row.
+    let divider = Divider {
+        band: Panel::new(list.x - GAP - GRAB, body.y, GAP + GRAB + 1.0, body.h),
+        track: body,
+        floor: rail_floor,
+    };
     let rows_fit = Text::rows_for(shape.pane_size, list.h);
     let (first, count) = panel.window(rows_fit);
     let label_w = settings_label_w(list.w, column);
@@ -2346,6 +2411,7 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
     SettingsPlaces {
         box_: area,
         rail,
+        divider,
         list,
         rows,
         values,
@@ -5123,6 +5189,7 @@ mod tests {
             input_h: INPUT_H,
             left_width: [LEFT_WIDTH; 2],
             top_height: [TOP_HEIGHT; 2],
+            settings_rail: SETTINGS_RAIL,
         }
     }
 
@@ -8110,6 +8177,7 @@ mod tests {
                 input_h: INPUT_H,
                 left_width: [LEFT_WIDTH; 2],
                 top_height: [TOP_HEIGHT; 2],
+                settings_rail: SETTINGS_RAIL,
             };
             let layout = Layout::compute(1400.0, 900.0, &shape);
             let skin = Skin::from(&Config::default());
@@ -8207,6 +8275,7 @@ mod tests {
             input_h: INPUT_H,
             left_width: [LEFT_WIDTH; 2],
             top_height: [TOP_HEIGHT; 2],
+            settings_rail: SETTINGS_RAIL,
         };
         let layout = Layout::compute(1400.0, 900.0, &shape);
         let skin = Skin::from(&Config::default());
@@ -11868,10 +11937,23 @@ mod tests {
     /// The window with the settings panel up, laid out and drawn off one shape,
     /// which is what makes a row land where it is drawn.
     fn render_settings(panel: &Settings, w: f32, h: f32, hot: Option<Hit>) -> Rendered {
+        render_settings_at_rail(panel, w, h, hot, SETTINGS_RAIL)
+    }
+
+    /// The same with the rail dragged to `rail` of the panel's width, which is
+    /// the only thing a drag of the line beside it changes.
+    fn render_settings_at_rail(
+        panel: &Settings,
+        w: f32,
+        h: f32,
+        hot: Option<Hit>,
+        rail: f32,
+    ) -> Rendered {
         let dock = Dock::new();
         let state = busy_state();
         let mut shape = shape(&dock, &["a.rs"]);
         shape.settings = Some(panel);
+        shape.settings_rail = rail;
         let layout = Layout::compute(w, h, &shape);
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
@@ -12140,6 +12222,130 @@ mod tests {
         assert!(text.contains("THE WINDOW"), "{text}");
         assert!(!text.contains("api keys"), "the agent section is still up");
         assert_eq!(tint_of(&out, "APPEARANCE"), out.skin.good);
+    }
+
+    /// The line between the rail and the settings is a divider like any other:
+    /// it is grabbed by a band wider than the gap it stands in, and it takes
+    /// nothing from either side that either side needs.
+    #[test]
+    fn the_settings_rail_is_grabbed_by_the_line_beside_it() {
+        let panel = a_settings_panel(&Config::default());
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let layout = &out.layout;
+        let divider = layout.settings_rail_divider;
+        assert!(divider.live(), "there is nothing to drag");
+        assert!(divider.band.w > GAP, "the band is no wider than the gap");
+
+        let y = layout.settings_list.y + 30.0;
+        // The hairline the eye reads as the line, and both ends of the band
+        // around it.
+        let drawn = layout.settings_list.x - (GAP * 0.5).floor();
+        for x in [
+            drawn,
+            divider.band.x + 0.5,
+            divider.band.x + divider.band.w - 0.5,
+        ] {
+            assert_eq!(layout.hit(x, y), Some(Hit::SettingsRailDivider), "at {x}");
+        }
+
+        // A name is still pressed where it is drawn, and the left hand end of a
+        // row is still that row: the band reaches into the rail, where there is
+        // room for it, and stops at the list, where the labels start.
+        let (rx, ry) = middle(layout.settings_rail[1].1);
+        assert_eq!(layout.hit(rx, ry), Some(Hit::SettingsSection(1)));
+        let (index, row) = layout.settings_rows[0];
+        assert_eq!(
+            layout.hit(row.x + 2.0, row.y + row.h * 0.5),
+            Some(Hit::SettingsRow(index))
+        );
+
+        // And it is not there when the panel is not: a band left behind by a
+        // shape change is a press that lands on something nobody can see.
+        let dock = Dock::new();
+        let plain = Layout::compute(1400.0, 900.0, &shape(&dock, &[]));
+        assert!(!plain.settings_rail_divider.live());
+        assert_ne!(plain.hit(drawn, y), Some(Hit::SettingsRailDivider));
+    }
+
+    /// Dragging it puts the line under the pointer and the settings beside it
+    /// move with it: the rail ends where the list begins, and nothing is drawn
+    /// across the two.
+    #[test]
+    fn dragging_the_settings_rail_moves_the_settings_with_it() {
+        let panel = a_panel_on(&Config::default(), crate::settings::APPEARANCE);
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let was = out.layout.settings_list.x;
+        let mut seen = Vec::new();
+        for x in [200.0, 420.0, 150.0] {
+            let ratio = out.layout.settings_rail_ratio_at(x);
+            let moved = render_settings_at_rail(&panel, 1400.0, 900.0, None, ratio);
+            let layout = &moved.layout;
+            let list = layout.settings_list;
+            seen.push(list.x);
+            // Under the pointer rather than near it, to the pixel the width was
+            // floored to.
+            let drawn = list.x - GAP * 0.5;
+            assert!((drawn - x).abs() <= 1.5, "{x}: the line landed at {drawn}");
+
+            // Every name ends where the gap begins, and every row starts on the
+            // far side of it.
+            for (index, at) in &layout.settings_rail {
+                assert!(
+                    (at.x + at.w + GAP - list.x).abs() <= 0.01,
+                    "name {index} at {at:?} against a list at {}",
+                    list.x
+                );
+            }
+            for (index, row) in &layout.settings_rows {
+                assert!(row.x >= list.x - 0.01, "row {index} at {row:?}");
+                assert!(row.x + row.w <= list.x + list.w + 0.01, "row {index}");
+            }
+
+            // And nothing straddles the line: a text box in the panel's body is
+            // either a name in the rail or a setting in the list.
+            for text in &moved.scene.texts {
+                let at = text.at;
+                if at.y + at.h <= list.y + 0.01 || at.y >= list.y + list.h - 0.01 {
+                    continue;
+                }
+                let in_rail = at.x + at.w <= list.x - GAP + 0.01;
+                let in_list = at.x >= list.x - 0.01;
+                assert!(in_rail || in_list, "{at:?} is drawn across the line at {x}");
+            }
+        }
+        assert!(
+            seen.iter().any(|at| (at - was).abs() > 1.0),
+            "the drag moved nothing: {seen:?} against {was}"
+        );
+    }
+
+    /// Thrown past either end it stops where the names still fit, and so does
+    /// the list beside them. Neither side is ever squeezed to nothing.
+    #[test]
+    fn the_settings_rail_dragged_past_the_end_stops_at_the_floor() {
+        let panel = a_settings_panel(&Config::default());
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let floor = out.layout.settings_rail_divider.floor;
+        assert!(floor > 0.0);
+        for x in [-9000.0, -1.0, 0.0, 700.0, 1401.0, 9000.0] {
+            let ratio = out.layout.settings_rail_ratio_at(x);
+            let moved = render_settings_at_rail(&panel, 1400.0, 900.0, None, ratio);
+            let layout = &moved.layout;
+            let rail_w = layout.settings_rail[0].1.w;
+            assert!(rail_w >= floor, "{x}: the rail is {rail_w}");
+            assert!(
+                layout.settings_list.w >= floor,
+                "{x}: the settings are {}",
+                layout.settings_list.w
+            );
+            assert!(!layout.settings_rows.is_empty(), "{x}: the list emptied");
+        }
+        // A fraction out of a settings file nobody clamped is held the same way.
+        for ratio in [0.0, 1.0, -5.0, 12.0] {
+            let moved = render_settings_at_rail(&panel, 1400.0, 900.0, None, ratio);
+            assert!(moved.layout.settings_rail[0].1.w >= floor, "{ratio}");
+            assert!(moved.layout.settings_list.w >= floor, "{ratio}");
+        }
     }
 
     /// The slider is a track a pointer can be anywhere along, and where it is

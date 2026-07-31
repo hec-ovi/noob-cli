@@ -309,7 +309,11 @@ right goes into one, left comes back out, and inside a section up and down walk
 its rows while left and right change the row the cursor is on. Enter flips a
 switch and starts an edit on the endpoint, Tab crosses between the rail and the
 rows, the wheel scrolls, and Esc puts the panel away. The panes are exactly where
-they were when it closes, and the agent keeps working behind it.
+they were when it closes, and the agent keeps working behind it. **Drag the line
+between the rail and the settings** to give one of them more room: the pointer
+takes a resize shape over it, neither side goes narrower than the longest section
+name, and where you leave it is written to `settings_rail` in the settings file,
+so the panel opens that way next time.
 
 Four of the sections are the agent's own files rather than the window's. AGENT
 reads `~/.config/noob/.env`, the file the CLI re-reads on every request: it names
@@ -343,7 +347,7 @@ also why a row cannot show a value the file will not carry, since what you see i
 what the next launch reads.
 
 A setting with a range is a slider: opacity, both font sizes, how tall the prompt
-may grow and all four divider positions. Press the track and drag it, with the value beside it
+may grow, all four divider positions and the settings rail. Press the track and drag it, with the value beside it
 and the arrow keys still nudging it one step. The file is written when the button
 comes up rather than on every motion event, which would be hundreds of writes for
 one decision, and the panel carries the value it is being dragged to until then.
@@ -360,7 +364,7 @@ makes it.
 
 `~/.config/noob/no0b.conf`, written with the defaults on first run and
 commented. Opacity, both font sizes, how tall the prompt may grow, where the
-dividers sit, which panes exist, and the whole palette: the eight base colors, one per tool,
+dividers sit, how wide the settings rail is, which panes exist, and the whole palette: the eight base colors, one per tool,
 ten gauge slots a monitor reading picks from, and the five the highlighter uses
 for code. A key it does not recognise is reported in the ACTIVITY pane rather
 than ignored, and a key an older build wrote and this one dropped, such as any of
