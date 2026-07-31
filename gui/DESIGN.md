@@ -103,7 +103,14 @@ server are.
 - **A document is a card too.** A block of text (the global `AGENTS.md`, the
   assembled prompt) is a card whose header is its title, whose body opens with
   where the text came from, in the hint role, and whose text scrolls inside the
-  body while the card stays where it is.
+  body while the card stays where it is. The column beside a list is the same
+  card, filling the column instead of one row: the name of whatever it belongs
+  to in the header, the text in the body, and its own bar down its own right
+  padding.
+- **A card's own action is one button, bottom right of its footer.** The card
+  exists for it, so it is the primary kind. Several buttons in one card's footer
+  is a toolbar, which is a different thing: the group that acts on a whole list
+  is centred (see below), and a card's own action is not a group.
 - **A table is a card too, and it is the one card with a list in it.** The saved
   conversations are a card whose header says how many there are and how many are
   chosen, whose body is the column names on a band with the rows under them, and
@@ -128,6 +135,11 @@ one line: that is what made every value look like part of a sentence.
   it is in, and the model counts that height before the layout knows the width.
   Write hints short enough that the tail is not load bearing.
 
+- A field that is typed into is not always a line of a file. The one a skill is
+  installed from is a field of the panel itself: Enter on it runs the card's
+  action instead of writing anything, and the routing branches on the key the
+  field carries before the write. A second such field added without that branch
+  writes whatever was typed into the agent's `.env`.
 - The input is a bordered box, `INPUT_PAD` inside, filled with `skin.input`.
 - A read-only reading uses the same shape with no border and no fill, so what can
   be typed into is obvious at a glance.

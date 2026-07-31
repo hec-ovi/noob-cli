@@ -401,7 +401,8 @@ it.** The arrow keys never touch the rail: up and down walk the rows of whatever
 is showing, and left and right change the row the cursor is on. Tab moves on to
 the next section and Shift-Tab back to the one before, wrapping at both ends, and
 the footer legend says so on every row. Enter flips a switch, turns a skill or a
-server on and off, and starts an edit on the endpoint, Shift with left or right
+server on and off, starts an edit on the endpoint and on the field a skill is
+installed from, and ends that edit by installing what was typed, Shift with left or right
 crosses a form row, the wheel scrolls, Ctrl-C copies what is
 selected in the document column, and Esc puts the panel
 away. The rail never hides a name: when the window is too short to list the
@@ -500,14 +501,16 @@ refuses, the rest still go and the panel says which one refused.
 
 SKILLS and MCP are two columns: a list on the left and, beside it, whatever the
 row under the cursor is. In a window too narrow to hold both, the list keeps the
-width and the second column is not drawn. A row of the list is three lines, name,
-what it is for, and where it is, each in its own place, with the toggle and the
-uninstall a gap in from the right edge rather than against it. The row under the
-cursor carries a band across the whole of it, the same solid one the folder
-picker marks its rows with. The column beside the list is titled with the name of
-whatever it belongs to and the text sits in a box of its own, wrapped at whatever
-width the column has, by the same rule the panes wrap prose at. Both sides
-scroll, each in its own box: the wheel moves whichever one the pointer is over.
+width and the second column is not drawn. Each row of the list is a card, and its
+three strings are three different things to look at: the name in the header at
+the card title size, what it is for in the body at the ordinary size, wrapped
+onto as many lines as it takes, and the repository or the file it came out of
+under that, smaller and dim. The card the keys are on wears the focus colour on
+its border with a mark down its edge. The column beside the list is a card too,
+with the name of whatever it belongs to in its header and the text in its body,
+wrapped at whatever width the column has, by the same rule the panes wrap prose
+at. Both sides scroll, each in its own box: the wheel moves whichever one the
+pointer is over.
 
 The text in that column selects. Drag across it and the characters under the
 pointer are banded, Ctrl-C puts them on the clipboard, and the right button
@@ -518,6 +521,26 @@ run that crosses a wrap comes back with the blank the row broke at. Scrolling th
 column moves the band with the text, since a selection holds line numbers. Moving
 the cursor onto another entry drops it, because the document under it is then a
 different document.
+
+SKILLS opens on the card that installs one. Type a git address, an `owner/name`
+shorthand or a folder on this machine into the field and press Enter, or press
+the install button in the card's footer. A repository is cloned shallow with a
+two minute limit and with git's terminal prompt turned off, so a private URL
+fails with a message instead of hanging on a password nobody can see the prompt
+for; the skill inside it is the root when that holds a `SKILL.md` and the one
+directory under it that does otherwise. It is read and refused before anything is
+written: no front matter, no `name`, no `description`, a name that is not lower
+case letters, digits and hyphens, or a name already installed (turned off
+counts), and the block over the list says which, in git's own words when git is
+what refused. It runs on a thread of its own and the window stays live while it
+does. What lands is a directory under `~/.config/noob/skills`, and the list is
+read back off the disk afterwards rather than from what the install said.
+
+The window does that itself rather than calling the CLI, because there is nothing
+there to call: `noob` installs skills only as the REPL command `/skills add`, and
+into `<workspace>/.noob/skills`, which is the project's directory and not the one
+this section lists. The rules are the CLI's, though, down to the limits on the
+two required keys, so a skill this accepts is a skill the agent loads.
 
 SKILLS lists the directories under `~/.config/noob/skills`, named and described
 from each `SKILL.md`'s front matter and by the directory name when it has none.
@@ -553,7 +576,12 @@ changes, and the whole value is written to a temporary file beside it and
 renamed, so every other server, every `timeout_s` and anything else in there
 survives, and a rewrite that cannot be finished leaves the file that was there.
 A file that is not JSON is a file to fix by hand: the panel refuses and says so
-rather than overwriting it with what it could parse.
+rather than overwriting it with what it could parse. There is no field here for
+adding one: a server is a name and either a URL or a command with its arguments
+and its environment, which is more than the two fields a card can be changed
+through and more than one line of text. Add one with `/mcp add <name> <url>` in
+the CLI, or write it into either file, and it is on this list next time the
+panel opens.
 
 The fifth is the window's own settings file: APPEARANCE. It is the sizes and the
 theme, then the palette, each group of colours under a heading of its own drawn
