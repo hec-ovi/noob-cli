@@ -4,12 +4,6 @@
 # local agent-CLI bake-off, not published
 /competition/
 
-# internal working docs, not published
-/docs/AUDIT-PLAN.md
-/featuresandbugs.md
-/feedback.md
-/review.md
-
 # build caches (docker bind mounts, user-owned)
 /target
 /gui/target
@@ -26,9 +20,6 @@
 !/config/skills/web-search/SKILL.md
 
 # internal working docs, not published
-/docs/REQUIREMENTS-RAW.md
-/docs/GUI-PLAN.md
-/docs/CLIPPY-NOTES.md
-/docs/held/
+/docs/RENDER-NOTES.md
 /docs/STATE.md
 /docs/EMISSION-MAP.md

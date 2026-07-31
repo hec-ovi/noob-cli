@@ -23,7 +23,8 @@ package, the binary and everything a user sees are `no0b`.
 | The conversation and metrics model: what an event does to state | `gui/clippy/src/state.rs` |
 | Where a pane that is a list is scrolled to, and what clamps it | `gui/clippy/src/scroll.rs`, content measured by `view::scroll_extent` |
 | Which readings the monitors show | `gui/clippy/src/monitor.rs` |
-| Totals that outlive the window, and the file they live in | `gui/clippy/src/totals.rs` |
+| Which skills and MCP servers the panel lists, and what turning one off or removing it does on disk | `gui/clippy/src/agent.rs`, listed by `gui/clippy/src/settings.rs` |
+| What a tool call is remembered as, and what the popup over an activity row shows | `gui/clippy/src/state.rs`, drawn by `view::call_popup` |
 | Talking to the agent process | `gui/clippy/src/link.rs` |
 | Drawing primitives: rects, corners, text, anything the shader does | `gui/noob-draw/src/lib.rs` |
 | The GPU device, surface, transparency probing | `gui/noob-gpu/src/lib.rs` |
@@ -56,9 +57,10 @@ Layers so far:
 - [`gui/layers/text-geometry`](../gui/layers/text-geometry/CONTRACT.md) - logical
   lines to visual rows.
 
-The rest of `gui/clippy/src` is not yet split into layers. The plan in
-[`CLIPPY-PLAN.md`](CLIPPY-PLAN.md) lists which module becomes which layer, in
-the order that makes the work after it cheaper.
+The rest of `gui/clippy/src` is not yet split into layers. The next candidates,
+in the order that makes the work after them cheaper, are the selection model in
+`select.rs` and the palette in `skin.rs`: both are pure, both are read by
+several modules, and both already have their rule written down in one place.
 
 ### One note on how the boundary is enforced
 

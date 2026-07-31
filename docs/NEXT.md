@@ -2,7 +2,7 @@
 
 Written for someone picking this up cold. Everything here was checked against
 the tree it describes; where a claim rests on a specific line, the line is
-named, and the lines were re-read at 0.7.0.
+named, and the lines were re-read at 0.8.0.
 
 Two things remain on the roadmap, and neither blocks the other: native binaries
 for the three desktop platforms, and letting the agent run containers.
@@ -99,7 +99,7 @@ here.
 It shipped as NO0B: `gui/`, its own cargo workspace, `no0b` on PATH,
 `./dev.sh gui` to run it and `./dev.sh gui-install` to install it. Its budgets
 are 40 MiB and 400 crates against the CLI's 8 MiB and 45, gated by
-`./dev.sh gui-check`, and it currently uses 13.2 MiB and 147 crates.
+`./dev.sh gui-check`, and it currently uses 13.4 MiB and 147 crates.
 `gui/README.md` is what a user reads.
 
 **It did not need a library target**, which was the standing assumption before
@@ -127,9 +127,13 @@ The design in the old `README.md` plan that did not ship: one isolated surface
 per concern (plan, multi-agent runner, agent management, main window) each
 talking to the others over schema-validated data, plus a dedicated code-stream
 surface showing each generated file as it is written. What shipped is one window
-with nine views on a capped 2x2 grid, and one contract-isolated layer,
-`gui/layers/text-geometry`. `docs/CLIPPY-PLAN.md` lists which module becomes
-which layer next.
+with eight views on a capped 2x2 grid, and one contract-isolated layer,
+`gui/layers/text-geometry`.
+
+What is still queued for the window, in order, none of it blocking anything
+else: the classic preset with a pinned single-line input, the orb as a launcher
+panel, putting the sandbox mode on the wire, a bridge that lets the `noob`
+command talk to a window that is already open, and a files tree.
 
 ## Task 3: let the agent run containers
 

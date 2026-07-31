@@ -3,6 +3,105 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.8.0 - 2026-07-31
+
+All of this is NO0B, the GPU window, driven by a session's worth of notes from
+using it. The CLI's behaviour is unchanged; only its version moved.
+
+### Added
+
+- Each half of the grid breaks where its own line was left. One number decided
+  where both columns broke, so a short pane on the left forced a short pane on
+  the right. There are two now, one per half, dragged independently, clamped
+  against the same floor, and they turn with the grid when a span makes it read
+  in rows rather than columns. The file carries `left_width`,
+  `left_width_bottom`, `top_height` and `top_height_right`. A drop is now read
+  off the half the pointer is over, which the single line had been hiding: both
+  bands were measured from the first cell whatever the pointer was doing.
+- A skills section and an MCP section on the settings panel, two columns each.
+  The entries are on the left, each with its description or its address under
+  its name, and the selected one's `SKILL.md` or server entry is rendered on the
+  right. A skill is turned off by moving it into a `disabled` directory beside
+  the one the agent scans, and a server by moving its entry into a `disabled`
+  object beside `servers`, so what the panel says is what is on disk rather than
+  a flag the window remembers. Either can be removed outright after a second
+  press on Uninstall. Every write goes to a temporary file and is renamed over
+  the original, and a file that cannot be fully built is not written at all.
+- The activity list marks the calls that ran together. A fan out reads as a fan
+  out instead of as four unrelated lines. It is derived from which calls were
+  still open when each one started, because nothing on the wire says so.
+- A row in that list opens into the call it wrote: the arguments the model
+  generated, what came back, the detail, and the name of the thing invoked, on
+  the floating layer, closed the way the right click menu closes. A successful
+  call that streamed nothing has no return value on the wire, so that cell says
+  so rather than sitting empty.
+- Every activity row carries the time it happened, dim, in front of the tag.
+- The agent's context window and its task concurrency are rows on the settings
+  panel. Both are written to the file the agent reads and passed to it when the
+  window starts it, so the number on the panel is the number the next run uses.
+- The settings rail is dragged by the line beside it, clamped so neither side
+  can be squeezed away, and where it was left is remembered in the file.
+- The session list is a table under a row naming its columns: when it was, the
+  folder, how big the transcript is, how full its context window got, and the
+  start of the first thing asked in it. A right click on a row offers Open and
+  Delete, and Delete takes the transcript and its line in the note file with it.
+  The context reading is recorded from this build onward, so a session saved
+  before it, or saved by the CLI directly, shows a dash rather than a guess.
+- A back arrow at the left of the session list's heading, which is the third way
+  back to the folders after the button at the foot and Esc.
+- Icons on the right click menu's rows.
+
+### Changed
+
+- The resting orb is square dots with room between them: 112 of them where
+  there were 204, at the same size, so the marks read as separate rather than as
+  a field. The working orb is the same 516 discs it was, on the same maths.
+- The prompt's three dots take turns rising while a turn runs, and stand still
+  when nothing is running, because the window has no redraw deadline at rest.
+- The showing tab's accent turns the corner and runs along its foot at half the
+  weight it has along the top, and a pane's cut corner is a drawn edge rather
+  than only a shape the fill stops at.
+- A double click on the title bar maximizes the window and restores it. Shading
+  is unreachable and its code is left in place, because this is what he asked
+  for while it is buggy rather than a decision to delete it.
+- The settings panel is ruled off between its rows, its headings are drawn
+  larger than what sits under them, and every editable field is bordered. The
+  whole palette is a grid of swatches under APPEARANCE, in groups with a
+  separator between them, instead of one column sixty rows long.
+- A slider moves the window while it is being dragged, not when the button comes
+  up, and the live value goes through the same clamps the file reader uses.
+- The prompt is one row tall and scrolls inside itself. `max_input_rows` never
+  did anything, so a number already in a file was never a choice: it is retired
+  rather than aliased, and the setting is `prompt_rows`, which starts at 1.
+- The title strip reads NO0B, the version, then the folder. The build commit is
+  gone from it.
+- Panes wrap at blanks rather than mid word, and the rows they are drawn in are
+  the rows their selection is counted in. One rule does both, and it lives in
+  `text-geometry`, which goes to 1.3.0 for the two operations it took to get
+  there. The two had disagreed: the shaper broke at words while the geometry
+  counted characters, which is what put the highlight on the wrong glyphs.
+- The transcript is counted, banded and copied in the markdown it draws. It was
+  measured in the source text and drawn in the rendered text, so the last
+  characters of a marked up line had no glyph to point at.
+- A wrapped line in the file view continues under its own text, past the line
+  number gutter, so every row of it is the same width the arithmetic budgets.
+- The mark in front of a folder is a small green box with nothing filled in,
+  drawn out of rectangles rather than out of a glyph, and the picker's filter is
+  a bordered field with a magnifier in it and the window's cut corner.
+
+### Removed
+
+- The DEBUG pane. Its failed call count now reads beside the total tool calls in
+  CONTEXT, which is where the question was being asked from anyway.
+- The MODEL and PATH rows from the CONTEXT pane.
+- The PANES and ALL TIME sections of the settings panel, and with them the rows
+  that said which panes are open and where the dividers sit. The right click
+  menu already lists every widget and reopens a closed one, and a divider is set
+  by dragging it. Their keys are still read and still written, so a closed pane
+  and a dragged layout survive a restart; they are simply not rows any more.
+- `no0b.totals` is no longer read or written, and the module behind it is gone.
+  An existing file is left alone rather than deleted.
+
 ## 0.7.1 - 2026-07-30
 
 ### Fixed
