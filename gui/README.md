@@ -214,6 +214,15 @@ off the calls that were open when a start frame arrived, which is exact, and the
 turn takes care of itself because a turn that ends closes everything it left
 open.
 
+Every row says when it happened, as a time of day in front of the tag and in the
+dim tone, so the clock column does not compete with the subject for the row. The
+window asks the system what time it is once at startup and adds the monotonic
+second each frame arrived at, which is the arrival the call record already kept
+for the box below, so the row and the box cannot disagree about one call. Rows
+the window writes for itself, a clipboard it could not open, are stamped the same
+way. If it cannot get an answer about local time, the rows carry no reading
+rather than a column of times an hour out.
+
 Clicking a row opens that call out into a box over the window: what was invoked
 (the skill by name, the MCP server and the tool on it, or just bash), which turn
 it was in and how long it took, the arguments the model generated, what came

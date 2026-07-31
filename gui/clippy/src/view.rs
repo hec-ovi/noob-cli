@@ -3650,7 +3650,15 @@ fn activity(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let cols = cols_of(panel, frame.pane_column);
     let mut runs = Vec::new();
     for line in state.activity.visible(rows, cols) {
-        runs.push(Run::tinted(&line.text, skin.tone(line.tone)));
+        // The clock column in front of a row is the subordinate part of it and
+        // is drawn in the dim tone: what the eye is looking down the list for
+        // is the tag and the subject, and a time in the call's own color would
+        // be competing with them for the row.
+        let (clock, rest) = line.split_gutter();
+        if !clock.is_empty() {
+            runs.push(Run::tinted(clock, skin.dim));
+        }
+        runs.push(Run::tinted(rest, skin.tone(line.tone)));
         runs.push(Run::plain("\n"));
     }
     scene.text(
@@ -8719,6 +8727,58 @@ mod tests {
             broken, on_the_column,
             "a row broke inside a word that had a blank to break at"
         );
+    }
+
+    /// The time on an activity row is drawn in the dim tone, and the tag and
+    /// the subject keep the call's own color.
+    ///
+    /// Item 42 put the clock on the row. Drawn in the call's color it would be
+    /// eight characters shouting as loudly as the thing the row is about, which
+    /// is what "does not fight the subject" rules out. The two runs together
+    /// are still exactly the stored line, so nothing the pane measures moved.
+    #[test]
+    fn the_clock_on_an_activity_row_is_drawn_dim_and_the_subject_is_not() {
+        let mut state = busy_state();
+        state.day_zero = Some(14 * 3600 + 30 * 60);
+        state.apply_at(
+            noob_proto::Event::ToolStart {
+                call_id: "c9".into(),
+                name: "bash".into(),
+                brief: "cargo build".into(),
+                args: serde_json::json!({"cmd": "cargo build --release"}),
+            },
+            Some(9.0),
+        );
+        let out = render(&state, 1400.0, 900.0, &Dock::new(), &[]);
+        let text = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| text.runs.iter().any(|run| run.text.starts_with("14:30:09")))
+            .expect("the activity pane draws the row's clock");
+        let at = text
+            .runs
+            .iter()
+            .position(|run| run.text.starts_with("14:30:09"))
+            .expect("the reading is its own run");
+        let (clock, rest) = (&text.runs[at], &text.runs[at + 1]);
+        assert_eq!(clock.text, "14:30:09  ");
+        assert_eq!(clock.color, Some(out.skin.dim));
+        assert!(rest.text.contains("bash"), "{:?}", rest.text);
+        assert!(rest.text.contains("cargo build --release"), "{:?}", rest.text);
+        assert_eq!(
+            rest.color,
+            Some(out.skin.tone(Tone::Call(crate::state::Kind::Bash))),
+            "the subject is drawn in the call's own color"
+        );
+        assert_ne!(rest.color, clock.color);
+        // The row on screen is the row the pane holds, character for character:
+        // the split is two runs of one line, not a line with something added.
+        let held = state
+            .activity
+            .line(state.activity.last() - 1)
+            .expect("the row is still there");
+        assert_eq!(format!("{}{}", clock.text, rest.text), held.text);
     }
 
     /// The transcript is drawn as Markdown, and it is counted in the Markdown

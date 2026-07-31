@@ -145,6 +145,14 @@ pub struct Line {
     pub tone: Tone,
     /// The line this is in its file, for the gutter. Only file views set it.
     pub number: Option<u32>,
+    /// How many characters at the front of this line are a subordinate column,
+    /// drawn in the dim tone rather than the line's own. The activity list uses
+    /// it for the clock reading in front of every row.
+    ///
+    /// Carried on the line rather than worked out from the text at draw time:
+    /// the column is written by whoever pushed the line, and a drawing that
+    /// sniffed for it would be a second rule about what a row looks like.
+    pub gutter: usize,
     /// What this line looks like on screen, when that is not what was written.
     ///
     /// Only a Markdown pane sets it, and only for the lines whose marks it
@@ -169,6 +177,7 @@ impl Line {
             text: text.into(),
             tone,
             number: None,
+            gutter: 0,
             shown: None,
             fence: crate::markdown::Fence::default(),
         }
@@ -177,6 +186,23 @@ impl Line {
     pub fn at(mut self, number: u32) -> Line {
         self.number = Some(number);
         self
+    }
+
+    /// A line whose first `gutter` characters are a subordinate column.
+    pub fn with_gutter(mut self, gutter: usize) -> Line {
+        self.gutter = gutter;
+        self
+    }
+
+    /// The line split into that column and the rest of it, which is what the
+    /// drawing needs to give the two of them different tones.
+    pub fn split_gutter(&self) -> (&str, &str) {
+        let at = self
+            .text
+            .char_indices()
+            .nth(self.gutter)
+            .map_or(self.text.len(), |(byte, _)| byte);
+        self.text.split_at(at)
     }
 
     /// The text this line is drawn as, which is the text everything else about
@@ -1065,6 +1091,15 @@ pub struct State {
     /// and a call that has since been evicted simply stops resolving.
     pub open_call: Option<usize>,
 
+    /// Where this window's own zero sits on the reader's clock, as seconds past
+    /// local midnight. Every activity row is stamped with it plus the monotonic
+    /// second its frame arrived at, which is the same reading the call record
+    /// keeps for the popup rather than a second clock.
+    ///
+    /// `None` until someone says, which is every test that folds a frame in
+    /// without a clock, and those rows carry no reading at all.
+    pub day_zero: Option<u64>,
+
     open: HashMap<String, Open>,
 }
 
@@ -1110,6 +1145,7 @@ impl State {
             calls: Vec::new(),
             calls_dropped: 0,
             open_call: None,
+            day_zero: None,
             open: HashMap::new(),
         }
     }
@@ -1134,6 +1170,42 @@ impl State {
             .iter()
             .rposition(|call| call.owns(line))
             .map(|index| self.calls_dropped + index)
+    }
+
+    /// The clock reading to write in front of a row, and the two blanks that
+    /// hold it off the tag. Empty when the frame was untimed or when nobody has
+    /// said what time it is here, so an untimed session's rows are exactly the
+    /// rows they always were.
+    fn stamp(&self, at: Option<f64>) -> String {
+        let (Some(zero), Some(at)) = (self.day_zero, at) else {
+            return String::new();
+        };
+        format!("{}  ", clock(zero + at.max(0.0) as u64))
+    }
+
+    /// Write one row of the activity list, under the clock reading of the frame
+    /// that caused it.
+    ///
+    /// The stamp goes in the row's own text rather than beside it because every
+    /// row count, scroll window and selection column in that pane is measured
+    /// off the stored line, the same reason the parallel mark is written in.
+    /// The drawing gives it the dim tone off the gutter width.
+    fn note(&mut self, stamp: &str, text: impl Into<String>, tone: Tone) {
+        let gutter = stamp.chars().count();
+        let line = format!("{stamp}{}", text.into());
+        self.activity.push(Line::new(line, tone).with_gutter(gutter));
+    }
+
+    /// A line the window says in the activity list on its own behalf, timed the
+    /// same way the frames around it are.
+    ///
+    /// The clipboard failing and a setting nobody recognizes are not calls and
+    /// have no frame behind them, but they land in the same list, and a row
+    /// with no reading in a column of readings looks like a row the clock
+    /// missed rather than a row that never had one.
+    pub fn noted(&mut self, at: Option<f64>, text: impl Into<String>, tone: Tone) {
+        let stamp = self.stamp(at);
+        self.note(&stamp, text, tone);
     }
 
     /// Keep a record, dropping the oldest once the list is full. Returns its
@@ -1167,7 +1239,10 @@ impl State {
         }
         call.parallel = true;
         let line = call.line;
-        self.activity.mark(line, PARALLEL_COLUMN, PARALLEL_MARK);
+        // Past the clock column, so the mark keeps standing in the blank
+        // between the tag and the subject on a row that carries a reading.
+        let column = PARALLEL_COLUMN + self.activity.line(line).map_or(0, |row| row.gutter);
+        self.activity.mark(line, column, PARALLEL_MARK);
     }
 
     /// What the human typed, echoed into the transcript so the conversation
@@ -1268,10 +1343,10 @@ impl State {
                     .drain()
                     .map(|(_, open)| (open.brief, open.call))
                     .collect();
+                let stamp = self.stamp(at);
                 for (brief, ordinal) in stragglers {
                     let at_line = self.activity.last();
-                    self.activity
-                        .say(format!("       {brief} never reported back"), Tone::Bad);
+                    self.note(&stamp, format!("       {brief} never reported back"), Tone::Bad);
                     if let Some(index) = ordinal.checked_sub(self.calls_dropped)
                         && let Some(call) = self.calls.get_mut(index)
                     {
@@ -1313,7 +1388,9 @@ impl State {
                 // Taken before the push, so it is the number of the row about to
                 // be written rather than the one after it.
                 let line = self.activity.last();
-                self.activity.say(
+                let stamp = self.stamp(at);
+                self.note(
+                    &stamp,
                     format!("{:>5}  {}", kind.tag(), subject(kind, &brief, &args)),
                     Tone::Call(kind),
                 );
@@ -1375,8 +1452,8 @@ impl State {
                 {
                     call.output.push(line.clone());
                 }
-                self.activity
-                    .say(format!("       {line}"), Tone::Call(kind));
+                let stamp = self.stamp(at);
+                self.note(&stamp, format!("       {line}"), Tone::Call(kind));
             }
             Event::ToolEnd {
                 call_id,
@@ -1386,36 +1463,35 @@ impl State {
             } => {
                 let ordinal = self.open.remove(&call_id).map(|open| open.call);
                 let tail_at = self.activity.last();
+                let stamp = self.stamp(at);
                 match &error {
-                    None => self.activity.say(format!("       {summary}"), Tone::Good),
+                    None => self.note(&stamp, format!("       {summary}"), Tone::Good),
                     Some(error) => {
                         // Counted whether or not this window saw the call
                         // start: an end frame with an error on it is a call
                         // that failed either way.
                         self.failed_calls += 1;
-                        self.activity.say(format!("       {summary}"), Tone::Bad);
+                        self.note(&stamp, format!("       {summary}"), Tone::Bad);
                         // The class and the number the system gave, when the
                         // failure was minted with them. `exit_status 3` is the
                         // whole answer often enough to be worth its own line.
-                        self.activity
-                            .say(format!("       {}", fault(error)), Tone::Bad);
-                        self.activity
-                            .say(format!("       {}", error.message), Tone::Bad);
+                        self.note(&stamp, format!("       {}", fault(error)), Tone::Bad);
+                        self.note(&stamp, format!("       {}", error.message), Tone::Bad);
                         if let Some(detail) = error.detail.as_deref() {
                             let mut rest = detail
                                 .lines()
                                 .skip(1)
                                 .filter(|line| !line.trim().is_empty());
                             for line in rest.by_ref().take(DETAIL_LINES) {
-                                self.activity.say(format!("       {line}"), Tone::Dim);
+                                self.note(&stamp, format!("       {line}"), Tone::Dim);
                             }
                             if rest.next().is_some() {
-                                self.activity.say("       …", Tone::Dim);
+                                self.note(&stamp, "       …", Tone::Dim);
                             }
                         }
                         // What to do next, last, where the eye ends up.
                         if let Some(remedy) = error.remedy.as_deref() {
-                            self.activity.say(format!("    -> {remedy}"), Tone::Bright);
+                            self.note(&stamp, format!("    -> {remedy}"), Tone::Bright);
                         }
                     }
                 }
@@ -1804,6 +1880,40 @@ const CELL_LINES: usize = 40;
 /// down the whole list and every row is exactly as wide as it was.
 const PARALLEL_COLUMN: usize = 6;
 const PARALLEL_MARK: char = '|';
+
+/// A clock reading, from seconds past midnight.
+///
+/// `HH:MM:SS` because a row of this list is compared against two things: the
+/// row above it, which is often the same minute, and the clock the reader has
+/// in front of him, which is why it is a time of day and not an age.
+pub fn clock(day_second: u64) -> String {
+    let second = day_second % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}",
+        second / 3600,
+        (second % 3600) / 60,
+        second % 60
+    )
+}
+
+/// Seconds past midnight, read back off an `HH:MM:SS` reading.
+///
+/// `None` for anything else. The window is told what time it is by asking, and
+/// an answer it cannot read leaves the rows with no clock at all rather than
+/// with a reading nobody can trust.
+pub fn day_second(reading: &str) -> Option<u64> {
+    let fields: Vec<&str> = reading.trim().split(':').collect();
+    let [hours, minutes, seconds] = fields[..] else {
+        return None;
+    };
+    let value = |field: &str, limit: u64| -> Option<u64> {
+        let digits = field.len() == 2 && field.bytes().all(|b| b.is_ascii_digit());
+        digits.then(|| field.parse().ok()).flatten().filter(|n| *n < limit)
+    };
+    // A leap second is minute 59 second 60, and a clock that reports one is
+    // right rather than broken.
+    Some(value(hours, 24)? * 3600 + value(minutes, 60)? * 60 + value(seconds, 61)?)
+}
 
 /// The checklist, straight out of the plan tool's own arguments. The call
 /// carries the whole updated list by contract, so nothing has to be merged and
@@ -2262,6 +2372,139 @@ mod tests {
         let second = state.call_at_line(2).expect("the third row is the bash");
         assert_eq!(state.call(second).expect("held").call_id, "b");
         assert_eq!(state.call_at_line(99), None, "a row nobody wrote");
+    }
+
+    /// A row of the list says when it happened, and still says what it is.
+    ///
+    /// The popup was given the timing and the row it opens from was left as a
+    /// tag and a subject, which is item 42: the list is what is read, and a
+    /// list of calls with no times on it cannot be lined up against anything.
+    #[test]
+    fn an_activity_row_carries_the_time_its_call_happened() {
+        let mut state = State::new();
+        // Half past two in the afternoon, on the reader's own clock.
+        state.day_zero = Some(14 * 3600 + 30 * 60);
+        state.apply_at(
+            tool_start("a", "bash", serde_json::json!({"cmd": "cargo test"})),
+            Some(7.0),
+        );
+        let row = &texts(&state.activity)[0];
+        assert!(row.starts_with("14:30:07  "), "{row}");
+        assert!(row.contains("bash"), "the tag survives: {row}");
+        assert!(row.contains("cargo test"), "the subject survives: {row}");
+        // The reading comes off the same arrival the record kept for the popup,
+        // so the row and the popup cannot disagree about one call.
+        assert_eq!(state.call(0).expect("kept").started, Some(7.0));
+        // And the clock column is the row's dim part, not the call's color.
+        let line = state.activity.line(0).expect("held");
+        assert_eq!(line.tone, Tone::Call(Kind::Bash));
+        assert_eq!(line.split_gutter().0, "14:30:07  ");
+        assert!(line.split_gutter().1.starts_with(" bash"), "{line:?}");
+    }
+
+    /// Two calls a minute apart are two different readings, and every row of a
+    /// call is stamped: the row it started on and the row it came back on.
+    #[test]
+    fn two_calls_a_minute_apart_carry_two_different_times() {
+        let mut state = State::new();
+        state.day_zero = Some(9 * 3600);
+        state.apply_at(
+            tool_start("a", "read", serde_json::json!({"path": "a.rs"})),
+            Some(0.0),
+        );
+        state.apply_at(
+            Event::ToolEnd {
+                call_id: "a".into(),
+                summary: "read 3 lines".into(),
+                elapsed_ms: 2,
+                error: None,
+            },
+            Some(4.0),
+        );
+        state.apply_at(
+            tool_start("b", "read", serde_json::json!({"path": "b.rs"})),
+            Some(61.0),
+        );
+        let rows = texts(&state.activity);
+        assert!(rows[0].starts_with("09:00:00  "), "{rows:?}");
+        assert!(rows[1].starts_with("09:00:04  "), "{rows:?}");
+        assert!(rows[2].starts_with("09:01:01  "), "{rows:?}");
+        assert_ne!(&rows[0][..8], &rows[2][..8], "a minute apart, two clocks");
+    }
+
+    /// A row no call wrote still draws, and carries the time its own line
+    /// arrived: a progress line belongs to a call that is still running and to
+    /// no row of the record, and a line pushed by anything but a frame has no
+    /// clock behind it at all.
+    #[test]
+    fn a_row_with_no_call_behind_it_still_draws() {
+        let mut state = State::new();
+        state.day_zero = Some(60);
+        state.apply_at(
+            Event::ToolProgress {
+                call_id: "never opened".into(),
+                line: "compiling no0b".into(),
+            },
+            Some(5.0),
+        );
+        assert_eq!(state.call_at_line(0), None, "no call owns this row");
+        let rows = texts(&state.activity);
+        assert!(rows[0].starts_with("00:01:05  "), "{rows:?}");
+        assert!(rows[0].contains("compiling no0b"), "{rows:?}");
+
+        // A note the window says for itself has no call and no frame behind it
+        // and is stamped all the same, so the column runs down the whole list.
+        state.noted(Some(70.0), "could not reach the clipboard", Tone::Bad);
+        let line = state.activity.line(1).expect("held");
+        assert_eq!(
+            line.split_gutter(),
+            ("00:02:10  ", "could not reach the clipboard")
+        );
+
+        // And anything pushed straight into the pane keeps the shape it was
+        // given, clock column and all, which is none.
+        state.activity.say("older than the clock", Tone::Dim);
+        let line = state.activity.line(2).expect("held");
+        assert_eq!(line.gutter, 0);
+        assert_eq!(line.split_gutter(), ("", "older than the clock"));
+    }
+
+    /// The parallel mark stands in the blank between the tag and the subject,
+    /// and the clock column in front of them moved that blank along.
+    #[test]
+    fn the_parallel_mark_lands_past_the_clock_column() {
+        let mut state = State::new();
+        state.day_zero = Some(0);
+        state.apply_at(Event::TurnStart { turn: 1 }, Some(0.0));
+        state.apply_at(
+            tool_start("a", "read", serde_json::json!({"path": "a.rs"})),
+            Some(1.0),
+        );
+        state.apply_at(
+            tool_start("b", "read", serde_json::json!({"path": "b.rs"})),
+            Some(2.0),
+        );
+        let rows = texts(&state.activity);
+        assert!(rows[0].starts_with("00:00:01   read |brief"), "{rows:?}");
+        assert!(rows[1].starts_with("00:00:02   read |brief"), "{rows:?}");
+    }
+
+    /// The clock is read off the one reading the window can trust, and anything
+    /// else leaves it unset rather than guessed at.
+    #[test]
+    fn a_clock_reading_is_read_back_or_refused() {
+        assert_eq!(day_second("00:00:00"), Some(0));
+        assert_eq!(day_second("14:30:07\n"), Some(14 * 3600 + 30 * 60 + 7));
+        // A leap second is a clock that is right, not one that is broken.
+        assert_eq!(day_second("23:59:60"), Some(86_400));
+        assert_eq!(day_second("24:00:00"), None);
+        assert_eq!(day_second("9:00:00"), None);
+        assert_eq!(day_second("+9:00:00"), None);
+        assert_eq!(day_second("nine o'clock"), None);
+        assert_eq!(day_second(""), None);
+        assert_eq!(clock(14 * 3600 + 30 * 60 + 7), "14:30:07");
+        // Past midnight the day starts over rather than reading 25:00:00.
+        assert_eq!(clock(86_400 + 61), "00:01:01");
     }
 
     /// The popup of a failed call carries what the model generated and the body

@@ -739,6 +739,20 @@ struct App {
     dirty: bool,
 }
 
+/// What time it is on the reader's own clock, as seconds past local midnight.
+///
+/// `std` has a wall clock and no timezone at all, and this window keeps no date
+/// crate in its graph, so the local reading is asked of the one program every
+/// unix ships. A window that gets no answer leaves `day_zero` unset and its
+/// rows carry no clock, which is better than a column of times an hour out.
+fn local_day_second() -> Option<u64> {
+    let told = std::process::Command::new("date")
+        .arg("+%H:%M:%S")
+        .output()
+        .ok()?;
+    state::day_second(std::str::from_utf8(&told.stdout).ok()?)
+}
+
 impl App {
     fn new(proxy: EventLoopProxy<Wake>, config: Config, workspace: Option<PathBuf>) -> App {
         let skin = Skin::from(&config);
@@ -752,6 +766,13 @@ impl App {
         if !config.show_files {
             hidden.push(View::Files);
         }
+        // Every activity row says what time it happened, which takes the
+        // reader's clock as well as the monotonic one the rates are measured
+        // on. Asked once here and never again: the frames carry their own
+        // monotonic second, and a time of day is that second added to this.
+        let mut state = State::new();
+        state.day_zero = local_day_second();
+        let epoch = Instant::now();
         App {
             dock: Dock::hiding(&hidden),
             left_width: [config.left_width, config.left_width_bottom],
@@ -762,7 +783,7 @@ impl App {
             renderer: None,
             proxy,
             config,
-            state: State::new(),
+            state,
             monitor: Monitor::new(),
             next_sample: None,
             next_orb: None,
@@ -793,9 +814,16 @@ impl App {
             hot: None,
             last_click: None,
             modifiers: ModifiersState::empty(),
-            epoch: Instant::now(),
+            epoch,
             dirty: true,
         }
+    }
+
+    /// How far into this window's life it is, in the monotonic seconds every
+    /// frame is folded in with. What a row of the activity list is stamped
+    /// with, whether an agent frame or the window's own note caused it.
+    fn now(&self) -> Option<f64> {
+        Some(self.epoch.elapsed().as_secs_f64())
     }
 
     fn shape(&self) -> Shape<'_> {
@@ -2190,10 +2218,12 @@ impl App {
         if self.clipboard.is_none() {
             self.clipboard = copypasta::ClipboardContext::new().ok();
         }
+        let now = self.now();
         let got = match self.clipboard.as_mut() {
             Some(clipboard) => clipboard.get_contents(),
             None => {
-                self.state.activity.say(
+                self.state.noted(
+                    now,
                     "could not reach the clipboard on this display",
                     state::Tone::Bad,
                 );
@@ -2213,8 +2243,7 @@ impl App {
             // to do nothing.
             Err(e) => {
                 self.state
-                    .activity
-                    .say(format!("nothing to paste: {e}"), state::Tone::Bad);
+                    .noted(now, format!("nothing to paste: {e}"), state::Tone::Bad);
                 self.dirty = true;
             }
         }
@@ -2332,18 +2361,21 @@ impl App {
         if self.clipboard.is_none() {
             self.clipboard = copypasta::ClipboardContext::new().ok();
         }
+        let now = self.now();
         match self.clipboard.as_mut() {
             Some(clipboard) => {
                 // A clipboard that will not take it is worth saying out loud:
                 // the alternative is a copy that silently did nothing.
                 if let Err(e) = clipboard.set_contents(text) {
-                    self.state.activity.say(
+                    self.state.noted(
+                        now,
                         format!("could not reach the clipboard: {e}"),
                         state::Tone::Bad,
                     );
                 }
             }
-            None => self.state.activity.say(
+            None => self.state.noted(
+                now,
                 "could not reach the clipboard on this display",
                 state::Tone::Bad,
             ),
@@ -2472,6 +2504,7 @@ impl App {
         let Some(path) = config::path() else {
             return;
         };
+        let now = self.now();
         match config::write_setting(&path, key, Some(&value)) {
             Ok(()) => match key {
                 "left_width" => self.config.left_width = ratio,
@@ -2481,10 +2514,10 @@ impl App {
                 // that is left to be.
                 _ => self.config.top_height_right = ratio,
             },
-            Err(why) => self
-                .state
-                .activity
-                .say(format!("cannot save the layout: {why}"), state::Tone::Bad),
+            Err(why) => {
+                self.state
+                    .noted(now, format!("cannot save the layout: {why}"), state::Tone::Bad);
+            }
         }
         self.dirty = true;
     }
@@ -2920,10 +2953,10 @@ impl ApplicationHandler<Wake> for App {
                 if !gpu.caps.transparent {
                     self.skin = self.skin.opaque();
                 }
+                let now = self.now();
                 for key in &self.config.unknown {
                     self.state
-                        .activity
-                        .say(format!("settings: {key:?} is not a setting"), Tone::Bad);
+                        .noted(now, format!("settings: {key:?} is not a setting"), Tone::Bad);
                 }
                 let mut renderer = noob_draw::Renderer::new(&gpu);
                 self.column = renderer.column_width(self.config.font_size);
