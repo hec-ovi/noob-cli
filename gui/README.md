@@ -385,7 +385,7 @@ the left with the chosen one beside it. Up and down on the rail walk the section
 right goes into one, left comes back out, and inside a section up and down walk
 its rows while left and right change the row the cursor is on. Enter flips a
 switch, turns a skill or a server on and off, and starts an edit on the
-endpoint, Tab crosses between the rail and the
+endpoint, Tab crosses a form row and otherwise crosses between the rail and the
 rows, the wheel scrolls, and Esc puts the panel away. The panes are exactly where
 they were when it closes, and the agent keeps working behind it. **Drag the line
 between the rail and the settings** to give one of them more room: the pointer
@@ -394,12 +394,14 @@ name, and where you leave it is written to `settings_rail` in the settings file,
 so the panel opens that way next time.
 
 Four of the sections are the agent's own files rather than the window's. AGENT
-reads `~/.config/noob/.env`, the file the CLI re-reads on every request: it names
-the file, shows the endpoint and every other key that is set, and the endpoint can
-be typed over. Two of the keys in it are controls rather than lines to read, under
-`HOW MUCH THE AGENT GETS`: `NOOB_CTX`, the context window the agent budgets
-against before it compacts, and `NOOB_TASK_CONCURRENCY`, how many sub-agent tasks
-it runs at once. Both are tracks held to the CLI's own bounds, so the context
+opens on a form of two columns, two rows tall: the endpoint and the file the CLI
+reads down the left, the two numbers that decide what the agent gets down the
+right. Tab crosses from one column to the other, and the arrow keys go on nudging
+whatever the cursor is on. The file is `~/.config/noob/.env`, which the CLI
+re-reads on every request; the endpoint can be typed over, and every other key
+that is set is listed under the form. The two numbers are `NOOB_CTX`, the context
+window the agent budgets against before it compacts, and `NOOB_TASK_CONCURRENCY`,
+how many sub-agent tasks it runs at once. Both are tracks held to the CLI's own bounds, so the context
 window starts at the 4096 below which the CLI stops reading it and the right end
 of the concurrency track is the 16 the CLI caps itself at: the maximum is a place
 to drop the pointer, not a number to guess. Until either is in the file the row
@@ -412,7 +414,23 @@ the child's environment, since the CLI prefers the environment over its file and
 an exported value would outrank every line the panel writes. No credential is ever
 shown or written from here: a key, token, secret
 or password reads as `set, and not shown here`, which is the same line the CLI
-takes by keeping secrets out of settable config. SESSIONS lists the saved
+takes by keeping secrets out of settable config.
+
+Under that form are two blocks of text. The first is the agent's global
+instructions, `<config dir>/AGENTS.md`: the CLI reads that file and puts it at the
+top of every prompt, before the project's own `AGENTS.md`, and the block names the
+path and shows what is in it. With no file there it says so and Enter writes a
+starter one. An edit lands on the next session rather than the next message,
+because the prompt is assembled once when `noob serve` starts, and the block says
+that too. The second block is the whole prompt: the window runs `noob debug
+prompt` in the folder the session is running in, off the interface thread and with
+the same two names cleared out of the environment the agent itself is started
+with, so what it prints is the prompt the session sends and not a different one.
+`AGENTS.md` is one capped layer of it, so it is never labelled as the prompt. A
+command that failed puts the reason on the block. Both blocks are a fixed twelve
+lines tall and read with Page Up and Page Down, or the wheel over them.
+
+SESSIONS lists the saved
 conversations the folder picker offers, through the same reader, with when each
 one was, which folder it belongs to and the opening of what was first said in it.
 SKILLS and MCP are two columns: a list on the left and, beside it, whatever the

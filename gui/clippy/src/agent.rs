@@ -30,6 +30,18 @@ const SKILL_HEAD_BYTES: u64 = 16 * 1024;
 /// work nobody asked for either.
 const SKILL_BODY_BYTES: u64 = 256 * 1024;
 
+/// The agent's own instructions file, the one it puts at the top of every
+/// prompt. One name, in the config directory and in the workspace, and it is
+/// hardcoded in the CLI: no setting anywhere names another file.
+pub const AGENTS_MD: &str = "AGENTS.md";
+
+/// How much of it the CLI actually reads.
+///
+/// `crates/noob/src/agent/prompt.rs` caps each `AGENTS.md` at 16 KiB and appends
+/// a truncation notice, so a window showing more than this would be showing text
+/// the model never sees.
+pub const AGENTS_CAP: u64 = 16 * 1024;
+
 /// What is on the end of the directory a turned-off skill is moved to.
 ///
 /// The agent has no idea of a skill being off. It discovers `<ws>/.noob/skills`,
@@ -517,6 +529,73 @@ fn front_matter(path: &Path) -> (Option<String>, Option<String>, Option<String>)
     (said(name), said(about), said(repo))
 }
 
+/// The agent's global instructions: where the file is, and the text of it the
+/// agent would actually get.
+///
+/// Whitespace-only counts as nothing at all, because that is what the CLI makes
+/// of it: `load_agents_md` trims and returns nothing, so a file of blank lines
+/// contributes no heading to the prompt and is the same thing as no file.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Instructions {
+    /// Where the file is or would go, or nothing with no config directory.
+    pub path: Option<PathBuf>,
+    /// The lines of it, or empty when there is nothing there to read.
+    pub body: Vec<String>,
+    /// Whether the file is longer than the CLI reads. The tail past
+    /// [`AGENTS_CAP`] is in the file and not in the prompt.
+    pub capped: bool,
+}
+
+/// Read the global `AGENTS.md`, capped the way the CLI caps it.
+///
+/// The path is the CLI's own: `<config dir>/AGENTS.md`, resolved by
+/// [`config_dir`], which is why nothing here spells out a home directory.
+pub fn read_instructions(dir: Option<&Path>) -> Instructions {
+    let path = dir.map(|dir| dir.join(AGENTS_MD));
+    let text = path
+        .as_deref()
+        .and_then(|path| head_of(path, AGENTS_CAP))
+        .unwrap_or_default();
+    let capped = path
+        .as_deref()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .is_some_and(|it| it.len() > AGENTS_CAP);
+    Instructions {
+        body: match text.trim().is_empty() {
+            true => Vec::new(),
+            false => text.lines().map(str::to_string).collect(),
+        },
+        path,
+        capped,
+    }
+}
+
+/// What a file that is not there yet is written with.
+///
+/// A heading and a line saying what the file is for, so the block on the panel
+/// has something in it that reads as an instruction rather than an empty box
+/// nobody knows what to put in.
+const STARTER: &str = "# Global instructions\n\nThese lines go at the top of every prompt, in every folder.\n\n- \n";
+
+/// Write a starter `AGENTS.md`, for the offer the panel makes when there is
+/// none.
+///
+/// Refuses a file that is already there rather than writing over it: the one
+/// thing this must never do is lose instructions somebody wrote. The directory
+/// is created when it is missing, which is a machine that has never run the CLI.
+pub fn start_instructions(path: &Path) -> Result<(), String> {
+    if path.exists() {
+        return Err(format!("{} is already there", path.display()));
+    }
+    if let Some(dir) = path.parent()
+        && !dir.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
+    }
+    std::fs::write(path, STARTER).map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
 /// The head of a file as text, or nothing when it cannot be read. Lossy, since
 /// the cap can land in the middle of a character.
 fn head_of(path: &Path, cap: u64) -> Option<String> {
@@ -777,6 +856,8 @@ pub struct Agent {
     pub skills_at: Option<PathBuf>,
     pub skills: Vec<Skill>,
     pub mcp: Mcp,
+    /// The global `AGENTS.md`, which is the first thing in every prompt.
+    pub instructions: Instructions,
     /// The sessions on disk, read with the same reader the folder picker uses.
     pub sessions: crate::sessions::Listing,
     /// When the snapshot was taken, which is what the ages on the session rows
@@ -794,6 +875,7 @@ impl Default for Agent {
             skills_at: None,
             skills: Vec::new(),
             mcp: Mcp::default(),
+            instructions: Instructions::default(),
             sessions: crate::sessions::Listing::default(),
             now: std::time::SystemTime::UNIX_EPOCH,
         }
@@ -828,6 +910,7 @@ impl Agent {
                 .unwrap_or_default(),
             skills_at,
             mcp: read_mcp(dir, workspace),
+            instructions: read_instructions(dir),
             env_path,
             sessions,
             now: std::time::SystemTime::now(),
@@ -926,6 +1009,80 @@ mod tests {
         );
         assert!(is_secret("NOOB_API_KEY"));
         assert!(!is_secret(ENDPOINT));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The agent's global instructions are one file with one name in the
+    /// directory the CLI resolves, and the window reads it the way the CLI does:
+    /// capped where the CLI caps it, and whitespace-only counted as nothing at
+    /// all, because that is what `load_agents_md` makes of it.
+    #[test]
+    fn the_global_instructions_are_read_the_way_the_agent_reads_them() {
+        let dir = temp("instructions");
+        let path = dir.join(AGENTS_MD);
+
+        // Nothing there: the path is still named, so there is somewhere to put
+        // one, and there is nothing to show.
+        let missing = read_instructions(Some(&dir));
+        assert_eq!(missing.path.as_deref(), Some(path.as_path()));
+        assert!(missing.body.is_empty());
+        assert!(!missing.capped);
+
+        // Written by hand, and read back as its lines.
+        std::fs::write(&path, "# Global instructions\n\nbe brief\n").expect("a file");
+        let read = read_instructions(Some(&dir));
+        assert_eq!(read.body, ["# Global instructions", "", "be brief"]);
+        assert!(!read.capped);
+
+        // A file of blank lines is the same thing as no file: the CLI trims it
+        // and it contributes no heading to the prompt.
+        std::fs::write(&path, "\n \n\t\n").expect("a file");
+        assert!(read_instructions(Some(&dir)).body.is_empty());
+
+        // Past the cap, what is on the panel is what the model gets, and the
+        // window says the file goes further.
+        let long = "x".repeat(AGENTS_CAP as usize + 500);
+        std::fs::write(&path, &long).expect("a file");
+        let big = read_instructions(Some(&dir));
+        assert!(big.capped, "a file the CLI cuts is shown whole");
+        assert_eq!(
+            big.body.iter().map(|line| line.len()).sum::<usize>(),
+            AGENTS_CAP as usize,
+            "more of the file is on the panel than the CLI reads"
+        );
+
+        // And with no config directory there is nowhere to read one from, which
+        // is said rather than guessed at.
+        let nowhere = read_instructions(None);
+        assert_eq!(nowhere.path, None);
+        assert!(nowhere.body.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The offer the panel makes when there is no instructions file: it writes
+    /// one, it makes the directory when the CLI has never run, and it refuses to
+    /// write over a file that is already there.
+    #[test]
+    fn a_starter_instructions_file_is_written_once_and_never_over() {
+        let dir = temp("starter");
+        let path = dir.join("fresh").join(AGENTS_MD);
+        start_instructions(&path).expect("it writes one");
+        let text = std::fs::read_to_string(&path).expect("the file");
+        assert!(text.contains("# Global instructions"), "{text}");
+
+        // The whole point of the offer: the file the agent reads is the file
+        // that was written.
+        let read = read_instructions(Some(path.parent().expect("its directory")));
+        assert!(
+            read.body.first().is_some_and(|line| line.contains("Global instructions")),
+            "{:?}",
+            read.body
+        );
+
+        // Instructions somebody wrote are never written over.
+        std::fs::write(&path, "mine\n").expect("a file");
+        assert!(start_instructions(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("the file"), "mine\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

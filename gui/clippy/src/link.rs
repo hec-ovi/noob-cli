@@ -61,6 +61,69 @@ pub fn command_for(
     command
 }
 
+/// How many lines of the assembled prompt the panel keeps.
+///
+/// The prompt carries the CLI's own base instructions, both `AGENTS.md` layers,
+/// the environment block, the skills resolver and the MCP line, and a machine
+/// with a shelf of skills on it can push that a long way. The block says where
+/// it stopped rather than holding a megabyte of text nobody scrolled to.
+pub const PROMPT_LINES: usize = 2000;
+
+/// What the thread that reads the prompt hands back: the folder it ran in, and
+/// either the prompt or why there is not one.
+pub type Asked = (String, Result<Vec<String>, String>);
+
+/// Exactly the command the assembled system prompt is read with, built without
+/// running it.
+///
+/// `noob debug prompt` prints the artifact a session actually sends, so it has
+/// to be run the way the session is started or it prints a different one: the
+/// same working directory, since the project's own `AGENTS.md`, its skills and
+/// its `mcp.json` are all found relative to it, and the same keys taken out of
+/// the environment, since the CLI prefers the environment over the file the
+/// panel writes. Its own function for the same reason [`command_for`] is one:
+/// what the window asks for is worth asserting without starting a process.
+pub fn prompt_command(program: &str, workspace: &std::path::Path, clear: &[&str]) -> Command {
+    let mut command = Command::new(program);
+    command.args(["debug", "prompt"]);
+    for key in clear {
+        command.env_remove(key);
+    }
+    command.current_dir(workspace);
+    command
+}
+
+/// What the panel makes of what that command answered.
+///
+/// The other half of the seam: the window runs the process and hands the three
+/// things a process answers with to this, so what the block shows can be checked
+/// without a model, a config directory or a child at all.
+pub fn prompt_from(ok: bool, stdout: &[u8], stderr: &[u8]) -> Result<Vec<String>, String> {
+    if !ok {
+        // The last thing it said, since a CLI that refuses says why on its last
+        // line and prints its usage above it.
+        let why = String::from_utf8_lossy(stderr);
+        let last = why.lines().map(str::trim).rfind(|line| !line.is_empty());
+        return Err(match last {
+            Some(line) => format!("noob debug prompt failed: {line}"),
+            None => String::from("noob debug prompt failed and said nothing"),
+        });
+    }
+    let said = String::from_utf8_lossy(stdout);
+    let mut lines: Vec<String> = said.lines().map(str::to_string).collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        return Err(String::from("noob debug prompt printed nothing"));
+    }
+    if lines.len() > PROMPT_LINES {
+        lines.truncate(PROMPT_LINES);
+        lines.push(format!("[the panel stops reading at {PROMPT_LINES} lines]"));
+    }
+    Ok(lines)
+}
+
 pub struct Link {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -337,6 +400,81 @@ mod tests {
         drop(link);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The prompt the panel shows has to be the prompt the session sends, and
+    /// the only thing that decides that is where the command runs and what it
+    /// runs with. Asserted on the command rather than by starting one: a real
+    /// `noob debug prompt` reads a config directory, a workspace and every skill
+    /// on the machine.
+    #[test]
+    fn the_prompt_is_read_the_way_the_agent_is_started() {
+        let workspace = std::env::temp_dir();
+        let asking = prompt_command("noob", &workspace, &crate::agent::OWNED);
+        let args: Vec<&str> = asking
+            .get_args()
+            .map(|arg| arg.to_str().expect("a flag is text"))
+            .collect();
+        assert_eq!(args, ["debug", "prompt"]);
+        assert_eq!(
+            asking.get_current_dir(),
+            Some(workspace.as_path()),
+            "a prompt read somewhere else is another project's prompt"
+        );
+        let mut cleared: Vec<&str> = asking
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_str().expect("a name is text"))
+            .collect();
+        cleared.sort_unstable();
+        assert_eq!(
+            cleared,
+            ["NOOB_CTX", "NOOB_TASK_CONCURRENCY"],
+            "the serve child and the prompt read different settings"
+        );
+        // The same treatment `serve` gets, which is what makes the two the same
+        // prompt.
+        let serving = command_for("noob", &workspace, None, &crate::agent::OWNED);
+        assert_eq!(asking.get_current_dir(), serving.get_current_dir());
+        assert_eq!(asking.get_envs().count(), serving.get_envs().count());
+    }
+
+    /// What the panel shows for each of the three things that command can do:
+    /// print a prompt, print nothing, and fail.
+    #[test]
+    fn what_the_prompt_command_answered_is_what_the_block_shows() {
+        let prompt = prompt_from(
+            true,
+            b"You are noob.\n\n# Global instructions (AGENTS.md)\nbe brief\n\n\n",
+            b"",
+        )
+        .expect("a prompt");
+        assert_eq!(
+            prompt,
+            [
+                "You are noob.",
+                "",
+                "# Global instructions (AGENTS.md)",
+                "be brief",
+            ],
+            "the blank lines on the end are not part of the prompt"
+        );
+
+        // A failure says why, off the last line the CLI wrote, rather than
+        // leaving the block empty with nothing anywhere saying what happened.
+        let why = prompt_from(false, b"", b"usage: noob debug <what>\nno such subcommand: prompt\n")
+            .expect_err("it failed");
+        assert!(why.contains("no such subcommand: prompt"), "{why}");
+        let quiet = prompt_from(false, b"", b"").expect_err("it failed");
+        assert!(quiet.contains("said nothing"), "{quiet}");
+        let empty = prompt_from(true, b"\n \n", b"").expect_err("nothing was printed");
+        assert!(empty.contains("printed nothing"), "{empty}");
+
+        // And a prompt longer than the block keeps says where it stopped.
+        let long = "line\n".repeat(PROMPT_LINES + 40);
+        let cut = prompt_from(true, long.as_bytes(), b"").expect("a prompt");
+        assert_eq!(cut.len(), PROMPT_LINES + 1);
+        assert!(cut[PROMPT_LINES].contains("stops reading"), "{:?}", cut[PROMPT_LINES]);
     }
 
     /// A program that is not there is a message in the window, not a panic and

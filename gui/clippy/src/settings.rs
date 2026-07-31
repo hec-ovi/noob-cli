@@ -48,6 +48,19 @@
 //! session cannot disagree. [`Deed`] is what a press asks for and `main` is
 //! what does it, the same way a [`Change`] is written there and not here.
 //!
+//! **The agent's section is a form, and it shows what the agent is really
+//! told.** Four things anybody opens it for were seven rows apart, with a
+//! heading and three notes standing between them: a section more than half
+//! prose. They are two rows of two now ([`Row::Pair`]), the endpoint and the
+//! file the CLI reads down one column and the two numbers that decide what the
+//! agent gets down the other, with Tab crossing between them because the arrow
+//! keys are the nudge. Under the form are two blocks ([`Row::Paper`]): the
+//! global `AGENTS.md`, which the CLI already reads and puts at the top of every
+//! prompt, and the whole assembled prompt out of `noob debug prompt`. The file
+//! is one capped layer of that prompt, so it is named as the file and never as
+//! the prompt, and the block that has neither says which of the two it is
+//! waiting on.
+//!
 //! **Two of the agent's own settings are controls, not readings.** Everything
 //! in the CLI's `.env` was listed as text with the endpoint as the only thing
 //! anybody could change, which left the two numbers that decide what the agent
@@ -215,6 +228,85 @@ pub enum Row {
     /// toggle that really turns it off, and an uninstall beside it. The row the
     /// column on the right belongs to.
     Entry(Entry),
+    /// Two rows side by side, each in half the width: a form rather than a
+    /// column of far apart lines.
+    ///
+    /// The AGENT section was one thing per row with prose between them, so the
+    /// four things anybody opens it to set were seven rows apart. They are two
+    /// rows of two now, which is what a form is. Never nested: a half is one of
+    /// the plain rows above, and [`cell`] is what reads one out.
+    Pair(Box<Row>, Box<Row>),
+    /// A block of text under a title of its own: the agent's own instructions
+    /// file, and the prompt it is a layer of. The one row that is more than a
+    /// line or two of text.
+    Paper(Paper),
+}
+
+/// A block of text on the panel, with a title over it.
+///
+/// Its own row rather than one row per line: the assembled prompt is thousands
+/// of lines, and a section that carried them would be a text file with four
+/// settings buried at the top of it. The block is a fixed [`PAPER_LINES`] tall
+/// and scrolls inside itself, so the rows under it stay where they are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Paper {
+    /// What this is, on the first line.
+    pub title: String,
+    /// The line under it: where the text came from, or why there is none.
+    pub under: String,
+    /// The text itself, one entry per line, already capped by whoever read it.
+    pub body: Vec<String>,
+    /// Which line of `body` the block starts on.
+    pub first: usize,
+    /// The file a press would write, when there is nothing to show and writing
+    /// one is the thing to do about it.
+    pub offer: Option<PathBuf>,
+    /// Whether `under` is something wrong rather than something explained.
+    pub bad: bool,
+}
+
+impl Paper {
+    /// The furthest down it can be scrolled and still be full.
+    fn most(&self) -> usize {
+        self.body.len().saturating_sub(PAPER_LINES)
+    }
+}
+
+/// How many lines of a [`Paper`] are on screen at once.
+///
+/// A number rather than what fits, because a row's height cannot depend on the
+/// width or the height of the window: [`lines`] is what the scroll window counts
+/// in and what the layout places with, and a block that grew when the window did
+/// would put every click under it on another row.
+pub const PAPER_LINES: usize = 12;
+
+/// Which half of a [`Row::Pair`] something is in. Left for every row that is not
+/// one, so a press on an ordinary row is still a press on the row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+impl Side {
+    pub fn other(self) -> Side {
+        match self {
+            Side::Left => Side::Right,
+            Side::Right => Side::Left,
+        }
+    }
+}
+
+/// One half of a row, or the row itself when it is not a pair.
+///
+/// Asked by the model, the layout and the drawing, so what a key changes, what a
+/// click lands on and what is drawn are the same thing.
+pub fn cell(row: &Row, side: Side) -> &Row {
+    match (row, side) {
+        (Row::Pair(left, _), Side::Left) => left,
+        (Row::Pair(_, right), Side::Right) => right,
+        (row, _) => row,
+    }
 }
 
 /// One thing off the agent's disk that can be turned on and off.
@@ -273,6 +365,9 @@ pub enum Deed {
         project: bool,
         on: bool,
     },
+    /// Write a starter `AGENTS.md` where the agent looks for one. Only ever
+    /// asked for by a block that found nothing there.
+    StartInstructions { path: PathBuf },
 }
 
 /// One colour on the grid: the key the file writes it under, what it actually
@@ -304,6 +399,11 @@ pub fn lines(row: &Row) -> usize {
         // A heading is drawn larger; an entry is a name with what it is
         // underneath, which is two lines of the ordinary text.
         Row::Heading(_) | Row::Entry(_) => 2,
+        // As tall as the taller half, so the two columns of a form sit on the
+        // same lines and the rows under them do not move when one half changes.
+        Row::Pair(left, right) => lines(left).max(lines(right)),
+        // Its title, the line under it, and the text.
+        Row::Paper(_) => PAPER_LINES + 2,
         _ => 1,
     }
 }
@@ -566,6 +666,9 @@ pub struct Section {
     /// document. Its own number because the two columns scroll separately: the
     /// wheel over a skill's own text must not walk the list of skills.
     doc_first: usize,
+    /// Which half of a [`Row::Pair`] the keyboard is in. Kept while the cursor
+    /// walks rows, so going down a form column stays in that column.
+    side: Side,
 }
 
 impl Section {
@@ -577,8 +680,35 @@ impl Section {
             cursor,
             first: 0,
             doc_first: 0,
+            side: Side::Left,
         }
     }
+}
+
+/// Where a section was left, so a rebuild does not throw it away.
+struct Place {
+    cursor: usize,
+    first: usize,
+    doc_first: usize,
+    side: Side,
+    /// Where each block of text was scrolled to, by the row it was on.
+    papers: Vec<(usize, usize)>,
+}
+
+/// What `noob debug prompt` answered, which is the only place the whole
+/// assembled prompt exists.
+///
+/// Not a file and not a frame: the protocol carries no prompt, and `AGENTS.md`
+/// is one capped layer of one. The window runs the CLI's own subcommand off the
+/// interface thread and this is what comes back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Assembled {
+    /// The command has been started and has not answered yet.
+    Waiting,
+    /// It printed a prompt, read in the folder named.
+    Got { at: String, body: Vec<String> },
+    /// It failed, and why.
+    Failed { at: String, why: String },
 }
 
 pub struct Settings {
@@ -590,9 +720,9 @@ pub struct Settings {
     /// is being edited. The row itself keeps saying what the file says until the
     /// edit lands.
     editing: Option<String>,
-    /// The row a slider is being dragged on and the value it is being dragged
-    /// to. Nothing is written until the button comes up.
-    dragging: Option<(usize, String)>,
+    /// The row and half a slider is being dragged on, and the value it is being
+    /// dragged to. Nothing is written until the button comes up.
+    dragging: Option<(usize, Side, String)>,
     /// The swatch that was last pressed, as the row it is on and the cell along
     /// it. Nothing is changed by it: the footer says which key in the file
     /// writes that colour, which is what a grid of blocks cannot say on its own.
@@ -613,6 +743,8 @@ pub struct Settings {
     /// Why the last change did not land. Cleared by the next refresh, since a
     /// refresh only happens after a write that worked.
     trouble: Option<String>,
+    /// The whole prompt the agent is given, once the CLI has printed it.
+    prompt: Assembled,
 }
 
 impl Settings {
@@ -632,28 +764,77 @@ impl Settings {
             file: file.map(PathBuf::from),
             agent,
             trouble: None,
+            prompt: Assembled::Waiting,
         };
         panel.sections = panel.build(config);
         panel
     }
 
+    /// Take what `noob debug prompt` answered, from the thread that ran it.
+    ///
+    /// The rows are rebuilt rather than patched, the same as every other thing
+    /// that arrives: the block says what the command said, and nothing about it
+    /// is assembled here.
+    pub fn adopt_prompt(
+        &mut self,
+        at: String,
+        answer: Result<Vec<String>, String>,
+        config: &Config,
+    ) {
+        self.prompt = match answer {
+            Ok(body) => Assembled::Got { at, body },
+            Err(why) => Assembled::Failed { at, why },
+        };
+        self.refresh(config);
+    }
+
     /// Rebuild the rows from the files as they now read, keeping the cursor
     /// where it was. Called after a change has been written and read back.
     pub fn refresh(&mut self, config: &Config) {
-        let places: Vec<(usize, usize, usize)> = self
+        let places: Vec<Place> = self
             .sections
             .iter()
-            .map(|section| (section.cursor, section.first, section.doc_first))
+            .map(|section| Place {
+                cursor: section.cursor,
+                first: section.first,
+                doc_first: section.doc_first,
+                side: section.side,
+                papers: section
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(at, row)| match row {
+                        Row::Paper(paper) => Some((at, paper.first)),
+                        _ => None,
+                    })
+                    .collect(),
+            })
             .collect();
         self.sections = self.build(config);
         self.trouble = None;
         self.dragging = None;
         self.picked = None;
         self.arming = None;
-        for (section, (cursor, first, doc_first)) in self.sections.iter_mut().zip(places) {
+        for (section, place) in self.sections.iter_mut().zip(places) {
+            let Place {
+                cursor,
+                first,
+                doc_first,
+                side,
+                papers,
+            } = place;
             let last = section.rows.len().saturating_sub(1);
             section.first = first.min(last);
             section.cursor = cursor.min(last);
+            section.side = side;
+            // Where each block of text was left, so a write somewhere else on
+            // the panel does not scroll the prompt back to its first line under
+            // whoever was reading it.
+            for (at, was) in papers {
+                if let Some(Row::Paper(paper)) = section.rows.get_mut(at) {
+                    paper.first = was.min(paper.most());
+                }
+            }
             // Clamped where it is read, since the document that comes back may
             // be a different length or another entry's altogether.
             section.doc_first = doc_first;
@@ -699,48 +880,60 @@ impl Settings {
     }
 
     /// What the agent is pointed at, out of the file the CLI owns.
+    ///
+    /// A form, not a column. The four things anybody opens this section to look
+    /// at were seven rows apart with a heading and three notes between them,
+    /// which is a section more than half prose. They are two rows of two now:
+    /// where the model is and which file says so on the left, how much the agent
+    /// gets on the right. What the notes were saying is either on the row itself
+    /// or gone, and the two blocks under the form are the instructions the agent
+    /// really receives.
     fn agent_rows(&self) -> Vec<Row> {
-        let mut rows = vec![note(
-            "the CLI reads this file on every request, so a change here lands on the next one",
-        )];
-        rows.push(Row::Reading {
-            label: String::from("file"),
-            value: match (&self.agent.env_path, self.agent.env_exists) {
-                // Not there yet is worth saying: an agent configured entirely by
-                // environment has no file at all, and the first save writes one.
-                (Some(path), false) => format!("{} (not there yet)", path.display()),
-                (Some(path), true) => path.display().to_string(),
-                (None, _) => String::from("nowhere: no config directory to read one in"),
-            },
-        });
-        rows.push(Row::Field {
-            key: agent::ENDPOINT,
-            value: self.agent.endpoint().unwrap_or_default().to_string(),
-        });
+        let mut unset = Vec::new();
+        let mut numbers = Vec::new();
+        for (key, kind) in AGENT_SETTINGS {
+            numbers.push(Row::Setting {
+                key,
+                value: match self.agent.setting(key) {
+                    Some(value) => value.to_string(),
+                    None => {
+                        unset.push(key);
+                        agent_default(key)
+                    }
+                },
+                kind,
+                file: File::Agent,
+            });
+        }
+        let tasks = numbers.pop().expect("both of the agent's numbers");
+        let ctx = numbers.pop().expect("both of the agent's numbers");
+        let mut rows = vec![
+            Row::Pair(
+                Box::new(Row::Field {
+                    key: agent::ENDPOINT,
+                    value: self.agent.endpoint().unwrap_or_default().to_string(),
+                }),
+                Box::new(ctx),
+            ),
+            Row::Pair(
+                Box::new(Row::Reading {
+                    label: String::from("main file"),
+                    value: match (&self.agent.env_path, self.agent.env_exists) {
+                        // Not there yet is worth saying: an agent configured
+                        // entirely by environment has no file at all, and the
+                        // first save writes one.
+                        (Some(path), false) => format!("{} (not there yet)", path.display()),
+                        (Some(path), true) => path.display().to_string(),
+                        (None, _) => String::from("nowhere: no config directory to read one in"),
+                    },
+                }),
+                Box::new(tasks),
+            ),
+        ];
         if self.agent.endpoint().is_none() {
             rows.push(note(
                 "with no endpoint set, noob probes the usual local ports and takes the first that answers",
             ));
-        }
-        rows.push(Row::Heading("HOW MUCH THE AGENT GETS"));
-        rows.push(note(
-            "the context window it budgets against before it compacts, and how many sub-agent tasks it runs at once; 16 is the CLI's own cap, so the end of that track is the most it will take",
-        ));
-        let mut unset = Vec::new();
-        for (key, kind) in AGENT_SETTINGS {
-            let value = match self.agent.setting(key) {
-                Some(value) => value.to_string(),
-                None => {
-                    unset.push(key);
-                    agent_default(key)
-                }
-            };
-            rows.push(Row::Setting {
-                key,
-                value,
-                kind,
-                file: File::Agent,
-            });
         }
         if !unset.is_empty() {
             rows.push(note(&format!(
@@ -748,6 +941,8 @@ impl Settings {
                 unset.join(" and ")
             )));
         }
+        rows.push(Row::Paper(self.instructions_paper()));
+        rows.push(Row::Paper(self.prompt_paper()));
         for (key, value) in &self.agent.env {
             if key == agent::ENDPOINT || agent::OWNED.contains(&key.as_str()) {
                 continue;
@@ -764,10 +959,109 @@ impl Settings {
                 },
             });
         }
-        rows.push(note(
-            "api keys are not shown or written here: edit the file to change one",
-        ));
         rows
+    }
+
+    /// The agent's global instructions, under a title naming the file they are
+    /// in.
+    ///
+    /// The answer to "is the global AGENTS.md a thing": it already is, and this
+    /// is it. The CLI reads `<config dir>/AGENTS.md` and puts it at the top of
+    /// every prompt, before the project's own. Nothing was built to make that
+    /// true; the window only names the path, shows what is in it, and offers to
+    /// write one when there is none.
+    ///
+    /// Not called the prompt. It is one capped layer of one, which is what the
+    /// block under it is for.
+    fn instructions_paper(&self) -> Paper {
+        let it = &self.agent.instructions;
+        let title = String::from("GLOBAL INSTRUCTIONS \u{2022} AGENTS.md");
+        let Some(path) = it.path.as_deref() else {
+            return Paper {
+                title,
+                under: String::from("nowhere: no config directory to keep one in"),
+                body: Vec::new(),
+                first: 0,
+                offer: None,
+                bad: true,
+            };
+        };
+        // Empty and missing are one thing here because they are one thing to the
+        // agent: it trims the file and a blank one contributes no heading at all.
+        if it.body.is_empty() {
+            return Paper {
+                title,
+                under: format!("nothing at {} yet", path.display()),
+                body: vec![
+                    String::from("The agent reads this file first, in every folder, before the"),
+                    String::from("project's own AGENTS.md. There is none here yet."),
+                ],
+                first: 0,
+                offer: Some(path.to_path_buf()),
+                bad: false,
+            };
+        }
+        let mut body = it.body.clone();
+        if it.capped {
+            body.push(String::new());
+            body.push(format!(
+                "[the CLI stops reading at {} KiB, so the rest of this file is not in the prompt]",
+                agent::AGENTS_CAP / 1024
+            ));
+        }
+        Paper {
+            title,
+            // The `.env` is re-read on every request; this is not. The prompt is
+            // assembled once when `serve` starts, so an edit here lands on the
+            // next session rather than the next message, and a block that did
+            // not say so would be the panel telling somebody their change was
+            // live when it is not.
+            under: format!(
+                "{} \u{2022} read when a session starts, so an edit lands on the next one",
+                path.display()
+            ),
+            body,
+            first: 0,
+            offer: None,
+            bad: false,
+        }
+    }
+
+    /// The whole prompt, exactly as the CLI assembles it.
+    ///
+    /// `AGENTS.md` is one layer of this: the prompt also carries the CLI's own
+    /// base instructions, the environment block, the project's own AGENTS.md,
+    /// the skills resolver and the MCP line. Only `noob debug prompt` returns
+    /// all of it, so that is what this block shows, and while it is running or
+    /// after it has failed the block says which of the two happened.
+    fn prompt_paper(&self) -> Paper {
+        let title = String::from("THE PROMPT THE AGENT GETS");
+        match &self.prompt {
+            Assembled::Waiting => Paper {
+                title,
+                under: String::from("running noob debug prompt\u{2026}"),
+                body: Vec::new(),
+                first: 0,
+                offer: None,
+                bad: false,
+            },
+            Assembled::Got { at, body } => Paper {
+                title,
+                under: format!("noob debug prompt, run in {at}"),
+                body: body.clone(),
+                first: 0,
+                offer: None,
+                bad: false,
+            },
+            Assembled::Failed { at, why } => Paper {
+                title,
+                under: format!("{why} (run in {at})"),
+                body: Vec::new(),
+                first: 0,
+                offer: None,
+                bad: true,
+            },
+        }
     }
 
     /// The conversations the agent has already written, read with the same
@@ -990,11 +1284,20 @@ impl Settings {
     /// Every row of every section, which only the tests want: what is on screen
     /// is one section, and a whole-panel accessor in the window would be a
     /// second way to draw rows nobody clamped.
+    /// A form row is its two halves here rather than the pair: what a test asks
+    /// about is the setting, and which row of a form it happens to sit on is the
+    /// layout's business.
     #[cfg(test)]
     pub fn all_rows(&self) -> impl Iterator<Item = (&'static str, &Row)> {
-        self.sections
-            .iter()
-            .flat_map(|section| section.rows.iter().map(move |row| (section.name, row)))
+        self.sections.iter().flat_map(|section| {
+            section.rows.iter().flat_map(move |row| match row {
+                Row::Pair(left, right) => vec![
+                    (section.name, left.as_ref()),
+                    (section.name, right.as_ref()),
+                ],
+                row => vec![(section.name, row)],
+            })
+        })
     }
 
     #[cfg(test)]
@@ -1008,6 +1311,58 @@ impl Settings {
 
     pub fn cursor(&self) -> usize {
         self.here().cursor
+    }
+
+    /// Which half of the row under the cursor the keyboard is in.
+    ///
+    /// Resolved rather than remembered: the half it was left in when that half
+    /// can hold the cursor, the other one when it cannot. So walking down a form
+    /// column stays in that column, and a row whose left half is a reading puts
+    /// the cursor on the control beside it instead of on nothing.
+    pub fn side(&self) -> Side {
+        let here = self.here();
+        let Some(row) = here.rows.get(here.cursor) else {
+            return Side::Left;
+        };
+        if !matches!(row, Row::Pair(_, _)) {
+            return Side::Left;
+        }
+        match landable(cell(row, here.side)) {
+            true => here.side,
+            false => here.side.other(),
+        }
+    }
+
+    /// The half of the row under the cursor the keys act on, which is the row
+    /// itself everywhere but in a form.
+    pub fn at_cursor(&self) -> Option<&Row> {
+        Some(cell(self.row(self.cursor())?, self.side()))
+    }
+
+    /// One half of one row, for the layout and the drawing.
+    pub fn cell(&self, index: usize, side: Side) -> Option<&Row> {
+        Some(cell(self.row(index)?, side))
+    }
+
+    /// Move across a form row, which is the one thing on this panel the arrow
+    /// keys cannot do: left and right are the nudge. False when the cursor is
+    /// not on a form, or when the other half of it is a reading.
+    pub fn swap(&mut self) -> bool {
+        if self.focus == Focus::Rail || self.editing.is_some() {
+            return false;
+        }
+        let side = self.side();
+        let here = self.here();
+        let Some(row @ Row::Pair(_, _)) = here.rows.get(here.cursor) else {
+            return false;
+        };
+        if !landable(cell(row, side.other())) {
+            return false;
+        }
+        self.picked = None;
+        self.arming = None;
+        self.here_mut().side = side.other();
+        true
     }
 
     /// Whether the cursor is on a row at all: a section of readings has nothing
@@ -1041,11 +1396,11 @@ impl Settings {
 
     /// What a slider is being dragged to, while it is being dragged. The row
     /// still says what the file says, which is what this is drawn instead of.
-    pub fn preview(&self, index: usize) -> Option<&str> {
+    pub fn preview(&self, index: usize, side: Side) -> Option<&str> {
         self.dragging
             .as_ref()
-            .filter(|(at, _)| *at == index)
-            .map(|(_, value)| value.as_str())
+            .filter(|(at, half, _)| *at == index && *half == side)
+            .map(|(_, _, value)| value.as_str())
     }
 
     /// The swatch at a place on the grid, or nothing when that row is not a
@@ -1125,11 +1480,27 @@ impl Settings {
         if self.focus == Focus::Rail {
             return "up and down choose a section \u{2022} right goes in \u{2022} esc closes";
         }
-        match self.row(self.cursor()) {
-            Some(Row::Setting { kind, .. }) => match kind {
-                Kind::Choice(_) => "left and right walk the presets",
-                Kind::Number { .. } => "left and right nudge it, or drag the slider",
+        // On a form row, the one thing the arrow keys cannot say is how to get
+        // to the other half of it, because left and right are the nudge.
+        let across = matches!(self.row(self.cursor()), Some(Row::Pair(_, _)))
+            && self.here().rows.get(self.cursor()).is_some_and(|row| {
+                landable(cell(row, Side::Left)) && landable(cell(row, Side::Right))
+            });
+        match self.at_cursor() {
+            Some(Row::Setting { kind, .. }) => match (kind, across) {
+                (Kind::Choice(_), _) => "left and right walk the presets",
+                (Kind::Number { .. }, false) => "left and right nudge it, or drag the slider",
+                (Kind::Number { .. }, true) => {
+                    "left and right nudge it \u{2022} tab crosses to the other column"
+                }
             },
+            Some(Row::Paper(paper)) => match paper.offer.is_some() {
+                true => "enter writes a starter AGENTS.md there",
+                false => "page up and page down read it \u{2022} up and down leave it",
+            },
+            Some(Row::Field { .. }) if across => {
+                "enter edits it \u{2022} tab crosses to the other column"
+            }
             Some(Row::Field { .. }) => "enter edits it \u{2022} left goes back to the sections",
             Some(Row::Entry(entry)) => match (entry.removable, &entry.what) {
                 (false, _) => "enter turns it on and off",
@@ -1195,7 +1566,7 @@ impl Settings {
             value,
             kind,
             file,
-        } = self.row(self.cursor())?
+        } = self.at_cursor()?
         else {
             return None;
         };
@@ -1241,11 +1612,11 @@ impl Settings {
 
     /// Where along its track the value of a row sits, for drawing the thumb.
     /// Nothing for a row that is not a slider.
-    pub fn fraction(&self, index: usize) -> Option<f32> {
-        let Row::Setting { value, kind, .. } = self.row(index)? else {
+    pub fn fraction(&self, index: usize, side: Side) -> Option<f32> {
+        let Row::Setting { value, kind, .. } = self.cell(index, side)? else {
             return None;
         };
-        let value = self.preview(index).unwrap_or(value);
+        let value = self.preview(index, side).unwrap_or(value);
         kind.fraction(value.parse::<f32>().ok()?)
     }
 
@@ -1259,17 +1630,19 @@ impl Settings {
     /// the file that waits for the button. The cursor follows the drag, so
     /// letting go and pressing an arrow key carries on from where the slider was
     /// left.
-    pub fn slide(&mut self, index: usize, fraction: f32) -> bool {
-        let Some(Row::Setting { kind, .. }) = self.row(index) else {
+    pub fn slide(&mut self, index: usize, side: Side, fraction: f32) -> bool {
+        let Some(Row::Setting { kind, .. }) = self.cell(index, side) else {
             return false;
         };
         let Some(next) = kind.at(fraction) else {
             return false;
         };
         self.focus = Focus::Content;
-        self.here_mut().cursor = index;
-        let moved = self.preview(index) != Some(next.as_str());
-        self.dragging = Some((index, next));
+        let section = self.here_mut();
+        section.cursor = index;
+        section.side = side;
+        let moved = self.preview(index, side) != Some(next.as_str());
+        self.dragging = Some((index, side, next));
         moved
     }
 
@@ -1282,8 +1655,8 @@ impl Settings {
     /// change is returned even when it matches the file, since a drag that went
     /// away and came back has to put the window back too.
     pub fn previewed(&self) -> Option<Change> {
-        let (index, value) = self.dragging.as_ref()?;
-        let Some(Row::Setting { key, file, .. }) = self.row(*index) else {
+        let (index, side, value) = self.dragging.as_ref()?;
+        let Some(Row::Setting { key, file, .. }) = self.cell(*index, *side) else {
             return None;
         };
         Some(Change {
@@ -1296,13 +1669,13 @@ impl Settings {
     /// The button came up: what the drag decided, or nothing when it decided
     /// what the file already said.
     pub fn drop_slider(&mut self) -> Option<Change> {
-        let (index, value) = self.dragging.take()?;
+        let (index, side, value) = self.dragging.take()?;
         let Some(Row::Setting {
             key,
             value: was,
             file,
             ..
-        }) = self.row(index)
+        }) = self.cell(index, side)
         else {
             return None;
         };
@@ -1321,7 +1694,7 @@ impl Settings {
         if self.editing.is_some() {
             return false;
         }
-        let Some(Row::Field { value, .. }) = self.row(self.cursor()) else {
+        let Some(Row::Field { value, .. }) = self.at_cursor() else {
             return false;
         };
         self.editing = Some(value.clone());
@@ -1365,7 +1738,7 @@ impl Settings {
     /// been read back.
     pub fn finish_edit(&mut self) -> Option<(&'static str, String)> {
         let typed = self.editing.take()?;
-        let Some(Row::Field { key, .. }) = self.row(self.cursor()) else {
+        let Some(Row::Field { key, .. }) = self.at_cursor() else {
             return None;
         };
         Some((key, typed))
@@ -1448,6 +1821,42 @@ impl Settings {
     /// Which uninstall is armed, for the button that says so.
     pub fn arming(&self) -> Option<usize> {
         self.arming
+    }
+
+    /// The block of text on one row, for whoever draws it.
+    pub fn paper(&self, index: usize) -> Option<&Paper> {
+        match self.row(index)? {
+            Row::Paper(paper) => Some(paper),
+            _ => None,
+        }
+    }
+
+    /// Move a block of text inside its own box, without moving the list.
+    ///
+    /// Its own scroll for the same reason the column beside the entry list has
+    /// one: the pointer is on the thing being scrolled, and reading a prompt
+    /// must not walk the rows under it.
+    pub fn scroll_paper(&mut self, index: usize, by: usize, down: bool) -> bool {
+        let section = self.here_mut();
+        let Some(Row::Paper(paper)) = section.rows.get_mut(index) else {
+            return false;
+        };
+        let most = paper.most();
+        let next = match down {
+            true => (paper.first + by).min(most),
+            false => paper.first.saturating_sub(by),
+        };
+        let moved = next != paper.first;
+        paper.first = next;
+        moved
+    }
+
+    /// What a press on a block with nothing in it asks for: the file it offered
+    /// to write. Nothing on a block that has something to show, so the press
+    /// cannot land on a file that is already there.
+    pub fn make(&self, index: usize) -> Option<Deed> {
+        let path = self.paper(index)?.offer.clone()?;
+        Some(Deed::StartInstructions { path })
     }
 
     /// The entry the column beside the list is showing: the one under the
@@ -1533,6 +1942,13 @@ impl Settings {
         if self.focus == Focus::Rail {
             return self.step(down);
         }
+        // A block of text is read with these keys rather than paged past. The
+        // cursor is on it, up and down are still how it is left, and the rows
+        // under it do not move while it is being read.
+        if matches!(self.at_cursor(), Some(Row::Paper(_))) {
+            let at = self.cursor();
+            return self.scroll_paper(at, PAPER_LINES, down);
+        }
         let by = rows.max(1);
         let section = self.here_mut();
         let reach = match down {
@@ -1580,8 +1996,19 @@ impl Settings {
     /// Put the cursor on the row under the pointer, when that row can hold it.
     /// A click in the content is also a click into it, so the keyboard follows
     /// the pointer instead of staying on the rail.
-    pub fn point_at(&mut self, index: usize) -> bool {
-        if !self.row(index).is_some_and(landable) {
+    ///
+    /// `side` is which half of a form row was pressed. A press on the half that
+    /// is a reading lands on the control beside it rather than on nothing, the
+    /// same way the keyboard resolves it.
+    pub fn point_at(&mut self, index: usize, side: Side) -> bool {
+        let Some(row) = self.row(index) else {
+            return false;
+        };
+        let side = match landable(cell(row, side)) {
+            true => side,
+            false => side.other(),
+        };
+        if !landable(cell(row, side)) {
             return false;
         }
         self.picked = None;
@@ -1591,10 +2018,12 @@ impl Settings {
             self.arming = None;
         }
         self.rewind_doc();
-        let was = (self.here().cursor, self.focus);
+        let was = (self.here().cursor, self.side(), self.focus);
         self.focus = Focus::Content;
-        self.here_mut().cursor = index;
-        (index, Focus::Content) != was
+        let section = self.here_mut();
+        section.cursor = index;
+        section.side = side;
+        (index, side, Focus::Content) != was
     }
 
     /// How many rows of text each row of the list takes, for the scroll window.
@@ -1814,10 +2243,15 @@ fn server_doc(server: &agent::Server, file: Option<&Path>) -> Vec<String> {
 /// on the settings and the one field and on nothing else. A swatch is a colour
 /// to read: the keys cannot change one, and the file is where they are edited.
 fn landable(row: &Row) -> bool {
-    matches!(
-        row,
-        Row::Setting { .. } | Row::Field { .. } | Row::Entry(_)
-    )
+    match row {
+        // A block of text holds the cursor because it is read rather than
+        // changed: the page keys scroll the one the cursor is on, and a block
+        // with nothing in it yet is where the press that writes the file is
+        // aimed.
+        Row::Setting { .. } | Row::Field { .. } | Row::Entry(_) | Row::Paper(_) => true,
+        Row::Pair(left, right) => landable(left) || landable(right),
+        _ => false,
+    }
 }
 
 /// The next row in that direction the cursor can land on, not counting the one
@@ -1941,7 +2375,8 @@ mod tests {
         }
     }
 
-    /// Put the cursor on a setting wherever it lives, section and all.
+    /// Put the cursor on a setting wherever it lives: section, row and, on a
+    /// form row, which half of it.
     fn put_cursor(panel: &mut Settings, key: &str) {
         let section = panel
             .all_rows()
@@ -1949,13 +2384,21 @@ mod tests {
             .map(|(section, _)| section)
             .unwrap_or_else(|| panic!("{key} is not on the panel"));
         go_to(panel, section);
-        let at = panel
+        let (at, side) = panel
             .rows()
             .iter()
-            .position(|row| matches!(row, Row::Setting { key: k, .. } if *k == key))
+            .enumerate()
+            .find_map(|(at, row)| {
+                [Side::Left, Side::Right]
+                    .into_iter()
+                    .find(|side| {
+                        matches!(cell(row, *side), Row::Setting { key: k, .. } if *k == key)
+                    })
+                    .map(|side| (at, side))
+            })
             .expect("the row is in the section it was found in");
         assert!(
-            panel.point_at(at) || panel.cursor() == at,
+            panel.point_at(at, side) || (panel.cursor() == at && panel.side() == side),
             "{key} cannot hold the cursor"
         );
     }
@@ -1980,10 +2423,11 @@ mod tests {
     /// Everything a section says, as one string, for the tests that care what is
     /// on it rather than which row it is on.
     fn said(panel: &Settings) -> String {
-        panel
-            .rows()
-            .iter()
-            .map(|row| match row {
+        panel.rows().iter().map(says).collect::<Vec<_>>().join("\n")
+    }
+
+    fn says(row: &Row) -> String {
+        match row {
                 Row::Note { text, .. } | Row::Item(text) => text.clone(),
                 Row::Reading { label, value } => format!("{label} {value}"),
                 Row::Setting { key, value, .. } | Row::Field { key, value } => {
@@ -2004,9 +2448,15 @@ mod tests {
                         false => "off",
                     }
                 ),
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+                // Both halves, the way both of them are on the panel.
+                Row::Pair(left, right) => format!("{}\n{}", says(left), says(right)),
+                Row::Paper(paper) => format!(
+                    "{}\n{}\n{}",
+                    paper.title,
+                    paper.under,
+                    paper.body.join("\n")
+                ),
+        }
     }
 
     fn a_session(id: &str, ago: u64, folder: Option<&str>, opening: &str) -> crate::sessions::Saved {
@@ -2413,33 +2863,33 @@ mod tests {
             high: 1.0,
             places: 2,
         };
-        assert_eq!(panel.fraction(at), opacity.fraction(0.5));
+        assert_eq!(panel.fraction(at, panel.side()), opacity.fraction(0.5));
 
-        assert!(panel.slide(at, 1.0));
-        assert_eq!(panel.preview(at), Some("1.00"));
+        assert!(panel.slide(at, panel.side(), 1.0));
+        assert_eq!(panel.preview(at, panel.side()), Some("1.00"));
         assert_eq!(
             value(&panel, "opacity"),
             "0.50",
             "the row said what the file did not"
         );
-        assert_eq!(panel.fraction(at), Some(1.0), "the thumb follows the drag");
-        assert!(!panel.slide(at, 1.0), "the same place is not a change");
+        assert_eq!(panel.fraction(at, panel.side()), Some(1.0), "the thumb follows the drag");
+        assert!(!panel.slide(at, panel.side(), 1.0), "the same place is not a change");
 
         let change = panel.drop_slider().expect("the drag decided something");
         assert_eq!(change.key, "opacity");
         assert_eq!(change.value, "1.00");
-        assert_eq!(panel.preview(at), None, "the preview outlived the drag");
+        assert_eq!(panel.preview(at, panel.side()), None, "the preview outlived the drag");
 
         // A drag that ends on the value the file already has writes nothing: a
         // press on the thumb must not rewrite the file.
-        assert!(panel.slide(at, 0.5));
+        assert!(panel.slide(at, panel.side(), 0.5));
         assert_eq!(panel.drop_slider(), None);
         assert_eq!(panel.drop_slider(), None, "and there is nothing to drop");
 
         // A row that is not a number has no track at all.
         put_cursor(&mut panel, "theme");
-        assert!(!panel.slide(panel.cursor(), 0.5));
-        assert_eq!(panel.fraction(panel.cursor()), None);
+        assert!(!panel.slide(panel.cursor(), panel.side(), 0.5));
+        assert_eq!(panel.fraction(panel.cursor(), panel.side()), None);
         assert_eq!(panel.previewed(), None, "a preset is being dragged");
     }
 
@@ -2458,7 +2908,7 @@ mod tests {
         put_cursor(&mut panel, "opacity");
         let at = panel.cursor();
 
-        assert!(panel.slide(at, 0.0));
+        assert!(panel.slide(at, panel.side(), 0.0));
         let live = panel.previewed().expect("the drag is holding a value");
         assert_eq!(live.key, "opacity");
         assert_eq!(live.value, "0.05");
@@ -2472,7 +2922,7 @@ mod tests {
         assert_eq!(Config::load_from(&path).opacity, was.opacity);
 
         // The pointer keeps moving. Every position is on the panel at once.
-        assert!(panel.slide(at, 1.0));
+        assert!(panel.slide(at, panel.side(), 1.0));
         let live = panel.previewed().expect("still dragging");
         assert_eq!(live.value, "1.00");
         assert_eq!(Config::load_from(&path).opacity, was.opacity, "written mid-drag");
@@ -2502,7 +2952,7 @@ mod tests {
             // Past both ends as well as along the track: a pointer dragged out
             // of the window is a fraction outside 0..1.
             for fraction in [-3.0, 0.0, 0.25, 0.5, 0.75, 1.0, 4.0] {
-                panel.slide(at, fraction);
+                panel.slide(at, panel.side(), fraction);
                 let live = panel.previewed().expect("the drag is holding a value");
                 assert_eq!(live.key, key);
                 let mut showing = was.clone();
@@ -2554,7 +3004,7 @@ mod tests {
         assert!(count > 1, "one swatch to a row is the list again");
 
         // The cursor cannot get there, so no change can be aimed at it.
-        assert!(!panel.point_at(at));
+        assert!(!panel.point_at(at, Side::Left));
         assert_ne!(panel.cursor(), at);
 
         // Pressing one says which line of the file writes it, which is the one
@@ -2602,6 +3052,10 @@ mod tests {
                 Row::Note { text, .. } => vec![text.as_str()],
                 Row::Item(text) => vec![text.as_str()],
                 Row::Entry(entry) => vec![entry.name.as_str()],
+                // A form is its halves here: `all_rows` hands those back
+                // instead of the pair they are in.
+                Row::Pair(_, _) => Vec::new(),
+                Row::Paper(paper) => vec![paper.title.as_str(), paper.under.as_str()],
             };
             for said in named {
                 for key in OFF_PANEL {
@@ -2976,11 +3430,16 @@ mod tests {
         assert!(text.contains("NOOB_API_KEY set, and not shown here"), "{text}");
         assert_eq!(panel.agent_file(), Some(dir.join(".env").as_path()));
 
-        // The endpoint is the one row here that is typed into rather than
-        // nudged, and it is where the section opens.
+        // The endpoint is the one thing here that is typed into rather than
+        // nudged, and it is where the section opens: the left half of the first
+        // row of the form.
         assert!(panel.on_row());
+        assert_eq!(panel.cursor(), 0, "the section does not open on the form");
+        assert_eq!(panel.side(), Side::Left);
         assert!(
-            matches!(panel.row(panel.cursor()), Some(Row::Field { key, .. }) if *key == agent::ENDPOINT)
+            matches!(panel.at_cursor(), Some(Row::Field { key, .. }) if *key == agent::ENDPOINT),
+            "{:?}",
+            panel.at_cursor()
         );
         assert!(panel.edit());
         assert_eq!(panel.editing(), Some("http://localhost:8080/v1"));
@@ -3009,7 +3468,7 @@ mod tests {
         );
         go_to(&mut panel, AGENT);
         assert!(
-            panel.rows().iter().any(|row| matches!(
+            panel.all_rows().any(|(_, row)| matches!(
                 row,
                 Row::Field { value, .. } if value == "http://localhost:8080/v12"
             )),
@@ -3066,9 +3525,9 @@ mod tests {
         // is somewhere the pointer can be dropped rather than a number to guess.
         put_cursor(&mut panel, agent::TASK_CONCURRENCY);
         let at = panel.cursor();
-        assert!(panel.slide(at, 0.0));
-        assert_eq!(panel.preview(at), Some("1"));
-        assert!(panel.slide(at, 1.0));
+        assert!(panel.slide(at, panel.side(), 0.0));
+        assert_eq!(panel.preview(at, panel.side()), Some("1"));
+        assert!(panel.slide(at, panel.side(), 1.0));
         let most = panel.drop_slider().expect("the drag decided something");
         assert_eq!(
             most,
@@ -3081,8 +3540,8 @@ mod tests {
         // And the context window bottoms out where the CLI stops reading it.
         put_cursor(&mut panel, agent::CTX);
         let at = panel.cursor();
-        assert!(panel.slide(at, 0.0));
-        assert_eq!(panel.preview(at), Some("4096"));
+        assert!(panel.slide(at, panel.side(), 0.0));
+        assert_eq!(panel.preview(at, panel.side()), Some("4096"));
         panel.drop_slider();
 
         // Written, it lands in the agent's file, the line keeps its comment and
@@ -3135,6 +3594,255 @@ mod tests {
         assert!(text.contains("not in the file yet"), "{text}");
         assert!(text.contains(agent::CTX), "{text}");
         assert!(text.contains(agent::TASK_CONCURRENCY), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// "actually is awful as is now, unclear because has too many lines
+    /// between": the four things this section is for are a form of two columns,
+    /// two rows tall, and the keyboard reaches every one of them.
+    ///
+    /// Left and right are the nudge on a control, so they cannot also be how a
+    /// form is crossed; tab is, which is what tab does on every other form. The
+    /// heading and the three notes that used to sit between these rows are gone,
+    /// so nothing that cannot be set stands between two things that can.
+    #[test]
+    fn the_agent_s_form_is_two_columns_the_keyboard_can_both_reach() {
+        let dir = scratch_dir("agent-form");
+        std::fs::write(
+            dir.join(".env"),
+            "NOOB_BASE_URL=http://localhost:8080/v1\nNOOB_CTX=262144\nNOOB_TASK_CONCURRENCY=2\n",
+        )
+        .expect("a file");
+        let mut panel = Settings::open(
+            &Config::default(),
+            None,
+            Agent::read(Some(&dir), None, crate::sessions::Listing::default()),
+        );
+        go_to(&mut panel, AGENT);
+
+        // Two rows of two: where the model is and which file says so on the
+        // left, how much the agent gets on the right.
+        for (at, left, right) in [
+            (0usize, agent::ENDPOINT, agent::CTX),
+            (1, "main file", agent::TASK_CONCURRENCY),
+        ] {
+            let row = panel.row(at).expect("a row of the form");
+            assert!(matches!(row, Row::Pair(_, _)), "row {at} is {row:?}");
+            assert!(
+                says(cell(row, Side::Left)).contains(left),
+                "{:?}",
+                cell(row, Side::Left)
+            );
+            assert!(
+                says(cell(row, Side::Right)).contains(right),
+                "{:?}",
+                cell(row, Side::Right)
+            );
+            // Both halves on the same lines, so the two columns line up.
+            assert_eq!(lines(row), 1);
+        }
+        // Nothing that cannot be set stands between the two rows of the form.
+        assert!(
+            !panel.rows()[..2]
+                .iter()
+                .any(|row| matches!(row, Row::Note { .. } | Row::Heading(_))),
+            "{:?}",
+            panel.rows()
+        );
+
+        // It opens on the endpoint, tab crosses to the number beside it, and
+        // there the arrow keys still nudge that number rather than moving again.
+        assert_eq!((panel.cursor(), panel.side()), (0, Side::Left));
+        assert!(matches!(panel.at_cursor(), Some(Row::Field { .. })));
+        assert!(panel.hint().contains("tab"), "{}", panel.hint());
+        assert!(panel.swap());
+        assert_eq!((panel.cursor(), panel.side()), (0, Side::Right));
+        assert_eq!(
+            panel.change(true).expect("the context window nudges"),
+            Change {
+                key: agent::CTX,
+                value: String::from("266240"),
+                file: File::Agent,
+            }
+        );
+        // And down the right hand column: the half is kept while the cursor
+        // walks rows, so a form is read a column at a time.
+        assert!(panel.step(true));
+        assert_eq!((panel.cursor(), panel.side()), (1, Side::Right));
+        assert!(
+            matches!(panel.at_cursor(), Some(Row::Setting { key, .. }) if *key == agent::TASK_CONCURRENCY)
+        );
+        // The left half of that row is a reading, so tab has nowhere to go and
+        // the cursor stays where something can be done.
+        assert!(!panel.swap(), "the cursor crossed onto a reading");
+        assert!(panel.step(false));
+        assert_eq!((panel.cursor(), panel.side()), (0, Side::Right));
+        assert!(panel.swap());
+        assert!(matches!(panel.at_cursor(), Some(Row::Field { .. })));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The two blocks under the form: the agent's own global instructions, and
+    /// the whole prompt it is one layer of.
+    ///
+    /// The file is named as the file, because calling it the prompt would be a
+    /// lie: the prompt also carries the CLI's base instructions, the environment
+    /// block, the project's own AGENTS.md, the skills resolver and the MCP line,
+    /// and only `noob debug prompt` returns all of it. Each block is a fixed
+    /// height and reads with the page keys, so a prompt a thousand lines long
+    /// does not turn the section into a text file.
+    #[test]
+    fn the_agent_section_carries_the_instructions_and_the_whole_prompt() {
+        let dir = scratch_dir("agent-instructions");
+        std::fs::write(
+            dir.join(agent::AGENTS_MD),
+            "# Global instructions\n\nbe brief\n",
+        )
+        .expect("a file");
+        let mut panel = Settings::open(
+            &Config::default(),
+            None,
+            Agent::read(Some(&dir), None, crate::sessions::Listing::default()),
+        );
+        go_to(&mut panel, AGENT);
+
+        let block = |panel: &Settings, title: &str| -> Paper {
+            panel
+                .rows()
+                .iter()
+                .find_map(|row| match row {
+                    Row::Paper(paper) if paper.title.contains(title) => Some(paper.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("there is no {title} block: {:?}", panel.rows()))
+        };
+        let its = block(&panel, "AGENTS.md");
+        assert!(
+            its.under.contains(&dir.join(agent::AGENTS_MD).display().to_string()),
+            "the block does not name the file: {}",
+            its.under
+        );
+        // Which the panel has to say, because this file is not the `.env`: the
+        // prompt is assembled once when a session starts.
+        assert!(its.under.contains("session"), "{}", its.under);
+        assert_eq!(its.body, ["# Global instructions", "", "be brief"]);
+        assert_eq!(its.offer, None, "there is a file to show");
+
+        // Until the CLI answers, the prompt block says it is being read rather
+        // than drawing an empty box.
+        assert!(
+            block(&panel, "PROMPT").under.contains("running"),
+            "{}",
+            block(&panel, "PROMPT").under
+        );
+        let body: Vec<String> = (0..PAPER_LINES * 3).map(|at| format!("line {at}")).collect();
+        panel.adopt_prompt(
+            String::from("/home/hec/workspace/noob-cli"),
+            Ok(body.clone()),
+            &Config::default(),
+        );
+        go_to(&mut panel, AGENT);
+        let whole = block(&panel, "PROMPT");
+        assert_eq!(whole.body, body);
+        assert!(whole.under.contains("/home/hec/workspace/noob-cli"), "{}", whole.under);
+
+        // A block is the same height whatever is in it, which is what keeps the
+        // rows under it where the clicks below them are tested for.
+        let at = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, Row::Paper(paper) if paper.title.contains("PROMPT")))
+            .expect("the prompt block");
+        assert_eq!(lines(panel.row(at).expect("the row")), PAPER_LINES + 2);
+        assert_eq!(panel.heights()[at], PAPER_LINES + 2, "the model and the window disagree");
+
+        // And it is read with the page keys: the cursor is on it, the block
+        // moves and the list under it does not.
+        assert!(panel.point_at(at, Side::Left));
+        assert!(panel.hint().contains("page"), "{}", panel.hint());
+        let was = panel.first();
+        assert!(panel.page(20, true));
+        assert_eq!(panel.paper(at).expect("the block").first, PAPER_LINES);
+        assert_eq!(panel.cursor(), at, "reading the block walked the list");
+        assert_eq!(panel.first(), was, "reading the block scrolled the section");
+        assert!(panel.page(20, false));
+        assert_eq!(panel.paper(at).expect("the block").first, 0);
+        assert!(!panel.page(20, false), "it scrolled past its own first line");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With no file there the block says so and offers to write one, and the
+    /// press writes it where the agent looks rather than anywhere this window
+    /// decided. A prompt the CLI would not print says why instead of showing
+    /// nothing.
+    #[test]
+    fn a_missing_agents_md_is_offered_and_a_failed_prompt_says_why() {
+        let dir = scratch_dir("agent-offer");
+        let path = dir.join(agent::AGENTS_MD);
+        let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
+        let mut panel = Settings::open(&Config::default(), None, read());
+        go_to(&mut panel, AGENT);
+        let at = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, Row::Paper(paper) if paper.title.contains("AGENTS.md")))
+            .expect("the instructions block");
+        let paper = panel.paper(at).expect("the block").clone();
+        assert_eq!(paper.offer.as_deref(), Some(path.as_path()));
+        assert!(paper.under.contains("nothing at"), "{}", paper.under);
+        assert!(!paper.body.is_empty(), "an empty box says nothing at all");
+
+        // The press asks for the file the block named, and nothing else on the
+        // panel offers one.
+        assert!(panel.point_at(at, Side::Left));
+        assert!(panel.hint().contains("enter"), "{}", panel.hint());
+        assert_eq!(
+            panel.make(at),
+            Some(Deed::StartInstructions { path: path.clone() })
+        );
+        agent::start_instructions(&path).expect("the file is written");
+        assert!(
+            agent::start_instructions(&path).is_err(),
+            "a second press wrote over instructions somebody had"
+        );
+        panel.adopt_agent(read(), &Config::default());
+        go_to(&mut panel, AGENT);
+        let paper = panel.paper(at).expect("the block");
+        assert_eq!(paper.offer, None, "it still offers a file that is there");
+        assert!(
+            paper.body.iter().any(|line| line.contains("Global instructions")),
+            "{:?}",
+            paper.body
+        );
+        assert_eq!(panel.make(at), None);
+
+        // A whitespace-only file is nothing at all to the agent, so it is
+        // nothing at all here: it trims the file and a blank one carries no
+        // heading into the prompt.
+        std::fs::write(&path, "\n   \n").expect("a file");
+        panel.adopt_agent(read(), &Config::default());
+        go_to(&mut panel, AGENT);
+        assert!(panel.paper(at).expect("the block").offer.is_some());
+
+        // And the other block says why there is no prompt rather than sitting
+        // empty with nothing anywhere saying what happened.
+        panel.adopt_prompt(
+            String::from("/tmp/work"),
+            Err(String::from("noob debug prompt failed: no such subcommand")),
+            &Config::default(),
+        );
+        go_to(&mut panel, AGENT);
+        let prompt = panel
+            .rows()
+            .iter()
+            .find_map(|row| match row {
+                Row::Paper(paper) if paper.title.contains("PROMPT") => Some(paper),
+                _ => None,
+            })
+            .expect("the prompt block");
+        assert!(prompt.bad, "a failure is not marked as one");
+        assert!(prompt.under.contains("no such subcommand"), "{}", prompt.under);
+        assert!(prompt.under.contains("/tmp/work"), "{}", prompt.under);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

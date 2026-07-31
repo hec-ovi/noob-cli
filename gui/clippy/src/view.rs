@@ -24,7 +24,7 @@ use crate::icons;
 use crate::menu::{MARKER_COLUMNS, Menu};
 use crate::monitor::{Gauge, Monitor};
 use crate::picker::{Picker, Row as PickerRow};
-use crate::settings::{Row as SettingRow, Settings};
+use crate::settings::{Row as SettingRow, Settings, Side};
 use crate::skin::Skin;
 use crate::state::{State, TodoState, Tone};
 
@@ -525,17 +525,21 @@ pub enum Hit {
     /// A section on the settings panel's rail, by position in it. Choosing one
     /// swaps what is beside the rail.
     SettingsSection(usize),
-    /// A row of the settings panel, by position in its list. Puts the cursor
-    /// there and nothing else: a click anywhere on a row that also changed the
-    /// setting would change one every time the pointer missed the value.
-    SettingsRow(usize),
+    /// A row of the settings panel, by position in its list and which half of it
+    /// was pressed. Puts the cursor there and nothing else: a click anywhere on
+    /// a row that also changed the setting would change one every time the
+    /// pointer missed the value.
+    ///
+    /// The half is [`crate::settings::Side::Left`] for every row that is not a
+    /// form, which is all of them outside the AGENT section.
+    SettingsRow(usize, Side),
     /// The value at the end of that row, which is the control. Clicking it is
     /// the same nudge the right arrow is, or the start of an edit on a field.
-    SettingsValue(usize),
+    SettingsValue(usize, Side),
     /// The track at the end of a row whose setting has a range. Pressed and
     /// dragged, the way a divider is: what it means is where the pointer is,
     /// and it is written when the button comes up.
-    SettingsSlider(usize),
+    SettingsSlider(usize, Side),
     /// One cell of the palette grid, as the row it is on and the column along
     /// it. A grid row is several controls wide, so the row on its own cannot say
     /// which colour the pointer is over.
@@ -761,9 +765,9 @@ pub struct Layout {
     /// every shape with no panes.
     pub settings_rail_divider: Divider,
     pub settings_list: Panel,
-    pub settings_rows: Vec<(usize, Panel)>,
-    pub settings_values: Vec<(usize, Panel)>,
-    pub settings_tracks: Vec<(usize, Panel)>,
+    pub settings_rows: Vec<(usize, Side, Panel)>,
+    pub settings_values: Vec<(usize, Side, Panel)>,
+    pub settings_tracks: Vec<(usize, Side, Panel)>,
     pub settings_cells: Vec<(usize, usize, Panel)>,
     /// The two controls an entry row carries: the toggle that turns it on and
     /// off, and the uninstall on the rows that have one. Empty on every section
@@ -1492,14 +1496,14 @@ impl Layout {
                 return Some(Hit::SettingsClose);
             }
             // The control before the row it sits in, because it sits inside it.
-            for (index, panel) in &self.settings_tracks {
+            for (index, side, panel) in &self.settings_tracks {
                 if panel.contains(x, y) {
-                    return Some(Hit::SettingsSlider(*index));
+                    return Some(Hit::SettingsSlider(*index, *side));
                 }
             }
-            for (index, panel) in &self.settings_values {
+            for (index, side, panel) in &self.settings_values {
                 if panel.contains(x, y) {
-                    return Some(Hit::SettingsValue(*index));
+                    return Some(Hit::SettingsValue(*index, *side));
                 }
             }
             // A cell before its row, for the same reason: it sits inside it, and
@@ -1536,9 +1540,9 @@ impl Layout {
                     return Some(Hit::SettingsSection(*index));
                 }
             }
-            for (index, panel) in &self.settings_rows {
+            for (index, side, panel) in &self.settings_rows {
                 if panel.contains(x, y) {
-                    return Some(Hit::SettingsRow(*index));
+                    return Some(Hit::SettingsRow(*index, *side));
                 }
             }
             if self.settings.w >= 1.0 && self.settings.contains(x, y) {
@@ -1802,12 +1806,12 @@ impl Layout {
     /// end of it holds the end instead of stopping: the pointer is still down,
     /// and a slider that goes dead when the pointer overshoots by a pixel is a
     /// slider that cannot reach its own ends.
-    pub fn slider_at(&self, index: usize, x: f32) -> Option<f32> {
-        let (_, track) = self
+    pub fn slider_at(&self, index: usize, side: Side, x: f32) -> Option<f32> {
+        let (_, _, track) = self
             .settings_tracks
             .iter()
-            .find(|(at, _)| *at == index)
-            .filter(|(_, track)| track.w >= 1.0)?;
+            .find(|(at, half, _)| *at == index && *half == side)
+            .filter(|(_, _, track)| track.w >= 1.0)?;
         Some(((x - track.x) / track.w).clamp(0.0, 1.0))
     }
 
@@ -2364,9 +2368,11 @@ struct SettingsPlaces {
     rail: Vec<(usize, Panel)>,
     divider: Divider,
     list: Panel,
-    rows: Vec<(usize, Panel)>,
-    values: Vec<(usize, Panel)>,
-    tracks: Vec<(usize, Panel)>,
+    /// Every row, and every half of a form row: the box it is drawn in and
+    /// clicked in. A row that is not a form is one entry on the left.
+    rows: Vec<(usize, Side, Panel)>,
+    values: Vec<(usize, Side, Panel)>,
+    tracks: Vec<(usize, Side, Panel)>,
     cells: Vec<(usize, usize, Panel)>,
     toggles: Vec<(usize, Panel)>,
     removes: Vec<(usize, Panel)>,
@@ -2443,6 +2449,22 @@ fn settings_rail_floor(column: f32) -> f32 {
 /// the right instead.
 fn settings_label_w(list_w: f32, column: f32) -> f32 {
     (SETTING_LABEL_COLUMNS as f32 * column).min((list_w * 0.5).floor())
+}
+
+/// Where the two halves of a form row sit.
+///
+/// Half each, floored to a whole pixel so the line between them does not land on
+/// a half one, and the same split is asked for by the placement, the hit test
+/// and the drawing.
+fn settings_halves(row: Panel) -> [(Side, Panel); 2] {
+    let half = (row.w * 0.5).floor().max(1.0);
+    [
+        (Side::Left, Panel::new(row.x, row.y, half, row.h)),
+        (
+            Side::Right,
+            Panel::new(row.x + half, row.y, (row.w - half).max(1.0), row.h),
+        ),
+    ]
 }
 
 /// How much of a slider's row the number beside the track takes. The track gets
@@ -2566,7 +2588,6 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
     };
     let rows_fit = Text::rows_for(shape.pane_size, list.h);
     let (first, count) = panel.window(rows_fit);
-    let label_w = settings_label_w(list.w, column);
     let mut rows = Vec::new();
     let mut values = Vec::new();
     let mut tracks = Vec::new();
@@ -2590,23 +2611,39 @@ fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlace
         }
         let row = Panel::new(list.x, y, list.w, tall);
         y += tall;
-        rows.push((index, row));
-        let value_at = settings_control(row, label_w, column);
-        // Only a row that carries a control gets one, and a control is either a
-        // value or a track. A heading or a reading with a click region over its
-        // value would answer a press with nothing.
+        // A form row is two boxes side by side and everything else is one. Each
+        // half is placed exactly the way a whole row is, with its own label
+        // column measured off its own width, so a control in one is drawn where
+        // the press that changes it is tested for.
+        let halves: Vec<(Side, Panel)> = match entry {
+            SettingRow::Pair(_, _) => settings_halves(row).into(),
+            _ => vec![(Side::Left, row)],
+        };
+        for (side, at) in &halves {
+            rows.push((index, *side, *at));
+            let cell = crate::settings::cell(entry, *side);
+            let label_w = settings_label_w(at.w, column);
+            let value_at = settings_control(*at, label_w, column);
+            // Only a row that carries a control gets one, and a control is
+            // either a value or a track. A heading or a reading with a click
+            // region over its value would answer a press with nothing.
+            match cell {
+                SettingRow::Setting { kind, .. } if kind.fraction(0.0).is_some() => {
+                    let number =
+                        (SETTING_TRACK_VALUE_COLUMNS as f32 * column).min(value_at.w * 0.5);
+                    tracks.push((
+                        index,
+                        *side,
+                        Panel::new(value_at.x, value_at.y, value_at.w - number, value_at.h),
+                    ));
+                }
+                SettingRow::Setting { .. } | SettingRow::Field { .. } => {
+                    values.push((index, *side, value_at));
+                }
+                _ => {}
+            }
+        }
         match entry {
-            SettingRow::Setting { kind, .. } if kind.fraction(0.0).is_some() => {
-                let number = (SETTING_TRACK_VALUE_COLUMNS as f32 * column).min(value_at.w * 0.5);
-                tracks.push((
-                    index,
-                    Panel::new(value_at.x, value_at.y, value_at.w - number, value_at.h),
-                ));
-            }
-            SettingRow::Setting { .. } => {
-                values.push((index, value_at));
-            }
-            SettingRow::Field { .. } => values.push((index, value_at)),
             // The whole row is controls: one cell per colour on it.
             SettingRow::Swatches(swatches) => {
                 for cell in 0..swatches.len() {
@@ -4819,17 +4856,34 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
         scene.rect(Panel::new(list.x - (GAP * 0.5).floor(), list.y, 1.0, list.h).fill(skin.edge));
     }
 
-    let label_w = settings_label_w(list.w, column);
-    let label_cols = columns_in(label_w, column).saturating_sub(1);
-    let last_drawn = layout.settings_rows.last().map(|(index, _)| *index);
-    for (index, row) in &layout.settings_rows {
-        let Some(entry) = panel.row(*index) else {
+    let last_drawn = layout.settings_rows.last().map(|(index, _, _)| *index);
+    for (index, side, row) in &layout.settings_rows {
+        let Some(whole_row) = panel.row(*index) else {
             continue;
         };
-        let on = *index == panel.cursor() && panel.on_row();
+        // A form row is drawn one half at a time, in the half's own box: what a
+        // cell is and where it goes come from the same two functions the
+        // placement and the hit test used.
+        let paired = matches!(whole_row, SettingRow::Pair(_, _));
+        let entry = crate::settings::cell(whole_row, *side);
+        let label_w = settings_label_w(row.w, column);
+        let label_cols = columns_in(label_w, column).saturating_sub(1);
+        let on = *index == panel.cursor() && panel.on_row() && (!paired || panel.side() == *side);
+        // The band is what says which half of a form the keyboard is in, so it
+        // is drawn on the half rather than across the row. Not on a block of
+        // text: a filled strip fourteen lines tall over a page of prose is a
+        // highlight nobody can read through, and the mark down its edge says the
+        // same thing.
         if on {
-            scene.rect(row.fill(skin.strip));
+            if !matches!(entry, SettingRow::Paper(_)) {
+                scene.rect(row.fill(skin.strip));
+            }
             scene.rect(Panel::new(row.x, row.y, MARK_W, row.h).fill(skin.edge_focus));
+        }
+        // The line between the two columns of a form, so the row reads as two
+        // things rather than as one sentence that happens to have a gap in it.
+        if paired && *side == Side::Right && row.h >= 2.0 {
+            scene.rect(Panel::new(row.x, row.y + 2.0, 1.0, (row.h - 4.0).max(1.0)).fill(skin.edge));
         }
         // A hairline under every row but the last one on screen. A settings
         // panel is a form, and a form with nothing between its rows is one block
@@ -4955,7 +5009,7 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 // looked exactly like a reading, and the only way to find out
                 // which was which was to press one.
                 scene.rect(panel_fill(value_at, skin.input));
-                if frame.hot == Some(Hit::SettingsValue(*index)) {
+                if frame.hot == Some(Hit::SettingsValue(*index, *side)) {
                     scene.rect(value_at.fill(skin.hot));
                 }
                 scene.rect(panel_edge(
@@ -5004,20 +5058,20 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 let track = layout
                     .settings_tracks
                     .iter()
-                    .find(|(at, _)| at == index)
-                    .map(|(_, track)| *track);
-                let value = panel.preview(*index).unwrap_or(value);
+                    .find(|(at, half, _)| at == index && half == side)
+                    .map(|(_, _, track)| *track);
+                let value = panel.preview(*index, *side).unwrap_or(value);
                 match track {
                     // A setting with a range is a position on a track, with the
                     // number it is at beside it. Nineteen presses of an arrow
                     // key from one end of opacity to the other is not a control.
                     Some(track) if track.w >= 1.0 => {
-                        if frame.hot == Some(Hit::SettingsSlider(*index)) {
+                        if frame.hot == Some(Hit::SettingsSlider(*index, *side)) {
                             scene.rect(track.fill(skin.hot));
                         }
                         let thick = (line * 0.3).floor().max(2.0);
                         let up = ((line - thick) * 0.5).floor();
-                        let at = panel.fraction(*index).unwrap_or(0.0);
+                        let at = panel.fraction(*index, *side).unwrap_or(0.0);
                         scene.rect(
                             Panel::new(track.x, track.y + up, track.w, thick)
                                 .fill(skin.gauge_track),
@@ -5060,7 +5114,7 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     // same press: anything with an outline here can be changed.
                     _ => {
                         scene.rect(panel_fill(value_at, skin.input));
-                        if frame.hot == Some(Hit::SettingsValue(*index)) {
+                        if frame.hot == Some(Hit::SettingsValue(*index, *side)) {
                             scene.rect(value_at.fill(skin.hot));
                         }
                         scene.rect(panel_edge(
@@ -5251,6 +5305,69 @@ fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     );
                 }
             }
+            // A block of text under a title of its own: what the agent is really
+            // told, and where that came from. Rendered as Markdown, the way the
+            // column beside the skills list renders a `SKILL.md`, because both of
+            // these are Markdown and printing the marks would be showing the
+            // file rather than the instructions.
+            SettingRow::Paper(paper) => {
+                let held = crate::settings::PAPER_LINES;
+                say(
+                    scene,
+                    vec![Run::tinted(clip(&paper.title, whole_cols), skin.good)],
+                    whole,
+                    skin.good,
+                );
+                // How far down a block that is longer than its box has been
+                // read, on the title's own line: a page of prose with no way of
+                // telling how much of it is left is a box that reads as the whole
+                // thing.
+                if paper.body.len() > held {
+                    let last = (paper.first + held).min(paper.body.len());
+                    let counter = format!("{}-{} of {}", paper.first + 1, last, paper.body.len());
+                    let wide = (counter.chars().count() as f32 + 1.0) * column;
+                    if wide < whole.w * 0.5 {
+                        say(
+                            scene,
+                            vec![Run::tinted(counter, skin.dim)],
+                            Panel::new(whole.x + whole.w - wide, whole.y, wide, line),
+                            skin.dim,
+                        );
+                    }
+                }
+                let under = match paper.bad {
+                    true => skin.bad,
+                    false => skin.dim,
+                };
+                if row.h >= line * 2.0 {
+                    say(
+                        scene,
+                        vec![Run::tinted(clip(&paper.under, whole_cols), under)],
+                        Panel::new(text_x, row.y + line, whole.w, line),
+                        under,
+                    );
+                }
+                // Where the fences stand after everything scrolled off, so a
+                // block that starts inside a code block is drawn as code.
+                let mut fence = crate::markdown::fence_after(
+                    paper.body.iter().take(paper.first).map(String::as_str),
+                );
+                for (step, text) in paper.body.iter().skip(paper.first).take(held).enumerate() {
+                    let at = Panel::new(text_x, row.y + (step as f32 + 2.0) * line, whole.w, line);
+                    // Cut off at the bottom of the row rather than drawn under
+                    // it: the last block on a short list is clipped by the list.
+                    if at.y + line > row.y + row.h {
+                        break;
+                    }
+                    let mut runs = Vec::new();
+                    crate::markdown::line(&clip(text, whole_cols), &mut fence, skin, &mut runs);
+                    scene.text(Text::rich(runs, at, size, skin.body));
+                }
+            }
+            // Never drawn: a half of a form is what is drawn, and `cell` hands
+            // one back rather than the pair it came out of. A pair inside a pair
+            // is the only way here, and nothing builds one.
+            SettingRow::Pair(_, _) => {}
         }
     }
     // The column beside that list: the entry under the cursor, rendered the way
@@ -13395,6 +13512,13 @@ mod tests {
                     String::from("Read the file before writing it."),
                 ],
             }],
+            // Where a global AGENTS.md would go, with nothing in it: the
+            // machine this fixture stands for has never written one.
+            instructions: crate::agent::Instructions {
+                path: Some(std::path::PathBuf::from("/home/hec/.config/noob/AGENTS.md")),
+                body: Vec::new(),
+                capped: false,
+            },
             sessions: crate::sessions::Listing {
                 sessions: vec![crate::sessions::Saved {
                     id: String::from("abc"),
@@ -13480,7 +13604,7 @@ mod tests {
             let out = render_settings(&panel, 1400.0, 900.0, None);
             let layout = &out.layout;
             assert!(!layout.settings_rows.is_empty(), "{section} draws no rows");
-            for (index, row) in &layout.settings_rows {
+            for (index, side, row) in &layout.settings_rows {
                 assert!(
                     layout.settings_list.contains(row.x + 1.0, row.y + 1.0),
                     "row {index} of {section} is outside the list: {row:?}"
@@ -13488,7 +13612,7 @@ mod tests {
                 // The left of the row, which is the label, puts the cursor there.
                 assert_eq!(
                     layout.hit(row.x + 2.0, row.y + row.h * 0.5),
-                    Some(Hit::SettingsRow(*index)),
+                    Some(Hit::SettingsRow(*index, *side)),
                     "{section}"
                 );
                 // What a row carries: a track when its setting has a range, a
@@ -13515,22 +13639,24 @@ mod tests {
                     }
                     continue;
                 }
-                let wanted = match panel.row(*index) {
+                let wanted = match panel.cell(*index, *side) {
                     Some(crate::settings::Row::Setting { kind, .. })
                         if kind.fraction(0.0).is_some() =>
                     {
-                        Some(Hit::SettingsSlider(*index))
+                        Some(Hit::SettingsSlider(*index, *side))
                     }
-                    Some(crate::settings::Row::Setting { .. }) => Some(Hit::SettingsValue(*index)),
-                    Some(crate::settings::Row::Field { .. }) => Some(Hit::SettingsValue(*index)),
+                    Some(crate::settings::Row::Setting { .. })
+                    | Some(crate::settings::Row::Field { .. }) => {
+                        Some(Hit::SettingsValue(*index, *side))
+                    }
                     _ => None,
                 };
                 let control = layout
                     .settings_values
                     .iter()
                     .chain(layout.settings_tracks.iter())
-                    .find(|(at, _)| at == index)
-                    .map(|(_, panel)| *panel);
+                    .find(|(at, half, _)| at == index && half == side)
+                    .map(|(_, _, panel)| *panel);
                 match (wanted, control) {
                     (Some(hit), Some(control)) => {
                         let (x, y) = middle(control);
@@ -13541,25 +13667,219 @@ mod tests {
                     // the row, and a press on its right hand end changes nothing.
                     (None, None) => assert_eq!(
                         layout.hit(row.x + row.w - 2.0, row.y + row.h * 0.5),
-                        Some(Hit::SettingsRow(*index)),
+                        Some(Hit::SettingsRow(*index, *side)),
                         "{section}"
                     ),
                     other => panic!("row {index} of {section} carries {other:?}"),
                 }
             }
-            // The controls all start in one column, which is what makes a screen
-            // of settings scannable rather than a wall of words.
-            let lefts: Vec<f32> = layout
-                .settings_values
-                .iter()
-                .chain(layout.settings_tracks.iter())
-                .map(|(_, p)| p.x)
-                .collect();
-            assert!(
-                lefts.windows(2).all(|pair| (pair[0] - pair[1]).abs() < 0.01),
-                "{section}: {lefts:?}"
-            );
+            // The controls of a column all start in the same place, which is
+            // what makes a screen of settings scannable rather than a wall of
+            // words. Per column rather than across the panel, because a form row
+            // has two of them: the right hand column lines up with itself.
+            for want in [crate::settings::Side::Left, crate::settings::Side::Right] {
+                let lefts: Vec<f32> = layout
+                    .settings_values
+                    .iter()
+                    .chain(layout.settings_tracks.iter())
+                    .filter(|(_, side, _)| *side == want)
+                    .map(|(_, _, p)| p.x)
+                    .collect();
+                assert!(
+                    lefts.windows(2).all(|pair| (pair[0] - pair[1]).abs() < 0.01),
+                    "{section}: {lefts:?}"
+                );
+            }
         }
+    }
+
+    /// An agent with instructions of its own and a prompt already read, for the
+    /// two blocks at the bottom of the AGENT section.
+    fn an_agent_with_instructions() -> crate::agent::Agent {
+        crate::agent::Agent {
+            instructions: crate::agent::Instructions {
+                path: Some(std::path::PathBuf::from("/home/hec/.config/noob/AGENTS.md")),
+                body: vec![
+                    String::from("# Global instructions"),
+                    String::new(),
+                    String::from("Answer in as few words as carry the answer."),
+                ],
+                capped: false,
+            },
+            ..an_agent()
+        }
+    }
+
+    /// The AGENT section is a form: two rows of two, each half drawn in its own
+    /// column and pressed where it is drawn.
+    ///
+    /// "put it like forms": the endpoint and the file the agent reads down the
+    /// left, the two numbers that decide what it gets down the right, with
+    /// nothing between them. Every half is its own box, so a press in one column
+    /// cannot land on the other.
+    #[test]
+    fn the_agent_form_draws_two_columns_that_are_pressed_apart() {
+        let mut panel = a_panel_on(&Config::default(), crate::settings::AGENT);
+        panel.adopt_prompt(
+            String::from("/home/hec/workspace/noob-cli"),
+            Ok(vec![String::from("You are noob.")]),
+            &Config::default(),
+        );
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let layout = &out.layout;
+        let list = layout.settings_list;
+        let form: Vec<(usize, Side, Panel)> = layout
+            .settings_rows
+            .iter()
+            .filter(|(index, _, _)| *index < 2)
+            .copied()
+            .collect();
+        assert_eq!(form.len(), 4, "the form is not two rows of two: {form:?}");
+        for pair in form.chunks(2) {
+            let [(index, left_side, left), (_, right_side, right)] = pair else {
+                panic!("{pair:?}");
+            };
+            assert_eq!((*left_side, *right_side), (Side::Left, Side::Right));
+            // Side by side, on the same lines, filling the row between them.
+            assert_eq!(left.y, right.y, "row {index} is not one row");
+            assert_eq!(left.h, right.h);
+            assert!((left.x - list.x).abs() < 0.01, "{left:?}");
+            assert!((left.x + left.w - right.x).abs() < 0.01, "{left:?} {right:?}");
+            assert!(
+                (right.x + right.w - (list.x + list.w)).abs() < 0.01,
+                "{right:?} against {list:?}"
+            );
+            // And each half answers for itself: a press in one column is that
+            // column's row, never the other's.
+            for (side, at) in [(Side::Left, left), (Side::Right, right)] {
+                let (x, y) = middle(*at);
+                assert!(
+                    matches!(layout.hit(x, y), Some(Hit::SettingsRow(row, half) | Hit::SettingsValue(row, half) | Hit::SettingsSlider(row, half)) if row == *index && half == side),
+                    "the {side:?} half of row {index} answers with {:?}",
+                    layout.hit(x, y)
+                );
+            }
+        }
+        // The controls are in the halves they belong to: the endpoint is typed
+        // into on the left, the context window is dragged on the right.
+        let endpoint = layout
+            .settings_values
+            .iter()
+            .find(|(index, side, _)| *index == 0 && *side == Side::Left)
+            .map(|(_, _, at)| *at)
+            .expect("the endpoint's box");
+        let ctx = layout
+            .settings_tracks
+            .iter()
+            .find(|(index, side, _)| *index == 0 && *side == Side::Right)
+            .map(|(_, _, at)| *at)
+            .expect("the context window's track");
+        assert!(endpoint.x + endpoint.w <= ctx.x, "{endpoint:?} {ctx:?}");
+        assert!(form[0].2.contains(endpoint.x + 1.0, endpoint.y + 1.0));
+        assert!(form[1].2.contains(ctx.x + 1.0, ctx.y + 1.0));
+
+        // Both are drawn, both are labelled with the key that writes them, and
+        // the file the agent reads is on the row under the endpoint.
+        let text = text_of(&out.scene);
+        for wanted in [
+            crate::agent::ENDPOINT,
+            crate::agent::CTX,
+            crate::agent::TASK_CONCURRENCY,
+            "main file",
+        ] {
+            assert!(text.contains(wanted), "{wanted} is not drawn: {text}");
+        }
+    }
+
+    /// The two blocks under the form: the file the agent really reads, and the
+    /// whole prompt it is one layer of. Both draw their title and their text.
+    #[test]
+    fn the_agent_section_draws_the_instructions_and_the_prompt() {
+        let mut panel = Settings::open(
+            &Config::default(),
+            None,
+            an_agent_with_instructions(),
+        );
+        let at = panel
+            .section_names()
+            .iter()
+            .position(|name| *name == crate::settings::AGENT)
+            .expect("the agent section");
+        panel.choose(at);
+        panel.enter();
+        panel.adopt_prompt(
+            String::from("/home/hec/workspace/noob-cli"),
+            Ok(vec![
+                String::from("You are noob, a coding agent."),
+                String::new(),
+                String::from("# Global instructions (AGENTS.md)"),
+            ]),
+            &Config::default(),
+        );
+        let out = render_settings(&panel, 1400.0, 1200.0, None);
+        let text = text_of(&out.scene);
+
+        // The file, by name and by path, with what is in it under the title.
+        assert!(text.contains("AGENTS.md"), "{text}");
+        assert!(text.contains("/home/hec/.config/noob/AGENTS.md"), "{text}");
+        assert!(
+            text.contains("Answer in as few words as carry the answer."),
+            "the instructions are not drawn: {text}"
+        );
+        // Rendered as Markdown rather than printed with its marks in, the way
+        // the column beside the skills list renders a SKILL.md.
+        assert!(text.contains("Global instructions"), "{text}");
+        assert!(!text.contains("# Global instructions"), "{text}");
+
+        // And the prompt, under a title of its own that says where it came
+        // from. The file is never called the prompt: it is one layer of it.
+        assert!(text.contains("THE PROMPT THE AGENT GETS"), "{text}");
+        assert!(text.contains("noob debug prompt"), "{text}");
+        assert!(text.contains("You are noob, a coding agent."), "{text}");
+
+        // The titles are the accent green, the way every heading on this panel
+        // is, so a block reads as a block rather than as more rows.
+        let title = out
+            .scene
+            .texts
+            .iter()
+            .flat_map(|text| text.runs.iter())
+            .find(|run| run.text.contains("THE PROMPT"))
+            .expect("the prompt's title");
+        assert_eq!(title.color, Some(out.skin.good));
+    }
+
+    /// A file that is not there is an offer to write one, and a command that
+    /// failed is the reason it failed. Neither is an empty box.
+    #[test]
+    fn a_missing_file_and_a_failed_command_are_said_on_their_own_block() {
+        let mut panel = a_panel_on(&Config::default(), crate::settings::AGENT);
+        panel.adopt_prompt(
+            String::from("/home/hec/workspace/noob-cli"),
+            Err(String::from("noob debug prompt failed: no such subcommand")),
+            &Config::default(),
+        );
+        let out = render_settings(&panel, 1400.0, 1200.0, None);
+        let text = text_of(&out.scene);
+        // `an_agent` has no AGENTS.md at all, so the block says where one would
+        // go and what the key would do.
+        assert!(text.contains("nothing at"), "{text}");
+        assert!(text.contains("/home/hec/.config/noob/AGENTS.md"), "{text}");
+        assert!(
+            text.contains("The agent reads this file first"),
+            "the block is empty: {text}"
+        );
+        // And the prompt block carries the reason, in the colour this window
+        // uses for something that went wrong.
+        assert!(text.contains("no such subcommand"), "{text}");
+        let why = out
+            .scene
+            .texts
+            .iter()
+            .flat_map(|text| text.runs.iter())
+            .find(|run| run.text.contains("no such subcommand"))
+            .expect("the reason");
+        assert_eq!(why.color, Some(out.skin.bad));
     }
 
     /// The skills section is two columns: the entries down the left, and the
@@ -13582,7 +13902,7 @@ mod tests {
         );
         // Every row of the list is in the left column, so a press in the
         // document cannot land on a skill.
-        for (index, row) in &layout.settings_rows {
+        for (index, _, row) in &layout.settings_rows {
             assert!(
                 row.x + row.w <= doc.x,
                 "row {index} runs into the document: {row:?}"
@@ -13641,18 +13961,18 @@ mod tests {
         let entries: Vec<usize> = layout
             .settings_rows
             .iter()
-            .filter(|(index, _)| {
+            .filter(|(index, _, _)| {
                 matches!(panel.row(*index), Some(crate::settings::Row::Entry(_)))
             })
-            .map(|(index, _)| *index)
+            .map(|(index, _, _)| *index)
             .collect();
         assert_eq!(entries.len(), 1, "the one skill is not a row of its own");
         let index = entries[0];
         let row = layout
             .settings_rows
             .iter()
-            .find(|(at, _)| *at == index)
-            .map(|(_, row)| *row)
+            .find(|(at, _, _)| *at == index)
+            .map(|(_, _, row)| *row)
             .expect("the row");
 
         let toggle = layout
@@ -13682,7 +14002,7 @@ mod tests {
         // The row itself is still the row.
         assert_eq!(
             layout.hit(row.x + 2.0, row.y + 2.0),
-            Some(Hit::SettingsRow(index))
+            Some(Hit::SettingsRow(index, crate::settings::Side::Left))
         );
         let text = text_of(&out.scene);
         assert!(text.contains("uninstall"), "{text}");
@@ -13783,10 +14103,10 @@ mod tests {
         // room for it, and stops at the list, where the labels start.
         let (rx, ry) = middle(layout.settings_rail[1].1);
         assert_eq!(layout.hit(rx, ry), Some(Hit::SettingsSection(1)));
-        let (index, row) = layout.settings_rows[0];
+        let (index, side, row) = layout.settings_rows[0];
         assert_eq!(
             layout.hit(row.x + 2.0, row.y + row.h * 0.5),
-            Some(Hit::SettingsRow(index))
+            Some(Hit::SettingsRow(index, side))
         );
 
         // And it is not there when the panel is not: a band left behind by a
@@ -13826,7 +14146,7 @@ mod tests {
                     list.x
                 );
             }
-            for (index, row) in &layout.settings_rows {
+            for (index, _, row) in &layout.settings_rows {
                 assert!(row.x >= list.x - 0.01, "row {index} at {row:?}");
                 assert!(row.x + row.w <= list.x + list.w + 0.01, "row {index}");
             }
@@ -13885,7 +14205,7 @@ mod tests {
         let panel = a_panel_on(&Config::parse("opacity = 0.50"), crate::settings::APPEARANCE);
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let layout = &out.layout;
-        let (index, track) = layout
+        let (index, side, track) = layout
             .settings_tracks
             .first()
             .copied()
@@ -13895,17 +14215,22 @@ mod tests {
         );
 
         // Both ends and the middle, off the geometry the row is drawn with.
-        assert_eq!(layout.slider_at(index, track.x), Some(0.0));
-        assert_eq!(layout.slider_at(index, track.x + track.w), Some(1.0));
+        assert_eq!(layout.slider_at(index, side, track.x), Some(0.0));
+        assert_eq!(layout.slider_at(index, side, track.x + track.w), Some(1.0));
         let half = layout
-            .slider_at(index, track.x + track.w * 0.5)
+            .slider_at(index, side, track.x + track.w * 0.5)
             .expect("the middle");
         assert!((half - 0.5).abs() < 0.01, "{half}");
         // A pointer that ran off the end holds the end rather than going dead.
-        assert_eq!(layout.slider_at(index, track.x - 500.0), Some(0.0));
-        assert_eq!(layout.slider_at(index, track.x + track.w + 500.0), Some(1.0));
-        // A row with no track has no position along one.
-        assert_eq!(layout.slider_at(index + 500, track.x), None);
+        assert_eq!(layout.slider_at(index, side, track.x - 500.0), Some(0.0));
+        assert_eq!(
+            layout.slider_at(index, side, track.x + track.w + 500.0),
+            Some(1.0)
+        );
+        // A row with no track has no position along one, and neither has the
+        // other half of a row that has one.
+        assert_eq!(layout.slider_at(index + 500, side, track.x), None);
+        assert_eq!(layout.slider_at(index, side.other(), track.x), None);
 
         // The track is drawn where it is pressed: an unlit bar the width of the
         // track and a lit one as far along it as the value.
@@ -14028,8 +14353,8 @@ mod tests {
                 .layout
                 .settings_rows
                 .iter()
-                .find(|(_, row)| row.contains(text.at.x + 1.0, text.at.y + 1.0))
-                .map(|(index, row)| (*index, *row))
+                .find(|(_, _, row)| row.contains(text.at.x + 1.0, text.at.y + 1.0))
+                .map(|(index, _, row)| (*index, *row))
                 .unwrap_or_else(|| panic!("{heading} is drawn on no row at all"));
             assert!(
                 matches!(panel.row(row.0), Some(crate::settings::Row::Heading(name)) if *name == heading),
@@ -14080,7 +14405,7 @@ mod tests {
             })
         };
         let mut ruled = 0;
-        for (index, row) in &rows[..rows.len() - 1] {
+        for (index, _, row) in &rows[..rows.len() - 1] {
             // A heading keeps the group under it: the line above it is what
             // separates that group from the one before.
             if matches!(panel.row(*index), Some(crate::settings::Row::Heading(_))) {
@@ -14093,7 +14418,7 @@ mod tests {
         assert!(ruled > 3, "hardly anything is ruled off: {ruled}");
         // Not under the last one: a line along the bottom of the list reads as
         // the edge of a box that is not there.
-        let (_, last) = rows.last().expect("a last row");
+        let (_, _, last) = rows.last().expect("a last row");
         assert!(!rule(last), "the list is closed off at the bottom");
     }
 
@@ -14109,7 +14434,7 @@ mod tests {
             let out = render_settings(&panel, 1400.0, 900.0, None);
             let boxes = &out.layout.settings_values;
             assert!(!boxes.is_empty(), "{section} has no control on it");
-            for (index, at) in boxes {
+            for (index, _, at) in boxes {
                 let over = |rect: &noob_draw::Rect| {
                     let [x, y, w, h] = rect.xywh();
                     (x - at.x).abs() < 0.01
@@ -14138,7 +14463,7 @@ mod tests {
         // so does the caret while it is being typed into.
         let mut panel = a_panel_on(&Config::default(), crate::settings::AGENT);
         while !matches!(
-            panel.row(panel.cursor()),
+            panel.at_cursor(),
             Some(crate::settings::Row::Field { .. })
         ) {
             assert!(panel.step(true), "the agent section has no field on it");
@@ -14146,11 +14471,11 @@ mod tests {
         assert!(panel.edit());
         assert!(panel.type_text("http://localhost:9/v1"));
         let out = render_settings(&panel, 1400.0, 900.0, None);
-        let (_, at) = out
+        let (_, _, at) = out
             .layout
             .settings_values
             .iter()
-            .find(|(index, _)| *index == panel.cursor())
+            .find(|(index, side, _)| *index == panel.cursor() && *side == panel.side())
             .expect("the endpoint's box");
         let caret = out
             .scene
@@ -14175,7 +14500,7 @@ mod tests {
     fn nothing_the_settings_panel_draws_escapes_it() {
         let panel = a_settings_panel(&Config::default());
         for (w, h) in [(1400.0, 900.0), (680.0, 380.0), (2200.0, 1400.0)] {
-            let out = render_settings(&panel, w, h, Some(Hit::SettingsValue(7)));
+            let out = render_settings(&panel, w, h, Some(Hit::SettingsValue(7, Side::Left)));
             let box_ = out.layout.settings;
             let inside = |x: f32, y: f32, rw: f32, rh: f32| {
                 x >= box_.x - 0.01
@@ -14269,8 +14594,8 @@ mod tests {
             .layout
             .settings_rows
             .iter()
-            .find(|(index, _)| *index == panel.cursor())
-            .map(|(_, row)| *row)
+            .find(|(index, side, _)| *index == panel.cursor() && *side == panel.side())
+            .map(|(_, _, row)| *row)
             .expect("the cursor's row is on screen");
         assert!(
             out.scene
@@ -14328,20 +14653,27 @@ mod tests {
         );
 
         // And both of them are tracks, so the maximum concurrency is a place to
-        // drop the pointer rather than a number to type.
+        // drop the pointer rather than a number to type. Both of them are in
+        // the right hand column of the form, which is where the two numbers
+        // that decide what the agent gets live.
         for key in crate::agent::OWNED {
-            let index = panel
+            let (index, side) = panel
                 .rows()
                 .iter()
-                .position(|row| {
-                    matches!(row, crate::settings::Row::Setting { key: k, .. } if *k == key)
+                .enumerate()
+                .find_map(|(at, row)| {
+                    [Side::Left, Side::Right].into_iter().find_map(|side| {
+                        matches!(crate::settings::cell(row, side), crate::settings::Row::Setting { key: k, .. } if *k == key)
+                            .then_some((at, side))
+                    })
                 })
                 .unwrap_or_else(|| panic!("{key} is not on the agent section"));
+            assert_eq!(side, Side::Right, "{key} is not in the form's right column");
             assert!(
                 out.layout
                     .settings_tracks
                     .iter()
-                    .any(|(row, _)| *row == index),
+                    .any(|(row, half, _)| *row == index && *half == side),
                 "{key} is not drawn as a track"
             );
         }

@@ -429,9 +429,9 @@ fn menu_for(
         // and there is no pane behind it to close.
         Hit::Settings
         | Hit::SettingsSection(_)
-        | Hit::SettingsRow(_)
-        | Hit::SettingsValue(_)
-        | Hit::SettingsSlider(_)
+        | Hit::SettingsRow(..)
+        | Hit::SettingsValue(..)
+        | Hit::SettingsSlider(..)
         | Hit::SettingsSwatch(_, _)
         | Hit::SettingsToggle(_)
         | Hit::SettingsRemove(_)
@@ -679,10 +679,14 @@ struct App {
     /// half of the grid it carries says which of the two lines on that axis is
     /// moving.
     sizing: Option<Hit>,
-    /// The settings row whose slider the button came down on, while it is being
-    /// dragged. The same cycle again, on the panel: the value follows the
-    /// pointer and the file is written once, when the button comes up.
-    sliding: Option<usize>,
+    /// The settings row and half whose slider the button came down on, while it
+    /// is being dragged. The same cycle again, on the panel: the value follows
+    /// the pointer and the file is written once, when the button comes up.
+    sliding: Option<(usize, settings::Side)>,
+    /// The thread reading the whole prompt out of the CLI, while it is still
+    /// reading it. Dropped as soon as it answers, so a panel opened twice does
+    /// not take the first run's answer for the second one's.
+    asking: Option<std::sync::mpsc::Receiver<link::Asked>>,
     /// Where the dividers are, as fractions: how much of the width the left
     /// column takes in each row, and how much of the height the top space takes
     /// in each column. Read out of the settings file at launch and written back
@@ -799,6 +803,7 @@ impl App {
             holding: None,
             sizing: None,
             sliding: None,
+            asking: None,
             selecting: false,
             prompt_selecting: false,
             clipboard: None,
@@ -1071,6 +1076,57 @@ impl App {
             self.settings_path().as_deref(),
             self.read_agent(),
         ));
+        self.ask_for_prompt();
+        self.dirty = true;
+    }
+
+    /// Ask the CLI what the whole prompt is, on a thread of its own.
+    ///
+    /// The panel shows what the agent is really told, and the only thing that
+    /// knows that is the CLI: `noob debug prompt` prints the artifact a session
+    /// sends. It reads a config directory, a workspace and every skill on the
+    /// machine, so it runs off the interface thread and wakes the event loop
+    /// when it answers, the same way the agent's own output arrives. A slow
+    /// endpoint or a big skills directory cannot hold up a frame.
+    fn ask_for_prompt(&mut self) {
+        let program = std::env::var("NOOB_BIN").unwrap_or_else(|_| String::from("noob"));
+        // The folder the session is running in, since the project's own
+        // AGENTS.md, its skills and its mcp.json are all found relative to it. A
+        // window with no folder open yet asks in the one the process is in,
+        // which is where a session started now would run.
+        let workspace = match self.state.workspace.is_empty() {
+            false => PathBuf::from(&self.state.workspace),
+            true => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.asking = Some(rx);
+        let proxy = self.proxy.clone();
+        let at = workspace.display().to_string();
+        std::thread::spawn(move || {
+            let answer = match link::prompt_command(&program, &workspace, &agent::OWNED).output() {
+                Ok(out) => link::prompt_from(out.status.success(), &out.stdout, &out.stderr),
+                Err(e) => Err(format!(
+                    "cannot run {program:?}: {e}; is noob on PATH, or set NOOB_BIN"
+                )),
+            };
+            let _ = tx.send((at, answer));
+            let _ = proxy.send_event(Wake);
+        });
+    }
+
+    /// Take what that thread answered, if it has.
+    fn take_prompt(&mut self) {
+        let Some(rx) = self.asking.as_ref() else {
+            return;
+        };
+        let Ok((at, answer)) = rx.try_recv() else {
+            return;
+        };
+        self.asking = None;
+        let config = self.config.clone();
+        if let Some(panel) = self.settings.as_mut() {
+            panel.adopt_prompt(at, answer, &config);
+        }
         self.dirty = true;
     }
 
@@ -1140,6 +1196,7 @@ impl App {
         let mut nudge = None;
         let mut edit = false;
         let mut flip = None;
+        let mut make = None;
         match event.logical_key.as_ref() {
             Key::Named(NamedKey::Escape) => {
                 self.close_settings();
@@ -1157,7 +1214,7 @@ impl App {
             // readings would otherwise be a place the keyboard cannot leave
             // without the pointer.
             Key::Named(NamedKey::ArrowLeft) => match panel.on_row() {
-                true => match panel.row(panel.cursor()) {
+                true => match panel.at_cursor() {
                     // An entry has two states, so either arrow means the other
                     // one, the way a flag does.
                     Some(settings::Row::Entry(_)) => flip = Some(panel.cursor()),
@@ -1170,20 +1227,25 @@ impl App {
             // and on an entry, where it turns the thing on or off.
             Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Enter) => {
                 if !panel.enter() {
-                    match panel.row(panel.cursor()) {
+                    match panel.at_cursor() {
                         Some(settings::Row::Field { .. }) => edit = true,
                         Some(settings::Row::Entry(_)) => flip = Some(panel.cursor()),
+                        // A block with nothing in it offers to write the file it
+                        // was looking for.
+                        Some(settings::Row::Paper(_)) => make = Some(panel.cursor()),
                         _ => nudge = Some(true),
                     }
                 }
                 self.dirty = true;
             }
-            // Between the rail and the rows, both ways. The one key that does it
-            // without also meaning something to a row.
+            // Across a form row first, then between the rail and the rows. Left
+            // and right are the nudge on a control, so tab is the only key that
+            // can cross a form without also meaning something to what it lands
+            // on, which is what tab means on every other form there is.
             Key::Named(NamedKey::Tab) => {
                 self.dirty |= match self.modifiers.shift_key() {
                     true => panel.leave(),
-                    false => panel.enter(),
+                    false => panel.swap() || panel.enter(),
                 }
             }
             _ => {}
@@ -1193,6 +1255,10 @@ impl App {
         }
         if let Some(index) = flip {
             let deed = self.settings.as_ref().and_then(|panel| panel.toggle(index));
+            self.do_deed(deed);
+        }
+        if let Some(index) = make {
+            let deed = self.settings.as_ref().and_then(|panel| panel.make(index));
             self.do_deed(deed);
         }
         if let Some(forward) = nudge {
@@ -1282,6 +1348,9 @@ impl App {
                 Some(path) => agent::remove_server(path, name),
                 None => Err(String::from("there is no file to take that server out of")),
             },
+            // The path came off the block that offered it, which read it off the
+            // agent's own config directory: nothing here spells one out.
+            settings::Deed::StartInstructions { path } => agent::start_instructions(path),
         };
         match done {
             Ok(()) => {
@@ -1310,19 +1379,19 @@ impl App {
                     self.dirty |= panel.choose(index);
                 }
             }
-            Hit::SettingsRow(index) => {
+            Hit::SettingsRow(index, side) => {
                 if let Some(panel) = self.settings.as_mut() {
-                    self.dirty |= panel.point_at(index);
+                    self.dirty |= panel.point_at(index, side);
                 }
             }
             // The value is the control, so clicking it does what the right arrow
             // does, on the row it is on rather than on the row the cursor was
             // left on. On the endpoint that is starting to type into it.
-            Hit::SettingsValue(index) => {
+            Hit::SettingsValue(index, side) => {
                 let field = match self.settings.as_mut() {
                     Some(panel) => {
-                        self.dirty |= panel.point_at(index);
-                        matches!(panel.row(index), Some(settings::Row::Field { .. }))
+                        self.dirty |= panel.point_at(index, side);
+                        matches!(panel.cell(index, side), Some(settings::Row::Field { .. }))
                     }
                     None => false,
                 };
@@ -1339,8 +1408,8 @@ impl App {
             // means while the pointer moves, and it is written when the button
             // comes up. The press itself already moves it, so a click on the
             // track jumps the thumb there rather than doing nothing.
-            Hit::SettingsSlider(index) => {
-                self.sliding = Some(index);
+            Hit::SettingsSlider(index, side) => {
+                self.sliding = Some((index, side));
                 self.drag_slider();
             }
             // Pressed, not clicked, the way a pane divider is: the rail follows
@@ -1361,7 +1430,7 @@ impl App {
             Hit::SettingsToggle(index) => {
                 let deed = match self.settings.as_mut() {
                     Some(panel) => {
-                        self.dirty |= panel.point_at(index);
+                        self.dirty |= panel.point_at(index, settings::Side::Left);
                         panel.toggle(index)
                     }
                     None => None,
@@ -1371,7 +1440,7 @@ impl App {
             Hit::SettingsRemove(index) => {
                 let deed = match self.settings.as_mut() {
                     Some(panel) => {
-                        self.dirty |= panel.point_at(index);
+                        self.dirty |= panel.point_at(index, settings::Side::Left);
                         panel.uninstall(index)
                     }
                     None => None,
@@ -1395,15 +1464,15 @@ impl App {
     /// on release is a control you cannot aim: the opacity you are dragging to
     /// is the one thing that would tell you where to stop.
     fn drag_slider(&mut self) {
-        let Some(index) = self.sliding else {
+        let Some((index, side)) = self.sliding else {
             return;
         };
         let layout = self.layout();
-        let Some(at) = layout.slider_at(index, self.cursor.x as f32) else {
+        let Some(at) = layout.slider_at(index, side, self.cursor.x as f32) else {
             return;
         };
         if let Some(panel) = self.settings.as_mut() {
-            self.dirty |= panel.slide(index, at);
+            self.dirty |= panel.slide(index, side, at);
         }
         self.preview_setting();
     }
@@ -1733,6 +1802,10 @@ impl App {
     }
 
     fn drain(&mut self) {
+        // Before the agent's own frames and outside the check for one: the
+        // prompt is read whether or not a session is running, and the panel can
+        // be open on a window that has no agent at all.
+        self.take_prompt();
         let Some(link) = self.link.as_mut() else {
             return;
         };
@@ -2049,9 +2122,9 @@ impl App {
             | Hit::Picker => {}
             // The same for the nine the settings panel owns.
             Hit::SettingsSection(_)
-            | Hit::SettingsRow(_)
-            | Hit::SettingsValue(_)
-            | Hit::SettingsSlider(_)
+            | Hit::SettingsRow(..)
+            | Hit::SettingsValue(..)
+            | Hit::SettingsSlider(..)
             | Hit::SettingsSwatch(_, _)
             | Hit::SettingsToggle(_)
             | Hit::SettingsRemove(_)
@@ -2740,6 +2813,22 @@ impl App {
         // And the same for the settings panel, which is the only thing on screen
         // while it is up.
         if self.settings.is_some() {
+            // Over a block of text, the wheel reads that block rather than
+            // walking the list under it. Same rule as the column beside the
+            // entry list: the pointer is on the thing being scrolled.
+            if let Some(Hit::SettingsRow(index, _)) =
+                layout.hit(self.cursor.x as f32, self.cursor.y as f32)
+                && self
+                    .settings
+                    .as_ref()
+                    .is_some_and(|panel| panel.paper(index).is_some())
+            {
+                let by = ((settings::PAPER_LINES as f32 * pages.abs()).round() as usize).max(1);
+                if let Some(panel) = self.settings.as_mut() {
+                    self.dirty |= panel.scroll_paper(index, by, pages < 0.0);
+                }
+                return;
+            }
             // Over the column beside the entry list, the wheel moves that
             // document rather than the list: the pointer is on the thing being
             // scrolled, which is what every two-column view in this window does.
@@ -3060,11 +3149,11 @@ impl ApplicationHandler<Wake> for App {
                         | Hit::PickerMark(_)
                         | Hit::SettingsClose
                         | Hit::SettingsSection(_)
-                        | Hit::SettingsSlider(_)
+                        | Hit::SettingsSlider(..)
                         | Hit::SettingsSwatch(_, _)
                         | Hit::SettingsToggle(_)
                         | Hit::SettingsRemove(_)
-                        | Hit::SettingsValue(_)),
+                        | Hit::SettingsValue(..)),
                     ) => Some(hit),
                     _ => None,
                 };
@@ -3765,8 +3854,8 @@ mod tests {
         // what is already open.
         for hit in [
             Hit::Settings,
-            Hit::SettingsRow(3),
-            Hit::SettingsValue(3),
+            Hit::SettingsRow(3, settings::Side::Left),
+            Hit::SettingsValue(3, settings::Side::Right),
             Hit::SettingsClose,
         ] {
             assert!(
