@@ -306,6 +306,31 @@ impl Pane {
         self.dropped + self.lines.len()
     }
 
+    /// Swap one character of a line that has already been pushed, by absolute
+    /// number.
+    ///
+    /// Only ever one single-byte character for another, and that is checked
+    /// rather than assumed, which is why no height has to be measured again: the
+    /// line is exactly as long as it was, so every cached wrapped height and
+    /// every selection column still holds. It exists for the parallel mark,
+    /// which is written into a row that was pushed before the window could know
+    /// anything ran beside it.
+    fn mark(&mut self, absolute: usize, column: usize, glyph: char) {
+        if !glyph.is_ascii() {
+            return;
+        }
+        let Some(index) = absolute.checked_sub(self.dropped) else {
+            return;
+        };
+        let Some(line) = self.lines.get_mut(index) else {
+            return;
+        };
+        if !line.text.is_char_boundary(column) || !line.text.is_char_boundary(column + 1) {
+            return;
+        }
+        line.text.replace_range(column..column + 1, glyph.encode_utf8(&mut [0u8; 4]));
+    }
+
     /// Scroll back by `rows`, stopping at the oldest row still held. Returns
     /// whether anything moved, so a caller only redraws when it did.
     ///
@@ -550,11 +575,275 @@ fn sample(rates: &mut Vec<f32>, tokens: u64, seconds: f64) {
 /// A call in flight, kept so its end can be reported the way its start was.
 ///
 /// The label comes along because the end frame does not carry it and a turn
-/// that ends with calls still open has to name them. The arguments do not: they
-/// were kept for the pane of failed calls, and that pane is gone.
+/// that ends with calls still open has to name them. `call` is where the whole
+/// record of it lives, so an end frame can complete the record its start frame
+/// opened without searching for it.
 struct Open {
     kind: Kind,
     brief: String,
+    /// The ordinal of its [`Call`], not a position in [`State::calls`]: that
+    /// list is bounded and slides, and an index into it would come to mean a
+    /// different call the moment the oldest fell off.
+    call: usize,
+}
+
+/// What came back from a call that failed, kept whole.
+///
+/// The agent sends the tool's own result body as `detail` and only when the
+/// call failed, so this is the one place the window ever sees what a tool
+/// actually returned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fault {
+    /// The class and the number the system gave, already read into one line.
+    pub fault: String,
+    pub message: String,
+    pub detail: Option<String>,
+    pub remedy: Option<String>,
+}
+
+/// Everything the window ever learned about one tool call.
+///
+/// The activity list is text and stays text: this is the record beside it, so a
+/// row can be clicked back into the call that wrote it. Bounded like every other
+/// store here, and keyed to the **absolute** line numbers of the rows it wrote,
+/// because the activity pane evicts from the front and a position in its deque
+/// stops meaning the same row as soon as it does.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Call {
+    pub call_id: String,
+    pub kind: Kind,
+    /// The tool the model asked for: `bash`, `skill`, `mcp_call`.
+    pub name: String,
+    pub brief: String,
+    /// The particular thing that tool reached for. See [`invoked`].
+    pub target: String,
+    /// The arguments the model generated, exactly as they arrived.
+    pub args: noob_proto::Value,
+    pub turn: u32,
+    /// When the start frame and the end frame reached this window, in the
+    /// window's own monotonic seconds. `None` while nothing has timed the frame,
+    /// which is every test that folds an event in without a clock.
+    pub started: Option<f64>,
+    pub ended: Option<f64>,
+    /// How long the agent says it ran. Zero for a canned or cancelled outcome,
+    /// so it is a label rather than the interval the overlap is read off.
+    pub elapsed_ms: Option<u64>,
+    pub summary: String,
+    /// Whether an end frame has arrived for it. Its own flag rather than
+    /// `ended.is_some()`: the arrival times are only there when something timed
+    /// the frame, and "nobody was holding a clock" and "it has not come back"
+    /// are two different things to say in the popup.
+    pub done: bool,
+    pub error: Option<Fault>,
+    /// Whatever the call streamed while it ran. The only return value on the
+    /// wire for a call that worked, and only for the tools that tap their own
+    /// stdout.
+    pub output: Vec<String>,
+    /// Whether this call was in flight at the same time as another one inside
+    /// the same turn.
+    pub parallel: bool,
+    /// The absolute activity line its start row was written to.
+    pub line: usize,
+    /// The block of rows its end wrote, as the first one and how many. `None`
+    /// until it ends.
+    pub tail: Option<(usize, usize)>,
+}
+
+/// One cell of the popup: a heading and the lines under it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cell {
+    pub label: &'static str,
+    pub lines: Vec<String>,
+    /// The lines are this window admitting it does not have the value, rather
+    /// than the value. A blank cell would read as "the tool returned nothing",
+    /// which is a different claim and usually a false one.
+    pub absent: bool,
+    pub tone: Tone,
+}
+
+impl Call {
+    /// Whether an activity row belongs to this call.
+    fn owns(&self, line: usize) -> bool {
+        line == self.line || self.tail.is_some_and(|(at, n)| line >= at && line < at + n)
+    }
+
+    /// How long it ran, in whatever the window can honestly say.
+    fn duration(&self) -> Option<f64> {
+        match (self.started, self.ended) {
+            (Some(start), Some(end)) if end >= start => Some(end - start),
+            _ => None,
+        }
+    }
+
+    /// The one line at the top of the popup: the tool, the thing it reached for,
+    /// and whether it worked.
+    pub fn heading(&self) -> String {
+        let outcome = match (&self.error, self.done) {
+            (Some(_), _) => "failed",
+            (None, true) => "returned",
+            (None, false) => "running",
+        };
+        format!("{} \u{25b8} {} \u{25b8} {outcome}", self.kind.tag(), self.target)
+    }
+
+    /// The popup's grid, top to bottom.
+    ///
+    /// Four of these are what was asked for: what was invoked, what the model
+    /// generated, what came back, and the detail. The fifth is the timing, which
+    /// costs nothing because the record already carries it and is the only place
+    /// a fan-out can be checked against the clock.
+    ///
+    /// Two of the four cannot be filled for a call that worked, and they say so
+    /// in words rather than sitting blank. See [`Cell::absent`].
+    pub fn cells(&self) -> Vec<Cell> {
+        vec![self.invoked_cell(), self.when_cell(), self.generated_cell(), self.returned_cell(), self.detail_cell()]
+    }
+
+    fn invoked_cell(&self) -> Cell {
+        let mut lines = vec![self.target.clone()];
+        if !self.brief.trim().is_empty() && self.brief != self.target {
+            lines.push(self.brief.clone());
+        }
+        // The skill's own file is computed agent side and written into the
+        // result body, which reaches this window only when the call fails.
+        if self.kind == Kind::Skill {
+            lines.push(String::from(
+                "the skill's own file is not on the wire: only its name is sent",
+            ));
+        }
+        Cell {
+            label: "INVOKED",
+            lines,
+            absent: false,
+            tone: Tone::Bright,
+        }
+    }
+
+    fn when_cell(&self) -> Cell {
+        let mut lines = vec![format!("turn {}", self.turn)];
+        if self.parallel {
+            lines.push(String::from("ran beside another call in this turn"));
+        }
+        match self.duration() {
+            Some(seconds) => lines.push(format!("{seconds:.2}s in this window")),
+            None => lines.push(String::from("no arrival time was taken")),
+        }
+        if let Some(ms) = self.elapsed_ms {
+            lines.push(format!("{ms} ms by the agent's own clock"));
+        }
+        Cell {
+            label: "WHEN",
+            lines,
+            absent: false,
+            tone: Tone::Dim,
+        }
+    }
+
+    fn generated_cell(&self) -> Cell {
+        let text = serde_json::to_string_pretty(&self.args).unwrap_or_else(|_| self.args.to_string());
+        let empty = matches!(&self.args, noob_proto::Value::Null)
+            || self.args.as_object().is_some_and(|o| o.is_empty());
+        match empty {
+            true => Cell {
+                label: "GENERATED",
+                lines: vec![String::from("the model sent no arguments with this call")],
+                absent: true,
+                tone: Tone::Dim,
+            },
+            false => Cell {
+                label: "GENERATED",
+                lines: clipped(&text),
+                absent: false,
+                tone: Tone::Body,
+            },
+        }
+    }
+
+    fn returned_cell(&self) -> Cell {
+        let mut lines = Vec::new();
+        if !self.summary.trim().is_empty() {
+            lines.push(self.summary.clone());
+        }
+        let (rest, absent, tone) = match (&self.error, self.done) {
+            (Some(error), _) => match error.detail.as_deref() {
+                Some(detail) => (clipped(detail), false, Tone::Bad),
+                None => (
+                    vec![String::from(
+                        "the failure carried no body: the tool sent a message and nothing else",
+                    )],
+                    true,
+                    Tone::Dim,
+                ),
+            },
+            (None, false) => (vec![String::from("still running")], true, Tone::Dim),
+            (None, true) if !self.output.is_empty() => (self.output.clone(), false, Tone::Body),
+            // The wire carries a display summary and no result body for a call
+            // that worked. Saying so is the whole of what this window can do
+            // about it without a protocol change.
+            (None, true) => (
+                vec![String::from(
+                    "the return value is not on the wire: a call that worked sends this summary and nothing more",
+                )],
+                true,
+                Tone::Dim,
+            ),
+        };
+        lines.extend(rest);
+        Cell {
+            label: "RETURNED",
+            lines,
+            absent,
+            tone,
+        }
+    }
+
+    fn detail_cell(&self) -> Cell {
+        let Some(error) = &self.error else {
+            return Cell {
+                label: "DETAIL",
+                lines: vec![String::from(
+                    "no detail: the agent sends one only with a failure",
+                )],
+                absent: true,
+                tone: Tone::Dim,
+            };
+        };
+        let mut lines = vec![error.fault.clone(), error.message.clone()];
+        if let Some(remedy) = error.remedy.as_deref() {
+            lines.push(format!("-> {remedy}"));
+        }
+        Cell {
+            label: "DETAIL",
+            lines,
+            absent: false,
+            tone: Tone::Bad,
+        }
+    }
+
+    /// The whole popup as lines and their tones, which is all the drawing needs.
+    ///
+    /// Built here rather than in the view so the one place that decides what the
+    /// popup says is the one place that can be tested without a window.
+    pub fn popup_lines(&self) -> Vec<(String, Tone)> {
+        let mut out = vec![(self.heading(), Tone::Bright)];
+        for cell in self.cells() {
+            out.push((String::new(), Tone::Dim));
+            out.push((cell.label.to_string(), Tone::Dim));
+            for line in cell.lines {
+                out.push((line, cell.tone));
+            }
+        }
+        out
+    }
+}
+
+/// A block of text as lines, bounded, with a last line saying what was left out.
+fn clipped(text: &str) -> Vec<String> {
+    let mut lines: Vec<String> = text.lines().take(CELL_LINES).map(str::to_string).collect();
+    if text.lines().nth(CELL_LINES).is_some() {
+        lines.push(String::from("\u{2026}"));
+    }
+    lines
 }
 
 pub struct State {
@@ -617,6 +906,18 @@ pub struct State {
     /// What is happening right now, in a few words, for the status bar.
     pub status: String,
 
+    /// One record per tool call, oldest first, bounded at [`MAX_CALLS`]. The
+    /// list beside the activity pane rather than inside it: the pane is text and
+    /// stays text, and this is what a row of it can be clicked back into.
+    pub calls: Vec<Call>,
+    /// How many records have fallen off the front over the session's whole life,
+    /// so a call can be named by an ordinal that never moves. Same reason
+    /// [`Pane::dropped`] exists.
+    calls_dropped: usize,
+    /// Which call the popup is showing, by ordinal. `None` with the popup shut,
+    /// and a call that has since been evicted simply stops resolving.
+    pub open_call: Option<usize>,
+
     open: HashMap<String, Open>,
 }
 
@@ -657,8 +958,67 @@ impl State {
             turn: 0,
             phase: Phase::Starting,
             status: String::from("starting the agent"),
+            calls: Vec::new(),
+            calls_dropped: 0,
+            open_call: None,
             open: HashMap::new(),
         }
+    }
+
+    /// One call by its ordinal, or nothing when it has been evicted.
+    pub fn call(&self, ordinal: usize) -> Option<&Call> {
+        self.calls.get(ordinal.checked_sub(self.calls_dropped)?)
+    }
+
+    /// The call the popup is showing, if it is up and still held.
+    pub fn popped(&self) -> Option<&Call> {
+        self.call(self.open_call?)
+    }
+
+    /// Which call wrote an activity row, by that row's absolute number.
+    ///
+    /// Newest first, because a bounded list can hold two calls that once wrote
+    /// the same row number only if one of them has been evicted, and the newer
+    /// answer is the one still on screen.
+    pub fn call_at_line(&self, line: usize) -> Option<usize> {
+        self.calls
+            .iter()
+            .rposition(|call| call.owns(line))
+            .map(|index| self.calls_dropped + index)
+    }
+
+    /// Keep a record, dropping the oldest once the list is full. Returns its
+    /// ordinal.
+    fn remember_call(&mut self, call: Call) -> usize {
+        self.calls.push(call);
+        while self.calls.len() > MAX_CALLS {
+            self.calls.remove(0);
+            self.calls_dropped += 1;
+        }
+        self.calls_dropped + self.calls.len() - 1
+    }
+
+    /// Say that a call ran beside another one, and put the mark in the gutter of
+    /// the row it wrote.
+    ///
+    /// The mark is written into the text rather than drawn beside it because
+    /// every row count, scroll window and selection column in that pane is
+    /// `chars / cols` arithmetic: a run added at draw time would put the drawn
+    /// rows and the measured ones a character apart. It replaces a space with a
+    /// bar, so the line is the length it always was.
+    fn mark_parallel(&mut self, ordinal: usize) {
+        let Some(index) = ordinal.checked_sub(self.calls_dropped) else {
+            return;
+        };
+        let Some(call) = self.calls.get_mut(index) else {
+            return;
+        };
+        if call.parallel {
+            return;
+        }
+        call.parallel = true;
+        let line = call.line;
+        self.activity.mark(line, PARALLEL_COLUMN, PARALLEL_MARK);
     }
 
     /// What the human typed, echoed into the transcript so the conversation
@@ -754,11 +1114,26 @@ impl State {
                 self.status = self.phase.word().to_lowercase();
                 // Close anything left open, so a row cannot show as running
                 // after the turn that owned it has ended.
-                let stragglers: Vec<String> =
-                    self.open.drain().map(|(_, open)| open.brief).collect();
-                for brief in stragglers {
+                let stragglers: Vec<(String, usize)> = self
+                    .open
+                    .drain()
+                    .map(|(_, open)| (open.brief, open.call))
+                    .collect();
+                for (brief, ordinal) in stragglers {
+                    let at_line = self.activity.last();
                     self.activity
                         .say(format!("       {brief} never reported back"), Tone::Bad);
+                    if let Some(index) = ordinal.checked_sub(self.calls_dropped)
+                        && let Some(call) = self.calls.get_mut(index)
+                    {
+                        // Ended, because the turn that owned it has: leaving it
+                        // reading as still running is the one thing that is not
+                        // true about it.
+                        call.ended = at;
+                        call.done = true;
+                        call.summary = String::from("never reported back");
+                        call.tail = Some((at_line, 1));
+                    }
                 }
             }
             Event::TextDelta { d } => self.output.stream(&d, Tone::Body),
@@ -786,25 +1161,83 @@ impl State {
                 if kind == Kind::Plan {
                     self.plan = read_todos(&args);
                 }
+                // Taken before the push, so it is the number of the row about to
+                // be written rather than the one after it.
+                let line = self.activity.last();
                 self.activity.say(
                     format!("{:>5}  {}", kind.tag(), subject(kind, &brief, &args)),
                     Tone::Call(kind),
                 );
-                self.open.insert(call_id, Open { kind, brief });
+                let ordinal = self.remember_call(Call {
+                    call_id: call_id.clone(),
+                    kind,
+                    target: invoked(kind, &name, &args),
+                    name,
+                    brief: brief.clone(),
+                    args,
+                    turn: self.turn,
+                    started: at,
+                    ended: None,
+                    elapsed_ms: None,
+                    summary: String::new(),
+                    done: false,
+                    error: None,
+                    output: Vec::new(),
+                    parallel: false,
+                    line,
+                    tail: None,
+                });
+                // Every call still open started before this one and has not come
+                // back, so this one and all of them were in flight together. The
+                // turn takes care of itself: a turn that ends drains `open`, so
+                // nothing here can be paired with a call from an earlier one.
+                //
+                // This is the whole of what the protocol allows. There is no
+                // batch id, no ordinal and no agent-side timestamp on a tool
+                // frame, so "these ran together" can only be read off what was
+                // still open when a start frame arrived.
+                if !self.open.is_empty() {
+                    let together: Vec<usize> =
+                        self.open.values().map(|open| open.call).chain([ordinal]).collect();
+                    for other in together {
+                        self.mark_parallel(other);
+                    }
+                }
+                self.open.insert(
+                    call_id,
+                    Open {
+                        kind,
+                        brief,
+                        call: ordinal,
+                    },
+                );
             }
             Event::ToolProgress { call_id, line } => {
-                let kind = self.open.get(&call_id).map_or(Kind::Other, |o| o.kind);
+                let open = self.open.get(&call_id);
+                let kind = open.map_or(Kind::Other, |o| o.kind);
+                // The live stdout tap is the only thing resembling a return
+                // value the wire carries for a call that works, so it is kept
+                // rather than only printed. Bounded: a build log is thousands of
+                // lines and the popup shows a screenful.
+                if let Some(ordinal) = open.map(|o| o.call)
+                    && let Some(index) = ordinal.checked_sub(self.calls_dropped)
+                    && let Some(call) = self.calls.get_mut(index)
+                    && call.output.len() < CELL_LINES
+                {
+                    call.output.push(line.clone());
+                }
                 self.activity
                     .say(format!("       {line}"), Tone::Call(kind));
             }
             Event::ToolEnd {
                 call_id,
                 summary,
+                elapsed_ms,
                 error,
-                ..
             } => {
-                self.open.remove(&call_id);
-                match error {
+                let ordinal = self.open.remove(&call_id).map(|open| open.call);
+                let tail_at = self.activity.last();
+                match &error {
                     None => self.activity.say(format!("       {summary}"), Tone::Good),
                     Some(error) => {
                         // Counted whether or not this window saw the call
@@ -816,7 +1249,7 @@ impl State {
                         // failure was minted with them. `exit_status 3` is the
                         // whole answer often enough to be worth its own line.
                         self.activity
-                            .say(format!("       {}", fault(&error)), Tone::Bad);
+                            .say(format!("       {}", fault(error)), Tone::Bad);
                         self.activity
                             .say(format!("       {}", error.message), Tone::Bad);
                         if let Some(detail) = error.detail.as_deref() {
@@ -836,6 +1269,26 @@ impl State {
                             self.activity.say(format!("    -> {remedy}"), Tone::Bright);
                         }
                     }
+                }
+                // Complete the record the start frame opened. Only reachable
+                // when this window saw that start: an end for a call it never
+                // saw has nothing to attach to and is already counted above.
+                let tail = (tail_at, self.activity.last() - tail_at);
+                let failed = error.map(|error| Fault {
+                    fault: fault(&error),
+                    message: error.message,
+                    detail: error.detail,
+                    remedy: error.remedy,
+                });
+                if let Some(index) = ordinal.and_then(|o| o.checked_sub(self.calls_dropped))
+                    && let Some(call) = self.calls.get_mut(index)
+                {
+                    call.ended = at;
+                    call.done = true;
+                    call.elapsed_ms = Some(elapsed_ms);
+                    call.summary = summary;
+                    call.error = failed;
+                    call.tail = Some(tail);
                 }
             }
 
@@ -1158,10 +1611,50 @@ fn shorten(text: &str) -> String {
     format!("\u{2026}{tail}")
 }
 
+/// The particular thing a call reached for, as against the tool that reached.
+///
+/// `bash` is only ever bash, so the tool's own name is the whole answer for most
+/// of them. A skill call names a skill and an MCP call names a server and a tool
+/// on it, and those two are the names worth reading rather than the word `skill`
+/// nine times down a list. The skill's own file is not derivable here: it is
+/// computed agent side and written into the result body, which reaches this
+/// window only when the call fails.
+fn invoked(kind: Kind, name: &str, args: &noob_proto::Value) -> String {
+    let field = |key: &str| {
+        args.get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+    };
+    match kind {
+        Kind::Skill => match field("name") {
+            Some(skill) => format!("skill {skill}"),
+            None => name.to_string(),
+        },
+        Kind::Mcp => match (field("server"), field("tool")) {
+            (Some(server), Some(tool)) => format!("{server} \u{25b8} {tool}"),
+            (Some(server), None) => server.to_string(),
+            _ => name.to_string(),
+        },
+        _ => name.to_string(),
+    }
+}
+
 const SUBJECT_CHARS: usize = 96;
 const DIFF_LINES: usize = 60;
 const DETAIL_LINES: usize = 6;
 const MAX_FILES: usize = 40;
+/// How many calls the window keeps the whole record of. Deep enough that a
+/// failure is still there to be clicked several minutes after it scrolled past,
+/// and bounded because a long session makes thousands of them.
+const MAX_CALLS: usize = 300;
+/// How many lines of any one popup cell are kept and shown. A build log is
+/// thousands of lines and the popup is a box on a window.
+const CELL_LINES: usize = 40;
+/// Where in an activity row the parallel mark goes: the second of the two spaces
+/// between the tag column and the subject, so the mark stands in its own column
+/// down the whole list and every row is exactly as wide as it was.
+const PARALLEL_COLUMN: usize = 6;
+const PARALLEL_MARK: char = '|';
 
 /// The checklist, straight out of the plan tool's own arguments. The call
 /// carries the whole updated list by contract, so nothing has to be merged and
@@ -1301,8 +1794,11 @@ mod tests {
                 Tone::Call(Kind::Skill),
             ]
         );
-        // Every kind is distinguishable without color, too.
-        assert!(lines[0].text.contains("bash  rm -rf build"), "{:?}", lines[0]);
+        // Every kind is distinguishable without color, too. The five were
+        // started back to back and not one of them came back, so all five carry
+        // the parallel mark in the column between the tag and the subject: see
+        // `calls_that_overlap_are_marked_and_calls_that_do_not_are_not`.
+        assert!(lines[0].text.contains("bash |rm -rf build"), "{:?}", lines[0]);
         assert!(lines[3].text.contains("web"), "{:?}", lines[3]);
     }
 
@@ -1509,6 +2005,245 @@ mod tests {
             .collect();
         assert!(shown.contains(&"exit_status 127"), "{shown:?}");
         assert!(shown.contains(&"-> available here: python3 node"), "{shown:?}");
+    }
+
+    /// Two calls in flight together are marked as such; two that took turns are
+    /// not.
+    ///
+    /// There is no field on the wire that says "these ran in parallel": no batch
+    /// id, no ordinal, no agent-side timestamp. What there is, is the set of
+    /// calls still open when a start frame arrives, and that set is exact. So
+    /// the rule under test is the whole of what the window can honestly claim.
+    #[test]
+    fn calls_that_overlap_are_marked_and_calls_that_do_not_are_not() {
+        let end = |id: &str| Event::ToolEnd {
+            call_id: id.into(),
+            summary: format!("{id} done"),
+            elapsed_ms: 5,
+            error: None,
+        };
+
+        // A fan-out: two starts before either end.
+        let mut fanned = State::new();
+        fanned.apply(Event::TurnStart { turn: 1 });
+        fanned.apply(tool_start("a", "read", serde_json::json!({"path": "a.rs"})));
+        fanned.apply(tool_start("b", "read", serde_json::json!({"path": "b.rs"})));
+        fanned.apply(end("a"));
+        fanned.apply(end("b"));
+        assert!(fanned.calls.iter().all(|call| call.parallel), "{:?}", fanned.calls);
+        let marked: Vec<String> = texts(&fanned.activity)
+            .into_iter()
+            .filter(|line| line.contains('|'))
+            .collect();
+        assert_eq!(marked.len(), 2, "both rows carry the mark: {marked:?}");
+        assert!(marked[0].contains("read |brief"), "{marked:?}");
+
+        // One after the other, inside the same turn. Nothing overlapped.
+        let mut queued = State::new();
+        queued.apply(Event::TurnStart { turn: 1 });
+        queued.apply(tool_start("a", "read", serde_json::json!({"path": "a.rs"})));
+        queued.apply(end("a"));
+        queued.apply(tool_start("b", "read", serde_json::json!({"path": "b.rs"})));
+        queued.apply(end("b"));
+        assert!(queued.calls.iter().all(|call| !call.parallel), "{:?}", queued.calls);
+        assert!(
+            !texts(&queued.activity).iter().any(|line| line.contains('|')),
+            "{:?}",
+            texts(&queued.activity)
+        );
+
+        // And a call left open by one turn cannot pair with the next turn's.
+        let mut across = State::new();
+        across.apply(Event::TurnStart { turn: 1 });
+        across.apply(tool_start("a", "read", serde_json::json!({"path": "a.rs"})));
+        across.apply(Event::TurnEnd {
+            turn: 1,
+            interrupted: None,
+        });
+        across.apply(Event::TurnStart { turn: 2 });
+        across.apply(tool_start("b", "read", serde_json::json!({"path": "b.rs"})));
+        assert!(across.calls.iter().all(|call| !call.parallel), "{:?}", across.calls);
+    }
+
+    /// The mark is written into the row rather than drawn beside it, so a marked
+    /// row is exactly as long as an unmarked one.
+    ///
+    /// Every row count, scroll window and selection column in that pane is
+    /// `chars / cols` arithmetic. A mark that made a row one character longer
+    /// would put the rows that are drawn and the rows that are measured out of
+    /// step for the rest of the session.
+    #[test]
+    fn the_parallel_mark_costs_the_row_no_width() {
+        let mut plain = State::new();
+        plain.apply(tool_start("a", "read", serde_json::json!({"path": "a.rs"})));
+        plain.apply(Event::ToolEnd {
+            call_id: "a".into(),
+            summary: "read 3 lines".into(),
+            elapsed_ms: 1,
+            error: None,
+        });
+
+        let mut fanned = State::new();
+        fanned.apply(tool_start("a", "read", serde_json::json!({"path": "a.rs"})));
+        fanned.apply(tool_start("b", "read", serde_json::json!({"path": "b.rs"})));
+
+        let (before, after) = (&texts(&plain.activity)[0], &texts(&fanned.activity)[0]);
+        assert_ne!(before, after, "the mark is there");
+        assert_eq!(before.chars().count(), after.chars().count());
+    }
+
+    /// A row of the list knows which call wrote it, and so do the rows that call
+    /// wrote when it ended.
+    #[test]
+    fn every_row_a_call_wrote_resolves_back_to_that_call() {
+        let mut state = State::new();
+        state.apply(tool_start("a", "read", serde_json::json!({"path": "a.rs"})));
+        state.apply(Event::ToolEnd {
+            call_id: "a".into(),
+            summary: "read 3 lines".into(),
+            elapsed_ms: 1,
+            error: None,
+        });
+        state.apply(tool_start("b", "bash", serde_json::json!({"cmd": "ls"})));
+
+        let first = state.call_at_line(0).expect("the first row is the read");
+        assert_eq!(state.call(first).expect("held").call_id, "a");
+        // Its summary row, written when it ended, belongs to it too.
+        assert_eq!(state.call_at_line(1), Some(first));
+        let second = state.call_at_line(2).expect("the third row is the bash");
+        assert_eq!(state.call(second).expect("held").call_id, "b");
+        assert_eq!(state.call_at_line(99), None, "a row nobody wrote");
+    }
+
+    /// The popup of a failed call carries what the model generated and the body
+    /// the toolkit sent back, because that pair is the whole reason to open it.
+    #[test]
+    fn the_popup_of_a_failed_call_carries_the_arguments_and_the_detail() {
+        let mut state = State::new();
+        state.apply(tool_start(
+            "b",
+            "bash",
+            serde_json::json!({"cmd": "cargo build", "timeout": 30}),
+        ));
+        state.apply(Event::ToolEnd {
+            call_id: "b".into(),
+            summary: "bash cargo build (exit 127)".into(),
+            elapsed_ms: 2000,
+            error: Some(ToolError {
+                kind: "exit_status".into(),
+                code: Some(127),
+                message: "cargo: command not found".into(),
+                detail: Some("error: linker `cc` not found\n  note: install build-essential".into()),
+                remedy: Some("available here: python3 node".into()),
+            }),
+        });
+        let call = state.call(0).expect("the call was kept");
+        let cells = call.cells();
+        let cell = |label: &str| {
+            cells
+                .iter()
+                .find(|cell| cell.label == label)
+                .unwrap_or_else(|| panic!("no {label} cell"))
+        };
+
+        let generated = cell("GENERATED");
+        assert!(!generated.absent);
+        let text = generated.lines.join("\n");
+        assert!(text.contains("cargo build"), "{text}");
+        assert!(text.contains("timeout"), "{text}");
+
+        let returned = cell("RETURNED");
+        assert!(!returned.absent, "a failure does carry its body");
+        let text = returned.lines.join("\n");
+        assert!(text.contains("linker `cc` not found"), "{text}");
+        assert!(text.contains("install build-essential"), "{text}");
+
+        let detail = cell("DETAIL");
+        assert!(!detail.absent);
+        let text = detail.lines.join("\n");
+        assert!(text.contains("exit_status 127"), "{text}");
+        assert!(text.contains("cargo: command not found"), "{text}");
+        assert!(text.contains("available here: python3 node"), "{text}");
+    }
+
+    /// A call that worked has no return value on the wire. The cell says that in
+    /// words instead of standing empty, because an empty cell reads as "the tool
+    /// returned nothing" and that is a different claim.
+    #[test]
+    fn a_call_that_worked_says_its_return_is_not_on_the_wire() {
+        let mut state = State::new();
+        state.apply(tool_start("r", "read", serde_json::json!({"path": "a.rs"})));
+        state.apply(Event::ToolEnd {
+            call_id: "r".into(),
+            summary: "read 40 lines".into(),
+            elapsed_ms: 3,
+            error: None,
+        });
+        let cells = state.call(0).expect("kept").cells();
+        let returned = cells.iter().find(|c| c.label == "RETURNED").expect("a cell");
+        assert!(returned.absent, "the window does not have the value");
+        let text = returned.lines.join("\n");
+        assert!(text.contains("read 40 lines"), "the summary is still shown: {text}");
+        assert!(text.contains("not on the wire"), "{text}");
+        assert!(!text.trim().is_empty());
+
+        let detail = cells.iter().find(|c| c.label == "DETAIL").expect("a cell");
+        assert!(detail.absent);
+        assert!(detail.lines.join("\n").contains("only with a failure"), "{detail:?}");
+
+        // A skill says the same about its own file, which is also never sent.
+        let mut skilled = State::new();
+        skilled.apply(tool_start("s", "skill", serde_json::json!({"name": "web-perf"})));
+        let cells = skilled.call(0).expect("kept").cells();
+        let invoked = cells.iter().find(|c| c.label == "INVOKED").expect("a cell");
+        let text = invoked.lines.join("\n");
+        assert!(text.contains("skill web-perf"), "{text}");
+        assert!(text.contains("not on the wire"), "{text}");
+    }
+
+    /// What streamed out of a call is kept, because for a tool that taps its own
+    /// stdout it is the only return value the wire ever carries.
+    #[test]
+    fn a_streaming_call_keeps_what_it_streamed_as_its_return() {
+        let mut state = State::new();
+        state.apply(tool_start("b", "bash", serde_json::json!({"cmd": "make"})));
+        for line in ["cc -c main.c", "cc -c util.c", "ld -o app"] {
+            state.apply(Event::ToolProgress {
+                call_id: "b".into(),
+                line: line.into(),
+            });
+        }
+        state.apply(Event::ToolEnd {
+            call_id: "b".into(),
+            summary: "bash make (1.2s)".into(),
+            elapsed_ms: 1200,
+            error: None,
+        });
+        let cells = state.call(0).expect("kept").cells();
+        let returned = cells.iter().find(|c| c.label == "RETURNED").expect("a cell");
+        assert!(!returned.absent, "this one really did come back");
+        let text = returned.lines.join("\n");
+        assert!(text.contains("ld -o app"), "{text}");
+    }
+
+    /// The record list is bounded, and a call that has fallen off it stops
+    /// resolving rather than answering with a neighbour's.
+    #[test]
+    fn the_call_records_are_bounded_and_the_oldest_stop_resolving() {
+        let mut state = State::new();
+        for n in 0..MAX_CALLS + 20 {
+            state.apply(tool_start(&format!("c{n}"), "read", serde_json::json!({"path": "a.rs"})));
+            state.apply(Event::ToolEnd {
+                call_id: format!("c{n}"),
+                summary: "read 1 line".into(),
+                elapsed_ms: 1,
+                error: None,
+            });
+        }
+        assert_eq!(state.calls.len(), MAX_CALLS);
+        assert_eq!(state.call(0), None, "the first twenty are gone");
+        let last = state.call(MAX_CALLS + 19).expect("the newest is held");
+        assert_eq!(last.call_id, format!("c{}", MAX_CALLS + 19));
     }
 
     /// Every call that came back with an error is counted, and nothing else is.

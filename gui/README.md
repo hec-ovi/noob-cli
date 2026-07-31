@@ -132,7 +132,7 @@ moves.
 | view | carries |
 |---|---|
 | OUTPUT | the conversation: what you asked and what the model said, prose and reasoning, streamed as it arrives |
-| ACTIVITY | every call, one colour and one tag per tool: bash, read, ls, glob, grep, context, write, edit, web, skill, mcp, agent, plan, and one for anything else, plus a running command's output as it arrives |
+| ACTIVITY | every call, one colour and one tag per tool: bash, read, ls, glob, grep, context, write, edit, web, skill, mcp, agent, plan, and one for anything else, plus a running command's output as it arrives. A bar in the gutter marks the calls that were in flight together, and clicking a row opens it out |
 | PLAN | the checklist, straight from the plan tool's own arguments |
 | AGENTS | sub-agents: their tool set, their brief, the last thing each one said, and how it ended |
 | HARDWARE | CPU and RAM, plus GPU, VRAM and GTT on an AMD card |
@@ -197,6 +197,38 @@ of the one you clicked. It is gone: a pane of its own for something that is one
 number most of the time, and the failure itself is already written into ACTIVITY
 where it happened, with its class, its message and what to do about it. The
 number survives, beside the total tool calls in CONTEXT.
+
+## The activity list
+
+Read-only tools run up to eight at a time, so a turn that fans out writes four
+rows that look like four unrelated calls. Every call still in flight when the
+next one starts gets a bar in the gutter between its tag and its subject, so a
+fan-out reads as one down the column. The bar replaces a space rather than
+widening the row: every row count and selection column in that pane is character
+arithmetic, and a mark that made a row one character longer would put the rows
+that are drawn and the rows that are measured out of step.
+
+Nothing on the wire says "these ran in parallel". There is no batch id, no
+per-call ordinal and no agent-side timestamp on a tool frame, so the mark is read
+off the calls that were open when a start frame arrived, which is exact, and the
+turn takes care of itself because a turn that ends closes everything it left
+open.
+
+Clicking a row opens that call out into a box over the window: what was invoked
+(the skill by name, the MCP server and the tool on it, or just bash), which turn
+it was in and how long it took, the arguments the model generated, what came
+back, and the detail. It closes the way the right click menu does, on Escape or
+on a press anywhere else. A press that turns into a drag is still a selection:
+the box goes away as soon as the drag has selected anything.
+
+Two of those cells cannot be filled for a call that worked, and they say so
+rather than sitting blank. `ToolEnd` carries a display summary and no result
+body; the tool's own output reaches the window only as `ToolError.detail`, and
+only when the call failed. Where a tool taps its own stdout the streamed lines
+are kept and shown as the return value. The skill's file path is the same story:
+only the skill's name is sent, and the box says so where the path would be. A
+blank cell would read as "the tool returned nothing", which is a different claim
+and usually a false one.
 
 Every pane scrolls inside its own box. The plan, the agent list and the three
 monitors used to draw what fitted and lose the rest, so a long plan ran off the
@@ -266,8 +298,9 @@ Routing is by tool name, and by file extension for syntax coloring. The agent is
 never told any of this exists: everything the window shows is derived from calls
 the model was already making, including the plan.
 
-Keys: Enter sends, Escape drops a selection then clears the line then cancels
-the turn, Ctrl-A selects the prompt, Ctrl-C copies a selection or cancels and
+Keys: Enter sends, Escape closes an open menu or an open activity call first,
+then drops a selection, then clears the line, then cancels the turn, Ctrl-A
+selects the prompt, Ctrl-C copies a selection or cancels and
 takes the prompt's selection over a pane's since that is the one you were last
 touching, Ctrl-Shift-C always copies, Tab walks every
 view wherever it has been dragged, Shift-Tab stays in one space and walks its
@@ -287,6 +320,9 @@ capped at 2x2, so four cells is the most there is and no space can be dragged
 smaller than a tab strip with enough pane under it to read. **Double-click the title bar** to maximize the
 window, and again to put it back, the same toggle as the maximize button and as
 every other window on the desktop.
+
+**Click a row of the activity list** to open that call out over the window, and
+press anywhere else or Escape to put it away.
 
 Right click the prompt for Copy and Paste, or a pane or its tab for Settings,
 Copy selection, Close this widget and Widgets. A row with nothing to act on is

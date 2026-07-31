@@ -489,6 +489,11 @@ pub enum Hit {
     /// The open menu's box, away from any row. Swallowed for the same reason:
     /// a press on its margin must not reach what is behind it.
     Menu,
+    /// The box of the activity popup. The whole of it: nothing inside it acts,
+    /// so there is one region and it swallows the press, which is what lets a
+    /// press anywhere else close the popup without also doing whatever it landed
+    /// on. The same bargain the menu makes.
+    CallPopup,
     /// A row of the folder picker, by position in its list.
     PickerRow(usize),
     /// The mark in front of a folder on that row, which puts what is inside it
@@ -762,6 +767,16 @@ pub struct Layout {
     /// hit testing goes: it is drawn over the menu, so it takes the click.
     pub menu_list: Panel,
     pub menu_list_rows: Vec<(usize, Panel)>,
+    /// The one call the activity list was clicked into, on the same floating
+    /// layer as the menu and under it. Empty when nothing is open, and empty
+    /// under every takeover: the panel and the picker cover the pane it was
+    /// opened from, so a popup left floating over either would be a box about
+    /// something nobody can see.
+    ///
+    /// One box and no rows: nothing inside it can be clicked, so it needs no
+    /// region beyond its own. It swallows the press that lands on it, the way
+    /// the menu's margin does.
+    pub call_popup: Panel,
 }
 
 /// What the layout needs beyond the window size.
@@ -815,6 +830,10 @@ pub struct Shape<'a> {
     /// An input for the same reason the pane ratios are: it is dragged while the
     /// panel is up and read back out of the settings file at the next launch.
     pub settings_rail: f32,
+    /// The call the activity popup is showing, while it is up. Part of the shape
+    /// for the reason the menu is: how tall the box is comes from what is in it,
+    /// so the layout has to see the call to know where its edges are.
+    pub popup: Option<&'a crate::state::Call>,
 }
 
 fn nowhere() -> Panel {
@@ -930,6 +949,12 @@ impl Layout {
         };
         let (menu, menu_rows) = (places.box_, places.rows);
         let (menu_list, menu_list_rows) = (places.list, places.list_rows);
+        // Only in the shape that has panes. The three takeovers below collapse
+        // it along with every other pane region.
+        let call_popup = match shape.popup {
+            Some(call) => place_popup(call, shape.pane_column, shape.pane_size, width, height),
+            None => nowhere(),
+        };
 
         if shape.shaded {
             // One strip and nothing else. Every other region collapses to
@@ -980,6 +1005,7 @@ impl Layout {
                 menu_rows,
                 menu_list,
                 menu_list_rows,
+                call_popup: nowhere(),
             };
         }
 
@@ -1035,6 +1061,7 @@ impl Layout {
                 menu_rows,
                 menu_list,
                 menu_list_rows,
+                call_popup: nowhere(),
             };
         }
 
@@ -1091,6 +1118,7 @@ impl Layout {
                 menu_rows,
                 menu_list,
                 menu_list_rows,
+                call_popup: nowhere(),
             };
         }
 
@@ -1330,6 +1358,7 @@ impl Layout {
             menu_rows,
             menu_list,
             menu_list_rows,
+            call_popup,
         }
     }
 
@@ -1365,6 +1394,12 @@ impl Layout {
         }
         if self.menu.w >= 1.0 && self.menu.contains(x, y) {
             return Some(Hit::Menu);
+        }
+        // Under the menu on the same layer, and above everything else. A menu
+        // opened over the popup is the newer thing and takes the click; the
+        // popup takes it from the panes it is drawn over.
+        if self.call_popup.w >= 1.0 && self.call_popup.contains(x, y) {
+            return Some(Hit::CallPopup);
         }
         for (panel, hit) in [
             (self.close, Hit::Close),
@@ -1919,6 +1954,44 @@ fn place_menu(menu: &Menu, column: f32, width: f32, height: f32) -> MenuPlaces {
         list: Panel::new(lx, ly, lw, lh),
         list_rows,
     }
+}
+
+/// How wide the activity popup is, in columns, and how much margin it keeps
+/// inside its box.
+///
+/// Wide enough for a pretty-printed argument object and a stack trace without
+/// wrapping every line of them, and capped again below against the window: a box
+/// wider than what it is floating over is not a popup.
+const POPUP_COLUMNS: usize = 88;
+const POPUP_PAD: f32 = 10.0;
+
+/// Where the activity popup sits and how big it is.
+///
+/// Centred, because it is about one row rather than opened at a point: a menu
+/// belongs to the pixel it was opened on and this belongs to the call. As tall
+/// as its contents up to nine tenths of the window, which is where it stops
+/// growing and starts clipping. Nothing inside it scrolls, so the cells are
+/// bounded at the source (`state::CELL_LINES`) rather than here.
+fn place_popup(call: &crate::state::Call, column: f32, size: f32, width: f32, height: f32) -> Panel {
+    let column = column.max(1.0);
+    let line = Text::line_for(size);
+    let room = (((width * 0.9 - POPUP_PAD * 2.0) / column).floor() as usize).max(8);
+    let cols = POPUP_COLUMNS.min(room);
+    let rows: usize = call
+        .popup_lines()
+        .iter()
+        .map(|(text, _)| text_geometry::rows_of(text.chars().count(), cols))
+        .sum();
+    let w = (cols as f32 * column + POPUP_PAD * 2.0).min(width);
+    let h = (rows as f32 * line + POPUP_PAD * 2.0)
+        .min(height * 0.9)
+        .max(line);
+    Panel::new(
+        ((width - w) * 0.5).max(0.0),
+        ((height - h) * 0.5).max(0.0),
+        w,
+        h,
+    )
 }
 
 /// One row per file, as heights the scroll window can be taken from.
@@ -2773,6 +2846,9 @@ fn drop_room(layout: &Layout, dock: &Dock, drag: Drag) -> Panel {
 /// under the pane text it covered and the rows were illegible over anything with
 /// writing in it. Every rectangle and every run here belongs to the overlay.
 fn overlay(scene: &mut Scene, frame: &Frame) {
+    // The popup first, so a menu opened over it is drawn on top of it, which is
+    // the order it is hit tested in.
+    call_popup(scene, frame);
     let Some(menu) = frame.menu else {
         return;
     };
@@ -2799,6 +2875,33 @@ fn overlay(scene: &mut Scene, frame: &Frame) {
             menu_row(scene, frame, *row, *index, *panel, chars);
         }
     }
+}
+
+/// One activity row opened out: what was invoked, when, what the model
+/// generated, what came back and the detail.
+///
+/// What it says is [`crate::state::Call::popup_lines`]; this only puts it on the
+/// screen. On the floating layer with `over_rect`/`over_text` for the reason the
+/// menu is: a box pushed onto the base layer is painted before every glyph in
+/// the window and comes out underneath the pane text it is covering.
+fn call_popup(scene: &mut Scene, frame: &Frame) {
+    let Some(call) = frame.state.popped() else {
+        return;
+    };
+    let (skin, box_) = (frame.skin, frame.layout.call_popup);
+    if box_.w < 1.0 || box_.h < 1.0 {
+        return;
+    }
+    scene.over_rect(panel_fill(box_, skin.menu));
+    scene.over_rect(panel_edge(box_, skin.edge_focus));
+    let text = box_.inset(POPUP_PAD);
+    let cols = cols_of(text, frame.pane_column);
+    let mut runs = Vec::new();
+    for (line, tone) in call.popup_lines() {
+        runs.push(Run::tinted(line, skin.tone(tone)));
+        runs.push(Run::plain("\n"));
+    }
+    scene.over_text(Text::rich(runs, text, frame.pane_size, skin.body).wrap_at(cols));
 }
 
 /// One row of a menu or of its flyout: the mark in the gutter, the label, and
@@ -5258,6 +5361,7 @@ mod tests {
             left_width: [LEFT_WIDTH; 2],
             top_height: [TOP_HEIGHT; 2],
             settings_rail: SETTINGS_RAIL,
+            popup: None,
         }
     }
 
@@ -8269,6 +8373,7 @@ mod tests {
                 left_width: [LEFT_WIDTH; 2],
                 top_height: [TOP_HEIGHT; 2],
                 settings_rail: SETTINGS_RAIL,
+                popup: None,
             };
             let layout = Layout::compute(1400.0, 900.0, &shape);
             let skin = Skin::from(&Config::default());
@@ -8367,6 +8472,7 @@ mod tests {
             left_width: [LEFT_WIDTH; 2],
             top_height: [TOP_HEIGHT; 2],
             settings_rail: SETTINGS_RAIL,
+            popup: None,
         };
         let layout = Layout::compute(1400.0, 900.0, &shape);
         let skin = Skin::from(&Config::default());
@@ -10790,6 +10896,118 @@ mod tests {
         assert_eq!(Item::Close.icon(), Some(icons::CLOSE_WIDGET));
         assert_eq!(Item::Widgets(false).icon(), Some(icons::WIDGETS));
         assert_eq!(Item::Paste.icon(), Some(icons::PASTE));
+    }
+
+    /// The same window with one activity row opened out.
+    fn render_popup(state: &State, w: f32, h: f32, dock: &Dock) -> Rendered {
+        let shape = Shape {
+            popup: state.popped(),
+            ..shape(dock, &[])
+        };
+        let layout = Layout::compute(w, h, &shape);
+        let skin = Skin::from(&Config::default());
+        let scene = build(&Frame {
+            state,
+            monitor: &Monitor::new(),
+            dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &typed_prompt("type here", 4),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            clock: 0.0,
+            drag: None,
+            hot: None,
+            trouble: None,
+            selection: None,
+            menu: None,
+            picker: None,
+            settings: None,
+        });
+        Rendered {
+            scene,
+            layout,
+            skin,
+        }
+    }
+
+    /// The popup is on the floating layer, it carries the four things it
+    /// promises, and shutting it takes the whole thing off the screen.
+    ///
+    /// On the overlay for the reason the menu is: the renderer paints a layer's
+    /// rectangles in one pass and its glyphs in a later one, so a box pushed onto
+    /// the base layer lands under the pane text it is covering, however late it
+    /// was pushed.
+    #[test]
+    fn the_activity_popup_is_painted_over_the_window_and_closes_off_it() {
+        let mut state = busy_state();
+        state.apply(noob_proto::Event::ToolEnd {
+            call_id: "c1".into(),
+            summary: "bash cargo test (2.0s, exit 101)".into(),
+            elapsed_ms: 2000,
+            error: Some(noob_proto::ToolError {
+                kind: "exit_status".into(),
+                code: Some(101),
+                message: "1 test failed".into(),
+                detail: Some("thread 'a' panicked at src/lib.rs:9".into()),
+                remedy: Some("run it again with --nocapture".into()),
+            }),
+        });
+        let dock = Dock::new();
+
+        // Shut, there is no box and nothing on the overlay.
+        let shut = render_popup(&state, 1400.0, 900.0, &dock);
+        assert!(shut.layout.call_popup.w < 1.0);
+        assert!(shut.scene.over_rects.is_empty(), "something is floating already");
+
+        state.open_call = state.call_at_line(0);
+        assert!(state.open_call.is_some(), "the first row is the bash call");
+        let out = render_popup(&state, 1400.0, 900.0, &dock);
+        let box_ = out.layout.call_popup;
+        assert!(box_.w >= 1.0 && box_.h >= 1.0);
+
+        // The condition that makes the overlay the point: there is pane text
+        // under it.
+        assert!(
+            text_over(&out.scene.texts, box_),
+            "nothing is written under the popup, so this proves nothing"
+        );
+        let surface = |rects: &[Rect]| {
+            rects
+                .iter()
+                .any(|r| r.xywh() == [box_.x, box_.y, box_.w, box_.h] && r.extra()[3] == 0.0)
+        };
+        assert!(surface(&out.scene.over_rects), "the popup has no surface");
+        assert!(
+            !surface(&out.scene.rects),
+            "the popup's surface is in the base layer, under every glyph"
+        );
+
+        // Everything on the overlay is the popup's, and every cell it promised
+        // is written.
+        let floating: String = out
+            .scene
+            .over_texts
+            .iter()
+            .flat_map(|t| t.runs.iter().map(|r| r.text.as_str()))
+            .collect();
+        for want in ["INVOKED", "GENERATED", "RETURNED", "DETAIL", "WHEN"] {
+            assert!(floating.contains(want), "no {want} cell: {floating}");
+        }
+        assert!(floating.contains("cargo test --workspace"), "{floating}");
+        assert!(floating.contains("exit_status 101"), "{floating}");
+        assert!(floating.contains("panicked at src/lib.rs:9"), "{floating}");
+        assert!(floating.contains("run it again with --nocapture"), "{floating}");
+
+        for text in &out.scene.over_texts {
+            assert!(
+                text.at.x >= box_.x - 0.01 && text.at.y >= box_.y - 0.01,
+                "{:?} is on the overlay but is not the popup",
+                text.at
+            );
+        }
     }
 
     /// Whether any text in this list has a glyph box overlapping the panel.

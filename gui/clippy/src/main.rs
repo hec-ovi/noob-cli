@@ -404,7 +404,11 @@ fn menu_for(
         Hit::TitleBar | Hit::Close | Hit::Maximize | Hit::Minimize => None,
         // The menu already open. Its own right click is handled before this is
         // reached, and a row is picked with the left button.
-        Hit::Menu | Hit::MenuRow(_) => None,
+        //
+        // The popup floats on the same layer and gets the same answer: it is
+        // about one call rather than about a widget, so there is no pane for a
+        // Close or a Copy row to act on.
+        Hit::Menu | Hit::MenuRow(_) | Hit::CallPopup => None,
         // A row of the session list is the one thing in the picker a menu can
         // act on: it names a file, so there is something to open and something
         // to delete. A folder row is not, because pressing it is the whole of
@@ -811,6 +815,7 @@ impl App {
             left_width: self.left_width,
             top_height: self.top_height,
             settings_rail: self.settings_rail,
+            popup: self.state.popped(),
         }
     }
 
@@ -1820,6 +1825,17 @@ impl App {
             }
             return;
         }
+        // The popup is on the same floating layer and closes the same way: its
+        // own box swallows the press, and anywhere else only puts it away. The
+        // press that closes it does nothing else, so a click aimed past a popup
+        // at a pane cannot also start a selection in that pane.
+        if self.state.open_call.is_some() {
+            if !matches!(hit, Hit::CallPopup) {
+                self.state.open_call = None;
+                self.dirty = true;
+            }
+            return;
+        }
 
         let now = Instant::now();
         let double = matches!(self.last_click, Some((last, at))
@@ -1875,7 +1891,16 @@ impl App {
                 self.state.show_file(index);
                 self.dirty = true;
             }
-            Hit::Body(space) => self.begin_selection(space),
+            // Both, in that order. A press in ACTIVITY on a row that belongs to
+            // a call opens that call, and the selection is still begun under it:
+            // a press that turns into a drag is a drag, and `extend_selection`
+            // takes the popup back down the moment one has selected anything.
+            // Opening the popup instead of the selection would make every call
+            // row in the pane uncopyable.
+            Hit::Body(space) => {
+                self.begin_selection(space);
+                self.open_call_under_pointer(space);
+            }
             // All four are handled above, while the picker is up, which is the
             // only time any of them can be hit at all.
             Hit::PickerRow(_)
@@ -1902,10 +1927,32 @@ impl App {
                 self.prompt_selecting = true;
                 self.dirty = true;
             }
-            // Both handled above, while a menu is open, which is the only time
-            // either can be hit at all.
-            Hit::MenuRow(_) | Hit::Menu => {}
+            // All three handled above, while a menu or the popup is open, which
+            // is the only time any of them can be hit at all.
+            Hit::MenuRow(_) | Hit::Menu | Hit::CallPopup => {}
         }
+    }
+
+    /// A press in the ACTIVITY pane, resolved back to the call that wrote the
+    /// row under it.
+    ///
+    /// The row is found through the same [`state::Pane::spot_in`] a selection
+    /// uses, so the row the popup is about and the row the pointer is over
+    /// cannot come apart. A row belonging to no call, a progress line or an
+    /// empty pane leaves the popup shut and the selection alone.
+    fn open_call_under_pointer(&mut self, space: Space) {
+        if self.dock.slot(space).active() != Some(View::Activity) {
+            return;
+        }
+        let layout = self.layout();
+        let Some(spot) = self.spot_at(&layout, space, View::Activity) else {
+            return;
+        };
+        let Some(ordinal) = self.state.call_at_line(spot.line) else {
+            return;
+        };
+        self.state.open_call = Some(ordinal);
+        self.dirty = true;
     }
 
     /// Walk one space's tab strip by one tab, which is what its arrows do. The
@@ -2140,6 +2187,12 @@ impl App {
         };
         if let Some(spot) = self.spot_at(&layout, space, selection.view) {
             selection.extend(spot);
+            // A drag is a selection, not a look at one call. The popup the press
+            // put up goes away as soon as the drag has actually selected
+            // something, which is what lets one press mean either.
+            if !selection.is_empty() {
+                self.state.open_call = None;
+            }
             self.state.selection = Some(selection);
             self.dirty = true;
         }
@@ -2378,6 +2431,16 @@ impl App {
         // through, so putting a menu away does not also drop a selection or a
         // half typed line.
         if self.menu.take().is_some() {
+            self.dirty = true;
+            if matches!(event.logical_key.as_ref(), Key::Named(NamedKey::Escape)) {
+                return;
+            }
+        }
+        // The activity popup closes the same way, and for the same reason: it is
+        // a box floating over the window for a pointer, and the keyboard has
+        // moved on. Escape stops here so putting it away does not also drop a
+        // selection or cancel the turn.
+        if self.state.open_call.take().is_some() {
             self.dirty = true;
             if matches!(event.logical_key.as_ref(), Key::Named(NamedKey::Escape)) {
                 return;
@@ -3400,6 +3463,7 @@ mod tests {
             left_width: [Config::default().left_width; 2],
             top_height: [Config::default().top_height; 2],
             settings_rail: Config::default().settings_rail,
+            popup: None,
         };
         Layout::compute(w, h, &shape)
     }
@@ -4270,6 +4334,123 @@ mod tests {
         // Off the right hand end stops at the end of the text.
         prompt.drag_to(caret(W - 1.0));
         assert_eq!(prompt.selected().as_deref(), Some("ect me please"));
+    }
+
+    /// A press on an activity row opens the call that wrote that row, and a
+    /// press anywhere else puts the popup away again.
+    ///
+    /// The two halves `App::open_call_under_pointer` is: `spot_in_pane` for the
+    /// row under the pointer and `State::call_at_line` for the call that wrote
+    /// it. Driven through the real layout at a real pixel, so a row that is drawn
+    /// somewhere other than where it is tested would fail here.
+    #[test]
+    fn a_press_on_an_activity_row_opens_the_call_under_the_pointer() {
+        let mut state = State::new();
+        state.apply(noob_proto::Event::TurnStart { turn: 1 });
+        state.apply(noob_proto::Event::ToolStart {
+            call_id: "a".into(),
+            name: "read".into(),
+            brief: "src/lib.rs".into(),
+            args: serde_json::json!({"path": "src/lib.rs"}),
+        });
+        state.apply(noob_proto::Event::ToolStart {
+            call_id: "b".into(),
+            name: "bash".into(),
+            brief: String::new(),
+            args: serde_json::json!({"cmd": "cargo test"}),
+        });
+
+        let dock = Dock::new();
+        let space = Space::ALL
+            .into_iter()
+            .find(|space| dock.slot(*space).active() == Some(View::Activity))
+            .expect("the activity list is in the window");
+        let layout = laid_out(&dock, None, 0);
+        let size = Config::default().pane_font_size;
+        let inner = layout.content(space).inset(9.0);
+        let line = noob_draw::Text::line_for(size);
+        let row = |n: usize| (inner.x + 2.0, inner.y + (n as f32 + 0.5) * line);
+        let call_at = |n: usize| {
+            let (x, y) = row(n);
+            let spot = spot_in_pane(&layout, space, View::Activity, &state.activity, x, y, size, COLUMN)
+                .expect("a row under the pointer");
+            state.call_at_line(spot.line)
+        };
+
+        // Each of the two rows resolves to its own call, not to the other one.
+        let first = call_at(0).expect("the first row is a call");
+        let second = call_at(1).expect("the second row is a call");
+        assert_ne!(first, second);
+        assert_eq!(state.call(first).expect("held").call_id, "a");
+        assert_eq!(state.call(second).expect("held").call_id, "b");
+
+        // Well below the last row there is no call to open, and the press stays
+        // a selection.
+        let (x, y) = row(40);
+        let spot = spot_in_pane(&layout, space, View::Activity, &state.activity, x, y, size, COLUMN)
+            .expect("a press below the text still selects");
+        assert_eq!(state.call_at_line(spot.line), Some(second), "the last row is the bash");
+        assert_eq!(state.call_at_line(spot.line + 5), None);
+    }
+
+    /// The popup takes the press that lands on it and lets every other press
+    /// through to close it, which is the whole of how it closes.
+    #[test]
+    fn the_popup_swallows_its_own_box_and_nothing_else() {
+        let mut state = State::new();
+        state.apply(noob_proto::Event::ToolStart {
+            call_id: "a".into(),
+            name: "read".into(),
+            brief: "src/lib.rs".into(),
+            args: serde_json::json!({"path": "src/lib.rs"}),
+        });
+        state.open_call = Some(0);
+
+        let dock = Dock::new();
+        let call = state.popped().expect("the popup is up");
+        let layout = laid_out_with_popup(&dock, Some(call));
+        let box_ = layout.call_popup;
+        assert!(box_.w >= 1.0 && box_.h >= 1.0, "it has a box: {box_:?}");
+        assert_eq!(layout.hit(box_.x + 4.0, box_.y + 4.0), Some(Hit::CallPopup));
+        assert_eq!(middle(box_), (W * 0.5, H * 0.5), "centred on the window");
+
+        // A press outside it is not the popup's, so `App::click` closes the
+        // popup and stops there.
+        let outside = layout.hit(box_.x - 8.0, box_.y + box_.h * 0.5);
+        assert!(!matches!(outside, Some(Hit::CallPopup)), "{outside:?}");
+
+        // And with nothing open there is no region at all, so nothing can be
+        // clicked onto a popup that is not there.
+        let shut = laid_out_with_popup(&dock, None);
+        assert!(shut.call_popup.w < 1.0);
+        assert!(!matches!(shut.hit(W * 0.5, H * 0.5), Some(Hit::CallPopup)));
+    }
+
+    fn laid_out_with_popup<'a>(dock: &'a Dock, popup: Option<&'a state::Call>) -> Layout {
+        let shape = Shape {
+            shaded: false,
+            dock,
+            menu: None,
+            picker: None,
+            settings: None,
+            file_labels: Vec::new(),
+            file_first: 0,
+            column: COLUMN,
+            pane_size: Config::default().pane_font_size,
+            pane_column: COLUMN,
+            input_h: view::input_height(
+                W,
+                COLUMN,
+                0,
+                noob_draw::Text::line_for(SIZE),
+                Config::default().max_input_rows,
+            ),
+            left_width: [Config::default().left_width; 2],
+            top_height: [Config::default().top_height; 2],
+            settings_rail: Config::default().settings_rail,
+            popup,
+        };
+        Layout::compute(W, H, &shape)
     }
 
     /// A pane of known text, and the pixel-to-character half of a selection in
