@@ -1751,6 +1751,12 @@ impl App {
         let Some(panel) = self.settings.as_mut() else {
             return;
         };
+        // The add card's two fields live on the panel until its button writes
+        // the file, the way the skill source does; Enter only keeps the text.
+        if panel.keep_server_edit(&self.config) {
+            self.dirty = true;
+            return;
+        }
         let Some(path) = panel.agent_file().map(std::path::Path::to_path_buf) else {
             panel.say_trouble(String::from("there is no config directory to write it in"));
             self.dirty = true;
@@ -1848,6 +1854,12 @@ impl App {
                 Some(path) => agent::remove_server(path, name),
                 None => Err(String::from("there is no file to take that server out of")),
             },
+            // Always the global file: it is the one the add card names, and
+            // the one the agent reads in every project.
+            settings::Deed::AddServer { name, how } => match panel.mcp_file(false) {
+                Some(path) => agent::add_server(path, name, how),
+                None => Err(String::from("there is no config directory to write a server in")),
+            },
             // The path came off the block that offered it, which read it off the
             // agent's own config directory: nothing here spells one out.
             settings::Deed::StartInstructions { path } => agent::start_instructions(path),
@@ -1861,6 +1873,11 @@ impl App {
                 let agent = self.read_agent();
                 let config = self.config.clone();
                 if let Some(panel) = self.settings.as_mut() {
+                    // A landed add leaves its card empty for the next one; a
+                    // refusal keeps what was typed.
+                    if matches!(&deed, settings::Deed::AddServer { .. }) {
+                        panel.clear_server_fields();
+                    }
                     panel.adopt_agent(agent, &config);
                 }
             }
@@ -2043,6 +2060,13 @@ impl App {
                         // second: one deletes transcripts, the other takes
                         // lines out of a file somebody may have edited by hand.
                         view::Act::Forget | view::Act::Restore => panel.uninstall(index),
+                        // The add card's button: the deed writes the file.
+                        view::Act::AddServer => {
+                            let config = self.config.clone();
+                            panel.cancel_edit_elsewhere(settings::SERVER_NAME, settings::SERVER_HOW);
+                            self.dirty |= panel.point_at(index, settings::Side::Left);
+                            panel.add_server_deed(&config)
+                        }
                         // The validate half of the install card's button:
                         // answered here and now, on the panel.
                         view::Act::Validate => {

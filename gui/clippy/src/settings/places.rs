@@ -180,6 +180,7 @@ pub(crate) fn settings_act_for(doing: crate::settings::Doing) -> Act {
     match doing {
         crate::settings::Doing::Validate => Act::Validate,
         crate::settings::Doing::Install => Act::Install,
+        crate::settings::Doing::AddServer => Act::AddServer,
         crate::settings::Doing::Restore => Act::Restore,
     }
 }

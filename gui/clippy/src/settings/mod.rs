@@ -416,6 +416,8 @@ pub enum Doing {
     /// Take what was typed into the card's first field and install it as a
     /// skill.
     Install,
+    /// Write the typed server into the global `mcp.json`.
+    AddServer,
     /// Take every line the appearance settings own out of the file, so all of
     /// them go back to what the window ships with.
     Restore,
@@ -427,6 +429,7 @@ impl Doing {
         match self {
             Doing::Validate => "validate",
             Doing::Install => "install",
+            Doing::AddServer => "add",
             Doing::Restore => "restore",
         }
     }
@@ -854,6 +857,8 @@ pub enum Deed {
     /// out of both objects, so which one it happened to sit in when the row was
     /// built cannot leave half of it behind.
     RemoveServer { name: String, project: bool },
+    /// Write a new server into the global file, from the add card's fields.
+    AddServer { name: String, how: String },
     /// Move a server's entry between the two objects in its own file. `on` is
     /// the state it should end in.
     TurnServer {
@@ -1056,6 +1061,11 @@ pub const SECRET: &str = "set, and not shown here";
 /// into it under whatever key it was given. `main` branches on this before the
 /// write and starts an install instead.
 pub const SKILL_SOURCE: &str = "skill source";
+
+/// The add-a-server card's two fields, held on the panel the way the skill
+/// source is: keys of the model, never written into any file themselves.
+pub const SERVER_NAME: &str = "server name";
+pub const SERVER_HOW: &str = "server command";
 
 /// The standard skill the fresh field suggests: web search, by the same
 /// owner/name shorthand `skills add` takes.
@@ -1582,6 +1592,9 @@ pub struct Settings {
     /// install button only exists while this matches what the field holds and
     /// the verdict is good; typing anything else voids it.
     checked: Option<(String, Result<String, String>)>,
+    /// The add-a-server card's two fields, until its button writes them.
+    server_name: String,
+    server_how: String,
     /// The install that is running, or the last one that ran. Nothing until one
     /// is asked for, which is what keeps the block off the section.
     install: Option<Installing>,
@@ -1606,6 +1619,8 @@ impl Settings {
             prompt: Assembled::Waiting,
             source: String::new(),
             checked: None,
+            server_name: String::new(),
+            server_how: String::new(),
             install: None,
         };
         // The standard skill, suggested: a fresh config has no web search at
@@ -1660,6 +1675,60 @@ impl Settings {
     /// approved. What turns the card's button from validate into install.
     pub fn checked_ok(&self) -> bool {
         matches!(&self.checked, Some((source, Ok(_))) if *source == self.source && !source.is_empty())
+    }
+
+    /// Keep a running edit on the add card's two fields: the text goes into
+    /// the panel, never into any file, and the rows are rebuilt so the field
+    /// shows what it now holds. Answers whether the edit was one of them.
+    pub fn keep_server_edit(&mut self, config: &Config) -> bool {
+        let key = match self.at_cursor() {
+            Some(Row::Field { key, .. }) if *key == SERVER_NAME || *key == SERVER_HOW => *key,
+            _ => return false,
+        };
+        let Some(typed) = self.editing.take() else {
+            return false;
+        };
+        match key == SERVER_NAME {
+            true => self.server_name = typed.trim().to_string(),
+            false => self.server_how = typed.trim().to_string(),
+        }
+        self.sections = self.build(config);
+        true
+    }
+
+    /// Drop an edit running anywhere but the two named fields, so a button
+    /// press acts on what its own card shows and never on half of somebody
+    /// else's endpoint.
+    pub fn cancel_edit_elsewhere(&mut self, one: &str, other: &str) {
+        let here = matches!(
+            self.at_cursor(),
+            Some(Row::Field { key, .. }) if *key == one || *key == other
+        );
+        if !here {
+            self.cancel_edit();
+        }
+    }
+
+    /// The add card's press, as the deed that writes the global file, or the
+    /// refusal said on the panel. A running edit on either field is taken in
+    /// first, so the deed carries what is on screen.
+    pub fn add_server_deed(&mut self, config: &Config) -> Option<Deed> {
+        self.keep_server_edit(config);
+        let (name, how) = (self.server_name.clone(), self.server_how.clone());
+        if name.is_empty() || how.is_empty() {
+            self.say_trouble(String::from(
+                "a server needs its name and its command or url",
+            ));
+            return None;
+        }
+        Some(Deed::AddServer { name, how })
+    }
+
+    /// After the deed landed: the card goes back to empty, ready for the next
+    /// one. On a refusal the fields keep what was typed.
+    pub fn clear_server_fields(&mut self) {
+        self.server_name.clear();
+        self.server_how.clear();
     }
 
     /// Say that an install has started, so the section says so while it runs.
@@ -2280,31 +2349,12 @@ impl Settings {
         // Said in full rather than shown as an empty list, which reads as a
         // panel that failed to load one.
         let hint = match (mcp.any_file, mcp.servers.is_empty() && mcp.trouble.is_empty()) {
-            (false, _) => "none configured: neither file exists. put a server in either one and the next session loads it",
-            (true, true) => "none configured: the files carry no servers",
-            (true, false) => "the project file wins for a server named in both; turning one off moves its entry to a key the CLI does not read, and uninstall takes the entry out of the file",
+            (false, _) | (true, true) => "none configured yet: the next session loads what is added",
+            (true, false) => "a project .noob/mcp.json wins for a server named in both files",
         };
-        let mut rows = vec![Row::Card(Card {
-            does: None,
-            title: String::from("WHERE SERVERS ARE READ FROM"),
-            fields: vec![
-                CardField::reading(
-                    "global",
-                    match &mcp.global {
-                        Some(path) => path.display().to_string(),
-                        None => String::from("nowhere: no config directory"),
-                    },
-                ),
-                CardField::reading(
-                    "project",
-                    match &mcp.project {
-                        Some(path) => path.display().to_string(),
-                        None => String::from("nowhere until a folder is open"),
-                    },
-                ),
-            ],
-            hint: Some(String::from(hint)),
-        })];
+        // The configured list first, the add card under it: what is running
+        // is the section's subject, and adding one is the act at the bottom.
+        let mut rows = Vec::new();
         for server in &mcp.servers {
             rows.push(Row::Entry(Entry {
                 name: server.name.clone(),
@@ -2323,6 +2373,27 @@ impl Settings {
                 doc: server_doc(server),
             }));
         }
+        rows.push(Row::Card(Card {
+            does: Some(Doing::AddServer),
+            title: String::from("ADD A SERVER"),
+            fields: vec![
+                CardField::text("name", SERVER_NAME, self.server_name.clone())
+                    .saying("what the agent's tools call it"),
+                CardField::text("command or url", SERVER_HOW, self.server_how.clone())
+                    .saying("a command line to start it, or an http(s) address it already answers on"),
+            ],
+            hint: Some(format!(
+                "written into {}, which the agent reads in every project{}",
+                match &mcp.global {
+                    Some(path) => path.display().to_string(),
+                    None => String::from("nowhere: no config directory"),
+                },
+                match hint.is_empty() {
+                    true => String::new(),
+                    false => format!("; {hint}"),
+                }
+            )),
+        }));
         for why in &mcp.trouble {
             rows.push(Row::Note {
                 text: why.clone(),
@@ -4747,10 +4818,10 @@ mod tests {
             .collect();
         assert_eq!(held.len(), LOOKS.len(), "{held:?}");
 
-        // A section of readings has nothing to land on and says so, rather than
-        // drawing a band on a row nothing can be done to.
+        // Every section now carries something to land on; MCP's is the add
+        // card's own fields.
         go_to(&mut panel, MCP);
-        assert!(!panel.on_row());
+        assert!(panel.on_row());
         go_to(&mut panel, APPEARANCE);
         assert!(panel.on_row());
     }
@@ -5689,9 +5760,14 @@ something_else = keep me
         assert_eq!(panel.cursor(), cursor);
         assert!(panel.scroll(3, false, rows, COLS));
 
-        // A section short enough to fit does not pretend to scroll.
+        // A section short enough for its window does not pretend to scroll:
+        // the empty MCP section is one add card.
         go_to(&mut panel, MCP);
-        assert!(panel.thumb(rows, COLS).is_none(), "three rows do not scroll");
+        let tall: usize = panel.heights(COLS).iter().sum();
+        assert!(
+            panel.thumb(tall + 1, COLS).is_none(),
+            "one card does not scroll in a window that holds it"
+        );
 
         // Down to the last setting of a longer one, in a window two rows tall:
         // the window follows the cursor to both ends.
@@ -6611,17 +6687,16 @@ something_else = keep me
             );
         }
 
-        // Both mcp.json paths are named, so there is somewhere to put one.
+        // The add card names the file it writes, so there is somewhere to
+        // put one, and the empty state is said rather than shown as nothing.
         go_to(&mut panel, MCP);
         let text = said(&panel);
         assert!(
             text.contains(&dir.join("mcp.json").display().to_string()),
             "{text}"
         );
-        assert!(
-            text.contains(&work.join(".noob/mcp.json").display().to_string()),
-            "{text}"
-        );
+        assert!(text.contains("none configured yet"), "{text}");
+        assert!(text.contains("ADD A SERVER"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

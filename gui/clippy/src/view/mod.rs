@@ -490,6 +490,8 @@ pub enum Act {
     /// Install what has been typed into the card this button stands in. The one
     /// action on the panel that starts something the window then waits for.
     Install,
+    /// Write the typed server into the global mcp.json.
+    AddServer,
     /// Take every appearance line out of the settings file, so the window goes
     /// back to what it ships with. Two presses, like every other button that
     /// loses something.
@@ -15171,7 +15173,10 @@ mod tests {
         );
         assert_eq!(
             counted,
-            design::card_row_lines(crate::settings::card_body_lines(card, cols), false)
+            design::card_row_lines(
+                crate::settings::card_body_lines(card, cols),
+                card.does.is_some()
+            )
         );
         assert!(
             (row.h - counted as f32 * line).abs() < 0.01,
@@ -15259,9 +15264,11 @@ mod tests {
                 "the value is not under its own label"
             );
             // A reading has no border and no fill, which is the whole of what
-            // says it cannot be typed into. It has no press region either: a
-            // region over a reading answers a press with nothing.
-            assert!(!field.editable());
+            // says it cannot be typed into; a field that can be typed into
+            // wears the input box.
+            if field.editable() {
+                continue;
+            }
             for rgba in [out.skin.input, out.skin.edge] {
                 assert!(
                     !covered(&out, input_at, input_at.h, rgba),
@@ -15275,12 +15282,21 @@ mod tests {
                 "a press inside the card answers for another row"
             );
         }
-        assert!(
-            !out.layout
+        // Only what can be typed into claims a press region: one per
+        // editable field, none for a reading.
+        let editable = card
+            .fields
+            .iter()
+            .filter(|field| field.editable())
+            .count();
+        assert_eq!(
+            out.layout
                 .settings_values
                 .iter()
-                .any(|(at, _, _)| *at == index),
-            "a card of readings claims press regions it cannot answer"
+                .filter(|(at, _, _)| *at == index)
+                .count(),
+            editable,
+            "the card's press regions do not match its editable fields"
         );
 
         // And the field that can be typed into is the same shape with the box
@@ -15385,7 +15401,7 @@ mod tests {
         assert_eq!(title.size, design::panel_title_size(size));
 
         let (_, row) = the_card_row(&out, &panel);
-        let (_, parts) = the_card(&out, row, false);
+        let (_, parts) = the_card(&out, row, true);
         let card_title = out
             .scene
             .texts
@@ -15397,7 +15413,7 @@ mod tests {
             card_title
                 .runs
                 .iter()
-                .any(|run| run.text.contains("WHERE SERVERS")),
+                .any(|run| run.text.contains("ADD A SERVER")),
             "{:?}",
             card_title.runs
         );
@@ -15599,14 +15615,16 @@ mod tests {
         let panel = a_panel_on(&Config::default(), crate::settings::MCP);
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let (_, row) = the_card_row(&out, &panel);
-        let (card, parts) = the_card(&out, row, false);
+        let (card, parts) = the_card(&out, row, true);
+        // The cursor opens on this card, so its border may wear the focus
+        // colour; either ink, the container is a border and not a rule.
         let border = out
             .scene
             .rects
             .iter()
             .find(|rect| {
                 let [x, y, w, h] = rect.xywh();
-                rect.rgba() == out.skin.edge
+                (rect.rgba() == out.skin.edge || rect.rgba() == out.skin.edge_focus)
                     && (x - card.x).abs() < 0.01
                     && (y - card.y).abs() < 0.01
                     && (w - card.w).abs() < 0.01

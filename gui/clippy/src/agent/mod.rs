@@ -760,6 +760,69 @@ fn how_of(entry: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// Put a new server into the file's live `servers` object, creating the file
+/// when there is none. `how` is either a URL (`http://` or `https://`, kept
+/// as a `url` entry) or a command line (the first word the command, the rest
+/// its `args`). A name already in the file, on or off, is refused rather
+/// than replaced: adding must never silently rewrite lines somebody typed.
+///
+/// The same whole-file rules as every other write here: parse, one key in,
+/// serialize before anything opens, and the rename in
+/// [`crate::config::replace_file`] so a crash mid-write cannot leave half an
+/// `mcp.json`.
+pub fn add_server(path: &Path, name: &str, how: &str) -> Result<(), String> {
+    let (name, how) = (name.trim(), how.trim());
+    if name.is_empty() {
+        return Err(String::from("a server has to have a name"));
+    }
+    if how.is_empty() {
+        return Err(String::from("a server has to have a command or a URL"));
+    }
+    let mut root: serde_json::Value = match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map_err(|e| format!("{} is not valid JSON ({e}); fix it first", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::Value::Object(serde_json::Map::new())
+        }
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    let Some(object) = root.as_object_mut() else {
+        return Err(format!("{} is not a JSON object", path.display()));
+    };
+    for held in ["servers", DISABLED] {
+        let taken = object
+            .get(held)
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|map| map.contains_key(name));
+        if taken {
+            return Err(format!("{name} is already in {}", path.display()));
+        }
+    }
+    let entry = match how.starts_with("http://") || how.starts_with("https://") {
+        true => serde_json::json!({ "url": how }),
+        false => {
+            let mut words = how.split_whitespace().map(String::from);
+            let command = words.next().expect("a non-empty command line");
+            let args: Vec<String> = words.collect();
+            match args.is_empty() {
+                true => serde_json::json!({ "command": command }),
+                false => serde_json::json!({ "command": command, "args": args }),
+            }
+        }
+    };
+    let into = object
+        .entry("servers")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(into) = into.as_object_mut() else {
+        return Err(format!("\"servers\" in {} is not an object", path.display()));
+    };
+    into.insert(name.to_string(), entry);
+    let mut text = serde_json::to_string_pretty(&root)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    text.push('\n');
+    crate::config::replace_file(path, &text)
+}
+
 /// Turn one server on or off, by moving its entry between `servers` and the
 /// [`DISABLED`] object beside it in the same file. `on` is the state it should
 /// end in.
@@ -1391,6 +1454,33 @@ mod tests {
     /// A server is turned off by moving its entry to a key beside `servers`,
     /// which the CLI's loader does not read, and the rest of the file comes back
     /// out of the rewrite exactly as it went in.
+    #[test]
+    fn a_server_is_added_into_a_fresh_file_and_a_taken_name_is_refused() {
+        let dir = temp("mcp-add");
+        let path = dir.join("mcp.json");
+
+        // No file yet: the add creates one, a URL as a url entry.
+        add_server(&path, "search", "https://localhost:8888/mcp").expect("a url server");
+        // A command line: the first word the command, the rest its args.
+        add_server(&path, "files", "npx -y files-mcp --root .").expect("a command server");
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("the file"))
+                .expect("valid json");
+        assert_eq!(root["servers"]["search"]["url"], "https://localhost:8888/mcp");
+        assert_eq!(root["servers"]["files"]["command"], "npx");
+        assert_eq!(
+            root["servers"]["files"]["args"],
+            serde_json::json!(["-y", "files-mcp", "--root", "."])
+        );
+
+        // A name already there, on or off, is refused rather than replaced.
+        let taken = add_server(&path, "search", "something-else").expect_err("a taken name");
+        assert!(taken.contains("already"), "{taken}");
+        assert!(add_server(&path, "", "x").is_err());
+        assert!(add_server(&path, "x", " ").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_server_is_turned_off_without_losing_the_rest_of_the_file() {
         let dir = temp("mcp-toggle");
