@@ -791,15 +791,9 @@ fn sample(rates: &mut Vec<f32>, tokens: u64, seconds: f64) {
     }
 }
 
-/// A call in flight, kept so its end can be reported the way its start was.
-///
-/// The label comes along because the end frame does not carry it and a turn
-/// that ends with calls still open has to name them. `call` is where the whole
-/// record of it lives, so an end frame can complete the record its start frame
-/// opened without searching for it.
+/// A call in flight, kept so its end can complete the record its start
+/// frame opened without searching for it.
 struct Open {
-    kind: Kind,
-    brief: String,
     /// The ordinal of its [`Call`], not a position in [`State::calls`]: that
     /// list is bounded and slides, and an index into it would come to mean a
     /// different call the moment the oldest fell off.
@@ -1505,14 +1499,7 @@ impl State {
                         self.mark_parallel(other);
                     }
                 }
-                self.open.insert(
-                    call_id,
-                    Open {
-                        kind,
-                        brief,
-                        call: ordinal,
-                    },
-                );
+                self.open.insert(call_id, Open { call: ordinal });
             }
             Event::ToolProgress { call_id, line } => {
                 // The live stdout tap is the call's own news, never the
