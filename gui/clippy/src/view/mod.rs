@@ -496,6 +496,19 @@ pub enum Act {
     /// back to what it ships with. Two presses, like every other button that
     /// loses something.
     Restore,
+    /// The enable-edition checkbox on a prompt document block: ticked opens
+    /// the editor on the document, ticked again drops the buffer.
+    EditPrompt,
+    /// Write the document block's buffer as its own file, the same save
+    /// Ctrl-S does.
+    SavePrompt,
+    /// Park the block's file in the `.bak` beside it and write the shipped
+    /// default in its place. Two presses, like every button that loses
+    /// something.
+    RestorePrompt,
+    /// Open the line an `.md` path is typed into, to load that file into the
+    /// editor as an unsaved edit.
+    LoadPrompt,
 }
 
 /// Something the pointer can land on. Returned by [`Layout::hit`] so every
@@ -12379,10 +12392,16 @@ mod tests {
                     String::from("Read the file before writing it."),
                 ],
             }],
-            // Where a global AGENTS.md would go, with nothing in it: the
-            // machine this fixture stands for has never written one.
+            // Where the global AGENTS.md and TOOLS.md would go, with nothing
+            // in either: the machine this fixture stands for has never
+            // written one, so the blocks show the shipped defaults.
             instructions: crate::agent::Instructions {
                 path: Some(std::path::PathBuf::from("/home/hec/.config/noob/AGENTS.md")),
+                body: Vec::new(),
+                capped: false,
+            },
+            tools: crate::agent::Instructions {
+                path: Some(std::path::PathBuf::from("/home/hec/.config/noob/TOOLS.md")),
                 body: Vec::new(),
                 capped: false,
             },
@@ -12899,10 +12918,11 @@ mod tests {
         let counted = crate::settings::lines(panel.row(at).expect("the row"), cols);
         assert_eq!(
             counted,
-            design::card_row_lines(crate::settings::paper_body_lines(), false)
+            design::card_row_lines(crate::settings::paper_body_lines(), true),
+            "an editable document is a card with a footer"
         );
         assert!((row.h - counted as f32 * line).abs() < 0.01, "{row:?}");
-        let (box_, parts) = the_card(&out, row, false);
+        let (box_, parts) = the_card(&out, row, true);
         assert!(
             out.scene.rects.iter().any(|rect| {
                 let [x, y, w, h] = rect.xywh();
@@ -12963,11 +12983,12 @@ mod tests {
         );
     }
 
-    /// A file that is not there is an offer to write one, not an empty box.
+    /// A file that is not there shows the shipped default under an honest
+    /// note, with the checkbox that starts owning it. Never an empty box.
     #[test]
-    fn a_missing_file_is_said_on_its_own_block() {
-        // `an_agent` has no AGENTS.md at all, so the SYSTEM PROMPT section
-        // says where one would go and what the key would do.
+    fn a_missing_file_shows_the_built_in_text_on_its_own_block() {
+        // `an_agent` has neither AGENTS.md nor TOOLS.md, so both blocks say
+        // where the file would go and draw the text the agent runs with.
         let out = render_settings(
             &a_panel_on(&Config::default(), crate::settings::PROMPT),
             1400.0,
@@ -12975,12 +12996,60 @@ mod tests {
             None,
         );
         let text = text_of(&out.scene);
-        assert!(text.contains("nothing at"), "{text}");
+        assert!(text.contains("not written yet"), "{text}");
         assert!(text.contains("/home/hec/.config/noob/AGENTS.md"), "{text}");
+        assert!(text.contains("/home/hec/.config/noob/TOOLS.md"), "{text}");
         assert!(
-            text.contains("The agent reads this file first"),
-            "the block is empty: {text}"
+            text.contains("You are noob, an agent working in the current directory."),
+            "the built-in text is not drawn: {text}"
         );
+        assert!(text.contains("enable edition"), "{text}");
+
+        // The checkbox is pressed where it is drawn, and until it is ticked
+        // the only action beside it is the load on the AGENTS.md block.
+        let acts: Vec<Act> = out
+            .layout
+            .settings_acts
+            .iter()
+            .filter(|(index, ..)| *index == 0)
+            .map(|(_, act, _)| *act)
+            .collect();
+        assert_eq!(acts, [Act::EditPrompt, Act::LoadPrompt], "{acts:?}");
+        let (index, _, box_) = out
+            .layout
+            .settings_acts
+            .iter()
+            .find(|(index, act, _)| *index == 0 && *act == Act::EditPrompt)
+            .expect("the checkbox has a box");
+        let (x, y) = middle(*box_);
+        assert_eq!(out.layout.hit(x, y), Some(Hit::SettingsAct(*index, Act::EditPrompt)));
+
+        // Ticked, the save and the armed restore appear beside it, each
+        // pressed where it is drawn.
+        let mut panel = a_panel_on(&Config::default(), crate::settings::PROMPT);
+        assert!(panel.toggle_edition(0, &Config::default()));
+        let on = render_settings(&panel, 1400.0, 1200.0, None);
+        let acts: Vec<Act> = on
+            .layout
+            .settings_acts
+            .iter()
+            .filter(|(index, ..)| *index == 0)
+            .map(|(_, act, _)| *act)
+            .collect();
+        assert_eq!(
+            acts,
+            [Act::EditPrompt, Act::LoadPrompt, Act::RestorePrompt, Act::SavePrompt],
+            "{acts:?}"
+        );
+        let text = text_of(&on.scene);
+        for word in ["save", "restore", "load"] {
+            assert!(text.contains(word), "{word} is not drawn: {text}");
+        }
+        for (index, act, box_) in on.layout.settings_acts.iter().filter(|(index, ..)| *index == 0)
+        {
+            let (x, y) = middle(*box_);
+            assert_eq!(on.layout.hit(x, y), Some(Hit::SettingsAct(*index, *act)));
+        }
     }
 
     /// The skills section is two columns: the entries down the left, and the

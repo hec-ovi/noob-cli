@@ -430,9 +430,16 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                                 (false, many) => format!("delete {many}"),
                             },
                         ),
-                        // A card's own action, which no table has one of. It
-                        // is drawn by the card it stands in.
-                        Act::Validate | Act::Install | Act::AddServer | Act::Restore => continue,
+                        // A card's or a document's own action, which no table
+                        // has one of. Each is drawn by the row it stands in.
+                        Act::Validate
+                        | Act::Install
+                        | Act::AddServer
+                        | Act::Restore
+                        | Act::EditPrompt
+                        | Act::SavePrompt
+                        | Act::RestorePrompt
+                        | Act::LoadPrompt => continue,
                     };
                     settings_button(
                         scene,
@@ -981,7 +988,8 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
             // file rather than the instructions.
             SettingRow::Paper(paper) => {
                 let box_ = settings_card(*row, line);
-                let parts = settings_card_parts(box_, line, size, column, list_cols, false);
+                let parts =
+                    settings_card_parts(box_, line, size, column, list_cols, paper.does.is_some());
                 // The text starts under the line saying where it came from, and
                 // runs to the bottom of the body. How many lines that really is
                 // rather than [`crate::settings::PAPER_LINES`], because a block
@@ -1096,6 +1104,91 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 let bar = settings_card_bar(box_, text);
                 if keep.holds(bar) {
                     scrollbar(scene, skin, bar, paper.thumb(held));
+                }
+                // The footer of a document that is edited here: the
+                // enable-edition checkbox, and the actions the layout placed.
+                // Drawn off the same boxes the presses are tested in.
+                if paper.does.is_some() {
+                    let ticked = panel.edition_on(*index);
+                    for (at, act, box2) in &layout.settings_acts {
+                        if at != index {
+                            continue;
+                        }
+                        match act {
+                            Act::EditPrompt => {
+                                let ink = match ticked {
+                                    true => skin.heading,
+                                    false => skin.dim,
+                                };
+                                if frame.hot == Some(Hit::SettingsAct(*index, Act::EditPrompt))
+                                    && keep.holds(*box2)
+                                {
+                                    scene.rect(panel_fill(*box2, skin.hot));
+                                }
+                                hold_say(
+                                    scene,
+                                    vec![
+                                        Run::icon(
+                                            match ticked {
+                                                true => icons::CHECKED.to_string(),
+                                                false => icons::UNCHECKED.to_string(),
+                                            },
+                                            ink,
+                                        ),
+                                        Run::tinted(" enable edition", ink),
+                                    ],
+                                    Panel::new(
+                                        box2.x + INPUT_PAD,
+                                        box2.y,
+                                        (box2.w - INPUT_PAD).max(1.0),
+                                        box2.h,
+                                    ),
+                                    ink,
+                                );
+                            }
+                            Act::SavePrompt => settings_button(
+                                scene,
+                                *box2,
+                                ButtonKind::Primary,
+                                vec![Run::tinted("save", skin.bright)],
+                                skin.bright,
+                                frame.hot == Some(Hit::SettingsAct(*index, Act::SavePrompt)),
+                                skin,
+                                size,
+                            ),
+                            Act::RestorePrompt => {
+                                let armed = panel.arming() == Some(*index);
+                                settings_button(
+                                    scene,
+                                    *box2,
+                                    ButtonKind::Danger,
+                                    vec![Run::tinted(
+                                        match armed {
+                                            true => "sure?",
+                                            false => "restore",
+                                        },
+                                        skin.bad,
+                                    )],
+                                    skin.bad,
+                                    frame.hot
+                                        == Some(Hit::SettingsAct(*index, Act::RestorePrompt)),
+                                    skin,
+                                    size,
+                                );
+                            }
+                            Act::LoadPrompt => settings_button(
+                                scene,
+                                *box2,
+                                ButtonKind::Secondary,
+                                vec![Run::tinted("load", skin.body)],
+                                skin.body,
+                                frame.hot == Some(Hit::SettingsAct(*index, Act::LoadPrompt)),
+                                skin,
+                                size,
+                            ),
+                            _ => {}
+                        }
+                    }
                 }
             }
         }

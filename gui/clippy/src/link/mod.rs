@@ -61,6 +61,70 @@ pub fn command_for(
     command
 }
 
+/// How many lines of the environment tail the panel keeps.
+///
+/// The tail carries the project's own `AGENTS.md`, the skills index and the
+/// MCP line, and a machine with a shelf of skills can push that a long way.
+/// The block says where it stopped rather than holding a megabyte of text
+/// nobody scrolled to.
+pub const ENV_LINES: usize = 2000;
+
+/// What the thread that reads the environment tail hands back: the folder it
+/// ran in, and either the lines or why there are none.
+pub type Asked = (String, Result<Vec<String>, String>);
+
+/// Exactly the command the environment tail is read with, built without
+/// running it.
+///
+/// `noob debug env` prints the tail a session's prompt ends in, so it has to
+/// be run the way the session is started or it prints another project's: the
+/// same working directory, since the project's own `AGENTS.md`, its skills
+/// and its `mcp.json` are all found relative to it, and the same keys taken
+/// out of the environment, since the CLI prefers the environment over the
+/// file the panel writes. Its own function for the same reason
+/// [`command_for`] is one: what the window asks for is worth asserting
+/// without starting a process.
+pub fn env_command(program: &str, workspace: &std::path::Path, clear: &[&str]) -> Command {
+    let mut command = Command::new(program);
+    command.args(["debug", "env"]);
+    for key in clear {
+        command.env_remove(key);
+    }
+    command.current_dir(workspace);
+    command
+}
+
+/// What the panel makes of what that command answered.
+///
+/// The other half of the seam: the window runs the process and hands the
+/// three things a process answers with to this, so what the block shows can
+/// be checked without a model, a config directory or a child at all.
+pub fn env_from(ok: bool, stdout: &[u8], stderr: &[u8]) -> Result<Vec<String>, String> {
+    if !ok {
+        // The last thing it said, since a CLI that refuses says why on its
+        // last line and prints its usage above it.
+        let why = String::from_utf8_lossy(stderr);
+        let last = why.lines().map(str::trim).rfind(|line| !line.is_empty());
+        return Err(match last {
+            Some(line) => format!("noob debug env failed: {line}"),
+            None => String::from("noob debug env failed and said nothing"),
+        });
+    }
+    let said = String::from_utf8_lossy(stdout);
+    let mut lines: Vec<String> = said.lines().map(str::to_string).collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        return Err(String::from("noob debug env printed nothing"));
+    }
+    if lines.len() > ENV_LINES {
+        lines.truncate(ENV_LINES);
+        lines.push(format!("[the panel stops reading at {ENV_LINES} lines]"));
+    }
+    Ok(lines)
+}
+
 pub struct Link {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -337,6 +401,71 @@ mod tests {
         drop(link);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The environment tail the panel shows has to be the tail the session's
+    /// prompt ends in, and the only thing that decides that is where the
+    /// command runs and what it runs with. Asserted on the command rather
+    /// than by starting one: a real `noob debug env` reads a config
+    /// directory, a workspace and every skill on the machine.
+    #[test]
+    fn the_env_is_read_the_way_the_agent_is_started() {
+        let workspace = std::env::temp_dir();
+        let asking = env_command("noob", &workspace, &crate::agent::OWNED);
+        let args: Vec<&str> = asking
+            .get_args()
+            .map(|arg| arg.to_str().expect("a flag is text"))
+            .collect();
+        assert_eq!(args, ["debug", "env"]);
+        assert_eq!(
+            asking.get_current_dir(),
+            Some(workspace.as_path()),
+            "a tail read somewhere else is another project's tail"
+        );
+        let mut cleared: Vec<&str> = asking
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_str().expect("a name is text"))
+            .collect();
+        cleared.sort_unstable();
+        assert_eq!(
+            cleared,
+            ["NOOB_CTX", "NOOB_TASK_CONCURRENCY"],
+            "the serve child and the env read different settings"
+        );
+        // The same treatment `serve` gets, which is what makes the two the
+        // same prompt.
+        let serving = command_for("noob", &workspace, None, &crate::agent::OWNED);
+        assert_eq!(asking.get_current_dir(), serving.get_current_dir());
+        assert_eq!(asking.get_envs().count(), serving.get_envs().count());
+    }
+
+    /// What the panel shows for each of the three things that command can do:
+    /// print the tail, print nothing, and fail.
+    #[test]
+    fn what_the_env_command_answered_is_what_the_block_shows() {
+        let tail = env_from(true, b"<env>\ncwd: /work\n</env>\n\n\n", b"").expect("a tail");
+        assert_eq!(
+            tail,
+            ["<env>", "cwd: /work", "</env>"],
+            "the blank lines on the end are not part of the tail"
+        );
+
+        // A failure says why, off the last line the CLI wrote, rather than
+        // leaving the block empty with nothing anywhere saying what happened.
+        let why = env_from(false, b"", b"usage: noob debug <what>\nno such subcommand: env\n")
+            .expect_err("it failed");
+        assert!(why.contains("no such subcommand: env"), "{why}");
+        let quiet = env_from(false, b"", b"").expect_err("it failed");
+        assert!(quiet.contains("said nothing"), "{quiet}");
+        let empty = env_from(true, b"\n \n", b"").expect_err("nothing was printed");
+        assert!(empty.contains("printed nothing"), "{empty}");
+
+        // And a tail longer than the block keeps says where it stopped.
+        let long = "line\n".repeat(ENV_LINES + 40);
+        let cut = env_from(true, long.as_bytes(), b"").expect("a tail");
+        assert_eq!(cut.len(), ENV_LINES + 1);
+        assert!(cut[ENV_LINES].contains("stops reading"), "{:?}", cut[ENV_LINES]);
     }
 
     /// A program that is not there is a message in the window, not a panic and

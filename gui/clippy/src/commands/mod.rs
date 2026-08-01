@@ -170,13 +170,14 @@ pub const ALL: [Command; 24] = [
     },
     Command {
         name: "show_system_prompt",
-        about: "open the global AGENTS.md on the settings panel",
+        about: "open the prompt's three layers on the settings panel",
         help: &[
-            "Opens the SYSTEM PROMPT section: the agent's global AGENTS.md",
-            "as one document. Editing it happens on the panel, where Enter",
-            "opens the document and Ctrl-S writes the file; a command line",
-            "is no place to type a document, so this one only takes you",
-            "there.",
+            "Opens the SYSTEM PROMPT section: AGENTS.md, TOOLS.md and the",
+            "environment block, in the order the CLI assembles them.",
+            "Editing happens on the panel, where the enable-edition",
+            "checkbox opens a document and Ctrl-S writes its file; a",
+            "command line is no place to type a document, so this one only",
+            "takes you there.",
         ],
         args: &[],
         does: Does::Open {
@@ -544,9 +545,9 @@ mod tests {
                 Deed::TurnServer { on: false, .. } => "mcp_off",
                 Deed::RemoveServer { .. } => "mcp_remove",
                 Deed::AddServer { .. } => "mcp_add",
-                // Writing the document happens on the panel; the command
-                // that covers both instruction deeds opens it there.
-                Deed::StartInstructions { .. } | Deed::SaveInstructions { .. } => {
+                // Writing the documents happens on the panel; the command
+                // that covers both prompt-file deeds opens it there.
+                Deed::SaveInstructions { .. } | Deed::RestorePrompt { .. } => {
                     "show_system_prompt"
                 }
                 Deed::ForgetSessions { .. } => "delete_session",
@@ -591,12 +592,13 @@ mod tests {
                 name: String::new(),
                 how: String::new(),
             },
-            Deed::StartInstructions {
-                path: std::path::PathBuf::new(),
-            },
             Deed::SaveInstructions {
                 path: std::path::PathBuf::new(),
                 text: String::new(),
+            },
+            Deed::RestorePrompt {
+                path: std::path::PathBuf::new(),
+                default: "",
             },
             Deed::ForgetSessions { ids: Vec::new() },
             Deed::RestoreLooks,

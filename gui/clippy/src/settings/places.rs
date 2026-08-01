@@ -187,6 +187,61 @@ pub(crate) fn settings_act_for(doing: crate::settings::Doing) -> Act {
     }
 }
 
+/// How wide the enable-edition checkbox is, in columns of pane text: the mark,
+/// a space, and the words `enable edition`.
+const SETTING_EDIT_COLUMNS: usize = 18;
+
+/// The footer of an editable document block: the enable-edition checkbox at
+/// the left, and the actions at the right, where every card action sits.
+///
+/// While edition is off the only action is the load, on the block that offers
+/// one: there is nothing to save and nothing armed. On, the save and the
+/// restore appear beside it. Asked by the placement and by the drawing, so a
+/// button is drawn exactly where the press on it is tested for; buttons that
+/// do not fit the footer are dropped as a group, since a button drawn over
+/// the checkbox is a press nobody can aim.
+pub(crate) fn settings_paper_acts(
+    footer: Panel,
+    line: f32,
+    column: f32,
+    load: bool,
+    on: bool,
+) -> Vec<(Act, Panel)> {
+    if footer.w < 1.0 || footer.h < 1.0 {
+        return Vec::new();
+    }
+    let check_w = (SETTING_EDIT_COLUMNS as f32 * column).min(footer.w);
+    let mut out = vec![(
+        Act::EditPrompt,
+        Panel::new(footer.x, footer.y, check_w, footer.h),
+    )];
+    let mut acts: Vec<Act> = Vec::new();
+    if load {
+        acts.push(Act::LoadPrompt);
+    }
+    if on {
+        acts.push(Act::RestorePrompt);
+        acts.push(Act::SavePrompt);
+    }
+    if acts.is_empty() {
+        return out;
+    }
+    let wide = SETTING_DOING_COLUMNS as f32 * column;
+    let step = design::step(line);
+    let whole = wide * acts.len() as f32 + step * acts.len().saturating_sub(1) as f32;
+    if footer.w < check_w + step + whole {
+        return out;
+    }
+    let x = footer.x + footer.w - whole;
+    for (at, act) in acts.into_iter().enumerate() {
+        out.push((
+            act,
+            Panel::new(x + at as f32 * (wide + step), footer.y, wide, footer.h),
+        ));
+    }
+    out
+}
+
 /// Where each option of a choice sits inside the box its field gives it.
 ///
 /// All of them, side by side, sharing the width: a choice the user cannot see
@@ -1431,6 +1486,34 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
                     let remove = Panel::new(x + toggle_w + gap, foot.y, remove_w, foot.h);
                     if entry.removable && clip.holds(remove) {
                         removes.push((index, remove));
+                    }
+                }
+            }
+            // An editable document block: the enable-edition checkbox and the
+            // actions in its footer, exactly where the painter draws them.
+            // Nothing when the card was cut off by the bottom of the list and
+            // has no footer left inside itself, the same rule every card's
+            // buttons follow. A block with no footer places nothing.
+            SettingRow::Paper(paper) => {
+                let Some(acts_of) = paper.does else {
+                    continue;
+                };
+                let card = settings_card(row, line);
+                let parts =
+                    settings_card_parts(card, line, shape.pane_size, column, entry_cols, true);
+                let inside = parts.footer.y >= card.y
+                    && parts.footer.y + parts.footer.h <= card.y + card.h + 0.01;
+                if inside {
+                    for (act, at) in settings_paper_acts(
+                        parts.footer,
+                        line,
+                        column,
+                        acts_of.load,
+                        panel.edition_on(index),
+                    ) {
+                        if clip.holds(at) {
+                            acts.push((index, act, at));
+                        }
                     }
                 }
             }

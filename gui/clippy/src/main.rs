@@ -520,12 +520,13 @@ fn deed_on_disk(
             Some(path) => agent::add_server(path, name, how),
             None => Err(String::from("there is no config directory to write a server in")),
         },
-        // The path came off the block that offered it, which read it off the
-        // agent's own config directory: nothing here spells one out.
-        settings::Deed::StartInstructions { path } => agent::start_instructions(path),
         // The editor's save: the whole file at once, by the same rename
         // every write in the agent box arrives by.
         settings::Deed::SaveInstructions { path, text } => agent::write_instructions(path, text),
+        // The restore: the file parks in the .bak beside it, then the shipped
+        // default lands as the file. The path and the text both came off the
+        // panel, which read them off the agent box's own constants.
+        settings::Deed::RestorePrompt { path, default } => agent::restore_prompt(path, default),
         settings::Deed::ForgetSessions { .. } | settings::Deed::RestoreLooks => Ok(()),
     }
 }
@@ -1006,6 +1007,10 @@ struct App {
     /// is being dragged. The same cycle again, on the panel: the value follows
     /// the pointer and the file is written once, when the button comes up.
     sliding: Option<(usize, settings::Side)>,
+    /// The thread reading the prompt's environment tail out of the CLI, while
+    /// it is still reading it. Dropped as soon as it answers, so a panel
+    /// opened twice does not take the first run's answer for the second one's.
+    asking: Option<std::sync::mpsc::Receiver<link::Asked>>,
     /// The thread installing a skill, while it is still installing it: the
     /// source it was given, and the name it landed under or why it did not.
     ///
@@ -1141,6 +1146,7 @@ impl App {
             holding: None,
             sizing: None,
             sliding: None,
+            asking: None,
             installing: None,
             install_from_command: false,
             selecting: false,
@@ -1414,6 +1420,58 @@ impl App {
             self.settings_path().as_deref(),
             self.read_agent(),
         ));
+        self.ask_for_env();
+        self.dirty = true;
+    }
+
+    /// Ask the CLI what the prompt's environment tail is, on a thread of its
+    /// own.
+    ///
+    /// The block shows what the agent's prompt really ends in, and the only
+    /// thing that knows that is the CLI: `noob debug env` prints the tail a
+    /// session sends. It reads a config directory, a workspace and every
+    /// skill on the machine, so it runs off the interface thread and wakes
+    /// the event loop when it answers, the same way the agent's own output
+    /// arrives.
+    fn ask_for_env(&mut self) {
+        let program = std::env::var("NOOB_BIN").unwrap_or_else(|_| String::from("noob"));
+        // The folder the session is running in, since the project's own
+        // AGENTS.md, its skills and its mcp.json are all found relative to
+        // it. A window with no folder open yet asks in the one the process is
+        // in, which is where a session started now would run.
+        let workspace = match self.state.workspace.is_empty() {
+            false => PathBuf::from(&self.state.workspace),
+            true => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.asking = Some(rx);
+        let proxy = self.proxy.clone();
+        let at = workspace.display().to_string();
+        std::thread::spawn(move || {
+            let answer = match link::env_command(&program, &workspace, &agent::OWNED).output() {
+                Ok(out) => link::env_from(out.status.success(), &out.stdout, &out.stderr),
+                Err(e) => Err(format!(
+                    "cannot run {program:?}: {e}; is noob on PATH, or set NOOB_BIN"
+                )),
+            };
+            let _ = tx.send((at, answer));
+            let _ = proxy.send_event(Wake);
+        });
+    }
+
+    /// Take what that thread answered, if it has.
+    fn take_env(&mut self) {
+        let Some(rx) = self.asking.as_ref() else {
+            return;
+        };
+        let Ok((at, answer)) = rx.try_recv() else {
+            return;
+        };
+        self.asking = None;
+        let config = self.config.clone();
+        if let Some(panel) = self.settings.as_mut() {
+            panel.adopt_env(at, answer, &config);
+        }
         self.dirty = true;
     }
 
@@ -1699,7 +1757,6 @@ impl App {
         let mut edit = false;
         let mut edit_doc = false;
         let mut flip = None;
-        let mut make = None;
         // Which conversation the keys are on, when they are on the table at
         // all: read before the match, because three of the arms below act on it
         // and the panel is borrowed for the whole of them.
@@ -1745,13 +1802,9 @@ impl App {
                 match panel.at_cursor() {
                     Some(settings::Row::Field { .. }) => edit = true,
                     Some(settings::Row::Entry(_)) => flip = Some(panel.cursor()),
-                    // A block with nothing in it offers to write the file it
-                    // was looking for; the system prompt's document opens its
-                    // editor instead, and any other block answers nothing.
-                    Some(settings::Row::Paper(paper)) => match paper.offer.is_some() {
-                        true => make = Some(panel.cursor()),
-                        false => edit_doc = true,
-                    },
+                    // A document that is edited here: Enter is the keyboard's
+                    // enable-edition. Any other block answers nothing.
+                    Some(settings::Row::Paper(_)) => edit_doc = true,
                     // Enter marks the conversation the keys are on, the same as
                     // space: enter on a row of a list is expected to do
                     // something to that row, and marking it is the one thing
@@ -1796,15 +1849,11 @@ impl App {
         if edit_doc {
             let config = self.config.clone();
             if let Some(panel) = self.settings.as_mut() {
-                self.dirty |= panel.edit_instructions(&config);
+                self.dirty |= panel.toggle_edition(panel.cursor(), &config);
             }
         }
         if let Some(index) = flip {
             let deed = self.settings.as_ref().and_then(|panel| panel.toggle(index));
-            self.do_deed(deed);
-        }
-        if let Some(index) = make {
-            let deed = self.settings.as_ref().and_then(|panel| panel.make(index));
             self.do_deed(deed);
         }
         if let Some(index) = forget {
@@ -1829,6 +1878,12 @@ impl App {
     /// shows next comes off the disk rather than out of what was typed. A file
     /// that refuses is said on the panel, where the edit is.
     fn save_endpoint(&mut self) {
+        // The load line on the prompt section: Enter reads the named file
+        // into the editor and writes nothing at all.
+        if self.settings.as_ref().is_some_and(Settings::loading) {
+            self.load_prompt_md();
+            return;
+        }
         // The install field is a field of the panel and not a line of any file,
         // so Enter on it starts the install instead. Branched here rather than
         // in the model, because this is the one place that turns a finished
@@ -1882,6 +1937,29 @@ impl App {
             return;
         };
         self.write_agent_setting(&path, key, &value);
+    }
+
+    /// Read the `.md` file named on the load line into the AGENTS.md editor,
+    /// as an unsaved edit: the reading happens here because the model owns no
+    /// I/O, and a refusal is said on the footer with the typed path kept.
+    fn load_prompt_md(&mut self) {
+        let Some(path) = self.settings.as_ref().and_then(Settings::load_path) else {
+            return;
+        };
+        let config = self.config.clone();
+        match agent::load_md(&path) {
+            Ok(body) => {
+                if let Some(panel) = self.settings.as_mut() {
+                    panel.take_loaded(body, &config);
+                }
+            }
+            Err(why) => {
+                if let Some(panel) = self.settings.as_mut() {
+                    panel.say_trouble(why);
+                }
+            }
+        }
+        self.dirty = true;
     }
 
     /// Write the whole instructions file from the document editor, and read
@@ -1983,10 +2061,14 @@ impl App {
                     if matches!(&deed, settings::Deed::AddServer { .. }) {
                         panel.clear_server_fields();
                     }
-                    // A landed save closes the editor, so the block shows the
-                    // file read back; a refusal keeps the buffer, with the
-                    // reason on the footer.
-                    if matches!(&deed, settings::Deed::SaveInstructions { .. }) {
+                    // A landed save or restore closes the editor, so the block
+                    // shows the file read back; a refusal keeps the buffer,
+                    // with the reason on the footer.
+                    if matches!(
+                        &deed,
+                        settings::Deed::SaveInstructions { .. }
+                            | settings::Deed::RestorePrompt { .. }
+                    ) {
                         panel.end_instructions_edit();
                     }
                     panel.adopt_agent(agent, &config);
@@ -2245,6 +2327,26 @@ impl App {
                                 panel.cancel_edit();
                             }
                             self.dirty |= panel.point_at(index, settings::Side::Left);
+                            None
+                        }
+                        // The enable-edition checkbox on a prompt document:
+                        // ticked opens the editor, ticked again drops it.
+                        view::Act::EditPrompt => {
+                            let config = self.config.clone();
+                            self.dirty |= panel.toggle_edition(index, &config);
+                            None
+                        }
+                        // The save in that footer: the same whole-file deed
+                        // Ctrl-S asks for.
+                        view::Act::SavePrompt => panel.finish_instructions(),
+                        // The restore beside it: armed on the first press,
+                        // acted on the second, like every button that loses
+                        // something.
+                        view::Act::RestorePrompt => panel.restore_prompt(index),
+                        // The load beside those: opens the path line; Enter
+                        // then reads the file ([`App::load_prompt_md`]).
+                        view::Act::LoadPrompt => {
+                            self.dirty |= panel.begin_load(index);
                             None
                         }
                         // The install card's own button. Not a deed: a deed is
@@ -2640,8 +2742,11 @@ impl App {
 
     fn drain(&mut self) {
         // Before the agent's own frames and outside the check for one: the
-        // skill being installed answers on its own thread and wakes the loop,
-        // and a window with no agent running still has to pick the answer up.
+        // environment tail is read whether or not a session is running, and
+        // the panel can be open on a window that has no agent at all.
+        self.take_env();
+        // The same, for the skill being installed: it answers on its own
+        // thread and wakes the loop.
         self.take_install();
         let Some(link) = self.link.as_mut() else {
             return;

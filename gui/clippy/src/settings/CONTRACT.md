@@ -1,6 +1,6 @@
 # settings
 
-contractVersion: 2.4.0
+contractVersion: 2.5.0
 
 ## Purpose
 
@@ -16,8 +16,9 @@ One folder, one contract each; a design change to one section happens inside
 its folder alone:
 
 - [`sections/agent`](sections/agent/CONTRACT.md) - the CLI's file as cards.
-- [`sections/prompt`](sections/prompt/CONTRACT.md) - the global AGENTS.md
-  as one document, edited in place, with the starter offer.
+- [`sections/prompt`](sections/prompt/CONTRACT.md) - the prompt's three
+  layers: AGENTS.md and TOOLS.md edited behind an edition checkbox, the
+  environment block read out.
 - [`sections/sessions`](sections/sessions/CONTRACT.md) - the saved
   conversations table, its columns and cells.
 - [`sections/skills`](sections/skills/CONTRACT.md) - the installed list and
@@ -82,11 +83,15 @@ be `Which::Fixed`: only read, no toggle, no uninstall, no deed.
    config parser and commits the value under the swatch's key into the
    window file, and a value the parser refuses is said on the footer with
    nothing written. Escape or any cursor movement lets the press go.
-8. The system prompt's document is edited in place: Enter on the block opens
-   the editor, the block shows the buffer with a caret while it is open,
-   nothing lands until Ctrl-S writes the whole file through the agent-files
-   box, and Escape leaves the file untouched. A failed write keeps the
-   buffer, with the reason on the footer.
+8. A prompt document is edited behind its enable-edition checkbox: ticking
+   it opens the editor on the file's text (the shipped default when there is
+   none), the block shows the buffer with a caret while it is open, nothing
+   lands until Ctrl-S or the save button writes the whole file through the
+   agent-files box, and Escape or the checkbox drops the buffer. The restore
+   parks the file in the `.bak` beside it and writes the shipped default,
+   armed on the first press; the load reads a named `.md` into the editor
+   and writes nothing. A failed write keeps the buffer, with the reason on
+   the footer.
 
 ## Dependencies
 
@@ -101,7 +106,7 @@ drawn on the track, and the keyboard nudge keeps stepping by the plain step.
 
 ## Tests
 
-67 model tests drive key- and click-shaped calls with scratch files: the
+70 model tests drive key- and click-shaped calls with scratch files: the
 frame's 28 (cursor, rail, scroll, sliders, doc viewer, footer) in mod.rs,
 each section's in its own box. Scene-level placement and paint are asserted
 by the view box's rendered-scene tests.

@@ -35,12 +35,22 @@ const SKILL_BODY_BYTES: u64 = 256 * 1024;
 /// hardcoded in the CLI: no setting anywhere names another file.
 pub const AGENTS_MD: &str = "AGENTS.md";
 
-/// How much of it the CLI actually reads.
+/// The tools text, appended after the instructions: the second user-owned
+/// layer of the prompt, in the config directory beside [`AGENTS_MD`].
+pub const TOOLS_MD: &str = "TOOLS.md";
+
+/// How much of each prompt file the CLI actually reads.
 ///
-/// `crates/noob/src/agent/prompt.rs` caps each `AGENTS.md` at 16 KiB and appends
-/// a truncation notice, so a window showing more than this would be showing text
-/// the model never sees.
+/// `crates/noob/src/agent/prompt.rs` caps `AGENTS.md` and `TOOLS.md` at 16 KiB
+/// and appends a truncation notice, so a window showing more than this would be
+/// showing text the model never sees.
 pub const AGENTS_CAP: u64 = 16 * 1024;
+
+/// The texts the CLI ships for the two prompt files, used whenever a file is
+/// absent. Included from the CLI's own sources, so what the panel shows as the
+/// built-in text and what the agent runs with cannot drift.
+pub const AGENTS_DEFAULT: &str = include_str!("../../../../crates/noob/prompts/agents-default.md");
+pub const TOOLS_DEFAULT: &str = include_str!("../../../../crates/noob/prompts/tools-default.md");
 
 /// What is on the end of the directory a turned-off skill is moved to.
 ///
@@ -573,7 +583,17 @@ pub struct Instructions {
 /// The path is the CLI's own: `<config dir>/AGENTS.md`, resolved by
 /// [`config_dir`], which is why nothing here spells out a home directory.
 pub fn read_instructions(dir: Option<&Path>) -> Instructions {
-    let path = dir.map(|dir| dir.join(AGENTS_MD));
+    read_prompt_file(dir, AGENTS_MD)
+}
+
+/// Read the global `TOOLS.md` the same way: the CLI reads the two files with
+/// one loader, so the window does too.
+pub fn read_tools(dir: Option<&Path>) -> Instructions {
+    read_prompt_file(dir, TOOLS_MD)
+}
+
+fn read_prompt_file(dir: Option<&Path>, name: &str) -> Instructions {
+    let path = dir.map(|dir| dir.join(name));
     let text = path
         .as_deref()
         .and_then(|path| head_of(path, AGENTS_CAP))
@@ -592,40 +612,68 @@ pub fn read_instructions(dir: Option<&Path>) -> Instructions {
     }
 }
 
-/// What a file that is not there yet is written with.
-///
-/// A heading and a line saying what the file is for, so the block on the panel
-/// has something in it that reads as an instruction rather than an empty box
-/// nobody knows what to put in.
-const STARTER: &str = "# Global instructions\n\nThese lines go at the top of every prompt, in every folder.\n\n- \n";
-
-/// Write a starter `AGENTS.md`, for the offer the panel makes when there is
-/// none.
-///
-/// Refuses a file that is already there rather than writing over it: the one
-/// thing this must never do is lose instructions somebody wrote. The directory
-/// is created when it is missing, which is a machine that has never run the CLI.
-pub fn start_instructions(path: &Path) -> Result<(), String> {
-    if path.exists() {
-        return Err(format!("{} is already there", path.display()));
-    }
-    if let Some(dir) = path.parent()
-        && !dir.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
-    }
-    std::fs::write(path, STARTER).map_err(|e| format!("cannot write {}: {e}", path.display()))
+/// Where a restore parks the current file: beside it, the same name with
+/// `.bak` on the end. One slot, overwritten each time: the bak is the last
+/// text a restore replaced, not a history.
+pub fn bak_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .unwrap_or_default();
+    name.push(".bak");
+    path.with_file_name(name)
 }
 
-/// Write the whole global `AGENTS.md`, for the panel's editor.
+/// Write the shipped default over a prompt file, parking what is there in the
+/// `.bak` beside it first. A file that is not there gets no bak, because there
+/// is nothing to lose; a bak that cannot be written stops the restore, so the
+/// one copy of somebody's text is never traded for the default.
+pub fn restore_prompt(path: &Path, default: &str) -> Result<(), String> {
+    if path.is_file() {
+        let bak = bak_path(path);
+        std::fs::copy(path, &bak)
+            .map_err(|e| format!("cannot park {} in {}: {e}", path.display(), bak.display()))?;
+    }
+    write_instructions(path, default)
+}
+
+/// Read an `.md` file somebody named, for the panel's load action: the text
+/// comes back as lines for the editor and nothing is written anywhere.
 ///
-/// The counterpart of [`start_instructions`] for a file that is being edited
-/// rather than started: the whole text lands at once, through the same
-/// rename every write here arrives by, so a crash mid-write cannot leave
-/// half of somebody's instructions. The directory is created on the way when
-/// it is missing, and a file that ends without a newline is given one,
-/// because that is how every writer here leaves a file.
+/// Refused when it is not an `.md` file, cannot be read, or goes past the
+/// [`AGENTS_CAP`] the CLI reads to: a loaded buffer past the cap would lose
+/// its tail the moment it was saved.
+pub fn load_md(path: &Path) -> Result<Vec<String>, String> {
+    if path.as_os_str().is_empty() {
+        return Err(String::from("type the path to an .md file first"));
+    }
+    let md = path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+    if !md {
+        return Err(format!("{} is not an .md file", path.display()));
+    }
+    let size = std::fs::metadata(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?
+        .len();
+    if size > AGENTS_CAP {
+        return Err(format!(
+            "{} goes past the {} KiB the CLI reads; cut it down first",
+            path.display(),
+            AGENTS_CAP / 1024
+        ));
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    Ok(text.lines().map(str::to_string).collect())
+}
+
+/// Write one prompt file whole, for the panel's editor: the text lands at
+/// once, through the same rename every write here arrives by, so a crash
+/// mid-write cannot leave half of somebody's instructions. The directory is
+/// created on the way when it is missing, and a file that ends without a
+/// newline is given one, because that is how every writer here leaves a file.
 pub fn write_instructions(path: &Path, text: &str) -> Result<(), String> {
     let mut whole = String::from(text);
     if !whole.is_empty() && !whole.ends_with('\n') {
@@ -959,6 +1007,8 @@ pub struct Agent {
     pub mcp: Mcp,
     /// The global `AGENTS.md`, which is the first thing in every prompt.
     pub instructions: Instructions,
+    /// The global `TOOLS.md`, appended after it.
+    pub tools: Instructions,
     /// The sessions on disk, read with the same reader the folder picker uses.
     pub sessions: crate::sessions::Listing,
     /// When the snapshot was taken, which is what the ages on the session rows
@@ -977,6 +1027,7 @@ impl Default for Agent {
             skills: Vec::new(),
             mcp: Mcp::default(),
             instructions: Instructions::default(),
+            tools: Instructions::default(),
             sessions: crate::sessions::Listing::default(),
             now: std::time::SystemTime::UNIX_EPOCH,
         }
@@ -1012,6 +1063,7 @@ impl Agent {
             skills_at,
             mcp: read_mcp(dir, workspace),
             instructions: read_instructions(dir),
+            tools: read_tools(dir),
             env_path,
             sessions,
             now: std::time::SystemTime::now(),
@@ -1152,6 +1204,13 @@ mod tests {
             "more of the file is on the panel than the CLI reads"
         );
 
+        // TOOLS.md is read with the same loader from the same directory,
+        // because the CLI reads the two files with one.
+        std::fs::write(dir.join(TOOLS_MD), "tools text\n").expect("a file");
+        let tools = read_tools(Some(&dir));
+        assert_eq!(tools.body, ["tools text"]);
+        assert_eq!(tools.path.as_deref(), Some(dir.join(TOOLS_MD).as_path()));
+
         // And with no config directory there is nowhere to read one from, which
         // is said rather than guessed at.
         let nowhere = read_instructions(None);
@@ -1160,30 +1219,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The offer the panel makes when there is no instructions file: it writes
-    /// one, it makes the directory when the CLI has never run, and it refuses to
-    /// write over a file that is already there.
+    /// The restore parks the current file in the `.bak` beside it and writes
+    /// the shipped default in its place. A file that is not there gets no bak,
+    /// and an older bak is overwritten rather than kept.
     #[test]
-    fn a_starter_instructions_file_is_written_once_and_never_over() {
-        let dir = temp("starter");
-        let path = dir.join("fresh").join(AGENTS_MD);
-        start_instructions(&path).expect("it writes one");
-        let text = std::fs::read_to_string(&path).expect("the file");
-        assert!(text.contains("# Global instructions"), "{text}");
+    fn a_restore_parks_a_bak_and_writes_the_default() {
+        let dir = temp("restore");
+        let path = dir.join(AGENTS_MD);
+        let bak = bak_path(&path);
+        assert_eq!(bak, dir.join("AGENTS.md.bak"));
 
-        // The whole point of the offer: the file the agent reads is the file
-        // that was written.
-        let read = read_instructions(Some(path.parent().expect("its directory")));
-        assert!(
-            read.body.first().is_some_and(|line| line.contains("Global instructions")),
-            "{:?}",
-            read.body
+        // No file yet: the default lands and no bak appears, because there was
+        // nothing to lose.
+        restore_prompt(&path, AGENTS_DEFAULT).expect("the default lands");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the file"),
+            AGENTS_DEFAULT
+        );
+        assert!(!bak.exists(), "a bak of a file that was not there");
+
+        // A file somebody wrote: the restore parks it first, then writes the
+        // default, and a second restore overwrites the older bak.
+        std::fs::write(&path, "mine\n").expect("a file");
+        restore_prompt(&path, AGENTS_DEFAULT).expect("the default lands");
+        assert_eq!(std::fs::read_to_string(&bak).expect("the bak"), "mine\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the file"),
+            AGENTS_DEFAULT
+        );
+        std::fs::write(&path, "newer\n").expect("a file");
+        restore_prompt(&path, TOOLS_DEFAULT).expect("the default lands");
+        assert_eq!(std::fs::read_to_string(&bak).expect("the bak"), "newer\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The load action reads an `.md` file into lines and writes nothing:
+    /// anything that is not a readable `.md` inside the CLI's cap is refused
+    /// with the reason.
+    #[test]
+    fn loading_a_custom_md_reads_lines_and_refuses_the_rest() {
+        let dir = temp("load-md");
+        let path = dir.join("mine.md");
+        std::fs::write(&path, "# Mine\n\nbe brief\n").expect("a file");
+        assert_eq!(
+            load_md(&path).expect("it reads"),
+            ["# Mine", "", "be brief"]
         );
 
-        // Instructions somebody wrote are never written over.
-        std::fs::write(&path, "mine\n").expect("a file");
-        assert!(start_instructions(&path).is_err());
-        assert_eq!(std::fs::read_to_string(&path).expect("the file"), "mine\n");
+        // Not markdown, not there, or past the cap: refused, with the reason.
+        let txt = dir.join("notes.txt");
+        std::fs::write(&txt, "text\n").expect("a file");
+        assert!(load_md(&txt).expect_err("not md").contains("not an .md file"));
+        assert!(load_md(&dir.join("gone.md")).is_err());
+        assert!(load_md(Path::new("")).is_err());
+        let big = dir.join("big.md");
+        std::fs::write(&big, "x".repeat(AGENTS_CAP as usize + 1)).expect("a file");
+        assert!(load_md(&big).expect_err("past the cap").contains("16 KiB"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

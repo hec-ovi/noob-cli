@@ -1,56 +1,65 @@
 # settings/sections/prompt
 
-contractVersion: 1.1.0
+contractVersion: 2.0.0
 
 ## Purpose
 
-The SYSTEM PROMPT section of the settings panel: the agent's global
-AGENTS.md, the first layer of every prompt, as one document with the file's
-path as a reading over it, an offer to write a starter file when there is
-none, and an editor that changes the file in place.
+The SYSTEM PROMPT section of the settings panel: the prompt as the three
+layers the CLI assembles it from, stacked in order. AGENTS.md and TOOLS.md
+are documents edited in place behind an enable-edition checkbox, each with
+its shipped default shown honestly when the file is absent; the environment
+block is what `noob debug env` printed, read and never edited; a line under
+them names the assembly order.
 
 ## Public surface
 
 ```rust
-pub struct PromptSection;        // the section's own state: the document's
+pub struct PromptSection;        // the section's own state: the document
                                  // editor (lines, caret, follow-the-caret
-                                 // scroll) while it is open. The frame embeds
-                                 // it and routes keys to it through its own
-                                 // edit_instructions/type_instructions/...
-                                 // delegation; the save is a Deed done in
-                                 // main through the agent-files box
-pub fn PromptSection::rows(&self, agent: &Agent) -> Vec<Row>
-                                 // THE FILE card naming the path, then the
-                                 // document as a Paper: the file's text, or
-                                 // the buffer while the editor is open
+                                 // scroll) for whichever file has edition
+                                 // enabled, one at a time. The frame embeds
+                                 // it and routes keys through its own
+                                 // instructions_* delegation; every save and
+                                 // restore is a Deed done in main through
+                                 // the agent-files box
+pub enum PromptFile;             // Agents | Tools: which file a row or the
+                                 // open editor is about
+pub fn PromptSection::rows(&self, agent: &Agent, env: &EnvBlock) -> Vec<Row>
+                                 // the three blocks in assembly order, then
+                                 // the note naming that order. Each file
+                                 // block carries PaperActs (the footer);
+                                 // only AGENTS.md offers the load
 pub fn PromptSection::editing(&self) -> bool
 ```
 
 ## Invariants
 
-1. No I/O here: rows come from the `Agent` snapshot's `Instructions` and the
-   editor's own buffer; the save is the whole file at once, written in
-   `main` through `agent::write_instructions`.
+1. No I/O here: rows come from the `Agent` snapshot, the shipped default
+   constants and the editor's own buffer; every write is a Deed done in
+   `main` through the agent-files box.
 2. Missing and whitespace-only files are one thing, because they are one
-   thing to the agent: both show the offer, and the offer carries the path
-   the agent would read.
-3. While the editor is open the block shows the buffer with the caret kept
-   on screen, and the file has not changed; abandoning the edit (Escape)
-   restores the block to the file's own text.
-4. A file longer than the CLI's 16 KiB cap shows exactly what the model
-   gets, with a line saying the file goes further, and refuses the editor:
-   saving the capped text would lose the tail.
-5. No config directory is said as trouble, never offered and never edited.
+   thing to the agent: both show the shipped default under a note naming
+   the path and saying the text is not written yet.
+3. Edition gates the editor: typing does nothing until the checkbox is
+   ticked, ticking opens the buffer on the file's text (the default when
+   there is none), and Escape or unticking drops the buffer with the file
+   untouched. One editor at a time; ticking one file drops the other's.
+4. Each block saves its own file whole; a file past the CLI's 16 KiB cap
+   refuses edition, since saving the capped text would lose the tail.
+5. The environment block never offers edition: it is computed by the CLI
+   for each request, and its `under` line says so.
+6. No config directory is said as trouble, never offered and never edited.
 
 ## Dependencies
 
-The settings box's shared vocabulary (Row, Card, CardField, Paper,
-PAPER_LINES); the agent-files box (`crate::agent`) for the `Instructions`
-snapshot, the starter write and the whole-file write.
+The settings box's shared vocabulary (Row, Paper, PaperActs, EnvBlock,
+PAPER_LINES); the agent-files box (`crate::agent`) for the two `Instructions`
+snapshots, the shipped defaults, and the whole-file writes.
 
 ## Tests
 
-Inline: the rail order, the document with its path, the offer round trip,
-the edit-and-save round trip, the caret-following scroll, the abandoned
-edit, the refused write (6 tests), driven through the frame's `Settings`.
-Scene-level drawing is asserted by the view box's rendered-scene tests.
+Inline: the three blocks in order with the env answer and its failure, the
+default shown and owned by saving, the edition gate, the two independent
+saves, the armed restore with its bak, the load into the editor, the
+read-only environment, the caret-following scroll, and the refused write
+with the cap (9 tests), driven through the frame's `Settings`.

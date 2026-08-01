@@ -149,7 +149,7 @@ impl SkillsSection {
                     "fetching it, reading its SKILL.md and putting it in place.",
                 )],
                 first: 0,
-                offer: None,
+                does: None,
                 bad: false,
             },
             Installing::Done { source, said, bad } => Paper {
@@ -160,7 +160,7 @@ impl SkillsSection {
                 },
                 body: said.clone(),
                 first: 0,
-                offer: None,
+                does: None,
                 bad: *bad,
             },
         })

@@ -157,8 +157,8 @@ use crate::config::{self, Config};
 /// The sections, in the order the rail lists them: the agent first, because
 /// what the window is a front end for matters more than what colour it is.
 pub const AGENT: &str = "AGENT";
-/// The system prompt: the global `AGENTS.md`, the first layer of every
-/// prompt, as one document of its own.
+/// The system prompt: its three layers as documents, AGENTS.md and TOOLS.md
+/// edited in place and the environment block read out.
 pub const PROMPT: &str = "SYSTEM PROMPT";
 pub const SESSIONS: &str = "SESSIONS";
 pub const SKILLS: &str = "SKILLS";
@@ -586,11 +586,20 @@ pub struct Paper {
     pub body: Vec<String>,
     /// Which line of `body` the block starts on.
     pub first: usize,
-    /// The file a press would write, when there is nothing to show and writing
-    /// one is the thing to do about it.
-    pub offer: Option<PathBuf>,
+    /// The footer a document that is edited here carries, or nothing on a
+    /// block that is only read.
+    pub does: Option<PaperActs>,
     /// Whether `under` is something wrong rather than something explained.
     pub bad: bool,
+}
+
+/// The footer of an editable document block: the enable-edition checkbox, and
+/// which optional actions stand beside the save and the restore.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaperActs {
+    /// Whether the footer also offers loading an `.md` file from disk into
+    /// the editor.
+    pub load: bool,
 }
 
 impl Paper {
@@ -858,13 +867,18 @@ pub enum Deed {
         project: bool,
         on: bool,
     },
-    /// Write a starter `AGENTS.md` where the agent looks for one. Only ever
-    /// asked for by a block that found nothing there.
-    StartInstructions { path: PathBuf },
-    /// Write the whole `AGENTS.md` at once, from the system prompt section's
+    /// Write one of the prompt files whole, from the system prompt section's
     /// editor. The path came off the agent's own config directory, the same
-    /// place the read came from.
+    /// place the read came from, so a deed off the AGENTS.md block writes
+    /// AGENTS.md and one off the TOOLS.md block writes TOOLS.md.
     SaveInstructions { path: PathBuf, text: String },
+    /// Park a prompt file in the `.bak` beside it and write the shipped
+    /// default in its place. The default rides in the deed, read off the same
+    /// constants the block showed, so what was promised is what lands.
+    RestorePrompt {
+        path: PathBuf,
+        default: &'static str,
+    },
     /// Delete saved conversations: each transcript and the line about it in the
     /// note beside them. Named by the ids the rows carry, which came off the
     /// reader rather than off anything drawn.
@@ -947,11 +961,11 @@ pub fn lines(row: &Row, cols: usize) -> usize {
         // column ended in an ellipsis with the rest of it unreadable.
         Row::Entry(entry) => crate::design::card_row_lines(entry_body_lines(entry, cols), true),
         // A block of text is a card too: its title in the header, where the
-        // text came from and the text itself in the body. It was a bare title,
-        // a bare line and twelve lines of prose with nothing round any of it,
-        // which on a panel of cards is the one thing on screen that reads as
-        // loose text.
-        Row::Paper(_) => crate::design::card_row_lines(paper_body_lines(), false),
+        // text came from and the text itself in the body. A footer only on a
+        // document that is edited here, for the checkbox and the actions.
+        Row::Paper(paper) => {
+            crate::design::card_row_lines(paper_body_lines(), paper.does.is_some())
+        }
         // A table is a card as well: the column names and the rows in the body,
         // and the buttons that act on what is marked in the footer. A fixed
         // number of rows, scrolled inside itself, for the same reason a block of
@@ -1099,6 +1113,21 @@ struct Place {
     tables: Vec<(usize, usize, usize, Vec<String>)>,
 }
 
+/// What `noob debug env` answered: the tail the CLI computes for every
+/// request, which is the one layer of the prompt no file carries.
+///
+/// The window runs the CLI's own subcommand off the interface thread and this
+/// is what comes back; until it answers the block says it is being read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EnvBlock {
+    /// The command has been started and has not answered yet.
+    Waiting,
+    /// It printed the tail, read in the folder named.
+    Got { at: String, body: Vec<String> },
+    /// It failed, and why.
+    Failed { at: String, why: String },
+}
+
 pub struct Settings {
     sections: Vec<Section>,
     /// Which section the rail is on, which is the one whose rows are beside it.
@@ -1138,6 +1167,12 @@ pub struct Settings {
     /// Why the last change did not land. Cleared by the next refresh, since a
     /// refresh only happens after a write that worked.
     trouble: Option<String>,
+    /// The environment tail of the prompt, once the CLI has printed it.
+    env: EnvBlock,
+    /// Whether the editing line is open for the load action's path rather
+    /// than for a field: Enter then reads the named file instead of writing
+    /// anything.
+    loading: bool,
     /// The skills section's own state: the install field, the validate
     /// verdict and the install cycle ([`sections::skills::SkillsSection`]).
     skills: sections::skills::SkillsSection,
@@ -1164,6 +1199,8 @@ impl Settings {
             arming: None,
             file: file.map(PathBuf::from),
             trouble: None,
+            env: EnvBlock::Waiting,
+            loading: false,
             // The skills box decides its own opening state, the web-search
             // suggestion included.
             skills: sections::skills::SkillsSection::new(&agent.skills),
@@ -1291,6 +1328,19 @@ impl Settings {
         self.refresh(config);
     }
 
+    /// Take what `noob debug env` answered, from the thread that ran it.
+    ///
+    /// The rows are rebuilt rather than patched, the same as every other thing
+    /// that arrives: the block says what the command said, and nothing about
+    /// it is computed here.
+    pub fn adopt_env(&mut self, at: String, answer: Result<Vec<String>, String>, config: &Config) {
+        self.env = match answer {
+            Ok(body) => EnvBlock::Got { at, body },
+            Err(why) => EnvBlock::Failed { at, why },
+        };
+        self.refresh(config);
+    }
+
     /// Rebuild the rows from the files as they now read, keeping the cursor
     /// where it was. Called after a change has been written and read back.
     pub fn refresh(&mut self, config: &Config) {
@@ -1337,7 +1387,7 @@ impl Settings {
         self.dragging = None;
         self.unpick();
         self.arming = None;
-        let held_paper = self.prompt_section.editing();
+        let held_row = self.prompt_section.editing_row();
         for (section, place) in self.sections.iter_mut().zip(places) {
             let Place {
                 cursor,
@@ -1354,15 +1404,16 @@ impl Settings {
             section.cursor = cursor.min(last);
             section.side = side;
             // Where each block of text was left, so a write somewhere else on
-            // the panel does not scroll the prompt back to its first line under
-            // whoever was reading it. Not while the system prompt's document
-            // is being edited: its block follows the caret, and putting the
-            // old scroll back would pull the text out from under it.
-            if !(held_paper && section.name == PROMPT) {
-                for (at, was) in papers {
-                    if let Some(Row::Paper(paper)) = section.rows.get_mut(at) {
-                        paper.first = was.min(paper.most());
-                    }
+            // the panel does not scroll a document back to its first line
+            // under whoever was reading it. Not the block being edited: it
+            // follows the caret, and putting the old scroll back would pull
+            // the text out from under it.
+            for (at, was) in papers {
+                if section.name == PROMPT && held_row == Some(at) {
+                    continue;
+                }
+                if let Some(Row::Paper(paper)) = section.rows.get_mut(at) {
+                    paper.first = was.min(paper.most());
                 }
             }
             // The same for a table, marks and all. Pruned by the rebuild itself:
@@ -1407,7 +1458,7 @@ impl Settings {
             .map(|name| {
                 let rows = match name {
                     AGENT => sections::agent::rows(&self.agent),
-                    PROMPT => self.prompt_section.rows(&self.agent),
+                    PROMPT => self.prompt_section.rows(&self.agent, &self.env),
                     SESSIONS => sections::sessions::rows(&self.agent),
                     SKILLS => self.skills.rows(&self.agent),
                     MCP => self.mcp.rows(&self.agent),
@@ -1717,6 +1768,15 @@ impl Settings {
                 "press restore again to comment out every size, transparency and colour line in the settings file; anything else leaves them alone",
             );
         }
+        // The restore on a document block: it names the bak the file is
+        // parked in, which is the one thing that makes the press safe to
+        // confirm.
+        if let Some(Row::Paper(paper)) = self.arming.and_then(|at| self.row(at)) {
+            return format!(
+                "press restore again to park {0} in {0}.bak and write the built-in text; anything else leaves it alone",
+                paper.title
+            );
+        }
         if let Some(Row::Entry(entry)) = self.arming.and_then(|at| self.row(at)) {
             // Named by the thing that is about to go, and said as what would
             // actually happen to it. A skill goes by its directory, since the
@@ -1733,6 +1793,15 @@ impl Settings {
                 Which::Fixed => String::new(),
             };
             return format!("press uninstall again to {what}; anything else leaves it alone");
+        }
+        // The load path, as it is typed: a paper has no field box, so the
+        // footer is where the line shows, the way a pressed swatch's hex does.
+        if self.loading
+            && let Some(typed) = self.editing.as_deref()
+        {
+            return format!(
+                "load: {typed}_ \u{2022} enter loads the file into the editor \u{2022} esc leaves it alone"
+            );
         }
         self.picked_says()
             .unwrap_or_else(|| String::from(self.hint()))
@@ -1751,6 +1820,9 @@ impl Settings {
         // the edit is left without touching it.
         if self.editing_instructions() {
             return "type it \u{2022} enter breaks the line \u{2022} ctrl+s writes the file \u{2022} esc leaves the file as it was";
+        }
+        if self.loading {
+            return "type the path to an .md file \u{2022} enter loads it into the editor \u{2022} esc leaves it alone";
         }
         if self.editing.is_some() {
             // The one field on the panel Enter does not write a file with.
@@ -1798,21 +1870,16 @@ impl Settings {
                     "left and right nudge it \u{2022} shift left and right cross the card \u{2022} tab and shift-tab change section"
                 }
             },
-            Some(Row::Paper(paper)) => {
-                match (paper.offer.is_some(), self.here().name == PROMPT && !paper.bad) {
-                    (true, _) => {
-                        "enter writes a starter AGENTS.md there \u{2022} tab and shift-tab change section"
-                    }
-                    // The system prompt's own document, which is the one block
-                    // on the panel that can be typed into.
-                    (false, true) => {
-                        "enter edits it \u{2022} page up and page down read it \u{2022} tab and shift-tab change section"
-                    }
-                    (false, false) => {
-                        "page up and page down read it \u{2022} up and down leave it \u{2022} tab and shift-tab change section"
-                    }
+            Some(Row::Paper(paper)) => match paper.does.is_some() {
+                // A document that is edited here: the checkbox is the way in,
+                // and Enter is its keyboard.
+                true => {
+                    "enter enables edition \u{2022} page up and page down read it \u{2022} tab and shift-tab change section"
                 }
-            }
+                false => {
+                    "page up and page down read it \u{2022} up and down leave it \u{2022} tab and shift-tab change section"
+                }
+            },
             // The install field. Enter on it starts typing, and the sentence
             // under the field already says what a source is, so the legend
             // says what happens when the typing ends.
@@ -1867,6 +1934,7 @@ impl Settings {
         let moved = index != self.chosen;
         self.chosen = index;
         self.editing = None;
+        self.loading = false;
         self.dragging = None;
         self.picked = None;
         self.arming = None;
@@ -2085,7 +2153,9 @@ impl Settings {
 
     /// Stop editing and keep what the file says. True when there was an edit to
     /// stop, which is what makes Escape close the panel only when there is not.
+    /// A load path being typed goes with it: the line and the intent are one.
     pub fn cancel_edit(&mut self) -> bool {
+        self.loading = false;
         self.editing.take().is_some()
     }
 
@@ -2373,14 +2443,6 @@ impl Settings {
         Some(moved)
     }
 
-    /// What a press on a block with nothing in it asks for: the file it offered
-    /// to write. Nothing on a block that has something to show, so the press
-    /// cannot land on a file that is already there.
-    pub fn make(&self, index: usize) -> Option<Deed> {
-        let path = self.paper(index)?.offer.clone()?;
-        Some(Deed::StartInstructions { path })
-    }
-
     /// Whether the system prompt's document is being edited with its section
     /// on screen, which is the one state the whole keyboard belongs to it in.
     ///
@@ -2391,26 +2453,42 @@ impl Settings {
         self.prompt_section.editing() && self.here().name == PROMPT
     }
 
-    /// Open the editor on the document under the cursor.
+    /// Whether edition is enabled on one row's document, which is what its
+    /// checkbox shows and what puts the save and the restore in its footer.
+    pub fn edition_on(&self, index: usize) -> bool {
+        self.here().name == PROMPT
+            && sections::prompt::PromptSection::file_at(index)
+                .is_some_and(|file| self.prompt_section.editing_file() == Some(file))
+    }
+
+    /// The enable-edition checkbox on one document block: ticking it opens
+    /// the editor on the file's text (the shipped default when there is no
+    /// file), ticking it again drops the buffer with the file untouched.
     ///
-    /// Only the system prompt section's own block, with a file to edit: an
-    /// empty block offers the starter instead ([`Settings::make`]), and a file
-    /// the CLI cuts at its cap is refused with the reason, because saving the
-    /// capped text would quietly lose the tail of the file.
-    pub fn edit_instructions(&mut self, config: &Config) -> bool {
-        if self.here().name != PROMPT || self.editing.is_some() {
+    /// One editor at a time, so ticking one file drops an edit running on the
+    /// other. A file with nowhere to be saved, or one the CLI cuts at its
+    /// cap, refuses with the reason: saving a capped buffer would quietly
+    /// lose the tail of the file.
+    pub fn toggle_edition(&mut self, index: usize, config: &Config) -> bool {
+        if self.here().name != PROMPT {
             return false;
         }
-        let Some(Row::Paper(paper)) = self.at_cursor() else {
+        let Some(file) = sections::prompt::PromptSection::file_at(index) else {
             return false;
         };
-        if paper.offer.is_some() || self.prompt_section.editing() {
-            return false;
+        // A load path being typed gives way: the press said what it wants.
+        self.cancel_edit();
+        self.point_at(index, Side::Left);
+        if self.prompt_section.editing_file() == Some(file) {
+            self.prompt_section.cancel();
+            self.refresh(config);
+            return true;
         }
-        let it = &self.agent.instructions;
+        let it = file.of(&self.agent);
         if it.path.is_none() {
-            self.trouble = Some(String::from(
-                "there is no config directory to keep instructions in",
+            self.trouble = Some(format!(
+                "there is no config directory to keep {} in",
+                file.name()
             ));
             return false;
         }
@@ -2421,10 +2499,79 @@ impl Settings {
             ));
             return false;
         }
-        let body = it.body.clone();
-        self.prompt_section.begin(&body);
+        self.prompt_section.cancel();
+        self.prompt_section.begin(file, &self.agent);
         self.refresh(config);
         true
+    }
+
+    /// Open the editing line for the load action's path, on the one block
+    /// that offers it. Enter then reads the named file into the editor
+    /// ([`Settings::take_loaded`]); nothing is written by any of it.
+    pub fn begin_load(&mut self, index: usize) -> bool {
+        if self.here().name != PROMPT || self.editing.is_some() {
+            return false;
+        }
+        let loads = matches!(
+            self.paper(index),
+            Some(Paper { does: Some(acts), .. }) if acts.load
+        );
+        if !loads {
+            return false;
+        }
+        self.point_at(index, Side::Left);
+        self.editing = Some(String::new());
+        self.loading = true;
+        true
+    }
+
+    /// Whether the editing line is open for a load path.
+    pub fn loading(&self) -> bool {
+        self.loading
+    }
+
+    /// The path as typed so far, while the load line is open. The buffer is
+    /// left in place, so a file that refuses can be corrected rather than
+    /// retyped.
+    pub fn load_path(&self) -> Option<PathBuf> {
+        if !self.loading {
+            return None;
+        }
+        self.editing.as_deref().map(PathBuf::from)
+    }
+
+    /// The named file's lines, read by `main`: they land in the AGENTS.md
+    /// editor as an unsaved edit, with edition on, and nothing on any disk
+    /// has changed.
+    pub fn take_loaded(&mut self, body: Vec<String>, config: &Config) {
+        self.loading = false;
+        self.editing = None;
+        self.prompt_section.cancel();
+        self.prompt_section
+            .begin_with(sections::prompt::PromptFile::Agents, body);
+        self.refresh(config);
+    }
+
+    /// The restore on one document block: the first press arms it, the second
+    /// answers the deed that parks the file in its `.bak` and writes the
+    /// shipped default. Only while edition is on, which is where the button
+    /// stands.
+    pub fn restore_prompt(&mut self, index: usize) -> Option<Deed> {
+        if !self.edition_on(index) {
+            return None;
+        }
+        let file = sections::prompt::PromptSection::file_at(index)?;
+        let path = file.of(&self.agent).path.clone()?;
+        let deed = Deed::RestorePrompt {
+            path,
+            default: file.default_text(),
+        };
+        if self.arming == Some(index) {
+            self.arming = None;
+            return Some(deed);
+        }
+        self.arming = Some(index);
+        None
     }
 
     /// One rebuild per editor change, so the block shows the buffer: the same
@@ -2473,12 +2620,13 @@ impl Settings {
         self.edited_instructions(moved, config)
     }
 
-    /// The save, as the deed that writes the whole file. The editor stays
-    /// open until the write lands ([`Settings::end_instructions_edit`]), so a
-    /// refusal loses nothing.
+    /// The save, as the deed that writes the whole file the open editor is
+    /// on. The editor stays open until the write lands
+    /// ([`Settings::end_instructions_edit`]), so a refusal loses nothing.
     pub fn finish_instructions(&self) -> Option<Deed> {
+        let file = self.prompt_section.editing_file()?;
         let text = self.prompt_section.take()?;
-        let path = self.agent.instructions.path.clone()?;
+        let path = file.of(&self.agent).path.clone()?;
         Some(Deed::SaveInstructions { path, text })
     }
 
@@ -2490,8 +2638,9 @@ impl Settings {
 
     /// Where the document's caret is while it is being edited, as a line of
     /// the block on `index` and the character along it, for whoever draws it.
+    /// Only on the block whose edition is on: the others show their files.
     pub fn instructions_caret(&self, index: usize) -> Option<(usize, usize)> {
-        if self.here().name != PROMPT || !matches!(self.row(index), Some(Row::Paper(_))) {
+        if !self.edition_on(index) {
             return None;
         }
         self.prompt_section.caret()

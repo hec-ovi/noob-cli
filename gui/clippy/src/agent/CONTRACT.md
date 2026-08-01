@@ -1,11 +1,12 @@
 # agent-files
 
-contractVersion: 1.1.0
+contractVersion: 1.2.0
 
 ## Purpose
 
 The agent's files, read and written the way the CLI does: the `.env` keys
-the settings panel edits, AGENTS.md, installed skills and their
+the settings panel edits, the two prompt files (AGENTS.md and TOOLS.md)
+with the CLI's shipped defaults behind them, installed skills and their
 frontmatter, mcp.json entries, and the on/off conventions.
 
 ## Public surface
@@ -15,13 +16,25 @@ pub fn config_dir() -> Option<PathBuf>;   // the AGENT's rule: NOOB_CONFIG_DIR,
                                           // /config when present, ~/.config/noob
 pub const ENDPOINT/API_KEY/MODEL/API_STYLE/REASONING/CTX/TASK_CONCURRENCY: &str;
 pub const OWNED: [&str; 2];               // the keys the window edits freely
-pub const AGENTS_MD: &str;  pub const AGENTS_CAP: u64;   // 16 KiB read cap
+pub const AGENTS_MD/TOOLS_MD: &str;  pub const AGENTS_CAP: u64;  // 16 KiB cap
+pub const AGENTS_DEFAULT/TOOLS_DEFAULT: &str;  // the CLI's shipped texts,
+                                          // included from its own sources
+pub const CTX_STOPS/TASK_CONCURRENCY_STOPS: [f32; _];  // slider detents
 pub const OFF: &str;  pub const DISABLED: &str;          // on-disk toggles
 pub fn is_secret(key: &str) -> bool;      // by name, wrong in the safe way
+pub fn read_tools(dir) -> Instructions;   // TOOLS.md, read like AGENTS.md
 pub fn write_instructions(path: &Path, text: &str) -> Result<(), String>;
-                                          // the whole AGENTS.md at once, by
-                                          // the same atomic rename as every
+                                          // one prompt file whole, by the
+                                          // same atomic rename as every
                                           // write here
+pub fn restore_prompt(path: &Path, default: &str) -> Result<(), String>;
+                                          // park the file in <name>.bak
+                                          // beside it (skipped when there is
+                                          // no file), then write the default
+pub fn bak_path(path: &Path) -> PathBuf;  // that .bak's name
+pub fn load_md(path: &Path) -> Result<Vec<String>, String>;
+                                          // a named .md as editor lines,
+                                          // refused past the cap; no writes
 // plus the read/toggle/remove operations the settings panel calls
 ```
 
@@ -44,4 +57,4 @@ and [`crates/noob/src/skills/CONTRACT.md`](../../../../crates/noob/src/skills/CO
 ## Tests
 
 Inline: config-dir rule, secret naming, frontmatter reads, toggles, the
-whole-file instructions write (17 tests).
+whole-file prompt writes, the restore with its bak, the load (19 tests).
