@@ -17,15 +17,15 @@ package, the binary and everything a user sees are `no0b`.
 | Settings file format and its defaults | `gui/clippy/src/config.rs` |
 | What the settings panel lists, and what changing a row writes | `gui/clippy/src/settings.rs`, drawn by `view::settings_panel`, routed in `gui/clippy/src/main.rs` |
 | Mouse, keyboard, selection gestures, the window lifecycle | `gui/clippy/src/main.rs` |
-| What a right click offers and what a row does | `gui/clippy/src/menu.rs`, routed in `gui/clippy/src/main.rs` |
+| What a right click offers and what a row does | `gui/clippy/src/menu/CONTRACT.md`, routed in `gui/clippy/src/main.rs` |
 | Choosing the folder the agent works in, and the folders NO0B remembers | `gui/clippy/src/picker.rs`, drawn by `view::folder_picker`, routed in `gui/clippy/src/main.rs` |
 | Which saved sessions the first screen offers, and which folder each one belongs to | `gui/clippy/src/sessions.rs`, listed by `picker::Picker::show_sessions`, routed in `gui/clippy/src/main.rs` |
 | The conversation and metrics model: what an event does to state | `gui/clippy/src/state.rs` |
 | Where a pane that is a list is scrolled to, and what clamps it | `gui/clippy/src/scroll/CONTRACT.md`, content measured by `view::scroll_extent` |
-| Which readings the monitors show | `gui/clippy/src/monitor.rs` |
+| Which readings the monitors show | `gui/clippy/src/monitor/CONTRACT.md` |
 | Which skills and MCP servers the panel lists, and what turning one off or removing it does on disk | `gui/clippy/src/agent.rs`, listed by `gui/clippy/src/settings.rs` |
 | What a tool call is remembered as, and what the popup over an activity row shows | `gui/clippy/src/state.rs`, drawn by `view::call_popup` |
-| Talking to the agent process | `gui/clippy/src/link.rs` |
+| Talking to the agent process | `gui/clippy/src/link/CONTRACT.md` |
 | Drawing primitives: rects, corners, text, anything the shader does | `gui/noob-draw/src/lib.rs` |
 | The GPU device, surface, transparency probing | `gui/noob-gpu/src/lib.rs` |
 | Markdown rendering in the transcript | `gui/clippy/src/markdown.rs` |
@@ -112,6 +112,12 @@ Boxes so far:
   animation: dots, orbit, square rest plate, one morph.
 - [`gui/clippy/src/design`](../gui/clippy/src/design/CONTRACT.md) - the
   space and type scales from one number, and the named icons.
+- [`gui/clippy/src/monitor`](../gui/clippy/src/monitor/CONTRACT.md) - the
+  hardware, context, and session gauges, pull-sampled, degrading gently.
+- [`gui/clippy/src/link`](../gui/clippy/src/link/CONTRACT.md) - the
+  supervised `noob serve` child: frames in and out, pipes never block.
+- [`gui/clippy/src/menu`](../gui/clippy/src/menu/CONTRACT.md) - the
+  right-click menus: rows, groups in place, stable shape.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,
