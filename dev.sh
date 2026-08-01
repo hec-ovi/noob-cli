@@ -129,6 +129,44 @@ case "${1:-}" in
     echo "no0b runtime crates: $crates"
     [ "$crates" -le 400 ] || { echo "FAIL: NO0B crate graph exceeds 400"; exit 1; }
     ;;
+  check-macos)
+    # Type-check every crate of both workspaces for aarch64-apple-darwin.
+    # The mac binaries are built by the release workflow on real runners;
+    # this catches unix-only code at the desk. Needs the target's std and a
+    # darwin-capable C compiler for ring's build script; zig serves as one.
+    # Skipped rather than failed where zig is absent, so a machine without
+    # it still runs everything else.
+    if ! command -v zig >/dev/null 2>&1; then
+      echo "skipped check-macos (install zig to type-check the mac target)"
+      exit 0
+    fi
+    rustup target add aarch64-apple-darwin >/dev/null 2>&1 || true
+    wrap=$(mktemp -d)
+    trap 'rm -rf "$wrap"' EXIT
+    cat > "$wrap/cc" <<'WRAP'
+#!/bin/sh
+# zig as darwin cc: drop the clang target flags zig cannot parse and pin
+# the zig triple instead.
+args=""
+skip=0
+for a in "$@"; do
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  case "$a" in
+    --target=*) continue ;;
+    -arch) skip=1; continue ;;
+    -mmacosx-version-min=*) continue ;;
+    *) args="$args \"$a\"" ;;
+  esac
+done
+eval exec zig cc -target aarch64-macos $args
+WRAP
+    printf '#!/bin/sh\nexec zig ar "$@"\n' > "$wrap/ar"
+    chmod +x "$wrap/cc" "$wrap/ar"
+    export CC_aarch64_apple_darwin="$wrap/cc" AR_aarch64_apple_darwin="$wrap/ar"
+    cargo check --workspace --target aarch64-apple-darwin
+    cargo check --manifest-path gui/Cargo.toml --workspace --target aarch64-apple-darwin
+    echo "check-macos: both workspaces type-check for aarch64-apple-darwin"
+    ;;
   # Every suite and gate in one pass: the CLI tests, the NO0B tests and
   # clippy, every box contract in the tree, both footprint gates. Stops at
   # the first failure; the last line is the verdict.
@@ -142,6 +180,7 @@ case "${1:-}" in
     run_contracts "${contracts[@]}" || { echo "test-all: FAIL at contracts"; exit 1; }
     step size-check
     step gui-check
+    step check-macos
     echo "test-all: PASS"
     ;;
   gui-package|gui-install)
@@ -185,6 +224,7 @@ case "${1:-}" in
     echo "  ./dev.sh --plan | --yolo    any noob flag is forwarded to the agent"
     echo "  ./dev.sh install|test|build|docker|exec \"prompt\"|smoke|size-check|clean"
     echo "  ./dev.sh test-all            every suite and gate in one pass"
+    echo "  ./dev.sh check-macos         type-check both workspaces for the mac target"
     echo "  ./dev.sh gui [workspace]     open NO0B, the GPU front end"
     echo "  ./dev.sh gui-test|gui-check  NO0B tests and its own size gate"
     echo "  ./dev.sh gui-install         install NO0B under ~/.local"

@@ -392,11 +392,13 @@ fn run_task(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    // If the parent dies, SIGTERM lets the child's watchdog kill Bash, MCP,
-    // and nested-agent descendants before the child exits. The parent-pid
-    // recheck closes the fork-to-prctl race.
+    // If the parent dies, the child must not outlive it. On Linux PDEATHSIG
+    // delivers SIGTERM to the child's watchdog; elsewhere the watchdog polls
+    // its parent pid instead (see install_parent_death_cleanup). The
+    // parent-pid recheck closes the fork-to-arm race on every platform.
     unsafe {
         command.pre_exec(move || {
+            #[cfg(target_os = "linux")]
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -684,7 +686,17 @@ pub(crate) fn install_parent_death_cleanup() {
     std::thread::Builder::new()
         .name("noob-parent-watchdog".to_string())
         .spawn(|| {
+            // Without PDEATHSIG, reparenting is the death notice: the parent
+            // recorded at spawn is gone the moment getppid answers with
+            // someone else. One compare per tick costs nothing.
+            #[cfg(not(target_os = "linux"))]
+            let parent_at_start = unsafe { libc::getppid() };
             loop {
+                #[cfg(not(target_os = "linux"))]
+                if unsafe { libc::getppid() } != parent_at_start {
+                    PARENT_DIED.store(true, Ordering::SeqCst);
+                    INTERRUPTED.store(true, Ordering::SeqCst);
+                }
                 if PARENT_DIED.load(Ordering::SeqCst) {
                     let pid = unsafe { libc::getpid() };
                     for _ in 0..3 {
@@ -702,6 +714,7 @@ pub(crate) fn install_parent_death_cleanup() {
 /// Kill the current snapshot of every Linux descendant, including processes
 /// that created their own session. Children are kept alive while this scan
 /// runs, so their descendants cannot be reparented out from under it first.
+#[cfg(target_os = "linux")]
 fn kill_descendants(root: libc::pid_t) {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return;
@@ -745,6 +758,18 @@ fn kill_descendants(root: libc::pid_t) {
         unsafe {
             libc::kill(pid, libc::SIGKILL);
         }
+    }
+}
+
+/// Without /proc there is no descendant walk. The child is its own process
+/// group leader, so the group is the killable unit: SIGTERM reaches every
+/// member that did not make its own session (this process catches it and is
+/// already exiting). A setsid escapee survives here where the Linux walk
+/// would have found it; that residue is the platform's limit.
+#[cfg(not(target_os = "linux"))]
+fn kill_descendants(root: libc::pid_t) {
+    unsafe {
+        libc::kill(-root, libc::SIGTERM);
     }
 }
 

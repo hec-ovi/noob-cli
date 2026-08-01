@@ -58,13 +58,11 @@ pub(crate) fn run(
     // interleaving matches what a terminal would show. O_CLOEXEC is load-
     // bearing: without it a concurrently spawned sibling process inherits
     // the write end and the reader never sees EOF.
-    let mut fds = [0i32; 2];
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+    let Some((read_fd, write_fd)) = cloexec_pipe() else {
         return Err(RunError::Spawn(
             "cannot create a pipe for the command".to_string(),
         ));
-    }
-    let (read_fd, write_fd) = (fds[0], fds[1]);
+    };
     let read_flags = unsafe { libc::fcntl(read_fd, libc::F_GETFL) };
     if read_flags < 0
         || unsafe { libc::fcntl(read_fd, libc::F_SETFL, read_flags | libc::O_NONBLOCK) } < 0
@@ -324,4 +322,35 @@ pub(crate) fn kill_group(child: &mut std::process::Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// A close-on-exec pipe. Linux gets the flag atomically from pipe2; macOS
+/// has no pipe2, so the flag lands right after creation. The window there is
+/// a few instructions wide and every other spawn in this process goes
+/// through std, which opens its own fds close-on-exec, so nothing can
+/// inherit these ends in that window.
+fn cloexec_pipe() -> Option<(i32, i32)> {
+    let mut fds = [0i32; 2];
+    #[cfg(target_os = "linux")]
+    {
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            return None;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        for fd in fds {
+            if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+                unsafe {
+                    libc::close(fds[0]);
+                    libc::close(fds[1]);
+                }
+                return None;
+            }
+        }
+    }
+    Some((fds[0], fds[1]))
 }

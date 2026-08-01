@@ -49,16 +49,17 @@ impl Pty {
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             });
+            let mut ws = ws;
             let ws_ptr = ws
-                .as_ref()
-                .map(|w| w as *const libc::winsize)
-                .unwrap_or(std::ptr::null());
+                .as_mut()
+                .map(|w| w as *mut libc::winsize)
+                .unwrap_or(std::ptr::null_mut());
             assert_eq!(
                 libc::openpty(
                     &mut m,
                     &mut s,
                     std::ptr::null_mut(),
-                    std::ptr::null(),
+                    std::ptr::null_mut(),
                     ws_ptr
                 ),
                 0,
