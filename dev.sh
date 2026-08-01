@@ -81,10 +81,6 @@ case "${1:-}" in
   docker)
     docker build --build-arg "TARGETARCH=${RUST_TARGET%%-*}" -t noob -f docker/Dockerfile .
     ;;
-  install)
-    shift
-    exec ./install.sh "$@"
-    ;;
   # One-shot headless run through compose.
   exec)
     shift

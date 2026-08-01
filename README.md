@@ -1,10 +1,10 @@
 # noob-cli
 
-noob-cli is a compact Rust agent for OpenAI-compatible model endpoints. It runs in an isolated Docker container against the current project directory, with persistent configuration and sessions stored outside the image.
+noob-cli is a compact Rust agent for OpenAI-compatible model endpoints. It runs against the current project directory with the kernel folder-locking every command the agent types, and keeps persistent configuration and sessions under `~/.config/noob`.
 
 **`noob tokens <path>...`** counts what a file costs through the model's own tokenizer, by asking the endpoint's `/tokenize` route. Every other token number here is an estimate; this one is the answer for the model actually loaded.
 
-The static release binary is 4,498,368 bytes (4.29 MiB) with 41 runtime crates. There is no async runtime or TUI framework.
+The static release binary is 4,502,464 bytes (4.29 MiB) with 41 runtime crates. There is no async runtime or TUI framework.
 
 ## Showcase
 
@@ -24,32 +24,29 @@ Ask for a three-step plan, then queue two follow-up messages while it builds. Th
 
 ## Install
 
-You need Docker and Git. Everything else, including the Rust toolchain, lives inside the container, so the first build pulls the base images and packages and needs network access. Tested on Linux (amd64 and arm64); running from the checkout with `./dev.sh` also wants the Docker Compose plugin.
+noob ships as one static Linux binary, amd64 and arm64, packaged as a deb and as a tarball on [Releases](https://github.com/hec-ovi/noob-cli/releases/latest):
 
 ```bash
-git clone https://github.com/hec-ovi/noob-cli.git
-cd noob-cli
-./install.sh
+curl -fLO https://github.com/hec-ovi/noob-cli/releases/latest/download/noob_amd64.deb
+sudo apt install ./noob_amd64.deb
 ```
 
-The installer builds `noob:local`, installs `~/.local/bin/noob`, and seeds the web-search skill under `~/.config/noob`. When upgrading, it replaces only the exact skill noob 0.5.1 used to seed and removes only the exact obsolete websearch MCP file; custom skills and MCP configuration are left alone. It refuses to replace an unrelated `noob` command unless `--force` is passed.
+(`noob_arm64.deb` for ARM machines; `sudo apt remove noob` uninstalls.) The tarballs hold the same binary for any other distribution: unpack and put `noob` on PATH. Nothing else is needed at runtime. macOS and Windows builds are on the roadmap, see Planned.
 
-Add `~/.local/bin` to `PATH` if your shell does not already include it, then run:
+Then run it in a project:
 
 ```bash
 cd /path/to/project
 noob
 ```
 
-The installed command mounts the directory where you run it at `/work`. For disposable work, keep it separate from a source checkout:
+Configuration lives in `~/.config/noob` (`NOOB_CONFIG_DIR` overrides it). Commands the agent types are folder-locked by the kernel (Landlock): they can read the whole system but write only inside the project directory and temp; `noob doctor` reports the lock's state, and the agent's own file tools refuse paths outside the project in any case. For disposable work, run it from an empty directory:
 
 ```bash
 mkdir -p ~/noob-workspace
 cd ~/noob-workspace
 noob
 ```
-
-It also mounts `${XDG_CONFIG_HOME:-$HOME/.config}/noob` at `/config`, uses the caller's UID and GID, and removes the container when the command exits.
 
 Resume a saved session:
 
@@ -61,17 +58,9 @@ noob --resume latest
 
 `noob sessions` lists saved sessions newest first. `--resume latest` selects the newest one without copying its ID. `--resume` is the canonical recovery flag; `--restore` and `--session` are aliases. On an interactive resume noob redisplays the prior conversation, and resuming an unknown id prints `no saved session <id>; starting fresh`. The exit line prints the session ID and the exact command that reopens it.
 
-Installer options:
-
-```text
-./install.sh [--prefix <dir>] [--force]
-```
-
-`NOOB_INSTALL_PREFIX`, `NOOB_CONFIG_HOME`, `NOOB_WORKSPACE`, and `NOOB_IMAGE` override the install prefix, persisted config directory, mounted workspace, and runtime image.
-
 ## Run from the checkout
 
-For development, or without installing the host command, the default agent mount is the ignored `workspace/` directory in this checkout:
+Development runs in Docker (the host needs docker and a shell, nothing else); the agent then runs containerized, mounted on the ignored `workspace/` directory in this checkout:
 
 ```bash
 ./dev.sh
@@ -173,13 +162,13 @@ websearch doctor
 
 There is no MCP server in this path. Up to websearch-skill 0.2.6 there was one, and it was the wrong shape: an MCP server reads its configuration once at startup and caches its engine fanout, so a SearXNG or a proxy configured afterwards stayed invisible until the client restarted it, which is exactly what the optional layers here need to change at runtime. One process per call reads the environment fresh every time.
 
-The tool takes an optional egress proxy, off by default: set `WEBSEARCH_PROXY` to a proxy URL (`socks5h://user:pass@host:1080`), to `nordvpn`, or to `off`. The `nordvpn` shorthand builds the SOCKS5 URL from the `NORDVPN_USER` and `NORDVPN_PASS` service credentials, with `NORDVPN_HOST` selecting a server. With a proxy set, nothing leaves the container around it, including the hostname lookups the fetch guard used to do locally. `WEBSEARCH_VPN` (`nordvpn` or `any`) routes nothing itself; it declares that egress should be tunneled so the doctor verifies it instead of assuming it. The launcher forwards all of these, plus `WEBSEARCH_SEARXNG_URL`, into the container, so exporting them before running `noob` is all it takes. To keep the credentials out of your shell history, put them in `websearch.env` in the config directory instead. The tool otherwise reads `.env` from its working directory, which inside the container is your project, so the image points it at the config directory: a `.env` of your own is never read, and a `WEBSEARCH_PROXY` line in it cannot silently reroute or break every search.
+The tool takes an optional egress proxy, off by default: set `WEBSEARCH_PROXY` to a proxy URL (`socks5h://user:pass@host:1080`), to `nordvpn`, or to `off`. The `nordvpn` shorthand builds the SOCKS5 URL from the `NORDVPN_USER` and `NORDVPN_PASS` service credentials, with `NORDVPN_HOST` selecting a server. With a proxy set, nothing leaves around it, including the hostname lookups the fetch guard used to do locally. `WEBSEARCH_VPN` (`nordvpn` or `any`) routes nothing itself; it declares that egress should be tunneled so the doctor verifies it instead of assuming it. Export any of these before running `noob`, or keep credentials out of shell history by putting them in `websearch.env` in the config directory. The tool otherwise reads `.env` from its working directory, which is your project, so noob pins its dotenv (`WEBSEARCH_ENV_FILE`) at the config directory: a `.env` of your own is never read, and a `WEBSEARCH_PROXY` line in it cannot silently reroute or break every search.
 
 Tor is a separate opt-in layer, off until `websearch tor up` runs, and on for everything after it. It uses a Tor already listening, else `tor` on PATH, else the official Expert Bundle checked against its published sha256. With a proxy also set the two chain rather than replace each other, so turning on the layer meant to add a hop never quietly drops one. `websearch tor status` answers whether traffic really leaves through Tor, which is not the same question as whether the port accepts connections. `--onion` swaps the clearnet engines for onion ones, and a `.onion` URL without the layer up fails before anything resolves rather than leaking the name to your resolver on the way to failing.
 
 The **tool registration** is automatic: noob registers a `websearch` tool whenever the CLI is on PATH, taking an `action` (`init`, `search`, `fetch`, `open`, `arxiv`, `github`, `tor`, `doctor`) plus typed fields. It builds a fixed argv and runs the binary directly, with no shell in between, so no value the model sends can become a flag or a second command. Onion searches and `tor up` get longer default timeouts than a clearnet call, since three relays make ten to thirty seconds normal and the Expert Bundle may have to be downloaded first. Results come back wrapped as untrusted, the same treatment MCP results got. Set `NOOB_WEBSEARCH=off` to unregister it, or to a path to point it at a different binary.
 
-The **skill** is a `SKILL.md` in the config that tells the model to run `init` first, which action to reach for after, and to leave Tor alone unless it was asked for. The installer seeds it and upgrades any copy it seeded before, identified byte for byte, so skipping a release still lands the current one; a copy you edited matches none of them and stays yours. It doubles as the Bash instructions for a session where the tool is not registered.
+The **skill** is a `SKILL.md` that tells the model to run `init` first, which action to reach for after, and to leave Tor alone unless it was asked for. Install the CLI with `uv tool install websearch-skill`, then add the skill from its repo with noob's skill installer (`hec-ovi/websearch-skill`). It doubles as the Bash instructions for a session where the tool is not registered.
 
 The opt-in live test gives qwen a research prompt and asserts that the JSON event stream contains a `websearch` search call and a grounded answer.
 
@@ -223,15 +212,14 @@ The mounted config directory contains `.env`, optional `AGENTS.md`, `mcp.json`, 
 | `NOOB_TOOL_CAPS` | enabled | Set `0` (or `off`) to lift every tool-output truncation cap: read, bash, grep, glob/ls, skill, websearch, and MCP results flow through whole | process start |
 | `NOOB_READ_DEDUP` | enabled | Set `0` (or `off`) to print every `read` in full. On, a whole-file read of content already in context returns a one-line note instead of the body, and reading again prints it | process start |
 | `NOOB_SKILL_PATHS` | none | Colon-separated skill directories, each resolved against the workspace and registered as one resolver skill (so a `cli/SKILL.md` dispatcher is discovered without copying it into a skills root) | `.env`: `/skills reload`; environment: process start |
-| `NOOB_ENV` | none | Comma-separated allowlist of extra environment variable names the host launcher forwards into the container (for a workflow's own variables) | process start (launcher) |
 
-If startup autodetection selects an endpoint, that selection is fixed for the process. Restart noob to switch from an autodetected endpoint to a newly added `.env` URL. The launcher forwards a fixed set of `NOOB_*` and proxy variables plus any names listed in `NOOB_ENV`, and never forwards `NOOB_API_KEY`; put secrets in the mounted config `.env` and protect that directory with normal file permissions. `/skills reload` reloads skills; `/mcp add` and `/mcp remove` reload the MCP server set in place.
+If startup autodetection selects an endpoint, that selection is fixed for the process. Restart noob to switch from an autodetected endpoint to a newly added `.env` URL. Put secrets in the config `.env` and protect that directory with normal file permissions. `/skills reload` reloads skills; `/mcp add` and `/mcp remove` reload the MCP server set in place.
 
 The model server needs one request slot for the parent plus `NOOB_TASK_CONCURRENCY` child slots to keep all of them generating at once. With the defaults, configure at least five slots. For llama.cpp, `--parallel` controls the `total_slots` reported by `GET /props`; set `--ctx-size` and the KV-cache configuration so the reported `n_ctx` is at least `NOOB_CTX` while those slots are active. `noob doctor` performs that read-only capacity check and also reports disabled tool-calling capabilities. See the current [llama.cpp server documentation](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md) and the [companion stack](https://github.com/hec-ovi/llama-vulkan-strix) for the deployment arithmetic.
 
 `/context` (and `/status`, and the model-callable `context` tool) shows the estimated use, configured total, and 75 percent automatic-compaction threshold. When compaction runs, the terminal states whether the configured threshold, an endpoint overflow, or a length finish triggered it, then reports whether old tool output was pruned or the older conversation was summarized. Provider failures include the failed stage or HTTP status and a concrete next check.
 
-`/config list` shows the effective non-secret settings and their file. `/config set ctx 65536` and `/config unset ctx` update that file atomically. Endpoint, model, and API-style edits apply on the next request unless a CLI flag or exported variable overrides them. Context and child-agent budget edits need a restart. API keys are intentionally not accepted by `/config`; edit the mounted `.env` so a secret does not enter terminal history.
+`/config list` shows the effective non-secret settings and their file. `/config set ctx 65536` and `/config unset ctx` update that file atomically. Endpoint, model, and API-style edits apply on the next request unless a CLI flag or exported variable overrides them. Context and child-agent budget edits need a restart. API keys are intentionally not accepted by `/config`; edit the config `.env` so a secret does not enter terminal history.
 
 Display variables can be set in the shell or the checkout's root `.env` for Compose:
 
@@ -240,7 +228,7 @@ Display variables can be set in the shell or the checkout's root `.env` for Comp
 | `NOOB_DOCK` | `1` | Set `0` for the classic prompt editor |
 | `NOOB_RAW` | `1` | Set `0` for cooked input |
 | `NOOB_THEME` | `matrix` | `matrix`, `ocean`, `amber`, or `violet` |
-| `COLORTERM` | `truecolor` in Docker | Terminal color capability |
+| `COLORTERM` | `truecolor` in the dev container | Terminal color capability |
 | `NO_COLOR` | unset | Disable color while keeping structure and status |
 
 ## Prompt budget
@@ -281,7 +269,7 @@ Packaged for Linux. [`gui/README.md`](gui/README.md) is its documentation.
 
 Future work, not built yet, in the order it will be built.
 
-- **Native binaries for macOS, Windows, and Linux.** Today the shipped artifact is a Linux static binary inside the runtime image, and the host command is a launcher that runs it under Docker. The process runner and the terminal backend are boxes with platform-neutral contracts, the macOS arms are in place, and both workspaces type-check for the mac target (`./dev.sh check-macos`). What remains: the Windows console and process implementations behind those two contracts, per-OS folder scoping of shell commands, web search inside the binary, and a release pipeline that builds all three systems on tag and installs with one online command.
+- **Native binaries for macOS and Windows.** Linux ships as a native package today. The process runner and the terminal backend are boxes with platform-neutral contracts, the macOS arms are in place, and both workspaces type-check for the mac target (`./dev.sh check-macos`). What remains: the Windows console and process implementations behind those two contracts, folder scoping on macOS (Seatbelt) and Windows, web search inside the binary, and extending the release pipeline to both systems.
 - **Letting the agent run containers.** The sandbox has no `docker` binary and no socket, so a task that needs one has no path at all and burns its round cap discovering that. The decision to make first is which of rootless Docker, Podman, a restricted socket proxy or a nested runtime it gets, because mounting the host socket dissolves the thing the sandbox is for.
 
 What each one actually blocks on, down to the file and line, is in [`docs/NEXT.md`](docs/NEXT.md).

@@ -317,6 +317,16 @@ fn run_inner(core: &Core, evidence: &Evidence, args: &Value) -> Result<ToolOutco
     };
     let mut command = Command::new(program);
     command.args(&argv).current_dir(&core.workspace);
+    // The tool reads a `.env` from its working directory and exports every
+    // key in it, and its working directory is the user's project. Pin its
+    // dotenv to the config directory instead, so a project `.env` can never
+    // feed a process that opens sockets. An explicit host export wins.
+    if std::env::var_os("WEBSEARCH_ENV_FILE").is_none() {
+        command.env(
+            "WEBSEARCH_ENV_FILE",
+            crate::config::config_dir().join("websearch.env"),
+        );
+    }
     let run = match crate::exec::run(
         command,
         PROGRAM,
