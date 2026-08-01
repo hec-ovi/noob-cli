@@ -194,7 +194,9 @@ Three small things the persistent dock does while a turn streams above it.
 
 ## Configuration
 
-The mounted config directory contains `.env`, optional `AGENTS.md`, `mcp.json`, global `skills/`, and `sessions/`.
+The mounted config directory contains `.env`, optional `AGENTS.md` and `TOOLS.md`, `mcp.json`, global `skills/`, and `sessions/`.
+
+The system prompt is yours: `AGENTS.md` is its main text and `TOOLS.md` its tool guidance, merged in that order ahead of the runtime facts (environment, skills index, MCP servers). Each file, when present, replaces the built-in default wholesale; the shipped tool guidance ends by noting it is the basic set, to adjust at your discretion. `noob debug prompt` prints the merged result and `noob doctor` says which text is in effect. A project-local `AGENTS.md` in the working directory is still appended as project instructions.
 
 | Key | Default | Meaning | Reload |
 |---|---|---|---|
@@ -233,7 +235,7 @@ Display variables can be set in the shell or the checkout's root `.env` for Comp
 
 ## Prompt budget
 
-`noob debug prompt --json` prints the exact system prompt and tool schemas the binary sends. The budget test registers all 14 tools, including websearch and both generic MCP tools, plus a skill and an MCP server. That artifact is about 1,875 o200k tokens: the tool schemas are 1,319 exactly, and the system prompt lands within a token or two of 556 because its environment block carries the working directory, so a deeper path costs a little more. The locked ceiling is 1,900 and the hard limit is 2,000. Both figures are o200k; another tokenizer gives another number for the same bytes.
+`noob debug prompt --json` prints the exact system prompt and tool schemas the binary sends. The budget test registers all 14 tools, including websearch and both generic MCP tools, plus a skill and an MCP server. With the embedded default prompt files, that artifact is about 1,901 o200k tokens: the tool schemas are 1,319 exactly, and the system prompt lands within a token or two of 582 because its environment block carries the working directory, so a deeper path costs a little more. The locked ceiling is 1,925 and the hard limit is 2,000. Both figures are o200k; another tokenizer gives another number for the same bytes. The budget guards the shipped defaults; your own `AGENTS.md` and `TOOLS.md` size is your call, capped at 16 KiB each.
 
 Model-specific chat-template framing is added by the server and is not part of those bytes. llama.cpp caches the prefix, so it is normally prefilled once per slot. Reproduce the noob side with `noob debug prompt --json`; use the server's `/tokenize` endpoint for its framing.
 

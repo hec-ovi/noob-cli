@@ -150,8 +150,8 @@ exists.
   configured, and all fourteen tools registered. That leaves room for about one
   more short skill index line. `crates/noob/tests/budget.rs` guards this with
   ceilings measured through tiktoken, which no served model here uses, so it
-  will not catch a real overrun on its own: the same artifact is 1,874 o200k
-  tokens against a 1,900 ceiling. Measure the real thing with
+  will not catch a real overrun on its own: the same artifact is 1,901 o200k
+  tokens against a 1,925 ceiling. Measure the real thing with
   `noob debug prompt --json` and the server's `/tokenize` endpoint.
 - **Never cap model output.** No `max_tokens` and no word or sentence limits in
   prompts. `crates/noob/tests/budget.rs` enforces both.

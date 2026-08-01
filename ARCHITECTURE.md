@@ -97,13 +97,16 @@ HTTP error and auxiliary integration bodies can be bounded because they are not 
 
 The system prompt is assembled once in this order:
 
-1. Embedded base prompt.
-2. Environment facts.
-3. Global and project `AGENTS.md`, each capped at 16 KiB.
-4. The SKILL.md resolver index when skills exist.
-5. One line naming configured MCP servers when any exist.
+1. `AGENTS.md` from the config directory: the main prompt. Absent, the embedded default text is used.
+2. `TOOLS.md` from the config directory, merged after it: tool guidance. The shipped default ends by naming these tools the basic set, for the user to adjust at their discretion; a present file replaces that default wholesale.
+3. Environment facts.
+4. Project `AGENTS.md`.
+5. The SKILL.md resolver index when skills exist.
+6. One line naming configured MCP servers when any exist.
 
-The fixed prompt plus all registered tool schemas must remain below the 1,900-token budget enforced by offline and live tokenizer tests, against a hard limit of 2,000. The offline ceilings are 560 for the head and 1,350 for the tools array, and they count with tiktoken, which no served model here uses: they are a drift alarm rather than the real bill.
+User prompt files are capped at 16 KiB each. `noob doctor` says which prompt text is in effect.
+
+The fixed prompt plus all registered tool schemas must remain below the 1,925-token budget enforced by offline and live tokenizer tests, against a hard limit of 2,000. The offline ceilings are 560 for the head and 1,350 for the tools array, and they count with tiktoken, which no served model here uses: they are a drift alarm rather than the real bill.
 
 Within a stable mode, each provider request is an exact byte-prefix extension of the prior request. The mock server checks serialized prefix bytes and tool-array stability on every turn. Deliberate prefix changes are limited to:
 
@@ -282,8 +285,8 @@ The enforced release budgets are:
 |---|---:|---:|
 | Static release binary | 8 MiB | 4,498,368 bytes |
 | Runtime dependency graph | 45 crates | 41 crates |
-| Fixed prompt plus schemas | 1,900 tokens | 1,874 o200k with all 14 tools registered |
-| Offline tests | None | 958 passed; 9 live checks and 1 on-demand diagnostic stay opt-in |
+| Fixed prompt plus schemas | 1,925 tokens | 1,901 o200k with all 14 tools registered |
+| Offline tests | None | 950 passed; 9 live checks and 1 on-demand diagnostic stay opt-in |
 
 The required local gates are:
 
