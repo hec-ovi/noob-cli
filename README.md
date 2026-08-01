@@ -102,8 +102,8 @@ noob --version
 ```
 
 `noob serve` is the front-end mode: it reads command frames on stdin and writes
-event frames on stdout, one JSON object per line, versioned by
-`crates/noob-proto`. It is what [NO0B](gui/README.md) drives. The same frames
+event frames on stdout, one JSON object per line, versioned and shaped by
+the [`crates/noob-proto`](crates/noob-proto/CONTRACT.md) contract. It is what [NO0B](gui/README.md) drives. The same frames
 can be tapped from any other surface by pointing `NOOB_EMIT` at a file, which
 writes them beside the session without changing a byte of what you see.
 
@@ -281,7 +281,7 @@ Packaged for Linux. [`gui/README.md`](gui/README.md) is its documentation.
 
 Future work, not built yet, in the order it will be built.
 
-- **Native binaries for macOS, Windows, and Linux.** Today the shipped artifact is a Linux static binary inside the runtime image, and the host command is a launcher that runs it under Docker. Two calls are Linux-only rather than merely Unix-only (`PR_SET_CHILD_SUBREAPER` in the bash tool and `PR_SET_PDEATHSIG` in the sub-agent runner), and the terminal layer is raw termios, so this is one process-supervision abstraction with three implementations rather than a handful of warnings.
+- **Native binaries for macOS, Windows, and Linux.** Today the shipped artifact is a Linux static binary inside the runtime image, and the host command is a launcher that runs it under Docker. The process runner and the terminal backend are boxes with platform-neutral contracts, the macOS arms are in place, and both workspaces type-check for the mac target (`./dev.sh check-macos`). What remains: the Windows console and process implementations behind those two contracts, per-OS folder scoping of shell commands, web search inside the binary, and a release pipeline that builds all three systems on tag and installs with one online command.
 - **Letting the agent run containers.** The sandbox has no `docker` binary and no socket, so a task that needs one has no path at all and burns its round cap discovering that. The decision to make first is which of rootless Docker, Podman, a restricted socket proxy or a nested runtime it gets, because mounting the host socket dissolves the thing the sandbox is for.
 
 What each one actually blocks on, down to the file and line, is in [`docs/NEXT.md`](docs/NEXT.md).
@@ -290,15 +290,20 @@ The `devkit` skill is not part of this repository and is not open source.
 
 ## Development and verification
 
+The tree is a set of boxes: every folder with a `CONTRACT.md` is used through
+that contract alone, never through its code, and [`docs/INDEX.md`](docs/INDEX.md)
+maps them. To change something, open its box's contract first.
+
 ```bash
 ./dev.sh test
 ./dev.sh size-check
 ./dev.sh docker
 ./dev.sh smoke
 ./dev.sh test-all
+./dev.sh check-macos
 ```
 
-`./dev.sh test` runs the full offline suite in the dev container. `./dev.sh size-check` enforces an 8 MiB static-binary limit and a 45-crate runtime limit. `./dev.sh smoke` runs the opt-in live model and web-search checks serially. `./dev.sh test-all` chains the CLI suite, the NO0B suite and clippy, every box's contract check, and both size gates, stopping at the first failure.
+`./dev.sh test` runs the full offline suite in the dev container. `./dev.sh size-check` enforces an 8 MiB static-binary limit and a 45-crate runtime limit. `./dev.sh smoke` runs the opt-in live model and web-search checks serially. `./dev.sh test-all` chains the CLI suite, the NO0B suite and clippy, every box's contract check, both size gates, and the mac type-check, stopping at the first failure. `./dev.sh check-macos` type-checks both workspaces for `aarch64-apple-darwin` (skipped without `zig` on PATH).
 
 The live checks default to `http://localhost:8080/v1` and the model name `llm` (llama-server serves whatever it loaded under its `--alias`). To point them elsewhere:
 
