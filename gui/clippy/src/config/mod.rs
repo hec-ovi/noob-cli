@@ -24,6 +24,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::os::unix::fs::OpenOptionsExt;
 
 /// Everything the window reads at startup.
+/// Where the two dividers break a fresh window, and the settings rail's
+/// share of its panel. Defaults, not constants: all of them are dragged,
+/// carried on the view's Shape, and this file remembers where they were
+/// left. One number per divider pair because a first window has both halves
+/// breaking in the same place; dragging is what lets them differ.
+pub const LEFT_WIDTH: f32 = 0.54;
+pub const TOP_HEIGHT: f32 = 0.46;
+/// The settings rail: a tenth, about fourteen columns of pane text on the
+/// usual window, held up to the longest section name on a narrower one.
+pub const SETTINGS_RAIL: f32 = 0.10;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     /// 0.0 fully see-through, 1.0 fully opaque. Scales every panel fill.
@@ -125,11 +136,11 @@ impl Default for Config {
             font_size: 14.0,
             pane_font_size: 13.0,
             prompt_rows: 1,
-            left_width: crate::view::LEFT_WIDTH,
-            left_width_bottom: crate::view::LEFT_WIDTH,
-            top_height: crate::view::TOP_HEIGHT,
-            top_height_right: crate::view::TOP_HEIGHT,
-            settings_rail: crate::view::SETTINGS_RAIL,
+            left_width: LEFT_WIDTH,
+            left_width_bottom: LEFT_WIDTH,
+            top_height: TOP_HEIGHT,
+            top_height_right: TOP_HEIGHT,
+            settings_rail: SETTINGS_RAIL,
             accent: [0x7c, 0xd8, 0x94],
             text: [0x9a, 0xd6, 0xac],
             dim: [0x58, 0x96, 0x6e],
@@ -1385,8 +1396,8 @@ mod tests {
     /// with, and a number nobody could use is pulled back rather than obeyed.
     #[test]
     fn the_divider_ratios_are_clamped_and_come_back_out_of_the_file() {
-        assert_eq!(Config::default().left_width, crate::view::LEFT_WIDTH);
-        assert_eq!(Config::default().top_height, crate::view::TOP_HEIGHT);
+        assert_eq!(Config::default().left_width, LEFT_WIDTH);
+        assert_eq!(Config::default().top_height, TOP_HEIGHT);
 
         let config = Config::parse("left_width = 0.72\ntop_height = 30%\n");
         assert_eq!(config.left_width, 0.72);
@@ -1434,7 +1445,7 @@ mod tests {
     /// panel.
     #[test]
     fn the_settings_rail_is_read_and_written_like_a_divider() {
-        assert_eq!(Config::default().settings_rail, crate::view::SETTINGS_RAIL);
+        assert_eq!(Config::default().settings_rail, SETTINGS_RAIL);
         assert_eq!(Config::parse("settings_rail = 0.22").settings_rail, 0.22);
         assert_eq!(Config::parse("settings_rail = 0").settings_rail, RAIL_LOW);
         assert_eq!(Config::parse("settings_rail = 9").settings_rail, RAIL_HIGH);

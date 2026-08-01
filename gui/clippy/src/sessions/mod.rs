@@ -33,7 +33,6 @@ use std::time::SystemTime;
 
 use serde_json::Value;
 
-use crate::picker::Folders;
 
 /// How much of a session file is read to describe it.
 ///
@@ -59,6 +58,22 @@ const MOST: usize = 200;
 /// How many folders the index remembers. One per session listed, with room to
 /// spare, so a session that is still on screen cannot have lost its folder.
 pub const REMEMBERED: usize = 400;
+
+/// Where folder questions get answered. Owned here because this box asks
+/// them (`read` resolves each saved session's workspace); the picker and
+/// the shell implement it over the real filesystem or a test tree.
+///
+/// A trait rather than direct calls to `std::fs`, so the cursor, the walking and
+/// the filter can be driven in a test over a tree that only exists in the test.
+/// The two questions the picker asks are all that is in it.
+pub trait Folders {
+    /// The names of the folders directly inside `at`, in any order, or why they
+    /// could not be read.
+    fn list(&self, at: &Path) -> Result<Vec<String>, String>;
+    /// Whether this path is a folder at all. Asked of remembered paths, which
+    /// may have been moved or deleted since they were written down.
+    fn is_folder(&self, at: &Path) -> bool;
+}
 
 /// One saved session, as much of it as a row needs.
 #[derive(Clone, Debug, PartialEq, Eq)]

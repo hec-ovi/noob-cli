@@ -13,17 +13,17 @@ package, the binary and everything a user sees are `no0b`.
 | How a line of text becomes rows on screen: wrapping, scroll windows, selection bands, the scrollbar's extent | `gui/layers/text-geometry/CONTRACT.md` |
 | Which panel sits where, tabs, drag and drop, where the two dividers sit | `gui/clippy/src/dock/CONTRACT.md` and the `Layout` half of `gui/clippy/src/view.rs` |
 | What a frame looks like: panels, tabs, gauges, the title bar | `gui/clippy/src/view.rs` |
-| Colors, transparency, the palette | `gui/clippy/src/skin.rs`, keys in `gui/clippy/src/config.rs` |
-| Settings file format and its defaults | `gui/clippy/src/config.rs` |
+| Colors, transparency, the palette | `gui/clippy/src/skin.rs`, keys in `gui/clippy/src/config/CONTRACT.md` |
+| Settings file format and its defaults | `gui/clippy/src/config/CONTRACT.md` |
 | What the settings panel lists, and what changing a row writes | `gui/clippy/src/settings.rs`, drawn by `view::settings_panel`, routed in `gui/clippy/src/main.rs` |
 | Mouse, keyboard, selection gestures, the window lifecycle | `gui/clippy/src/main.rs` |
 | What a right click offers and what a row does | `gui/clippy/src/menu/CONTRACT.md`, routed in `gui/clippy/src/main.rs` |
 | Choosing the folder the agent works in, and the folders NO0B remembers | `gui/clippy/src/picker.rs`, drawn by `view::folder_picker`, routed in `gui/clippy/src/main.rs` |
-| Which saved sessions the first screen offers, and which folder each one belongs to | `gui/clippy/src/sessions.rs`, listed by `picker::Picker::show_sessions`, routed in `gui/clippy/src/main.rs` |
+| Which saved sessions the first screen offers, and which folder each one belongs to | `gui/clippy/src/sessions/CONTRACT.md`, listed by `picker::Picker::show_sessions`, routed in `gui/clippy/src/main.rs` |
 | The conversation and metrics model: what an event does to state | `gui/clippy/src/state.rs` |
 | Where a pane that is a list is scrolled to, and what clamps it | `gui/clippy/src/scroll/CONTRACT.md`, content measured by `view::scroll_extent` |
 | Which readings the monitors show | `gui/clippy/src/monitor/CONTRACT.md` |
-| Which skills and MCP servers the panel lists, and what turning one off or removing it does on disk | `gui/clippy/src/agent.rs`, listed by `gui/clippy/src/settings.rs` |
+| Which skills and MCP servers the panel lists, and what turning one off or removing it does on disk | `gui/clippy/src/agent/CONTRACT.md`, listed by `gui/clippy/src/settings.rs` |
 | What a tool call is remembered as, and what the popup over an activity row shows | `gui/clippy/src/state.rs`, drawn by `view::call_popup` |
 | Talking to the agent process | `gui/clippy/src/link/CONTRACT.md` |
 | Drawing primitives: rects, corners, text, anything the shader does | `gui/noob-draw/src/lib.rs` |
@@ -118,6 +118,12 @@ Boxes so far:
   supervised `noob serve` child: frames in and out, pipes never block.
 - [`gui/clippy/src/menu`](../gui/clippy/src/menu/CONTRACT.md) - the
   right-click menus: rows, groups in place, stable shape.
+- [`gui/clippy/src/config`](../gui/clippy/src/config/CONTRACT.md) - the
+  window's settings file: tolerant parse, atomic write, every default.
+- [`gui/clippy/src/sessions`](../gui/clippy/src/sessions/CONTRACT.md) - saved
+  session rows from JSONL heads, the folder index, the Folders port.
+- [`gui/clippy/src/agent`](../gui/clippy/src/agent/CONTRACT.md) - the agent's
+  files as the CLI shapes them: env keys, AGENTS.md, skills, mcp.json.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,

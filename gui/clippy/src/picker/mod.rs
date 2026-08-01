@@ -43,25 +43,11 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::sessions::{Listing, Saved};
+use crate::sessions::{Folders, Listing, Saved};
 
 /// How many folders the file remembers. Long enough to hold the projects in
 /// rotation, short enough that the list is still one glance.
 pub const REMEMBERED: usize = 8;
-
-/// Where the picker reads folders from.
-///
-/// A trait rather than direct calls to `std::fs`, so the cursor, the walking and
-/// the filter can be driven in a test over a tree that only exists in the test.
-/// The two questions the picker asks are all that is in it.
-pub trait Folders {
-    /// The names of the folders directly inside `at`, in any order, or why they
-    /// could not be read.
-    fn list(&self, at: &Path) -> Result<Vec<String>, String>;
-    /// Whether this path is a folder at all. Asked of remembered paths, which
-    /// may have been moved or deleted since they were written down.
-    fn is_folder(&self, at: &Path) -> bool;
-}
 
 /// The real filesystem.
 pub struct Disk;

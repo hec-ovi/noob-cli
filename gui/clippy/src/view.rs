@@ -202,22 +202,6 @@ const DIFF_MIN_COLUMNS: usize = GUTTER + 20;
 const PICKER_COLUMNS: usize = 96;
 /// Where the dividers sit on a window nobody has dragged one in: a column takes
 /// this much of the width, and a top space this much of the height.
-///
-/// One number each rather than one per half, because a window opened for the
-/// first time has both halves of the grid breaking in the same place. What makes
-/// them free to differ is that they are dragged apart afterwards.
-///
-/// Defaults, not constants. All of them are dragged, all of them are carried in
-/// on [`Shape`], and the settings file remembers where they were left.
-pub const LEFT_WIDTH: f32 = 0.54;
-pub const TOP_HEIGHT: f32 = 0.46;
-/// The same for the settings panel's rail: how much of the panel the column of
-/// section names takes before anyone drags it.
-///
-/// A tenth, which is about fourteen columns of pane text on the window this is
-/// usually opened in and is held up to the longest section name on a narrower
-/// one.
-pub const SETTINGS_RAIL: f32 = 0.10;
 /// How far either side of the gap between two panes the pointer still counts as
 /// being on the divider between them.
 ///
@@ -7518,9 +7502,9 @@ mod tests {
             pane_size: 13.0,
             pane_column: 8.0,
             input_h: INPUT_H,
-            left_width: [LEFT_WIDTH; 2],
-            top_height: [TOP_HEIGHT; 2],
-            settings_rail: SETTINGS_RAIL,
+            left_width: [crate::config::LEFT_WIDTH; 2],
+            top_height: [crate::config::TOP_HEIGHT; 2],
+            settings_rail: crate::config::SETTINGS_RAIL,
             popup: None,
         }
     }
@@ -9272,7 +9256,7 @@ mod tests {
     #[test]
     fn the_two_ratios_decide_where_the_dividers_fall() {
         let dock = Dock::new();
-        for (left_width, top_height) in [(0.3, 0.3), (LEFT_WIDTH, TOP_HEIGHT), (0.7, 0.7)] {
+        for (left_width, top_height) in [(0.3, 0.3), (crate::config::LEFT_WIDTH, crate::config::TOP_HEIGHT), (0.7, 0.7)] {
             let layout = Layout::compute(1400.0, 900.0, &split_shape(&dock, left_width, top_height));
             let body = layout.column_divider[0].track;
             let room = body.w - GAP;
@@ -9320,7 +9304,7 @@ mod tests {
     #[test]
     fn a_dragged_divider_lands_under_the_pointer() {
         let dock = Dock::new();
-        let layout = Layout::compute(1400.0, 900.0, &split_shape(&dock, LEFT_WIDTH, TOP_HEIGHT));
+        let layout = Layout::compute(1400.0, 900.0, &split_shape(&dock, crate::config::LEFT_WIDTH, crate::config::TOP_HEIGHT));
         let body = layout.column_divider[0].track;
         let right = layout.row_divider[1].track;
 
@@ -9338,7 +9322,7 @@ mod tests {
             let moved = Layout::compute(
                 1400.0,
                 900.0,
-                &halves_shape(&dock, [0.54; 2], [TOP_HEIGHT, ratio]),
+                &halves_shape(&dock, [0.54; 2], [crate::config::TOP_HEIGHT, ratio]),
             );
             let top = moved.placed(Space::TopRight);
             let gap = top.body.y + top.body.h;
@@ -9357,14 +9341,14 @@ mod tests {
     #[test]
     fn a_divider_dragged_past_the_end_stops_at_the_floor() {
         let dock = Dock::new();
-        let layout = Layout::compute(1400.0, 900.0, &split_shape(&dock, LEFT_WIDTH, TOP_HEIGHT));
+        let layout = Layout::compute(1400.0, 900.0, &split_shape(&dock, crate::config::LEFT_WIDTH, crate::config::TOP_HEIGHT));
         let column_floor = layout.column_divider[0].floor;
         let row_floor = layout.row_divider[1].floor;
         assert!(column_floor > 0.0 && row_floor > 0.0);
 
         for x in [-4000.0, -1.0, 700.0, 1401.0, 9000.0] {
             let ratio = layout.column_ratio_at(0, x);
-            let moved = Layout::compute(1400.0, 900.0, &split_shape(&dock, ratio, TOP_HEIGHT));
+            let moved = Layout::compute(1400.0, 900.0, &split_shape(&dock, ratio, crate::config::TOP_HEIGHT));
             let (left_w, _) = box_of(&moved, Space::TopLeft);
             let (right_w, _) = box_of(&moved, Space::TopRight);
             assert!(left_w >= column_floor, "{x}: the left column is {left_w}");
@@ -9372,7 +9356,7 @@ mod tests {
         }
         for y in [-4000.0, -1.0, 500.0, 901.0, 9000.0] {
             let ratio = layout.row_ratio_at(1, y);
-            let moved = Layout::compute(1400.0, 900.0, &split_shape(&dock, LEFT_WIDTH, ratio));
+            let moved = Layout::compute(1400.0, 900.0, &split_shape(&dock, crate::config::LEFT_WIDTH, ratio));
             let (_, top_h) = box_of(&moved, Space::TopRight);
             let (_, bottom_h) = box_of(&moved, Space::BottomRight);
             assert!(top_h >= row_floor, "{y}: the top space is {top_h}");
@@ -9403,7 +9387,7 @@ mod tests {
         assert!(left_w > 1.0 && right_w > 1.0, "a column collapsed");
 
         // The same downward: a right column with no room for two floors.
-        let short = Layout::compute(1400.0, 180.0, &split_shape(&dock, LEFT_WIDTH, 0.9));
+        let short = Layout::compute(1400.0, 180.0, &split_shape(&dock, crate::config::LEFT_WIDTH, 0.9));
         let (_, top_h) = box_of(&short, Space::TopRight);
         let (_, bottom_h) = box_of(&short, Space::BottomRight);
         assert!((top_h - bottom_h).abs() <= 1.0, "{top_h} against {bottom_h}");
@@ -9509,7 +9493,7 @@ mod tests {
     #[test]
     fn no_divider_survives_a_shape_change() {
         let dock = Dock::new();
-        let open = Layout::compute(1200.0, 800.0, &split_shape(&dock, LEFT_WIDTH, TOP_HEIGHT));
+        let open = Layout::compute(1200.0, 800.0, &split_shape(&dock, crate::config::LEFT_WIDTH, crate::config::TOP_HEIGHT));
         assert!(open.column_divider[0].live() && open.row_divider[1].live());
         let band = open.column_divider[0].band;
         let (x, y) = (band.x + band.w * 0.5, band.y + TAB_H + 20.0);
@@ -9517,9 +9501,9 @@ mod tests {
         let picker = a_picker(&["src", "docs"], &[]);
         let panel = a_settings_panel(&Config::default());
         for (what, shape) in [
-            ("shaded", Shape { shaded: true, ..split_shape(&dock, LEFT_WIDTH, TOP_HEIGHT) }),
-            ("picking", Shape { picker: Some(&picker), ..split_shape(&dock, LEFT_WIDTH, TOP_HEIGHT) }),
-            ("settings", Shape { settings: Some(&panel), ..split_shape(&dock, LEFT_WIDTH, TOP_HEIGHT) }),
+            ("shaded", Shape { shaded: true, ..split_shape(&dock, crate::config::LEFT_WIDTH, crate::config::TOP_HEIGHT) }),
+            ("picking", Shape { picker: Some(&picker), ..split_shape(&dock, crate::config::LEFT_WIDTH, crate::config::TOP_HEIGHT) }),
+            ("settings", Shape { settings: Some(&panel), ..split_shape(&dock, crate::config::LEFT_WIDTH, crate::config::TOP_HEIGHT) }),
         ] {
             let layout = Layout::compute(1200.0, 800.0, &shape);
             let lines = layout.column_divider.iter().chain(layout.row_divider.iter());
@@ -9640,7 +9624,7 @@ mod tests {
     fn the_four_cells_tile_the_room_the_panes_share() {
         let dock = Dock::new();
         for (w, h) in [(1400.0, 900.0), (700.0, 460.0), (2200.0, 1400.0)] {
-            for (left_width, top_height) in [(0.3, 0.3), (LEFT_WIDTH, TOP_HEIGHT), (0.7, 0.72)] {
+            for (left_width, top_height) in [(0.3, 0.3), (crate::config::LEFT_WIDTH, crate::config::TOP_HEIGHT), (0.7, 0.72)] {
                 let layout =
                     Layout::compute(w, h, &split_shape(&dock, left_width, top_height));
                 let cells = layout.grid;
@@ -9720,7 +9704,7 @@ mod tests {
     fn each_half_of_the_grid_breaks_where_its_own_line_was_left() {
         let dock = Dock::new();
         let layout =
-            Layout::compute(1400.0, 900.0, &halves_shape(&dock, [LEFT_WIDTH; 2], [0.3, 0.7]));
+            Layout::compute(1400.0, 900.0, &halves_shape(&dock, [crate::config::LEFT_WIDTH; 2], [0.3, 0.7]));
         let at = |space: Space| layout.grid[space.index()];
         // What the two cells of a column share, gap included, is what a ratio is
         // a fraction of.
@@ -9756,7 +9740,7 @@ mod tests {
     fn the_two_halves_are_dragged_apart_and_neither_moves_the_other() {
         let mut dock = Dock::new();
         dock.move_view(View::Hardware, Space::BottomLeft);
-        let start = Layout::compute(1400.0, 900.0, &split_shape(&dock, LEFT_WIDTH, TOP_HEIGHT));
+        let start = Layout::compute(1400.0, 900.0, &split_shape(&dock, crate::config::LEFT_WIDTH, crate::config::TOP_HEIGHT));
         assert!(
             start.row_divider[0].live() && start.row_divider[1].live(),
             "both columns are split, so both have a line"
@@ -9771,7 +9755,7 @@ mod tests {
         let track = start.row_divider[0].track;
         let (up, down) = (track.y + track.h * 0.3, track.y + track.h * 0.7);
         let ratios = [start.row_ratio_at(0, up), start.row_ratio_at(1, down)];
-        let moved = Layout::compute(1400.0, 900.0, &halves_shape(&dock, [LEFT_WIDTH; 2], ratios));
+        let moved = Layout::compute(1400.0, 900.0, &halves_shape(&dock, [crate::config::LEFT_WIDTH; 2], ratios));
         let line_of = |layout: &Layout, space: Space| {
             let cell = layout.grid[space.index()];
             cell.y + cell.h + GAP * 0.5
@@ -9784,7 +9768,7 @@ mod tests {
         let one = Layout::compute(
             1400.0,
             900.0,
-            &halves_shape(&dock, [LEFT_WIDTH; 2], [TOP_HEIGHT, ratios[1]]),
+            &halves_shape(&dock, [crate::config::LEFT_WIDTH; 2], [crate::config::TOP_HEIGHT, ratios[1]]),
         );
         for space in [Space::TopLeft, Space::BottomLeft] {
             assert_eq!(
@@ -9810,7 +9794,7 @@ mod tests {
         let mut dock = Dock::new();
         dock.move_view(View::Hardware, Space::BottomLeft);
         let layout =
-            Layout::compute(1400.0, 900.0, &halves_shape(&dock, [LEFT_WIDTH; 2], [0.3, 0.7]));
+            Layout::compute(1400.0, 900.0, &halves_shape(&dock, [crate::config::LEFT_WIDTH; 2], [0.3, 0.7]));
         let at = |space: Space| layout.grid[space.index()];
         let line_of = |space: Space| at(space).y + at(space).h + GAP * 0.5;
         let (left_line, right_line) = (line_of(Space::TopLeft), line_of(Space::TopRight));
@@ -9875,7 +9859,7 @@ mod tests {
         assert!(dock.rows_first(), "a tab moved does not turn the grid back");
 
         let layout =
-            Layout::compute(1400.0, 900.0, &halves_shape(&dock, [0.3, 0.7], [TOP_HEIGHT; 2]));
+            Layout::compute(1400.0, 900.0, &halves_shape(&dock, [0.3, 0.7], [crate::config::TOP_HEIGHT; 2]));
         let at = |space: Space| layout.grid[space.index()];
         let room = at(Space::TopLeft).w + at(Space::TopRight).w;
         assert!((at(Space::TopLeft).w - room * 0.3).abs() <= 1.0, "the top row");
@@ -9996,13 +9980,13 @@ mod tests {
         let open = Layout::compute(
             1200.0,
             800.0,
-            &halves_shape(&dock, [LEFT_WIDTH; 2], halves),
+            &halves_shape(&dock, [crate::config::LEFT_WIDTH; 2], halves),
         );
         dock.slot_mut(Space::TopLeft).folded = true;
         let folded = Layout::compute(
             1200.0,
             800.0,
-            &halves_shape(&dock, [LEFT_WIDTH; 2], halves),
+            &halves_shape(&dock, [crate::config::LEFT_WIDTH; 2], halves),
         );
         // While it is folded the pane is its strip and the one under it has the
         // rest, whatever the ratio says.
@@ -10013,7 +9997,7 @@ mod tests {
         let opened = Layout::compute(
             1200.0,
             800.0,
-            &halves_shape(&dock, [LEFT_WIDTH; 2], halves),
+            &halves_shape(&dock, [crate::config::LEFT_WIDTH; 2], halves),
         );
         for space in Space::ALL {
             assert_eq!(
@@ -11120,9 +11104,9 @@ mod tests {
                 pane_size: 13.0,
                 pane_column,
                 input_h: INPUT_H,
-                left_width: [LEFT_WIDTH; 2],
-                top_height: [TOP_HEIGHT; 2],
-                settings_rail: SETTINGS_RAIL,
+                left_width: [crate::config::LEFT_WIDTH; 2],
+                top_height: [crate::config::TOP_HEIGHT; 2],
+                settings_rail: crate::config::SETTINGS_RAIL,
                 popup: None,
             };
             let layout = Layout::compute(1400.0, 900.0, &shape);
@@ -11221,9 +11205,9 @@ mod tests {
             pane_size: 13.0,
             pane_column: 8.0,
             input_h: INPUT_H,
-            left_width: [LEFT_WIDTH; 2],
-            top_height: [TOP_HEIGHT; 2],
-            settings_rail: SETTINGS_RAIL,
+            left_width: [crate::config::LEFT_WIDTH; 2],
+            top_height: [crate::config::TOP_HEIGHT; 2],
+            settings_rail: crate::config::SETTINGS_RAIL,
             popup: None,
         };
         let layout = Layout::compute(1400.0, 900.0, &shape);
@@ -15610,7 +15594,7 @@ mod tests {
     /// The window with the settings panel up, laid out and drawn off one shape,
     /// which is what makes a row land where it is drawn.
     fn render_settings(panel: &Settings, w: f32, h: f32, hot: Option<Hit>) -> Rendered {
-        render_settings_at_rail(panel, w, h, hot, SETTINGS_RAIL)
+        render_settings_at_rail(panel, w, h, hot, crate::config::SETTINGS_RAIL)
     }
 
     /// The same with the rail dragged to `rail` of the panel's width, which is
@@ -15633,7 +15617,7 @@ mod tests {
         h: f32,
         selection: crate::select::Selection,
     ) -> Rendered {
-        render_settings_with(panel, w, h, None, SETTINGS_RAIL, Some(selection), PANE_TEXT)
+        render_settings_with(panel, w, h, None, crate::config::SETTINGS_RAIL, Some(selection), PANE_TEXT)
     }
 
     /// The pane text every other settings test is laid out and drawn in: the
@@ -15650,7 +15634,7 @@ mod tests {
     /// The same panel at one font size, since the rail's layout is a question
     /// about how many lines of that size fit in the window.
     fn render_settings_at_font(panel: &Settings, w: f32, h: f32, font: (f32, f32)) -> Rendered {
-        render_settings_with(panel, w, h, None, SETTINGS_RAIL, None, font)
+        render_settings_with(panel, w, h, None, crate::config::SETTINGS_RAIL, None, font)
     }
 
     fn render_settings_with(
