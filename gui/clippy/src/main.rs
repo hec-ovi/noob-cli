@@ -426,6 +426,15 @@ fn soonest(deadlines: [Option<Instant>; 3]) -> Option<Instant> {
     deadlines.into_iter().flatten().min()
 }
 
+/// Which scrollbar a press took: a pane's, the file explorer's own, or the
+/// call popup's. One press, one track, decided where the button went down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Thumb {
+    Pane(Space),
+    Explorer(Space),
+    Popup,
+}
+
 /// The folder named on the command line, if one was.
 ///
 /// The first argument that is not a flag. Without one the window opens on the
@@ -608,7 +617,8 @@ fn menu_for(
         // The popup floats on the same layer and gets the same answer: it is
         // about one call rather than about a widget, so there is no pane for a
         // Close or a Copy row to act on.
-        Hit::Menu | Hit::MenuRow(_) | Hit::CallPopup => None,
+        Hit::Menu | Hit::MenuRow(_) | Hit::CallPopup | Hit::CallPopupClose
+        | Hit::CallPopupScrollbar => None,
         // A row of the session list is the one thing in the picker a menu can
         // act on: it names a file, so there is something to open and something
         // to delete. A folder row is not, because pressing it is the whole of
@@ -977,6 +987,9 @@ struct App {
     skin: Skin,
     link: Option<Link>,
     trouble: Option<String>,
+    /// The call popup's first visible content row. Reset when a call opens;
+    /// clamped against the popup's own extent on every move.
+    popup_scroll: usize,
     /// Armed until this instant by a first ESC that had nothing left to drop.
     /// A second ESC inside the window cancels the turn; any other key, or the
     /// window lapsing, disarms. One tap was too easy to spend by accident: a
@@ -1018,10 +1031,9 @@ struct App {
     /// half of the grid it carries says which of the two lines on that axis is
     /// moving.
     sizing: Option<Hit>,
-    /// The scrollbar the button came down on, while it is being dragged: the
-    /// space, and whether it is the file explorer's own track rather than
-    /// the pane's. The same press, motion, release cycle a divider runs.
-    thumbing: Option<(Space, bool)>,
+    /// The scrollbar the button came down on, while it is being dragged.
+    /// The same press, motion, release cycle a divider runs.
+    thumbing: Option<Thumb>,
     /// The settings row and half whose slider the button came down on, while it
     /// is being dragged. The same cycle again, on the panel: the value follows
     /// the pointer and the file is written once, when the button comes up.
@@ -1157,6 +1169,7 @@ impl App {
             link: None,
             trouble: None,
             esc_armed: None,
+            popup_scroll: 0,
             workspace,
             session: None,
             picker: None,
@@ -3234,6 +3247,18 @@ impl App {
             // All three handled above, while a menu or the popup is open, which
             // is the only time any of them can be hit at all.
             Hit::MenuRow(_) | Hit::Menu | Hit::CallPopup => {}
+            // The same close the settings panel has: one press, the popup
+            // goes, and the pane under it is exactly as it was.
+            Hit::CallPopupClose => {
+                self.state.open_call = None;
+                self.dirty = true;
+            }
+            // The popup's own track: the press takes the thumb, like every
+            // other scrollbar in the window.
+            Hit::CallPopupScrollbar => {
+                self.thumbing = Some(Thumb::Popup);
+                self.drag_thumb();
+            }
         }
     }
 
@@ -3279,14 +3304,55 @@ impl App {
             return;
         }
         let layout = self.layout();
-        let Some(spot) = self.spot_at(&layout, space, View::Activity) else {
-            return;
-        };
-        let Some(ordinal) = self.state.call_at_line(spot.line) else {
+        // Strict, unlike a selection: a press on the empty space under the
+        // list is a press on nothing, not on the nearest row. The selection
+        // clamp is for sweeps; opening the last call from a click that
+        // landed on air was a popup nobody asked for.
+        let Some(ordinal) = self.call_strictly_under_pointer(&layout, space) else {
             return;
         };
         self.state.open_call = Some(ordinal);
+        self.popup_scroll = 0;
         self.dirty = true;
+    }
+
+    /// The call whose row is exactly under the pointer, or nothing: the same
+    /// geometry the pane is drawn and hovered with, with no clamp.
+    fn call_strictly_under_pointer(&self, layout: &view::Layout, space: Space) -> Option<usize> {
+        let (row, at) = layout.cell_in(
+            space,
+            self.cursor.x as f32,
+            self.cursor.y as f32,
+            self.config.pane_font_size,
+            self.pane_column,
+        )?;
+        let body = layout.content(space);
+        let rows = layout.rows(body, self.config.pane_font_size);
+        let (cols, chrome) = view::text_columns(View::Activity, body, self.pane_column);
+        let (line, _) = self
+            .state
+            .activity
+            .spot_in(rows, cols, row, at.saturating_sub(chrome))?;
+        self.state.call_at_line(line)
+    }
+
+    /// Move the popup's window by pages of itself, the way every pane moves.
+    fn scroll_popup(&mut self, layout: &view::Layout, pages: f32) {
+        let geometry = {
+            let frame = self.frame(layout);
+            crate::widgets::popup::scroll_geometry(&frame)
+        };
+        let Some((total, fit)) = geometry else {
+            return;
+        };
+        let by = ((fit.saturating_sub(1).max(1) as f32 * pages.abs()).round() as usize).max(1);
+        let most = total.saturating_sub(fit);
+        let next = match pages > 0.0 {
+            true => self.popup_scroll.saturating_sub(by),
+            false => (self.popup_scroll + by).min(most),
+        };
+        self.dirty |= next != self.popup_scroll;
+        self.popup_scroll = next.min(most);
     }
 
     /// Walk one space's tab strip by one tab, which is what its arrows do. The
@@ -3726,7 +3792,7 @@ impl App {
             if scroll::file_thumb(self.file_scroll, self.state.files.len(), rows).is_none() {
                 return false;
             }
-            self.thumbing = Some((space, true));
+            self.thumbing = Some(Thumb::Explorer(space));
             return true;
         }
         let panel = layout.placed(space).body;
@@ -3746,7 +3812,7 @@ impl App {
             }
         };
         if has {
-            self.thumbing = Some((space, false));
+            self.thumbing = Some(Thumb::Pane(space));
         }
         has
     }
@@ -3754,10 +3820,32 @@ impl App {
     /// The pane under a held scrollbar follows the pointer down its track,
     /// through the same geometry the bar is drawn with.
     fn drag_thumb(&mut self) {
-        let Some((space, explorer)) = self.thumbing else {
+        let Some(grip) = self.thumbing else {
             return;
         };
         let layout = self.layout();
+        // The popup's track first: while it is up it covers the panes.
+        if matches!(grip, Thumb::Popup) {
+            let track = view::scroll_track(layout.call_popup);
+            let fraction = ((self.cursor.y as f32 - track.y) / track.h.max(1.0)).clamp(0.0, 1.0);
+            let geometry = {
+                let frame = self.frame(&layout);
+                crate::widgets::popup::scroll_geometry(&frame)
+            };
+            let Some((total, fit)) = geometry else {
+                return;
+            };
+            let most = total.saturating_sub(fit);
+            let next = ((fraction * most as f32).round() as usize).min(most);
+            self.dirty |= next != self.popup_scroll;
+            self.popup_scroll = next;
+            return;
+        }
+        let (space, explorer) = match grip {
+            Thumb::Pane(space) => (space, false),
+            Thumb::Explorer(space) => (space, true),
+            Thumb::Popup => unreachable!("handled above"),
+        };
         let Some(view) = self.dock.slot(space).active() else {
             return;
         };
@@ -4142,6 +4230,11 @@ impl App {
     /// history.
     fn scroll_hovered(&mut self, pages: f32) {
         let layout = self.layout();
+        // The popup covers the panes, so while it is up the wheel is its.
+        if self.state.open_call.is_some() {
+            self.scroll_popup(&layout, pages);
+            return;
+        }
         // A menu floats above the window, so while the pointer is on one the
         // wheel moves the menu rather than the pane it covers. First, for the
         // same reason the menu is hit tested first.
@@ -4304,6 +4397,8 @@ impl App {
             hot: self.hot,
             trouble: self.trouble.as_deref(),
             esc_armed: self.esc_armed.is_some(),
+            popup_scroll: self.popup_scroll,
+            cursor: (self.cursor.x as f32, self.cursor.y as f32),
             selection: self.selection,
             scrolls: &self.scrolls,
             file_scroll: self.file_scroll,
@@ -4529,6 +4624,7 @@ impl ApplicationHandler<Wake> for App {
                         | Hit::PickerSessions
                         | Hit::PickerMark(_)
                         | Hit::SettingsClose
+                        | Hit::CallPopupClose
                         | Hit::SettingsSection(_)
                         | Hit::SettingsSlider(..)
                         | Hit::SettingsSwatch(_, _)
@@ -6813,6 +6909,15 @@ mod tests {
         // from every edge, rather than a note sized to its lines.
         assert!(box_.w >= W * 0.9, "{box_:?}");
         assert!(box_.y + box_.h >= H * 0.9, "{box_:?}");
+        // Its close mark answers for itself, the same close settings has,
+        // and its scroll track takes the press the way every track does.
+        let close = layout.call_popup_close;
+        assert!(close.w >= 1.0, "{close:?}");
+        let (x, y) = middle(close);
+        assert_eq!(layout.hit(x, y), Some(Hit::CallPopupClose));
+        let track = view::scroll_track(box_);
+        let (x, y) = middle(track);
+        assert_eq!(layout.hit(x, y), Some(Hit::CallPopupScrollbar));
 
         // A press outside it is not the popup's, so `App::click` closes the
         // popup and stops there.
@@ -7119,6 +7224,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
             picker: None,

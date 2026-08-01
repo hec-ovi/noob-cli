@@ -546,11 +546,16 @@ pub enum Hit {
     /// The open menu's box, away from any row. Swallowed for the same reason:
     /// a press on its margin must not reach what is behind it.
     Menu,
-    /// The box of the activity popup. The whole of it: nothing inside it acts,
-    /// so there is one region and it swallows the press, which is what lets a
-    /// press anywhere else close the popup without also doing whatever it landed
-    /// on. The same bargain the menu makes.
+    /// The box of the activity popup. Its close mark and its scroll track
+    /// answer for themselves; the rest of the box swallows the press, which
+    /// is what lets a press anywhere else close the popup without also doing
+    /// whatever it landed on. The same bargain the menu makes.
     CallPopup,
+    /// The cross at the popup's top right, the same close the settings panel
+    /// has.
+    CallPopupClose,
+    /// The popup's own scroll track, pressed and dragged like every other.
+    CallPopupScrollbar,
     /// A row of the folder picker, by position in its list.
     PickerRow(usize),
     /// The mark in front of a folder on that row, which puts what is inside it
@@ -896,6 +901,8 @@ pub struct Layout {
     /// region beyond its own. It swallows the press that lands on it, the way
     /// the menu's margin does.
     pub call_popup: Panel,
+    /// The popup's close mark, when the popup is up.
+    pub call_popup_close: Panel,
 }
 
 /// What the layout needs beyond the window size.
@@ -1079,9 +1086,21 @@ impl Layout {
         let (menu_fly, menu_fly_rows) = (places.fly, places.fly_rows);
         // Only in the shape that has panes. The three takeovers below collapse
         // it along with every other pane region.
-        let call_popup = match shape.popup {
-            Some(_) => place_popup(width, height),
-            None => nowhere(),
+        let (call_popup, call_popup_close) = match shape.popup {
+            Some(_) => {
+                let box_ = place_popup(width, height);
+                let mark = Text::line_for(shape.pane_size);
+                (
+                    box_,
+                    Panel::new(
+                        box_.x + box_.w - mark - POPUP_PAD,
+                        box_.y + POPUP_PAD,
+                        mark,
+                        mark,
+                    ),
+                )
+            }
+            None => (nowhere(), nowhere()),
         };
 
         if shape.shaded {
@@ -1142,6 +1161,7 @@ impl Layout {
                 menu_fly,
                 menu_fly_rows,
                 call_popup: nowhere(),
+                call_popup_close: nowhere(),
             };
         }
 
@@ -1206,6 +1226,7 @@ impl Layout {
                 menu_fly,
                 menu_fly_rows,
                 call_popup: nowhere(),
+                call_popup_close: nowhere(),
             };
         }
 
@@ -1271,6 +1292,7 @@ impl Layout {
                 menu_fly,
                 menu_fly_rows,
                 call_popup: nowhere(),
+                call_popup_close: nowhere(),
             };
         }
 
@@ -1527,6 +1549,7 @@ impl Layout {
             menu_fly,
             menu_fly_rows,
             call_popup,
+            call_popup_close,
         }
     }
 
@@ -1569,8 +1592,22 @@ impl Layout {
         }
         // Under the menu on the same layer, and above everything else. A menu
         // opened over the popup is the newer thing and takes the click; the
-        // popup takes it from the panes it is drawn over.
+        // popup takes it from the panes it is drawn over. Inside it, the
+        // close mark and the scroll track answer before the box swallows.
         if self.call_popup.w >= 1.0 && self.call_popup.contains(x, y) {
+            if self.call_popup_close.w >= 1.0 && self.call_popup_close.contains(x, y) {
+                return Some(Hit::CallPopupClose);
+            }
+            let track = scroll_track(self.call_popup);
+            let band = Panel::new(
+                track.x - SCROLL_GAP * 2.0,
+                track.y,
+                track.w + SCROLL_GAP * 3.0,
+                track.h,
+            );
+            if band.contains(x, y) {
+                return Some(Hit::CallPopupScrollbar);
+            }
             return Some(Hit::CallPopup);
         }
         for (panel, hit) in [
@@ -2550,6 +2587,12 @@ pub struct Frame<'a> {
     /// A first ESC has landed with nothing left for it to drop: the input row
     /// says the second one is the one that cancels the turn.
     pub esc_armed: bool,
+    /// The call popup's first visible content row, shell-owned like every
+    /// other scroll offset.
+    pub popup_scroll: usize,
+    /// Where the pointer is, for the hover highlights. Off screen when the
+    /// window has never seen it.
+    pub cursor: (f32, f32),
     /// A drag over one of the text panes, drawn as a band under the glyphs.
     pub selection: Option<crate::select::Selection>,
     /// The open menu. The same one the layout was computed from, or the rows
@@ -2749,7 +2792,7 @@ fn drop_room(layout: &Layout, dock: &Dock, drag: Drag) -> Panel {
 fn overlay(scene: &mut Scene, frame: &Frame) {
     // The popup first, so a menu opened over it is drawn on top of it, which is
     // the order it is hit tested in.
-    call_popup(scene, frame);
+    crate::widgets::popup::popup(scene, frame);
     let Some(menu) = frame.menu else {
         return;
     };
@@ -2781,72 +2824,6 @@ fn overlay(scene: &mut Scene, frame: &Frame) {
             menu_row(scene, frame, *row, *index, *panel, fly_chars, layout.menu_fly);
         }
         scene.over_rect(panel_edge(layout.menu_fly, skin.edge_focus));
-    }
-}
-
-/// One activity row opened out, full panel: what was invoked, when, what the
-/// model generated, what came back and the detail, each a block of its own.
-///
-/// What it says is [`crate::state::Call::cells`]; this only puts it on the
-/// screen. On the floating layer with `over_rect`/`over_text` for the reason the
-/// menu is: a box pushed onto the base layer is painted before every glyph in
-/// the window and comes out underneath the pane text it is covering.
-fn call_popup(scene: &mut Scene, frame: &Frame) {
-    let Some(call) = frame.state.popped() else {
-        return;
-    };
-    let (skin, box_) = (frame.skin, frame.layout.call_popup);
-    if box_.w < 1.0 || box_.h < 1.0 {
-        return;
-    }
-    scene.over_rect(panel_fill(box_, skin.menu));
-    scene.over_rect(panel_edge(box_, skin.edge_focus));
-    let inside = box_.inset(POPUP_PAD);
-    let line = Text::line_for(frame.pane_size);
-    // The heading, alone at the top: the tool, its target, how it stands.
-    scene.over_text(Text::rich(
-        vec![Run::tinted(call.heading(), skin.bright)],
-        inside.row(0.0, line),
-        frame.pane_size,
-        skin.bright,
-    ));
-    // Then one block per cell, each a surface of its own: a bar down the
-    // left in the cell's tone, its label over its lines, and air between
-    // blocks. What was asked, when it ran, what the model generated, what
-    // came back and the failure detail read as five separate things because
-    // they are drawn as five separate things.
-    let mut y = inside.y + line * 2.0;
-    for cell in call.cells() {
-        let label_pad = 2usize;
-        let cols = cols_of(inside, frame.pane_column).saturating_sub(label_pad).max(8);
-        let rows: usize = cell
-            .lines
-            .iter()
-            .map(|text| text_geometry::rows_in(text, cols, crate::state::PANE_WRAP).len())
-            .sum();
-        let h = (rows + 1) as f32 * line + POPUP_PAD;
-        let bottom = box_.y + box_.h - POPUP_PAD;
-        if y + line >= bottom {
-            break;
-        }
-        let block = Panel::new(inside.x, y, inside.w, h.min(bottom - y));
-        let tone = skin.tone(cell.tone);
-        let bar = tone.map(|c| f32::from(c) / 255.0);
-        scene.over_rect(block.fill(skin.panel));
-        scene.over_rect(Panel::new(block.x, block.y, MARK_W, block.h).fill(bar));
-        let text = Panel::new(
-            block.x + label_pad as f32 * frame.pane_column,
-            block.y + POPUP_PAD * 0.5,
-            (block.w - label_pad as f32 * frame.pane_column - POPUP_PAD).max(1.0),
-            (block.h - POPUP_PAD * 0.5).max(1.0),
-        );
-        let mut runs = vec![Run::tinted(cell.label, skin.dim), Run::plain("\n")];
-        for entry in &cell.lines {
-            runs.push(Run::tinted(entry, tone));
-            runs.push(Run::plain("\n"));
-        }
-        scene.over_text(Text::rich(runs, text, frame.pane_size, skin.body).wrap_at(cols));
-        y += block.h + GAP;
     }
 }
 
@@ -3612,7 +3589,7 @@ pub fn scroll_extent(frame: &Frame, view: View, panel: Panel) -> Option<(Vec<usi
     };
     match view {
         View::Plan => lines(crate::widgets::plan::plan_rows(frame.state, frame.skin)),
-        View::Agents => lines(crate::widgets::agents::agent_rows(frame.state, frame.skin)),
+        View::Agents => lines(crate::widgets::agents::agent_rows(frame.state, frame.skin, cols)),
         View::Hardware => crate::widgets::gauges::gauge_extent(frame, panel, frame.monitor.hardware()),
         View::Session => crate::widgets::gauges::gauge_extent(frame, panel, frame.monitor.session()),
         // The readings sit under the header, in a box of their own, and it is that
@@ -4381,6 +4358,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
             picker: None,
@@ -4499,6 +4478,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
             picker: None,
@@ -4756,6 +4737,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
             picker: None,
@@ -4805,6 +4788,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: true,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
             picker: None,
@@ -4852,6 +4837,29 @@ mod tests {
         assert!(text.contains("reading src/main.rs"), "{text}");
     }
 
+    /// A child's brief is a paragraph and its output lines run long; the
+    /// list clips both to one row each, so the pane stays a list however
+    /// long the fleet's prompts run.
+    #[test]
+    fn an_agent_entry_is_one_row_however_long_its_text() {
+        let mut state = busy_state();
+        state.apply(noob_proto::Event::AgentSpawn {
+            agent_id: "kid".into(),
+            prompt: "Research Arthur Schopenhauer. Focus on his main ideas. ".repeat(8),
+            tools: "all".into(),
+        });
+        state.apply(noob_proto::Event::AgentOutput {
+            agent_id: "kid".into(),
+            line: "* websearch search over a very long query string ".repeat(8),
+        });
+        let skin = Skin::from(&Config::default());
+        let cols = 48;
+        let rows = crate::widgets::agents::agent_rows(&state, &skin, cols);
+        for row in &rows {
+            assert_eq!(row.rows(cols), 1, "an entry wrapped");
+        }
+    }
+
     /// A press on an agent's rows resolves to that agent, through the same
     /// geometry the list is drawn with, and a press past the list resolves
     /// to nothing.
@@ -4893,6 +4901,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
             picker: None,
@@ -5911,6 +5921,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: Some(selection),
             menu: None,
             picker: None,
@@ -7315,6 +7327,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: Some(selection),
             menu: None,
             picker: None,
@@ -7432,6 +7446,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
             picker: None,
@@ -7635,6 +7651,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
             picker: None,
@@ -7749,6 +7767,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: Some(selection),
             menu: None,
             picker: None,
@@ -8013,6 +8033,8 @@ mod tests {
                 hot: None,
                 trouble: None,
                 esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
                 selection: None,
                 menu: None,
                 picker: None,
@@ -8118,6 +8140,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
             picker: None,
@@ -8604,6 +8628,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
             picker: None,
@@ -8814,6 +8840,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
             picker: None,
@@ -9396,6 +9424,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
             picker: None,
@@ -10084,6 +10114,8 @@ mod tests {
             hot,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: None,
             menu: Some(menu),
             picker: None,
@@ -10911,6 +10943,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
             picker: None,
@@ -11130,6 +11164,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: None,
             menu: Some(&menu),
             picker: None,
@@ -11318,6 +11354,8 @@ mod tests {
             hot,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
             picker: Some(picker),
@@ -12388,6 +12426,8 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection: None,
             menu: Some(menu),
             picker: Some(picker),
@@ -12708,6 +12748,8 @@ mod tests {
             hot,
             trouble: None,
             esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
             selection,
             menu: None,
             picker: None,

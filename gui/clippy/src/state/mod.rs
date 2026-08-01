@@ -896,17 +896,35 @@ impl Call {
         format!("{} \u{25b8} {} \u{25b8} {outcome}", self.kind.tag(), self.target)
     }
 
-    /// The popup's grid, top to bottom.
+    /// The popup's blocks, top to bottom: what was invoked, when, what the
+    /// model generated, what came back, and - for a failure - the detail.
     ///
-    /// Four of these are what was asked for: what was invoked, what the model
-    /// generated, what came back, and the detail. The fifth is the timing, which
-    /// costs nothing because the record already carries it and is the only place
-    /// a fan-out can be checked against the clock.
-    ///
-    /// Two of the four cannot be filled for a call that worked, and they say so
-    /// in words rather than sitting blank. See [`Cell::absent`].
+    /// Only the blocks with something to say: a filler block ("no detail")
+    /// under every working call taught nothing, and a failure's message
+    /// printed by three blocks at once read as three different failures.
+    /// Every line appears exactly once, in the block it belongs to.
     pub fn cells(&self) -> Vec<Cell> {
-        vec![self.invoked_cell(), self.when_cell(), self.generated_cell(), self.returned_cell(), self.detail_cell()]
+        let mut out = vec![self.invoked_cell(), self.when_cell()];
+        if let Some(generated) = self.generated_cell() {
+            out.push(generated);
+        }
+        out.push(self.returned_cell());
+        if let Some(detail) = self.detail_cell() {
+            out.push(detail);
+        }
+        let mut seen: Vec<String> = Vec::new();
+        for cell in &mut out {
+            cell.lines.retain(|line| {
+                let key = line.trim().to_string();
+                let fresh = key.is_empty() || !seen.contains(&key);
+                if fresh && !key.is_empty() {
+                    seen.push(key);
+                }
+                fresh
+            });
+        }
+        out.retain(|cell| !cell.lines.is_empty());
+        out
     }
 
     fn invoked_cell(&self) -> Cell {
@@ -949,24 +967,21 @@ impl Call {
         }
     }
 
-    fn generated_cell(&self) -> Cell {
-        let text = serde_json::to_string_pretty(&self.args).unwrap_or_else(|_| self.args.to_string());
+    /// The arguments the model wrote, or nothing when it sent none: a block
+    /// explaining its own absence taught nothing.
+    fn generated_cell(&self) -> Option<Cell> {
         let empty = matches!(&self.args, noob_proto::Value::Null)
             || self.args.as_object().is_some_and(|o| o.is_empty());
-        match empty {
-            true => Cell {
-                label: "GENERATED",
-                lines: vec![String::from("the model sent no arguments with this call")],
-                absent: true,
-                tone: Tone::Dim,
-            },
-            false => Cell {
-                label: "GENERATED",
-                lines: clipped(&text),
-                absent: false,
-                tone: Tone::Body,
-            },
+        if empty {
+            return None;
         }
+        let text = serde_json::to_string_pretty(&self.args).unwrap_or_else(|_| self.args.to_string());
+        Some(Cell {
+            label: "GENERATED",
+            lines: clipped(&text),
+            absent: false,
+            tone: Tone::Body,
+        })
     }
 
     fn returned_cell(&self) -> Cell {
@@ -975,16 +990,10 @@ impl Call {
             lines.push(self.summary.clone());
         }
         let (rest, absent, tone) = match (&self.error, self.done) {
-            (Some(error), _) => match error.detail.as_deref() {
-                Some(detail) => (clipped(detail), false, Tone::Bad),
-                None => (
-                    vec![String::from(
-                        "the failure carried no body: the tool sent a message and nothing else",
-                    )],
-                    true,
-                    Tone::Dim,
-                ),
-            },
+            // The failure's own story is the DETAIL block; this one keeps
+            // only the summary and whatever the call printed before it died.
+            (Some(_), _) => (self.output.clone(), false, Tone::Dim),
+            (None, false) if !self.output.is_empty() => (self.output.clone(), false, Tone::Body),
             (None, false) => (vec![String::from("still running")], true, Tone::Dim),
             (None, true) if !self.output.is_empty() => (self.output.clone(), false, Tone::Body),
             // The wire carries a display summary and no result body for a call
@@ -1007,29 +1016,24 @@ impl Call {
         }
     }
 
-    fn detail_cell(&self) -> Cell {
-        let Some(error) = &self.error else {
-            return Cell {
-                label: "DETAIL",
-                lines: vec![String::from(
-                    "no detail: the agent sends one only with a failure",
-                )],
-                absent: true,
-                tone: Tone::Dim,
-            };
-        };
+    /// The failure, whole and in one place: its class, its message, the body
+    /// the tool sent, and what to do next. Nothing for a call that worked.
+    fn detail_cell(&self) -> Option<Cell> {
+        let error = self.error.as_ref()?;
         let mut lines = vec![error.fault.clone(), error.message.clone()];
+        if let Some(detail) = error.detail.as_deref() {
+            lines.extend(clipped(detail));
+        }
         if let Some(remedy) = error.remedy.as_deref() {
             lines.push(format!("-> {remedy}"));
         }
-        Cell {
+        Some(Cell {
             label: "DETAIL",
             lines,
             absent: false,
             tone: Tone::Bad,
-        }
+        })
     }
-
 }
 
 /// A block of text as lines, bounded, with a last line saying what was left out.
@@ -2696,17 +2700,15 @@ mod tests {
         assert!(text.contains("cargo build"), "{text}");
         assert!(text.contains("timeout"), "{text}");
 
-        let returned = cell("RETURNED");
-        assert!(!returned.absent, "a failure does carry its body");
-        let text = returned.lines.join("\n");
-        assert!(text.contains("linker `cc` not found"), "{text}");
-        assert!(text.contains("install build-essential"), "{text}");
-
+        // The failure's whole story is one block: class, message, the body
+        // the tool sent, and what to do next, with nothing said twice.
         let detail = cell("DETAIL");
         assert!(!detail.absent);
         let text = detail.lines.join("\n");
         assert!(text.contains("exit_status 127"), "{text}");
         assert!(text.contains("cargo: command not found"), "{text}");
+        assert!(text.contains("linker `cc` not found"), "{text}");
+        assert!(text.contains("install build-essential"), "{text}");
         assert!(text.contains("available here: python3 node"), "{text}");
     }
 
@@ -2731,9 +2733,8 @@ mod tests {
         assert!(text.contains("not on the wire"), "{text}");
         assert!(!text.trim().is_empty());
 
-        let detail = cells.iter().find(|c| c.label == "DETAIL").expect("a cell");
-        assert!(detail.absent);
-        assert!(detail.lines.join("\n").contains("only with a failure"), "{detail:?}");
+        // No failure, no DETAIL block: a filler cell taught nothing.
+        assert!(!cells.iter().any(|c| c.label == "DETAIL"), "{cells:?}");
 
         // A skill says the same about its own file, which is also never sent.
         let mut skilled = State::new();
@@ -3057,25 +3058,25 @@ mod tests {
                 remedy: None,
             }),
         });
-        // The pane keeps the one recolored row; the popup carries the rest.
+        // The pane keeps the one recolored row; the popup's DETAIL block
+        // carries the message and the bounded body, nothing said twice.
         assert_eq!(texts(&state.activity).len(), 1);
         let call = state.call(0).expect("the record");
-        let flat: Vec<String> = call.cells().into_iter().flat_map(|c| c.lines).collect();
-        assert!(
-            flat.iter().any(|l| l.contains("could not compile")),
-            "{flat:?}"
-        );
-        let returned = call
+        let detail = call
             .cells()
             .into_iter()
-            .find(|cell| cell.label == "RETURNED")
-            .expect("the returned block");
-        assert!(returned.lines.iter().any(|l| l.contains("trace line 0")), "{returned:?}");
-        assert!(returned.lines.last().unwrap().contains('…'), "{returned:?}");
+            .find(|cell| cell.label == "DETAIL")
+            .expect("the detail block");
         assert!(
-            returned.lines.len() <= CELL_LINES + 2,
+            detail.lines.iter().any(|l| l.contains("could not compile")),
+            "{detail:?}"
+        );
+        assert!(detail.lines.iter().any(|l| l.contains("trace line 0")), "{detail:?}");
+        assert!(detail.lines.iter().any(|l| l.contains('…')), "{detail:?}");
+        assert!(
+            detail.lines.len() <= CELL_LINES + 4,
             "the body is bounded: {}",
-            returned.lines.len()
+            detail.lines.len()
         );
     }
 

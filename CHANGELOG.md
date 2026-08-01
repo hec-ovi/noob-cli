@@ -3,6 +3,19 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## Unreleased
+
+- The call popup is its own widget box, rebuilt: a header with the
+  settings-style close mark, blocks that never overlap or repeat a line
+  (the failure's whole story lives in one DETAIL block), and the content
+  scrolls with the wheel and a draggable track of its own.
+- Activity rows light up under the pointer, and a click on the empty space
+  below the list opens nothing instead of the last call.
+- Agents list entries clip to one row each, however long a child's brief
+  runs.
+- A padded status:true beside a real prompt spawns the sub-agent instead of
+  refusing the call.
+
 ## 0.11.1 - 2026-08-01
 
 - Round budgets are unbounded by default: an instruction runs until it

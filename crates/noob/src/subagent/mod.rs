@@ -159,6 +159,12 @@ pub fn run(env: &SpawnEnv, args: &Value) -> ToolOutcome {
         .get("prompt")
         .and_then(Value::as_str)
         .is_some_and(|prompt| !prompt.trim().is_empty());
+    // A padded status beside a real prompt is the same small-model tic a
+    // padded status:false is: the prompt is the operation, the padding is
+    // noise, and refusing the call starved real work over a filler field.
+    // A cancel is different: destroying a job on a call that also asks to
+    // start one is ambiguous enough to refuse.
+    let status = status && !has_prompt;
     if usize::from(cancel.is_some()) + usize::from(status) + usize::from(has_prompt) > 1 {
         return ToolOutcome::err(
             "choose exactly one subagent operation: prompt to spawn, status:true to inspect, \
@@ -917,6 +923,19 @@ mod tests {
         let out = run(&env_of(&ctx.core.workspace, Some(&task), &loaded), &json!({"prompt": "x", "cancel": "agent-1"}));
         assert!(out.is_error);
         assert!(out.content.contains("choose exactly one"));
+        // A padded status:true beside a real prompt spawns: refusing the
+        // call starved real work over a filler field. Proven without
+        // spawning: the call walks past the exclusive-operation check and
+        // trips on the bad tools value, the check after it.
+        let out = run(
+            &env_of(&ctx.core.workspace, Some(&task), &loaded),
+            &json!({"prompt": "x", "status": true, "tools": "everything"}),
+        );
+        assert!(
+            out.content.contains("\"read-only\", \"web\", or \"all\""),
+            "{}",
+            out.content
+        );
 
         let schema = spec().parameters;
         assert_eq!(schema["anyOf"].as_array().unwrap().len(), 3);

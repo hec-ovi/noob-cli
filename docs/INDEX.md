@@ -26,7 +26,7 @@ package, the binary and everything a user sees are `no0b`.
 | Where a pane that is a list is scrolled to, and what clamps it | `gui/clippy/src/scroll/CONTRACT.md`, content measured by `view::scroll_extent` |
 | Which readings the monitors show | `gui/clippy/src/monitor/CONTRACT.md` |
 | Which skills and MCP servers the panel lists, and what turning one off or removing it does on disk | `gui/clippy/src/agent/CONTRACT.md`, listed by `gui/clippy/src/settings/sections/skills/CONTRACT.md` and `gui/clippy/src/settings/sections/mcp/CONTRACT.md` |
-| What a tool call is remembered as, and what the popup over an activity row shows | `gui/clippy/src/state/CONTRACT.md`, drawn by `view::call_popup` |
+| What a tool call is remembered as, and what the popup over an activity row shows | `gui/clippy/src/state/CONTRACT.md`, drawn by `gui/clippy/src/widgets/popup` |
 | Talking to the agent process | `gui/clippy/src/link/CONTRACT.md` |
 | Drawing primitives: rects, corners, text, anything the shader does | `gui/noob-draw/src/lib.rs` |
 | The GPU device, surface, transparency probing | `gui/noob-gpu/src/lib.rs` |
@@ -132,8 +132,8 @@ Boxes so far:
 - [`gui/clippy/src/state`](../gui/clippy/src/state/CONTRACT.md) - the pure
   reducer: events in, the conversation and metrics model out, bounded.
 - `gui/clippy/src/widgets/*` - one box per pane widget (output, activity,
-  plan, agents, agent, files, context, gauges), each a pure painter with
-  its own contract.
+  plan, agents, agent, popup, files, context, gauges), each a pure painter
+  with its own contract.
 - [`gui/clippy/src/settings`](../gui/clippy/src/settings/CONTRACT.md) - the
   settings panel: the frame (rail, cursor, shared row vocabulary, write-back)
   over six nested section boxes, with places and paint on one geometry.

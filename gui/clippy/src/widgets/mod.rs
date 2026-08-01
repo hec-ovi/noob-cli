@@ -10,3 +10,4 @@ pub mod files;
 pub mod gauges;
 pub mod output;
 pub mod plan;
+pub mod popup;

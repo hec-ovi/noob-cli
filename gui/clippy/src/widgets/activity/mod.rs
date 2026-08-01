@@ -19,6 +19,29 @@ pub(crate) fn activity(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let (skin, state) = (frame.skin, frame.state);
     let rows = frame.layout.rows(panel, frame.pane_size);
     let cols = cols_of(panel, frame.pane_column);
+    // The row under the pointer lights up when it belongs to a call: the
+    // band under the glyphs is what says these rows press, before anything
+    // is pressed. Only while no popup covers the pane.
+    let (cx, cy) = frame.cursor;
+    if state.open_call.is_none() && panel.inset(PAD).contains(cx, cy) {
+        let inset = panel.inset(PAD);
+        let line = Text::line_for(frame.pane_size);
+        let row = ((cy - inset.y) / line).floor().max(0.0) as usize;
+        if let Some((absolute, _)) = state.activity.spot_in(rows, cols, row, 0)
+            && state.call_at_line(absolute).is_some()
+            && let Some((first, tall)) = state.activity.band_of(rows, cols, absolute)
+        {
+            scene.rect(
+                Panel::new(
+                    inset.x,
+                    inset.y + first as f32 * line,
+                    (inset.w - SCROLL_W - SCROLL_GAP * 2.0).max(1.0),
+                    tall as f32 * line,
+                )
+                .fill(skin.hot),
+            );
+        }
+    }
     let mut runs = Vec::new();
     for line in state.activity.visible(rows, cols) {
         // The clock column in front of a row is the subordinate part of it and
