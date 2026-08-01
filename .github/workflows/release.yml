@@ -1,0 +1,44 @@
+# The one CI surface: build and publish the Linux packages when a version
+# tag lands. Tests run locally (./dev.sh test-all); nothing here tests.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: ./dev.sh build
+      - run: ./dev.sh package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.runner }}
+          path: |
+            dist/*.deb
+            dist/*.tar.gz
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME"
+          --repo "$GITHUB_REPOSITORY"
+          --title "noob $GITHUB_REF_NAME"
+          --notes "CHANGELOG.md holds what this version does."
+          dist/*

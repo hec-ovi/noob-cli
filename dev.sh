@@ -77,6 +77,45 @@ case "${1:-}" in
       -v "$PWD":/src -w /src "$DEV_IMG" \
       cargo test --workspace -- --ignored --test-threads=1
     ;;
+  # Release artifacts for this machine's architecture, into dist/: the deb
+  # (stable asset name, version inside) and the tarball. Run build first.
+  package)
+    [ -x "$BIN" ] || { echo "no release binary; run ./dev.sh build first" >&2; exit 2; }
+    version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+    built="$("$BIN" --version | awk '{print $2}')"
+    [ "$built" = "$version" ] || {
+      echo "the built binary is $built but Cargo.toml says $version; run ./dev.sh build" >&2
+      exit 2
+    }
+    case "$RUST_TARGET" in
+      x86_64-*) deb_arch=amd64 ;;
+      aarch64-*) deb_arch=arm64 ;;
+    esac
+    rm -rf dist/deb dist/stage
+    mkdir -p dist/deb/DEBIAN dist/deb/usr/bin dist/deb/usr/share/doc/noob dist/stage
+    install -m 0755 "$BIN" dist/deb/usr/bin/noob
+    install -m 0644 LICENSE dist/deb/usr/share/doc/noob/copyright
+    cat > dist/deb/DEBIAN/control <<EOF
+Package: noob
+Version: $version
+Architecture: $deb_arch
+Maintainer: Hector Oviedo <hec-ovi@users.noreply.github.com>
+Section: utils
+Priority: optional
+Homepage: https://github.com/hec-ovi/noob-cli
+Description: terminal coding agent for OpenAI-compatible endpoints
+ One static binary, no runtime dependencies. Runs against the current
+ project directory; commands the agent types are folder-locked by the
+ kernel (Landlock).
+EOF
+    dpkg-deb --build --root-owner-group dist/deb "dist/noob_${deb_arch}.deb" >/dev/null
+    install -m 0755 "$BIN" dist/stage/noob
+    install -m 0644 LICENSE README.md dist/stage/
+    tar -czf "dist/noob-${RUST_TARGET%%-*}-linux.tar.gz" -C dist/stage noob LICENSE README.md
+    rm -rf dist/deb dist/stage
+    echo "packaged $version:"
+    ls -l dist/
+    ;;
   # Build the runtime image without running it.
   docker)
     docker build --build-arg "TARGETARCH=${RUST_TARGET%%-*}" -t noob -f docker/Dockerfile .

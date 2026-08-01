@@ -3,6 +3,33 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.10.0 - 2026-08-01
+
+The Linux install is a native package.
+
+### Added
+
+- Releases carry a deb and a tarball per architecture (amd64 and arm64), one
+  static musl binary inside, built and published on tag by the release
+  workflow, the one CI surface. `sudo apt install ./noob_amd64.deb` is the
+  whole install; configuration and sessions live under `~/.config/noob`.
+- Commands the agent types are folder-locked by the kernel. Landlock rules
+  built in the process runner give a bash child, and everything it starts,
+  write access only beneath the workspace, the temp trees, and `/dev/null`;
+  reading and executing stay unrestricted. A locked command's toolchain
+  caches (cargo, go, npm, XDG) are redirected under temp so builds keep
+  working. `noob doctor` reports the lock's state, the bash tool's one-time
+  notice says whichever is true, and `--yolo` lifts the lock.
+- The terminal backend and the process runner each stand behind a
+  platform-neutral contract with a unix arm, and the terminal carries its
+  Windows console arm.
+- noob pins the websearch tool's dotenv at the config directory
+  (`WEBSEARCH_ENV_FILE`), so a project `.env` never feeds a process that
+  opens sockets, with or without a container around it.
+- Web search is the `websearch-skill` package: the CLI from
+  `uv tool install websearch-skill`, the skill from `hec-ovi/websearch-skill`
+  through the skill installer.
+
 ## 0.9.0 - 2026-07-31
 
 NO0B again, from a second round of notes taken while using the 0.8.0 window.

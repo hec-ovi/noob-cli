@@ -4,15 +4,14 @@ Written for someone picking this up cold. Everything here was checked against
 the tree it describes; where a claim rests on a specific line, the line is
 named, and the lines were re-read at 0.8.0.
 
-Two things remain on the roadmap: native binaries for the three desktop
-platforms, and letting the agent run containers. The tree itself is
+Two things remain on the roadmap: native binaries for macOS and Windows,
+and letting the agent run containers. The tree itself is
 contract-carrying boxes: every box is a folder with a CONTRACT.md, outsiders
 read the contract and never the code, and `docs/INDEX.md` maps them.
 
 The GPU front end is built. It shipped as NO0B at 0.7.0 and is task 2 below,
-kept for the design record. It did not wait for native binaries after all: it
-runs `noob serve` as a subprocess, so the Docker launcher was enough to build
-against on Linux. What native binaries still buy it is macOS and Windows.
+kept for the design record. It runs `noob serve` as a subprocess, so the two
+halves share no code; what native binaries still buy it is macOS and Windows.
 
 ## Where the project actually is
 
@@ -20,83 +19,49 @@ noob is a terminal coding agent in Rust that talks to any OpenAI-compatible
 endpoint. It is developed against a local llama.cpp server (`http://localhost:8080/v1`,
 model alias `llm`). `README.md` covers what it does; `ARCHITECTURE.md` covers how.
 
-What ships today is one Linux static binary living inside a Docker image, plus a
-shell launcher on the host. `install.sh` builds the `noob:local` image and copies
-`scripts/noob` to `~/.local/bin/noob`. That launcher is a bash script: it runs
-`docker run` with the working directory bind-mounted at `/work` and the config
-directory at `/config`. `docker/Dockerfile` cross-builds
-`x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl` depending on
-`TARGETARCH`. So "installing noob" today means "installing Docker and a script
-that calls it".
+What ships today is a native Linux package: a deb and a tarball per
+architecture on GitHub Releases, one static musl binary inside
+(`x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`), built and
+published by the tag-triggered release workflow. Every command the model
+types is folder-locked with Landlock (the exec box's `Lockdown`).
+Development runs in containers through `./dev.sh`; users never touch them.
 
-## Task 1: native binaries for macOS, Windows, and Linux
+## Task 1: native binaries for macOS and Windows
 
-The goal is a binary a person downloads and runs, on all three, with no Docker.
+The goal is a binary a person downloads and runs, with the same folder lock
+the Linux package carries.
 
-### What has to change, in the order the compiler will force
+### Where the port stands
 
-**The tree has almost no platform gating.** The only `#[cfg(unix)]` in the whole
-workspace is in `crates/noob/src/config/mod.rs` (four sites, at lines 11,
-171, 487 and 518). Everything else assumes Unix unconditionally. So the work is not
-"fix a few warnings", it is "decide, per subsystem, what the Windows path is".
+The terminal backend (`crates/noob/src/term`) and the process runner
+(`crates/noob/src/exec`) are boxes behind platform-neutral contracts. Their
+unix arms build for macOS, and `./dev.sh check-macos` type-checks both
+workspaces for `aarch64-apple-darwin`. The terminal carries its Windows
+console arm; the runner does not yet.
 
-**Two calls are Linux-only, not merely Unix-only.** These will fail on macOS as
-well as Windows, so they are the first thing to look at:
+### What remains, in order
 
-- `crates/noob/src/tools/bash.rs:331` uses `prctl(PR_SET_CHILD_SUBREAPER)` so
-  orphaned grandchildren of a shell command reparent here and can be reaped.
-- `crates/noob/src/subagent/mod.rs:391` uses `prctl(PR_SET_PDEATHSIG, SIGTERM)`
-  so a detached sub-agent dies with its parent instead of outliving it.
-
-Neither exists on macOS. The usual macOS substitute is a process group per job
-plus `killpg`, with `kqueue`/`NOTE_EXIT` if you need the death notification.
-Windows has a genuinely better primitive for both: a Job Object with
-`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, which kills the whole tree when the handle
-closes. Treat "kill the whole process tree, reliably, when we go away" as one
-capability with three implementations, not as three unrelated fixes.
-
-**The terminal layer is raw termios.** `crates/noob/src/ui/prompt.rs` holds 24
-`libc` calls: `tcgetattr`/`tcsetattr` for raw mode (lines 994, 1007 and 1092),
-`read` on `STDIN_FILENO`, and `ioctl(TIOCGWINSZ)` for the terminal size (lines
-542 and 557). Windows needs the console API or a crate over it. Decide early
-whether to introduce a dependency here, because `dev.sh size-check` enforces a
-45-crate runtime graph and an 8 MiB binary, and a terminal crate is not free.
-
-**Signals.** `crates/noob/src/main.rs` installs `sigaction` handlers for SIGINT
-(line 1665, and SIGWINCH at 1686) and blocks signals with `pthread_sigmask` (line 1690);
-`crates/noob/src/ui/dock.rs:379` unblocks in the dock thread; SIGWINCH drives
-resize. Windows has no signals in this sense. Ctrl-C is a console control
-handler, and there is no SIGWINCH, so resize has to come from console events.
-
-**The sandbox story changes meaning.** `crates/noob/src/tools/guard.rs:48`
-defines two modes: `Container`, where tools run unrestricted because the
-container is the boundary, and `Workspace`, where write and edit refuse paths
-outside the workspace. A native binary has no container, so `Workspace` becomes
-the only real boundary and it needs to hold up. Read that code before assuming
-it does; it was written when a container was always there behind it. The chosen
-direction (2026-07-31): shell commands get folder-scoped too, best effort, with
-the OS mechanism each platform has (Landlock on Linux, Seatbelt on macOS, the
-closest available on Windows).
-
-**The test suite assumes a pty.** `crates/noob/tests/e2e_ui.rs`,
-`e2e_p3.rs`, `e2e_p5.rs`, and `vt.rs` drive the real binary through a pseudo
-terminal and assert on rendered screens. That is the most valuable part of the
-suite and the least portable. Plan for how these run on Windows before porting,
-not after.
-
-### Suggested order
-
-1. macOS first. It is Unix, so only the two `prctl` calls and any Linux-only
-   file behaviour block it. This gets you a second platform cheaply and forces
-   the process-supervision abstraction into existence.
-2. Introduce that abstraction properly: one internal capability for spawning a
-   supervised child and killing its tree, with per-platform implementations
-   behind it. Do this before Windows, because on Windows it is the whole job.
-3. Windows last: terminal, signals, process tree, path handling.
-4. Only then work out distribution: a release workflow under `.github/workflows`
-   builds all three platforms on tag and publishes to GitHub Releases; the
-   online install command fetches from there (approved 2026-07-31). macOS ships
-   unsigned for now, with the one-time approval step documented.
+1. macOS: a machine to run the suite on; the folder lock's Seatbelt arm
+   behind the exec contract's `Lockdown`; packaging (macOS wants layered
+   icon artwork it masks into a squircle itself, and ships unsigned for
+   now with the one-time approval step documented); a mac leg in the
+   release workflow.
+2. Windows: the runner's arm. A Job Object with
+   `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` kills the whole tree when the
+   handle closes, which covers the group-kill half of the contract in one
+   primitive. Then the signal story: `crates/noob/src/main.rs` installs
+   `sigaction` handlers for SIGINT and SIGWINCH and blocks signals with
+   `pthread_sigmask`, `crates/noob/src/ui/dock.rs` unblocks in the dock
+   thread; on Windows Ctrl-C is a console control handler and resize is a
+   console event, both already surfaced by the term arm. Path handling,
+   and the closest folder-scoping mechanism, close it out.
+3. The pty suite: `crates/noob/tests/e2e_ui.rs`, `e2e_p3.rs`, `e2e_p5.rs`,
+   and `vt.rs` drive the real binary through a pseudo terminal and assert
+   on rendered screens. That is the most valuable part of the suite and
+   the least portable. Plan for how these run on Windows before porting,
+   not after.
+4. Web search inside the binary, in Rust, so no platform asks the user's
+   machine for Python or uv.
 
 ## Task 2: the GPU front end. Built, at 0.7.0
 
