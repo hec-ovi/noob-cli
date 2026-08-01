@@ -92,6 +92,50 @@ impl Scrolls {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// The file explorer's list, as plain arithmetic over its first visible row.
+// Every file row is exactly one row (the explorer clips a long name rather
+// than wrapping it, so a click can never resolve to a different file than
+// the one under the pointer), which is what makes these functions total.
+// ---------------------------------------------------------------------------
+
+fn file_heights(count: usize) -> Vec<usize> {
+    text_geometry::heights((0..count).map(|_| 0), 1)
+}
+
+/// Where the explorer's scrollbar sits, or nothing when every file fits.
+pub fn file_thumb(first: usize, count: usize, rows: usize) -> Option<(f32, f32)> {
+    let heights = file_heights(count);
+    let back = text_geometry::scrollback_for(&heights, rows, first);
+    text_geometry::thumb(&heights, rows, back)
+}
+
+/// The list moved by `by` rows, clamped so the last file stays on screen: a
+/// list scrolled into empty space says nothing about what is in it.
+pub fn scroll_files(first: usize, by: usize, down: bool, count: usize, rows: usize) -> usize {
+    let most = text_geometry::max_scrollback(&file_heights(count), rows);
+    match down {
+        true => (first + by).min(most),
+        false => first.saturating_sub(by),
+    }
+}
+
+/// The least scroll that brings the open file's row on screen. The agent
+/// moves this selection by touching a file, not the pointer, so a list
+/// scrolled elsewhere has to come back to it.
+pub fn reveal_file(first: usize, open: usize, count: usize, rows: usize) -> usize {
+    if rows == 0 || count == 0 {
+        return first;
+    }
+    let most = text_geometry::max_scrollback(&file_heights(count), rows);
+    let mut next = first.min(open);
+    if open + 1 > next + rows {
+        next = open + 1 - rows;
+    }
+    next.min(most)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +215,36 @@ mod tests {
         assert_eq!(window.count, 5);
         let (top, size) = scrolls.thumb(View::Plan, &heights, 5).expect("a thumb");
         assert!((top + size - 1.0).abs() < 0.001, "at the foot: {top} + {size}");
+    }
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::*;
+
+    #[test]
+    fn the_file_list_scrolls_and_stops_at_both_ends() {
+        let mut first = 0usize;
+        first = scroll_files(first, 3, false, 20, 8);
+        assert_eq!(first, 0, "already at the top");
+        first = scroll_files(first, 5, true, 20, 8);
+        assert_eq!(first, 5);
+        // Twenty files in an eight row list leaves twelve rows to scroll.
+        first = scroll_files(first, 99, true, 20, 8);
+        assert_eq!(first, 12);
+        assert_eq!(scroll_files(first, 1, true, 20, 8), 12, "already at the bottom");
+        assert_eq!(scroll_files(first, 99, false, 20, 8), 0);
+        // A list that fits has nowhere to go and no thumb to say otherwise.
+        assert!(file_thumb(0, 4, 8).is_none());
+        assert!(file_thumb(12, 20, 8).is_some(), "twenty files in eight rows");
+    }
+
+    #[test]
+    fn the_list_comes_back_to_the_file_the_agent_touched() {
+        assert_eq!(reveal_file(0, 15, 20, 5), 11, "scrolled by the least it takes");
+        // Already showing, so it is left where the reader put it.
+        assert_eq!(reveal_file(11, 13, 20, 5), 11);
+        // And upwards, when the touched file is above the window.
+        assert_eq!(reveal_file(11, 2, 20, 5), 2);
     }
 }

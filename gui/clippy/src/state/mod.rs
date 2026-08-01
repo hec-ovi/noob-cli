@@ -1031,15 +1031,6 @@ pub struct State {
     pub agents: Vec<AgentRow>,
     pub files: Vec<FileView>,
     pub open_file: usize,
-    /// Which row the file explorer starts on, counted from the top of the list.
-    /// Top-anchored, unlike a pane's scrollback: a list is read from its first
-    /// entry down, and new files arrive at the end without moving the rest.
-    pub file_scroll: usize,
-    /// Where every pane that is a list rather than a transcript is scrolled to:
-    /// PLAN, AGENTS and the three monitors. One place for all five, so a pane
-    /// gains a scroll by being added to [`crate::view::scroll_extent`] rather
-    /// than by growing a field of its own here.
-    pub scrolls: crate::scroll::Scrolls,
 
     pub usage: Option<Usage>,
     pub prefilled: u64,
@@ -1071,8 +1062,6 @@ pub struct State {
     /// The agent's own reading of how full it is. None until it says.
     pub context: Option<ContextFill>,
 
-    /// A drag over one of the text panes, if there is one.
-    pub selection: Option<crate::select::Selection>,
 
     pub turn: u32,
     pub phase: Phase,
@@ -1124,8 +1113,6 @@ impl State {
             agents: Vec::new(),
             files: Vec::new(),
             open_file: 0,
-            file_scroll: 0,
-            scrolls: crate::scroll::Scrolls::default(),
             usage: None,
             prefilled: 0,
             generated: 0,
@@ -1138,7 +1125,6 @@ impl State {
             failed_calls: 0,
             rates: Rates::default(),
             context: None,
-            selection: None,
             turn: 0,
             phase: Phase::Starting,
             status: String::from("starting the agent"),
@@ -1688,58 +1674,9 @@ impl State {
             return false;
         }
         self.open_file = index;
-        if self.selection.map(|s| s.at)
-            == Some(crate::select::Where::Pane(crate::dock::View::Files))
-        {
-            self.selection = None;
-        }
         true
     }
 
-    /// Where the explorer's scrollbar sits, or nothing when every file fits.
-    pub fn files_thumb(&self, rows: usize) -> Option<(f32, f32)> {
-        let heights = crate::view::file_heights(self.files.len());
-        let back = text_geometry::scrollback_for(&heights, rows, self.file_scroll);
-        text_geometry::thumb(&heights, rows, back)
-    }
-
-    /// Move the explorer list by `by` rows, down the list when `down`.
-    ///
-    /// Clamped so the last file stays on screen: a list scrolled into empty
-    /// space says nothing about what is in it. Returns whether it moved, so a
-    /// caller only redraws when it did.
-    pub fn scroll_files(&mut self, by: usize, down: bool, rows: usize) -> bool {
-        let most = text_geometry::max_scrollback(&crate::view::file_heights(self.files.len()), rows);
-        let next = match down {
-            true => (self.file_scroll + by).min(most),
-            false => self.file_scroll.saturating_sub(by),
-        };
-        let moved = next != self.file_scroll;
-        self.file_scroll = next;
-        moved
-    }
-
-    /// Bring the row of the open file on screen.
-    ///
-    /// The agent moves this selection by touching a file, not the pointer, so a
-    /// session that touches fifty files would otherwise leave the marked row
-    /// scrolled off with nothing on screen saying which file the diff belongs
-    /// to. Scrolls by the least it takes, so a list already showing the row is
-    /// left where the reader put it.
-    pub fn reveal_open_file(&mut self, rows: usize) -> bool {
-        if rows == 0 || self.files.is_empty() {
-            return false;
-        }
-        let most = text_geometry::max_scrollback(&crate::view::file_heights(self.files.len()), rows);
-        let mut next = self.file_scroll.min(self.open_file);
-        if self.open_file + 1 > next + rows {
-            next = self.open_file + 1 - rows;
-        }
-        let next = next.min(most);
-        let moved = next != self.file_scroll;
-        self.file_scroll = next;
-        moved
-    }
 
     /// How much of the context window this session is holding, 0.0 to 1.0.
     ///
@@ -2883,92 +2820,6 @@ mod tests {
             state.open_file < state.files.len(),
             "the selection stays valid"
         );
-    }
-
-    fn with_files(count: usize) -> State {
-        let mut state = State::new();
-        for n in 0..count {
-            state.apply(Event::FileOpen {
-                path: format!("src/f{n}.rs"),
-                lines: 1,
-                call_id: None,
-            });
-        }
-        state
-    }
-
-    /// Showing another file drops a selection made in the one before it. The
-    /// selection holds line numbers and the view it was made in, so it would
-    /// otherwise band the same line numbers of a different file.
-    #[test]
-    fn showing_another_file_drops_the_selection_from_the_last_one() {
-        let mut state = with_files(3);
-        state.selection = Some(crate::select::Selection::new(
-            crate::select::Where::Pane(crate::dock::View::Files),
-            crate::select::Spot::new(1, 0),
-        ));
-        assert!(state.show_file(0), "file 0 was not the one showing");
-        assert_eq!(state.open_file, 0);
-        assert!(state.selection.is_none(), "the old file's selection survived");
-
-        // A selection somewhere else is none of this pane's business.
-        state.selection = Some(crate::select::Selection::new(
-            crate::select::Where::Pane(crate::dock::View::Output),
-            crate::select::Spot::new(1, 0),
-        ));
-        assert!(state.show_file(2));
-        assert!(state.selection.is_some(), "the transcript's selection was dropped");
-        // Asking for the file already showing, or one that does not exist,
-        // changes nothing at all.
-        assert!(!state.show_file(2));
-        assert!(!state.show_file(99));
-        assert_eq!(state.open_file, 2);
-    }
-
-    /// The list scrolls in both directions and stops at both ends. Scrolling
-    /// past the last file would show empty rows, which says nothing about what
-    /// the agent has touched.
-    #[test]
-    fn the_file_list_scrolls_and_stops_at_both_ends() {
-        let mut state = with_files(20);
-        assert!(!state.scroll_files(3, false, 8), "already at the top");
-        assert_eq!(state.file_scroll, 0);
-        assert!(state.scroll_files(5, true, 8));
-        assert_eq!(state.file_scroll, 5);
-        // Twenty files in an eight row list leaves twelve rows to scroll.
-        assert!(state.scroll_files(99, true, 8));
-        assert_eq!(state.file_scroll, 12);
-        assert!(!state.scroll_files(1, true, 8), "already at the bottom");
-        assert!(state.scroll_files(99, false, 8));
-        assert_eq!(state.file_scroll, 0);
-        // A list that fits has nowhere to go and no thumb to say otherwise.
-        let short = with_files(4);
-        assert!(short.files_thumb(8).is_none());
-        assert!(state.files_thumb(8).is_some(), "twenty files in eight rows");
-    }
-
-    /// The agent moves the selection by touching a file, so a list scrolled
-    /// elsewhere has to come back to it: otherwise the marked row is off screen
-    /// and nothing says which file the diff belongs to.
-    #[test]
-    fn the_list_comes_back_to_the_file_the_agent_touched() {
-        let mut state = with_files(20);
-        state.file_scroll = 0;
-        state.open_file = 15;
-        assert!(state.reveal_open_file(5), "row 15 is not in rows 0 to 4");
-        assert_eq!(state.file_scroll, 11, "scrolled by the least it takes");
-        // Already showing, so it is left where the reader put it.
-        state.open_file = 13;
-        assert!(!state.reveal_open_file(5));
-        assert_eq!(state.file_scroll, 11);
-        // And upwards, when the touched file is above the window.
-        state.open_file = 2;
-        assert!(state.reveal_open_file(5));
-        assert_eq!(state.file_scroll, 2);
-        // A list with nothing in it, and a pane with no room, are both no-ops
-        // rather than a position nothing can be drawn at.
-        assert!(!State::new().reveal_open_file(5));
-        assert!(!state.reveal_open_file(0));
     }
 
     /// A failure says what broke. This is the same failure that used to render

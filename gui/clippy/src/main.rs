@@ -881,6 +881,16 @@ struct App {
 
     config: Config,
     state: State,
+    /// Where each list pane is scrolled to. Shell-owned: scrolling is a
+    /// window question, and the reducer stays a function of the stream.
+    scrolls: scroll::Scrolls,
+    /// A drag over one of the text panes, if there is one.
+    selection: Option<select::Selection>,
+    /// The explorer's first visible row, top-anchored.
+    file_scroll: usize,
+    /// The open file at the last look, so a change can drop that pane's
+    /// selection and reveal the row wherever the change came from.
+    last_open_file: usize,
     monitor: Monitor,
     next_sample: Option<Instant>,
     /// When the orb wants its next frame, and `None` whenever it is still.
@@ -1051,6 +1061,10 @@ impl App {
             proxy,
             config,
             state,
+            scrolls: scroll::Scrolls::default(),
+            selection: None,
+            file_scroll: 0,
+            last_open_file: 0,
             monitor: Monitor::new(),
             next_sample: None,
             next_orb: None,
@@ -1110,7 +1124,7 @@ impl App {
                 .iter()
                 .map(|file| view::short_name(&file.path))
                 .collect(),
-            file_first: self.state.file_scroll,
+            file_first: self.file_scroll,
             column: self.column,
             menu_column: self.menu_column,
             pane_size: self.config.pane_font_size,
@@ -2447,12 +2461,32 @@ impl App {
     /// Here rather than in `State`, because how many rows the list can show is a
     /// question about the window, and the layout is the only thing that knows.
     fn follow_open_file(&mut self) {
+        if self.last_open_file != self.state.open_file {
+            self.last_open_file = self.state.open_file;
+            // Showing another file drops a selection made in the one before
+            // it: the selection holds line numbers and the view it was made
+            // in, so it would otherwise band the same line numbers of a
+            // different file. A selection somewhere else is untouched.
+            if self.selection.map(|s| s.at) == Some(select::Where::Pane(dock::View::Files)) {
+                self.selection = None;
+            }
+            self.dirty = true;
+        }
         let layout = self.layout();
         if layout.file_list.h < 1.0 {
             return;
         }
         let rows = layout.rows(layout.file_list, self.config.pane_font_size);
-        self.dirty |= self.state.reveal_open_file(rows);
+        let next = scroll::reveal_file(
+            self.file_scroll,
+            self.state.open_file,
+            self.state.files.len(),
+            rows,
+        );
+        if next != self.file_scroll {
+            self.file_scroll = next;
+            self.dirty = true;
+        }
     }
 
     fn submit(&mut self) {
@@ -2712,6 +2746,7 @@ impl App {
             Hit::ColumnDivider(_) | Hit::RowDivider(_) => self.sizing = Some(hit),
             Hit::File(index, _) => {
                 self.state.show_file(index);
+                self.follow_open_file();
                 self.dirty = true;
             }
             // Both, in that order. A press in ACTIVITY on a row that belongs to
@@ -2829,7 +2864,7 @@ impl App {
             at,
             &self.dock,
             self.prompt.selection().is_some(),
-            self.state.selection,
+            self.selection,
             self.picker.as_ref(),
         );
         self.dirty |= had || self.menu.is_some();
@@ -2925,11 +2960,10 @@ impl App {
     /// anywhere saying so.
     fn forget_selection_in(&mut self, view: View) {
         if self
-            .state
             .selection
             .is_some_and(|selection| selection.at == select::Where::Pane(view))
         {
-            self.state.selection = None;
+            self.selection = None;
         }
     }
 
@@ -2941,11 +2975,10 @@ impl App {
     /// numbers, and a band left behind would be over words nobody highlighted.
     fn forget_doc_selection(&mut self) {
         if self
-            .state
             .selection
             .is_some_and(|selection| selection.at == select::Where::SettingsDoc)
         {
-            self.state.selection = None;
+            self.selection = None;
             self.dirty = true;
         }
     }
@@ -2990,15 +3023,15 @@ impl App {
     /// Press inside a pane: put the anchor where the pointer is, or clear the
     /// selection when the press is somewhere with no text to select.
     fn begin_selection(&mut self, space: Space) {
-        let previous = self.state.selection.take();
+        let previous = self.selection.take();
         let Some(view) = self.dock.slot(space).active() else {
             self.dirty = previous.is_some();
             return;
         };
         let layout = self.layout();
         let spot = self.spot_at(&layout, space, view);
-        self.state.selection = spot.map(|spot| select::Selection::new(select::Where::Pane(view), spot));
-        self.selecting = self.state.selection.is_some();
+        self.selection = spot.map(|spot| select::Selection::new(select::Where::Pane(view), spot));
+        self.selecting = self.selection.is_some();
         self.dirty = true;
     }
 
@@ -3007,8 +3040,8 @@ impl App {
     fn begin_doc_selection(&mut self) {
         let layout = self.layout();
         let spot = self.doc_spot_at(&layout);
-        self.state.selection = spot.map(|spot| select::Selection::new(select::Where::SettingsDoc, spot));
-        self.selecting = self.state.selection.is_some();
+        self.selection = spot.map(|spot| select::Selection::new(select::Where::SettingsDoc, spot));
+        self.selecting = self.selection.is_some();
         self.dirty = true;
     }
 
@@ -3056,7 +3089,7 @@ impl App {
 
     /// Extend the selection to wherever the pointer is now.
     fn extend_selection(&mut self) {
-        let Some(mut selection) = self.state.selection else {
+        let Some(mut selection) = self.selection else {
             return;
         };
         let layout = self.layout();
@@ -3075,7 +3108,7 @@ impl App {
             if !selection.is_empty() {
                 self.state.open_call = None;
             }
-            self.state.selection = Some(selection);
+            self.selection = Some(selection);
             self.dirty = true;
         }
     }
@@ -3090,7 +3123,7 @@ impl App {
     /// was anything to copy, so the caller can fall back to what the key
     /// otherwise does.
     fn copy_selection(&mut self) -> bool {
-        let Some(selection) = self.state.selection else {
+        let Some(selection) = self.selection else {
             return false;
         };
         let text = match selection.at {
@@ -3427,7 +3460,7 @@ impl App {
             // a key meant for the agent is the worse mistake of the two, and
             // losing a turn to one meant for a selection is worse still.
             Key::Named(NamedKey::Escape) => {
-                if self.state.selection.take().is_some() {
+                if self.selection.take().is_some() {
                     self.dirty = true;
                 } else if self.prompt.is_empty() {
                     self.cancel();
@@ -3590,7 +3623,17 @@ impl App {
         {
             let rows = layout.rows(layout.file_list, self.config.pane_font_size);
             let by = ((rows as f32 * pages.abs()).round() as usize).max(1);
-            self.dirty |= self.state.scroll_files(by, pages < 0.0, rows);
+            {
+                let next = scroll::scroll_files(
+                    self.file_scroll,
+                    by,
+                    pages < 0.0,
+                    self.state.files.len(),
+                    rows,
+                );
+                self.dirty |= next != self.file_scroll;
+                self.file_scroll = next;
+            }
             return;
         }
         let Some((view, panel)) = self.under_pointer(&layout) else {
@@ -3634,10 +3677,7 @@ impl App {
             return;
         };
         let by = ((fit.saturating_sub(1).max(1) as f32 * pages.abs()).round() as usize).max(1);
-        self.dirty |= self
-            .state
-            .scrolls
-            .scroll(view, by, pages < 0.0, &heights, fit);
+        self.dirty |= self.scrolls.scroll(view, by, pages < 0.0, &heights, fit);
     }
 
     /// Everything a frame is drawn from, for a layout that has already been
@@ -3662,7 +3702,9 @@ impl App {
             drag: self.drag,
             hot: self.hot,
             trouble: self.trouble.as_deref(),
-            selection: self.state.selection,
+            selection: self.selection,
+            scrolls: &self.scrolls,
+            file_scroll: self.file_scroll,
             // The same menu the layout was computed from, or the rows would be
             // drawn somewhere other than where they are hit tested.
             menu: self.menu.as_ref(),
@@ -3720,7 +3762,7 @@ impl App {
             }
         }
         for (view, heights, rows) in want {
-            self.dirty |= self.state.scrolls.settle(view, &heights, rows);
+            self.dirty |= self.scrolls.settle(view, &heights, rows);
         }
     }
 
@@ -6426,6 +6468,8 @@ mod tests {
         let prompt = Prompt::default();
         let frame = view::Frame {
             state: &state,
+            scrolls: &scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor: &monitor,
             dock: &dock,
             skin: &skin,

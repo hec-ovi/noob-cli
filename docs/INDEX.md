@@ -20,11 +20,11 @@ package, the binary and everything a user sees are `no0b`.
 | What a right click offers and what a row does | `gui/clippy/src/menu/CONTRACT.md`, routed in `gui/clippy/src/main.rs` |
 | Choosing the folder the agent works in, and the folders NO0B remembers | `gui/clippy/src/picker.rs`, drawn by `view::folder_picker`, routed in `gui/clippy/src/main.rs` |
 | Which saved sessions the first screen offers, and which folder each one belongs to | `gui/clippy/src/sessions/CONTRACT.md`, listed by `picker::Picker::show_sessions`, routed in `gui/clippy/src/main.rs` |
-| The conversation and metrics model: what an event does to state | `gui/clippy/src/state.rs` |
+| The conversation and metrics model: what an event does to state | `gui/clippy/src/state/CONTRACT.md` |
 | Where a pane that is a list is scrolled to, and what clamps it | `gui/clippy/src/scroll/CONTRACT.md`, content measured by `view::scroll_extent` |
 | Which readings the monitors show | `gui/clippy/src/monitor/CONTRACT.md` |
 | Which skills and MCP servers the panel lists, and what turning one off or removing it does on disk | `gui/clippy/src/agent/CONTRACT.md`, listed by `gui/clippy/src/settings.rs` |
-| What a tool call is remembered as, and what the popup over an activity row shows | `gui/clippy/src/state.rs`, drawn by `view::call_popup` |
+| What a tool call is remembered as, and what the popup over an activity row shows | `gui/clippy/src/state/CONTRACT.md`, drawn by `view::call_popup` |
 | Talking to the agent process | `gui/clippy/src/link/CONTRACT.md` |
 | Drawing primitives: rects, corners, text, anything the shader does | `gui/noob-draw/src/lib.rs` |
 | The GPU device, surface, transparency probing | `gui/noob-gpu/src/lib.rs` |
@@ -127,6 +127,8 @@ Boxes so far:
 - [`gui/clippy/src/style`](../gui/clippy/src/style/CONTRACT.md) - the
   palette from config, syntax spans, markdown runs; config in, styled runs
   out.
+- [`gui/clippy/src/state`](../gui/clippy/src/state/CONTRACT.md) - the pure
+  reducer: events in, the conversation and metrics model out, bounded.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,

@@ -3991,6 +3991,10 @@ pub struct Drag {
 
 pub struct Frame<'a> {
     pub state: &'a State,
+    /// Where each list pane is scrolled to, owned by the shell.
+    pub scrolls: &'a crate::scroll::Scrolls,
+    /// The explorer's first visible row, owned by the shell.
+    pub file_scroll: usize,
     pub monitor: &'a Monitor,
     pub dock: &'a Dock,
     pub skin: &'a Skin,
@@ -5089,7 +5093,7 @@ fn list_pane(scene: &mut Scene, frame: &Frame, panel: Panel, view: View, rows: V
     let fit = frame.layout.rows(panel, size);
     let cols = cols_of(panel, frame.pane_column);
     let heights: Vec<usize> = rows.iter().map(|row| row.rows(cols)).collect();
-    let scrolls = &frame.state.scrolls;
+    let scrolls = frame.scrolls;
     let window = scrolls.window(view, &heights, fit);
     let mut runs = Vec::new();
     for row in rows.into_iter().skip(window.first).take(window.count) {
@@ -5211,7 +5215,7 @@ fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, view: View, gauges: Ve
 
     let grid = gauge_grid(&gauges, content, frame.pane_size, frame.pane_column);
     let heights = flat_heights(gauges.len());
-    let scrolls = &frame.state.scrolls;
+    let scrolls = frame.scrolls;
     let window = scrolls.window(view, &heights, grid.rows);
     let (label_w, gap, dot) = (grid.label_w, grid.gap, grid.dot);
     let (block_h, pitch) = (grid.block_h, grid.pitch);
@@ -5663,7 +5667,12 @@ fn explorer(scene: &mut Scene, frame: &Frame, list: Panel) {
     // The list is a scroll window like any other pane, so it says how much of
     // itself is on screen the same way.
     let rows = layout.rows(list, frame.pane_size);
-    scrollbar(scene, skin, list, state.files_thumb(rows));
+    scrollbar(
+        scene,
+        skin,
+        list,
+        crate::scroll::file_thumb(frame.file_scroll, state.files.len(), rows),
+    );
 }
 
 /// The folder picker: the whole window until a folder is chosen.
@@ -7740,6 +7749,8 @@ mod tests {
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor: &Monitor::new(),
             dock: &dock,
             skin: &skin,
@@ -7855,6 +7866,8 @@ mod tests {
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state: &state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor: &Monitor::new(),
             dock: &dock,
             skin: &skin,
@@ -8055,11 +8068,36 @@ mod tests {
         monitor: &Monitor,
         drag: Option<Drag>,
     ) -> Rendered {
+        render_scrolled(
+            state,
+            &crate::scroll::Scrolls::default(),
+            w,
+            h,
+            dock,
+            files,
+            monitor,
+            drag,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_scrolled(
+        state: &State,
+        scrolls: &crate::scroll::Scrolls,
+        w: f32,
+        h: f32,
+        dock: &Dock,
+        files: &[&str],
+        monitor: &Monitor,
+        drag: Option<Drag>,
+    ) -> Rendered {
         let shape = shape(dock, files);
         let layout = Layout::compute(w, h, &shape);
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state,
+            scrolls,
+            file_scroll: 0,
             monitor,
             dock,
             skin: &skin,
@@ -8784,9 +8822,12 @@ mod tests {
 
         // And the list carries a thumb, because it does not all fit.
         let rows = out.layout.rows(out.layout.file_list, 13.0);
-        assert!(state.files_thumb(rows).is_some(), "no thumb on a long list");
         assert!(
-            State::new().files_thumb(rows).is_none(),
+            crate::scroll::file_thumb(0, state.files.len(), rows).is_some(),
+            "no thumb on a long list"
+        );
+        assert!(
+            crate::scroll::file_thumb(0, 0, rows).is_none(),
             "a thumb with nothing to scroll"
         );
     }
@@ -9013,7 +9054,7 @@ mod tests {
     fn the_band_over_a_wrapped_file_line_covers_the_glyphs() {
         let long = "let total = numbers.iter().filter(|n| **n > 0).map(|n| n * 2).sum::<i64>(); \
                     // and a comment on the end of it with plenty of blanks to break at";
-        let (mut state, names) = a_wrapped_file(&[(7, long)]);
+        let (state, names) = a_wrapped_file(&[(7, long)]);
         let files = names.iter().map(String::as_str).collect::<Vec<_>>();
         let line = state.files[0].pane.last() - 1;
         let chars = long.chars().count();
@@ -9023,7 +9064,6 @@ mod tests {
             selection.extend(crate::select::Spot::new(line, chars));
             selection
         };
-        state.selection = Some(selection);
 
         let dock = Dock::new();
         let shape = shape(&dock, &files);
@@ -9031,6 +9071,8 @@ mod tests {
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state: &state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor: &Monitor::new(),
             dock: &dock,
             skin: &skin,
@@ -10419,7 +10461,6 @@ mod tests {
         let mut selection =
             crate::select::Selection::new(crate::select::Where::Pane(View::Output), crate::select::Spot::new(last - 2, 6));
         selection.extend(crate::select::Spot::new(last, 5));
-        state.selection = Some(selection);
 
         let dock = Dock::new();
         let shape = shape(&dock, &["a.rs"]);
@@ -10427,6 +10468,8 @@ mod tests {
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state: &state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor: &Monitor::new(),
             dock: &dock,
             skin: &skin,
@@ -10541,6 +10584,8 @@ mod tests {
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state: &state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor: &Monitor::new(),
             dock: &dock,
             skin: &skin,
@@ -10741,6 +10786,8 @@ mod tests {
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state: &state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor: &Monitor::new(),
             dock: &dock,
             skin: &skin,
@@ -10841,7 +10888,6 @@ mod tests {
         let mut selection =
             crate::select::Selection::new(crate::select::Where::Pane(View::Activity), crate::select::Spot::new(last, 0));
         selection.extend(crate::select::Spot::new(last, 9));
-        state.selection = Some(selection);
 
         // Fold every space away, so nothing is showing at all.
         let mut dock = Dock::new();
@@ -10853,6 +10899,8 @@ mod tests {
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state: &state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor: &Monitor::new(),
             dock: &dock,
             skin: &skin,
@@ -11113,6 +11161,8 @@ mod tests {
             let skin = Skin::from(&Config::default());
             let scene = build(&Frame {
                 state: &state,
+                scrolls: &crate::scroll::Scrolls::default(),
+                file_scroll: 0,
                 monitor: &monitor,
                 dock: &dock,
                 skin: &skin,
@@ -11214,6 +11264,8 @@ mod tests {
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state: &state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor: &monitor,
             dock: &dock,
             skin: &skin,
@@ -11697,6 +11749,8 @@ mod tests {
         let skin = Skin::from(&Config::default());
         let frame = Frame {
             state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor,
             dock,
             skin: &skin,
@@ -11761,7 +11815,8 @@ mod tests {
             // The monitor pane is five readings in a box that holds fewer.
             (View::Session, 900.0, 330.0, "DECODE"),
         ] {
-            let mut state = crowded_state();
+            let state = crowded_state();
+            let mut scrolls = crate::scroll::Scrolls::default();
             let monitor = sampled(&state);
             let mut dock = Dock::new();
             dock.reveal(view);
@@ -11785,14 +11840,14 @@ mod tests {
             // Scrolled to the end, the last item is on screen, and one notch
             // further moves nothing.
             assert!(
-                state.scrolls.scroll(view, 9_999, true, &heights, rows),
+                scrolls.scroll(view, 9_999, true, &heights, rows),
                 "{view:?} would not scroll"
             );
             assert!(
-                !state.scrolls.scroll(view, 1, true, &heights, rows),
+                !scrolls.scroll(view, 1, true, &heights, rows),
                 "{view:?} scrolled past its own end"
             );
-            let end = render_with(&state, w, h, &dock, &[], &monitor, None);
+            let end = render_scrolled(&state, &scrolls, w, h, &dock, &[], &monitor, None);
             let written = written_in(&end, space);
             assert!(written.contains(last), "{view:?} cannot reach {last}: {written}");
             let (track, thumb) = bar_in(&end, space).expect("still a bar");
@@ -11802,8 +11857,8 @@ mod tests {
             );
 
             // And back to the top, where it started.
-            assert!(state.scrolls.scroll(view, 9_999, false, &heights, rows));
-            assert_eq!(state.scrolls.first(view), 0, "{view:?}");
+            assert!(scrolls.scroll(view, 9_999, false, &heights, rows));
+            assert_eq!(scrolls.first(view), 0, "{view:?}");
         }
     }
 
@@ -11840,12 +11895,13 @@ mod tests {
     #[test]
     fn a_pane_that_shrank_under_a_scroll_is_not_left_blank() {
         let mut state = crowded_state();
+        let mut scrolls = crate::scroll::Scrolls::default();
         let monitor = sampled(&state);
         let mut dock = Dock::new();
         dock.reveal(View::Plan);
         let (space, heights, rows) = measured(&state, 1400.0, 900.0, &dock, &monitor, View::Plan);
-        state.scrolls.scroll(View::Plan, 9_999, true, &heights, rows);
-        let scrolled = state.scrolls.first(View::Plan);
+        scrolls.scroll(View::Plan, 9_999, true, &heights, rows);
+        let scrolled = scrolls.first(View::Plan);
         assert!(scrolled > 0, "the pane did not scroll");
 
         state.apply(noob_proto::Event::ToolStart {
@@ -11858,7 +11914,7 @@ mod tests {
                 {"content": "late 02", "status": "pending"},
             ]}),
         });
-        let out = render_with(&state, 1400.0, 900.0, &dock, &[], &monitor, None);
+        let out = render_scrolled(&state, &scrolls, 1400.0, 900.0, &dock, &[], &monitor, None);
         let written = written_in(&out, space);
         for wanted in ["late 00", "late 01", "late 02"] {
             assert!(
@@ -11869,11 +11925,11 @@ mod tests {
 
         let (_, short, rows) = measured(&state, 1400.0, 900.0, &dock, &monitor, View::Plan);
         assert!(
-            state.scrolls.settle(View::Plan, &short, rows),
+            scrolls.settle(View::Plan, &short, rows),
             "the offset was left past the end"
         );
-        assert_eq!(state.scrolls.first(View::Plan), 0);
-        let after = render_with(&state, 1400.0, 900.0, &dock, &[], &monitor, None);
+        assert_eq!(scrolls.first(View::Plan), 0);
+        let after = render_scrolled(&state, &scrolls, 1400.0, 900.0, &dock, &[], &monitor, None);
         assert!(
             bar_in(&after, space).is_none(),
             "three todos in eighteen rows still drew a bar"
@@ -11902,6 +11958,8 @@ mod tests {
         let layout = Layout::compute(1200.0, 800.0, &shape);
         let scene = build(&Frame {
             state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor: &Monitor::new(),
             dock: &dock,
             skin: &skin,
@@ -12481,6 +12539,8 @@ mod tests {
         let layout = Layout::compute(w, h, &shape);
         build(&Frame {
             state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor: &Monitor::new(),
             dock: &dock,
             skin,
@@ -13152,6 +13212,8 @@ mod tests {
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor: &Monitor::new(),
             dock,
             skin: &skin,
@@ -13931,6 +13993,8 @@ mod tests {
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor: &Monitor::new(),
             dock,
             skin: &skin,
@@ -14146,6 +14210,8 @@ mod tests {
         let state = busy_state();
         let scene = build(&Frame {
             state: &state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor: &Monitor::new(),
             dock: &dock,
             skin: &skin,
@@ -14288,6 +14354,8 @@ mod tests {
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state: &state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor: &Monitor::new(),
             dock: &dock,
             skin: &skin,
@@ -15340,6 +15408,8 @@ mod tests {
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state: &state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor: &Monitor::new(),
             dock: &dock,
             skin: &skin,
@@ -15657,6 +15727,8 @@ mod tests {
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state: &state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
             monitor: &Monitor::new(),
             dock: &dock,
             skin: &skin,
