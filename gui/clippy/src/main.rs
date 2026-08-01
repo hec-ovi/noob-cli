@@ -27,7 +27,6 @@ mod design;
 mod dock;
 mod install;
 mod link;
-mod markdown;
 mod menu;
 mod monitor;
 mod orb;
@@ -38,9 +37,10 @@ mod scroll;
 mod select;
 mod sessions;
 mod settings;
-mod skin;
 mod state;
-mod syntax;
+mod style;
+#[allow(unused_imports)]
+use style::{markdown, skin, syntax};
 mod view;
 
 use std::path::{Path, PathBuf};

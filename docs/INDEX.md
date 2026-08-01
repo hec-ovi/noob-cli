@@ -13,7 +13,7 @@ package, the binary and everything a user sees are `no0b`.
 | How a line of text becomes rows on screen: wrapping, scroll windows, selection bands, the scrollbar's extent | `gui/layers/text-geometry/CONTRACT.md` |
 | Which panel sits where, tabs, drag and drop, where the two dividers sit | `gui/clippy/src/dock/CONTRACT.md` and the `Layout` half of `gui/clippy/src/view.rs` |
 | What a frame looks like: panels, tabs, gauges, the title bar | `gui/clippy/src/view.rs` |
-| Colors, transparency, the palette | `gui/clippy/src/skin.rs`, keys in `gui/clippy/src/config/CONTRACT.md` |
+| Colors, transparency, the palette | `gui/clippy/src/style/CONTRACT.md`, keys in `gui/clippy/src/config/CONTRACT.md` |
 | Settings file format and its defaults | `gui/clippy/src/config/CONTRACT.md` |
 | What the settings panel lists, and what changing a row writes | `gui/clippy/src/settings.rs`, drawn by `view::settings_panel`, routed in `gui/clippy/src/main.rs` |
 | Mouse, keyboard, selection gestures, the window lifecycle | `gui/clippy/src/main.rs` |
@@ -28,8 +28,8 @@ package, the binary and everything a user sees are `no0b`.
 | Talking to the agent process | `gui/clippy/src/link/CONTRACT.md` |
 | Drawing primitives: rects, corners, text, anything the shader does | `gui/noob-draw/src/lib.rs` |
 | The GPU device, surface, transparency probing | `gui/noob-gpu/src/lib.rs` |
-| Markdown rendering in the transcript | `gui/clippy/src/markdown.rs` |
-| Syntax colors in the file view | `gui/clippy/src/syntax.rs` |
+| Markdown rendering in the transcript | `gui/clippy/src/style/CONTRACT.md` |
+| Syntax colors in the file view | `gui/clippy/src/style/CONTRACT.md` |
 | The thinking orb in the title strip: its maths, its two states | `gui/clippy/src/orb/CONTRACT.md`, drawn by `view::title_bar`, clocked in `gui/clippy/src/main.rs` |
 | Desktop entry, icons, packaging | `gui/clippy/src/packaging.rs`, `gui/data/`, `dev.sh gui-package` |
 
@@ -124,6 +124,9 @@ Boxes so far:
   session rows from JSONL heads, the folder index, the Folders port.
 - [`gui/clippy/src/agent`](../gui/clippy/src/agent/CONTRACT.md) - the agent's
   files as the CLI shapes them: env keys, AGENTS.md, skills, mcp.json.
+- [`gui/clippy/src/style`](../gui/clippy/src/style/CONTRACT.md) - the
+  palette from config, syntax spans, markdown runs; config in, styled runs
+  out.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,
