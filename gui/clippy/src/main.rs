@@ -2959,9 +2959,13 @@ impl App {
                 self.open_settings();
             }
             // The flyout header: its rows come out beside it and the menu
-            // stays open over them, which is the whole of what the row is for.
-            (Item::Widgets(_), _) => {
-                menu.fold(index, &self.dock);
+            // stays open over them. A press on a header the rollover already
+            // opened leaves it open, or the click would take back what the
+            // hover just did.
+            (Item::Widgets(open), _) => {
+                if !open {
+                    menu.fold(index, &self.dock);
+                }
                 self.menu = Some(menu);
             }
             (Item::CopySelection, _) => {
@@ -4009,10 +4013,13 @@ impl ApplicationHandler<Wake> for App {
                 // leaving its row, so the second press can only be made by a
                 // pointer that is still on the row which asked for it.
                 if let Some(menu) = self.menu.as_mut() {
-                    self.dirty |= menu.point_at(match under {
-                        Some(Hit::MenuRow(row)) => Some(row),
-                        _ => None,
-                    });
+                    self.dirty |= menu.hover(
+                        match under {
+                            Some(Hit::MenuRow(row)) => Some(row),
+                            _ => None,
+                        },
+                        &self.dock,
+                    );
                 }
                 // The pointer shape is the only thing telling a user that an
                 // undecorated window can be resized at all, and the only thing

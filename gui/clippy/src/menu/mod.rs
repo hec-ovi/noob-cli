@@ -559,6 +559,29 @@ impl Menu {
         true
     }
 
+    /// The pointer resting on a row opens what the row opens: the flyout
+    /// comes out on rollover, the way every desktop menu opens its submenus,
+    /// and it goes away when the pointer rests on another row of the column.
+    /// A pointer inside the flyout, or off the menu entirely, leaves it be.
+    pub fn hover(&mut self, row: Option<usize>, dock: &Dock) -> bool {
+        let mut changed = self.point_at(row);
+        let Some(at) = row else {
+            return changed;
+        };
+        match self.rows.get(at).map(|row| row.item) {
+            Some(Item::Widgets(false)) => changed |= self.fold(at, dock),
+            Some(item)
+                if item.group().is_none() && self.fly_start.is_some_and(|fly| at < fly) =>
+            {
+                if let Some(anchor) = self.fly_anchor() {
+                    changed |= self.fold(anchor, dock);
+                }
+            }
+            _ => {}
+        }
+        changed
+    }
+
     /// Which row is asking for a second press.
     pub fn arming(&self) -> Option<usize> {
         self.rows.iter().position(|row| row.item.warns())
@@ -885,6 +908,34 @@ mod tests {
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
         assert!(menu.walk(false, 8));
         assert_eq!(menu.cursor, Some(3));
+    }
+
+    /// The flyout opens on rollover, the way every desktop menu opens its
+    /// submenus: resting on the header brings it out, resting on another row
+    /// of the column puts it away, and a pointer inside the flyout or off the
+    /// menu leaves it be.
+    #[test]
+    fn resting_on_the_header_opens_the_flyout_and_resting_elsewhere_shuts_it() {
+        let dock = Dock::new();
+        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, true);
+        assert!(menu.hover(Some(3), &dock), "rollover did not open it");
+        assert_eq!(menu.rows[3].item, Item::Widgets(true));
+        let fly = menu.fly_start.expect("the flyout is out");
+
+        // Inside the flyout, and off the menu entirely: it stays out.
+        assert!(!menu.hover(Some(fly + 2), &dock));
+        assert_eq!(menu.rows[3].item, Item::Widgets(true));
+        assert!(!menu.hover(None, &dock));
+        assert_eq!(menu.rows[3].item, Item::Widgets(true));
+
+        // Back on the header: still out, not toggled shut under the pointer.
+        assert!(!menu.hover(Some(3), &dock));
+        assert_eq!(menu.rows[3].item, Item::Widgets(true));
+
+        // Resting on another row of the column puts it away.
+        assert!(menu.hover(Some(0), &dock));
+        assert_eq!(menu.rows[3].item, Item::Widgets(false));
+        assert_eq!(menu.fly_start, None);
     }
 
     /// The pointer and the keys never both say which row is next: whichever one

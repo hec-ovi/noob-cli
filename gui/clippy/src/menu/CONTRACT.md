@@ -23,7 +23,7 @@ impl Menu {
                       has_selection: bool) -> Menu;
     pub fn for_session(at: (f32, f32), index: usize, gone: bool) -> Menu;
     // rows, pick(index), fold (the flyout), fly_start/fly_anchor/main_len,
-    // width_chars/fly_width_chars, walk/scroll/point_at
+    // width_chars/fly_width_chars, walk/scroll/point_at/hover
 }
 ```
 
@@ -32,7 +32,9 @@ impl Menu {
 1. Opening the widgets flyout moves no row of the menu: its rows are
    appended after the menu's own (`fly_start` marks where they begin) and
    the view places them in a second box beside the header, top-aligned
-   with it.
+   with it. It opens on rollover of the header (`hover`), stays while the
+   pointer is inside it or off the menu, and goes away when the pointer
+   rests on another row of the column.
 2. A row that would do nothing (copy with no selection, a gone session) is
    greyed, not hidden, so the menu's shape is stable.
 3. Settings is one act that opens the settings panel; the panel's rail is
