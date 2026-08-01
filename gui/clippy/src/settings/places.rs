@@ -124,14 +124,12 @@ pub(crate) fn settings_paper_text(parts: &CardParts, line: f32) -> Panel {
 /// pressed and the second press lands on the same box.
 const SETTING_ACT_COLUMNS: usize = 13;
 
-/// The buttons in the table's footer: select all, select none, and the delete,
-/// centred as one group.
-///
-/// Centred because that is where a button that acts on the whole list belongs:
-/// pinned to one end of a footer it reads as belonging to whatever is nearest
-/// that end. Nothing at all in a footer too narrow to hold the three of them
-/// side by side, since a button drawn over another one is a press nobody can
-/// aim.
+/// The buttons in the table's footer: select all, select none, and the
+/// delete, one group at the footer's right end, where every card's own
+/// action already sits, so the panel's buttons hang on one edge instead of
+/// floating in the middle of it. Nothing at all in a footer too narrow to
+/// hold the three of them side by side, since a button drawn over another
+/// one is a press nobody can aim.
 pub(crate) fn settings_act_boxes(footer: Panel, line: f32, column: f32) -> Vec<(Act, Panel)> {
     let acts = [Act::All, Act::None, Act::Forget];
     let wide = SETTING_ACT_COLUMNS as f32 * column;
@@ -140,7 +138,7 @@ pub(crate) fn settings_act_boxes(footer: Panel, line: f32, column: f32) -> Vec<(
     if footer.w < whole || footer.h < 1.0 {
         return Vec::new();
     }
-    let x = footer.x + ((footer.w - whole) * 0.5).floor();
+    let x = footer.x + footer.w - whole;
     acts.into_iter()
         .enumerate()
         .map(|(step_at, act)| {
@@ -249,15 +247,18 @@ pub(crate) fn settings_palette_slots(body: Panel, line: f32, cells: usize, acros
 /// Takes the text after it has been clipped to what the box holds, because what
 /// the right edge is measured back from is what is really drawn.
 pub(crate) fn settings_session_ink(at: Panel, step: usize, shown: &str, column: f32) -> Panel {
+    // Off the rules on both sides: a cell whose text touches the hairline
+    // beside it reads as text stuck to a line, header and data alike.
+    let pad = (column * 0.75).floor();
     let right = matches!(
         crate::settings::SESSION_COLUMNS.get(step),
         Some((_, _, crate::settings::Align::Right))
     );
     if !right {
-        return at;
+        return Panel::new(at.x + pad, at.y, (at.w - pad).max(1.0), at.h);
     }
-    let wide = (shown.chars().count() as f32 * column).min(at.w);
-    Panel::new(at.x + at.w - wide, at.y, wide, at.h)
+    let wide = (shown.chars().count() as f32 * column).min((at.w - pad).max(1.0));
+    Panel::new(at.x + at.w - pad - wide, at.y, wide, at.h)
 }
 
 /// The lines between the columns of the saved-conversations table.

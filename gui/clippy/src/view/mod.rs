@@ -12974,18 +12974,17 @@ mod tests {
         // box for a word, against the right edge for a number. Asserting every
         // cell at its box's left edge is what left the size and the context
         // ragged, so it asserts the edge the column says it takes.
+        // Cells stand a padding off the rules on both sides
+        // (`settings_session_ink`), so the written x is asked from the same
+        // helper the painter uses rather than recomputed here.
         let written_at = |at: Panel, step: usize, text: &str| -> f32 {
-            let wide = text.chars().count() as f32 * column;
-            match crate::settings::SESSION_COLUMNS[step].2 {
-                crate::settings::Align::Left => at.x,
-                crate::settings::Align::Right => at.x + at.w - wide.min(at.w),
-            }
+            settings_session_ink(at, step, text, column).x
         };
         for (step, (name, _, _)) in crate::settings::SESSION_COLUMNS.iter().enumerate() {
             if name.is_empty() {
                 continue;
             }
-            let shown = clip(name, columns_in(names[step].w, column).saturating_sub(1));
+            let shown = clip(name, columns_in(names[step].w, column).saturating_sub(2));
             let x = written_at(names[step], step, &shown);
             let said = text_at(&out, Panel::new(x, names_at.y, 1.0, 1.0));
             assert!(said.starts_with(&shown), "column {step} is headed {said:?}");
@@ -13059,7 +13058,7 @@ mod tests {
         // The card says what it holds, in the card title role, and the count is
         // the one thing it can say that the panel's own heading does not.
         let said = text_of(&out.scene);
-        assert!(said.contains("3 CONVERSATIONS"), "{said}");
+        assert!(said.contains("3 SESSIONS"), "{said}");
         assert!(
             out.scene.texts.iter().any(|text| {
                 (text.at.y - parts.title.y).abs() < 0.01
@@ -13067,7 +13066,7 @@ mod tests {
                     && text
                         .runs
                         .iter()
-                        .any(|run| run.text.contains("3 CONVERSATIONS"))
+                        .any(|run| run.text.contains("3 SESSIONS"))
             }),
             "the card's title is not drawn in the card title role"
         );
@@ -13118,14 +13117,13 @@ mod tests {
             );
             assert!(card.contains(x, y), "{act:?} is outside its card");
         }
-        let left = acts[0].1.x;
         let right = acts[2].1.x + acts[2].1.w;
-        // Within a pixel and a half either way: the group's left edge is
-        // floored to a whole pixel, and a button on a half pixel draws a blurred
-        // border.
+        // One group hung on the footer's right end, where every card's own
+        // action already sits: centred, the group read as belonging to
+        // nothing.
         assert!(
-            ((left - parts.footer.x) - (parts.footer.x + parts.footer.w - right)).abs() <= 2.0,
-            "the buttons are not centred: {left} to {right} in {:?}",
+            (parts.footer.x + parts.footer.w - right).abs() <= 0.01,
+            "the buttons are not right-aligned: end {right} in {:?}",
             parts.footer
         );
         assert!(said.contains("select all") && said.contains("select none"), "{said}");
@@ -13275,7 +13273,7 @@ mod tests {
         // And the header counts it, which is what says how many a delete would
         // take before the delete is pressed.
         let said = text_of(&after.scene);
-        assert!(said.contains("3 CONVERSATIONS, 1 CHOSEN"), "{said}");
+        assert!(said.contains("3 SESSIONS, 1 CHOSEN"), "{said}");
         assert!(said.contains("delete 1"), "the button does not say how many: {said}");
     }
 

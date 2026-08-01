@@ -245,7 +245,7 @@ pub fn table_body_lines() -> f32 {
 /// are says what is listed; the section under it no longer carries a title row
 /// of its own, because a title said twice on one screen is the trouble the rail
 /// word was.
-pub const SESSION_TITLE: &str = "SAVED CONVERSATIONS";
+pub const SESSION_TITLE: &str = "SESSIONS";
 
 /// What the panel's own heading calls a section.
 ///
@@ -684,8 +684,8 @@ impl Table {
     /// nothing else on the panel does.
     pub fn title(&self) -> String {
         let all = match self.rows.len() {
-            1 => String::from("1 CONVERSATION"),
-            many => format!("{many} CONVERSATIONS"),
+            1 => String::from("1 SESSION"),
+            many => format!("{many} SESSIONS"),
         };
         match self.chosen() {
             0 => all,
@@ -2095,14 +2095,14 @@ impl Settings {
     /// reader the folder picker offers them with.
     /// Two cards: where the transcripts are kept, and the table of them.
     ///
-    /// No title row: the panel's own heading says SAVED CONVERSATIONS
+    /// No title row: the body's own title says SESSIONS
     /// ([`SESSION_TITLE`]), and a section that repeats its heading two lines
     /// under it is the same noise the rail's word was.
     fn session_rows(&self) -> Vec<Row> {
         let empty = self.agent.sessions.sessions.is_empty();
         let mut rows = vec![Row::Card(Card {
             does: None,
-            title: String::from("WHERE CONVERSATIONS ARE KEPT"),
+            title: String::from("WHERE SESSIONS ARE KEPT"),
             fields: vec![CardField::reading(
                 "folder",
                 match crate::sessions::dir() {
@@ -2111,8 +2111,8 @@ impl Settings {
                 },
             )],
             hint: Some(String::from(match empty {
-                true => "none saved yet: the agent writes one transcript here per conversation",
-                false => "one row of the table is one conversation the agent has already had",
+                true => "none saved yet: the agent writes one transcript here per session",
+                false => "one row of the table is one session the agent has already had",
             })),
         })];
         if !empty {
@@ -6685,20 +6685,16 @@ something_else = keep me
             assert!(!name.is_empty(), "a column with no name");
         }
 
-        // And what the section is is said once, in words that are not the word
-        // SESSIONS a third time, by the heading at the top of the panel. This
-        // asserted the title as a row of the section; the section carried it
-        // and the heading above it said SETTINGS SESSIONS, which named the list
-        // nowhere and the panel twice, so the title moved up to the heading and
-        // the row went with it.
+        // What the section is is said by the title inside its body, which the
+        // painter draws from `panel.title()`; the section's own rows never
+        // carry a bare title row of their own.
         assert_eq!(panel.title(), SESSION_TITLE);
         assert_eq!(section_title(SESSIONS), SESSION_TITLE);
         let text = said(&panel);
-        assert!(!text.contains(SESSION_TITLE), "the title is said twice: {text}");
-        assert!(text.contains("WHERE CONVERSATIONS ARE KEPT"), "{text}");
+        assert!(text.contains("WHERE SESSIONS ARE KEPT"), "{text}");
         // The card over the table says how many there are, which is the one
         // thing a header here can say that the panel's own heading does not.
-        assert_eq!(table.title(), "2 CONVERSATIONS", "{text}");
+        assert_eq!(table.title(), "2 SESSIONS", "{text}");
         // Every other section is headed by the word the rail marks it with:
         // only this one lists something its rail word does not name.
         for name in SECTIONS {
@@ -6832,7 +6828,7 @@ something_else = keep me
         go_to(&mut panel, SESSIONS);
         let index = the_table_row(&panel);
         assert_eq!(the_table(&panel).rows.len(), many.len());
-        assert_eq!(the_table(&panel).title(), format!("{} CONVERSATIONS", many.len()));
+        assert_eq!(the_table(&panel).title(), format!("{} SESSIONS", many.len()));
 
         // Two of them, marked, with the keys walked between the two: neither the
         // arrow keys nor the page keys take a mark off.
@@ -6845,7 +6841,7 @@ something_else = keep me
         let table = the_table(&panel);
         assert_eq!(table.chosen(), 2, "a key took a mark off");
         assert_eq!(table.taking(), vec![String::from("s00"), String::from("s02")]);
-        assert_eq!(table.title(), format!("{} CONVERSATIONS, 2 CHOSEN", many.len()));
+        assert_eq!(table.title(), format!("{} SESSIONS, 2 CHOSEN", many.len()));
 
         // Marked again is unmarked, and the delete then falls back to the row
         // the keys are on rather than taking nothing.

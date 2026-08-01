@@ -276,7 +276,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     if at.w < column {
                         continue;
                     }
-                    let shown = clip(name, columns_in(at.w, column).saturating_sub(1));
+                    let shown = clip(name, columns_in(at.w, column).saturating_sub(2));
                     let ink = settings_session_ink(*at, step, &shown, column);
                     say(
                         scene,
@@ -313,7 +313,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                             continue;
                         }
                         let step = step + crate::settings::SESSION_FIRST_CELL;
-                        let shown = clip(text, columns_in(box_.w, column).saturating_sub(1));
+                        let shown = clip(text, columns_in(box_.w, column).saturating_sub(2));
                         let room = settings_session_ink(*box_, step, &shown, column);
                         say(
                             scene,
