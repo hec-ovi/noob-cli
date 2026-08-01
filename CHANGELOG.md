@@ -3,7 +3,7 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
-## Unreleased
+## 0.11.2 - 2026-08-01
 
 - The call popup is its own widget box, rebuilt: a header with the
   settings-style close mark, blocks that never overlap or repeat a line
