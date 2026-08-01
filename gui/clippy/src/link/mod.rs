@@ -288,7 +288,11 @@ mod tests {
     /// reaped by the operating system in its own time, so this waits for the
     /// whole of what it was going to say rather than reading it half written.
     fn written(log: &Path, lines: usize) -> Vec<String> {
-        for _ in 0..200 {
+        // Ten seconds of deadline, returning the moment the lines are there:
+        // a run that passes stays instant, and a machine busy under the full
+        // parallel gate no longer misses the stub's scheduling window, which
+        // flaked this test twice in one day at two seconds.
+        for _ in 0..1000 {
             if let Ok(text) = std::fs::read_to_string(log)
                 && text.lines().count() >= lines
             {
@@ -297,6 +301,31 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("the stub agent never ran: {}", log.display());
+    }
+
+    /// Start a stub, riding out ETXTBSY: the write's descriptor is
+    /// close-on-exec, but a test forking in parallel holds it for the
+    /// instant between our write and its own exec, and exec of a script
+    /// held open for writing is refused (os error 26). The window is
+    /// microseconds wide; retrying is the whole fix, and it flaked the
+    /// suite three times in one day before it was understood.
+    fn spawn_stub(program: &Path, workspace: &Path, session: Option<&str>) -> Link {
+        for _ in 0..200 {
+            match Link::spawn(
+                program.to_str().expect("a path"),
+                workspace,
+                session,
+                &[],
+                || {},
+            ) {
+                Ok(link) => return link,
+                Err(why) if why.contains("Text file busy") => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(why) => panic!("the stub did not start: {why}"),
+            }
+        }
+        panic!("ETXTBSY never cleared for {}", program.display());
     }
 
     fn temp(name: &str) -> PathBuf {
@@ -368,14 +397,7 @@ mod tests {
         let log = dir.join("called-with");
         let program = stub(&dir, "resuming-noob", &log);
 
-        let link = Link::spawn(
-            program.to_str().expect("a path"),
-            &workspace,
-            Some("19fb08fb0cf-55ace-0-ee6569bb"),
-            &[],
-            || {},
-        )
-        .expect("the stub starts");
+        let link = spawn_stub(&program, &workspace, Some("19fb08fb0cf-55ace-0-ee6569bb"));
         assert_eq!(
             written(&log, 4),
             [
@@ -392,8 +414,7 @@ mod tests {
         // being passed empty.
         let plain_log = dir.join("called-plain");
         let plain = stub(&dir, "fresh-noob", &plain_log);
-        let link = Link::spawn(plain.to_str().expect("a path"), &workspace, None, &[], || {})
-            .expect("the stub starts");
+        let link = spawn_stub(&plain, &workspace, None);
         assert_eq!(
             written(&plain_log, 2),
             ["serve", workspace.to_str().expect("a path")]
