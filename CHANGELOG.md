@@ -9,6 +9,11 @@ The Linux install is a native package.
 
 ### Added
 
+- Slash commands in the NO0B prompt: every settings-panel capability has a
+  `/command` (endpoint, limits, skills, MCP servers, sessions, theme, fonts,
+  transparency, colours), `/help` lists them and `/help <name>` explains
+  one, and a COMMANDS section on the settings rail shows the same registry.
+
 - Releases carry a deb and a tarball per architecture (amd64 and arm64), one
   static musl binary inside, built and published on tag by the release
   workflow, the one CI surface. `sudo apt install ./noob_amd64.deb` is the

@@ -320,7 +320,7 @@ mod tests {
     use crate::config::Config;
     use crate::settings::testing::*;
     use crate::settings::{
-        Deed, Settings, AGENT, APPEARANCE, MCP, PROMPT, SECTIONS, SESSIONS, SKILLS,
+        Deed, Settings, AGENT, APPEARANCE, COMMANDS, MCP, PROMPT, SECTIONS, SESSIONS, SKILLS,
     };
 
     /// The section is on the rail between AGENT and SESSIONS, and it shows the
@@ -330,7 +330,7 @@ mod tests {
     fn the_section_names_the_file_and_shows_the_document() {
         assert_eq!(
             SECTIONS,
-            [AGENT, PROMPT, SESSIONS, SKILLS, MCP, APPEARANCE],
+            [AGENT, PROMPT, SESSIONS, SKILLS, MCP, COMMANDS, APPEARANCE],
             "the rail order is contract data"
         );
         let dir = scratch_dir("prompt-doc");

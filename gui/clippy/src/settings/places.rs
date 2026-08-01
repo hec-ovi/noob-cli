@@ -1371,6 +1371,11 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
             // all in a footer too narrow to hold them, since a button drawn over
             // another one is a press nobody can aim.
             SettingRow::Entry(entry) => {
+                // A fixed entry is only read: no footer buttons at all, so
+                // nothing here to place and nothing for a press to land on.
+                if matches!(entry.what, crate::settings::Which::Fixed) {
+                    continue;
+                }
                 let parts = settings_card_parts(
                     settings_card(row, line),
                     line,

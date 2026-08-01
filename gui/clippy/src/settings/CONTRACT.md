@@ -1,11 +1,11 @@
 # settings
 
-contractVersion: 2.3.0
+contractVersion: 2.4.0
 
 ## Purpose
 
 The settings panel: a frame (the rail, the cursor and scroll machinery, the
-shared row vocabulary, the write-back) over six nested section boxes, one
+shared row vocabulary, the write-back) over seven nested section boxes, one
 folder each under `sections/`, plus where everything sits (places.rs) and
 what gets drawn (paint.rs). Placement, paint, and hit regions read the same
 rectangles.
@@ -25,15 +25,18 @@ its folder alone:
   the validate-then-install cycle.
 - [`sections/mcp`](sections/mcp/CONTRACT.md) - the configured servers and
   the add-a-server card.
+- [`sections/commands`](sections/commands/CONTRACT.md) - the slash commands
+  as a read-only list off the command registry.
 - [`sections/appearance`](sections/appearance/CONTRACT.md) - the window's
   looks, the palette, the restore.
 
 ## Public surface
 
 ```rust
-pub const SECTIONS: [&str; 6];   // AGENT, SYSTEM PROMPT, SESSIONS, SKILLS,
-                                 // MCP, APPEARANCE: the rail, in rail order.
-                                 // Contract data; the menu consumes it
+pub const SECTIONS: [&str; 7];   // AGENT, SYSTEM PROMPT, SESSIONS, SKILLS,
+                                 // MCP, COMMANDS, APPEARANCE: the rail, in
+                                 // rail order. Contract data; the menu
+                                 // consumes it
 pub struct Settings;             // the panel state machine: rows per
                                  // section, cursor and side, field editing,
                                  // sliders, swatches, the sessions table,
@@ -49,7 +52,10 @@ pub mod paint;                   // settings_panel(scene, frame)
 
 Section vocabulary the rest of the window reads keeps its `settings::` path
 by re-export: `SESSION_COLUMNS` and the table constants, `SKILL_SOURCE`,
-`SERVER_NAME`, `SERVER_HOW`, `restoring`.
+`SERVER_NAME`, `SERVER_HOW`, `restoring`. The two settings tables and the
+preset key (`LOOKS`, `AGENT_SETTINGS`, `THEME`) are re-exported crate-wide
+for the command registry, whose bounds are the panel's own. An `Entry` can
+be `Which::Fixed`: only read, no toggle, no uninstall, no deed.
 
 ## Invariants
 
@@ -92,7 +98,7 @@ box (colors), the state box (the doc pane type).
 
 ## Tests
 
-66 model tests drive key- and click-shaped calls with scratch files: the
+68 model tests drive key- and click-shaped calls with scratch files: the
 frame's 28 (cursor, rail, scroll, sliders, doc viewer, footer) in mod.rs,
 each section's in its own box. Scene-level placement and paint are asserted
 by the view box's rendered-scene tests.

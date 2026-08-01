@@ -17,6 +17,7 @@ package, the binary and everything a user sees are `no0b`.
 | Settings file format and its defaults | `gui/clippy/src/config/CONTRACT.md` |
 | What the settings panel lists, and what changing a row writes | `gui/clippy/src/settings/CONTRACT.md`, routed in `gui/clippy/src/main.rs` |
 | What a typed /command does, its arguments and its help | `gui/clippy/src/commands/CONTRACT.md`, routed in `gui/clippy/src/main.rs` |
+| The COMMANDS list on the settings panel | `gui/clippy/src/settings/sections/commands/CONTRACT.md`, rows off the commands registry |
 | Mouse, keyboard, selection gestures, the window lifecycle | `gui/clippy/src/main.rs` |
 | What a right click offers and what a row does | `gui/clippy/src/menu/CONTRACT.md`, routed in `gui/clippy/src/main.rs` |
 | Choosing the folder the agent works in, and the folders NO0B remembers | `gui/clippy/src/picker/CONTRACT.md`, routed in `gui/clippy/src/main.rs` |

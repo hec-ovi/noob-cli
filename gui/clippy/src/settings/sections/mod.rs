@@ -7,6 +7,7 @@
 
 pub mod agent;
 pub mod appearance;
+pub mod commands;
 pub mod mcp;
 pub mod prompt;
 pub mod sessions;

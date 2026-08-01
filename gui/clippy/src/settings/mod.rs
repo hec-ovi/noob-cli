@@ -167,6 +167,8 @@ pub const PROMPT: &str = "SYSTEM PROMPT";
 pub const SESSIONS: &str = "SESSIONS";
 pub const SKILLS: &str = "SKILLS";
 pub const MCP: &str = "MCP";
+/// The slash commands, listed: everything this panel does, typed instead.
+pub const COMMANDS: &str = "COMMANDS";
 pub const APPEARANCE: &str = "APPEARANCE";
 
 /// Every section name, in rail order.
@@ -178,7 +180,7 @@ pub const APPEARANCE: &str = "APPEARANCE";
 /// asking on a settings panel, and went with the file behind it. COLOURS was the
 /// palette, which is what the window looks like: it is the last block of
 /// [`APPEARANCE`] now, under its own headings.
-pub const SECTIONS: [&str; 6] = [AGENT, PROMPT, SESSIONS, SKILLS, MCP, APPEARANCE];
+pub const SECTIONS: [&str; 7] = [AGENT, PROMPT, SESSIONS, SKILLS, MCP, COMMANDS, APPEARANCE];
 
 /// The sessions section's own vocabulary, re-exported so the frame, the
 /// painter and the panel's callers keep one `settings::` path to it.
@@ -790,7 +792,7 @@ pub struct Entry {
     pub doc: Vec<String>,
 }
 
-/// Which of the two kinds of entry it is, and what naming it on the disk takes.
+/// Which kind of entry it is, and what naming it on the disk takes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Which {
     /// A skill, named by the directory it lives in.
@@ -798,6 +800,10 @@ pub enum Which {
     /// A server, named by [`Entry::name`] inside one of the two `mcp.json`
     /// files. Which file is the whole of what `project` says.
     Server { project: bool },
+    /// An entry that is only read: a command in the COMMANDS list. Nothing
+    /// on any disk to turn or take out, so it carries no toggle, no
+    /// uninstall, and no deed ever comes off it.
+    Fixed,
 }
 
 /// What a press on an entry's toggle or its uninstall asks the disk to do.
@@ -1415,6 +1421,7 @@ impl Settings {
                     SESSIONS => sections::sessions::rows(&self.agent),
                     SKILLS => self.skills.rows(&self.agent),
                     MCP => self.mcp.rows(&self.agent),
+                    COMMANDS => sections::commands::rows(),
                     APPEARANCE => sections::appearance::rows(config, self.file.as_deref()),
                     // A name on the rail with no builder behind it opens on
                     // nothing, which `every_section_is_reachable` fails on. The
@@ -1731,6 +1738,9 @@ impl Settings {
                 Which::Server { .. } => {
                     format!("take {} out of its mcp.json", entry.name)
                 }
+                // Unreachable: a fixed entry is never removable, so the
+                // uninstall above refuses to arm it.
+                Which::Fixed => String::new(),
             };
             return format!("press uninstall again to {what}; anything else leaves it alone");
         }
@@ -1829,6 +1839,11 @@ impl Settings {
                 "up and down move \u{2022} enter edits it \u{2022} tab and shift-tab change section"
             }
             Some(Row::Entry(entry)) => match (entry.removable, &entry.what) {
+                // A command's row is only read; the column beside the list
+                // is where the rest of it is.
+                (_, Which::Fixed) => {
+                    "up and down move \u{2022} the column beside the list is its help \u{2022} tab and shift-tab change section"
+                }
                 (false, _) => {
                     "up and down move \u{2022} enter turns it on and off \u{2022} tab and shift-tab change section"
                 }
@@ -2150,6 +2165,8 @@ impl Settings {
                 project: *project,
                 on: !entry.on,
             },
+            // A command's row has nothing to turn.
+            Which::Fixed => return None,
         })
     }
 
@@ -2173,6 +2190,8 @@ impl Settings {
                     name: entry.name.clone(),
                     project: *project,
                 },
+                // Never removable, so never here.
+                Which::Fixed => return None,
             },
             // The delete under the table of saved conversations. The same two
             // presses, because it is the same kind of act: the transcripts are
