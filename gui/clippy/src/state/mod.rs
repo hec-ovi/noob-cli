@@ -1241,6 +1241,14 @@ impl State {
         self.status = String::from("thinking");
     }
 
+    /// A /command the window ran itself, echoed the same way but never sent:
+    /// no turn starts, so the phase does not move. The answer follows as the
+    /// window's own lines.
+    pub fn commanded(&mut self, text: &str) {
+        self.output.blank_if_needed();
+        self.output.say(format!("› {text}"), Tone::Bright);
+    }
+
     /// The file's view, creating it the first time it is mentioned. Opening it
     /// selects it, which is what makes the list follow the agent without anyone
     /// clicking.

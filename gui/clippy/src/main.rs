@@ -22,6 +22,7 @@
 //! and exits.
 
 mod agent;
+mod commands;
 mod config;
 mod design;
 mod dock;
@@ -473,6 +474,60 @@ fn forget_sessions(dir: Option<PathBuf>, index: Option<PathBuf>, ids: &[String])
     ids.iter()
         .filter_map(|id| forget_session(dir.clone(), index.clone(), id).err())
         .collect()
+}
+
+/// The disk half of a panel deed: which agent file it touches, and the write
+/// itself. One function shared by the panel's button path ([`App::do_deed`])
+/// and the slash command path ([`App::command_deed`]), so the two cannot do
+/// different things to the same file.
+///
+/// A free function so an add or a turn can be proven against a scratch file
+/// without a window. The two deeds that are not the agent's answer Ok here
+/// and are handled by their callers: a set of conversations cannot answer
+/// with one result, and a restore writes the window's own file.
+fn deed_on_disk(
+    deed: &settings::Deed,
+    skills_at: Option<&Path>,
+    mcp_global: Option<&Path>,
+    mcp_project: Option<&Path>,
+) -> Result<(), String> {
+    match deed {
+        settings::Deed::TurnSkill { dir, on } => match skills_at {
+            Some(at) => agent::set_skill(at, dir, *on),
+            None => Err(String::from("there is no skills directory to move it in")),
+        },
+        settings::Deed::RemoveSkill { dir, on } => match skills_at {
+            Some(at) => agent::remove_skill(at, dir, *on),
+            None => Err(String::from("there is no skills directory to remove it from")),
+        },
+        settings::Deed::TurnServer { name, project, on } => {
+            match *project {
+                true => mcp_project,
+                false => mcp_global,
+            }
+            .map(|path| agent::set_server(path, name, *on))
+            .unwrap_or_else(|| Err(String::from("there is no file to write that server in")))
+        }
+        settings::Deed::RemoveServer { name, project } => match *project {
+            true => mcp_project,
+            false => mcp_global,
+        }
+        .map(|path| agent::remove_server(path, name))
+        .unwrap_or_else(|| Err(String::from("there is no file to take that server out of"))),
+        // Always the global file: it is the one the add card names, and
+        // the one the agent reads in every project.
+        settings::Deed::AddServer { name, how } => match mcp_global {
+            Some(path) => agent::add_server(path, name, how),
+            None => Err(String::from("there is no config directory to write a server in")),
+        },
+        // The path came off the block that offered it, which read it off the
+        // agent's own config directory: nothing here spells one out.
+        settings::Deed::StartInstructions { path } => agent::start_instructions(path),
+        // The editor's save: the whole file at once, by the same rename
+        // every write in the agent box arrives by.
+        settings::Deed::SaveInstructions { path, text } => agent::write_instructions(path, text),
+        settings::Deed::ForgetSessions { .. } | settings::Deed::RestoreLooks => Ok(()),
+    }
 }
 
 /// What to write down as a session's context reading, out of the two places the
@@ -963,6 +1018,10 @@ struct App {
     /// second press while one is running is refused rather than starting a race
     /// between two installs for one directory.
     installing: Option<std::sync::mpsc::Receiver<(String, Result<String, String>)>>,
+    /// Whether the running install was asked for by a /command, so its
+    /// answer goes to the transcript rather than only to a panel that may
+    /// not even be open.
+    install_from_command: bool,
     /// Where the dividers are, as fractions: how much of the width the left
     /// column takes in each row, and how much of the height the top space takes
     /// in each column. Read out of the settings file at launch and written back
@@ -1089,6 +1148,7 @@ impl App {
             sliding: None,
             asking: None,
             installing: None,
+            install_from_command: false,
             selecting: false,
             prompt_selecting: false,
             clipboard: None,
@@ -1466,18 +1526,52 @@ impl App {
         let Some(skills_at) = skills_at else {
             return;
         };
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.installing = Some(rx);
-        let proxy = self.proxy.clone();
         let config = self.config.clone();
         if let Some(panel) = self.settings.as_mut() {
             panel.begin_install(source.clone(), &config);
         }
+        self.spawn_install(source, skills_at);
+    }
+
+    /// The clone itself, off the interface thread: the shared tail of the
+    /// panel's install button and /skill_install. The answer comes back
+    /// through [`App::take_install`].
+    fn spawn_install(&mut self, source: String, skills_at: PathBuf) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.installing = Some(rx);
+        let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let answer = install::install(&source, &skills_at);
             let _ = tx.send((source, answer));
             let _ = proxy.send_event(Wake);
         });
+    }
+
+    /// Start the install a /skill_install asked for: the source has already
+    /// been validated by the dispatcher, the same check the panel's button
+    /// runs. The answer is reported in the transcript when it lands.
+    fn command_install(&mut self, source: String, said: String) {
+        if self.installing.is_some() {
+            self.state
+                .output
+                .say("an install is already running: wait for it to answer", Tone::Bad);
+            return;
+        }
+        let Some(skills_at) = agent::config_dir().map(|dir| dir.join("skills")) else {
+            self.state
+                .output
+                .say("there is no config directory to install a skill into", Tone::Bad);
+            return;
+        };
+        self.state.output.say(said, Tone::Dim);
+        self.install_from_command = true;
+        // The open panel says an install is running too, so the SKILLS
+        // section and the transcript tell one story.
+        let config = self.config.clone();
+        if let Some(panel) = self.settings.as_mut() {
+            panel.begin_install(source.clone(), &config);
+        }
+        self.spawn_install(source, skills_at);
     }
 
     /// Take what that thread answered, if it has, and read the disk back with
@@ -1497,7 +1591,23 @@ impl App {
         let agent = self.read_agent();
         let config = self.config.clone();
         if let Some(panel) = self.settings.as_mut() {
-            panel.adopt_install(source, answer, agent, &config);
+            panel.adopt_install(source, answer.clone(), agent, &config);
+        }
+        // An install a /command started answers where it was asked for: in
+        // the transcript, whether or not the panel is up to say it too.
+        if self.install_from_command {
+            self.install_from_command = false;
+            match &answer {
+                Ok(name) => self.state.output.say(
+                    format!("installed {name}; the agent picks it up on its next session"),
+                    Tone::Dim,
+                ),
+                Err(why) => {
+                    for line in why.lines() {
+                        self.state.output.say(line.to_string(), Tone::Bad);
+                    }
+                }
+            }
         }
         self.dirty = true;
     }
@@ -1850,21 +1960,25 @@ impl App {
     /// nudged number and a typed URL are the same write to the same file. What
     /// the panel shows next is what the file answered.
     fn write_agent_setting(&mut self, path: &Path, key: &str, value: &str) {
-        match settings::write_endpoint(path, key, value) {
-            Ok(()) => {
-                let agent = self.read_agent();
-                let config = self.config.clone();
-                if let Some(panel) = self.settings.as_mut() {
-                    panel.adopt_agent(agent, &config);
-                }
-            }
-            Err(why) => {
-                if let Some(panel) = self.settings.as_mut() {
-                    panel.say_trouble(why);
-                }
-            }
+        if let Err(why) = self.agent_setting(path, key, value)
+            && let Some(panel) = self.settings.as_mut()
+        {
+            panel.say_trouble(why);
         }
         self.dirty = true;
+    }
+
+    /// The write itself, shared with the command path: the line lands, the
+    /// agent's files are read back, and the open panel follows them. The
+    /// reason comes back instead of being put anywhere.
+    fn agent_setting(&mut self, path: &Path, key: &str, value: &str) -> Result<(), String> {
+        settings::write_endpoint(path, key, value)?;
+        let agent = self.read_agent();
+        let config = self.config.clone();
+        if let Some(panel) = self.settings.as_mut() {
+            panel.adopt_agent(agent, &config);
+        }
+        Ok(())
     }
 
     /// Do what a press on an entry's toggle or its uninstall asked for, and read
@@ -1911,44 +2025,12 @@ impl App {
             Some(panel) => panel,
             None => return,
         };
-        let done = match &deed {
-            settings::Deed::TurnSkill { dir, on } => match panel.skills_at() {
-                Some(at) => agent::set_skill(at, dir, *on),
-                None => Err(String::from("there is no skills directory to move it in")),
-            },
-            settings::Deed::RemoveSkill { dir, on } => match panel.skills_at() {
-                Some(at) => agent::remove_skill(at, dir, *on),
-                None => Err(String::from("there is no skills directory to remove it from")),
-            },
-            settings::Deed::TurnServer { name, project, on } => {
-                match panel.mcp_file(*project) {
-                    Some(path) => agent::set_server(path, name, *on),
-                    None => Err(String::from("there is no file to write that server in")),
-                }
-            }
-            settings::Deed::RemoveServer { name, project } => match panel.mcp_file(*project) {
-                Some(path) => agent::remove_server(path, name),
-                None => Err(String::from("there is no file to take that server out of")),
-            },
-            // Always the global file: it is the one the add card names, and
-            // the one the agent reads in every project.
-            settings::Deed::AddServer { name, how } => match panel.mcp_file(false) {
-                Some(path) => agent::add_server(path, name, how),
-                None => Err(String::from("there is no config directory to write a server in")),
-            },
-            // The path came off the block that offered it, which read it off the
-            // agent's own config directory: nothing here spells one out.
-            settings::Deed::StartInstructions { path } => agent::start_instructions(path),
-            // The editor's save: the whole file at once, by the same rename
-            // every write in the agent box arrives by.
-            settings::Deed::SaveInstructions { path, text } => {
-                agent::write_instructions(path, text)
-            }
-            // Both handled above: a set of conversations cannot answer with one
-            // result, since some of it can land and the rest fail, and a
-            // restore writes the window's own file rather than the agent's.
-            settings::Deed::ForgetSessions { .. } | settings::Deed::RestoreLooks => Ok(()),
-        };
+        let done = deed_on_disk(
+            &deed,
+            panel.skills_at(),
+            panel.mcp_file(false),
+            panel.mcp_file(true),
+        );
         match done {
             Ok(()) => {
                 let agent = self.read_agent();
@@ -1975,6 +2057,61 @@ impl App {
             }
         }
         self.dirty = true;
+    }
+
+    /// Do one deed for a slash command, without needing the panel: the same
+    /// disk writes [`App::do_deed`] routes, against the same places the agent
+    /// snapshot names, with the whole of the agent read back after. The
+    /// reason comes back to the transcript instead of landing on a footer
+    /// nobody can see.
+    fn command_deed(&mut self, deed: &settings::Deed) -> Result<(), String> {
+        match deed {
+            // The one deed that can half succeed: every id is tried, the
+            // agent is read back whatever happened, and what failed is the
+            // answer.
+            settings::Deed::ForgetSessions { ids } => {
+                let failed = forget_sessions(sessions::dir(), sessions::index_path(), ids);
+                self.adopt_fresh_agent();
+                match failed.is_empty() {
+                    true => Ok(()),
+                    false => Err(failed.join("; ")),
+                }
+            }
+            // The window's own file rather than the agent's: what comes back
+            // is a whole Config, applied the way any appearance change is.
+            settings::Deed::RestoreLooks => {
+                let path = self.settings_path().ok_or_else(|| {
+                    String::from("there is no home directory to write settings in")
+                })?;
+                let config = settings::restore(&path)?;
+                self.adopt(config);
+                if let Some(panel) = self.settings.as_mut() {
+                    panel.refresh(&self.config);
+                }
+                Ok(())
+            }
+            deed => {
+                let agent = self.read_agent();
+                deed_on_disk(
+                    deed,
+                    agent.skills_at.as_deref(),
+                    agent.mcp.global.as_deref(),
+                    agent.mcp.project.as_deref(),
+                )?;
+                self.adopt_fresh_agent();
+                Ok(())
+            }
+        }
+    }
+
+    /// Read the agent's files again and hand them to the panel when it is
+    /// open, so a command run behind it still leaves it saying the disk.
+    fn adopt_fresh_agent(&mut self) {
+        let agent = self.read_agent();
+        let config = self.config.clone();
+        if let Some(panel) = self.settings.as_mut() {
+            panel.adopt_agent(agent, &config);
+        }
     }
 
     /// Take every appearance line out of the settings file, and apply the file
@@ -2285,52 +2422,46 @@ impl App {
 
     /// Write one change and take the file's answer. The half of
     /// [`App::change_setting`] the slider shares, since a drag decides its value
-    /// the other way round and lands in exactly the same place.
+    /// the other way round and lands in exactly the same place. A refusal is
+    /// said on the panel rather than in the activity pane, which is behind the
+    /// takeover and cannot be read from here.
     fn write_setting(&mut self, change: &settings::Change) {
+        if let Err(why) = self.apply_change(change)
+            && let Some(panel) = self.settings.as_mut()
+        {
+            panel.say_trouble(why);
+        }
+        self.dirty = true;
+    }
+
+    /// Route one change to the file it belongs to and apply what comes back.
+    /// The one write path the panel's nudges and the slash commands share, so
+    /// the two cannot land the same key differently; the caller decides where
+    /// the reason goes when nothing lands.
+    fn apply_change(&mut self, change: &settings::Change) -> Result<(), String> {
         // A setting of the agent's goes to the agent's file, through the agent's
-        // writer. Same nudge, same track, other file.
+        // writer. Same nudge, same track, other file. The path is the panel's
+        // when it is open and the agent's own config directory when it is not:
+        // the same place, since the panel read it from there.
         if change.file == settings::File::Agent {
             let path = self
                 .settings
                 .as_ref()
                 .and_then(Settings::agent_file)
-                .map(std::path::Path::to_path_buf);
-            match path {
-                Some(path) => self.write_agent_setting(&path, change.key, &change.value),
-                None => {
-                    if let Some(panel) = self.settings.as_mut() {
-                        panel.say_trouble(String::from(
-                            "there is no config directory to write it in",
-                        ));
-                    }
-                    self.dirty = true;
-                }
-            }
-            return;
+                .map(std::path::Path::to_path_buf)
+                .or_else(|| agent::config_dir().map(|dir| dir.join(".env")))
+                .ok_or_else(|| String::from("there is no config directory to write it in"))?;
+            return self.agent_setting(&path, change.key, &change.value);
         }
-        let Some(path) = self.settings_path() else {
-            if let Some(panel) = self.settings.as_mut() {
-                panel.say_trouble(String::from("there is no home directory to write settings in"));
-            }
-            self.dirty = true;
-            return;
-        };
-        match settings::commit(&path, change) {
-            Ok(config) => {
-                self.adopt(config);
-                if let Some(panel) = self.settings.as_mut() {
-                    panel.refresh(&self.config);
-                }
-            }
-            // Said on the panel rather than in the activity pane, which is
-            // behind the takeover and cannot be read from here.
-            Err(why) => {
-                if let Some(panel) = self.settings.as_mut() {
-                    panel.say_trouble(why);
-                }
-            }
+        let path = self
+            .settings_path()
+            .ok_or_else(|| String::from("there is no home directory to write settings in"))?;
+        let config = settings::commit(&path, change)?;
+        self.adopt(config);
+        if let Some(panel) = self.settings.as_mut() {
+            panel.refresh(&self.config);
         }
-        self.dirty = true;
+        Ok(())
     }
 
     /// Take a settings file the panel just wrote and apply all of it.
@@ -2651,12 +2782,60 @@ impl App {
             return;
         }
         self.prompt.clear();
+        // A line that starts with / is for the window, never for the agent:
+        // no turn starts, and the answer is a local line in the transcript.
+        if commands::is_command(&text) {
+            self.run_command(&text);
+            self.dirty = true;
+            return;
+        }
         self.state.submitted(&text);
         match self.link.as_mut() {
             Some(link) if link.is_alive() => link.send(Cmd::PromptSubmit { text }),
             _ => self.state.output.say("no agent is running", Tone::Bad),
         }
         self.dirty = true;
+    }
+
+    /// Run one slash command: parse it against the registry, do what it asks
+    /// through the same writes the settings panel does, and answer in the
+    /// transcript.
+    ///
+    /// The snapshot handed to the dispatcher is the same reading the panel
+    /// opens over, so a skill or a server is named by what is really on the
+    /// disk right now.
+    fn run_command(&mut self, text: &str) {
+        self.state.commanded(text);
+        match commands::dispatch(text, &self.read_agent()) {
+            commands::Answer::Say(lines) => {
+                for line in lines {
+                    self.state.output.say(line, Tone::Dim);
+                }
+            }
+            commands::Answer::Refuse(why) => self.state.output.say(why, Tone::Bad),
+            commands::Answer::Do(act) => match act {
+                commands::Act::Change { change, said } => match self.apply_change(&change) {
+                    Ok(()) => self.state.output.say(said, Tone::Dim),
+                    Err(why) => self.state.output.say(why, Tone::Bad),
+                },
+                commands::Act::Deed { deed, said } => match self.command_deed(&deed) {
+                    Ok(()) => self.state.output.say(said, Tone::Dim),
+                    Err(why) => self.state.output.say(why, Tone::Bad),
+                },
+                commands::Act::Install { source, said } => self.command_install(source, said),
+                commands::Act::Open { section, said } => {
+                    if self.settings.is_none() {
+                        self.open_settings();
+                    }
+                    if let Some(at) = section
+                        && let Some(panel) = self.settings.as_mut()
+                    {
+                        panel.choose(at);
+                    }
+                    self.state.output.say(said, Tone::Dim);
+                }
+            },
+        }
     }
 
     fn cancel(&mut self) {
@@ -6705,5 +6884,38 @@ mod tests {
         assert_eq!(pasted("one\r\n\ttwo"), "one   two");
         assert_eq!(pasted(""), "");
         assert_eq!(pasted("nothing to do"), "nothing to do");
+    }
+
+    /// A typed /mcp_add lands in the file through the same deed the panel's
+    /// add card writes: the dispatcher resolves the line and [`deed_on_disk`]
+    /// couriers it, which is the exact pair the window wires together in
+    /// [`App::run_command`]. And a deed with nowhere to land answers with a
+    /// reason rather than nothing.
+    #[test]
+    fn a_typed_mcp_add_writes_through_the_panels_own_deed() {
+        let dir = std::env::temp_dir().join(format!("no0b-command-add-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let global = dir.join("mcp.json");
+
+        let answer = commands::dispatch(
+            "/mcp_add docs npx docs-server --port 9000",
+            &agent::Agent::default(),
+        );
+        let commands::Answer::Do(commands::Act::Deed { deed, .. }) = answer else {
+            panic!("an add resolves to a deed");
+        };
+        deed_on_disk(&deed, None, Some(&global), None).expect("the add lands");
+        let written = std::fs::read_to_string(&global).expect("the file is there");
+        assert!(written.contains("\"docs\""), "{written}");
+        // The writer splits a command line into command and args, the same
+        // shape the CLI reads; the whole call is in there, word by word.
+        for word in ["npx", "docs-server", "--port", "9000"] {
+            assert!(written.contains(&format!("\"{word}\"")), "{written}");
+        }
+
+        let refused = deed_on_disk(&deed, None, None, None);
+        assert!(refused.is_err(), "nowhere to write is a reason, not silence");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

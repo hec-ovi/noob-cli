@@ -200,7 +200,11 @@ pub use sections::appearance::restoring;
 #[cfg(test)]
 pub use sections::appearance::OFF_PANEL;
 
-use sections::appearance::THEME;
+/// The two settings tables and the preset key, re-exported for the command
+/// registry: a /command's bounds are the panel's own, read off one table
+/// rather than copied.
+pub(crate) use sections::agent::AGENT_SETTINGS;
+pub(crate) use sections::appearance::{LOOKS, THEME};
 
 /// What the panel's own heading calls a section.
 ///
