@@ -2158,7 +2158,13 @@ struct MenuPlaces {
 fn place_menu(menu: &Menu, column: f32, width: f32, height: f32) -> MenuPlaces {
     let column = column.max(1.0);
     let main = menu.main_len();
-    let w = ((menu.width_chars() + MENU_GUTTER) as f32 * column + MENU_PAD * 2.0).min(width.max(1.0));
+    // One column of slack past the measured width, in both boxes: the icon
+    // glyphs come from the symbol font and can run a hair wider than a text
+    // column, and a row measured to an exact fit wraps its label out of its
+    // one-line row, which draws as a row with no name at all.
+    let slack = 1;
+    let w = ((menu.width_chars() + MENU_GUTTER + slack) as f32 * column + MENU_PAD * 2.0)
+        .min(width.max(1.0));
     let room = (((height - MENU_EDGE * 2.0) / MENU_ROW_H).floor() as usize).max(1);
     let shown = main.min(room);
     let h = shown as f32 * MENU_ROW_H + MENU_EDGE * 2.0;
@@ -2183,7 +2189,8 @@ fn place_menu(menu: &Menu, column: f32, width: f32, height: f32) -> MenuPlaces {
         None => (nowhere(), Vec::new()),
         Some(fly_start) => {
             let count = menu.rows.len() - fly_start;
-            let fw = ((menu.fly_width_chars() + MENU_GUTTER) as f32 * column + MENU_PAD * 2.0)
+            let fw = ((menu.fly_width_chars() + MENU_GUTTER + slack) as f32 * column
+                + MENU_PAD * 2.0)
                 .min(width.max(1.0));
             let fh = count as f32 * MENU_ROW_H + MENU_EDGE * 2.0;
             // Top-aligned with the header's row, on whichever side has room.
@@ -10036,7 +10043,9 @@ mod tests {
         shape.column = 16.0;
         shape.menu_column = 7.0;
         let layout = Layout::compute(1400.0, 900.0, &shape);
-        let want = (menu.width_chars() + MENU_GUTTER) as f32 * 7.0 + MENU_PAD * 2.0;
+        // The gutter, and the one column of slack that keeps a wide icon
+        // glyph from wrapping an exact-fit label out of its row.
+        let want = (menu.width_chars() + MENU_GUTTER + 1) as f32 * 7.0 + MENU_PAD * 2.0;
         assert!(
             (layout.menu.w - want).abs() < 0.01,
             "the box is sized from the wrong font: {} against {want}",
@@ -10221,6 +10230,19 @@ mod tests {
             assert!(
                 row.x >= fly.x && row.x + row.w <= fly.x + fly.w + 0.01,
                 "{} is not written in the flyout: {row:?} against {fly:?}",
+                view.label()
+            );
+            // And every label fits its one-line row with the gutter and a
+            // column to spare: a row measured to an exact fit wraps its
+            // longest labels out of sight, which is how ACTIVITY and
+            // HARDWARE shipped as two nameless checkboxes.
+            // The column render_menu's shape carries; the box was placed
+            // with it, so the row is measured in the same unit it was sized.
+            let column = 7.0;
+            let cols = (row.w / column).floor() as usize;
+            assert!(
+                view.label().chars().count() + MENU_GUTTER < cols,
+                "{} has no slack in {cols} columns",
                 view.label()
             );
         }
