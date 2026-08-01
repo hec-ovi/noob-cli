@@ -6,3 +6,4 @@
 //! CONTRACT.md.
 
 pub mod agent;
+pub mod sessions;
