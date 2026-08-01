@@ -25,7 +25,6 @@ mod agent;
 mod config;
 mod design;
 mod dock;
-mod icons;
 mod install;
 mod link;
 mod markdown;

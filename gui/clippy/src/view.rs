@@ -20,7 +20,7 @@
 use noob_draw::{Panel, Rect, Run, Scene, Text};
 
 use crate::dock::{Dock, Space, View};
-use crate::icons;
+use crate::design::icons;
 use crate::menu::{MARKER_COLUMNS, Menu};
 use crate::monitor::{Gauge, Monitor};
 use crate::picker::{Picker, Row as PickerRow};
@@ -4439,9 +4439,9 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
     // draws as nothing. The symbol font ships in the binary now, so they are
     // the same marks every other window on the desktop uses.
     for (panel, hit, tint, glyph, quiet) in [
-        (layout.minimize, Hit::Minimize, skin.hot, crate::icons::MINIMIZE, true),
-        (layout.maximize, Hit::Maximize, skin.hot, crate::icons::MAXIMIZE, true),
-        (layout.close, Hit::Close, skin.close_hot, crate::icons::CLOSE, false),
+        (layout.minimize, Hit::Minimize, skin.hot, crate::design::icons::MINIMIZE, true),
+        (layout.maximize, Hit::Maximize, skin.hot, crate::design::icons::MAXIMIZE, true),
+        (layout.close, Hit::Close, skin.close_hot, crate::design::icons::CLOSE, false),
     ] {
         let lit = frame.hot == Some(hit);
         if lit {
@@ -5663,7 +5663,7 @@ fn explorer(scene: &mut Scene, frame: &Frame, list: Panel) {
             .max(1);
         let mut runs = vec![
             // The type mark, so a row is recognisable before it is read.
-            Run::icon(crate::icons::for_path(&file.path).to_string(), tint),
+            Run::icon(crate::design::icons::for_path(&file.path).to_string(), tint),
             Run::tinted(format!(" {}", fit_name(&file.path, room)), tint),
         ];
         if file.changed {
@@ -8710,7 +8710,7 @@ mod tests {
             assert!(text.contains(name.as_str()), "{name} is not in the list: {text}");
         }
         for path in paths {
-            let icon = crate::icons::for_path(path).to_string();
+            let icon = crate::design::icons::for_path(path).to_string();
             assert!(text.contains(&icon), "{path} has no type icon");
         }
     }
@@ -12569,9 +12569,9 @@ mod tests {
             for wanted in [
                 "NO0B",
                 VERSION,
-                &crate::icons::MINIMIZE.to_string(),
-                &crate::icons::MAXIMIZE.to_string(),
-                &crate::icons::CLOSE.to_string(),
+                &crate::design::icons::MINIMIZE.to_string(),
+                &crate::design::icons::MAXIMIZE.to_string(),
+                &crate::design::icons::CLOSE.to_string(),
             ] {
                 assert!(written.contains(wanted), "{height}: the strip lost {wanted:?}");
             }

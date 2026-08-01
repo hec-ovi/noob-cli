@@ -368,3 +368,5 @@ mod tests {
         assert!(card_cols(flip) >= FIELD_COLUMNS * 2);
     }
 }
+
+pub mod icons;

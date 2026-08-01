@@ -38,7 +38,7 @@
 //! having to re-read the column each time.
 
 use crate::dock::{Dock, Space, View};
-use crate::icons;
+use crate::design::icons;
 use crate::settings::SECTIONS;
 
 /// Columns a row reserves at its end for the group marker: the mark and the
@@ -154,7 +154,7 @@ impl Item {
     /// still an `Option` only because the drawing already handles a row without
     /// a mark and a future row may not have one.
     ///
-    /// Named in [`crate::icons`] rather than written here, because a codepoint
+    /// Named in [`crate::design::icons`] rather than written here, because a codepoint
     /// the embedded font lacks draws as nothing at all and the coverage test
     /// over there is what catches that.
     ///

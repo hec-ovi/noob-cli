@@ -11,7 +11,7 @@ package, the binary and everything a user sees are `no0b`.
 | You want to change | Open |
 |---|---|
 | How a line of text becomes rows on screen: wrapping, scroll windows, selection bands, the scrollbar's extent | `gui/layers/text-geometry/CONTRACT.md` |
-| Which panel sits where, tabs, drag and drop, where the two dividers sit | `gui/clippy/src/dock.rs` and the `Layout` half of `gui/clippy/src/view.rs` |
+| Which panel sits where, tabs, drag and drop, where the two dividers sit | `gui/clippy/src/dock/CONTRACT.md` and the `Layout` half of `gui/clippy/src/view.rs` |
 | What a frame looks like: panels, tabs, gauges, the title bar | `gui/clippy/src/view.rs` |
 | Colors, transparency, the palette | `gui/clippy/src/skin.rs`, keys in `gui/clippy/src/config.rs` |
 | Settings file format and its defaults | `gui/clippy/src/config.rs` |
@@ -21,7 +21,7 @@ package, the binary and everything a user sees are `no0b`.
 | Choosing the folder the agent works in, and the folders NO0B remembers | `gui/clippy/src/picker.rs`, drawn by `view::folder_picker`, routed in `gui/clippy/src/main.rs` |
 | Which saved sessions the first screen offers, and which folder each one belongs to | `gui/clippy/src/sessions.rs`, listed by `picker::Picker::show_sessions`, routed in `gui/clippy/src/main.rs` |
 | The conversation and metrics model: what an event does to state | `gui/clippy/src/state.rs` |
-| Where a pane that is a list is scrolled to, and what clamps it | `gui/clippy/src/scroll.rs`, content measured by `view::scroll_extent` |
+| Where a pane that is a list is scrolled to, and what clamps it | `gui/clippy/src/scroll/CONTRACT.md`, content measured by `view::scroll_extent` |
 | Which readings the monitors show | `gui/clippy/src/monitor.rs` |
 | Which skills and MCP servers the panel lists, and what turning one off or removing it does on disk | `gui/clippy/src/agent.rs`, listed by `gui/clippy/src/settings.rs` |
 | What a tool call is remembered as, and what the popup over an activity row shows | `gui/clippy/src/state.rs`, drawn by `view::call_popup` |
@@ -30,7 +30,7 @@ package, the binary and everything a user sees are `no0b`.
 | The GPU device, surface, transparency probing | `gui/noob-gpu/src/lib.rs` |
 | Markdown rendering in the transcript | `gui/clippy/src/markdown.rs` |
 | Syntax colors in the file view | `gui/clippy/src/syntax.rs` |
-| The thinking orb in the title strip: its maths, its two states | `gui/clippy/src/orb.rs`, drawn by `view::title_bar`, clocked in `gui/clippy/src/main.rs` |
+| The thinking orb in the title strip: its maths, its two states | `gui/clippy/src/orb/CONTRACT.md`, drawn by `view::title_bar`, clocked in `gui/clippy/src/main.rs` |
 | Desktop entry, icons, packaging | `gui/clippy/src/packaging.rs`, `gui/data/`, `dev.sh gui-package` |
 
 ## The agent (`crates/`)
@@ -100,6 +100,18 @@ Boxes so far:
   frames in, Event frames out; the surface a front end drives.
 - [`crates/noob`](../crates/noob/CONTRACT.md) - the binary itself: argv
   surface, exit codes, and the box map behind it.
+- [`gui/clippy/src/dock`](../gui/clippy/src/dock/CONTRACT.md) - the 2x2
+  grid model: views, cells, tabs, dividers.
+- [`gui/clippy/src/prompt`](../gui/clippy/src/prompt/CONTRACT.md) - the
+  input line: text, caret, selection, counted in characters.
+- [`gui/clippy/src/select`](../gui/clippy/src/select/CONTRACT.md) - pointer
+  selection over monospace panes, in absolute lines.
+- [`gui/clippy/src/scroll`](../gui/clippy/src/scroll/CONTRACT.md) - one
+  top-anchored offset per view, clamped to content.
+- [`gui/clippy/src/orb`](../gui/clippy/src/orb/CONTRACT.md) - the thinking
+  animation: dots, orbit, square rest plate, one morph.
+- [`gui/clippy/src/design`](../gui/clippy/src/design/CONTRACT.md) - the
+  space and type scales from one number, and the named icons.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,
