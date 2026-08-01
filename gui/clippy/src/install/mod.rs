@@ -130,7 +130,7 @@ pub fn check(source: &str) -> Result<String, String> {
 
 /// Exactly the clone the window runs, built without running it.
 ///
-/// Its own function for the reason [`crate::link::prompt_command`] is one: what
+/// Its own function for the reason [`crate::link::env_command`] is one: what
 /// the window asks a process to do is worth asserting without a repository and a
 /// network behind it. Shallow, quiet, and with `--` in front of the URL so a
 /// source beginning with a hyphen is a URL rather than a flag. The terminal
