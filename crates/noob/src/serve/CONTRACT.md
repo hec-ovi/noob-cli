@@ -29,6 +29,14 @@ agent answers and when.
   exactly as a Ctrl-C would, and the flag resets before the next prompt.
 - Exactly one frame stream: stdout carries frames and nothing else; human
   diagnostics go to stderr.
+- Every frame is also recorded beside the session
+  (`<id>.frames.jsonl`), the prompts included as `user.echo` (record-only:
+  the front end that sent one already echoed it). At resume the record
+  streams back first, lifecycle frames excepted, so a front end rebuilds
+  every pane from what already happened; a session that predates the
+  record replays its transcript mapped to frames instead, and gains a
+  record from then on. A record that cannot be written costs the replay,
+  never the session.
 
 ## Errors
 

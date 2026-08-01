@@ -24,6 +24,12 @@ tags rather than here; this file starts where it was added.
 - The CLI's session bootstrap is its own box (`crates/noob/src/boot`),
   shared by the REPL, exec, child and serve; serve stops reaching into
   main's privates.
+- A recovered session comes back whole: serve records every frame beside
+  the session and replays the record at resume, so the window rebuilds all
+  of its panes - conversation, activity, plan, agents, files, context -
+  exactly as they were, prompts included (`user.echo`, protocol version 2).
+  A session from before the record replays its transcript mapped to frames
+  and gains a record from then on.
 
 ## 0.11.1 - 2026-08-01
 

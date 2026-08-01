@@ -49,7 +49,7 @@ use std::fmt::Write as _;
 pub use serde_json::Value;
 
 /// Protocol version. Additive changes bump this; readers accept `<=` their own.
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 
 /// One frame on the wire: a version and a body.
 ///
@@ -434,6 +434,13 @@ pub enum Event {
     Error {
         line: String,
     },
+    /// A prompt the human sent, echoed back onto the stream. Written only
+    /// when a recorded session is replayed at resume: live prompts travel
+    /// as Commands and every front end echoes its own. This is what lets a
+    /// replay read as the conversation it was.
+    UserEcho {
+        text: String,
+    },
 
     /// A frame this reader does not know. Present so a newer writer degrades to
     /// missing features rather than a dead stream.
@@ -465,6 +472,7 @@ impl Body for Event {
             Event::UsageReport { .. } => "usage",
             Event::Metrics { .. } => "metrics",
             Event::Note { .. } => "note",
+            Event::UserEcho { .. } => "user.echo",
             Event::Error { .. } => "error",
             Event::Unknown => "unknown",
         }
@@ -598,6 +606,7 @@ impl Body for Event {
                 f_sample_list(out, "samples", samples);
             }
             Event::Note { line } | Event::Error { line } => f_str(out, "line", line),
+            Event::UserEcho { text } => f_str(out, "text", text),
             Event::Unknown => {}
         }
     }
@@ -699,6 +708,9 @@ impl Body for Event {
                     .and_then(Value::as_array)
                     .map(|items| items.iter().map(Sample::read).collect())
                     .unwrap_or_default(),
+            },
+            "user.echo" => Event::UserEcho {
+                text: get_str(value, "text"),
             },
             "note" => Event::Note {
                 line: get_str(value, "line"),
@@ -1322,6 +1334,7 @@ mod tests {
         ] {
             round_trip(Event::TextDelta { d: text.into() });
             round_trip(Event::Note { line: text.into() });
+            round_trip(Event::UserEcho { text: text.into() });
         }
     }
 
@@ -1350,7 +1363,7 @@ mod tests {
             brief: "src/a.rs".into(),
             args: Value::Null,
         });
-        assert!(line.starts_with(r#"{"v":1,"t":"tool.start","#), "{line}");
+        assert!(line.starts_with(r#"{"v":2,"t":"tool.start","#), "{line}");
     }
 
     /// The correlation fix. Every tool frame carries the same id, so a consumer

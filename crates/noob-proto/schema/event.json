@@ -304,6 +304,18 @@
       }
     },
     {
+      "title": "user.echo",
+      "description": "A prompt the human sent, echoed back onto the stream when a recorded session is replayed at resume. Live prompts travel as Commands.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "t", "text"],
+      "properties": {
+        "v": { "$ref": "#/$defs/v" },
+        "t": { "const": "user.echo" },
+        "text": { "type": "string" }
+      }
+    },
+    {
       "title": "error",
       "type": "object",
       "additionalProperties": false,
@@ -328,10 +340,10 @@
   ],
   "$defs": {
     "v": {
-      "description": "Protocol version. This writer writes 1; a reader refuses a frame above its own version.",
+      "description": "Protocol version. This writer writes 2; a reader refuses a frame above its own version.",
       "type": "integer",
       "minimum": 0,
-      "maximum": 1
+      "maximum": 2
     },
     "u32": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
     "u64": { "type": "integer", "minimum": 0 },

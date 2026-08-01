@@ -25,12 +25,22 @@ fn write_env(dir: &Path, base_url: &str) {
 /// wrote. Stdin closes after the last line, which is how a front end says it is
 /// done and how the session ends.
 fn serve(config: &Path, work: &Path, commands: &[Value]) -> (Vec<Value>, String) {
+    serve_with(config, work, &[], commands)
+}
+
+fn serve_with(
+    config: &Path,
+    work: &Path,
+    extra: &[&str],
+    commands: &[Value],
+) -> (Vec<Value>, String) {
     let mut child: Child = {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_noob"));
         noob_testkit::scrub_noob_env(&mut cmd);
         cmd.env("NOOB_CONFIG_DIR", config);
         cmd.current_dir(work);
         cmd.arg("serve");
+        cmd.args(extra);
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -49,7 +59,7 @@ fn serve(config: &Path, work: &Path, commands: &[Value]) -> (Vec<Value>, String)
         .map(|line| {
             let value: Value = serde_json::from_str(line)
                 .unwrap_or_else(|e| panic!("stdout must be frames only, got {line:?}: {e}"));
-            assert_eq!(value["v"], 1, "{line}");
+            assert_eq!(value["v"], 2, "{line}");
             value
         })
         .collect();
@@ -246,4 +256,57 @@ fn closing_stdin_ends_the_session() {
     let status = child.wait().unwrap();
     assert!(status.success(), "a closed front end is not a failure");
     server.assert_clean();
+}
+
+/// A resumed session replays its whole picture before anything new: every
+/// recorded frame streams back first - the prompt included, as `user.echo` -
+/// so a front end rebuilds all of its panes from what already happened, and
+/// only then does the live conversation continue.
+#[test]
+fn a_resumed_session_replays_its_record_before_the_live_stream() {
+    let server = MockServer::start();
+    server.enqueue_completion("first answer");
+    let config = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    write_env(config.path(), &server.base_url());
+    let (frames, _) = serve(
+        config.path(),
+        work.path(),
+        &[serde_json::json!({"v": 1, "t": "prompt.submit", "text": "hello there"})],
+    );
+    let id = frames[0]["id"].as_str().unwrap().to_string();
+    server.assert_clean();
+
+    server.enqueue_completion("second answer");
+    let (frames, stderr) = serve_with(
+        config.path(),
+        work.path(),
+        &["--resume", &id],
+        &[serde_json::json!({"v": 1, "t": "prompt.submit", "text": "and again"})],
+    );
+    assert_eq!(stderr, "", "the protocol is the only output");
+    server.assert_clean();
+
+    assert_eq!(frames[0]["t"], "session.start");
+    assert_eq!(frames[0]["resumed"], true);
+    // The record comes back whole and in order: the old turn, its prompt as
+    // user.echo, its text; then the live turn.
+    let full = text(&frames);
+    let old = full.find("first answer").expect("the recorded answer replays");
+    let live = full.find("second answer").expect("the live answer arrives");
+    assert!(old < live, "{full}");
+    let echoed: Vec<&str> = frames
+        .iter()
+        .filter(|f| f["t"] == "user.echo")
+        .map(|f| f["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(echoed, ["hello there"], "the prompt replays exactly once");
+    // And a third life replays both turns, so the record really grew.
+    let (frames, _) = serve_with(config.path(), work.path(), &["--resume", &id], &[]);
+    let echoed: Vec<&str> = frames
+        .iter()
+        .filter(|f| f["t"] == "user.echo")
+        .map(|f| f["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(echoed, ["hello there", "and again"]);
 }

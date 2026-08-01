@@ -1,17 +1,132 @@
 //! The `serve` subcommand: noob-proto Command frames on stdin, Event frames
 //! on stdout. The surface a front end attaches to.
 
+use std::io::Write;
 use std::process::ExitCode;
 
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use noob_provider::http::INTERRUPTED;
-use noob_provider::types::Overrides;
+use noob_provider::types::{Item, Overrides};
 
 use crate::ui::Ui;
 use crate::agent::RunEnd;
 use crate::boot::{BootArgs, bootstrap, value_for};
 use crate::emit;
+
+/// Every frame to stdout, and to the session's record beside it once one is
+/// attached. The record is what a resumed session replays, so the window
+/// gets the whole picture back; a record that cannot be written costs the
+/// replay, never the session.
+struct Tee {
+    out: std::io::Stdout,
+    record: Arc<Mutex<Option<std::fs::File>>>,
+}
+
+impl Write for Tee {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Ok(mut file) = self.record.lock()
+            && let Some(file) = file.as_mut()
+        {
+            let _ = file.write_all(buf);
+        }
+        self.out.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if let Ok(mut file) = self.record.lock()
+            && let Some(file) = file.as_mut()
+        {
+            let _ = file.flush();
+        }
+        self.out.flush()
+    }
+}
+
+/// Where a session's frame record lives: beside its transcript.
+fn record_path(session: &std::path::Path) -> std::path::PathBuf {
+    session.with_extension("frames.jsonl")
+}
+
+/// Send a recorded session's frames back down the live stream, skipping the
+/// lifecycle frames the fresh boot has already said. Junk lines are skipped
+/// the way every reader of this protocol skips them.
+fn replay_record(emitter: &emit::Emitter, path: &std::path::Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let mut sent = false;
+    for line in text.lines() {
+        let Some(frame) = noob_proto::decode::<noob_proto::Event>(line) else {
+            continue;
+        };
+        match frame.body {
+            noob_proto::Event::SessionStart { .. } | noob_proto::Event::SessionEnd { .. } => {}
+            body => {
+                emitter.send(body);
+                sent = true;
+            }
+        }
+    }
+    sent
+}
+
+/// The fallback for a session recorded before frames were: the transcript
+/// itself, mapped to the frames it would have produced. Coarser than a
+/// record (no timings, no progress, no file diffs), but every prompt,
+/// answer and call comes back.
+fn replay_transcript(emitter: &emit::Emitter, items: &[Item]) {
+    let mut turn = 0u32;
+    let mut open = false;
+    for item in items {
+        match item {
+            Item::User(text) => {
+                if open {
+                    emitter.send(noob_proto::Event::TurnEnd {
+                        turn,
+                        interrupted: None,
+                    });
+                }
+                turn += 1;
+                open = true;
+                emitter.send(noob_proto::Event::TurnStart { turn });
+                emitter.send(noob_proto::Event::UserEcho { text: text.clone() });
+            }
+            Item::Assistant { text, tool_calls, .. } => {
+                if !text.is_empty() {
+                    emitter.send(noob_proto::Event::TextDelta {
+                        d: format!("{text}\n"),
+                    });
+                }
+                for call in tool_calls {
+                    let args: noob_proto::Value =
+                        serde_json::from_str(&call.arguments).unwrap_or(noob_proto::Value::Null);
+                    emitter.send(noob_proto::Event::ToolStart {
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        brief: String::new(),
+                        args,
+                    });
+                }
+            }
+            Item::ToolResult { call_id, content } => {
+                emitter.send(noob_proto::Event::ToolEnd {
+                    call_id: call_id.clone(),
+                    summary: content.lines().next().unwrap_or("").to_string(),
+                    elapsed_ms: 0,
+                    error: None,
+                });
+            }
+        }
+    }
+    if open {
+        emitter.send(noob_proto::Event::TurnEnd {
+            turn,
+            interrupted: None,
+        });
+    }
+}
 
 /// The surface a front end drives. It is a separate subcommand rather than a
 /// mode of the REPL for one reason: the REPL owns the terminal outright, in raw
@@ -63,8 +178,13 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
 
     let mut ui = Ui::serve();
     // Line-buffered stdout would hold a frame until a newline it already has,
-    // and the emitter flushes per frame anyway, so this is the whole transport.
-    let emitter = emit::Emitter::to(Box::new(std::io::stdout()));
+    // and the emitter flushes per frame anyway, so this is the whole
+    // transport - teed into the session's record once one is known.
+    let record = Arc::new(Mutex::new(None));
+    let emitter = emit::Emitter::to(Box::new(Tee {
+        out: std::io::stdout(),
+        record: record.clone(),
+    }));
     let mut boot = BootArgs::new(ov, yolo, plan, Some(session_id));
     boot.verbose = verbose;
     boot.emitter = Some(emitter.clone());
@@ -80,6 +200,31 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    // A resumed session replays its whole picture before anything new: the
+    // recorded frames when this session has them, the transcript mapped to
+    // frames when it predates the record. Only then does the record open
+    // for appending, so a replay can never read its own writes.
+    if let Some(session) = agent.session.as_ref() {
+        let path = record_path(session.path());
+        let recorded = replay_record(&emitter, &path);
+        // Attached after the read, so a replay can never read its own
+        // writes; before the fallback, so a session that predates the
+        // record gets one now and replays in full next time.
+        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            *record.lock().expect("no holder panics") = Some(file);
+        }
+        if !recorded && !agent.items.is_empty() {
+            let harness = [crate::agent::PLAN_ENTER_MSG, crate::agent::BUDGET_NUDGE_MSG];
+            let shown: Vec<Item> = agent
+                .items
+                .iter()
+                .filter(|item| !matches!(item, Item::User(text) if harness.contains(&text.as_str())))
+                .cloned()
+                .collect();
+            replay_transcript(&emitter, &shown);
+        }
+    }
 
     // A front end drives a long-lived conversation, same as the dock, so
     // sub-agents detach here too. Without this they run inline, the session
@@ -153,6 +298,15 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
         if text.trim().is_empty() {
             continue;
         }
+        // The prompt goes into the record and only the record: the front end
+        // that sent it already echoed it, and a replay is the one reader
+        // that needs it back.
+        if let Ok(mut file) = record.lock()
+            && let Some(file) = file.as_mut()
+        {
+            let echo = noob_proto::Event::UserEcho { text: text.clone() };
+            let _ = file.write_all(noob_proto::encode(&echo).as_bytes());
+        }
         // A cancel that arrived between turns has nothing to cancel; leaving
         // it set would kill the turn about to start.
         INTERRUPTED.store(false, Ordering::SeqCst);
@@ -173,4 +327,89 @@ pub(crate) fn run(args: &[String]) -> ExitCode {
             .unwrap_or_default(),
     });
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The transcript mapper: every prompt, answer and call comes back as
+    /// the frames it would have produced, turns bracketed, calls paired by
+    /// id so nothing replays as still running or as parallel.
+    #[test]
+    fn a_transcript_replays_as_the_frames_it_would_have_produced() {
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let emitter = emit::Emitter::to(Box::new(Buf(sink.clone())));
+        replay_transcript(
+            &emitter,
+            &[
+                Item::User("hello".into()),
+                Item::Assistant {
+                    text: "hi there".into(),
+                    tool_calls: vec![noob_provider::types::ToolCall {
+                        id: "c1".into(),
+                        name: "read".into(),
+                        arguments: r#"{"path":"a.rs"}"#.into(),
+                    }],
+                    raw_items: Vec::new(),
+                },
+                Item::ToolResult {
+                    call_id: "c1".into(),
+                    content: "read 3 lines\nmore".into(),
+                },
+                Item::User("and now?".into()),
+                Item::Assistant {
+                    text: "done".into(),
+                    tool_calls: Vec::new(),
+                    raw_items: Vec::new(),
+                },
+            ],
+        );
+        let text = String::from_utf8(sink.lock().unwrap().clone()).unwrap();
+        let tags: Vec<String> = text
+            .lines()
+            .filter_map(noob_proto::decode::<noob_proto::Event>)
+            .map(|frame| {
+                use noob_proto::Body;
+                frame.body.tag().to_string()
+            })
+            .collect();
+        assert_eq!(
+            tags,
+            [
+                "turn.start",
+                "user.echo",
+                "text.delta",
+                "tool.start",
+                "tool.end",
+                "turn.end",
+                "turn.start",
+                "user.echo",
+                "text.delta",
+                "turn.end"
+            ],
+            "{text}"
+        );
+        assert!(text.contains(r#""text":"hello""#), "{text}");
+        assert!(text.contains(r#""summary":"read 3 lines""#), "{text}");
+    }
+
+    /// The record lives beside the transcript it belongs to.
+    #[test]
+    fn the_record_stands_beside_its_session() {
+        assert_eq!(
+            record_path(std::path::Path::new("/tmp/s/abc.jsonl")),
+            std::path::Path::new("/tmp/s/abc.frames.jsonl")
+        );
+    }
 }

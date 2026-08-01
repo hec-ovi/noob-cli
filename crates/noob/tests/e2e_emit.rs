@@ -37,7 +37,7 @@ fn frames(path: &Path) -> Vec<Value> {
         .map(|line| {
             let value: Value =
                 serde_json::from_str(line).unwrap_or_else(|e| panic!("bad frame {line:?}: {e}"));
-            assert_eq!(value["v"], 1, "every frame carries its version: {line}");
+            assert_eq!(value["v"], 2, "every frame carries its version: {line}");
             assert!(value["t"].is_string(), "every frame names its type: {line}");
             value
         })

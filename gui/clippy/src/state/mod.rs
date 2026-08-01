@@ -1742,6 +1742,9 @@ impl State {
                 self.usage = Some(usage);
             }
 
+            // A replayed prompt from a recorded session: the record the
+            // live submit would have echoed, without the phase moving.
+            Event::UserEcho { text } => self.echo(&text),
             Event::Note { line } => self.output.say(line, Tone::Dim),
             Event::Error { line } => {
                 self.output.blank_if_needed();
@@ -2110,6 +2113,24 @@ mod tests {
             .filter(|l| l.contains("› second"))
             .count();
         assert_eq!(echoes, 1, "one dispatch, one record");
+    }
+
+    /// A replayed prompt echoes exactly as a live submit would have, so a
+    /// recovered session reads as the conversation it was.
+    #[test]
+    fn a_replayed_prompt_echoes_like_a_live_one() {
+        let mut state = State::new();
+        state.apply(Event::UserEcho {
+            text: "spin up one agent".into(),
+        });
+        assert!(
+            texts(&state.output)
+                .iter()
+                .any(|l| l == "› spin up one agent"),
+            "{:?}",
+            texts(&state.output)
+        );
+        assert_eq!(state.phase, Phase::Starting, "a replay moves no phase");
     }
 
     /// The queue dies with the session: nothing is left to dispatch it, and a

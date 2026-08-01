@@ -164,7 +164,7 @@
       "description": "Protocol version. This writer writes 1; a reader refuses a frame above its own version.",
       "type": "integer",
       "minimum": 0,
-      "maximum": 1
+      "maximum": 2
     }
   }
 }
