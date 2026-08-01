@@ -40,6 +40,9 @@
 //! session to carry on in it, so the one path that starts an agent starts both
 //! kinds.
 
+pub mod paint;
+pub mod places;
+
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 

@@ -23,7 +23,7 @@ use crate::dock::{Dock, Space, View};
 use crate::design::icons;
 use crate::menu::{MARKER_COLUMNS, Menu};
 use crate::monitor::Monitor;
-use crate::picker::{Picker, Row as PickerRow};
+use crate::picker::Picker;
 use crate::settings::{Settings, Side};
 use crate::skin::Skin;
 use crate::state::State;
@@ -198,7 +198,7 @@ const DIFF_MIN_COLUMNS: usize = GUTTER + 20;
 /// fixed size ([`SESSION_COLUMNS`]) and the last one holding what was first said
 /// in the session. Sixty-four columns fitted the folder list alone and left the
 /// opening line four words wide.
-const PICKER_COLUMNS: usize = 96;
+pub(crate) const PICKER_COLUMNS: usize = 96;
 /// Where the dividers sit on a window nobody has dragged one in: a column takes
 /// this much of the width, and a top space this much of the height.
 /// How far either side of the gap between two panes the pointer still counts as
@@ -268,7 +268,7 @@ pub(crate) const SETTING_VALUE_COLUMNS: usize = 28;
 /// The rows the picker spends above its list on plain writing: the heading and
 /// the folder it is listing. What has been typed sits under them in a bordered
 /// field of its own, which is [`picker_field_h`] rather than one row.
-const PICKER_HEAD_ROWS: f32 = 2.0;
+pub(crate) const PICKER_HEAD_ROWS: f32 = 2.0;
 
 /// How much taller the search field is than the line of text in it, on each
 /// side.
@@ -276,14 +276,14 @@ const PICKER_HEAD_ROWS: f32 = 2.0;
 /// The field carries the same cut corner and the same hairline every panel in
 /// this window carries, and a box drawn tight around a line of text reads as a
 /// line of text with a box round it rather than as something to type in.
-const PICKER_FIELD_PAD: f32 = 4.0;
+pub(crate) const PICKER_FIELD_PAD: f32 = 4.0;
 
 /// How far in from the left edge of a picker row its first mark sits.
 ///
 /// A pane's row runs to its own edge because the band behind it is the width of
 /// the pane. The picker's band is green and solid, so it needs an edge of its
 /// own rather than starting under the glyph.
-const PICKER_ROW_PAD: f32 = 5.0;
+pub(crate) const PICKER_ROW_PAD: f32 = 5.0;
 
 /// Columns a picker row spends on the mark that opens and shuts it, the mark
 /// included and a space after it, and columns a step further into the tree costs.
@@ -291,12 +291,12 @@ const PICKER_ROW_PAD: f32 = 5.0;
 /// Every row reserves the mark's column whether it has a mark or not, so the
 /// folder glyphs line up in one column down the list instead of the ones with a
 /// plus in front of them standing out of the ones without.
-const PICKER_MARK_COLUMNS: usize = 2;
-const PICKER_INDENT_COLUMNS: usize = 2;
+pub(crate) const PICKER_MARK_COLUMNS: usize = 2;
+pub(crate) const PICKER_INDENT_COLUMNS: usize = 2;
 /// The columns a row keeps for what it says, however deep it sits. Past this the
 /// indent stops growing: a name at depth twelve pushed off the right of the box
 /// is a row that says nothing.
-const PICKER_LABEL_COLUMNS: usize = 12;
+pub(crate) const PICKER_LABEL_COLUMNS: usize = 12;
 
 /// The session table's fixed columns: what each one is called at the top of the
 /// list, and how many characters wide it is.
@@ -310,14 +310,14 @@ const PICKER_LABEL_COLUMNS: usize = 12;
 /// One row of a session list used to be a single string, `"5m ago  hec  first"`,
 /// and item A7 is exactly the complaint that nobody could tell which part of it
 /// was what.
-const SESSION_COLUMNS: [(&str, usize); 4] = [
+pub(crate) const SESSION_COLUMNS: [(&str, usize); 4] = [
     ("when", 10),
     ("folder", 18),
     ("size", 10),
     ("context", 9),
 ];
 /// What the last column is called. It has no width of its own.
-const SESSION_OPENING: &str = "opening";
+pub(crate) const SESSION_OPENING: &str = "opening";
 
 /// Where a session row's table starts and how many columns it has, for a row
 /// panel `row` wide.
@@ -326,7 +326,7 @@ const SESSION_OPENING: &str = "opening";
 /// cannot come apart. In from the left by the same indent a folder row's mark
 /// takes plus the row's own glyph and the space after it, because a session row
 /// carries that glyph too and the table begins after it.
-fn session_table(row: Panel, column: f32) -> (f32, usize) {
+pub(crate) fn session_table(row: Panel, column: f32) -> (f32, usize) {
     let column = column.max(1.0);
     let x = row.x + PICKER_ROW_PAD + (PICKER_MARK_COLUMNS + ROW_ICON_COLUMNS + 1) as f32 * column;
     let room = ((row.x + row.w - x) / column).floor().max(0.0) as usize;
@@ -340,7 +340,7 @@ fn session_table(row: Panel, column: f32) -> (f32, usize) {
 /// padded string is a table, and one shaped run per row is one run to tint: a
 /// row of five texts on the cursor's green band would be five chances for one of
 /// them to be tinted wrong.
-fn session_line(cells: &[String], room: usize) -> String {
+pub(crate) fn session_line(cells: &[String], room: usize) -> String {
     let mut out = String::new();
     let mut left = room;
     for (step, cell) in cells.iter().enumerate() {
@@ -378,7 +378,7 @@ fn session_line(cells: &[String], room: usize) -> String {
 /// A SESSION. The title says what the box is for; which of the two lists is in
 /// front of you is said by the pair of buttons under it, and a title that also
 /// said it was a second thing to read for an answer already on screen.
-const PICKER_TITLE: &str = "OPEN FOLDER OR CONTINUE SESSION";
+pub(crate) const PICKER_TITLE: &str = "OPEN FOLDER OR CONTINUE SESSION";
 
 /// What the picker says on the button that opens the row the cursor is on.
 ///
@@ -386,21 +386,21 @@ const PICKER_TITLE: &str = "OPEN FOLDER OR CONTINUE SESSION";
 /// as wide as a path and made it change width every time the cursor moved. The
 /// path is already written above the list. "selected" rather than the folder or
 /// the session, because one button opens whichever of the two the cursor is on.
-const PICKER_OPEN_LABEL: &str = "Open selected";
+pub(crate) const PICKER_OPEN_LABEL: &str = "Open selected";
 
 /// The two buttons that choose which list is showing.
 ///
 /// Both are drawn in a box sized for the longer of the two, so the pair does not
 /// shuffle sideways when the list swaps, and the one whose list is showing is
 /// filled in the colour the chosen row is filled in.
-const PICKER_SESSIONS_LABEL: &str = "Sessions";
-const PICKER_FOLDERS_LABEL: &str = "Folders";
+pub(crate) const PICKER_SESSIONS_LABEL: &str = "Sessions";
+pub(crate) const PICKER_FOLDERS_LABEL: &str = "Folders";
 
 /// How much taller that button is than the line of text in it, on each side.
 ///
 /// A button reads as a button because there is room around what it says. The
 /// same string with a hairline drawn around it reads as a label with a box.
-const PICKER_OPEN_PAD: f32 = 5.0;
+pub(crate) const PICKER_OPEN_PAD: f32 = 5.0;
 
 /// How tall the picker's list is allowed to get, in rows, and how short.
 ///
@@ -412,16 +412,16 @@ const PICKER_OPEN_PAD: f32 = 5.0;
 /// still on one of them. A short folder now gets empty rows under its list,
 /// which is the cheaper of the two: a box that does not move is worth more than
 /// a box with no whitespace in it.
-const PICKER_MIN_ROWS: usize = 6;
-const PICKER_MAX_ROWS: usize = 24;
+pub(crate) const PICKER_MIN_ROWS: usize = 6;
+pub(crate) const PICKER_MAX_ROWS: usize = 24;
 
 /// How tall the Open button is for text of this line height.
-fn picker_open_h(line: f32) -> f32 {
+pub(crate) fn picker_open_h(line: f32) -> f32 {
     line + PICKER_OPEN_PAD * 2.0
 }
 
 /// How tall the search field is, for the same line height.
-fn picker_field_h(line: f32) -> f32 {
+pub(crate) fn picker_field_h(line: f32) -> f32 {
     line + PICKER_FIELD_PAD * 2.0
 }
 
@@ -436,14 +436,14 @@ fn picker_field_h(line: f32) -> f32 {
 /// The buttons moved up here from the foot and the foot kept the line of keys,
 /// so this is the same total as before and the list holds the same number of
 /// rows it always did.
-fn picker_head_h(line: f32) -> f32 {
+pub(crate) fn picker_head_h(line: f32) -> f32 {
     picker_open_h(line) + GAP + PICKER_HEAD_ROWS * line + picker_field_h(line) + GAP
 }
 
 /// What the picker keeps below its list: the line of keys. One answer, so the
 /// box that is measured and the rows that are drawn into it cannot disagree
 /// about where the bottom is.
-fn picker_foot(line: f32) -> f32 {
+pub(crate) fn picker_foot(line: f32) -> f32 {
     line
 }
 
@@ -1112,7 +1112,7 @@ impl Layout {
         // stale hit region left behind here would let a click reach a pane that
         // has no agent behind it.
         if let Some(picker) = shape.picker {
-            let places = place_picker(rest.inset(GAP), shape, picker);
+            let places = crate::picker::places::place_picker(rest.inset(GAP), shape, picker);
             return Layout {
                 width,
                 height,
@@ -2262,239 +2262,6 @@ fn place_files(body: Panel, shape: &Shape) -> (Panel, Panel, Vec<(usize, Panel)>
     (list, diff, panels)
 }
 
-/// Where the picker's pieces are. A struct rather than a tuple, the way the
-/// settings panel's are: five panels in a row is a call site nobody can read.
-struct PickerPlaces {
-    box_: Panel,
-    list: Panel,
-    rows: Vec<(usize, Panel)>,
-    marks: Vec<(usize, Panel)>,
-    open: Panel,
-    filter: Panel,
-    folders: Panel,
-    sessions: Panel,
-}
-
-/// How far in from the left of a picker row its mark sits, and how wide that
-/// mark is, for a row at this depth in the tree.
-///
-/// One answer, so the region a press is tested against and the glyph that is
-/// drawn cannot end up in two places. The indent stops growing once the label
-/// is down to [`PICKER_LABEL_COLUMNS`]: a deep tree in a narrow box would
-/// otherwise push its names off the right of the list.
-fn picker_indent(depth: usize, column: f32, cols: usize) -> (f32, f32) {
-    let column = column.max(1.0);
-    let room = cols
-        .saturating_sub(PICKER_LABEL_COLUMNS + PICKER_MARK_COLUMNS + ROW_ICON_COLUMNS + 1)
-        / PICKER_INDENT_COLUMNS.max(1);
-    let steps = depth.min(room);
-    (
-        PICKER_ROW_PAD + (steps * PICKER_INDENT_COLUMNS) as f32 * column,
-        PICKER_MARK_COLUMNS as f32 * column,
-    )
-}
-
-/// How much of the region that answers for the mark in front of a folder the
-/// mark itself is drawn in, and the least it is ever drawn at.
-///
-/// Well under half of it. The mark used to be a filled glyph as tall as the row,
-/// which made it the loudest thing on a row whose point is the folder's name,
-/// and a solid block is a state rather than a control.
-const PICKER_MARK_SIDE: f32 = 0.6;
-const PICKER_MARK_MIN: f32 = 5.0;
-
-/// The box that mark is drawn in, centred in the region that answers for
-/// pressing it.
-///
-/// An odd side, so the plus inside it has a middle column and a middle row to
-/// sit on. An even one puts the two bars off centre by half a pixel each and the
-/// mark reads as a lower-case t.
-fn picker_mark_box(mark: Panel) -> Panel {
-    let side = (mark.w.min(mark.h) * PICKER_MARK_SIDE)
-        .floor()
-        .max(PICKER_MARK_MIN);
-    let side = match side as i32 % 2 {
-        0 => side + 1.0,
-        _ => side,
-    };
-    Panel::new(
-        mark.x + ((mark.w - side) * 0.5).floor(),
-        mark.y + ((mark.h - side) * 0.5).floor(),
-        side,
-        side,
-    )
-}
-
-/// The folder picker's box, its list, the rows on screen, the mark that opens
-/// and shuts each of them, and its button.
-///
-/// Centred in `area` and no wider than [`PICKER_COLUMNS`], because the thing
-/// being read is a column of folder names: stretched across a 2200 pixel window
-/// the eye has to travel the whole width to get from a name to the button under
-/// it.
-///
-/// One shape, and it is not the folder's shape. The height is chosen from the
-/// room the window has, between [`PICKER_MIN_ROWS`] and [`PICKER_MAX_ROWS`], and
-/// then held: `picker` says what goes in the box and never how big it is. That
-/// is why nothing here reads `picker.rows().len()`. Walking into a folder with a
-/// different number of entries used to resize and recentre the whole dialog
-/// under the pointer, so every row moved out from under the click that was about
-/// to happen.
-fn place_picker(area: Panel, shape: &Shape, picker: &Picker) -> PickerPlaces {
-    if area.w < 1.0 || area.h < 1.0 {
-        return PickerPlaces {
-            box_: nowhere(),
-            list: nowhere(),
-            rows: Vec::new(),
-            marks: Vec::new(),
-            open: nowhere(),
-            filter: nowhere(),
-            folders: nowhere(),
-            sessions: nowhere(),
-        };
-    }
-    let column = shape.pane_column.max(1.0);
-    let line = Text::line_for(shape.pane_size);
-    let head = picker_head_h(line);
-    let foot = picker_foot(line);
-    // Everything the box spends on something other than its list.
-    let chrome = PAD * 2.0 + head + GAP + foot;
-    let fits = ((area.h - chrome) / line).floor().max(0.0) as usize;
-    let want = fits.clamp(PICKER_MIN_ROWS, PICKER_MAX_ROWS);
-    let w = (PICKER_COLUMNS as f32 * column + PAD * 2.0).min(area.w);
-    let h = (chrome + want as f32 * line).min(area.h);
-    let box_ = Panel::new(
-        area.x + ((area.w - w) * 0.5).floor(),
-        area.y + ((area.h - h) * 0.5).floor(),
-        w,
-        h,
-    );
-    let content = box_.inset(PAD);
-    // The session list keeps one line above itself for the row that names its
-    // columns. Taken out of the list rather than added to the head, so the box
-    // is the same box in both lists and only the rows inside it move: a head
-    // that changed height with the mode would move the whole dialog every time
-    // the Sessions button was pressed.
-    let header = match picker.on_sessions() {
-        true => line,
-        false => 0.0,
-    };
-    // Never past the room the box has for it: the head, the field and the
-    // button all want a height of their own, and in a window too short for
-    // them the list would otherwise start below the bottom of the box with the
-    // field above it sized as if that room were there.
-    let list = Panel::new(
-        content.x,
-        (content.y + head + header)
-            .min(content.y + content.h - foot - GAP)
-            .max(content.y),
-        content.w,
-        (content.h - head - header - foot - GAP).max(0.0),
-    );
-    let rows_fit = Text::rows_for(shape.pane_size, list.h);
-    let heights = picker.heights();
-    let back = text_geometry::scrollback_for(&heights, rows_fit, picker.first());
-    let window = text_geometry::window(&heights, rows_fit, back);
-    let rows: Vec<(usize, Panel)> = (0..window.count)
-        .map(|step| {
-            // The full width of the list, so the whole row answers the click the
-            // way a row of a file manager does, not just the characters of the
-            // name.
-            let index = window.first + step;
-            (
-                index,
-                Panel::new(list.x, list.y + step as f32 * line, list.w, line),
-            )
-        })
-        .collect();
-    // A mark only where there is a folder to open: the folder being listed, the
-    // way out of it, a folder remembered from an earlier session and the message
-    // under a folder that could not be read are not branches of the tree.
-    let cols = cols_of(list, column);
-    let marks = rows
-        .iter()
-        .filter_map(|(index, row)| {
-            let entry = picker.row(*index)?;
-            entry.open()?;
-            let (indent, wide) = picker_indent(entry.depth(), column, cols);
-            Some((*index, Panel::new(row.x + indent, row.y, wide, row.h)))
-        })
-        .collect();
-    // The three buttons, all on the head's first row and all the same height.
-    //
-    // Open sits at the right limit of the box and the two that choose the list
-    // sit at the left, so the button that acts on the row the cursor is on is
-    // the furthest thing on the row from the two that only change what is being
-    // listed. It used to be the other way round, with Open and the swap side by
-    // side in the bottom left corner, which put a button that starts a session
-    // one gap away from a button that does not.
-    let button_h = picker_open_h(line).min(content.h);
-    // Exactly as wide as what it says: the confirm glyph, the space after it,
-    // [`PICKER_OPEN_LABEL`], a column of indent on the left and two on the right
-    // so the cut corner never reaches the text.
-    let open_w = ((ROW_ICON_COLUMNS + 1 + PICKER_OPEN_LABEL.chars().count() + 3) as f32 * column)
-        .min(content.w);
-    let open = Panel::new(
-        content.x + content.w - open_w,
-        content.y,
-        open_w,
-        button_h,
-    );
-    // The pair at the left, both sized for the longer of the two words, so
-    // swapping the list does not move either of them, and both clipped to what
-    // is left of the row once Open and a gap on either side of the pair have
-    // been taken off: in a box too narrow for all three there are no mode
-    // buttons rather than buttons sticking out of the picker.
-    let mode_room = (content.w - open_w - GAP * 2.0).max(0.0);
-    let mode_w = ((ROW_ICON_COLUMNS
-        + 1
-        + PICKER_SESSIONS_LABEL
-            .chars()
-            .count()
-            .max(PICKER_FOLDERS_LABEL.chars().count())
-        + 3) as f32
-        * column)
-        .min(((mode_room - GAP) * 0.5).max(0.0));
-    let (folders, sessions) = match mode_w >= 1.0 {
-        true => (
-            Panel::new(content.x, content.y, mode_w, button_h),
-            Panel::new(content.x + mode_w + GAP, content.y, mode_w, button_h),
-        ),
-        false => (nowhere(), nowhere()),
-    };
-    // The search field, under the buttons and the two lines of writing and above
-    // the list. Its own panel rather than a rectangle worked out where the text
-    // is drawn, so the border, the icon and what has been typed all come off one
-    // shape.
-    //
-    // Its height is the room between the writing and the list, not the height a
-    // field would like to be: in a window short enough that the head has no
-    // room, a field taking its own height is drawn over the first rows of the
-    // list. It ends up at nothing at that size, which is a picker with no field
-    // rather than a field over the list. Its top is held inside the box for the
-    // same reason: a field with no height still has a position, and a position
-    // below the box is one the head of a short window would otherwise hand it.
-    let field_top = (content.y + button_h + GAP + PICKER_HEAD_ROWS * line)
-        .min(content.y + content.h)
-        .max(content.y);
-    let filter = Panel::new(
-        content.x,
-        field_top,
-        content.w,
-        picker_field_h(line).min((list.y - header - GAP - field_top).max(0.0)),
-    );
-    PickerPlaces {
-        box_,
-        list,
-        rows,
-        marks,
-        open,
-        filter,
-        folders,
-        sessions,
-    }
-}
-
 /// One strip's tabs, and the arrows for reaching the ones that did not fit.
 struct Strip {
     /// The tabs on screen, left to right, starting at `first`.
@@ -2736,7 +2503,7 @@ pub fn build(frame: &Frame) -> Scene {
     // returning before the overlay left a menu that answered presses and was
     // nowhere on screen.
     if layout.picking {
-        folder_picker(&mut scene, frame);
+        crate::picker::paint::folder_picker(&mut scene, frame);
         overlay(&mut scene, frame);
         return scene;
     }
@@ -3666,336 +3433,6 @@ pub fn scroll_extent(frame: &Frame, view: View, panel: Panel) -> Option<(Vec<usi
     }
 }
 
-/// The folder picker: the whole window until a folder is chosen.
-///
-/// One box in the middle of the surface, drawn with the same rectangles and the
-/// same text as everything else here. No native dialog: a file chooser from the
-/// desktop's toolkit would pull in dozens of crates and a portal at runtime, for
-/// a window whose whole point is that it is one GPU surface.
-fn folder_picker(scene: &mut Scene, frame: &Frame) {
-    let Some(picker) = frame.picker else {
-        return;
-    };
-    let (skin, layout) = (frame.skin, frame.layout);
-    let box_ = layout.picker;
-    if box_.w < 1.0 || box_.h < 1.0 {
-        return;
-    }
-    scene.rect(panel_fill(box_, skin.panel));
-    scene.rect(panel_edge(box_, skin.edge_focus));
-
-    let size = frame.pane_size;
-    let line = Text::line_for(size);
-    let content = box_.inset(PAD);
-    let cols = cols_of(content, frame.pane_column);
-    let say = |scene: &mut Scene, runs: Vec<Run>, at: Panel, tint: [u8; 4]| {
-        scene.text(Text::rich(runs, at, size, tint));
-    };
-
-    // The three buttons, on the row above the writing: the two that choose the
-    // list at the left, the one that opens the row the cursor is on at the right
-    // limit of the box.
-    //
-    // The pair carries a third face on top of the idle and the hot one every
-    // button here has, and the one whose list is showing wears it: the band the
-    // chosen row is drawn in, written over in the same dark ink. Two buttons
-    // drawn identically are two buttons that do not say which list is in front
-    // of you, and that answer used to be carried by the heading alone.
-    let on_sessions = picker.on_sessions();
-    for (panel, hit, icon, label) in [
-        (
-            layout.picker_folders,
-            Hit::PickerFolders,
-            icons::FOLDER,
-            PICKER_FOLDERS_LABEL,
-        ),
-        (
-            layout.picker_sessions,
-            Hit::PickerSessions,
-            icons::RECENT,
-            PICKER_SESSIONS_LABEL,
-        ),
-        (
-            layout.picker_open,
-            Hit::PickerOpen,
-            icons::CONFIRM,
-            PICKER_OPEN_LABEL,
-        ),
-    ] {
-        if panel.w < 1.0 || panel.h < 1.0 {
-            continue;
-        }
-        let showing = match hit {
-            Hit::PickerFolders => !on_sessions,
-            Hit::PickerSessions => on_sessions,
-            _ => false,
-        };
-        // The showing mode keeps its band under the pointer. Pressing it does
-        // nothing, so lighting it would promise a change that never comes.
-        let (face, ink) = match (showing, frame.hot == Some(hit)) {
-            (true, _) => (skin.picked, skin.picked_ink),
-            (false, true) => (skin.button_hot, skin.bright),
-            (false, false) => (skin.button, skin.bright),
-        };
-        scene.rect(panel_fill(panel, face));
-        scene.rect(panel_edge(panel, skin.edge_focus));
-        say(
-            scene,
-            vec![
-                Run::icon(icon.to_string(), ink),
-                Run::tinted(format!(" {label}"), ink),
-            ],
-            Panel::new(
-                panel.x + frame.pane_column,
-                panel.y + PICKER_OPEN_PAD,
-                (panel.w - frame.pane_column).max(1.0),
-                line,
-            ),
-            ink,
-        );
-    }
-    // The title, one string in both lists, and what the session list says about
-    // itself beside it: how many there are, and how many files in the directory
-    // could not be described.
-    let writing = layout.picker_open.y + layout.picker_open.h + GAP;
-    let mut head = vec![Run::tinted(PICKER_TITLE, skin.bright)];
-    if let Some(note) = picker.note() {
-        let room = cols.saturating_sub(PICKER_TITLE.chars().count() + 2);
-        head.push(Run::tinted(format!("  {}", clip(note, room)), skin.dim));
-    }
-    say(
-        scene,
-        head,
-        Panel::new(content.x, writing, content.w, line),
-        skin.bright,
-    );
-    // The folder being listed, in full. The rows under it are names, so this is
-    // the only thing on screen saying where in the tree they are, and with the
-    // sessions showing it is the folder a session that never noted one would be
-    // resumed in.
-    say(
-        scene,
-        vec![Run::tinted(
-            clip(&picker.at().display().to_string(), cols),
-            skin.body,
-        )],
-        Panel::new(content.x, writing + line, content.w, line),
-        skin.body,
-    );
-    // What has been typed, why the list is empty when it is empty for a reason,
-    // or why the last press did nothing. A folder with no permission looks
-    // exactly like an empty folder otherwise, and a button that silently does
-    // not work looks exactly like a button that is broken.
-    //
-    // In a box of its own, with the surface the prompt is drawn on, the hairline
-    // every panel here carries and the same cut corner. It was a line of text
-    // with a funnel in front of it, which said the list had been narrowed and
-    // never said that this is the thing you type into.
-    let field = layout.picker_filter;
-    let mut runs = vec![Run::icon(icons::SEARCH.to_string(), skin.dim), Run::plain(" ")];
-    let room = cols.saturating_sub(ROW_ICON_COLUMNS + 2);
-    let tint = match (picker.refused().or(picker.trouble()), picker.filter()) {
-        (Some(why), _) => {
-            runs.push(Run::tinted(clip(why, room), skin.bad));
-            skin.bad
-        }
-        (None, "") => {
-            runs.push(Run::tinted("type to narrow the list", skin.dim));
-            skin.dim
-        }
-        (None, typed) => {
-            runs.push(Run::tinted(clip(typed, room), skin.bright));
-            skin.bright
-        }
-    };
-    if field.w >= 1.0 && field.h >= 1.0 {
-        scene.rect(panel_fill(field, skin.input));
-        scene.rect(panel_edge(field, skin.edge_focus));
-        say(
-            scene,
-            runs,
-            Panel::new(
-                field.x + PAD,
-                field.y + PICKER_FIELD_PAD,
-                (field.w - 2.0 * PAD).max(1.0),
-                line,
-            ),
-            tint,
-        );
-    }
-
-    // The row that names the columns, on the line the layout kept above the
-    // list. Only the sessions are a table: a folder list is one column of names
-    // and a header over it would be a word explaining the obvious.
-    if picker.on_sessions() {
-        let head_row = Panel::new(
-            layout.picker_list.x,
-            layout.picker_list.y - line,
-            layout.picker_list.w,
-            line,
-        );
-        let (at, room) = session_table(head_row, frame.pane_column);
-        let names: Vec<String> = SESSION_COLUMNS
-            .iter()
-            .map(|(name, _)| String::from(*name))
-            .chain(std::iter::once(String::from(SESSION_OPENING)))
-            .collect();
-        say(
-            scene,
-            vec![Run::tinted(session_line(&names, room), skin.dim)],
-            Panel::new(at, head_row.y, (head_row.w - (at - head_row.x)).max(1.0), line),
-            skin.dim,
-        );
-    }
-
-    let list_cols = cols_of(layout.picker_list, frame.pane_column);
-    for (index, row) in &layout.picker_rows {
-        let Some(entry) = picker.row(*index) else {
-            continue;
-        };
-        let on = *index == picker.cursor();
-        if on {
-            // Filled solid in the good colour, and written over in the darkest
-            // ink the palette has. The quiet band the file explorer marks its
-            // open row with was not enough here: the picker is a list of forty
-            // folders where the only question is which one Enter opens.
-            scene.rect(row.fill(skin.picked));
-        }
-        // Typing dims what it did not match instead of taking it away, so the
-        // list you were reading is still the list in front of you. The answer
-        // comes from the model, which is the same answer the arrow keys walk by:
-        // a row cannot be dim here and bright to the keyboard.
-        // A session whose folder has been deleted is drawn the way an
-        // unreadable folder is, because it is the same thing: a row that is
-        // there to be seen and cannot be opened.
-        let dead = matches!(entry, PickerRow::Session(saved) if saved.gone);
-        let tint = match (on, picker.matched(entry), entry) {
-            (true, _, _) => skin.picked_ink,
-            (false, false, _) => skin.dim,
-            (false, true, PickerRow::Locked { .. }) => skin.bad,
-            (false, true, _) if dead => skin.bad,
-            (false, true, _) => skin.body,
-        };
-        let icon = match entry {
-            PickerRow::Here => icons::FOLDER_OPEN,
-            PickerRow::Up => icons::UP,
-            PickerRow::Recent(_) => icons::RECENT,
-            PickerRow::Folder { .. } => icons::FOLDER,
-            PickerRow::Locked { .. } => icons::LOCKED,
-            // The clock the remembered folders carry, since a saved session is
-            // the same idea: something from before. The lock when it cannot be
-            // opened, which is what that glyph says everywhere else here.
-            PickerRow::Session(saved) => match saved.gone {
-                true => icons::LOCKED,
-                false => icons::RECENT,
-            },
-        };
-        // The mark that opens and shuts the folder, drawn inside the region that
-        // answers for pressing it: a hairline box with a plus in it, or with the
-        // plus's upright taken away once the folder is open.
-        //
-        // Rectangles rather than a glyph. It was Font Awesome's filled
-        // plus-square at the size of the row's text, which put a solid block at
-        // the front of every folder in the list: the biggest, heaviest thing on
-        // a row whose point is the folder's name. Nothing is filled here and the
-        // box is well under the height of the row.
-        let (indent, wide) = picker_indent(entry.depth(), frame.pane_column, list_cols);
-        if let Some(open) = entry.open() {
-            let hot = frame.hot == Some(Hit::PickerMark(*index));
-            // Green, and the panel colour instead on the row the cursor is on,
-            // where the band behind it is already that green. Under the pointer
-            // it keeps its colour and doubles its weight: a second colour for a
-            // hover is a mark that means two things.
-            let edge = match on {
-                true => skin.mark_on_band,
-                false => skin.mark_edge,
-            };
-            let weight = match hot {
-                true => 2.0,
-                false => 1.0,
-            };
-            let square = picker_mark_box(Panel::new(row.x + indent, row.y, wide, line));
-            scene.rect(square.outline(edge, weight));
-            // The bars sit two pixels inside the box on every side, so the plus
-            // never touches the edge round it, and both are one pixel: the box
-            // is nine across and a thicker bar closes the gap up.
-            let middle = ((square.w - 1.0) * 0.5).floor();
-            let arm = (square.w - 4.0).max(1.0);
-            scene.rect(Panel::new(square.x + 2.0, square.y + middle, arm, 1.0).fill(edge));
-            if !open {
-                scene.rect(Panel::new(square.x + middle, square.y + 2.0, 1.0, arm).fill(edge));
-            }
-        }
-        let start = indent + wide;
-        // A session is a table row: the glyph in the gutter, then the cells, at
-        // the one x the header above the list is written at. Its own text rather
-        // than one run after the glyph, because the header has no glyph and the
-        // two have to line up to the pixel.
-        if let PickerRow::Session(saved) = entry {
-            let (at, room) = session_table(*row, frame.pane_column);
-            say(
-                scene,
-                vec![Run::icon(icon.to_string(), tint)],
-                Panel::new(row.x + start, row.y, (row.w - start).max(1.0), line),
-                tint,
-            );
-            say(
-                scene,
-                vec![Run::tinted(
-                    session_line(&picker.session_cells(saved), room),
-                    tint,
-                )],
-                Panel::new(at, row.y, (row.x + row.w - at).max(1.0), line),
-                tint,
-            );
-            continue;
-        }
-        let room = cols
-            .saturating_sub(ROW_ICON_COLUMNS + 1 + (start / frame.pane_column.max(1.0)) as usize)
-            .max(1);
-        say(
-            scene,
-            vec![
-                Run::icon(icon.to_string(), tint),
-                Run::tinted(format!(" {}", clip(&picker.label(entry), room)), tint),
-            ],
-            Panel::new(row.x + start, row.y, (row.w - start).max(1.0), line),
-            tint,
-        );
-    }
-    scrollbar(
-        scene,
-        skin,
-        layout.picker,
-        picker.thumb(layout.picker_capacity(size)),
-    );
-
-    // The keys, spelled out, on the last line of the box. Nothing else in this
-    // window needs them written down, but this is the first thing a new install
-    // shows and it is the one place where there is no pane to experiment in.
-    //
-    // It is the whole of the foot now that the buttons are in the head, so it is
-    // placed off the bottom of the box, which is where [`picker_foot`] says the
-    // one line it keeps down there is.
-    say(
-        scene,
-        vec![Run::tinted(
-            clip(
-                "enter opens \u{2022} right walks in \u{2022} left goes out \u{2022} esc quits",
-                cols,
-            ),
-            skin.dim,
-        )],
-        Panel::new(
-            content.x,
-            (content.y + content.h - line).max(content.y),
-            content.w,
-            line,
-        ),
-        skin.dim,
-    );
-}
-
 /// The tab under the pointer while it is being dragged, so the drag has
 /// something following it and the drop has somewhere to be aimed.
 ///
@@ -4368,6 +3805,7 @@ mod tests {
     #[allow(clippy::wildcard_imports)]
     use crate::settings::places::*;
     use crate::settings::paint::swatch;
+    use crate::picker::Row as PickerRow;
     use crate::settings::Row as SettingRow;
     use crate::state::Tone;
 

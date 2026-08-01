@@ -18,7 +18,7 @@ package, the binary and everything a user sees are `no0b`.
 | What the settings panel lists, and what changing a row writes | `gui/clippy/src/settings/CONTRACT.md`, routed in `gui/clippy/src/main.rs` |
 | Mouse, keyboard, selection gestures, the window lifecycle | `gui/clippy/src/main.rs` |
 | What a right click offers and what a row does | `gui/clippy/src/menu/CONTRACT.md`, routed in `gui/clippy/src/main.rs` |
-| Choosing the folder the agent works in, and the folders NO0B remembers | `gui/clippy/src/picker.rs`, drawn by `view::folder_picker`, routed in `gui/clippy/src/main.rs` |
+| Choosing the folder the agent works in, and the folders NO0B remembers | `gui/clippy/src/picker/CONTRACT.md`, routed in `gui/clippy/src/main.rs` |
 | Which saved sessions the first screen offers, and which folder each one belongs to | `gui/clippy/src/sessions/CONTRACT.md`, listed by `picker::Picker::show_sessions`, routed in `gui/clippy/src/main.rs` |
 | The conversation and metrics model: what an event does to state | `gui/clippy/src/state/CONTRACT.md` |
 | Where a pane that is a list is scrolled to, and what clamps it | `gui/clippy/src/scroll/CONTRACT.md`, content measured by `view::scroll_extent` |
@@ -134,6 +134,8 @@ Boxes so far:
   contract.
 - [`gui/clippy/src/settings`](../gui/clippy/src/settings/CONTRACT.md) - the
   settings panel reunited: model, places, and paint over one geometry.
+- [`gui/clippy/src/picker`](../gui/clippy/src/picker/CONTRACT.md) - the
+  startup chooser reunited: model, places, and paint over one geometry.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,
