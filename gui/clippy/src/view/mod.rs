@@ -3332,7 +3332,13 @@ pub(crate) fn selection_band(scene: &mut Scene, frame: &Frame, panel: Panel, sho
     // put the highlight off the glyphs it was supposed to cover.
     let (size, column) = frame.metrics_of(view);
     let content = panel.inset(PAD);
-    let rows = frame.layout.rows(panel, size);
+    let fit = frame.layout.rows(panel, size);
+    // The transcript gives its bottom rows to the queued messages, so the
+    // band is measured over the rows the text was really drawn in.
+    let rows = match view {
+        View::Output => fit - frame.state.output_reserved(fit),
+        _ => fit,
+    };
     // The columns the text is in and the columns in front of it, from the one
     // place that says so: the file view keeps four for its line numbers, and a
     // band measured in the full width of the box was four columns wide of the
@@ -4683,6 +4689,24 @@ mod tests {
         assert!(text_of(&build(&frame)).contains("press ESC again to cancel"));
         frame.esc_armed = false;
         assert!(!text_of(&build(&frame)).contains("press ESC again to cancel"));
+    }
+
+    /// A message waiting behind the running turn is pinned into the OUTPUT
+    /// pane as a tagged row; dispatching it takes the tag away.
+    #[test]
+    fn a_queued_message_pins_a_tagged_row_into_the_output_pane() {
+        let mut state = busy_state();
+        state.enqueue("try the other file");
+        let out = render_at(&state, 0.0);
+        assert!(text_of(&out.scene).contains("› try the other file [queued]"));
+        state.apply(noob_proto::Event::TurnEnd {
+            turn: 1,
+            interrupted: None,
+        });
+        state.apply(noob_proto::Event::TurnStart { turn: 2 });
+        let text = text_of(&render_at(&state, 0.0).scene);
+        assert!(text.contains("› try the other file"));
+        assert!(!text.contains("[queued]"));
     }
 
     /// Every cell that has tabs in it, which is not every cell of the grid: the

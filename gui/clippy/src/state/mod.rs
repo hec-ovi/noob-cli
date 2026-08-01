@@ -1027,6 +1027,12 @@ pub struct State {
 
     pub output: Pane,
     pub activity: Pane,
+    /// Prompts submitted while a turn was running, waiting behind it in
+    /// dispatch order. Not part of the transcript yet: each one echoes as a
+    /// plain `› message` record at the `turn.start` that takes it, and until
+    /// then the OUTPUT pane pins it to its bottom rows as a dim `[queued]`
+    /// line that never scrolls away.
+    pub queued: Vec<String>,
     pub plan: Vec<Todo>,
     pub agents: Vec<AgentRow>,
     pub files: Vec<FileView>,
@@ -1109,6 +1115,7 @@ impl State {
             // is measured, banded and copied in what it draws.
             output: Pane::new(6000).rendered(),
             activity: Pane::new(4000),
+            queued: Vec::new(),
             plan: Vec::new(),
             agents: Vec::new(),
             files: Vec::new(),
@@ -1234,11 +1241,32 @@ impl State {
     /// What the human typed, echoed into the transcript so the conversation
     /// reads as a conversation.
     pub fn submitted(&mut self, text: &str) {
+        self.echo(text);
+        self.phase = Phase::Thinking;
+        self.status = String::from("thinking");
+    }
+
+    /// A prompt typed while the agent already had the turn. It waits in
+    /// [`State::queued`] rather than entering the transcript: echoed at
+    /// acceptance it would read as answered by whatever the running turn was
+    /// already saying. The phase stays where it is, because nothing new is
+    /// being thought about yet.
+    pub fn enqueue(&mut self, text: &str) {
+        self.queued.push(text.to_string());
+    }
+
+    /// How many of a panel's rows the queued messages pin to its bottom. At
+    /// least one row always stays with the transcript, so a queue can crowd
+    /// the conversation but never replace it.
+    pub fn output_reserved(&self, rows: usize) -> usize {
+        self.queued.len().min(rows.saturating_sub(1))
+    }
+
+    /// The `› message` record both submission paths write.
+    fn echo(&mut self, text: &str) {
         self.output.blank_if_needed();
         self.output.say(format!("› {text}"), Tone::Bright);
         self.output.push(Line::new("", Tone::Body));
-        self.phase = Phase::Thinking;
-        self.status = String::from("thinking");
     }
 
     /// A /command the window ran itself, echoed the same way but never sent:
@@ -1317,9 +1345,21 @@ impl State {
             Event::SessionEnd { .. } => {
                 self.phase = Phase::Gone;
                 self.status = String::from("the agent stopped");
+                // Nothing is left to dispatch these; a [queued] row outliving
+                // the agent would promise a turn that can never come.
+                self.queued.clear();
             }
             Event::TurnStart { turn } => {
                 self.turn = turn;
+                // A turn that starts while messages wait is the front one's
+                // turn: its pinned [queued] row becomes the plain `› message`
+                // record, and the tag goes with it. Echoed here rather than
+                // at acceptance, so a message can never read as answered by a
+                // turn that never saw it.
+                if !self.queued.is_empty() {
+                    let text = self.queued.remove(0);
+                    self.echo(&text);
+                }
                 self.phase = Phase::Thinking;
                 self.status = String::from("thinking");
             }
@@ -1918,6 +1958,56 @@ mod tests {
             .iter()
             .map(|l| l.text.clone())
             .collect()
+    }
+
+    /// A prompt queued mid-turn stays out of the transcript until the turn
+    /// that takes it starts, then echoes exactly once, in dispatch order.
+    #[test]
+    fn a_queued_prompt_echoes_at_the_turn_that_takes_it() {
+        let mut state = State::new();
+        state.submitted("first");
+        state.apply(Event::TurnStart { turn: 1 });
+        state.enqueue("second");
+        assert_eq!(state.queued, vec!["second"]);
+        assert!(
+            !texts(&state.output).iter().any(|l| l.contains("second")),
+            "queued must not enter the transcript at acceptance"
+        );
+        state.apply(Event::TurnEnd {
+            turn: 1,
+            interrupted: None,
+        });
+        state.apply(Event::TurnStart { turn: 2 });
+        assert!(state.queued.is_empty());
+        let echoes = texts(&state.output)
+            .iter()
+            .filter(|l| l.contains("› second"))
+            .count();
+        assert_eq!(echoes, 1, "one dispatch, one record");
+    }
+
+    /// The queue dies with the session: nothing is left to dispatch it, and a
+    /// [queued] row outliving the agent would promise a turn that never comes.
+    #[test]
+    fn the_queue_dies_with_the_session() {
+        let mut state = State::new();
+        state.apply(Event::TurnStart { turn: 1 });
+        state.enqueue("waiting");
+        state.apply(Event::SessionEnd { id: String::new() });
+        assert!(state.queued.is_empty());
+    }
+
+    /// The queue can crowd the transcript but never replace it: at least one
+    /// row of the panel always stays with the conversation.
+    #[test]
+    fn the_reservation_leaves_the_transcript_a_row() {
+        let mut state = State::new();
+        for n in 0..10 {
+            state.enqueue(&format!("m{n}"));
+        }
+        assert_eq!(state.output_reserved(30), 10);
+        assert_eq!(state.output_reserved(5), 4);
+        assert_eq!(state.output_reserved(0), 0);
     }
 
     /// A row that is a colored tag and nothing else says nothing. Every call

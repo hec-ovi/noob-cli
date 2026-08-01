@@ -18,8 +18,15 @@ impl State {
     pub fn apply(&mut self, event: Event) -> bool;          // dirty?
     pub fn apply_at(&mut self, event: Event, at: Option<f64>) -> bool;
     pub fn show_file(&mut self, index: usize) -> bool;      // model only
-    // read surface: output/activity/plan/agents/files/context/phase/
-    // status/usage/turn and the wrapped panes
+    pub fn submitted(&mut self, text: &str);   // echo now, turn starting
+    pub fn enqueue(&mut self, text: &str);     // wait in `queued`; echoes
+                                               // once at the turn.start
+                                               // that takes it, front first
+    pub fn output_reserved(&self, rows: usize) -> usize;  // rows the queue
+                                               // pins at the OUTPUT bottom;
+                                               // one row always stays text
+    // read surface: output/activity/queued/plan/agents/files/context/
+    // phase/status/usage/turn and the wrapped panes
 }
 pub struct Pane;   // wrapped scrollback: lines in, visual rows out, ring
 pub struct Line;   // one logical line with its Tone and Kind

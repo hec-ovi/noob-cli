@@ -4,7 +4,11 @@ contractVersion: 1.0.0
 
 ## Purpose
 
-The transcript widget: the conversation pane, wrapped text with selection bands.
+The transcript widget: the conversation pane, wrapped text with selection
+bands. Messages waiting behind the running turn (`state.queued`) are pinned
+to the panel's bottom rows as dim one-line `› message [queued]` rows that
+stand outside the scrollback; the transcript is measured, scrolled and
+banded in the rows that remain (`state.output_reserved`).
 
 ## Surface
 

@@ -798,12 +798,16 @@ fn spot_in_pane(
     y: f32,
     size: f32,
     column: f32,
+    reserved: usize,
 ) -> Option<select::Spot> {
     let (row, at) = layout.cell_in(space, x, y, size, column)?;
     // The box the glyphs are in, which is not the whole pane in the file
     // view: its left column is the explorer.
     let body = layout.content(space);
-    let rows = layout.rows(body, size);
+    // Minus the rows the caller says are pinned under the transcript: a
+    // click counted in rows the text was not drawn in lands that many lines
+    // away from the character under the pointer.
+    let rows = layout.rows(body, size).saturating_sub(reserved);
     // A file row is drawn with its line number in front of the text, so the
     // column under the pointer is that many columns further along than the
     // character it is over.
@@ -2848,10 +2852,24 @@ impl App {
             self.dirty = true;
             return;
         }
-        self.state.submitted(&text);
-        match self.link.as_mut() {
-            Some(link) if link.is_alive() => link.send(Cmd::PromptSubmit { text }),
-            _ => self.state.output.say("no agent is running", Tone::Bad),
+        // A prompt typed while the agent has the turn queues behind it, on
+        // both sides of the wire: serve holds the text until the turn ends,
+        // and the state pins a dim [queued] row until the turn that takes it
+        // starts. Echoing it into the transcript now would show it answered
+        // by a turn that never saw it.
+        let waits = self.link.as_ref().is_some_and(link::Link::is_alive)
+            && (self.state.phase.busy() || !self.state.queued.is_empty());
+        if waits {
+            self.state.enqueue(&text);
+            if let Some(link) = self.link.as_mut() {
+                link.send(Cmd::PromptQueue { text });
+            }
+        } else {
+            self.state.submitted(&text);
+            match self.link.as_mut() {
+                Some(link) if link.is_alive() => link.send(Cmd::PromptSubmit { text }),
+                _ => self.state.output.say("no agent is running", Tone::Bad),
+            }
         }
         self.dirty = true;
     }
@@ -3462,6 +3480,12 @@ impl App {
         // Hit testing it with the smaller one put every click a growing number
         // of rows away from the character under the pointer.
         let (size, column) = self.metrics_of(view);
+        let reserved = match view {
+            View::Output => self
+                .state
+                .output_reserved(layout.rows(layout.content(space), size)),
+            _ => 0,
+        };
         spot_in_pane(
             layout,
             space,
@@ -3471,6 +3495,7 @@ impl App {
             self.cursor.y as f32,
             size,
             column,
+            reserved,
         )
     }
 
@@ -4052,7 +4077,13 @@ impl App {
             return;
         };
         let (size, column) = self.metrics_of(view);
-        let rows = layout.rows(panel, size).saturating_sub(1).max(1);
+        // The OUTPUT pane's bottom rows belong to the queued messages while
+        // any wait, so the wheel pages by the rows the transcript really has.
+        let reserved = match view {
+            View::Output => self.state.output_reserved(layout.rows(panel, size)),
+            _ => 0,
+        };
+        let rows = (layout.rows(panel, size) - reserved).saturating_sub(1).max(1);
         // The file view spends four columns per row on its gutter, so its text
         // wraps in a narrower box than the panel is wide.
         let (cols, _) = view::text_columns(view, panel, column);
@@ -6571,7 +6602,7 @@ mod tests {
         let row = |n: usize| (inner.x + 2.0, inner.y + (n as f32 + 0.5) * line);
         let call_at = |n: usize| {
             let (x, y) = row(n);
-            let spot = spot_in_pane(&layout, space, View::Activity, &state.activity, x, y, size, COLUMN)
+            let spot = spot_in_pane(&layout, space, View::Activity, &state.activity, x, y, size, COLUMN, 0)
                 .expect("a row under the pointer");
             state.call_at_line(spot.line)
         };
@@ -6586,7 +6617,7 @@ mod tests {
         // Well below the last row there is no call to open, and the press stays
         // a selection.
         let (x, y) = row(40);
-        let spot = spot_in_pane(&layout, space, View::Activity, &state.activity, x, y, size, COLUMN)
+        let spot = spot_in_pane(&layout, space, View::Activity, &state.activity, x, y, size, COLUMN, 0)
             .expect("a press below the text still selects");
         assert_eq!(state.call_at_line(spot.line), Some(second), "the last row is the bash");
         assert_eq!(state.call_at_line(spot.line + 5), None);
@@ -6688,7 +6719,7 @@ mod tests {
             )
         };
         let spot = |(x, y): (f32, f32)| {
-            spot_in_pane(&layout, space, View::Output, &pane, x, y, SIZE, COLUMN)
+            spot_in_pane(&layout, space, View::Output, &pane, x, y, SIZE, COLUMN, 0)
                 .expect("a pane with text has a nearest character everywhere")
         };
 
@@ -6719,7 +6750,7 @@ mod tests {
         let inner = body.inset(9.0);
         let line = noob_draw::Text::line_for(SIZE);
         let spot = |x: f32, y: f32| {
-            spot_in_pane(&layout, space, View::Output, &pane, x, y, SIZE, COLUMN)
+            spot_in_pane(&layout, space, View::Output, &pane, x, y, SIZE, COLUMN, 0)
                 .expect("a drag off the pane still has a nearest character")
         };
 
@@ -6758,7 +6789,7 @@ mod tests {
         let (_dock, layout, space, pane) = output_pane(&["hello world", "second line"]);
         let body = layout.content(space);
         let spot = |x: f32, y: f32| {
-            spot_in_pane(&layout, space, View::Output, &pane, x, y, SIZE, COLUMN)
+            spot_in_pane(&layout, space, View::Output, &pane, x, y, SIZE, COLUMN, 0)
         };
 
         // The press is inside the pane and outside the text box, on all four
@@ -6825,7 +6856,7 @@ mod tests {
             for at in [0usize, 1, span.len().saturating_sub(1)] {
                 let x = inner.x + (chrome + at) as f32 * COLUMN;
                 let y = inner.y + (row as f32 + 0.5) * line_h;
-                let spot = spot_in_pane(&layout, space, View::Files, &pane, x, y, size, COLUMN)
+                let spot = spot_in_pane(&layout, space, View::Files, &pane, x, y, size, COLUMN, 0)
                     .expect("a row of the file has a character under the pointer");
                 assert_eq!(
                     spot,
@@ -6841,7 +6872,7 @@ mod tests {
         // not a character of the row above.
         let last = spans.last().expect("the line has rows");
         let y = inner.y + (spans.len() as f32 + 0.5) * line_h;
-        let spot = spot_in_pane(&layout, space, View::Files, &pane, inner.x, y, size, COLUMN)
+        let spot = spot_in_pane(&layout, space, View::Files, &pane, inner.x, y, size, COLUMN, 0)
             .expect("a press on the gutter still selects");
         assert_eq!(spot, select::Spot::new(1, last.start));
     }
