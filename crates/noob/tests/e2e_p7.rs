@@ -68,6 +68,8 @@ fn doctor_healthy_setup_exits_zero() {
     for needle in [
         "ok    config dir",
         ".env parsed (2 keys)",
+        "AGENTS.md: absent (embedded default in use)",
+        "TOOLS.md: absent (embedded default in use)",
         "answers /models (HTTP 200)",
         "style chat",
         "llama.cpp slots: 5 available; enough for the parent + 4 detached sub-agents",
@@ -184,6 +186,34 @@ fn doctor_ignores_non_llama_props_with_a_similar_field() {
     assert!(out.status.success(), "{stdout}");
     assert!(!stdout.contains("llama.cpp"), "{stdout}");
     assert!(!stdout.contains("NOOB_TASK_CONCURRENCY"), "{stdout}");
+}
+
+#[test]
+fn doctor_notes_present_prompt_files() {
+    let config = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    // Discard port: the endpoint check fails fast; the prompt lines print
+    // either way.
+    std::fs::write(
+        config.path().join(".env"),
+        "NOOB_BASE_URL=http://127.0.0.1:9/v1\n",
+    )
+    .unwrap();
+    std::fs::write(config.path().join("AGENTS.md"), "my prompt\n").unwrap();
+    std::fs::write(config.path().join("TOOLS.md"), "my tools\n").unwrap();
+
+    let out = noob(config.path(), work.path())
+        .arg("doctor")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for name in ["AGENTS.md", "TOOLS.md"] {
+        assert!(
+            stdout.contains(&format!("ok    {name}: "))
+                && stdout.contains("(replaces the embedded default)"),
+            "{stdout}"
+        );
+    }
 }
 
 #[test]

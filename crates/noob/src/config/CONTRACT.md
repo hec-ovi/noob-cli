@@ -13,7 +13,9 @@ the sandbox mode, and localhost endpoint autodetect.
 ```rust
 pub fn config_dir() -> PathBuf;
     // NOOB_CONFIG_DIR if set and non-empty, else /config when that directory
-    // exists (the container bind mount), else $HOME/.config/noob
+    // exists (the container bind mount), else $HOME/.config/noob.
+    // Besides .env the directory holds the user's files read by other boxes:
+    // AGENTS.md and TOOLS.md (agent box), mcp.json, skills/, sessions/
 pub fn setting(config_dir: &Path, key: &str) -> Option<String>;
     // process env wins, then the .env file; empty values count as unset;
     // the file is reparsed on every call, so an edit lands mid-session

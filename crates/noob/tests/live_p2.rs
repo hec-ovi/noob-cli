@@ -193,7 +193,7 @@ fn live_tokenizer_budget() {
         tools_tokens <= 940,
         "tools {tools_tokens} tokens on the served model's tokenizer"
     );
-    assert!(head_tokens + tools_tokens <= 1500);
+    assert!(head_tokens + tools_tokens <= 1525);
 }
 
 /// User-style requirements check: the real model creates and advances its own

@@ -173,8 +173,9 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
         cwd: workspace.display().to_string(),
         model,
         sandbox: sandbox_label,
-        global_agents: prompt::load_agents_md(&config_dir),
-        project_agents: prompt::load_agents_md(&workspace),
+        agents: prompt::load_prompt_md(&config_dir, "AGENTS.md"),
+        tools: prompt::load_prompt_md(&config_dir, "TOOLS.md"),
+        project_agents: prompt::load_prompt_md(&workspace, "AGENTS.md"),
         skills_index: skills::index(&discovered),
         // A read-only child has no mcp_call; naming servers would only
         // tempt it into calls it cannot make.
@@ -1454,8 +1455,9 @@ fn cmd_debug(args: &[String]) -> ExitCode {
         cwd: workspace.display().to_string(),
         model,
         sandbox: sandbox_label,
-        global_agents: prompt::load_agents_md(&config_dir),
-        project_agents: prompt::load_agents_md(&workspace),
+        agents: prompt::load_prompt_md(&config_dir, "AGENTS.md"),
+        tools: prompt::load_prompt_md(&config_dir, "TOOLS.md"),
+        project_agents: prompt::load_prompt_md(&workspace, "AGENTS.md"),
         skills_index: skills::index(&discovered),
         mcp_line: prompt::mcp_line(&mcp_servers),
     };

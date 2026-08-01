@@ -39,6 +39,7 @@ pub fn run() -> ExitCode {
 
     checks.push(check_config_dir(&config_dir));
     checks.push(check_env_file(&config_dir));
+    checks.extend(check_prompt_files(&config_dir));
     checks.extend(check_endpoint(&config_dir));
     checks.extend(check_mcp(&workspace, &config_dir));
     checks.push(check_workspace(&workspace));
@@ -109,6 +110,22 @@ fn check_env_file(config_dir: &Path) -> Check {
             path.display()
         )),
     }
+}
+
+/// The two user-owned prompt files. Absence is fine (the binary ships an
+/// embedded default for each); the line says which text is in effect.
+fn check_prompt_files(config_dir: &Path) -> Vec<Check> {
+    ["AGENTS.md", "TOOLS.md"]
+        .iter()
+        .map(|name| {
+            let path = config_dir.join(name);
+            Check::Ok(if path.is_file() {
+                format!("{name}: {} (replaces the embedded default)", path.display())
+            } else {
+                format!("{name}: absent (embedded default in use)")
+            })
+        })
+        .collect()
 }
 
 fn check_endpoint(config_dir: &Path) -> Vec<Check> {

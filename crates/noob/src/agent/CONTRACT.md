@@ -35,9 +35,14 @@ impl Agent {
 pub enum RunEnd;                  // how the turn ended
 ```
 
-`prompt::assemble` builds the fixed system prompt from `PromptInputs`; the
-prompt texts live in `crates/noob/prompts/base.md` and `compact.md`, loaded
-at compile time.
+`prompt::assemble` builds the fixed system prompt from `PromptInputs`, in
+order: the config directory's `AGENTS.md` (the main prompt), its `TOOLS.md`
+(tool guidance, merged after it), then the runtime layers (environment
+block, project `AGENTS.md`, skills index, MCP line). A present file
+replaces its embedded default wholesale; the defaults live in
+`crates/noob/prompts/agents-default.md` and `tools-default.md`, with
+`compact.md` for compaction, all loaded at compile time. User prompt files
+are capped at 16 KiB each.
 
 ## The seam
 

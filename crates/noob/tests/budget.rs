@@ -1,6 +1,9 @@
 //! Token-budget enforcement on the SHIPPED artifact: `noob debug prompt
 //! --json` prints the exact system prompt and wire tools array the binary
 //! sends; tiktoken o200k tokenizes them against the locked ceilings.
+//! The config dir here is empty, so the measured prompt is the embedded
+//! defaults (agents-default.md + tools-default.md): these ceilings guard
+//! what ships, not whatever a user puts in AGENTS.md or TOOLS.md.
 //! The live suite closes the loop against the real qwen tokenizer via
 //! llama-server /tokenize (P7).
 
@@ -36,9 +39,12 @@ use serde_json::Value;
 // and then given back: the model never used them, so the cost was permanent
 // and the benefit was zero. Harness capability does not belong in the agent's
 // prompt; it belongs in the harness.
-const HEAD_CEILING: usize = 560; // base.md + environment block
+// TOTAL_CEILING carries the owner-mandated clause in the default TOOLS text
+// that names the tool set as the basic one and the file as the user's to
+// adjust; that clause is what the 1,925 pays for.
+const HEAD_CEILING: usize = 560; // agents + tools defaults + environment block
 const TOOLS_CEILING: usize = 1350; // serialized wire tools array
-const TOTAL_CEILING: usize = 1900; // total fixed first-request overhead
+const TOTAL_CEILING: usize = 1925; // total fixed first-request overhead
 const OWNER_HARD_LIMIT: usize = 2000; // never exceed, whatever the above say
 
 /// The switches plant one skill, one configured MCP server, and one executable
@@ -108,7 +114,8 @@ fn no_output_cap_budget_and_phrasing() {
     let head = artifact["head"].as_str().unwrap();
     let tools = artifact["tools"].to_string();
 
-    // With no AGENTS.md, skills, or MCP, the system prompt IS the head.
+    // With no user prompt files, skills, or MCP, the system prompt IS the
+    // head: the embedded AGENTS and TOOLS defaults plus the env block.
     assert_eq!(system, head);
     // 9 core (7 file/shell + context + todo) + subagent.
     assert_eq!(artifact["tools"].as_array().unwrap().len(), 10);
