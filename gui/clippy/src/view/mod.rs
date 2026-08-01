@@ -529,6 +529,11 @@ pub enum Hit {
     TabsRight(Space),
     /// The body of a space: where a dragged tab lands.
     Body(Space),
+    /// The scroll track down a pane's right edge. Pressed and dragged, the
+    /// way a divider is: the pane follows the pointer down the track. The
+    /// shell falls back to a body press when the pane has no bar, so the
+    /// gutter of a short pane still starts a selection.
+    Scrollbar(Space),
     /// A row of the file view's explorer list, and the space it is showing in.
     /// The space is carried so a view dropped on the list still lands somewhere:
     /// a drop target is a place on screen, not a widget.
@@ -647,6 +652,7 @@ impl Hit {
             | Hit::TabsLeft(space)
             | Hit::TabsRight(space)
             | Hit::Body(space)
+            | Hit::Scrollbar(space)
             | Hit::File(_, space) => Some(space),
             _ => None,
         }
@@ -1730,6 +1736,42 @@ impl Layout {
                 if panel.contains(x, y) {
                     return Some(Hit::File(*index, space));
                 }
+            }
+        }
+        // The scroll gutter before the dividers and the bodies: it is the
+        // smallest target of the three, and a track pressed at the pane's
+        // edge must not read as the divider running beside it. Widened a
+        // little past the drawn track, because four pixels is a target only
+        // a plotter could hit. The explorer's own track first: it stands
+        // inside the files pane, so the pane's band cannot cover it.
+        if let Some(space) = self.files_in
+            && self.file_list.w >= 1.0
+        {
+            let track = scroll_track(self.file_list);
+            let band = Panel::new(
+                track.x - SCROLL_GAP * 2.0,
+                track.y,
+                track.w + SCROLL_GAP * 3.0,
+                track.h,
+            );
+            if band.contains(x, y) {
+                return Some(Hit::Scrollbar(space));
+            }
+        }
+        for space in Space::ALL {
+            let placed = self.placed(space);
+            if placed.body.h < 2.0 {
+                continue;
+            }
+            let track = scroll_track(placed.body);
+            let band = Panel::new(
+                track.x - SCROLL_GAP * 2.0,
+                track.y,
+                track.w + SCROLL_GAP * 3.0,
+                track.h,
+            );
+            if band.contains(x, y) {
+                return Some(Hit::Scrollbar(space));
             }
         }
         // Before the bodies, because the band is wider than the gap it stands
@@ -3634,22 +3676,31 @@ fn dragging(scene: &mut Scene, frame: &Frame) {
 
 /// The bar down the right edge of a pane. Absent when everything fits, because
 /// a scrollbar that is always full length says nothing.
-pub(crate) fn scrollbar(scene: &mut Scene, skin: &Skin, panel: Panel, thumb: Option<(f32, f32)>) {
-    let Some((top, size)) = thumb else {
-        return;
-    };
+/// Where a pane's scroll track runs: down the right edge, below the cut.
+///
+/// One function for the drawing, the hit band and the drag arithmetic, so a
+/// press lands on the track exactly where the thumb is drawn and a dragged
+/// fraction means the same place on both.
+pub(crate) fn scroll_track(panel: Panel) -> Panel {
     // The track runs down the right edge, which is the edge the cut takes a
     // triangle out of. Starting it three pixels down put its head inside that
     // triangle, hanging in the air outside the pane, so it starts below the cut
     // instead: the cut reaches `cut` in from the corner along both edges, and
     // the track is already `SCROLL_GAP` in from the right.
     let head = (cut_of(panel) - SCROLL_GAP).max(3.0);
-    let track = Panel::new(
+    Panel::new(
         panel.x + panel.w - SCROLL_W - SCROLL_GAP,
         panel.y + head,
         SCROLL_W,
         (panel.h - head - 3.0).max(1.0),
-    );
+    )
+}
+
+pub(crate) fn scrollbar(scene: &mut Scene, skin: &Skin, panel: Panel, thumb: Option<(f32, f32)>) {
+    let Some((top, size)) = thumb else {
+        return;
+    };
+    let track = scroll_track(panel);
     scene.rect(track.fill(skin.scroll_track));
     scene.rect(
         Panel::new(
@@ -6189,18 +6240,24 @@ mod tests {
     }
 
     /// The band is wider than the gap it stands in, or a six pixel line is a
-    /// target nobody can hit. It wins against the panes it reaches into, and the
-    /// pane wins back one pixel outside it.
+    /// target nobody can hit. It wins against the pane it reaches into on its
+    /// right; on its left the pane's own scroll track wins back the pixels it
+    /// is drawn in, because a bar that loses to an invisible band is a bar
+    /// that cannot be dragged at all.
     #[test]
     fn a_divider_is_grabbed_by_a_band_wider_than_the_gap() {
         let out = render(&busy_state(), 1400.0, 900.0, &Dock::new(), &[]);
         let band = out.layout.column_divider[0].band;
         assert!(band.w > GAP, "the band is no wider than the gap");
         let y = band.y + TAB_H + 20.0;
-        for x in [band.x + 0.5, band.x + band.w * 0.5, band.x + band.w - 0.5] {
+        for x in [band.x + band.w * 0.5, band.x + band.w - 0.5] {
             assert_eq!(out.layout.hit(x, y), Some(Hit::ColumnDivider(0)), "at {x}");
         }
-        assert_eq!(out.layout.hit(band.x - 1.0, y), Some(Hit::Body(Space::TopLeft)));
+        assert_eq!(
+            out.layout.hit(band.x + 0.5, y),
+            Some(Hit::Scrollbar(Space::TopLeft)),
+            "the reach into the left pane is the pane's own track"
+        );
         assert_eq!(
             out.layout.hit(band.x + band.w + 1.0, y),
             Some(Hit::Body(Space::TopRight))

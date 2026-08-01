@@ -25,6 +25,8 @@ tags rather than here; this file starts where it was added.
   clicking one opens that child's own output as a `[N] AGENT - OUTPUT` tab
   in the top-left space, and a child that finishes leaves the list (its
   report still reaches the conversation), closing its tab with it.
+- Scrollbars drag: every pane's track, the file explorer's included,
+  follows a held pointer, alongside the wheel it already had.
 
 ## 0.11.0 - 2026-08-01
 

@@ -62,6 +62,14 @@ impl Scrolls {
         self.put(view, next, heights, rows)
     }
 
+    /// Put this view where a dragged scrollbar says, as a fraction of its
+    /// whole travel: 0.0 is the top of the content, 1.0 the last screenful.
+    pub fn scroll_to(&mut self, view: View, fraction: f32, heights: &[usize], rows: usize) -> bool {
+        let most = text_geometry::max_scrollback(heights, rows);
+        let first = (fraction.clamp(0.0, 1.0) * most as f32).round() as usize;
+        self.put(view, first, heights, rows)
+    }
+
     /// Pull an offset back inside content that shrank, or a pane that did.
     ///
     /// Called every frame. Nothing else can catch it: the content of these panes
@@ -109,6 +117,12 @@ pub fn file_thumb(first: usize, count: usize, rows: usize) -> Option<(f32, f32)>
     let heights = file_heights(count);
     let back = text_geometry::scrollback_for(&heights, rows, first);
     text_geometry::thumb(&heights, rows, back)
+}
+
+/// The list where a dragged scrollbar says, as a fraction of its travel.
+pub fn file_scroll_to(fraction: f32, count: usize, rows: usize) -> usize {
+    let most = text_geometry::max_scrollback(&file_heights(count), rows);
+    (fraction.clamp(0.0, 1.0) * most as f32).round() as usize
 }
 
 /// The list moved by `by` rows, clamped so the last file stays on screen: a
@@ -175,6 +189,21 @@ mod tests {
         assert!(scrolls.scroll(View::Agents, 999, false, &heights, 10));
         assert_eq!(scrolls.first(View::Agents), 0);
         assert!(!scrolls.scroll(View::Agents, 1, false, &heights, 10));
+    }
+
+    /// A dragged thumb lands where the fraction says, and both ends of the
+    /// track mean both ends of the content.
+    #[test]
+    fn a_dragged_thumb_lands_where_the_fraction_says() {
+        let mut scrolls = Scrolls::default();
+        let heights = flat(30);
+        assert!(scrolls.scroll_to(View::Plan, 1.0, &heights, 10));
+        assert_eq!(scrolls.first(View::Plan), 20, "1.0 is the last screenful");
+        assert!(scrolls.scroll_to(View::Plan, 0.5, &heights, 10));
+        assert_eq!(scrolls.first(View::Plan), 10);
+        assert!(scrolls.scroll_to(View::Plan, 0.0, &heights, 10));
+        assert_eq!(scrolls.first(View::Plan), 0);
+        assert!(!scrolls.scroll_to(View::Plan, -3.0, &heights, 10), "clamped");
     }
 
     /// A pane scrolled to its end and then made shorter, or emptied, is the case

@@ -596,9 +596,11 @@ fn menu_for(
         // A pane, the rows of its own file list and the arrows of its own strip
         // are all the same widget: the menu acts on whatever that space is
         // showing.
-        Hit::Body(space) | Hit::File(_, space) | Hit::TabsLeft(space) | Hit::TabsRight(space) => {
-            widget(dock.slot(space).active()?, space)
-        }
+        Hit::Body(space)
+        | Hit::Scrollbar(space)
+        | Hit::File(_, space)
+        | Hit::TabsLeft(space)
+        | Hit::TabsRight(space) => widget(dock.slot(space).active()?, space),
         Hit::TitleBar | Hit::Close | Hit::Maximize | Hit::Minimize => None,
         // The menu already open. Its own right click is handled before this is
         // reached, and a row is picked with the left button.
@@ -1016,6 +1018,10 @@ struct App {
     /// half of the grid it carries says which of the two lines on that axis is
     /// moving.
     sizing: Option<Hit>,
+    /// The scrollbar the button came down on, while it is being dragged: the
+    /// space, and whether it is the file explorer's own track rather than
+    /// the pane's. The same press, motion, release cycle a divider runs.
+    thumbing: Option<(Space, bool)>,
     /// The settings row and half whose slider the button came down on, while it
     /// is being dragged. The same cycle again, on the panel: the value follows
     /// the pointer and the file is written once, when the button comes up.
@@ -1159,6 +1165,7 @@ impl App {
             menu: None,
             holding: None,
             sizing: None,
+            thumbing: None,
             sliding: None,
             asking: None,
             installing: None,
@@ -3180,6 +3187,17 @@ impl App {
                 self.open_call_under_pointer(space);
                 self.open_agent_under_pointer(space);
             }
+            // A press on a live track takes the thumb; on the gutter of a
+            // pane with nothing to scroll it is a press on the pane.
+            Hit::Scrollbar(space) => {
+                if self.begin_thumb(space) {
+                    self.drag_thumb();
+                } else {
+                    self.begin_selection(space);
+                    self.open_call_under_pointer(space);
+                    self.open_agent_under_pointer(space);
+                }
+            }
             // All four are handled above, while the picker is up, which is the
             // only time any of them can be hit at all.
             Hit::PickerRow(_)
@@ -3654,6 +3672,7 @@ impl App {
     fn release(&mut self) {
         self.selecting = false;
         self.prompt_selecting = false;
+        self.thumbing = None;
         // A press on the title bar that never moved far enough to become a move
         // of the window. Nothing happens on the way up; it was a click, and a
         // second one of them shades.
@@ -3685,6 +3704,106 @@ impl App {
             click_tab(self.dock.slot_mut(space), view);
             self.dirty = true;
         }
+    }
+
+    /// Whether a press on a space's scroll gutter has a thumb to take, and
+    /// which track it is: the explorer's own when the files pane is showing
+    /// and the press is on its list, the pane's otherwise. Arms the drag
+    /// when it does.
+    fn begin_thumb(&mut self, space: Space) -> bool {
+        let layout = self.layout();
+        let Some(view) = self.dock.slot(space).active() else {
+            return false;
+        };
+        // The explorer's track stands inside the files pane; the press's x
+        // says which of the two tracks was taken.
+        if view == View::Files
+            && layout.files_in == Some(space)
+            && layout.file_list.w >= 1.0
+            && (self.cursor.x as f32) < layout.file_list.x + layout.file_list.w + view::SCROLL_GAP
+        {
+            let rows = layout.rows(layout.file_list, self.config.pane_font_size);
+            if scroll::file_thumb(self.file_scroll, self.state.files.len(), rows).is_none() {
+                return false;
+            }
+            self.thumbing = Some((space, true));
+            return true;
+        }
+        let panel = layout.placed(space).body;
+        let (size, column) = self.metrics_of(view);
+        let reserved = match view {
+            View::Output => self.state.output_reserved(layout.rows(panel, size)),
+            _ => 0,
+        };
+        let rows = (layout.rows(panel, size) - reserved).max(1);
+        let (cols, _) = view::text_columns(view, panel, column);
+        let has = match self.state.pane_of(view) {
+            Some(pane) => pane.thumb(rows, cols).is_some(),
+            None => {
+                let frame = self.frame(&layout);
+                view::scroll_extent(&frame, view, panel)
+                    .is_some_and(|(heights, fit)| self.scrolls.thumb(view, &heights, fit).is_some())
+            }
+        };
+        if has {
+            self.thumbing = Some((space, false));
+        }
+        has
+    }
+
+    /// The pane under a held scrollbar follows the pointer down its track,
+    /// through the same geometry the bar is drawn with.
+    fn drag_thumb(&mut self) {
+        let Some((space, explorer)) = self.thumbing else {
+            return;
+        };
+        let layout = self.layout();
+        let Some(view) = self.dock.slot(space).active() else {
+            return;
+        };
+        if explorer {
+            let track = view::scroll_track(layout.file_list);
+            let fraction = ((self.cursor.y as f32 - track.y) / track.h.max(1.0)).clamp(0.0, 1.0);
+            let rows = layout.rows(layout.file_list, self.config.pane_font_size);
+            let next = scroll::file_scroll_to(fraction, self.state.files.len(), rows);
+            self.dirty |= next != self.file_scroll;
+            self.file_scroll = next;
+            return;
+        }
+        let panel = layout.placed(space).body;
+        let track = view::scroll_track(panel);
+        let fraction = ((self.cursor.y as f32 - track.y) / track.h.max(1.0)).clamp(0.0, 1.0);
+        let (size, column) = self.metrics_of(view);
+        let reserved = match view {
+            View::Output => self.state.output_reserved(layout.rows(panel, size)),
+            _ => 0,
+        };
+        let rows = (layout.rows(panel, size) - reserved).max(1);
+        let (cols, _) = view::text_columns(view, panel, column);
+        let open_file = self.state.open_file;
+        let pane = match view {
+            View::Output => Some(&mut self.state.output),
+            View::Activity => Some(&mut self.state.activity),
+            View::Files => self
+                .state
+                .files
+                .get_mut(open_file)
+                .map(|file| &mut file.pane),
+            View::Agent => self.state.agent_shown_mut().map(|agent| &mut agent.pane),
+            _ => None,
+        };
+        if let Some(pane) = pane {
+            self.dirty |= pane.scroll_to(fraction, rows, cols);
+            return;
+        }
+        let extent = {
+            let frame = self.frame(&layout);
+            view::scroll_extent(&frame, view, panel)
+        };
+        let Some((heights, fit)) = extent else {
+            return;
+        };
+        self.dirty |= self.scrolls.scroll_to(view, fraction, &heights, fit);
     }
 
     /// Move the divider under the button to where the pointer is now.
@@ -4388,6 +4507,7 @@ impl ApplicationHandler<Wake> for App {
                 self.maybe_drag();
                 self.drag_divider();
                 self.drag_slider();
+                self.drag_thumb();
                 if self.selecting {
                     self.extend_selection();
                 }

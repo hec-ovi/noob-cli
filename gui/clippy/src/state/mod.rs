@@ -525,6 +525,18 @@ impl Pane {
         moved
     }
 
+    /// Put the window where a dragged scrollbar says, as a fraction of the
+    /// whole travel: 0.0 is the oldest row still held, 1.0 the live end.
+    /// The scrollback this pane keeps is counted from the end, so the
+    /// fraction inverts here and nowhere else.
+    pub fn scroll_to(&mut self, fraction: f32, rows: usize, cols: usize) -> bool {
+        let most = text_geometry::max_scrollback(&self.heights(cols), rows);
+        let back = ((1.0 - fraction.clamp(0.0, 1.0)) * most as f32).round() as usize;
+        let moved = back != self.scrollback;
+        self.scrollback = back;
+        moved
+    }
+
     /// Whether a fenced code block is open where this window starts.
     ///
     /// A transcript is drawn from a scrolling window, so a block that opened
@@ -2045,6 +2057,21 @@ mod tests {
             .iter()
             .map(|l| l.text.clone())
             .collect()
+    }
+
+    /// A transcript's thumb drags between its ends: 0.0 is the oldest row
+    /// still held, 1.0 the live end it rests at.
+    #[test]
+    fn the_transcript_thumb_drags_between_its_ends() {
+        let mut pane = Pane::new(100);
+        for n in 0..30 {
+            pane.say(format!("line {n}"), Tone::Body);
+        }
+        assert!(pane.scroll_to(0.0, 10, 80));
+        assert_eq!(pane.window(10, 80).first, 0, "the top of the scrollback");
+        assert!(pane.scroll_to(1.0, 10, 80));
+        assert_eq!(pane.window(10, 80).first, 20, "back at the live end");
+        assert!(!pane.scroll_to(1.0, 10, 80), "already there");
     }
 
     /// A prompt queued mid-turn stays out of the transcript until the turn

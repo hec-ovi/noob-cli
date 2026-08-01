@@ -16,6 +16,10 @@ impl Scrolls {
     pub fn first(&self, view: View) -> usize;
     pub fn scroll(&mut self, view: View, by: usize, down: bool,
                   heights: &[usize], rows: usize) -> bool;
+    pub fn scroll_to(&mut self, view: View, fraction: f32,
+                     heights: &[usize], rows: usize) -> bool;
+                                           // a dragged bar: 0.0 the top,
+                                           // 1.0 the last screenful
     pub fn settle(&mut self, view: View, heights: &[usize], rows: usize)
         -> bool;                           // clamp after content shrank
     pub fn window(&self, view: View, heights: &[usize], rows: usize)
@@ -38,6 +42,9 @@ impl Scrolls {
 Contracts: the dock box (`View` order),
 [`text-geometry`](../../../layers/text-geometry/CONTRACT.md) (`Window`).
 
+The file explorer's flat list has the same operations as free functions
+(`file_thumb`, `scroll_files`, `file_scroll_to`, `reveal_file`).
+
 ## Tests
 
-Inline: clamping, windows, thumbs (4 tests).
+Inline: clamping, windows, thumbs, dragged fractions.
