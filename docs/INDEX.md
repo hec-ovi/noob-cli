@@ -45,7 +45,7 @@ package, the binary and everything a user sees are `no0b`.
 | Talking to a model server | `crates/noob-provider/CONTRACT.md` |
 | Skills | `crates/noob/src/skills/CONTRACT.md` |
 | Talking to MCP servers, mcp.json | `crates/noob/src/mcp/CONTRACT.md` |
-| The `serve` subcommand the window drives | `crates/noob/src/main.rs` |
+| The `serve` subcommand the window drives | `crates/noob/src/serve/CONTRACT.md` |
 
 ## Boxes
 
@@ -96,6 +96,10 @@ Boxes so far:
 - [`crates/noob/src/ui`](../crates/noob/src/ui/CONTRACT.md) - the four
   output surfaces behind one turn surface; the dock; headless bytes never
   change.
+- [`crates/noob/src/serve`](../crates/noob/src/serve/CONTRACT.md) - Command
+  frames in, Event frames out; the surface a front end drives.
+- [`crates/noob`](../crates/noob/CONTRACT.md) - the binary itself: argv
+  surface, exit codes, and the box map behind it.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,
