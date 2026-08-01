@@ -3122,15 +3122,19 @@ impl App {
             }
             return;
         }
-        // The popup is on the same floating layer and closes the same way: its
-        // own box swallows the press, and anywhere else only puts it away. The
-        // press that closes it does nothing else, so a click aimed past a popup
-        // at a pane cannot also start a selection in that pane.
-        if self.state.open_call.is_some() {
-            if !matches!(hit, Hit::CallPopup) {
-                self.state.open_call = None;
-                self.dirty = true;
-            }
+        // The popup is on the same floating layer and closes the same way:
+        // a press anywhere off it only puts it away, and does nothing else,
+        // so a click aimed past a popup at a pane cannot also start a
+        // selection in that pane. A press ON it falls through to its own
+        // arms: the close mark, the track, and the selection its box starts.
+        if self.state.open_call.is_some()
+            && !matches!(
+                hit,
+                Hit::CallPopup | Hit::CallPopupClose | Hit::CallPopupScrollbar
+            )
+        {
+            self.state.open_call = None;
+            self.dirty = true;
             return;
         }
 
@@ -3244,9 +3248,29 @@ impl App {
                 self.prompt_selecting = true;
                 self.dirty = true;
             }
-            // All three handled above, while a menu or the popup is open, which
-            // is the only time any of them can be hit at all.
-            Hit::MenuRow(_) | Hit::Menu | Hit::CallPopup => {}
+            // Both handled above, while a menu is open, which is the only
+            // time either can be hit at all.
+            Hit::MenuRow(_) | Hit::Menu => {}
+            // A press on the popup starts a selection over its document; the
+            // band and the copy resolve against the same lines the blocks
+            // are drawn from.
+            Hit::CallPopup => {
+                let spot = {
+                    let layout = self.layout();
+                    let frame = self.frame(&layout);
+                    crate::widgets::popup::spot_at(
+                        &frame,
+                        self.cursor.x as f32,
+                        self.cursor.y as f32,
+                    )
+                };
+                if let Some(spot) = spot {
+                    self.selection =
+                        Some(select::Selection::new(select::Where::CallPopup, spot));
+                    self.selecting = true;
+                    self.dirty = true;
+                }
+            }
             // The same close the settings panel has: one press, the popup
             // goes, and the pane under it is exactly as it was.
             Hit::CallPopupClose => {
@@ -3643,13 +3667,18 @@ impl App {
                 None => return,
             },
             select::Where::SettingsDoc => self.doc_spot_at(&layout),
+            select::Where::CallPopup => {
+                let frame = self.frame(&layout);
+                crate::widgets::popup::spot_at(&frame, self.cursor.x as f32, self.cursor.y as f32)
+            }
         };
         if let Some(spot) = spot {
             selection.extend(spot);
-            // A drag is a selection, not a look at one call. The popup the press
-            // put up goes away as soon as the drag has actually selected
-            // something, which is what lets one press mean either.
-            if !selection.is_empty() {
+            // A drag over a pane is a selection, not a look at one call: the
+            // popup the press put up goes away as soon as the drag has
+            // selected something. A drag inside the popup is the opposite -
+            // selecting its text is what the popup is open for.
+            if !selection.is_empty() && selection.at != select::Where::CallPopup {
                 self.state.open_call = None;
             }
             self.selection = Some(selection);
@@ -3680,6 +3709,12 @@ impl App {
             // and where the column happens to be scrolled to is none of it.
             select::Where::SettingsDoc => match self.settings.as_ref() {
                 Some(panel) => selection.text(&panel.doc_pane()),
+                None => return false,
+            },
+            // Off the popup's own document, whole lines included however the
+            // clip drew them.
+            select::Where::CallPopup => match self.state.popped() {
+                Some(call) => selection.text(&crate::widgets::popup::document(call)),
                 None => return false,
             },
         };

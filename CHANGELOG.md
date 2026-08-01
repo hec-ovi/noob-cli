@@ -15,6 +15,15 @@ tags rather than here; this file starts where it was added.
   runs.
 - A padded status:true beside a real prompt spawns the sub-agent instead of
   refusing the call.
+- Text in the popup selects and copies, blocks and all; a drag inside it
+  keeps it open.
+- Activity entries are clipped rows: one row each, broken where the wrap
+  would have broken, a dim ellipsis when the entry goes on, and the row
+  under the pointer brightens instead of wearing a band. Agents entries are
+  one row each, whole.
+- The CLI's session bootstrap is its own box (`crates/noob/src/boot`),
+  shared by the REPL, exec, child and serve; serve stops reaching into
+  main's privates.
 
 ## 0.11.1 - 2026-08-01
 

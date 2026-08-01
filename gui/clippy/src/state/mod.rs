@@ -233,6 +233,8 @@ pub struct Pane {
     /// Whether the body lines of this pane are Markdown, drawn as the thing
     /// they describe rather than as the marks that describe it.
     rendered: bool,
+    /// Every line is one visual row, clipped by the painter, never wrapped.
+    one_row: bool,
     /// Where a fenced block stands after the last line pushed, so the next one
     /// knows whether it is prose or code. Carried rather than rescanned: a full
     /// pane is thousands of lines and one arrives per token.
@@ -284,9 +286,39 @@ impl Pane {
                 ..Heights::default()
             }),
             rendered: false,
+            one_row: false,
             fence: crate::markdown::Fence::default(),
             tail_fence: crate::markdown::Fence::default(),
         }
+    }
+
+    /// A pane whose lines never wrap: each is one row however long it runs,
+    /// clipped by the painter, like the file explorer clips its names. What
+    /// a list needs - a row is an entry, and an entry is a row.
+    pub fn clipped(mut self) -> Pane {
+        self.one_row = true;
+        self
+    }
+
+    /// Whether this pane's painter clips rather than wraps.
+    pub fn one_row(&self) -> bool {
+        self.one_row
+    }
+
+    /// Park the window on a top-anchored first visual row: how a surface
+    /// with an offset of its own (the call popup) borrows this pane's row
+    /// arithmetic.
+    pub fn anchor_first(&mut self, first: usize, rows: usize, cols: usize) {
+        let back = text_geometry::scrollback_for(&self.heights(cols), rows, first);
+        self.scrollback = back;
+    }
+
+    /// Which line and wrapped row a visual row of the window shows, with no
+    /// column resolution: what a band walk wants.
+    pub fn spot_row(&self, rows: usize, cols: usize, row: usize) -> Option<(usize, usize)> {
+        let w = self.window(rows, cols);
+        let (line, wrapped) = text_geometry::row_at(&self.heights(cols), w, row)?;
+        Some((self.dropped + line, wrapped))
     }
 
     /// A pane whose body lines are Markdown.
@@ -392,6 +424,10 @@ impl Pane {
                 // arrives.
                 let mut wrapped = Vec::new();
                 for line in &self.lines {
+                    if self.one_row {
+                        cache.rows.push(1);
+                        continue;
+                    }
                     text_geometry::rows_into(line.shown(), cols, PANE_WRAP, &mut wrapped);
                     cache.rows.push(wrapped.len());
                 }
@@ -446,9 +482,18 @@ impl Pane {
     /// shorter than the text that was written: a row of the source is not a row
     /// anybody can point at.
     pub fn rows_of_line(&self, absolute: usize, cols: usize) -> Vec<text_geometry::Row> {
-        self.line(absolute)
-            .map(|line| text_geometry::rows_in(line.shown(), cols, PANE_WRAP))
-            .unwrap_or_default()
+        let Some(line) = self.line(absolute) else {
+            return Vec::new();
+        };
+        if self.one_row {
+            // One span: the row the wrap would have drawn first. What is on
+            // screen is what a selection takes ("a reader selects what he
+            // can see"); the whole entry lives on the popup, which selects.
+            let mut rows = text_geometry::rows_in(line.shown(), cols, PANE_WRAP);
+            rows.truncate(1);
+            return rows;
+        }
+        text_geometry::rows_in(line.shown(), cols, PANE_WRAP)
     }
 
     /// The rows one line occupies on screen, clipped to the viewport.
@@ -1150,7 +1195,7 @@ impl State {
             // The one pane the model writes Markdown into, so the one pane that
             // is measured, banded and copied in what it draws.
             output: Pane::new(6000).rendered(),
-            activity: Pane::new(4000),
+            activity: Pane::new(4000).clipped(),
             queued: Vec::new(),
             plan: Vec::new(),
             agents: Vec::new(),

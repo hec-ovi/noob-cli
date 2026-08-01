@@ -27,22 +27,20 @@ pub(crate) fn agents(scene: &mut Scene, frame: &Frame, panel: Panel) {
     );
 }
 
-/// Two rows per child, each clipped to one physical row, like the file
-/// explorer clips its names: a child's brief is a paragraph, and a list
-/// whose entries wrap into paragraphs is not a list. The whole brief is on
-/// the popup side of things anyway - the `[N] AGENT - OUTPUT` tab.
+/// One row per child, clipped to one physical row like the file explorer
+/// clips its names: a child's brief is a paragraph, and a list whose
+/// entries wrap into paragraphs is not a list. The rest of the child's
+/// story lives on its `[N] AGENT - OUTPUT` tab.
 ///
-/// The head row leads with `[N] Agent` in the bright tone: it is the press
-/// that opens the child's own output tab, and bright over a pane of dim
-/// detail is what says these rows are for clicking. While a child runs the
-/// second row is its latest output line.
+/// The row leads with `[N] Agent` in the bright tone: it is the press that
+/// opens that tab, and bright over a pane of dim detail is what says these
+/// rows are for clicking.
 pub(crate) fn agent_rows(state: &State, skin: &Skin, cols: usize) -> Vec<ListRow> {
     agent_list(state, skin, cols).0
 }
 
 /// Which agent each list row belongs to, by ordinal, aligned with
-/// [`agent_rows`]: the head row and the news row under it both name their
-/// agent, so a press on either opens the same tab.
+/// [`agent_rows`].
 pub(crate) fn agent_at(frame: &Frame, panel: Panel, x: f32, y: f32) -> Option<usize> {
     let cols = cols_of(panel, frame.pane_column);
     let (rows, owners) = agent_list(frame.state, frame.skin, cols);
@@ -73,16 +71,11 @@ fn agent_list(state: &State, skin: &Skin, cols: usize) -> (Vec<ListRow>, Vec<Opt
         if !agent.tools.is_empty() {
             runs.push(Run::tinted(format!("{:<5}", agent.tools), skin.dim));
         }
+        // One line per agent, whole: the brief's head, and everything else
+        // on its own `[N] AGENT - OUTPUT` tab.
         runs.push(Run::tinted(&agent.brief, skin.body));
         rows.push(one_row(runs, cols));
         owners.push(Some(agent.ordinal));
-        if !agent.last.is_empty() {
-            rows.push(one_row(
-                vec![Run::tinted(format!("           {}", agent.last), skin.dim)],
-                cols,
-            ));
-            owners.push(Some(agent.ordinal));
-        }
     }
     (rows, owners)
 }

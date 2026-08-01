@@ -9,7 +9,9 @@ use noob_provider::http::INTERRUPTED;
 use noob_provider::types::Overrides;
 
 use crate::ui::Ui;
-use crate::{BootArgs, RunEnd, bootstrap, emit, value_for};
+use crate::agent::RunEnd;
+use crate::boot::{BootArgs, bootstrap, value_for};
+use crate::emit;
 
 /// The surface a front end drives. It is a separate subcommand rather than a
 /// mode of the REPL for one reason: the REPL owns the terminal outright, in raw

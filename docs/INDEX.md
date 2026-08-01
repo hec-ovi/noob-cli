@@ -69,6 +69,9 @@ Boxes so far:
 - [`crates/noob/src/emit`](../crates/noob/src/emit/CONTRACT.md) - the
   `NOOB_EMIT` side channel: Event frames to a file beside the session, off by
   default.
+- [`crates/noob/src/boot`](../crates/noob/src/boot/CONTRACT.md) - the one
+  session bootstrap: flags to an assembled Agent, shared by the REPL, exec,
+  child and serve.
 - [`crates/noob/src/config`](../crates/noob/src/config/CONTRACT.md) - config
   dir, the one settings lookup rule, validated atomic `.env` writes, sandbox
   mode, endpoint autodetect.

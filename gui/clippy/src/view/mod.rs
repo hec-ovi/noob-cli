@@ -4912,7 +4912,7 @@ mod tests {
         let panel = layout.placed(space).body;
         let inset = panel.inset(PAD);
         let line = Text::line_for(13.0);
-        // Each agent takes two rows: its head and its news line. Both name it.
+        // One row per agent: busy_state's own child, then the two spawned.
         let rows: Vec<Option<usize>> = (0..4)
             .map(|row| {
                 crate::widgets::agents::agent_at(
@@ -4923,7 +4923,7 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(rows, vec![Some(1), Some(1), Some(2), Some(2)]);
+        assert_eq!(rows, vec![Some(1), Some(2), Some(3), None]);
         assert_eq!(
             crate::widgets::agents::agent_at(
                 &frame,
@@ -7373,31 +7373,11 @@ mod tests {
         assert!((first[0] - (body.x + 6.0 * 8.0)).abs() < 0.01, "{first:?}");
     }
 
-    /// A pane is drawn in exactly the columns its selection is counted in.
-    ///
-    /// Everything from the pointer to the clipboard runs over the stored text
-    /// by character index, and that is only true if the row on screen holds the
-    /// characters the pane says it does. No shaper wraps the way anything else
-    /// counts, so the box names its column count and the rows are broken before
-    /// shaping, by the same `text-geometry` call that measured them. Left to
-    /// the shaper, the blank at each break was dropped from the screen, so
-    /// every row below one began a character further along than the arithmetic
-    /// said and a selection made there picked up spaces that were nowhere on
-    /// screen. It only showed up once the window was narrow enough to wrap,
-    /// which is why resizing looked like the trigger.
-    ///
-    /// The first version of this fix made both sides break on the column, which
-    /// held the property and broke prose in the middle of words. Both sides
-    /// break at the blank now, so the assertion is no longer `row * cols`: it
-    /// is that the row a hit test lands on starts where the drawn row starts,
-    /// that the drawn row runs to where the next one begins, and that the only
-    /// thing between two rows is the single blank the break was spent on.
-    ///
-    /// Prose with blanks, deliberately, plus a word wider than the pane, a run
-    /// of blanks and an empty line: every wrapped-pane test in this repo used
-    /// `"x".repeat(n)`, which has no blank to break at and so wraps the same
-    /// way whatever the rule is. That is why the whole corpus stayed green over
-    /// the bug.
+    /// The activity pane is a clipped list: every entry is exactly one
+    /// screen row, that row is the one the wrap rule would have drawn first
+    /// (so it still breaks at a blank, never mid-word when a blank exists),
+    /// and what is drawn is what a press or a selection there resolves to,
+    /// with only the dim ellipsis decoration after an entry that goes on.
     #[test]
     fn a_pane_is_drawn_in_the_columns_its_selection_is_counted_in() {
         let mut state = busy_state();
@@ -7415,14 +7395,10 @@ mod tests {
              and once more for luck, with blanks all the way along it so the \
              wrap has plenty of chances to eat one of them on a boundary"
                 .to_string(),
-            "a second line of prose with a good few blanks in it to break on, \
-             long enough that it takes three rows of this pane to show and so \
-             crosses two wrap points on the way down"
-                .to_string(),
+            "short and it fits".to_string(),
             String::new(),
-            // A word with nowhere to break in it, wider than the pane whatever
-            // the pane turns out to be, and a run of blanks either side.
-            format!("a word   with   runs   of   blanks   {}   and no room to break it", "z".repeat(cols + 5)),
+            // A word with nowhere to break in it, wider than the pane.
+            format!("a word   with   runs   of   blanks   {}   after it", "z".repeat(cols + 5)),
         ] {
             state.activity.say(text, Tone::Body);
         }
@@ -7472,16 +7448,11 @@ mod tests {
             .collect();
         let drawn: Vec<Vec<char>> = laid.split('\n').map(|row| row.chars().collect()).collect();
 
-        // And the characters the hit test believes each row is showing. Both
-        // ends of the row come out of the hit test itself: column zero is where
-        // a drag from the left edge of the row starts, and a column past the
-        // right edge is where a drag off the end of the row stops.
         let rows = layout.rows(panel, 13.0);
         let skip = state.activity.window(rows, cols).skip;
         let mut checked = 0;
-        let mut wrapped = 0;
-        let mut on_the_column = 0;
-        let mut previous: Option<(usize, usize)> = None;
+        let mut clipped_rows = 0;
+        let mut seen = Vec::new();
         for row in 0..rows {
             let Some((line, start)) = state.activity.spot_in(rows, cols, row, 0) else {
                 break;
@@ -7491,6 +7462,9 @@ mod tests {
                 .spot_in(rows, cols, row, cols + 9)
                 .expect("the row a moment ago is still a row");
             assert_eq!(same, line, "row {row} lands on two different lines");
+            // One row per entry, always: a line never takes two rows.
+            assert!(!seen.contains(&line), "line {line} took a second row");
+            seen.push(line);
             let text = &state
                 .activity
                 .line(line)
@@ -7498,53 +7472,33 @@ mod tests {
                 .text;
             let source: Vec<char> = text.chars().take(end).skip(start).collect();
             assert!(end - start <= cols, "row {row} is wider than the pane");
+            let whole = text.chars().count();
+            let mut want = source.clone();
+            if end < whole && end - start < cols {
+                // The one decoration: a dim ellipsis after an entry that
+                // goes on past its row.
+                want.push('\u{2026}');
+            }
+            if end < whole {
+                clipped_rows += 1;
+            }
             assert_eq!(
-                drawn[row + skip], source,
+                drawn[row + skip], want,
                 "screen row {row} holds something other than what a selection there would copy"
             );
-            // Nothing falls between two rows of one line but the single blank
-            // the break was spent on, and nothing is on both.
-            if let Some((before, was)) = previous.filter(|(_, was)| *was == line) {
-                match start - before {
-                    0 => {}
-                    1 => assert_eq!(
-                        text.chars().nth(before),
-                        Some(' '),
-                        "row {row} of line {was} skipped a character that is not a blank"
-                    ),
-                    gap => panic!("row {row} of line {was} starts {gap} characters past the row above"),
-                }
-                wrapped += 1;
+            // And the row still breaks where the wrap rule would have: at a
+            // blank when the entry has one inside the pane's columns.
+            if end < whole && end - start < cols {
+                assert_eq!(
+                    text.chars().nth(end),
+                    Some(' '),
+                    "row {row} was cut mid-word with a blank to break at"
+                );
             }
-            if end - start == cols && !source.contains(&' ') {
-                on_the_column += 1;
-            }
-            previous = Some((end, line));
             checked += 1;
         }
         assert!(checked > 3, "only {checked} rows were on screen");
-        assert!(wrapped > 2, "only {wrapped} rows continued a wrapped line");
-        assert!(
-            on_the_column > 0,
-            "no row broke on the column, so the word wider than the pane was never drawn"
-        );
-        // The words really are whole: no row of prose ends mid-word with the
-        // next one carrying on from it, unless the word had nowhere to break.
-        let broken: usize = (0..rows)
-            .filter_map(|row| {
-                let (line, start) = state.activity.spot_in(rows, cols, row, 0)?;
-                let (_, end) = state.activity.spot_in(rows, cols, row, cols + 9)?;
-                let text = &state.activity.line(line)?.text;
-                let after = text.chars().nth(end);
-                Some(usize::from(
-                    end > start && after.is_some_and(|ch| ch != ' ') && end - start == cols,
-                ))
-            })
-            .sum();
-        assert_eq!(
-            broken, on_the_column,
-            "a row broke inside a word that had a blank to break at"
-        );
+        assert!(clipped_rows >= 2, "nothing overflowed: {clipped_rows}");
     }
 
     /// The time on an activity row is drawn in the dim tone, and the tag and
@@ -8548,7 +8502,7 @@ mod tests {
             brief: "40 items".into(),
             args: serde_json::json!({"todos": todos}),
         });
-        for i in 0..12 {
+        for i in 0..24 {
             state.apply(noob_proto::Event::AgentSpawn {
                 agent_id: format!("kid-{i:02}"),
                 prompt: format!("child {i:02} is reading"),
@@ -8676,7 +8630,7 @@ mod tests {
     fn a_pane_with_more_rows_than_its_box_scrolls_to_the_end() {
         for (view, w, h, last) in [
             (View::Plan, 1400.0, 900.0, "step 39"),
-            (View::Agents, 1400.0, 900.0, "news 11"),
+            (View::Agents, 1400.0, 900.0, "child 23 is reading"),
             // The monitor pane is five readings in a box that holds fewer.
             (View::Session, 900.0, 330.0, "DECODE"),
         ] {

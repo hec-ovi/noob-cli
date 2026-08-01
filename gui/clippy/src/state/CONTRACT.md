@@ -35,7 +35,10 @@ impl State {
     // finishes leaves the list in the event that ends it, and shown_agent
     // clears with it
 }
-pub struct Pane;   // wrapped scrollback: lines in, visual rows out, ring
+pub struct Pane;   // wrapped scrollback: lines in, visual rows out, ring;
+                   // .clipped() lists one row per line (activity), and
+                   // anchor_first/spot_row lend the row arithmetic to a
+                   // surface with an offset of its own (the call popup)
 pub struct Line;   // one logical line with its Tone and Kind
 pub enum Tone;  pub enum Kind;   // what a tool call renders as
 pub struct Call;   // one remembered tool call, and its popup cells

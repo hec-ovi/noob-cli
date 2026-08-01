@@ -11,11 +11,14 @@ with a bar down its left in the cell's tone.
 
 ## Surface
 
-Two functions: `popup(scene, frame)` paints it from `frame.state.popped()`,
-`frame.layout.call_popup` and `frame.popup_scroll`;
-`scroll_geometry(frame) -> Option<(total_rows, fit_rows)>` is what the
-wheel, the dragged track and the shell's clamp measure with, from the same
-columns the glyphs wrap in.
+`popup(scene, frame)` paints it from `frame.state.popped()`,
+`frame.layout.call_popup` and `frame.popup_scroll`, selection bands
+included. `scroll_geometry(frame) -> Option<(total_rows, fit_rows)>` is
+what the wheel, the dragged track and the shell's clamp measure with.
+`document(call) -> Pane` is the blocks flattened to the lines they are
+drawn as - what a selection resolves and copies against - and
+`spot_at(frame, x, y)` is the character under a point, for the shell's
+press and drag.
 
 ## Invariants
 
@@ -36,6 +39,7 @@ Run, Text), [`text-geometry`](../../../../layers/text-geometry/CONTRACT.md)
 
 ## Tests
 
+Inline: the document's order and what a selection over it copies.
 Scene-level: the view box's rendered-scene tests assert the popup's visible
 behavior through `build`; the shell's hit tests cover the close mark and
 the track.

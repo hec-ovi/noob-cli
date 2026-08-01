@@ -4,10 +4,12 @@ contractVersion: 1.0.0
 
 ## Purpose
 
-The activity widget: exactly one row per tool call, ending in the chevron
-that says a press opens it. A call's progress, summary, and failure detail
-are never rows here; they live on the full-panel popup the row opens, and a
-failure recolors its row. The row is the anchor the popup opens over.
+The activity widget: exactly one clipped row per tool call - the row the
+wrap would have drawn first, a dim ellipsis after an entry that goes on,
+never a second row. The call row under the pointer brightens, which is what
+says these rows press. A call's progress, summary, and failure detail are
+never rows here; they live on the full-panel popup the row opens, and a
+failure recolors its row.
 
 ## Surface
 
