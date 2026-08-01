@@ -759,10 +759,10 @@ pub(crate) fn settings_card_shell(
     if on && let Some(mark) = held.cut(Panel::new(card.x, card.y, MARK_W, card.h)) {
         scene.rect(mark.fill(skin.edge_focus));
     }
-    if parts.title.w >= 1.0 && held.holds(parts.title) {
+    if parts.title.w >= 1.0 {
         let big = design::card_title_size(size);
         let big_column = design::column_for(column, size, design::CARD_TITLE);
-        scene.text(Text::rich(
+        if let Some(text) = held.text(Text::rich(
             vec![Run::tinted(
                 clip(title, columns_in(parts.title.w, big_column).saturating_sub(1)),
                 tint,
@@ -770,7 +770,9 @@ pub(crate) fn settings_card_shell(
             parts.title,
             big,
             tint,
-        ));
+        )) {
+            scene.text(text);
+        }
     }
     if parts.rule.w >= 1.0 && parts.rule.y + 1.0 <= card.y + card.h && held.holds(parts.rule) {
         scene.rect(parts.rule.fill(skin.edge));
@@ -1038,6 +1040,29 @@ impl ListClip {
     /// How much of a box hangs below the band, in pixels.
     pub(crate) fn under(&self, panel: Panel) -> f32 {
         (panel.y + panel.h - self.bottom).max(0.0)
+    }
+
+    /// A text box held to the band, or nothing when none of it is on.
+    ///
+    /// What the band cuts off the top is scrolled out of a box that now
+    /// starts at the band, in the box's own line height, so every glyph row
+    /// keeps its pixels and the renderer's bounds cut the split row exactly
+    /// where the band is. The bottom needs only the shorter box, since the
+    /// bounds already end the drawing there.
+    pub(crate) fn text(&self, text: Text) -> Option<Text> {
+        let over = self.over(text.at);
+        let under = self.under(text.at);
+        if over <= 0.0 && under <= 0.0 {
+            return Some(text);
+        }
+        let h = text.at.h - over - under;
+        if h < 1.0 {
+            return None;
+        }
+        let mut text = text;
+        text.at = Panel::new(text.at.x, text.at.y + over, text.at.w, h);
+        text.scroll_lines += over / text.line_height;
+        Some(text)
     }
 }
 

@@ -160,26 +160,9 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
     // where it really is and cut where it really ends.
     let keep = ListClip::of(cards_box);
     let window = panel.window(Text::rows_for(size, list.h), list_cols);
-    // A text box held to that band: the rows the band cuts off the top are
-    // scrolled out of a box that now starts at the band, in the box's own line
-    // height, so every glyph row keeps its pixels and the renderer's bounds
-    // cut the split row exactly. The bottom needs only the shorter box, since
-    // the bounds already end the drawing there.
-    let held_text = |text: Text| -> Option<Text> {
-        let over = keep.over(text.at);
-        let under = keep.under(text.at);
-        if over <= 0.0 && under <= 0.0 {
-            return Some(text);
-        }
-        let h = text.at.h - over - under;
-        if h < 1.0 {
-            return None;
-        }
-        let mut text = text;
-        text.at = Panel::new(text.at.x, text.at.y + over, text.at.w, h);
-        text.scroll_lines += over / text.line_height;
-        Some(text)
-    };
+    // A text held to that band scrolls what the band cut off out of its own
+    // box ([`ListClip::text`]), so the rows still showing keep their pixels.
+    let held_text = |text: Text| keep.text(text);
     let hold_say = |scene: &mut Scene, runs: Vec<Run>, at: Panel, tint: [u8; 4]| {
         if let Some(text) = held_text(Text::rich(runs, at, size, tint)) {
             scene.text(text);
