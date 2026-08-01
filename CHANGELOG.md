@@ -16,7 +16,8 @@ command for everything.
   index, MCP line). A present file replaces its embedded default wholesale;
   the shipped tool guidance ends by naming these tools the basic set, for
   the user to adjust at their discretion. `noob debug prompt` prints the
-  merged result and `noob doctor` says which text is in effect.
+  merged result, `noob debug env` only the generated runtime lines, and
+  `noob doctor` says which text is in effect.
 - Slash commands in the NO0B prompt: every settings-panel capability has a
   `/command` (endpoint, limits, skills, MCP servers, sessions, theme, fonts,
   transparency, colours), `/help` lists them and `/help <name>` explains one,

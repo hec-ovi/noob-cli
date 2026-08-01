@@ -1426,15 +1426,18 @@ fn child_result(
 
 /// `noob debug prompt [--json]`: the EXACT assembled system prompt and wire
 /// tools array this binary would send, so budget tests measure the shipped
-/// artifact rather than a reimplementation.
+/// artifact rather than a reimplementation. `noob debug env`: only the
+/// runtime lines the assembly appends after AGENTS.md and TOOLS.md, for a
+/// front end that shows them read-only under the two editable files.
 fn cmd_debug(args: &[String]) -> ExitCode {
-    match args.first().map(String::as_str) {
-        Some("prompt") => {}
+    let env_mode = match args.first().map(String::as_str) {
+        Some("prompt") => false,
+        Some("env") => true,
         _ => {
-            eprintln!("usage: noob debug prompt [--json]");
+            eprintln!("usage: noob debug prompt [--json] | noob debug env");
             return ExitCode::from(2);
         }
-    }
+    };
     let json_mode = args.iter().any(|a| a == "--json");
     let config_dir = config::config_dir();
     let ov = Overrides::default();
@@ -1461,6 +1464,10 @@ fn cmd_debug(args: &[String]) -> ExitCode {
         skills_index: skills::index(&discovered),
         mcp_line: prompt::mcp_line(&mcp_servers),
     };
+    if env_mode {
+        println!("{}", prompt::runtime_lines(&inputs));
+        return ExitCode::SUCCESS;
+    }
     // One head computation feeds both outputs: a date rollover between two
     // calls must not make "head" disagree with "system".
     let head = prompt::head(&inputs);

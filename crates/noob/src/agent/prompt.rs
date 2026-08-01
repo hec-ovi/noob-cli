@@ -46,14 +46,28 @@ pub fn head(inputs: &PromptInputs) -> String {
         .as_deref()
         .unwrap_or(TOOLS_DEFAULT_MD)
         .trim_end();
+    format!("{agents}\n\n{tools}\n\n{}", env_block(inputs))
+}
+
+/// The environment facts, one computation shared by the assembled prompt and
+/// `debug env` so the two can never disagree on the bytes.
+fn env_block(inputs: &PromptInputs) -> String {
     format!(
-        "{agents}\n\n{tools}\n\n<env>\ncwd: {}\nplatform: {}\ndate: {}\nmodel: {}\nsandbox: {}\n</env>",
+        "<env>\ncwd: {}\nplatform: {}\ndate: {}\nmodel: {}\nsandbox: {}\n</env>",
         inputs.cwd,
         std::env::consts::OS,
         today_utc(),
         inputs.model,
         inputs.sandbox,
     )
+}
+
+/// Everything the assembly appends after the two authored prompt files: the
+/// environment block plus the runtime layers (project AGENTS.md, skills
+/// index, MCP line). `noob debug env` prints this, byte-identical to the
+/// system prompt's tail at that moment.
+pub fn runtime_lines(inputs: &PromptInputs) -> String {
+    assemble_from(env_block(inputs), inputs)
 }
 
 /// The full system prompt: head + project AGENTS.md + skills index + MCP line.
@@ -215,16 +229,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn user_files_replace_their_defaults_and_merge_agents_then_tools() {
-        let mut i = inputs();
-        i.agents = Some("my main prompt".into());
-        i.tools = Some("my tool rules".into());
-        let s = assemble(&i);
-        assert!(s.starts_with("my main prompt\n\nmy tool rules\n\n<env>"));
-        assert!(!s.contains("You are noob"));
-        assert!(!s.contains("These tools are the basic set"));
-    }
+    // Replacement and agents-then-tools ordering are proven through the real
+    // binary in tests/prompt_files.rs.
 
     #[test]
     fn project_agents_md_appends_under_its_header() {

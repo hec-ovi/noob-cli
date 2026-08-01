@@ -42,7 +42,10 @@ block, project `AGENTS.md`, skills index, MCP line). A present file
 replaces its embedded default wholesale; the defaults live in
 `crates/noob/prompts/agents-default.md` and `tools-default.md`, with
 `compact.md` for compaction, all loaded at compile time. User prompt files
-are capped at 16 KiB each.
+are capped at 16 KiB each. `prompt::runtime_lines` is the runtime tail
+alone, byte-identical to what follows the two authored texts in the
+assembled prompt; `noob debug env` prints it for front ends that show the
+generated lines read-only.
 
 ## The seam
 

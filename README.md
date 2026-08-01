@@ -196,7 +196,7 @@ Three small things the persistent dock does while a turn streams above it.
 
 The mounted config directory contains `.env`, optional `AGENTS.md` and `TOOLS.md`, `mcp.json`, global `skills/`, and `sessions/`.
 
-The system prompt is yours: `AGENTS.md` is its main text and `TOOLS.md` its tool guidance, merged in that order ahead of the runtime facts (environment, skills index, MCP servers). Each file, when present, replaces the built-in default wholesale; the shipped tool guidance ends by noting it is the basic set, to adjust at your discretion. `noob debug prompt` prints the merged result and `noob doctor` says which text is in effect. A project-local `AGENTS.md` in the working directory is still appended as project instructions.
+The system prompt is yours: `AGENTS.md` is its main text and `TOOLS.md` its tool guidance, merged in that order ahead of the runtime facts (environment, skills index, MCP servers). Each file, when present, replaces the built-in default wholesale; the shipped tool guidance ends by noting it is the basic set, to adjust at your discretion. `noob debug prompt` prints the merged result, `noob debug env` prints only the runtime lines appended after the two files, and `noob doctor` says which text is in effect. A project-local `AGENTS.md` in the working directory is still appended as project instructions.
 
 | Key | Default | Meaning | Reload |
 |---|---|---|---|
