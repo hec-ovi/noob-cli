@@ -315,6 +315,10 @@ impl Monitor {
             },
         ];
 
+        // The pane's order is a decision, not the accident of which source
+        // was read first. A reading whose key is not on the list (a future
+        // gauge) goes after the named ones rather than vanishing.
+        gauges.sort_by_key(|gauge| hardware_order(gauge.key));
         self.hardware = gauges;
         self.context = context;
         self.session = session;
@@ -349,6 +353,14 @@ fn read_number(path: &std::path::Path) -> Option<f64> {
 }
 
 /// Total and idle jiffies from the aggregate `cpu` line.
+/// Where a hardware reading stands in the pane: GPU, CPU, GTT, RAM, VRAM.
+fn hardware_order(key: &str) -> usize {
+    ["gpu", "cpu", "gtt", "ram", "vram"]
+        .iter()
+        .position(|name| *name == key)
+        .unwrap_or(usize::MAX)
+}
+
 fn parse_cpu(stat: &str) -> Option<(u64, u64)> {
     let line = stat.lines().find(|line| line.starts_with("cpu "))?;
     let fields: Vec<u64> = line
@@ -383,6 +395,15 @@ fn parse_meminfo(meminfo: &str) -> Option<(f64, f64)> {
 
 #[cfg(test)]
 mod tests {
+    /// The pane's declared order: GPU, CPU, GTT, RAM, VRAM, and an unknown
+    /// key sorts after every named one.
+    #[test]
+    fn hardware_readings_stand_in_the_declared_order() {
+        let mut keys = ["vram", "ram", "gtt", "cpu", "gpu", "later"];
+        keys.sort_by_key(|key| super::hardware_order(key));
+        assert_eq!(keys, ["gpu", "cpu", "gtt", "ram", "vram", "later"]);
+    }
+
     use super::*;
 
     #[test]
