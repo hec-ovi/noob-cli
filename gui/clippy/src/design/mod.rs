@@ -199,7 +199,7 @@ pub fn fields_lines(hints: &[bool], across: usize) -> f32 {
 /// `ROOM` is around one. The number is deliberately generous because it is what
 /// decides the width a description wraps in, and text measured in one width and
 /// drawn in another is a row measured at one height and drawn at another.
-pub const CARD_COLUMNS: usize = 4;
+pub const CARD_COLUMNS: usize = 6;
 
 /// How wide a card's body is, in columns, inside a list `cols` wide.
 pub fn card_cols(cols: usize) -> usize {

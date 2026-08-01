@@ -94,9 +94,11 @@ pub(crate) fn settings_session_cells(row: Panel, column: f32) -> Vec<Panel> {
 pub(crate) fn settings_table_parts(body: Panel, line: f32) -> (Panel, Vec<Panel>) {
     let names = Panel::new(body.x, body.y, body.w, line);
     let top = body.y + line + design::tight(line);
-    let rows = (0..crate::settings::TABLE_ROWS)
+    // As many rows as the body holds: a stretched table fills what it was
+    // given. The cap is a backstop, far above any window.
+    let rows = (0..512)
         .map(|step| Panel::new(body.x, top + step as f32 * line, body.w, line))
-        .filter(|at| at.y + at.h <= body.y + body.h + 0.01)
+        .take_while(|at| at.y + at.h <= body.y + body.h + 0.01)
         .collect();
     (names, rows)
 }
@@ -324,24 +326,25 @@ pub(crate) fn settings_card_parts(
     // model counted the card's height with, so it is taken in columns and not
     // in pixels. Held to what is really inside the border, which it is under at
     // every size the panel is used at.
-    let body_w = (design::card_cols(cols) as f32 * column).min((card.w - room * 2.0).max(1.0));
+    let inset = room * 2.0;
+    let body_w = (design::card_cols(cols) as f32 * column).min((card.w - inset * 2.0).max(1.0));
     let foot_h = match footer {
         true => (design::BUTTON_LINES + design::ROOM) * line,
         false => 0.0,
     };
     let body_y = card.y + head + room;
     CardParts {
-        title: Panel::new(card.x + room, card.y + room, body_w, title_h),
+        title: Panel::new(card.x + inset, card.y + room, body_w, title_h),
         rule: Panel::new(card.x, (card.y + head).floor(), card.w, 1.0),
         body: Panel::new(
-            card.x + room,
+            card.x + inset,
             body_y,
             body_w,
             (card.y + card.h - room - foot_h - body_y).max(0.0),
         ),
         footer: match footer {
             true => Panel::new(
-                card.x + room,
+                card.x + inset,
                 card.y + card.h - room - design::BUTTON_LINES * line,
                 body_w,
                 design::BUTTON_LINES * line,
@@ -361,13 +364,16 @@ pub(crate) fn settings_card_parts(
 pub(crate) fn settings_card_slots(body: Panel, line: f32, hints: &[bool], across: usize) -> Vec<Panel> {
     let across = across.max(1);
     let step = design::step(line);
-    let wide = ((body.w - step * (across - 1) as f32) / across as f32).max(1.0);
+    // Three steps between two fields across: the halves read as two columns
+    // with air between them, not as one line that collides mid-card.
+    let gutter = step * 3.0;
+    let wide = ((body.w - gutter * (across - 1) as f32) / across as f32).max(1.0);
     design::field_slots(hints, across)
         .into_iter()
         .enumerate()
         .map(|(at, (top, tall))| {
             Panel::new(
-                body.x + (at % across) as f32 * (wide + step),
+                body.x + (at % across) as f32 * (wide + gutter),
                 body.y + top * line,
                 wide,
                 tall * line,
@@ -830,20 +836,25 @@ pub(crate) fn settings_rail_cells(body: Panel, rail_w: f32, line: f32, names: us
     // in a small window), the rows pack back to a line each so the names keep
     // their width instead of wrapping into slivers.
     let roomy = line * 1.5;
-    let tall = match body.h >= names as f32 * roomy {
+    // The rail stands a padding in from its left edge and half a line down
+    // from its top, so the names are not stuck to the panel's corner.
+    let pad = crate::view::PAD;
+    let top = (line * 0.5).min(body.h * 0.2);
+    let room_h = (body.h - top).max(1.0);
+    let tall = match room_h >= names as f32 * roomy {
         true => roomy,
         false => line,
     }
-    .min(body.h)
+    .min(room_h)
     .max(1.0);
-    let down = ((body.h / tall).floor() as usize).max(1);
+    let down = ((room_h / tall).floor() as usize).max(1);
     let across = names.div_ceil(down);
-    let wide = (rail_w / across as f32).floor().max(1.0);
+    let wide = (((rail_w - pad).max(1.0)) / across as f32).floor().max(1.0);
     (0..names)
         .map(|index| {
             let at = Panel::new(
-                body.x + (index / down) as f32 * wide,
-                body.y + (index % down) as f32 * tall,
+                body.x + pad + (index / down) as f32 * wide,
+                body.y + top + (index % down) as f32 * tall,
                 wide,
                 tall,
             );
@@ -1095,6 +1106,15 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
         // one row tall that opens on a heading has room for one row of it.
         let tall =
             (crate::settings::lines(entry, entry_cols) as f32 * line).min(cards.y + cards.h - y);
+        // The last row of a section, when it is a table, takes the room under
+        // it: a list with dead space below it is a list that stopped short.
+        // Nothing scrolls differently, because nothing scrolls when it fits.
+        let tall = match entry {
+            SettingRow::Table(_) if panel.row(index + 1).is_none() => {
+                tall.max(cards.y + cards.h - y)
+            }
+            _ => tall,
+        };
         if tall < 1.0 {
             break;
         }
@@ -1113,10 +1133,17 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
         match entry {
             SettingRow::Setting { kind, .. } if kind.fraction(0.0).is_some() => {
                 let number = (SETTING_TRACK_VALUE_COLUMNS as f32 * column).min(value_at.w * 0.5);
+                // A column of air on either side: a track that starts on the
+                // border reads as part of the frame.
                 tracks.push((
                     index,
                     Side::Left,
-                    Panel::new(value_at.x, value_at.y, value_at.w - number, value_at.h),
+                    Panel::new(
+                        value_at.x + column,
+                        value_at.y,
+                        (value_at.w - number - column * 2.0).max(1.0),
+                        value_at.h,
+                    ),
                 ));
             }
             SettingRow::Setting { .. } | SettingRow::Field { .. } => {
@@ -1295,7 +1322,12 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
                             tracks.push((
                                 index,
                                 side,
-                                Panel::new(input.x, input.y, input.w - number, input.h),
+                                Panel::new(
+                                    input.x + column,
+                                    input.y,
+                                    (input.w - number - column * 2.0).max(1.0),
+                                    input.h,
+                                ),
                             ));
                         }
                         SettingRow::Setting { .. } | SettingRow::Field { .. } => {
@@ -1310,9 +1342,10 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
             _ => {}
         }
     }
-    // Top right, one cut's reach in from the corner the cut takes away, so the
-    // mark is not drawn in the triangle that is not there.
-    let close = Panel::new(content.x + content.w - CUT - line, content.y, line, line);
+    // Top right, its right edge on the content's own right edge: the padding
+    // already clears the corner's cut, and a cross floating a glyph further
+    // in reads as an offset, not a corner.
+    let close = Panel::new(content.x + content.w - line - 2.0, content.y, line, line);
     SettingsPlaces {
         box_: area,
         rail,

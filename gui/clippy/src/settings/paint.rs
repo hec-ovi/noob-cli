@@ -64,7 +64,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
             Run::icon(icons::SETTINGS.to_string(), skin.bright),
             Run::tinted(" SETTINGS", skin.bright),
         ],
-        Panel::new(content.x + MARK_W + 3.0, content.y, rail_head_w, title_line),
+        Panel::new(content.x + PAD + MARK_W + 3.0, content.y, rail_head_w, title_line),
         title_size,
         skin.bright,
     ));
@@ -247,9 +247,9 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 // How far down a list longer than its body has been read, at the
                 // right end of the header: a body showing twelve of forty with
                 // nothing saying so reads as the whole list.
-                if table.rows.len() > crate::settings::TABLE_ROWS {
-                    let last =
-                        (table.first + crate::settings::TABLE_ROWS).min(table.rows.len());
+                let (names_at, boxes) = settings_table_parts(parts.body, line);
+                if table.rows.len() > boxes.len() {
+                    let last = (table.first + boxes.len()).min(table.rows.len());
                     let counter = format!("{}-{} of {}", table.first + 1, last, table.rows.len());
                     let wide = (counter.chars().count() as f32 + 1.0) * column;
                     if wide < parts.title.w * 0.5 {
@@ -266,7 +266,6 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                         );
                     }
                 }
-                let (names_at, boxes) = settings_table_parts(parts.body, line);
                 // The names stand on a filled band, which is what separates a
                 // header from the data under it: rules between the columns and
                 // nothing else drew them as one more row of the list.
@@ -330,7 +329,10 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     if let Some(mark) = cells.get(crate::settings::SESSION_MARK) {
                         let hot = frame.hot == Some(Hit::SettingsMark(*index, table.first + step));
                         let tint = match (kept.marked, here) {
-                            (true, _) => skin.good,
+                            // On the picked band the mark inverts, or a green
+                            // tick on the green band is a mark nobody can see.
+                            (true, true) => skin.picked_ink,
+                            (true, false) => skin.good,
                             (false, true) => skin.picked_ink,
                             (false, false) => skin.dim,
                         };
@@ -514,10 +516,9 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     // number it is at beside it. Nineteen presses of an arrow
                     // key from one end of opacity to the other is not a control.
                     Some(track) if track.w >= 1.0 => {
-                        // No band behind a pointed-at slider: a track-sized
-                        // background read as a selection effect nobody asked
-                        // for. The grip says where the pointer's attention is.
-                        let hot = frame.hot == Some(Hit::SettingsSlider(*index, *side));
+                        // Nothing changes on rollover: a slider that lights
+                        // up under a passing pointer read as a selection
+                        // effect nobody asked for.
                         let thick = (line * 0.3).floor().max(2.0);
                         let up = ((line - thick) * 0.5).floor();
                         let at = panel.fraction(*index, *side).unwrap_or(0.0);
@@ -539,10 +540,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                                 grip,
                                 (line - 2.0).max(1.0),
                             )
-                            .fill(match hot {
-                                true => skin.gauge,
-                                false => skin.edge_focus,
-                            }),
+                            .fill(skin.edge_focus),
                         );
                         let number = Panel::new(
                             track.x + track.w + column,

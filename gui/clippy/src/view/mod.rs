@@ -12422,18 +12422,20 @@ mod tests {
             // what makes a screen of settings scannable rather than a wall of
             // words. Per column rather than across the panel, because a form row
             // has two of them: the right hand column lines up with itself.
+            // Values with values and tracks with tracks: a slider stands a
+            // column of air in from where an input box starts, on purpose.
             for want in [crate::settings::Side::Left, crate::settings::Side::Right] {
-                let lefts: Vec<f32> = layout
-                    .settings_values
-                    .iter()
-                    .chain(layout.settings_tracks.iter())
-                    .filter(|(_, side, _)| *side == want)
-                    .map(|(_, _, p)| p.x)
-                    .collect();
-                assert!(
-                    lefts.windows(2).all(|pair| (pair[0] - pair[1]).abs() < 0.01),
-                    "{section}: {lefts:?}"
-                );
+                for group in [&layout.settings_values, &layout.settings_tracks] {
+                    let lefts: Vec<f32> = group
+                        .iter()
+                        .filter(|(_, side, _)| *side == want)
+                        .map(|(_, _, p)| p.x)
+                        .collect();
+                    assert!(
+                        lefts.windows(2).all(|pair| (pair[0] - pair[1]).abs() < 0.01),
+                        "{section}: {lefts:?}"
+                    );
+                }
             }
         }
     }
@@ -12942,10 +12944,10 @@ mod tests {
             .map(|(_, on, at)| (*on, *at))
             .collect();
         assert_eq!(picks.len(), 3, "every saved conversation is drawn");
-        // The body was measured for a fixed number of rows and the layout laid
-        // out exactly that many boxes: a row drawn where the model did not count
-        // one puts every press below it on another row.
-        assert_eq!(boxes.len(), crate::settings::TABLE_ROWS);
+        // The body was measured for at least the fixed row count, and the
+        // last card of a section that fits stretches to the bottom of the
+        // list, so the body may hold more boxes than the model counted.
+        assert!(boxes.len() >= crate::settings::TABLE_ROWS, "{}", boxes.len());
         for (step, (_, at)) in picks.iter().enumerate() {
             assert!(
                 (at.y - boxes[step].y).abs() < 0.01 && (at.h - boxes[step].h).abs() < 0.01,
@@ -15004,7 +15006,9 @@ mod tests {
             let ratio = out.layout.settings_rail_ratio_at(x);
             let moved = render_settings_at_rail(&panel, 1400.0, 900.0, None, ratio);
             let layout = &moved.layout;
-            let rail_w = layout.settings_rail[0].1.w;
+            // The cells stand PAD in from the rail's left edge, so the rail
+            // itself is a padding wider than its first cell.
+            let rail_w = layout.settings_rail[0].1.w + PAD;
             assert!(rail_w >= floor, "{x}: the rail is {rail_w}");
             assert!(
                 layout.settings_list.w >= floor,
@@ -15016,7 +15020,10 @@ mod tests {
         // A fraction out of a settings file nobody clamped is held the same way.
         for ratio in [0.0, 1.0, -5.0, 12.0] {
             let moved = render_settings_at_rail(&panel, 1400.0, 900.0, None, ratio);
-            assert!(moved.layout.settings_rail[0].1.w >= floor, "{ratio}");
+            assert!(
+                moved.layout.settings_rail[0].1.w + PAD >= floor,
+                "{ratio}"
+            );
             assert!(moved.layout.settings_list.w >= floor, "{ratio}");
         }
     }
