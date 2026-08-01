@@ -690,15 +690,27 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                         true => skin.bright,
                         false => skin.body,
                     };
-                    say(
-                        scene,
-                        vec![Run::tinted(
-                            clip(colour.about, columns_in(words.w, column).saturating_sub(1)),
-                            ink,
-                        )],
-                        words,
-                        ink,
-                    );
+                    // While the pressed swatch is being typed into, its label
+                    // gives way to the hex line, with the same caret every
+                    // field draws: the edit happens where the colour is rather
+                    // than only on the footer.
+                    let typing = held.then(|| panel.editing()).flatten();
+                    let written = match typing {
+                        Some(typed) => tail(typed, columns_in(words.w, column).saturating_sub(2)),
+                        None => clip(colour.about, columns_in(words.w, column).saturating_sub(1)),
+                    };
+                    say(scene, vec![Run::tinted(written.clone(), ink)], words, ink);
+                    if typing.is_some() {
+                        scene.rect(
+                            Panel::new(
+                                words.x + written.chars().count() as f32 * column,
+                                words.y,
+                                2.0,
+                                line.min(at.h),
+                            )
+                            .fill(skin.caret),
+                        );
+                    }
                 }
             }
             // One skill or one server, as a card of its own: its name in the

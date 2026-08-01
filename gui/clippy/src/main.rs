@@ -1751,6 +1751,18 @@ impl App {
         let Some(panel) = self.settings.as_mut() else {
             return;
         };
+        // A pressed colour: what was typed is a hex value for the window's own
+        // file, under the key the swatch names. The panel refuses a value the
+        // parser cannot read, on the footer, and nothing is written; a good one
+        // lands where every other appearance change lands.
+        if panel.picked().is_some() {
+            let change = panel.finish_swatch_edit();
+            if let Some(change) = change {
+                self.write_setting(&change);
+            }
+            self.dirty = true;
+            return;
+        }
         // The add card's two fields live on the panel until its button writes
         // the file, the way the skill source does; Enter only keeps the text.
         if panel.keep_server_edit(&self.config) {

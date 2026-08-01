@@ -1090,8 +1090,10 @@ pub struct Settings {
     /// dragged to. Nothing is written until the button comes up.
     dragging: Option<(usize, Side, String)>,
     /// The swatch that was last pressed, as the row it is on and the cell along
-    /// it. Nothing is changed by it: the footer says which key in the file
-    /// writes that colour, which is what a grid of blocks cannot say on its own.
+    /// it. The footer says which key in the file writes that colour, which is
+    /// what a grid of blocks cannot say on its own, and while it is pressed the
+    /// editing line above holds a hex value for that key: Enter writes it the
+    /// way any other appearance change lands, Escape keeps what the file says.
     picked: Option<(usize, usize)>,
     /// The entry row whose uninstall has been pressed once.
     ///
@@ -1323,7 +1325,7 @@ impl Settings {
         self.sections = self.build(config);
         self.trouble = None;
         self.dragging = None;
-        self.picked = None;
+        self.unpick();
         self.arming = None;
         for (section, place) in self.sections.iter_mut().zip(places) {
             let Place {
@@ -1597,18 +1599,35 @@ impl Settings {
     }
 
     /// Press one swatch: which colour it is stays on the footer until something
-    /// else is pressed.
+    /// else is pressed, and the frame's editing line opens on the value in
+    /// hand, so a hex colour can be typed straight onto the swatch.
     ///
-    /// Nothing is changed by it. A block of colour cannot say which line of the
-    /// file writes it, and that line is the whole of what somebody looking at
-    /// the palette wants next.
+    /// The buffer starts as the current value rather than empty: the colour is
+    /// then on screen to read, and backspace-and-retype is the edit most
+    /// presses want. The same single line every field edits with; Enter hands
+    /// it to [`Settings::finish_swatch_edit`] and Escape keeps what the file
+    /// says.
     pub fn pick(&mut self, row: usize, cell: usize) -> bool {
-        if self.swatch(row, cell).is_none() {
+        let Some(swatch) = self.swatch(row, cell) else {
             return false;
-        }
-        let moved = self.picked != Some((row, cell));
+        };
+        let value = hex(swatch.rgb);
+        let moved = self.picked != Some((row, cell))
+            || self.editing.as_deref() != Some(value.as_str());
         self.picked = Some((row, cell));
+        self.editing = Some(value);
         moved
+    }
+
+    /// Let go of the pressed swatch, and the hex line that was open on it.
+    ///
+    /// One helper because the two are one state: a buffer left behind after the
+    /// press it belonged to would land its value on nothing. A field's own edit
+    /// is untouched, since a field never has a swatch pressed under it.
+    fn unpick(&mut self) {
+        if self.picked.take().is_some() {
+            self.editing = None;
+        }
     }
 
     /// Which swatch is pressed, for the block the grid draws around it.
@@ -1616,17 +1635,24 @@ impl Settings {
         self.picked
     }
 
-    /// What the footer says about the pressed swatch: the key that writes it and
-    /// the value it is carrying.
+    /// What the footer says about the pressed swatch: the hex line being typed
+    /// while one is open, the key that writes the colour and the value it is
+    /// carrying otherwise.
     fn picked_says(&self) -> Option<String> {
         let (row, cell) = self.picked?;
         let swatch = self.swatch(row, cell)?;
-        Some(format!(
-            "{}: the settings file writes it as {} = {}",
-            swatch.about,
-            swatch.key,
-            hex(swatch.rgb)
-        ))
+        Some(match self.editing.as_deref() {
+            Some(typed) => format!(
+                "{}: {} = {typed}_ \u{2022} enter writes it \u{2022} esc leaves it alone",
+                swatch.about, swatch.key
+            ),
+            None => format!(
+                "{}: the settings file writes it as {} = {}",
+                swatch.about,
+                swatch.key,
+                hex(swatch.rgb)
+            ),
+        })
     }
 
     /// What the keys under the cursor do, spelled out for the footer. The panel
@@ -2035,6 +2061,28 @@ impl Settings {
         Some((key, typed))
     }
 
+    /// Finish typing into a pressed swatch: the change that writes that colour
+    /// to the window's own file, for the same committer every nudge lands in.
+    /// A value the file's parser cannot read is refused here, on the footer,
+    /// and nothing is written.
+    ///
+    /// The parser is asked rather than repeated, the way the writer itself
+    /// validates: what a colour is stays one rule, owned by the config box.
+    pub fn finish_swatch_edit(&mut self) -> Option<Change> {
+        let (row, cell) = self.picked?;
+        let typed = self.editing.take()?;
+        let swatch = self.swatch(row, cell)?;
+        if !Config::parse(&format!("{} = {typed}", swatch.key)).unknown.is_empty() {
+            self.trouble = Some(format!("{typed:?} is not a colour; type it as #rrggbb"));
+            return None;
+        }
+        Some(Change {
+            key: swatch.key,
+            value: typed,
+            file: File::Window,
+        })
+    }
+
     /// Where the agent's own file is, for the write the field asks for.
     pub fn agent_file(&self) -> Option<&Path> {
         self.agent.env_path.as_deref()
@@ -2430,7 +2478,7 @@ impl Settings {
         // keyboard is on. The column beside the list goes back to the top of
         // its document for the same reason: the cursor is about to be on
         // another entry, and that entry's text starts at its own first line.
-        self.picked = None;
+        self.unpick();
         self.arming = None;
         self.rewind_doc();
         // Inside a table these walk its rows rather than the panel's: the card
@@ -2453,7 +2501,7 @@ impl Settings {
 
     /// A screenful, then the nearest row that can hold the cursor.
     pub fn page(&mut self, rows: usize, down: bool) -> bool {
-        self.picked = None;
+        self.unpick();
         self.arming = None;
         self.rewind_doc();
         // A block of text is read with these keys rather than paged past. The
@@ -2487,7 +2535,7 @@ impl Settings {
 
     /// The first or last row anything can be done to.
     pub fn jump(&mut self, last: bool) -> bool {
-        self.picked = None;
+        self.unpick();
         self.arming = None;
         self.rewind_doc();
         // The two ends of a block of text, when the cursor is on one. Page moves
@@ -2537,7 +2585,7 @@ impl Settings {
         if !landable_at(row, side) {
             return false;
         }
-        self.picked = None;
+        self.unpick();
         // Only when the pointer moved to another row: the press that deletes is
         // the second one on the same uninstall, and it comes through here first.
         if self.arming.is_some_and(|at| at != index) {

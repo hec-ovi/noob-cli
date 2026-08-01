@@ -1,6 +1,6 @@
 # settings
 
-contractVersion: 2.1.0
+contractVersion: 2.2.0
 
 ## Purpose
 
@@ -68,6 +68,11 @@ by re-export: `SESSION_COLUMNS` and the table constants, `SKILL_SOURCE`,
    drawn cut, and a control is drawn and pressable only while it is wholly
    on screen. Pointer presses never scroll the list; only keyboard movement
    reveals the cursor.
+7. A pressed swatch is edited through the frame's own line: the press opens
+   the editing buffer on the colour's current hex value, Enter asks the
+   config parser and commits the value under the swatch's key into the
+   window file, and a value the parser refuses is said on the footer with
+   nothing written. Escape or any cursor movement lets the press go.
 
 ## Dependencies
 
@@ -78,7 +83,7 @@ box (colors), the state box (the doc pane type).
 
 ## Tests
 
-59 model tests drive key- and click-shaped calls with scratch files: the
+60 model tests drive key- and click-shaped calls with scratch files: the
 frame's 28 (cursor, rail, scroll, sliders, doc viewer, footer) in mod.rs,
 each section's in its own box. Scene-level placement and paint are asserted
 by the view box's rendered-scene tests.

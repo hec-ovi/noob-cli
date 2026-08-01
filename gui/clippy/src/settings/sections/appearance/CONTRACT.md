@@ -1,12 +1,13 @@
 # settings/sections/appearance
 
-contractVersion: 1.0.0
+contractVersion: 1.1.0
 
 ## Purpose
 
 The APPEARANCE section of the settings panel: the window-file settings as
-cards, the palette as labelled swatch grids under their theme card, and the
-restore back to the defaults.
+cards, the palette as labelled swatch grids under their theme card (each
+swatch editable in place by a press and a typed hex value), and the restore
+back to the defaults.
 
 ## Public surface
 
@@ -38,8 +39,13 @@ pub(crate) const LOOKS: [(&str, Kind); 6]
 3. The theme row names the palette actually in hand: a file overriding a
    preset reads as custom, never as the preset's name.
 4. Every swatch is labelled with what it colours in plain words, never with
-   its key.
-5. `restoring()` never contains an `OFF_PANEL` key.
+   its key; the key is said on the footer when the swatch is pressed.
+5. Every swatch is settable from the panel: a press opens the frame's
+   editing line on the value in hand, a typed `#rrggbb` lands in the window
+   file under the swatch's key and overrides its theme, and a value the
+   parser refuses is said on the footer with nothing written. The swatch
+   always shows the value the file really carries.
+6. `restoring()` never contains an `OFF_PANEL` key.
 
 ## Dependencies
 
@@ -50,5 +56,6 @@ bounds.
 ## Tests
 
 Inline: the key coverage sweep, the palette's labels and groups, the theme
-naming and picking, the two transparencies, the round trip through the real
-file, and the restore (12 tests), driven through the frame's `Settings`.
+naming and picking, the swatch hex write path, the two transparencies, the
+round trip through the real file, and the restore (13 tests), driven
+through the frame's `Settings`.

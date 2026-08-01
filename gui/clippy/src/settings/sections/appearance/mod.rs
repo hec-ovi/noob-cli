@@ -441,10 +441,10 @@ fn colour_rows(config: &Config, file: Option<&Path>) -> Vec<Row> {
                     None => String::from("nowhere: no home directory to write one in"),
                 },
             )
-            .saying("a colour is edited here: a hex value needs a keyboard this window has nowhere to put"),
+            .saying("a colour typed on a swatch lands here, under the key the footer names"),
         ],
         hint: Some(String::from(
-            "press a colour above to see which key of that file writes it",
+            "press a colour above and type a hex value (#rrggbb) to change it",
         )),
         does: None,
     }));
@@ -466,7 +466,9 @@ mod tests {
     use super::*;
     use crate::agent::{self, Agent};
     use crate::settings::testing::*;
-    use crate::settings::{commit, restore, Deed, Settings, Side, AGENT, APPEARANCE, SECTIONS};
+    use crate::settings::{
+        commit, restore, Change, Deed, Settings, Side, AGENT, APPEARANCE, SECTIONS,
+    };
 
     /// Every key the file understands is on the panel exactly once, in one
     /// section or another, as a row that changes or as a swatch, unless it is
@@ -824,13 +826,13 @@ mod tests {
         assert_eq!(panel.change(false).expect("a choice").value, "noob-red");
     }
 
-    /// A colour is on the panel to be read, and reading is all.
+    /// A swatch carries its colour, and a press on it says which key writes it
+    /// and opens the hex line on the value in hand.
     ///
     /// This was `a_colour_row_carries_its_swatch_and_cannot_be_changed`, which
     /// asserted the same thing about a `Row::Setting` of its own. A colour is a
-    /// cell of a grid row now, so what it is asserted about moved with it: the
-    /// grid still cannot hold the cursor and the file is still where a colour is
-    /// edited. What is new is the press, which says which key writes it.
+    /// cell of a grid row now: the grid still cannot hold the cursor, and the
+    /// pointer press is how a colour is read and edited.
     #[test]
     fn a_swatch_carries_its_colour_and_says_which_key_writes_it() {
         let config = Config::parse("accent = #123456");
@@ -852,31 +854,103 @@ mod tests {
         };
         assert!(count > 1, "one swatch to a card is the list again");
 
-        // The cursor cannot get there, so no change can be aimed at it.
+        // The cursor cannot get there: the pointer is how a swatch is reached.
         assert!(!panel.point_at(at, Side::Left));
         assert_ne!(panel.cursor(), at);
 
-        // Pressing one says which line of the file writes it, which is the one
-        // thing a block of colour cannot say for itself.
+        // Pressing one says which line of the file writes it, and opens the
+        // hex line on what that line says now.
         assert!(panel.pick(at, cell));
         assert_eq!(panel.picked(), Some((at, cell)));
+        assert_eq!(panel.editing(), Some("#123456"));
         let says = panel.says();
         assert!(says.contains("accent"), "{says}");
         assert!(says.contains("#123456"), "{says}");
         assert!(says.contains("the accent"), "{says}");
-        // And it goes away the moment the keyboard is used again.
+        // And it goes away the moment the keyboard is used again, the typed
+        // line with it.
         panel.step(true);
         assert_eq!(panel.picked(), None);
+        assert_eq!(panel.editing(), None);
         assert_eq!(panel.says(), panel.hint());
         // A cell nobody drew is not a press.
         assert!(!panel.pick(at, count));
         assert!(!panel.pick(0, 0), "the first row of the section is not a grid");
 
-        // And the section says where a colour is edited, with the file to do it
-        // in beside it.
+        // And the section says what a press does, with the file it writes
+        // beside it.
         let text = said(&panel);
-        assert!(text.contains("a colour is edited here"), "{text}");
+        assert!(text.contains("type a hex value"), "{text}");
+        assert!(text.contains("a colour typed on a swatch lands here"), "{text}");
         assert!(text.contains("no0b.conf"), "{text}");
+    }
+
+    /// "where is the setup i asked for individual colors and palettes?" A
+    /// pressed swatch takes a typed hex value: a good one lands in the file
+    /// under the swatch's own key and overrides the theme, a bad one is
+    /// refused on the footer with nothing written, and Escape keeps what the
+    /// file says.
+    #[test]
+    fn a_pressed_swatch_takes_a_hex_value_and_writes_it_under_its_key() {
+        let path = scratch("swatch-edit");
+        let _ = std::fs::remove_file(&path);
+        let config = Config::load_from(&path);
+        let mut panel = Settings::open(&config, Some(&path), Agent::default());
+        go_to(&mut panel, APPEARANCE);
+        let (at, cell) = swatch_at(&panel, "accent");
+
+        // The press opens the hex line on the value in hand; retyping it is
+        // the same buffer every field edits with.
+        assert!(panel.pick(at, cell));
+        assert_eq!(panel.editing(), Some("#7cd894"));
+        while panel.backspace() {}
+        assert!(panel.type_text("#12ff34"));
+        let says = panel.says();
+        assert!(says.contains("accent = #12ff34"), "{says}");
+        let change = panel.finish_swatch_edit().expect("a colour the file can read");
+        assert_eq!(
+            change,
+            Change {
+                key: "accent",
+                value: String::from("#12ff34"),
+                file: File::Window,
+            }
+        );
+        let config = commit(&path, &change).expect("the file takes it");
+        assert_eq!(config.accent, [0x12, 0xff, 0x34]);
+        panel.refresh(&config);
+        go_to(&mut panel, APPEARANCE);
+        // The swatch shows the value it really has, and the palette is no
+        // preset's any more: an explicit colour overrides its theme.
+        let (at, cell) = swatch_at(&panel, "accent");
+        assert_eq!(panel.swatch(at, cell).expect("the accent").rgb, [0x12, 0xff, 0x34]);
+        assert_eq!(value(&panel, THEME), CUSTOM);
+        assert!(panel.editing().is_none(), "the write left the line open");
+        let text = std::fs::read_to_string(&path).expect("the file");
+        assert!(text.contains("accent = #12ff34"), "{text}");
+
+        // A value that is not a colour is refused on the footer and nothing
+        // lands: the file still says what it said.
+        assert!(panel.pick(at, cell));
+        while panel.backspace() {}
+        panel.type_text("#nothex");
+        assert!(panel.finish_swatch_edit().is_none());
+        assert!(
+            panel.trouble().is_some_and(|why| why.contains("#nothex")),
+            "{:?}",
+            panel.trouble()
+        );
+        assert_eq!(Config::load_from(&path).accent, [0x12, 0xff, 0x34]);
+
+        // Escape keeps what the file says, and the pressed swatch stays
+        // readable on the footer.
+        assert!(panel.pick(at, cell));
+        panel.type_text("ff");
+        assert!(panel.cancel_edit());
+        assert_eq!(panel.picked(), Some((at, cell)));
+        assert!(panel.says().contains("#12ff34"), "{}", panel.says());
+        assert_eq!(Config::load_from(&path).accent, [0x12, 0xff, 0x34]);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// "PANES: remove, has no purpose." Neither group PANES held is anywhere on
