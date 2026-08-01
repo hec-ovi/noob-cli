@@ -727,7 +727,8 @@ pub(crate) fn settings_button(
     ));
 }
 
-/// The box, the title bar and the one divider every card carries.
+/// The box, the title bar and the one divider every card carries, held to the
+/// clip the list is drawn through.
 ///
 /// The border goes to the focus colour with the mark down its edge while the
 /// keys are on the card. That is what a full row band said on a row one line
@@ -744,18 +745,21 @@ pub(crate) fn settings_card_shell(
     skin: &Skin,
     size: f32,
     column: f32,
+    held: ListClip,
 ) {
-    scene.rect(panel_edge(
+    settings_card_border(
+        scene,
         card,
         match on {
             true => skin.edge_focus,
             false => skin.edge,
         },
-    ));
-    if on {
-        scene.rect(Panel::new(card.x, card.y, MARK_W, card.h).fill(skin.edge_focus));
+        held,
+    );
+    if on && let Some(mark) = held.cut(Panel::new(card.x, card.y, MARK_W, card.h)) {
+        scene.rect(mark.fill(skin.edge_focus));
     }
-    if parts.title.w >= 1.0 {
+    if parts.title.w >= 1.0 && held.holds(parts.title) {
         let big = design::card_title_size(size);
         let big_column = design::column_for(column, size, design::CARD_TITLE);
         scene.text(Text::rich(
@@ -768,8 +772,53 @@ pub(crate) fn settings_card_shell(
             tint,
         ));
     }
-    if parts.rule.w >= 1.0 && parts.rule.y + 1.0 <= card.y + card.h {
+    if parts.rule.w >= 1.0 && parts.rule.y + 1.0 <= card.y + card.h && held.holds(parts.rule) {
         scene.rect(parts.rule.fill(skin.edge));
+    }
+}
+
+/// A card's border, held to the clip: the stroked ring while the card is
+/// wholly on screen, and only the sides that are really there while it slides
+/// past an edge. A stroke trimmed instead would close the box and draw an
+/// edge along the cut, a line the card does not have there: what a cut card
+/// shows is its two sides running off the screen.
+fn settings_card_border(scene: &mut Scene, card: Panel, edge: [f32; 4], held: ListClip) {
+    if held.holds(card) {
+        scene.rect(panel_edge(card, edge));
+        return;
+    }
+    let Some(shown) = held.cut(card) else {
+        return;
+    };
+    scene.rect(shown.left_edge(edge));
+    if held.under(card) < 1.0 {
+        scene.rect(shown.bottom_edge(edge));
+    }
+    match held.over(card) >= 1.0 {
+        // The top is gone, and the cut corner with it: the chamfer reaches
+        // [`CUT`] down the card and the window scrolls by whole rows of text,
+        // which are taller than that. The right edge runs the whole visible
+        // height.
+        true => {
+            scene.rect(shown.right_edge(edge));
+        }
+        // The top is on screen: the top edge stops where the corner's cut
+        // starts, the diagonal is the stair the panes draw theirs with, and
+        // the right edge picks up under it and runs to the clip.
+        false => {
+            let cut = cut_of(card);
+            scene.rect(Panel::new(card.x, card.y, (card.w - cut).max(1.0), 1.0).fill(edge));
+            cut_line(scene, card, edge, 1.0);
+            scene.rect(
+                Panel::new(
+                    card.x + card.w - 1.0,
+                    card.y + cut,
+                    1.0,
+                    (shown.y + shown.h - card.y - cut).max(0.0),
+                )
+                .fill(edge),
+            );
+        }
     }
 }
 
@@ -932,6 +981,66 @@ pub(crate) fn settings_list_rows(list: Panel) -> Panel {
     Panel::new(list.x, list.y, (list.w - SETTING_GUTTER).max(1.0), list.h)
 }
 
+/// The band of the list the rows show through.
+///
+/// The scroll window can start and end inside a row now
+/// ([`Settings::window`]), so a row's boxes are laid out at their true place
+/// and then held to this band: a hit region is cut to what is on screen, a
+/// control that is not wholly on screen is dropped, and the painter cuts its
+/// drawing by the same two numbers off the same list box. That is what keeps
+/// a press and a pixel in step while a card slides past either edge.
+///
+/// [`Settings::window`]: crate::settings::Settings::window
+#[derive(Clone, Copy)]
+pub(crate) struct ListClip {
+    top: f32,
+    bottom: f32,
+}
+
+impl ListClip {
+    pub(crate) fn of(cards: Panel) -> ListClip {
+        ListClip {
+            top: cards.y,
+            bottom: cards.y + cards.h,
+        }
+    }
+
+    /// A clip that holds everything, for a card that does not scroll past
+    /// anything: the document beside the entry list is never cut.
+    pub(crate) fn open() -> ListClip {
+        ListClip {
+            top: f32::NEG_INFINITY,
+            bottom: f32::INFINITY,
+        }
+    }
+
+    /// Whether a box is wholly on screen. A control that is not is neither
+    /// drawn nor pressable: half a button is a press nobody can aim, so it
+    /// appears once the scroll brings the whole of it on.
+    pub(crate) fn holds(&self, panel: Panel) -> bool {
+        panel.y >= self.top - 0.01 && panel.y + panel.h <= self.bottom + 0.01
+    }
+
+    /// The visible part of a box, or nothing when it is off screen: for a hit
+    /// region or a fill that can honestly be cut, since what comes back is
+    /// exactly the part that is on screen.
+    pub(crate) fn cut(&self, panel: Panel) -> Option<Panel> {
+        let y = panel.y.max(self.top);
+        let h = (panel.y + panel.h).min(self.bottom) - y;
+        (h >= 1.0).then(|| Panel::new(panel.x, y, panel.w, h))
+    }
+
+    /// How much of a box hangs above the band, in pixels.
+    pub(crate) fn over(&self, panel: Panel) -> f32 {
+        (self.top - panel.y).max(0.0)
+    }
+
+    /// How much of a box hangs below the band, in pixels.
+    pub(crate) fn under(&self, panel: Panel) -> f32 {
+        (panel.y + panel.h - self.bottom).max(0.0)
+    }
+}
+
 /// The gutter itself, which is the box the list's bar is drawn in.
 pub(crate) fn settings_list_bar(list: Panel) -> Panel {
     settings_bar_box(list, list)
@@ -1082,7 +1191,8 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
     // is as tall as it wraps to in the box it is actually drawn in, not in the
     // whole panel.
     let entry_cols = settings_entry_cols(cards.w, column);
-    let (first, count) = panel.window(rows_fit, entry_cols);
+    let window = panel.window(rows_fit, entry_cols);
+    let clip = ListClip::of(cards);
     let mut rows = Vec::new();
     let mut values = Vec::new();
     let mut tracks = Vec::new();
@@ -1093,19 +1203,20 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
     let mut picks = Vec::new();
     let mut marks = Vec::new();
     let mut acts = Vec::new();
-    // A running height rather than the row number times a line: a heading is two
+    // A running height rather than the row number times a line: a card is many
     // rows of text tall and everything under it moves down by that much. The
     // heights come from the model, which is what the scroll window counts in.
-    let mut y = cards.y;
-    for step in 0..count {
-        let index = first + step;
+    // The first row starts above the top by the rows of text the window says
+    // are scrolled past: every box below is laid out at its true place and
+    // then held to the clip, so a card sliding off the top keeps its geometry
+    // and loses only the part that is really gone.
+    let mut y = cards.y - window.skip as f32 * line;
+    for step in 0..window.count {
+        let index = window.first + step;
         let Some(entry) = panel.row(index) else {
             break;
         };
-        // Cut off at the bottom of the list rather than drawn over it: a list
-        // one row tall that opens on a heading has room for one row of it.
-        let tall =
-            (crate::settings::lines(entry, entry_cols) as f32 * line).min(cards.y + cards.h - y);
+        let tall = crate::settings::lines(entry, entry_cols) as f32 * line;
         // The last row of a section, when it is a table, takes the room under
         // it: a list with dead space below it is a list that stopped short.
         // Nothing scrolls differently, because nothing scrolls when it fits.
@@ -1115,16 +1226,17 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
             }
             _ => tall,
         };
-        if tall < 1.0 {
-            break;
-        }
         let row = Panel::new(cards.x, y, cards.w, tall);
         y += tall;
-        // One box per row, always. It was two side by side on a form row, which
-        // is what the AGENT section was before it was cards: a card is what
-        // holds two settings side by side now, and it is one row with two fields
-        // in it rather than one row cut in half.
-        rows.push((index, Side::Left, row));
+        // One box per row, always, cut to what is on screen: a press can only
+        // land on the part of a card that is really there. It was two side by
+        // side on a form row, which is what the AGENT section was before it
+        // was cards: a card is what holds two settings side by side now, and
+        // it is one row with two fields in it rather than one row cut in half.
+        let Some(shown) = clip.cut(row) else {
+            continue;
+        };
+        rows.push((index, Side::Left, shown));
         let label_w = settings_label_w(row.w, column);
         let value_at = settings_control(row, label_w, column);
         // Only a row that carries a control gets one, and a control is either a
@@ -1135,18 +1247,17 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
                 let number = (SETTING_TRACK_VALUE_COLUMNS as f32 * column).min(value_at.w * 0.5);
                 // A column of air on either side: a track that starts on the
                 // border reads as part of the frame.
-                tracks.push((
-                    index,
-                    Side::Left,
-                    Panel::new(
-                        value_at.x + column,
-                        value_at.y,
-                        (value_at.w - number - column * 2.0).max(1.0),
-                        value_at.h,
-                    ),
-                ));
+                let track = Panel::new(
+                    value_at.x + column,
+                    value_at.y,
+                    (value_at.w - number - column * 2.0).max(1.0),
+                    value_at.h,
+                );
+                if clip.holds(track) {
+                    tracks.push((index, Side::Left, track));
+                }
             }
-            SettingRow::Setting { .. } | SettingRow::Field { .. } => {
+            SettingRow::Setting { .. } | SettingRow::Field { .. } if clip.holds(value_at) => {
                 values.push((index, Side::Left, value_at));
             }
             _ => {}
@@ -1169,7 +1280,12 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
                         .into_iter()
                         .enumerate()
                 {
-                    cells.push((index, cell, at));
+                    // Only the colours wholly on screen: the painter drops the
+                    // same cells, so a swatch is pressable exactly when it can
+                    // be seen.
+                    if clip.holds(at) {
+                        cells.push((index, cell, at));
+                    }
                 }
             }
             // The toggle and, where there is one, the uninstall: both at the
@@ -1198,19 +1314,27 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
                         break;
                     };
                     let on = table.first + step;
-                    picks.push((index, on, *at));
+                    // Cut, not dropped: the painter draws the visible part of
+                    // a row on the card's cut edge, so that part answers.
+                    let Some(shown) = clip.cut(*at) else {
+                        continue;
+                    };
+                    picks.push((index, on, shown));
                     if let Some(mark) = settings_session_cells(*at, column)
                         .get(crate::settings::SESSION_MARK)
                         && mark.w >= 1.0
+                        && let Some(mark) = clip.cut(*mark)
                     {
-                        marks.push((index, on, *mark));
+                        marks.push((index, on, mark));
                     }
                 }
                 let inside = parts.footer.y >= card.y
                     && parts.footer.y + parts.footer.h <= card.y + card.h + 0.01;
                 if inside {
                     for (act, at) in settings_act_boxes(parts.footer, line, column) {
-                        acts.push((index, act, at));
+                        if clip.holds(at) {
+                            acts.push((index, act, at));
+                        }
                     }
                 }
             }
@@ -1248,12 +1372,13 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
                 let card = settings_card(row, line);
                 let inside = foot.y >= card.y && foot.y + foot.h <= card.y + card.h + 0.01;
                 if foot.w >= 1.0 && x >= foot.x && inside {
-                    toggles.push((index, Panel::new(x, foot.y, toggle_w, foot.h)));
-                    if entry.removable {
-                        removes.push((
-                            index,
-                            Panel::new(x + toggle_w + gap, foot.y, remove_w, foot.h),
-                        ));
+                    let toggle = Panel::new(x, foot.y, toggle_w, foot.h);
+                    if clip.holds(toggle) {
+                        toggles.push((index, toggle));
+                    }
+                    let remove = Panel::new(x + toggle_w + gap, foot.y, remove_w, foot.h);
+                    if entry.removable && clip.holds(remove) {
+                        removes.push((index, remove));
                     }
                 }
             }
@@ -1281,6 +1406,7 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
                     && parts.footer.y >= box_.y
                     && parts.footer.y + parts.footer.h <= box_.y + box_.h + 0.01
                     && let Some(at) = settings_doing_box(parts.footer, column)
+                    && clip.holds(at)
                 {
                     acts.push((index, settings_act_for(doing), at));
                 }
@@ -1297,6 +1423,12 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
                         1 => Side::Right,
                         _ => continue,
                     };
+                    // A field cut by either edge of the list is not a control:
+                    // the painter draws the whole slot or none of it, so half
+                    // an input box is never on screen to press.
+                    if !clip.holds(*slot) {
+                        continue;
+                    }
                     let input = settings_field_boxes(*slot, line).1;
                     // A number with a range is a track with its own number
                     // beside it, inside the input box: the same slider the

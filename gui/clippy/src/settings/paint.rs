@@ -152,12 +152,59 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
     // in rather than off the whole list: the gutter down the right of it belongs
     // to the list's own bar, and text measured in a width it is not drawn in is
     // a row measured at one height and drawn at another.
-    let list_cols = settings_entry_cols(settings_list_rows(list).w, column);
-    for (index, side, row) in &layout.settings_rows {
+    let cards_box = settings_list_rows(list);
+    let list_cols = settings_entry_cols(cards_box.w, column);
+    // The band the rows show through and the same window the placement read:
+    // the layout hands over the visible part of each row, and the drawing
+    // wants the row's true box back, so a card sliding past the top is drawn
+    // where it really is and cut where it really ends.
+    let keep = ListClip::of(cards_box);
+    let window = panel.window(Text::rows_for(size, list.h), list_cols);
+    // A text box held to that band: the rows the band cuts off the top are
+    // scrolled out of a box that now starts at the band, in the box's own line
+    // height, so every glyph row keeps its pixels and the renderer's bounds
+    // cut the split row exactly. The bottom needs only the shorter box, since
+    // the bounds already end the drawing there.
+    let held_text = |text: Text| -> Option<Text> {
+        let over = keep.over(text.at);
+        let under = keep.under(text.at);
+        if over <= 0.0 && under <= 0.0 {
+            return Some(text);
+        }
+        let h = text.at.h - over - under;
+        if h < 1.0 {
+            return None;
+        }
+        let mut text = text;
+        text.at = Panel::new(text.at.x, text.at.y + over, text.at.w, h);
+        text.scroll_lines += over / text.line_height;
+        Some(text)
+    };
+    let hold_say = |scene: &mut Scene, runs: Vec<Run>, at: Panel, tint: [u8; 4]| {
+        if let Some(text) = held_text(Text::rich(runs, at, size, tint)) {
+            scene.text(text);
+        }
+    };
+    for (index, side, shown) in &layout.settings_rows {
         let Some(whole_row) = panel.row(*index) else {
             continue;
         };
         let entry = whole_row;
+        // The row's true box: the layout keeps only what is on screen, so the
+        // part the window says is scrolled past the top goes back on, and a
+        // row cut by the bottom gets its counted height back. What is drawn
+        // from it is still held to the band, piece by piece.
+        let mut full = *shown;
+        if *index == window.first {
+            let over = window.skip as f32 * line;
+            full.y -= over;
+            full.h += over;
+        }
+        let natural = crate::settings::lines(entry, list_cols) as f32 * line;
+        if full.h + 0.5 < natural {
+            full.h = natural;
+        }
+        let row = &full;
         let label_w = settings_label_w(row.w, column);
         let label_cols = columns_in(label_w, column).saturating_sub(1);
         let on = *index == panel.cursor() && panel.on_row();
@@ -243,6 +290,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     skin,
                     size,
                     column,
+                    keep,
                 );
                 // How far down a list longer than its body has been read, at the
                 // right end of the header: a body showing twelve of forty with
@@ -252,42 +300,43 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     let last = (table.first + boxes.len()).min(table.rows.len());
                     let counter = format!("{}-{} of {}", table.first + 1, last, table.rows.len());
                     let wide = (counter.chars().count() as f32 + 1.0) * column;
-                    if wide < parts.title.w * 0.5 {
-                        say(
-                            scene,
-                            vec![Run::tinted(counter, skin.dim)],
-                            Panel::new(
-                                parts.title.x + parts.title.w - wide,
-                                parts.title.y,
-                                wide,
-                                line.min(parts.title.h),
-                            ),
-                            skin.dim,
-                        );
+                    let at = Panel::new(
+                        parts.title.x + parts.title.w - wide,
+                        parts.title.y,
+                        wide,
+                        line.min(parts.title.h),
+                    );
+                    if wide < parts.title.w * 0.5 && keep.holds(at) {
+                        say(scene, vec![Run::tinted(counter, skin.dim)], at, skin.dim);
                     }
                 }
                 // The names stand on a filled band, which is what separates a
                 // header from the data under it: rules between the columns and
                 // nothing else drew them as one more row of the list.
-                scene.rect(names_at.fill(skin.strip));
-                let names = settings_session_cells(names_at, column);
-                for (step, (at, name)) in names.iter().zip(&table.names).enumerate() {
-                    if at.w < column {
-                        continue;
+                if let Some(band) = keep.cut(names_at) {
+                    scene.rect(band.fill(skin.strip));
+                    let names = settings_session_cells(names_at, column);
+                    for (step, (at, name)) in names.iter().zip(&table.names).enumerate() {
+                        if at.w < column {
+                            continue;
+                        }
+                        let shown = clip(name, columns_in(at.w, column).saturating_sub(2));
+                        let ink = settings_session_ink(*at, step, &shown, column);
+                        hold_say(
+                            scene,
+                            vec![Run::tinted(shown, skin.dim)],
+                            Panel::new(ink.x, names_at.y, ink.w, line),
+                            skin.dim,
+                        );
                     }
-                    let shown = clip(name, columns_in(at.w, column).saturating_sub(2));
-                    let ink = settings_session_ink(*at, step, &shown, column);
-                    say(
-                        scene,
-                        vec![Run::tinted(shown, skin.dim)],
-                        Panel::new(ink.x, names_at.y, ink.w, line),
-                        skin.dim,
-                    );
+                    settings_session_lines(scene, &names, band, skin.edge);
                 }
-                settings_session_lines(scene, &names, names_at, skin.edge);
                 for (step, at) in boxes.iter().enumerate() {
                     let Some(kept) = table.rows.get(table.first + step) else {
                         break;
+                    };
+                    let Some(band) = keep.cut(*at) else {
+                        continue;
                     };
                     // The row the keys are on wears the solid band the folder
                     // picker's own session list wears, across the whole row:
@@ -295,7 +344,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     // is invisible next to fourteen other tints.
                     let here = on && table.first + step == table.cursor;
                     if here {
-                        scene.rect(at.fill(skin.picked));
+                        scene.rect(band.fill(skin.picked));
                     }
                     let ink = match here {
                         true => skin.picked_ink,
@@ -314,14 +363,14 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                         let step = step + crate::settings::SESSION_FIRST_CELL;
                         let shown = clip(text, columns_in(box_.w, column).saturating_sub(2));
                         let room = settings_session_ink(*box_, step, &shown, column);
-                        say(
+                        hold_say(
                             scene,
                             vec![Run::tinted(shown, ink)],
                             Panel::new(room.x, at.y, room.w, line),
                             ink,
                         );
                     }
-                    settings_session_lines(scene, &cells, *at, skin.edge);
+                    settings_session_lines(scene, &cells, band, skin.edge);
                     // The mark. A box that is filled when the row is one of the
                     // ones about to go: the whole of what multi selection is is
                     // being able to see which rows are in it without pressing
@@ -336,10 +385,13 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                             (false, true) => skin.picked_ink,
                             (false, false) => skin.dim,
                         };
-                        if hot {
-                            scene.rect(panel_fill(*mark, skin.hot));
+                        if hot && let Some(under) = keep.cut(*mark) {
+                            match keep.holds(*mark) {
+                                true => scene.rect(panel_fill(*mark, skin.hot)),
+                                false => scene.rect(under.fill(skin.hot)),
+                            };
                         }
-                        say(
+                        hold_say(
                             scene,
                             vec![Run::icon(
                                 match kept.marked {
@@ -356,7 +408,9 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 // Its own bar, down the card's right padding and only as far as
                 // the rows it counts: the header naming the columns and the
                 // buttons under them do not scroll. Nothing at all for a list
-                // that already fits in the body.
+                // that already fits in the body, or for a card cut by the edge
+                // of the list: a bar over a cut body would count rows that are
+                // not on screen.
                 if let Some(first) = boxes.first()
                     && let Some(last) = boxes.last()
                 {
@@ -366,12 +420,10 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                         first.w,
                         last.y + last.h - first.y,
                     );
-                    scrollbar(
-                        scene,
-                        skin,
-                        settings_card_bar(card, rows),
-                        table.thumb(boxes.len()),
-                    );
+                    let bar = settings_card_bar(card, rows);
+                    if keep.holds(bar) {
+                        scrollbar(scene, skin, bar, table.thumb(boxes.len()));
+                    }
                 }
                 // The buttons, centred in the footer: they act on the whole
                 // list, and a button pinned to one end of a footer reads as
@@ -609,12 +661,19 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     skin,
                     size,
                     column,
+                    keep,
                 );
                 let across = design::swatch_across(design::card_cols(list_cols));
                 let slots =
                     settings_palette_slots(parts.body, line, palette.cells.len(), across);
                 for (cell, (colour, at)) in palette.cells.iter().zip(&slots).enumerate() {
                     let at = *at;
+                    // Only the colours wholly on screen, the same rule the
+                    // layout keeps their press regions by: a swatch is a block
+                    // with an outline, and half of one reads as another colour.
+                    if !keep.holds(at) {
+                        continue;
+                    }
                     let held = panel.picked() == Some((*index, cell));
                     if held {
                         scene.rect(at.fill(skin.strip));
@@ -684,6 +743,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     skin,
                     size,
                     column,
+                    keep,
                 );
                 let about_tint = match entry.on {
                     true => skin.body,
@@ -701,8 +761,9 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     parts.body.w,
                     (about_rows as f32 * line).min(parts.body.h.max(0.0)),
                 );
-                if !entry.about.is_empty() && about_at.h >= line {
-                    scene.text(
+                if !entry.about.is_empty()
+                    && about_at.h >= line
+                    && let Some(text) = held_text(
                         Text::rich(
                             vec![Run::tinted(entry.about.clone(), about_tint)],
                             about_at,
@@ -710,7 +771,9 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                             about_tint,
                         )
                         .wrap_at(about_cols),
-                    );
+                    )
+                {
+                    scene.text(text);
                 }
                 // Where it came from, in the hint role: a repository or a path
                 // is the quietest of the three things a row of a list carries,
@@ -724,7 +787,10 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     parts.body.w,
                     Text::line_for(small).min(line),
                 );
-                if !entry.under.is_empty() && under_at.y + under_at.h <= at.y + at.h {
+                if !entry.under.is_empty()
+                    && under_at.y + under_at.h <= at.y + at.h
+                    && keep.holds(under_at)
+                {
                     scene.text(Text::rich(
                         vec![Run::tinted(
                             clip(
@@ -814,12 +880,19 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     skin,
                     size,
                     column,
+                    keep,
                 );
                 let hints = crate::settings::card_hints(card);
                 let across = design::across(card.fields.len(), design::card_cols(list_cols));
                 let slots = settings_card_slots(parts.body, line, &hints, across);
                 for (at, (field, slot)) in card.fields.iter().zip(&slots).enumerate() {
                     if slot.y + slot.h > parts.body.y + parts.body.h + 0.01 {
+                        continue;
+                    }
+                    // A field cut by either edge of the list is not drawn at
+                    // all, the same rule the layout keeps its press region by:
+                    // half an input box reads as a whole one further down.
+                    if !keep.holds(*slot) {
                         continue;
                     }
                     // Which slot the keys are in, so the field being changed is
@@ -858,7 +931,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                         parts.body.w,
                         Text::line_for(small).min(line),
                     );
-                    if hint_at.y + hint_at.h <= at.y + at.h {
+                    if hint_at.y + hint_at.h <= at.y + at.h && keep.holds(hint_at) {
                         scene.text(Text::rich(
                             vec![Run::tinted(
                                 clip(
@@ -931,6 +1004,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     skin,
                     size,
                     column,
+                    keep,
                 );
                 let body_cols = columns_in(parts.body.w, column).saturating_sub(1);
                 // How far down a block that is longer than its box has been
@@ -941,18 +1015,14 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     let last = (paper.first + held).min(paper.body.len());
                     let counter = format!("{}-{} of {}", paper.first + 1, last, paper.body.len());
                     let wide = (counter.chars().count() as f32 + 1.0) * column;
-                    if wide < parts.title.w * 0.5 {
-                        say(
-                            scene,
-                            vec![Run::tinted(counter, skin.dim)],
-                            Panel::new(
-                                parts.title.x + parts.title.w - wide,
-                                parts.title.y,
-                                wide,
-                                line.min(parts.title.h),
-                            ),
-                            skin.dim,
-                        );
+                    let at = Panel::new(
+                        parts.title.x + parts.title.w - wide,
+                        parts.title.y,
+                        wide,
+                        line.min(parts.title.h),
+                    );
+                    if wide < parts.title.w * 0.5 && keep.holds(at) {
+                        say(scene, vec![Run::tinted(counter, skin.dim)], at, skin.dim);
                     }
                 }
                 // Where the text came from, in the hint role: a path under a
@@ -964,7 +1034,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 };
                 let small = design::hint_size(size);
                 let small_column = design::column_for(column, size, design::HINT);
-                scene.text(Text::rich(
+                if let Some(from) = held_text(Text::rich(
                     vec![Run::tinted(
                         clip(
                             &paper.under,
@@ -980,7 +1050,9 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     ),
                     small,
                     under,
-                ));
+                )) {
+                    scene.text(from);
+                }
                 // Where the fences stand after everything scrolled off, so a
                 // block that starts inside a code block is drawn as code.
                 let mut fence = crate::markdown::fence_after(
@@ -990,18 +1062,18 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     let box_ = Panel::new(text.x, text.y + step as f32 * line, text.w, line);
                     let mut runs = Vec::new();
                     crate::markdown::line(&clip(at, body_cols), &mut fence, skin, &mut runs);
-                    scene.text(Text::rich(runs, box_, size, skin.body));
+                    if let Some(text) = held_text(Text::rich(runs, box_, size, skin.body)) {
+                        scene.text(text);
+                    }
                 }
                 // Its own bar, down the card's right padding and only as far as
                 // the text it counts. Nothing at all for a block that is already
-                // all on screen, which is what makes a bar here mean there is
-                // more of it.
-                scrollbar(
-                    scene,
-                    skin,
-                    settings_card_bar(box_, text),
-                    paper.thumb(held),
-                );
+                // all on screen, or for a card cut by the edge of the list: a
+                // bar over a cut body would count lines that are not on screen.
+                let bar = settings_card_bar(box_, text);
+                if keep.holds(bar) {
+                    scrollbar(scene, skin, bar, paper.thumb(held));
+                }
             }
         }
     }
@@ -1032,6 +1104,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 skin,
                 size,
                 column,
+                ListClip::open(),
             );
             let doc_cols = layout.settings_doc_columns(column);
             let doc_rows = layout.settings_doc_rows(size);

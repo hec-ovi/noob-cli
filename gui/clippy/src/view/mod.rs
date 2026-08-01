@@ -13186,6 +13186,10 @@ mod tests {
                 continue;
             };
             let card = settings_card(row, line);
+            // The bottom bound is the visible row box rather than the card
+            // arithmetic: a card cut by the bottom of the list shows its rows
+            // down to the cut itself, and the layout hands over exactly the
+            // visible part.
             for (_, on, at) in out
                 .layout
                 .settings_picks
@@ -13196,7 +13200,7 @@ mod tests {
                     at.x >= card.x - 0.01
                         && at.x + at.w <= card.x + card.w + 0.01
                         && at.y >= card.y - 0.01
-                        && at.y + at.h <= card.y + card.h + 0.01,
+                        && at.y + at.h <= row.y + row.h + 0.01,
                     "{w}x{h}: row {on} is outside its card: {at:?} in {card:?}"
                 );
                 let (x, y) = middle(*at);
@@ -16293,7 +16297,11 @@ mod tests {
                         if palette.title == "THE TOOL MARKS")
                 })
                 .expect("the tools");
-            while panel.first() < at && panel.scroll(1, true, rows, cols) {}
+            // Scroll the card's own top line to the top of the window: the
+            // scroll counts rows of text now, and the assertions below want
+            // the card whole on screen.
+            let top: usize = panel.heights(cols).iter().take(at).sum();
+            while panel.first() < top && panel.scroll(1, true, rows, cols) {}
             let out = render_settings(&panel, w, h, None);
             let Some(crate::settings::Row::Palette(palette)) = panel.row(at) else {
                 panic!("the tools are not a palette card");
@@ -16421,7 +16429,10 @@ mod tests {
         let shape = render_settings(&panel, 1400.0, 1200.0, None);
         let rows = shape.layout.settings_capacity(13.0);
         let cols = shape.layout.settings_entry_columns(PANE_TEXT.1);
-        while panel.first() < at && panel.scroll(1, true, rows, cols) {}
+        // The scroll counts rows of text: walk the card's own top line up to
+        // the window, which the clamp then holds whole on the last screenful.
+        let top: usize = panel.heights(cols).iter().take(at).sum();
+        while panel.first() < top && panel.scroll(1, true, rows, cols) {}
         let out = render_settings(&panel, 1400.0, 1200.0, None);
         let (act, box_) = out
             .layout

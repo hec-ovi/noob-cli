@@ -1,6 +1,6 @@
 # settings
 
-contractVersion: 2.0.0
+contractVersion: 2.1.0
 
 ## Purpose
 
@@ -63,6 +63,11 @@ by re-export: `SESSION_COLUMNS` and the table constants, `SKILL_SOURCE`,
 5. A section box produces `Vec<Row>` from the frame's shared vocabulary and
    holds only its own state; the cursor, the scroll, the editing buffer and
    every write stay in the frame.
+6. The list scrolls by rows of text, not by rows of the list: a wheel notch
+   slides a few of them, a card can stand partly past either edge and is
+   drawn cut, and a control is drawn and pressable only while it is wholly
+   on screen. Pointer presses never scroll the list; only keyboard movement
+   reveals the cursor.
 
 ## Dependencies
 
@@ -73,7 +78,7 @@ box (colors), the state box (the doc pane type).
 
 ## Tests
 
-57 model tests drive key- and click-shaped calls with scratch files: the
-frame's 26 (cursor, rail, scroll, sliders, doc viewer, footer) in mod.rs,
+59 model tests drive key- and click-shaped calls with scratch files: the
+frame's 28 (cursor, rail, scroll, sliders, doc viewer, footer) in mod.rs,
 each section's in its own box. Scene-level placement and paint are asserted
 by the view box's rendered-scene tests.

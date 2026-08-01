@@ -329,8 +329,8 @@ pub enum Row {
     /// row at one text size with a hairline under it, so a group title, a field
     /// label and a value all read alike and nothing said where one group ended.
     ///
-    /// One card is one row, because the scroll window counts rows and a card
-    /// that spanned several of them could not be counted. Never nested: a card holds fields, not cards.
+    /// One card is one row of the list, as tall as the rows of text [`lines`]
+    /// counts it at. Never nested: a card holds fields, not cards.
     Card(Card),
 }
 
@@ -1010,6 +1010,10 @@ pub struct Section {
     pub name: &'static str,
     rows: Vec<Row>,
     cursor: usize,
+    /// Where the list is scrolled to, in rows of text ([`lines`]): the row of
+    /// text at the top of the window. Rows of text rather than rows of the
+    /// section, because a row can be a ten-line card and a scroll that could
+    /// only land on a whole one moved a whole card per wheel step.
     first: usize,
     /// Where the column beside the list is scrolled to, as a wrapped row of that
     /// document. Its own number because the two columns scroll separately: the
@@ -1331,7 +1335,9 @@ impl Settings {
                 tables,
             } = place;
             let last = section.rows.len().saturating_sub(1);
-            section.first = first.min(last);
+            // The scroll is in rows of text and clamping it needs a width, so
+            // it is clamped where it is read, like `doc_first` below.
+            section.first = first;
             section.cursor = cursor.min(last);
             section.side = side;
             // Where each block of text was left, so a write somewhere else on
@@ -1549,9 +1555,9 @@ impl Settings {
         self.row(self.cursor()).is_some_and(landable)
     }
 
-    /// Where the list is scrolled to, as a row of the section rather than a row
-    /// of text. Only the tests want it on its own: what the window asks for is
-    /// [`Settings::window`], which is that row and everything that fits under it.
+    /// Where the list is scrolled to, as a row of text of the section. Only the
+    /// tests want it on its own: what the window asks for is
+    /// [`Settings::window`], which is the rows that line falls among.
     #[cfg(test)]
     pub fn first(&self) -> usize {
         self.here().first
@@ -2557,62 +2563,58 @@ impl Settings {
         text_geometry::heights(self.here().rows.iter().map(|row| lines(row, cols)), 1)
     }
 
-    /// Which rows are on screen in a list `rows` tall and `cols` wide: the first
-    /// one, and how many fit under it.
+    /// Which rows are on screen in a list `rows` of text tall and `cols` wide:
+    /// the first one, how many are showing, and how many rows of text of the
+    /// first one sit above the top.
     ///
-    /// Anchored on a row rather than on a row of text, so the top of the list is
-    /// always the top of a row. Half a heading at the top of the list is a
-    /// heading nobody can read whose click region starts off the screen, and
-    /// every hit region below it would be a row out of step with what is drawn.
-    /// A row that does not fit whole is left for the next screenful, except when
-    /// it is the only one there is room to start with.
-    pub fn window(&self, rows: usize, cols: usize) -> (usize, usize) {
+    /// Anchored on a row of text rather than on a row of the list. A row can be
+    /// a ten-line card, and a window that could only start on a whole row moved
+    /// a whole card per wheel step: scrolling read as one pane teleporting in
+    /// over another. A row partly past either edge is in the count and is drawn
+    /// cut; the layout trims what it answers for to what is really on screen,
+    /// so the hit regions and the drawing cannot disagree.
+    pub fn window(&self, rows: usize, cols: usize) -> text_geometry::Window {
         let heights = self.heights(cols);
-        if rows == 0 || heights.is_empty() {
-            return (0, 0);
-        }
-        let first = self.here().first.min(last_top(&heights, rows));
-        let mut used = 0;
-        let mut count = 0;
-        while first + count < heights.len() {
-            let height = heights[first + count];
-            if count > 0 && used + height > rows {
-                break;
-            }
-            used += height;
-            count += 1;
-        }
-        (first, count)
+        let back = text_geometry::scrollback_for(&heights, rows, self.here().first);
+        text_geometry::window(&heights, rows, back)
     }
 
-    /// Bring the cursor on screen, for a `rows` tall and `cols` wide list.
+    /// Bring the cursor on screen, for a `rows` of text tall and `cols` wide
+    /// list. Keyboard movement only: a press is on a row that is already on
+    /// screen, so the window never reveals on a pointer path.
     pub fn reveal(&mut self, rows: usize, cols: usize) -> bool {
         if rows == 0 || self.here().rows.is_empty() {
             return false;
         }
         let heights = self.heights(cols);
-        let most = last_top(&heights, rows);
+        let most = text_geometry::max_scrollback(&heights, rows);
         let section = self.here_mut();
         let cursor = section.cursor.min(heights.len() - 1);
-        let mut next = section.first.min(cursor);
-        // Down one row at a time until the cursor's own row fits under the top,
-        // which is the same walk `window` does and cannot disagree with it.
-        while next < cursor && heights[next..=cursor].iter().sum::<usize>() > rows {
-            next += 1;
+        let top: usize = heights[..cursor].iter().sum();
+        let tall = heights[cursor];
+        let mut next = section.first.min(most);
+        // The whole row where it fits; the top of one taller than the window,
+        // so what comes on screen is its beginning.
+        if top + tall > next + rows {
+            next = (top + tall).saturating_sub(rows).min(top);
         }
-        let next = next.min(most);
+        if top < next {
+            next = top;
+        }
         let moved = next != section.first;
         section.first = next;
         moved
     }
 
-    /// Move the window without moving the cursor, for the wheel.
+    /// Move the window without moving the cursor, for the wheel, `by` rows of
+    /// text at a time.
     pub fn scroll(&mut self, by: usize, down: bool, rows: usize, cols: usize) -> bool {
-        let most = last_top(&self.heights(cols), rows);
+        let most = text_geometry::max_scrollback(&self.heights(cols), rows);
         let section = self.here_mut();
+        let here = section.first.min(most);
         let next = match down {
-            true => (section.first + by).min(most),
-            false => section.first.saturating_sub(by),
+            true => (here + by).min(most),
+            false => here.saturating_sub(by),
         };
         let moved = next != section.first;
         section.first = next;
@@ -2622,11 +2624,7 @@ impl Settings {
     /// How much of the list is on screen, for the scrollbar.
     pub fn thumb(&self, rows: usize, cols: usize) -> Option<(f32, f32)> {
         let heights = self.heights(cols);
-        let (first, _) = self.window(rows, cols);
-        // The scrollbar counts rows of text, so the row the list starts on has
-        // to be turned into the row of text it starts on first.
-        let above: usize = heights.iter().take(first).sum();
-        let back = text_geometry::scrollback_for(&heights, rows, above);
+        let back = text_geometry::scrollback_for(&heights, rows, self.here().first);
         text_geometry::thumb(&heights, rows, back)
     }
 
@@ -2656,23 +2654,15 @@ impl Settings {
                 return true;
             }
         }
-        self.scroll(by(rows), down, rows, cols)
+        self.scroll(by(WHEEL_LINES), down, rows, cols)
     }
 }
 
-/// The furthest down the list can start and still fill the last screenful.
-///
-/// In rows rather than in rows of text, because the list starts on a row.
-fn last_top(heights: &[usize], rows: usize) -> usize {
-    let mut used = 0;
-    for (index, height) in heights.iter().enumerate().rev() {
-        used += height;
-        if used > rows {
-            return (index + 1).min(heights.len().saturating_sub(1));
-        }
-    }
-    0
-}
+/// What one page of the wheel means over the list, in rows of text. The wheel
+/// hands fractions of a page and a notch is about a third of one, so a step
+/// slides the list a few rows of text: enough to watch a card arrive, never a
+/// whole card at once.
+const WHEEL_LINES: usize = 12;
 
 /// Whether the cursor stops on a row. A cursor that lands where nothing can
 /// happen is a dead stop the arrow keys have to be pressed through, so it stops
@@ -3773,18 +3763,24 @@ mod tests {
             "one card does not scroll in a window that holds it"
         );
 
-        // Down to the last setting of a longer one, in a window two rows tall:
-        // the window follows the cursor to both ends.
+        // Down to the last setting of a longer one, in a window two rows of
+        // text tall: the window follows the cursor to both ends. The scroll is
+        // in rows of text, so where the cursor's row starts is where its
+        // heights say it does.
         go_to(&mut panel, APPEARANCE);
+        let heights = panel.heights(COLS);
         assert!(panel.jump(true));
         panel.reveal(2, COLS);
-        assert!(panel.cursor() < panel.first() + 2, "the cursor is off screen");
+        let top: usize = heights[..panel.cursor()].iter().sum();
+        assert!(
+            top >= panel.first() && top < panel.first() + 2,
+            "the cursor is off screen"
+        );
         assert!(panel.jump(false));
         panel.reveal(2, COLS);
-        assert!(
-            panel.first() <= panel.cursor(),
-            "the cursor is above the window"
-        );
+        let top: usize = heights[..panel.cursor()].iter().sum();
+        assert!(panel.first() <= top, "the cursor is above the window");
+        assert!(top < panel.first() + 2, "the cursor is below the window");
 
         // A page through the palette stops on nothing inside it: the colours
         // are read here and edited in the file, so the cursor goes over the
@@ -3815,13 +3811,15 @@ mod tests {
         let mut panel = over(&config);
         go_to(&mut panel, APPEARANCE);
         let rows = 10;
-        assert!(panel.scroll(3, true, rows, COLS), "the list scrolled down");
+        // Far enough that the cursor's own row is entirely off the top.
+        let jump = panel.heights(COLS)[0] + 1;
+        assert!(panel.scroll(jump, true, rows, COLS), "the list scrolled down");
         let was = panel.first();
         assert!(was > 0, "the wheel did not move the window");
         // The cursor stayed behind, above the window: the press that follows
         // is exactly the one the reveal used to answer with a scroll.
-        let (first, count) = panel.window(rows, COLS);
-        let pressed = (first..first + count)
+        let window = panel.window(rows, COLS);
+        let pressed = (window.first..window.first + window.count)
             .find(|at| panel.row(*at).is_some_and(landable))
             .expect("a row on screen can hold the cursor");
         assert!(panel.point_at(pressed, Side::Left));
@@ -3833,8 +3831,34 @@ mod tests {
         assert_eq!(panel.first(), was);
     }
 
-    /// The window is counted in rows of text and starts on a row, so a card
-    /// nine rows tall never sits half on and half off the top of the list.
+    /// One notch of the wheel slides the list a few rows of text and never a
+    /// whole card. The jumpiness being fixed was exactly that: the wheel used
+    /// to step by rows of the list, a row can be a ten-line card, and one
+    /// notch teleported a pane in and out of the window.
+    #[test]
+    fn a_wheel_notch_moves_a_few_rows_of_text_and_never_a_card() {
+        let mut panel = over(&Config::default());
+        go_to(&mut panel, APPEARANCE);
+        let rows = 10;
+        let shortest_card = panel
+            .heights(COLS)
+            .into_iter()
+            .min()
+            .expect("the section has rows");
+        // A notch of the window's wheel is 0.34 of a page, the number
+        // `scroll_hovered` hands over.
+        assert!(panel.wheel(None, -0.34, rows, COLS), "a notch did nothing");
+        let step = panel.first();
+        assert!(step >= 1, "a notch moved nothing at all");
+        assert!(
+            step < shortest_card,
+            "one notch moved {step} rows of text, past a card {shortest_card} tall"
+        );
+    }
+
+    /// The window is counted in rows of text, so a card nine rows tall
+    /// scrolls through it a row of text at a time rather than a card at a
+    /// time.
     ///
     /// This counted headings, which were two rows of text and the only thing on
     /// the panel drawn larger than a row. There are no headings: every group is
@@ -3870,24 +3894,41 @@ mod tests {
         let wide = panel.heights(160)[grid];
         assert!(narrow > wide, "the palette does not reflow: {narrow} and {wide}");
 
-        // Whatever it is scrolled to, the rows on screen start at the top of a
-        // row and take no more room than the list has.
+        // Wherever it is scrolled to, the window starts inside the row the top
+        // line of text falls in and covers the whole list under it. One step
+        // of the wheel moves that top line by exactly one, which is the whole
+        // fix: a card slides through the top of the list rather than
+        // teleporting off it.
         let rows = 12;
-        for _ in 0..40 {
-            let (first, count) = panel.window(rows, COLS);
-            let used: usize = heights[first..first + count].iter().sum();
-            assert!(count > 0, "the list showed nothing at {first}");
+        let total: usize = heights.iter().sum();
+        let mut top = 0;
+        loop {
+            let window = panel.window(rows, COLS);
+            let above: usize = heights[..window.first].iter().sum();
+            assert!(window.count > 0, "the list showed nothing at {top}");
+            assert_eq!(above + window.skip, top, "the window drifted off the scroll");
             assert!(
-                used <= rows || count == 1,
-                "{count} rows from {first} take {used} of {rows}"
+                window.skip < heights[window.first],
+                "the first row is not on screen at all"
+            );
+            let drawn: usize = heights[window.first..window.first + window.count].iter().sum();
+            assert!(
+                drawn - window.skip >= rows.min(total - top),
+                "the rows from {top} leave the window uncovered"
             );
             if !panel.scroll(1, true, rows, COLS) {
                 break;
             }
+            top += 1;
         }
-        // The end of the list is reachable and stops there.
-        let (first, count) = panel.window(rows, COLS);
-        assert_eq!(first + count, panel.rows().len(), "the last row is off screen");
+        // The end of the list is reachable, line by line, and stops there.
+        assert_eq!(top, total - rows, "the list stopped short of its end");
+        let window = panel.window(rows, COLS);
+        assert_eq!(
+            window.first + window.count,
+            panel.rows().len(),
+            "the last row is off screen"
+        );
         assert!(!panel.scroll(1, true, rows, COLS), "the list scrolled past its end");
     }
 
@@ -3951,15 +3992,33 @@ mod tests {
         );
 
         // And the window counts it: the section is the card naming the skills
-        // directory and the entry under it, and a list one row short of both of
-        // them stops at the first.
+        // directory and the entry under it. In a list one row of text short of
+        // both, the entry is still on screen with its last row cut by the
+        // bottom, and one step of the wheel cuts the first card by one row of
+        // text instead: the rows of text the entry wrapped to are the rows the
+        // scroll walks through.
         assert_eq!(panel.rows().len(), 2, "{:?}", panel.rows());
         let both: usize = panel.heights(wide).iter().sum();
-        assert_eq!(panel.window(both, wide), (0, 2), "the section fits");
+        let whole = text_geometry::Window {
+            first: 0,
+            count: 2,
+            skip: 0,
+        };
+        assert_eq!(panel.window(both, wide), whole, "the section fits");
         assert_eq!(
             panel.window(both - 1, wide),
-            (0, 1),
-            "a row that does not fit whole was drawn anyway"
+            whole,
+            "the cut entry went off screen instead of being drawn cut"
+        );
+        assert!(panel.scroll(1, true, both - 1, wide));
+        assert_eq!(
+            panel.window(both - 1, wide),
+            text_geometry::Window {
+                first: 0,
+                count: 2,
+                skip: 1,
+            },
+            "the scroll did not walk into the first card"
         );
     }
 
