@@ -1,11 +1,11 @@
 # settings
 
-contractVersion: 2.2.0
+contractVersion: 2.3.0
 
 ## Purpose
 
 The settings panel: a frame (the rail, the cursor and scroll machinery, the
-shared row vocabulary, the write-back) over five nested section boxes, one
+shared row vocabulary, the write-back) over six nested section boxes, one
 folder each under `sections/`, plus where everything sits (places.rs) and
 what gets drawn (paint.rs). Placement, paint, and hit regions read the same
 rectangles.
@@ -16,7 +16,9 @@ One folder, one contract each; a design change to one section happens inside
 its folder alone:
 
 - [`sections/agent`](sections/agent/CONTRACT.md) - the CLI's file as cards,
-  the AGENTS.md and prompt blocks.
+  the assembled-prompt block.
+- [`sections/prompt`](sections/prompt/CONTRACT.md) - the global AGENTS.md
+  as one document, with the starter offer.
 - [`sections/sessions`](sections/sessions/CONTRACT.md) - the saved
   conversations table, its columns and cells.
 - [`sections/skills`](sections/skills/CONTRACT.md) - the installed list and
@@ -29,8 +31,8 @@ its folder alone:
 ## Public surface
 
 ```rust
-pub const SECTIONS: [&str; 5];   // AGENT, SESSIONS, SKILLS, MCP,
-                                 // APPEARANCE: the rail, in rail order.
+pub const SECTIONS: [&str; 6];   // AGENT, SYSTEM PROMPT, SESSIONS, SKILLS,
+                                 // MCP, APPEARANCE: the rail, in rail order.
                                  // Contract data; the menu consumes it
 pub struct Settings;             // the panel state machine: rows per
                                  // section, cursor and side, field editing,

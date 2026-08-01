@@ -1012,7 +1012,7 @@ mod tests {
             }
         }
 
-        // The panel is unhurt: five sections, all of them with rows, and every
+        // The panel is unhurt: every section on the rail with rows, and every
         // one of them still lands the cursor somewhere or says why it cannot.
         let mut panel = panel;
         assert_eq!(panel.section_names(), SECTIONS.to_vec());

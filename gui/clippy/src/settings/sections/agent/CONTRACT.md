@@ -1,12 +1,13 @@
 # settings/sections/agent
 
-contractVersion: 1.0.0
+contractVersion: 1.1.0
 
 ## Purpose
 
 The AGENT section of the settings panel: what the CLI is pointed at, as
-cards over the agent's own `.env`, with the global AGENTS.md and the whole
-assembled prompt as two blocks under them.
+cards over the agent's own `.env`, with the whole assembled prompt as one
+block under them. The global AGENTS.md is the prompt section's own document
+([`sections/prompt`](../prompt/CONTRACT.md)).
 
 ## Public surface
 
@@ -26,8 +27,8 @@ pub(crate) const AGENT_SETTINGS: [(&str, Kind); 2]
    and nothing else; no I/O here.
 2. A credential is reported as set and never shown; a missing key reads as
    the frame's UNSET.
-3. Every key the file carries is on a card above the two blocks: known keys
-   by their plain-words field, the rest on THE REST OF THE FILE.
+3. Every key the file carries is on a card above the prompt block: known
+   keys by their plain-words field, the rest on THE REST OF THE FILE.
 4. The two numbers with CLI bounds are tracks; unset, they show the CLI's
    default and the card says so.
 
@@ -39,6 +40,6 @@ the snapshot, the key names and the bounds.
 
 ## Tests
 
-Inline: the section's cards, the walkable keyboard, the two blocks, the
-defaults, and the missing-AGENTS.md offer (7 tests), driven through the
+Inline: the section's cards, the walkable keyboard, the prompt block, the
+defaults, and the failed-prompt reason (7 tests), driven through the
 frame's `Settings`.

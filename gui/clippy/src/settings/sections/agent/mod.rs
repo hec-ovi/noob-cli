@@ -1,5 +1,5 @@
 //! The AGENT section: what the CLI is pointed at, out of the file the CLI
-//! owns, and the two documents under it.
+//! owns, and the whole assembled prompt under it.
 //!
 //! One of the settings panel's nested section boxes. It builds rows out of the
 //! shared vocabulary in [`crate::settings`] and owns the plain-words names for
@@ -123,8 +123,8 @@ fn agent_default(key: &str) -> String {
 ///
 /// Cards, in the order somebody meeting this window needs them: where the
 /// model is, which model it is, how much the agent gets, the file all of it
-/// is written in, and whatever else that file carries. Then the two
-/// documents, which are cards as well.
+/// is written in, and whatever else that file carries. Then the whole
+/// assembled prompt, a card as well.
 ///
 /// "actually is awful as is now, unclear because has too many lines
 /// between". It was a two column form of raw environment keys with three
@@ -246,9 +246,8 @@ pub fn rows(agent: &Agent, prompt: &Assembled) -> Vec<Row> {
             )),
         }));
     }
-    // The documents last, and nothing under them: they are a screenful
-    // each, and a field below one is a field nobody scrolls to.
-    rows.push(Row::Paper(instructions_paper(agent)));
+    // The prompt last, and nothing under it: it is a screenful, and a field
+    // below it is a field nobody scrolls to.
     rows.push(Row::Paper(prompt_paper(prompt)));
     rows
 }
@@ -266,78 +265,14 @@ fn env_says(agent: &Agent, key: &str) -> String {
     }
 }
 
-/// The agent's global instructions, under a title naming the file they are
-/// in.
-///
-/// The answer to "is the global AGENTS.md a thing": it already is, and this
-/// is it. The CLI reads `<config dir>/AGENTS.md` and puts it at the top of
-/// every prompt, before the project's own. Nothing was built to make that
-/// true; the window only names the path, shows what is in it, and offers to
-/// write one when there is none.
-///
-/// Not called the prompt. It is one capped layer of one, which is what the
-/// block under it is for.
-fn instructions_paper(agent: &Agent) -> Paper {
-    let it = &agent.instructions;
-    let title = String::from("GLOBAL INSTRUCTIONS \u{2022} AGENTS.md");
-    let Some(path) = it.path.as_deref() else {
-        return Paper {
-            title,
-            under: String::from("nowhere: no config directory to keep one in"),
-            body: Vec::new(),
-            first: 0,
-            offer: None,
-            bad: true,
-        };
-    };
-    // Empty and missing are one thing here because they are one thing to the
-    // agent: it trims the file and a blank one contributes no heading at all.
-    if it.body.is_empty() {
-        return Paper {
-            title,
-            under: format!("nothing at {} yet", path.display()),
-            body: vec![
-                String::from("The agent reads this file first, in every folder, before the"),
-                String::from("project's own AGENTS.md. There is none here yet."),
-            ],
-            first: 0,
-            offer: Some(path.to_path_buf()),
-            bad: false,
-        };
-    }
-    let mut body = it.body.clone();
-    if it.capped {
-        body.push(String::new());
-        body.push(format!(
-            "[the CLI stops reading at {} KiB, so the rest of this file is not in the prompt]",
-            agent::AGENTS_CAP / 1024
-        ));
-    }
-    Paper {
-        title,
-        // The `.env` is re-read on every request; this is not. The prompt is
-        // assembled once when `serve` starts, so an edit here lands on the
-        // next session rather than the next message, and a block that did
-        // not say so would be the panel telling somebody their change was
-        // live when it is not.
-        under: format!(
-            "{} \u{2022} read when a session starts, so an edit lands on the next one",
-            path.display()
-        ),
-        body,
-        first: 0,
-        offer: None,
-        bad: false,
-    }
-}
-
 /// The whole prompt, exactly as the CLI assembles it.
 ///
-/// `AGENTS.md` is one layer of this: the prompt also carries the CLI's own
-/// base instructions, the environment block, the project's own AGENTS.md,
-/// the skills resolver and the MCP line. Only `noob debug prompt` returns
-/// all of it, so that is what this block shows, and while it is running or
-/// after it has failed the block says which of the two happened.
+/// The global `AGENTS.md` (the SYSTEM PROMPT section's own document) is one
+/// layer of this: the prompt also carries the CLI's own base instructions,
+/// the environment block, the project's own AGENTS.md, the skills resolver
+/// and the MCP line. Only `noob debug prompt` returns all of it, so that is
+/// what this block shows, and while it is running or after it has failed the
+/// block says which of the two happened.
 fn prompt_paper(prompt: &Assembled) -> Paper {
     let title = String::from("THE PROMPT THE AGENT GETS");
     match prompt {
@@ -375,7 +310,7 @@ mod tests {
     use crate::settings::testing::*;
     use crate::settings::{
         card_is_reachable, commit, landable, lines, paper_body_lines, write_endpoint, Change,
-        Deed, Settings, Side, AGENT, PAPER_LINES,
+        Settings, Side, AGENT, PAPER_LINES,
     };
     use std::path::Path;
 
@@ -598,7 +533,7 @@ mod tests {
         );
         go_to(&mut panel, AGENT);
 
-        // Cards, in the order somebody needs them, and the two documents last.
+        // Cards, in the order somebody needs them, and the prompt last.
         let titles: Vec<String> = panel
             .rows()
             .iter()
@@ -615,7 +550,6 @@ mod tests {
                 "MODEL",
                 "LIMITS",
                 "THE SETTINGS FILE",
-                "GLOBAL INSTRUCTIONS \u{2022} AGENTS.md",
                 "THE PROMPT THE AGENT GETS",
             ],
             "{titles:?}"
@@ -717,7 +651,7 @@ mod tests {
             );
         }
 
-        // Up and down walk the cards that can be set and the two documents, and
+        // Up and down walk the cards that can be set and the prompt block, and
         // every one of them is reachable from the top.
         assert!(panel.jump(false));
         let mut seen = vec![panel.cursor()];
@@ -726,22 +660,22 @@ mod tests {
         }
         assert_eq!(
             seen,
-            vec![0, numbers, numbers + 2, numbers + 3],
+            vec![0, numbers, numbers + 2],
             "the keyboard cannot walk the section: {seen:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Every key of the agent's file is on a card above the two blocks, the one
-    /// this window has no control for included.
+    /// Every key of the agent's file is on a card above the prompt block, the
+    /// one this window has no control for included.
     ///
-    /// The rest of the environment used to be pushed on after the blocks, which
+    /// The rest of the environment used to be pushed on after the block, which
     /// left it about thirty lines under the rows it reads with: the section went
-    /// form, two documents, and then more form. Under the first block there is
-    /// nothing but the other block. A key the window has never heard of is still
-    /// a key the agent reads, so it is on the last card rather than dropped.
+    /// form, a document, and then more form. A key the window has never heard of
+    /// is still a key the agent reads, so it is on the last card rather than
+    /// dropped.
     #[test]
-    fn the_agent_cards_keep_every_key_above_the_blocks() {
+    fn the_agent_cards_keep_every_key_above_the_block() {
         let dir = scratch_dir("agent-form-order");
         std::fs::write(
             dir.join(".env"),
@@ -760,8 +694,8 @@ mod tests {
             .position(|row| matches!(row, Row::Paper(_)))
             .unwrap_or_else(|| panic!("there is no block at all: {rows:?}"));
         assert!(
-            matches!(&rows[first_block], Row::Paper(paper) if paper.title.contains("AGENTS.md")),
-            "the first block is not the instructions: {:?}",
+            matches!(&rows[first_block], Row::Paper(paper) if paper.title.contains("PROMPT")),
+            "the block is not the prompt: {:?}",
             rows[first_block]
         );
         // Every key in the file: the four with a field of their own by the name
@@ -800,23 +734,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The two blocks under the form: the agent's own global instructions, and
-    /// the whole prompt it is one layer of.
+    /// The block under the form: the whole prompt the agent gets.
     ///
-    /// The file is named as the file, because calling it the prompt would be a
-    /// lie: the prompt also carries the CLI's base instructions, the environment
-    /// block, the project's own AGENTS.md, the skills resolver and the MCP line,
-    /// and only `noob debug prompt` returns all of it. Each block is a fixed
-    /// height and reads with the page keys, so a prompt a thousand lines long
-    /// does not turn the section into a text file.
+    /// The prompt carries the CLI's base instructions, the environment block,
+    /// both AGENTS.md layers, the skills resolver and the MCP line, and only
+    /// `noob debug prompt` returns all of it. The block is a fixed height and
+    /// reads with the page keys, so a prompt a thousand lines long does not
+    /// turn the section into a text file.
     #[test]
-    fn the_agent_section_carries_the_instructions_and_the_whole_prompt() {
-        let dir = scratch_dir("agent-instructions");
-        std::fs::write(
-            dir.join(agent::AGENTS_MD),
-            "# Global instructions\n\nbe brief\n",
-        )
-        .expect("a file");
+    fn the_agent_section_carries_the_whole_prompt() {
+        let dir = scratch_dir("agent-prompt-block");
         let mut panel = Settings::open(
             &Config::default(),
             None,
@@ -834,18 +761,6 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("there is no {title} block: {:?}", panel.rows()))
         };
-        let its = block(&panel, "AGENTS.md");
-        assert!(
-            its.under.contains(&dir.join(agent::AGENTS_MD).display().to_string()),
-            "the block does not name the file: {}",
-            its.under
-        );
-        // Which the panel has to say, because this file is not the `.env`: the
-        // prompt is assembled once when a session starts.
-        assert!(its.under.contains("session"), "{}", its.under);
-        assert_eq!(its.body, ["# Global instructions", "", "be brief"]);
-        assert_eq!(its.offer, None, "there is a file to show");
-
         // Until the CLI answers, the prompt block says it is being read rather
         // than drawing an empty box.
         assert!(
@@ -908,61 +823,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// With no file there the block says so and offers to write one, and the
-    /// press writes it where the agent looks rather than anywhere this window
-    /// decided. A prompt the CLI would not print says why instead of showing
-    /// nothing.
+    /// A prompt the CLI would not print says why instead of showing nothing.
     #[test]
-    fn a_missing_agents_md_is_offered_and_a_failed_prompt_says_why() {
-        let dir = scratch_dir("agent-offer");
-        let path = dir.join(agent::AGENTS_MD);
+    fn a_failed_prompt_says_why() {
+        let dir = scratch_dir("agent-prompt-failed");
         let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
         let mut panel = Settings::open(&Config::default(), None, read());
         go_to(&mut panel, AGENT);
-        let at = panel
-            .rows()
-            .iter()
-            .position(|row| matches!(row, Row::Paper(paper) if paper.title.contains("AGENTS.md")))
-            .expect("the instructions block");
-        let paper = panel.paper(at).expect("the block").clone();
-        assert_eq!(paper.offer.as_deref(), Some(path.as_path()));
-        assert!(paper.under.contains("nothing at"), "{}", paper.under);
-        assert!(!paper.body.is_empty(), "an empty box says nothing at all");
-
-        // The press asks for the file the block named, and nothing else on the
-        // panel offers one.
-        assert!(panel.point_at(at, Side::Left));
-        assert!(panel.hint().contains("enter"), "{}", panel.hint());
-        assert_eq!(
-            panel.make(at),
-            Some(Deed::StartInstructions { path: path.clone() })
-        );
-        agent::start_instructions(&path).expect("the file is written");
-        assert!(
-            agent::start_instructions(&path).is_err(),
-            "a second press wrote over instructions somebody had"
-        );
-        panel.adopt_agent(read(), &Config::default());
-        go_to(&mut panel, AGENT);
-        let paper = panel.paper(at).expect("the block");
-        assert_eq!(paper.offer, None, "it still offers a file that is there");
-        assert!(
-            paper.body.iter().any(|line| line.contains("Global instructions")),
-            "{:?}",
-            paper.body
-        );
-        assert_eq!(panel.make(at), None);
-
-        // A whitespace-only file is nothing at all to the agent, so it is
-        // nothing at all here: it trims the file and a blank one carries no
-        // heading into the prompt.
-        std::fs::write(&path, "\n   \n").expect("a file");
-        panel.adopt_agent(read(), &Config::default());
-        go_to(&mut panel, AGENT);
-        assert!(panel.paper(at).expect("the block").offer.is_some());
-
-        // And the other block says why there is no prompt rather than sitting
-        // empty with nothing anywhere saying what happened.
         panel.adopt_prompt(
             String::from("/tmp/work"),
             Err(String::from("noob debug prompt failed: no such subcommand")),

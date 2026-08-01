@@ -12665,33 +12665,22 @@ mod tests {
         }
     }
 
-    /// The two blocks under the form: the file the agent really reads, and the
-    /// whole prompt it is one layer of. Both draw their title and their text.
+    /// The two documents draw where they live: the global AGENTS.md on the
+    /// SYSTEM PROMPT section, the whole prompt under the AGENT cards. Both
+    /// draw their title and their text.
     #[test]
-    fn the_agent_section_draws_the_instructions_and_the_prompt() {
+    fn the_system_prompt_draws_the_document_and_the_agent_draws_the_prompt() {
         let mut panel = Settings::open(
             &Config::default(),
             None,
             an_agent_with_instructions(),
         );
-        let at = panel
+        let doc = panel
             .section_names()
             .iter()
-            .position(|name| *name == crate::settings::AGENT)
-            .expect("the agent section");
-        panel.choose(at);
-        panel.adopt_prompt(
-            String::from("/home/hec/workspace/noob-cli"),
-            Ok(vec![
-                String::from("You are noob, a coding agent."),
-                String::new(),
-                String::from("# Global instructions (AGENTS.md)"),
-            ]),
-            &Config::default(),
-        );
-        // The blocks are the last two rows of a section of cards, so the list
-        // is wound to its end to look at them.
-        scrolled_to_the_end(&mut panel);
+            .position(|name| *name == crate::settings::PROMPT)
+            .expect("the system prompt section");
+        panel.choose(doc);
         let out = render_settings(&panel, 1400.0, 1200.0, None);
         let text = text_of(&out.scene);
 
@@ -12707,8 +12696,29 @@ mod tests {
         assert!(text.contains("Global instructions"), "{text}");
         assert!(!text.contains("# Global instructions"), "{text}");
 
-        // And the prompt, under a title of its own that says where it came
-        // from. The file is never called the prompt: it is one layer of it.
+        // And the prompt on the AGENT section, under a title of its own that
+        // says where it came from. The file is never called the prompt: it is
+        // one layer of it.
+        let at = panel
+            .section_names()
+            .iter()
+            .position(|name| *name == crate::settings::AGENT)
+            .expect("the agent section");
+        panel.choose(at);
+        panel.adopt_prompt(
+            String::from("/home/hec/workspace/noob-cli"),
+            Ok(vec![
+                String::from("You are noob, a coding agent."),
+                String::new(),
+                String::from("# Global instructions (AGENTS.md)"),
+            ]),
+            &Config::default(),
+        );
+        // The block is the last row of a section of cards, so the list is
+        // wound to its end to look at it.
+        scrolled_to_the_end(&mut panel);
+        let out = render_settings(&panel, 1400.0, 1200.0, None);
+        let text = text_of(&out.scene);
         assert!(text.contains("THE PROMPT THE AGENT GETS"), "{text}");
         assert!(text.contains("noob debug prompt"), "{text}");
         assert!(text.contains("You are noob, a coding agent."), "{text}");
@@ -12837,6 +12847,24 @@ mod tests {
     /// failed is the reason it failed. Neither is an empty box.
     #[test]
     fn a_missing_file_and_a_failed_command_are_said_on_their_own_block() {
+        // `an_agent` has no AGENTS.md at all, so the SYSTEM PROMPT section
+        // says where one would go and what the key would do.
+        let out = render_settings(
+            &a_panel_on(&Config::default(), crate::settings::PROMPT),
+            1400.0,
+            1200.0,
+            None,
+        );
+        let text = text_of(&out.scene);
+        assert!(text.contains("nothing at"), "{text}");
+        assert!(text.contains("/home/hec/.config/noob/AGENTS.md"), "{text}");
+        assert!(
+            text.contains("The agent reads this file first"),
+            "the block is empty: {text}"
+        );
+
+        // And the prompt block carries the reason, in the colour this window
+        // uses for something that went wrong.
         let mut panel = a_panel_on(&Config::default(), crate::settings::AGENT);
         panel.adopt_prompt(
             String::from("/home/hec/workspace/noob-cli"),
@@ -12846,16 +12874,6 @@ mod tests {
         scrolled_to_the_end(&mut panel);
         let out = render_settings(&panel, 1400.0, 1200.0, None);
         let text = text_of(&out.scene);
-        // `an_agent` has no AGENTS.md at all, so the block says where one would
-        // go and what the key would do.
-        assert!(text.contains("nothing at"), "{text}");
-        assert!(text.contains("/home/hec/.config/noob/AGENTS.md"), "{text}");
-        assert!(
-            text.contains("The agent reads this file first"),
-            "the block is empty: {text}"
-        );
-        // And the prompt block carries the reason, in the colour this window
-        // uses for something that went wrong.
         assert!(text.contains("no such subcommand"), "{text}");
         let why = out
             .scene
@@ -15041,7 +15059,7 @@ mod tests {
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let was = out.layout.settings_list.x;
         let mut seen = Vec::new();
-        for x in [200.0, 420.0, 150.0] {
+        for x in [200.0, 420.0, 170.0] {
             let ratio = out.layout.settings_rail_ratio_at(x);
             let moved = render_settings_at_rail(&panel, 1400.0, 900.0, None, ratio);
             let layout = &moved.layout;

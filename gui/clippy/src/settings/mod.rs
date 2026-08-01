@@ -1,4 +1,4 @@
-//! The settings panel: five sections, what each one carries, and what changing
+//! The settings panel: the sections, what each one carries, and what changing
 //! a row writes back.
 //!
 //! A full screen takeover rather than a popup or a second OS window. A second
@@ -12,7 +12,8 @@
 //! above it saying where you were and nothing on it about the agent the window
 //! is a front end for. It is a rail of section names now, with the chosen
 //! section's rows beside it, and each section is short enough to read at a
-//! glance. Four of them ([`AGENT`], [`SESSIONS`], [`SKILLS`], [`MCP`]) are the
+//! glance. Five of them ([`AGENT`], [`PROMPT`], [`SESSIONS`], [`SKILLS`],
+//! [`MCP`]) are the
 //! agent's own files rather than the window's; the last one ([`APPEARANCE`]) is
 //! the window's own settings file, the palette included, minus the keys the
 //! window itself already sets ([`OFF_PANEL`]).
@@ -87,13 +88,11 @@
 //! whatever else that file carries. Every field is a plain-words label over its
 //! value with the key and what it decides in one sentence under it, and the
 //! shifted arrow crosses between the two fields of a card because the plain
-//! arrow keys are the nudge. Under the cards are two blocks
-//! ([`Row::Paper`]), cards themselves: the
-//! global `AGENTS.md`, which the CLI already reads and puts at the top of every
-//! prompt, and the whole assembled prompt out of `noob debug prompt`. The file
-//! is one capped layer of that prompt, so it is named as the file and never as
-//! the prompt, and the block that has neither says which of the two it is
-//! waiting on.
+//! arrow keys are the nudge. Under the cards is one block ([`Row::Paper`]), a
+//! card itself: the whole assembled prompt out of `noob debug prompt`, and
+//! while the command has not answered the block says it is waiting. The global
+//! `AGENTS.md`, one capped layer of that prompt, is the [`PROMPT`] section's
+//! own document.
 //!
 //! **Two of the agent's own settings are controls, not readings.** Everything
 //! in the CLI's `.env` was listed as text with the endpoint as the only thing
@@ -162,6 +161,9 @@ use crate::config::{self, Config};
 /// The sections, in the order the rail lists them: the agent first, because
 /// what the window is a front end for matters more than what colour it is.
 pub const AGENT: &str = "AGENT";
+/// The system prompt: the global `AGENTS.md`, the first layer of every
+/// prompt, as one document of its own.
+pub const PROMPT: &str = "SYSTEM PROMPT";
 pub const SESSIONS: &str = "SESSIONS";
 pub const SKILLS: &str = "SKILLS";
 pub const MCP: &str = "MCP";
@@ -176,7 +178,7 @@ pub const APPEARANCE: &str = "APPEARANCE";
 /// asking on a settings panel, and went with the file behind it. COLOURS was the
 /// palette, which is what the window looks like: it is the last block of
 /// [`APPEARANCE`] now, under its own headings.
-pub const SECTIONS: [&str; 5] = [AGENT, SESSIONS, SKILLS, MCP, APPEARANCE];
+pub const SECTIONS: [&str; 6] = [AGENT, PROMPT, SESSIONS, SKILLS, MCP, APPEARANCE];
 
 /// The sessions section's own vocabulary, re-exported so the frame, the
 /// painter and the panel's callers keep one `settings::` path to it.
@@ -1392,6 +1394,7 @@ impl Settings {
             .map(|name| {
                 let rows = match name {
                     AGENT => sections::agent::rows(&self.agent, &self.prompt),
+                    PROMPT => sections::prompt::rows(&self.agent),
                     SESSIONS => sections::sessions::rows(&self.agent),
                     SKILLS => self.skills.rows(&self.agent),
                     MCP => self.mcp.rows(&self.agent),

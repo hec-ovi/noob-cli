@@ -849,12 +849,12 @@ pub(crate) fn settings_control(row: Panel, label_w: f32, column: f32) -> Panel {
 /// The least the rail of section names goes down to, and how wide the label
 /// column of a row is, both in columns of pane text.
 ///
-/// The rail holds the longest section name with room for its mark; the label
-/// column holds the longest key in the settings file. The rail's number is a
-/// floor rather than its width, because the rail is dragged: it is the room the
-/// names need, and the settings beside them are held to the same floor, so
-/// neither side of the drag can be squeezed away.
-const SETTING_RAIL_COLUMNS: usize = 14;
+/// The rail holds the longest section name (SYSTEM PROMPT) with room for its
+/// mark; the label column holds the longest key in the settings file. The
+/// rail's number is a floor rather than its width, because the rail is
+/// dragged: it is the room the names need, and the settings beside them are
+/// held to the same floor, so neither side of the drag can be squeezed away.
+const SETTING_RAIL_COLUMNS: usize = 17;
 const SETTING_LABEL_COLUMNS: usize = 24;
 
 pub(crate) fn settings_rail_floor(column: f32) -> f32 {
