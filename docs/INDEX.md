@@ -11,8 +11,8 @@ package, the binary and everything a user sees are `no0b`.
 | You want to change | Open |
 |---|---|
 | How a line of text becomes rows on screen: wrapping, scroll windows, selection bands, the scrollbar's extent | `gui/layers/text-geometry/CONTRACT.md` |
-| Which panel sits where, tabs, drag and drop, where the two dividers sit | `gui/clippy/src/dock/CONTRACT.md` and the `Layout` half of `gui/clippy/src/view.rs` |
-| What a frame looks like: panels, tabs, gauges, the title bar | `gui/clippy/src/view.rs` |
+| Which panel sits where, tabs, drag and drop, where the two dividers sit | `gui/clippy/src/dock/CONTRACT.md` and `gui/clippy/src/view/CONTRACT.md` |
+| What a frame looks like: panels, tabs, gauges, the title bar | `gui/clippy/src/view/CONTRACT.md` |
 | Colors, transparency, the palette | `gui/clippy/src/style/CONTRACT.md`, keys in `gui/clippy/src/config/CONTRACT.md` |
 | Settings file format and its defaults | `gui/clippy/src/config/CONTRACT.md` |
 | What the settings panel lists, and what changing a row writes | `gui/clippy/src/settings/CONTRACT.md`, routed in `gui/clippy/src/main.rs` |
@@ -31,7 +31,7 @@ package, the binary and everything a user sees are `no0b`.
 | Markdown rendering in the transcript | `gui/clippy/src/style/CONTRACT.md` |
 | Syntax colors in the file view | `gui/clippy/src/style/CONTRACT.md` |
 | The thinking orb in the title strip: its maths, its two states | `gui/clippy/src/orb/CONTRACT.md`, drawn by `view::title_bar`, clocked in `gui/clippy/src/main.rs` |
-| Desktop entry, icons, packaging | `gui/clippy/src/packaging.rs`, `gui/data/`, `dev.sh gui-package` |
+| Desktop entry, icons, packaging | `gui/clippy/src/packaging/CONTRACT.md`, `gui/data/`, `dev.sh gui-package` |
 
 ## The agent (`crates/`)
 
@@ -136,6 +136,15 @@ Boxes so far:
   settings panel reunited: model, places, and paint over one geometry.
 - [`gui/clippy/src/picker`](../gui/clippy/src/picker/CONTRACT.md) - the
   startup chooser reunited: model, places, and paint over one geometry.
+- [`gui/clippy/src/view`](../gui/clippy/src/view/CONTRACT.md) - layout, hit
+  testing, and chrome: one geometry, one dispatch, the cut-corner
+  vocabulary.
+- [`gui/clippy/src/packaging`](../gui/clippy/src/packaging/CONTRACT.md) -
+  desktop entry, icons, app id, the per-user installer.
+- [`gui/clippy/src/install`](../gui/clippy/src/install/CONTRACT.md) - the
+  settings window's skill installer, mirroring the CLI's conventions.
+- [`gui/clippy`](../gui/clippy/CONTRACT.md) - the no0b binary: the shell's
+  composition rules and the box map behind it.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,

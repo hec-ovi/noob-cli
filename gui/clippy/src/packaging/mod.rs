@@ -61,15 +61,15 @@ fn usable_token(raw: Option<String>) -> Option<ActivationToken> {
 
 /// The desktop entry, checked against the code rather than trusted.
 #[cfg(test)]
-const DESKTOP: &str = include_str!("../../data/io.github.hec_ovi.NO0B.desktop");
+const DESKTOP: &str = include_str!("../../../data/io.github.hec_ovi.NO0B.desktop");
 #[cfg(test)]
-const ICON: &str = include_str!("../../data/io.github.hec_ovi.NO0B.svg");
+const ICON: &str = include_str!("../../../data/io.github.hec_ovi.NO0B.svg");
 #[cfg(test)]
-const SYMBOLIC: &str = include_str!("../../data/io.github.hec_ovi.NO0B-symbolic.svg");
+const SYMBOLIC: &str = include_str!("../../../data/io.github.hec_ovi.NO0B-symbolic.svg");
 #[cfg(test)]
-const INSTALLER: &str = include_str!("../../data/install.sh");
+const INSTALLER: &str = include_str!("../../../data/install.sh");
 #[cfg(test)]
-const MAIN: &str = include_str!("main.rs");
+const MAIN: &str = include_str!("../main.rs");
 
 /// The binary this crate builds, which is the name the entry's `Exec` says and
 /// the name the installer places. Taken from cargo rather than typed out, so a
