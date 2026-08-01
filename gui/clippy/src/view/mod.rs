@@ -484,6 +484,9 @@ pub enum Act {
     /// Delete what is marked, or the row the keys are on when nothing is. Two
     /// presses, like every other delete on this panel.
     Forget,
+    /// Say what the typed source would install, without installing it. The
+    /// same button as Install, one step earlier.
+    Validate,
     /// Install what has been typed into the card this button stands in. The one
     /// action on the panel that starts something the window then waits for.
     Install,
@@ -13874,10 +13877,9 @@ mod tests {
     /// read through. The border says the same thing and leaves the words alone.
     #[test]
     fn the_entry_under_the_cursor_is_the_card_with_the_focus_border() {
-        let mut panel = a_wordy_skills_panel();
-        // Down one: the section opens on the card an install is typed into, and
-        // the skill is the row under it.
-        panel.step(true);
+        let panel = a_wordy_skills_panel();
+        // The section opens on the skill itself: the list comes first and the
+        // install card stands under it.
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let (index, row) = the_entry_row(&out, &panel);
         let (card, _) = the_card(&out, row, true);
@@ -14003,7 +14005,7 @@ mod tests {
             .iter()
             .find(|(at, ..)| *at == index)
             .expect("the install card has no button");
-        assert_eq!(act, Act::Install);
+        assert_eq!(act, Act::Validate, "an unchecked source validates first");
 
         // In the footer, at the bottom right, and inside its own card.
         assert!(
@@ -14022,7 +14024,7 @@ mod tests {
             "the install button is not filled: {box_:?}"
         );
         assert!(
-            line_of(&out, box_.x + INPUT_PAD, box_.y).contains("install"),
+            line_of(&out, box_.x + INPUT_PAD, box_.y).contains("validate"),
             "the button has no word in it"
         );
 
@@ -14030,7 +14032,7 @@ mod tests {
         let (x, y) = (box_.x + box_.w * 0.5, box_.y + box_.h * 0.5);
         assert_eq!(
             out.layout.hit(x, y),
-            Some(Hit::SettingsAct(index, Act::Install))
+            Some(Hit::SettingsAct(index, Act::Validate))
         );
     }
 
@@ -14147,13 +14149,14 @@ mod tests {
         let cols = out.layout.settings_doc_columns(8.0);
         let rows = out.layout.settings_doc_rows(13.0);
         assert!(rows > 1, "the box holds more than a line");
-        let first_row = out.layout.settings_rows[0];
 
         // A document longer than any window, scrolled past its first screenful.
         let long: Vec<String> = (0..200).map(|n| format!("line {n} of it")).collect();
         let mut agent = an_agent();
         agent.skills[0].doc = long;
         panel.adopt_agent(agent, &Config::default());
+        let before = render_settings(&panel, 1400.0, 900.0, None);
+        let first_row = before.layout.settings_rows[0];
         assert!(panel.scroll_doc(3, true, cols, rows), "the wheel moves it");
         let after = render_settings(&panel, 1400.0, 900.0, None);
         let inside = after.layout.settings_doc_text;

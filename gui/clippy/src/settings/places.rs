@@ -178,6 +178,7 @@ pub(crate) fn settings_doing_box(footer: Panel, column: f32) -> Option<Panel> {
 /// What a card's action is, as the press the routing answers.
 pub(crate) fn settings_act_for(doing: crate::settings::Doing) -> Act {
     match doing {
+        crate::settings::Doing::Validate => Act::Validate,
         crate::settings::Doing::Install => Act::Install,
         crate::settings::Doing::Restore => Act::Restore,
     }

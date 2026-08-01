@@ -1417,6 +1417,20 @@ impl App {
     /// crashed as far as anybody watching it is concerned. The same shape the
     /// prompt block runs in instead: a thread, a channel, and a wake of the
     /// event loop when it answers.
+    /// Answer the validate press: what the typed source would install, or
+    /// why it would not, said under the card. Synchronous on purpose: the
+    /// check reads a string and at most a local directory.
+    fn validate_source(&mut self) {
+        let config = self.config.clone();
+        let Some(panel) = self.settings.as_mut() else {
+            return;
+        };
+        let source = panel.take_source();
+        let verdict = install::check(&source);
+        panel.note_check(source, verdict, &config);
+        self.dirty = true;
+    }
+
     fn start_install(&mut self) {
         let already = self.installing.is_some();
         let (source, skills_at) = match self.settings.as_mut() {
@@ -1722,7 +1736,16 @@ impl App {
             Some(settings::Row::Field { key, .. }) if *key == settings::SKILL_SOURCE
         );
         if installing {
-            self.start_install();
+            // The same two steps the card's button walks: Enter validates
+            // what was typed, and Enter again installs what checked out.
+            match self
+                .settings
+                .as_ref()
+                .is_some_and(settings::Settings::checked_ok)
+            {
+                true => self.start_install(),
+                false => self.validate_source(),
+            }
             return;
         }
         let Some(panel) = self.settings.as_mut() else {
@@ -2020,6 +2043,20 @@ impl App {
                         // second: one deletes transcripts, the other takes
                         // lines out of a file somebody may have edited by hand.
                         view::Act::Forget | view::Act::Restore => panel.uninstall(index),
+                        // The validate half of the install card's button:
+                        // answered here and now, on the panel.
+                        view::Act::Validate => {
+                            let elsewhere = !matches!(
+                                panel.at_cursor(),
+                                Some(settings::Row::Field { key, .. })
+                                    if *key == settings::SKILL_SOURCE
+                            );
+                            if elsewhere {
+                                panel.cancel_edit();
+                            }
+                            self.dirty |= panel.point_at(index, settings::Side::Left);
+                            None
+                        }
                         // The install card's own button. Not a deed: a deed is
                         // done here and now, and this is a clone with two
                         // minutes to answer in.
@@ -2044,6 +2081,9 @@ impl App {
                 };
                 if matches!(act, view::Act::Install) {
                     self.start_install();
+                }
+                if matches!(act, view::Act::Validate) {
+                    self.validate_source();
                 }
                 self.do_deed(deed);
             }

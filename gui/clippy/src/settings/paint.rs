@@ -395,7 +395,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                         ),
                         // A card's own action, which no table has one of. It
                         // is drawn by the card it stands in.
-                        Act::Install | Act::Restore => continue,
+                        Act::Validate | Act::Install | Act::Restore => continue,
                     };
                     settings_button(
                         scene,

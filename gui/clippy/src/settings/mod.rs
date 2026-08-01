@@ -409,6 +409,10 @@ pub struct Card {
 /// the layout only has to know there is a footer with one button in it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Doing {
+    /// Say what the typed source would install, without installing it. The
+    /// card's button starts here and turns into Install once the source
+    /// checks out; typing something else turns it back.
+    Validate,
     /// Take what was typed into the card's first field and install it as a
     /// skill.
     Install,
@@ -421,6 +425,7 @@ impl Doing {
     /// The word on the button.
     pub fn word(self) -> &'static str {
         match self {
+            Doing::Validate => "validate",
             Doing::Install => "install",
             Doing::Restore => "restore",
         }
@@ -1052,6 +1057,10 @@ pub const SECRET: &str = "set, and not shown here";
 /// write and starts an install instead.
 pub const SKILL_SOURCE: &str = "skill source";
 
+/// The standard skill the fresh field suggests: web search, by the same
+/// owner/name shorthand `skills add` takes.
+pub const WEBSEARCH_SUGGESTION: &str = "hec-ovi/websearch-skill";
+
 /// What the install of a skill is doing.
 ///
 /// The same three states the assembled prompt has ([`Assembled`]), for the same
@@ -1569,6 +1578,10 @@ pub struct Settings {
     /// install that failed leaves the address on screen to be corrected rather
     /// than making it be typed again.
     source: String,
+    /// The last source the validate button checked, and its verdict. The
+    /// install button only exists while this matches what the field holds and
+    /// the verdict is good; typing anything else voids it.
+    checked: Option<(String, Result<String, String>)>,
     /// The install that is running, or the last one that ran. Nothing until one
     /// is asked for, which is what keeps the block off the section.
     install: Option<Installing>,
@@ -1592,8 +1605,20 @@ impl Settings {
             trouble: None,
             prompt: Assembled::Waiting,
             source: String::new(),
+            checked: None,
             install: None,
         };
+        // The standard skill, suggested: a fresh config has no web search at
+        // all, and the field offering `skills add`'s own shorthand for it is
+        // how the list says so without lying about what is installed.
+        if panel
+            .agent
+            .skills
+            .iter()
+            .all(|skill| skill.name != "web-search")
+        {
+            panel.source = String::from(WEBSEARCH_SUGGESTION);
+        }
         panel.sections = panel.build(config);
         panel
     }
@@ -1621,6 +1646,20 @@ impl Settings {
         }
         self.source = self.source.trim().to_string();
         self.source.clone()
+    }
+
+    /// The validate button's answer, shown under the card and voided the
+    /// moment the field says something else. The rows are rebuilt rather than
+    /// patched, the same as everything else that arrives here.
+    pub fn note_check(&mut self, source: String, verdict: Result<String, String>, config: &Config) {
+        self.checked = Some((source, verdict));
+        self.sections = self.build(config);
+    }
+
+    /// Whether the field's current source is the one the validate button
+    /// approved. What turns the card's button from validate into install.
+    pub fn checked_ok(&self) -> bool {
+        matches!(&self.checked, Some((source, Ok(_))) if *source == self.source && !source.is_empty())
     }
 
     /// Say that an install has started, so the section says so while it runs.
@@ -2154,31 +2193,9 @@ impl Settings {
     /// The card at the top is the one thing this section could not do: it could
     /// list, turn off and delete, and installing one meant a terminal.
     fn skill_rows(&self) -> Vec<Row> {
-        let mut rows = vec![Row::Card(Card {
-            // The action this card exists for, so it is a filled button at the
-            // bottom right of it rather than a key nothing on screen names.
-            does: Some(Doing::Install),
-            title: String::from("INSTALL A SKILL"),
-            fields: vec![
-                CardField::text("repository or folder", SKILL_SOURCE, self.source.clone())
-                    .saying("a git address, an owner/name, or a folder with a SKILL.md in it"),
-                CardField::reading(
-                    "installed in",
-                    match &self.agent.skills_at {
-                        Some(path) => path.display().to_string(),
-                        None => String::from("nowhere: no config directory"),
-                    },
-                )
-                .saying("the agent reads this folder in every project, not just this one"),
-            ],
-            hint: Some(String::from(match self.agent.skills.is_empty() {
-                true => "none installed yet: a skill is a directory in there with a SKILL.md in it",
-                false => "turning one off moves its directory beside that one, where the agent does not look; uninstall deletes it",
-            })),
-        })];
-        if let Some(paper) = self.install_paper() {
-            rows.push(Row::Paper(paper));
-        }
+        // The installed list first, the install box under it: what is here is
+        // the section's subject, and adding one is the act at the bottom of it.
+        let mut rows = Vec::new();
         for skill in &self.agent.skills {
             rows.push(Row::Entry(Entry {
                 name: skill.name.clone(),
@@ -2196,6 +2213,55 @@ impl Settings {
                 removable: true,
                 doc: skill.doc.clone(),
             }));
+        }
+        let suggesting = self.source == WEBSEARCH_SUGGESTION
+            && self.agent.skills.iter().all(|skill| skill.name != "web-search");
+        rows.push(Row::Card(Card {
+            // The act the card exists for: validate what was typed, and once
+            // the source checks out, install it. One button, two steps.
+            does: Some(match self.checked_ok() {
+                true => Doing::Install,
+                false => Doing::Validate,
+            }),
+            title: String::from("INSTALL A SKILL"),
+            fields: vec![
+                CardField::text("repository or folder", SKILL_SOURCE, self.source.clone())
+                    .saying(match suggesting {
+                        true => {
+                            "the standard web-search skill, suggested; validate and install it, or type another source"
+                        }
+                        false => "a git address, an owner/name, or a folder with a SKILL.md in it",
+                    }),
+                CardField::reading(
+                    "installed in",
+                    match &self.agent.skills_at {
+                        Some(path) => path.display().to_string(),
+                        None => String::from("nowhere: no config directory"),
+                    },
+                )
+                .saying("the agent reads this folder in every project, not just this one"),
+            ],
+            hint: Some(String::from(match self.agent.skills.is_empty() {
+                true => "none installed yet: a skill is a directory in there with a SKILL.md in it",
+                false => "turning one off moves its directory beside that one, where the agent does not look; uninstall deletes it",
+            })),
+        }));
+        // The validate button's verdict, under the card it answers, for the
+        // source the field still holds; a verdict about something no longer
+        // typed says nothing and is not shown.
+        if let Some((source, verdict)) = &self.checked
+            && *source == self.source
+        {
+            rows.push(Row::Note {
+                text: match verdict {
+                    Ok(what) => format!("valid: {what}"),
+                    Err(why) => why.clone(),
+                },
+                bad: verdict.is_err(),
+            });
+        }
+        if let Some(paper) = self.install_paper() {
+            rows.push(Row::Paper(paper));
         }
         rows
     }
@@ -6966,15 +7032,13 @@ something_else = keep me
             "the panel does not say where they live"
         );
 
-        // The section opens on the field one more is installed with, which is
-        // the first thing on it anybody can act on.
+        // The section opens on the list itself: what is installed is the
+        // section's subject, and the install card stands under it.
         assert!(
-            matches!(panel.at_cursor(), Some(Row::Field { key, .. }) if *key == SKILL_SOURCE),
-            "the section does not open on the install field"
+            matches!(panel.at_cursor(), Some(Row::Entry(entry)) if entry.name == "coding"),
+            "the section does not open on the first skill"
         );
-        // The column beside the list is the skill under the cursor, and it
-        // shows the first one rather than an empty column while the cursor is
-        // somewhere that is not an entry at all.
+        // The column beside the list is the skill under the cursor.
         let showing = panel.showing().expect("something to show");
         assert_eq!(showing.name, "coding");
         assert_eq!(
@@ -6986,8 +7050,6 @@ something_else = keep me
             ],
             "the front matter is not the document"
         );
-        assert!(panel.step(true), "the cursor walks the entries");
-        assert_eq!(panel.showing().expect("the first one").name, "coding");
         assert!(panel.step(true), "the cursor walks the entries");
         assert_eq!(panel.showing().expect("the next one").name, "noisy");
 
@@ -7061,24 +7123,30 @@ something_else = keep me
             .collect()
     }
 
-    /// The section opens on a card that installs one, with the address typed
-    /// into its first field and the button that runs it in its footer.
+    /// The install card stands under the list, its address field validated
+    /// before its button will install: the button reads validate until the
+    /// source checks out, then install.
     ///
     /// "on skills allow to install more by command as well". The list could
     /// show, turn off and delete, and the only way to add one was a terminal.
     #[test]
     fn a_skill_is_installed_from_a_field_at_the_top_of_the_section() {
         let mut panel = a_panel_showing(vec![String::from("# coding")]);
-        let Some(Row::Card(card)) = panel.row(0) else {
-            panic!("the section does not open on a card: {:?}", panel.row(0));
+        let at = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, Row::Card(card) if card.title == "INSTALL A SKILL"))
+            .expect("the install card is on the section");
+        assert!(at > 0, "the card does not stand under the list");
+        let Some(Row::Card(card)) = panel.row(at) else {
+            panic!("no card at {at}");
         };
-        assert_eq!(card.title, "INSTALL A SKILL");
         assert_eq!(
             card.does,
-            Some(Doing::Install),
-            "the card has no action, so its footer holds nothing"
+            Some(Doing::Validate),
+            "an unchecked source must be validated before it installs"
         );
-        assert_eq!(card.does.expect("an action").word(), "install");
+        assert_eq!(card.does.expect("an action").word(), "validate");
         // The field it is typed into, and the folder it lands in, which is the
         // one the agent reads in every project.
         assert!(card.fields[0].editable(), "the source cannot be typed into");
@@ -7098,9 +7166,17 @@ something_else = keep me
         );
 
         // What is typed is what is installed, whether the edit was ended with
-        // Enter or left running when the button was pressed.
-        assert!(matches!(panel.at_cursor(), Some(Row::Field { key, .. }) if *key == SKILL_SOURCE));
+        // Enter or left running when the button was pressed. The cursor walks
+        // down past the list onto the card's field.
+        while !matches!(panel.at_cursor(), Some(Row::Field { key, .. }) if *key == SKILL_SOURCE) {
+            assert!(panel.step(true), "the install field is not reachable");
+        }
         assert!(panel.edit());
+        // The field opens holding the standard suggestion; typing another
+        // source starts by taking it out, the way a person would.
+        while panel.editing().is_some_and(|typed| !typed.is_empty()) {
+            assert!(panel.backspace());
+        }
         assert!(panel.type_text("someone/writing"));
         assert!(
             panel.hint().contains("installs it"),
@@ -7335,9 +7411,8 @@ something_else = keep me
         let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
         let mut panel = Settings::open(&Config::default(), None, read());
         go_to(&mut panel, SKILLS);
-        // Past the card the section opens on, which is the one an install is
-        // typed into, onto the skill itself.
-        assert!(panel.step(true));
+        // The section opens on the skill itself; the install card is under
+        // the list now.
         let at = panel.cursor();
         assert!(matches!(panel.row(at), Some(Row::Entry(entry)) if entry.on));
 

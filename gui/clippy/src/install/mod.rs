@@ -100,6 +100,34 @@ pub fn source_for(text: &str, here: bool) -> Source {
     }
 }
 
+/// What the typed source would install, without installing it: the validate
+/// half of the card's cycle. Ok is the plain sentence the panel shows before
+/// the button turns into install; Err is why nothing would.
+///
+/// A repository is answered from its address alone, since cloning it IS the
+/// install; a local path is answered from the disk, with the same
+/// one-skill-only rule the install applies.
+pub fn check(source: &str) -> Result<String, String> {
+    let source = source.trim();
+    if source.is_empty() {
+        return Err(String::from(
+            "type a repository, an owner/name or a path first",
+        ));
+    }
+    let here = Path::new(source).exists();
+    match source_for(source, here) {
+        Source::Git(url) => Ok(format!("a repository: install clones {url}")),
+        Source::Local(path) if !path.exists() => Err(format!(
+            "{} is not on this machine, and does not read as a repository",
+            path.display()
+        )),
+        Source::Local(path) => {
+            let found = skill_in(&path)?;
+            Ok(format!("a local skill at {}", found.display()))
+        }
+    }
+}
+
 /// Exactly the clone the window runs, built without running it.
 ///
 /// Its own function for the reason [`crate::link::prompt_command`] is one: what
@@ -484,6 +512,23 @@ mod tests {
     }
 
     const GOOD: &str = "---\nname: coding\ndescription: how this repo is built\n---\n\n# coding\n";
+
+    /// The validate half answers without installing: an empty or missing
+    /// source is refused with why, a shorthand names the repository it would
+    /// clone, and a real local skill checks out.
+    #[test]
+    fn the_check_answers_before_anything_installs() {
+        assert!(check("").is_err(), "an empty source validated");
+        assert!(check("   ").is_err());
+        let repo = check("someone/writing").expect("a shorthand is checkable");
+        assert!(repo.contains("https://github.com/someone/writing.git"), "{repo}");
+        let missing = check("/nowhere/of/the/kind").expect_err("a missing path validated");
+        assert!(missing.contains("not on this machine"), "{missing}");
+        let dir = a_skill(&temp("check"), GOOD);
+        let local = check(dir.to_str().expect("utf8")).expect("a real skill checks out");
+        assert!(local.contains("a local skill"), "{local}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// What is typed decides what happens, and it decides it the way the CLI
     /// decides it: the same string typed into either has to mean the same skill,
