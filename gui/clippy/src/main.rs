@@ -1205,6 +1205,7 @@ impl App {
                 .map(|file| view::short_name(&file.path))
                 .collect(),
             file_first: self.file_scroll,
+            agent_tab: self.state.shown_agent,
             column: self.column,
             menu_column: self.menu_column,
             pane_size: self.config.pane_font_size,
@@ -2803,6 +2804,12 @@ impl App {
         if turn_ended {
             self.remember_context();
         }
+        // The output tab follows its agent out: a finished child leaves the
+        // fleet, and a tab over "no agent chosen" is a tab with no job.
+        if self.state.shown_agent.is_none() && !self.dock.is_hidden(View::Agent) {
+            self.dock.hide(View::Agent);
+            self.dirty = true;
+        }
         self.follow_open_file();
     }
 
@@ -3171,6 +3178,7 @@ impl App {
             Hit::Body(space) => {
                 self.begin_selection(space);
                 self.open_call_under_pointer(space);
+                self.open_agent_under_pointer(space);
             }
             // All four are handled above, while the picker is up, which is the
             // only time any of them can be hit at all.
@@ -3209,6 +3217,36 @@ impl App {
             // is the only time any of them can be hit at all.
             Hit::MenuRow(_) | Hit::Menu | Hit::CallPopup => {}
         }
+    }
+
+    /// A press in the AGENTS pane opens the pressed child's own output as
+    /// the `[N] AGENT - OUTPUT` tab, in the top-left space the first time
+    /// and wherever it has been dragged to after.
+    fn open_agent_under_pointer(&mut self, space: Space) {
+        if self.dock.slot(space).active() != Some(View::Agents) {
+            return;
+        }
+        let ordinal = {
+            let layout = self.layout();
+            let panel = layout.placed(space).body;
+            let frame = self.frame(&layout);
+            crate::widgets::agents::agent_at(
+                &frame,
+                panel,
+                self.cursor.x as f32,
+                self.cursor.y as f32,
+            )
+        };
+        let Some(ordinal) = ordinal else {
+            return;
+        };
+        self.state.show_agent(ordinal);
+        if self.dock.is_hidden(View::Agent) {
+            self.dock.unhide(View::Agent);
+        } else {
+            self.dock.reveal(View::Agent);
+        }
+        self.dirty = true;
     }
 
     /// A press in the ACTIVITY pane, resolved back to the call that wrote the
@@ -4097,6 +4135,7 @@ impl App {
                 .files
                 .get_mut(open_file)
                 .map(|file| &mut file.pane),
+            View::Agent => self.state.agent_shown_mut().map(|agent| &mut agent.pane),
             _ => None,
         };
         // A pane with a scrollback of its own, which is a transcript: it follows
@@ -5123,6 +5162,7 @@ mod tests {
             settings: None,
             file_labels: Vec::new(),
             file_first: 0,
+            agent_tab: None,
             column: COLUMN,
             menu_column: COLUMN,
             pane_size: Config::default().pane_font_size,
@@ -6048,7 +6088,13 @@ mod tests {
         let mut dock = Dock::new();
         let mut menu = Menu::for_widget((0.0, 0.0), View::Output, Space::TopLeft, false);
         menu.fold(3, &dock);
-        for view in View::ALL {
+        // Every switchable view: the agent-output one has no switch, opening
+        // and closing with the agent it is on instead.
+        let switchable: Vec<View> = View::ALL
+            .into_iter()
+            .filter(|view| *view != View::Agent)
+            .collect();
+        for view in switchable.iter().copied() {
             assert!(toggle_view(&mut dock, &mut menu, view).hidden);
             assert!(dock.is_sound(), "after {view:?} went out: {dock:?}");
             assert!(dock.is_hidden(view));
@@ -6057,13 +6103,13 @@ mod tests {
         for space in Space::ALL {
             assert!(dock.slot(space).views.is_empty());
         }
-        for view in View::ALL {
+        for view in switchable.iter().copied() {
             assert!(!toggle_view(&mut dock, &mut menu, view).hidden);
             assert!(dock.is_sound(), "after {view:?} came back: {dock:?}");
         }
-        assert_eq!(dock.walk().len(), View::ALL.len());
+        assert_eq!(dock.walk().len(), switchable.len());
         // Every row of the list says the widget is in the window again.
-        for (step, view) in View::ALL.into_iter().enumerate() {
+        for (step, view) in switchable.iter().copied().enumerate() {
             assert_eq!(
                 menu.pick(4 + step),
                 Some(Item::Widget(view, false)),
@@ -6340,6 +6386,7 @@ mod tests {
             settings: None,
             file_labels: Vec::new(),
             file_first: 0,
+            agent_tab: None,
             column: COLUMN,
             menu_column: COLUMN,
             pane_size: config.pane_font_size,
@@ -6665,6 +6712,7 @@ mod tests {
             settings: None,
             file_labels: Vec::new(),
             file_first: 0,
+            agent_tab: None,
             column: COLUMN,
             menu_column: COLUMN,
             pane_size: Config::default().pane_font_size,
@@ -6897,6 +6945,12 @@ mod tests {
             prompt: "look".into(),
             tools: "read".into(),
         });
+        state.apply(noob_proto::Event::AgentOutput {
+            agent_id: "kid".into(),
+            line: "looking".into(),
+        });
+        // Pointed at the child, so the agent-output pane is a scrollback too.
+        assert!(state.show_agent(1));
         state.apply(noob_proto::Event::FileEdit {
             path: "src/calc.py".into(),
             span: noob_proto::Span {

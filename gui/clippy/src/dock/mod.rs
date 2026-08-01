@@ -43,6 +43,11 @@ pub enum View {
     /// The files the agent has touched, listed down the left of the pane with
     /// the open one's diff beside it.
     Files,
+    /// One running sub-agent's own output, opened by clicking its row on the
+    /// AGENTS pane. Hidden until then: with no agent chosen there is nothing
+    /// for it to show. Its tab reads `[N] AGENT - OUTPUT` for the agent it is
+    /// on; the label here is the fallback the drag ghost and the menus use.
+    Agent,
 }
 
 impl View {
@@ -57,7 +62,7 @@ impl View {
     /// shifted along by one when the labels changed. DEBUG came out from
     /// between SESSION and FILES when its pane went; the two either side of the
     /// hole closed up rather than moving anywhere else.
-    pub const ALL: [View; 8] = [
+    pub const ALL: [View; 9] = [
         View::Output,
         View::Activity,
         View::Plan,
@@ -66,6 +71,9 @@ impl View {
         View::Context,
         View::Session,
         View::Files,
+        // Appended, never inserted: the order above is stability API, and
+        // the accents and offsets indexed by it must not shift.
+        View::Agent,
     ];
 
     pub fn label(self) -> &'static str {
@@ -78,6 +86,7 @@ impl View {
             View::Context => "CONTEXT",
             View::Session => "SESSION",
             View::Files => "FILES",
+            View::Agent => "AGENT",
         }
     }
 }
@@ -282,14 +291,23 @@ impl Dock {
 
     /// The same arrangement without the views the settings turned off. A
     /// hidden view is not a folded one: it has no tab and nothing walks to it.
+    ///
+    /// The agent-output view starts hidden whatever the settings say: it is a
+    /// window onto one running sub-agent, and before anyone has clicked one
+    /// there is no agent for it to be a window onto. Clicking a row of the
+    /// AGENTS pane unhides it.
     pub fn hiding(hidden: &[View]) -> Dock {
         let mut dock = Dock::full();
-        for view in hidden {
+        let mut hidden = hidden.to_vec();
+        if !hidden.contains(&View::Agent) {
+            hidden.push(View::Agent);
+        }
+        for view in &hidden {
             for space in Space::ALL {
                 dock.slot_mut(space).remove(*view);
             }
         }
-        dock.hidden = hidden.to_vec();
+        dock.hidden = hidden;
         dock
     }
 
@@ -302,8 +320,10 @@ impl Dock {
             // sit above right and the files below them.
             rows_first: false,
             slots: [
+                // The agent-output view homes here, the priority cell, so a
+                // clicked agent opens beside the conversation's own space.
                 Slot {
-                    views: vec![View::Output],
+                    views: vec![View::Output, View::Agent],
                     active: 0,
                     folded: false,
                     tab_first: 0,
@@ -635,7 +655,10 @@ mod tests {
         assert_eq!(dock.slot(Space::TopLeft).active(), Some(View::Output));
         assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Activity));
         assert_eq!(dock.slot(Space::BottomRight).active(), Some(View::Files));
-        assert_eq!(dock.walk().len(), View::ALL.len());
+        // Every view but the agent-output one, which waits hidden for an
+        // agent to be clicked.
+        assert_eq!(dock.walk().len(), View::ALL.len() - 1);
+        assert!(dock.is_hidden(View::Agent));
     }
 
     /// The decorative avatar was a view of its own and is not one any more, the
@@ -648,8 +671,8 @@ mod tests {
     /// removed, so they cost no slot: a tab still reading either of them means a
     /// variant kept its old label.
     #[test]
-    fn there_are_eight_views_and_no_avatar_no_single_llm_monitor_and_no_debug() {
-        assert_eq!(View::ALL.len(), 8);
+    fn there_are_nine_views_and_no_avatar_no_single_llm_monitor_and_no_debug() {
+        assert_eq!(View::ALL.len(), 9);
         for view in View::ALL {
             for gone in ["CLIPPY", "LLM", "TALK", "OVERALL", "DEBUG"] {
                 assert_ne!(view.label(), gone, "{view:?}");
@@ -859,7 +882,7 @@ mod tests {
             dock.place_view(view, to, at);
             assert!(dock.is_sound(), "after {view:?} into {to:?} at {at}: {dock:?}");
             assert_eq!(dock.space_of(view), Some(to), "{view:?}");
-            assert_eq!(dock.walk().len(), View::ALL.len());
+            assert_eq!(dock.walk().len(), View::ALL.len() - 1);
         }
         // A view the settings turned off cannot be dropped in by naming a place
         // either.
@@ -911,20 +934,23 @@ mod tests {
         assert!(!dock.slot_mut(Space::TopLeft).cycle());
     }
 
-    /// The keyboard walk visits everything, wherever it has been dragged.
+    /// The keyboard walk visits everything placed, wherever it has been
+    /// dragged; the hidden agent-output view is not on it.
     #[test]
     fn the_walk_covers_every_view_and_wraps() {
         let mut dock = Dock::new();
         dock.move_view(View::Files, Space::TopLeft);
         dock.move_view(View::Output, Space::BottomRight);
+        let placed = dock.walk().len();
         let mut seen = vec![View::Output];
         let mut at = View::Output;
-        for _ in 0..View::ALL.len() - 1 {
+        for _ in 0..placed - 1 {
             at = dock.after(at).unwrap();
             assert!(!seen.contains(&at), "{at:?} twice in {seen:?}");
             seen.push(at);
         }
-        assert_eq!(seen.len(), View::ALL.len());
+        assert_eq!(seen.len(), placed);
+        assert!(!seen.contains(&View::Agent));
         assert_eq!(dock.after(at), Some(View::Output), "and it wraps");
     }
 
@@ -937,7 +963,7 @@ mod tests {
         assert!(dock.is_sound());
         assert_eq!(dock.space_of(View::Files), None);
         assert_eq!(dock.space_of(View::Activity), None);
-        assert_eq!(dock.walk().len(), View::ALL.len() - 2);
+        assert_eq!(dock.walk().len(), View::ALL.len() - 3);
         assert!(!dock.walk().contains(&View::Files));
         // The space those two were the only occupants of is empty, not broken.
         assert!(dock.slot(Space::BottomRight).is_empty());
@@ -965,7 +991,7 @@ mod tests {
         assert!(dock.is_hidden(View::Plan));
         assert_eq!(dock.space_of(View::Plan), None);
         assert!(!dock.walk().contains(&View::Plan));
-        assert_eq!(dock.walk().len(), View::ALL.len() - 1);
+        assert_eq!(dock.walk().len(), View::ALL.len() - 2);
         // Hidden means out, so a drag cannot put it back either.
         assert!(!dock.move_view(View::Plan, Space::TopLeft));
         assert_eq!(dock.space_of(View::Plan), None);
@@ -978,7 +1004,7 @@ mod tests {
         assert!(!dock.is_hidden(View::Plan));
         assert_eq!(dock.space_of(View::Plan), Some(Space::TopRight));
         assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Plan));
-        assert_eq!(dock.walk().len(), View::ALL.len());
+        assert_eq!(dock.walk().len(), View::ALL.len() - 1);
         assert!(!dock.unhide(View::Plan), "it was not hidden any more");
     }
 
@@ -1016,7 +1042,8 @@ mod tests {
     fn hiding_everything_leaves_a_dock_that_still_holds() {
         let mut dock = Dock::new();
         for view in View::ALL {
-            assert!(dock.hide(view), "{view:?}");
+            // The agent-output view opens hidden, so hiding it is a no-op.
+            assert_eq!(dock.hide(view), view != View::Agent, "{view:?}");
             assert!(dock.is_sound(), "{view:?}");
         }
         assert!(dock.walk().is_empty());
@@ -1170,7 +1197,7 @@ mod tests {
             ],
             "two columns, each spanning both rows"
         );
-        assert_eq!(dock.walk().len(), View::ALL.len());
+        assert_eq!(dock.walk().len(), View::ALL.len() - 1);
     }
 
     /// And a drop inside one cell takes a span back apart: the pane that was
@@ -1283,10 +1310,11 @@ mod tests {
             ],
             "two full width rows"
         );
-        // One widget left is still a window: it covers the lot.
+        // One widget left is still a window: it covers the lot. The
+        // agent-output view is already hidden, so hiding it is a no-op.
         for view in View::ALL {
             if view != View::Output {
-                assert!(dock.hide(view), "{view:?}");
+                assert_eq!(dock.hide(view), view != View::Agent, "{view:?}");
             }
         }
         assert_eq!(dock.walk(), vec![View::Output]);

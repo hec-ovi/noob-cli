@@ -564,9 +564,13 @@ pub struct Todo {
     pub state: TodoState,
 }
 
-#[derive(Clone, Debug)]
 pub struct AgentRow {
+    /// The wire id (`agent-N`), the key every agent.* frame correlates by.
     pub label: String,
+    /// The agent's number for a human: 1-based, in spawn order, stable for
+    /// the whole session however many rows come and go around it. The list
+    /// row reads `[N] Agent` and the output tab `[N] AGENT - OUTPUT`.
+    pub ordinal: usize,
     pub brief: String,
     pub state: &'static str,
     pub tone: Tone,
@@ -576,17 +580,36 @@ pub struct AgentRow {
     /// The last thing it said, live while it runs and its reason once it ends.
     /// A fleet of eight children is unreadable as eight names and no news.
     pub last: String,
+    /// Everything it has said, one line per `agent.output` frame, bounded:
+    /// what the `[N] AGENT - OUTPUT` tab shows.
+    pub pane: Pane,
+}
+
+impl std::fmt::Debug for AgentRow {
+    /// By hand because the pane is a scrollback, not a fact about the row:
+    /// a test failure wants to say which children were listed, not print
+    /// two thousand lines of one of them.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentRow")
+            .field("label", &self.label)
+            .field("ordinal", &self.ordinal)
+            .field("state", &self.state)
+            .field("last", &self.last)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AgentRow {
-    fn new(label: String, brief: String, tools: String) -> AgentRow {
+    fn new(label: String, ordinal: usize, brief: String, tools: String) -> AgentRow {
         AgentRow {
             label,
+            ordinal,
             brief,
             state: "queued",
             tone: Tone::Dim,
             tools,
             last: String::new(),
+            pane: Pane::new(2000),
         }
     }
 }
@@ -1034,7 +1057,17 @@ pub struct State {
     /// line that never scrolls away.
     pub queued: Vec<String>,
     pub plan: Vec<Todo>,
+    /// The live fleet: queued and running children only. A child that
+    /// finishes leaves the list in the same event that ends it; its report
+    /// reaches the conversation through the parent's own turn.
     pub agents: Vec<AgentRow>,
+    /// Children spawned this session, which is where an ordinal comes from:
+    /// rows leave the list, so its length cannot number anything.
+    agents_spawned: usize,
+    /// The agent the `[N] AGENT - OUTPUT` tab is on, by ordinal. None when
+    /// none was clicked, or when the one that was has finished; the shell
+    /// hides the tab when this goes.
+    pub shown_agent: Option<usize>,
     pub files: Vec<FileView>,
     pub open_file: usize,
 
@@ -1118,6 +1151,8 @@ impl State {
             queued: Vec::new(),
             plan: Vec::new(),
             agents: Vec::new(),
+            agents_spawned: 0,
+            shown_agent: None,
             files: Vec::new(),
             open_file: 0,
             usage: None,
@@ -1609,7 +1644,11 @@ impl State {
                 agent_id,
                 prompt,
                 tools,
-            } => self.agents.push(AgentRow::new(agent_id, prompt, tools)),
+            } => {
+                self.agents_spawned += 1;
+                self.agents
+                    .push(AgentRow::new(agent_id, self.agents_spawned, prompt, tools));
+            }
             Event::AgentStateChanged {
                 agent_id,
                 state,
@@ -1626,11 +1665,27 @@ impl State {
                     noob_proto::AgentState::Queued => ("queued", Tone::Dim),
                     noob_proto::AgentState::Unknown => ("unknown", Tone::Dim),
                 };
-                if let Some(agent) = self.agents.iter_mut().find(|a| a.label == agent_id) {
+                // A finished child leaves the list in the same event that
+                // ends it: the pane shows the live fleet, and the report
+                // lands in the conversation through the parent's own turn.
+                // Its output tab goes with it, having nothing left to watch.
+                if matches!(
+                    state,
+                    noob_proto::AgentState::Done
+                        | noob_proto::AgentState::Failed
+                        | noob_proto::AgentState::Canceled
+                ) {
+                    if let Some(at) = self.agents.iter().position(|a| a.label == agent_id) {
+                        if self.shown_agent == Some(self.agents[at].ordinal) {
+                            self.shown_agent = None;
+                        }
+                        self.agents.remove(at);
+                    }
+                } else if let Some(agent) =
+                    self.agents.iter_mut().find(|a| a.label == agent_id)
+                {
                     agent.state = word;
                     agent.tone = tone;
-                    // How it ended replaces what it was last doing: at the end
-                    // the reason is the only line worth the room.
                     if let Some(detail) = detail {
                         agent.last = detail;
                     }
@@ -1638,10 +1693,15 @@ impl State {
             }
             // A child's own output belongs to the child, not to the parent's
             // activity list: eight of them at once made that list unreadable
-            // and buried the parent's own work under it.
+            // and buried the parent's own work under it. The row keeps the
+            // last line for the list; the child's pane keeps all of them for
+            // its output tab.
             Event::AgentOutput { agent_id, line } => {
                 match self.agents.iter_mut().find(|a| a.label == agent_id) {
-                    Some(agent) => agent.last = line,
+                    Some(agent) => {
+                        agent.pane.say(line.clone(), Tone::Body);
+                        agent.last = line;
+                    }
                     None => return false,
                 }
             }
@@ -1708,8 +1768,35 @@ impl State {
             crate::dock::View::Output => Some(&self.output),
             crate::dock::View::Activity => Some(&self.activity),
             crate::dock::View::Files => self.files.get(self.open_file).map(|file| &file.pane),
+            crate::dock::View::Agent => self.agent_shown().map(|agent| &agent.pane),
             _ => None,
         }
+    }
+
+    /// The agent the output tab is on, while it is still running.
+    pub fn agent_shown(&self) -> Option<&AgentRow> {
+        let ordinal = self.shown_agent?;
+        self.agents.iter().find(|agent| agent.ordinal == ordinal)
+    }
+
+    /// The same row writable, for the wheel.
+    pub fn agent_shown_mut(&mut self) -> Option<&mut AgentRow> {
+        let ordinal = self.shown_agent?;
+        self.agents.iter_mut().find(|agent| agent.ordinal == ordinal)
+    }
+
+    /// Point the output tab at one agent by its ordinal. Says whether
+    /// anything changed, so a click on the row already showing costs no
+    /// frame.
+    pub fn show_agent(&mut self, ordinal: usize) -> bool {
+        if !self.agents.iter().any(|agent| agent.ordinal == ordinal) {
+            return false;
+        }
+        if self.shown_agent == Some(ordinal) {
+            return false;
+        }
+        self.shown_agent = Some(ordinal);
+        true
     }
 
     /// Show a file, dropping a selection that belonged to the one before it.
@@ -2213,15 +2300,49 @@ mod tests {
         assert_eq!(state.agents[0].last, "* websearch search");
         assert_eq!(state.activity.visible(200, 200).len(), before);
 
+        // Its whole output is kept on the row's own pane for the output tab,
+        // not only the last line.
+        assert_eq!(state.agents[0].pane.visible(10, 100).len(), 1);
+
+        // Finishing takes the row out of the list: the pane shows the live
+        // fleet, and the child's report reaches the conversation through the
+        // parent's own turn.
         state.apply(Event::AgentStateChanged {
             agent_id: "agent-1".into(),
             state: noob_proto::AgentState::Failed,
             detail: Some("needs the websearch CLI on PATH".into()),
         });
-        assert_eq!(state.agents[0].state, "failed");
-        assert_eq!(state.agents[0].tone, Tone::Bad);
-        // How it ended replaces what it was last doing.
-        assert_eq!(state.agents[0].last, "needs the websearch CLI on PATH");
+        assert!(state.agents.is_empty(), "{:?}", state.agents);
+    }
+
+    /// Clicking a row points the output tab at that agent; the agent
+    /// finishing takes the choice away with the row, so the shell knows to
+    /// close the tab rather than leave it over nothing.
+    #[test]
+    fn the_shown_agent_dies_with_its_row() {
+        let mut state = State::new();
+        for n in 1..=2 {
+            state.apply(Event::AgentSpawn {
+                agent_id: format!("agent-{n}"),
+                prompt: format!("task {n}"),
+                tools: "read".into(),
+            });
+        }
+        assert_eq!(state.agents[1].ordinal, 2, "ordinals are spawn order");
+        assert!(state.show_agent(2));
+        assert!(!state.show_agent(2), "already showing");
+        assert!(!state.show_agent(99), "no such agent");
+        assert_eq!(state.agent_shown().map(|agent| agent.ordinal), Some(2));
+        state.apply(Event::AgentStateChanged {
+            agent_id: "agent-2".into(),
+            state: noob_proto::AgentState::Done,
+            detail: None,
+        });
+        assert_eq!(state.shown_agent, None);
+        assert!(state.agent_shown().is_none());
+        // The other child kept its row and its stable number.
+        assert_eq!(state.agents.len(), 1);
+        assert_eq!(state.agents[0].ordinal, 1);
     }
 
     /// The tail of a fan-out: a child cancelled before it ever ran still
@@ -2243,7 +2364,8 @@ mod tests {
             state: noob_proto::AgentState::Canceled,
             detail: Some("canceled before it started".into()),
         });
-        assert_eq!(state.agents[2].state, "canceled");
+        // A canceled child resolves by leaving; the others keep their rows.
+        assert_eq!(state.agents.len(), 2);
         assert_eq!(state.agents[0].state, "queued", "one child, not all of them");
         assert!(!state.apply(Event::AgentOutput {
             agent_id: "agent-99".into(),

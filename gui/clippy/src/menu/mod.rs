@@ -356,11 +356,18 @@ impl Menu {
         if !open {
             self.fly_start = Some(self.rows.len());
             // Nothing on it is greyed: every row is a switch and every
-            // switch can be thrown either way.
-            self.rows.extend(View::ALL.into_iter().map(|view| Row {
-                item: Item::Widget(view, dock.is_hidden(view)),
-                enabled: true,
-            }));
+            // switch can be thrown either way. The agent-output view is not
+            // on the list: it opens by clicking an agent, and a switch for a
+            // pane with no agent chosen would open an empty window.
+            self.rows.extend(
+                View::ALL
+                    .into_iter()
+                    .filter(|view| *view != View::Agent)
+                    .map(|view| Row {
+                        item: Item::Widget(view, dock.is_hidden(view)),
+                        enabled: true,
+                    }),
+            );
         }
         // The cursor follows the header only when the keys had it: a flyout
         // opened by the pointer must not light a row the keys are not on.
@@ -634,6 +641,15 @@ mod tests {
         menu.rows.iter().map(|row| row.item).collect()
     }
 
+    /// The views the flyout lists: every one but the agent-output view,
+    /// which opens by clicking an agent rather than from a switch.
+    fn switchable() -> Vec<View> {
+        View::ALL
+            .into_iter()
+            .filter(|view| *view != View::Agent)
+            .collect()
+    }
+
     /// The rows the open flyout holds, as views, in order.
     fn fly_views(menu: &Menu) -> Vec<View> {
         let fly = menu.fly_start.expect("the flyout is open");
@@ -695,7 +711,7 @@ mod tests {
         assert_eq!(&items(&menu)[..3], &shut[..3]);
         assert_eq!(
             fly_views(&menu),
-            View::ALL.to_vec(),
+            switchable(),
             "the list is in the one order, so it is in the same place every time"
         );
         assert_eq!(menu.fly_anchor(), Some(at));
@@ -770,7 +786,7 @@ mod tests {
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
         let at = 3;
         menu.fold(at, &dock);
-        for (step, view) in View::ALL.into_iter().enumerate() {
+        for (step, view) in switchable().into_iter().enumerate() {
             let index = at + 1 + step;
             let hidden = matches!(view, View::Hardware | View::Files);
             assert_eq!(
@@ -792,7 +808,7 @@ mod tests {
                 "a widget row is a switch, not a group"
             );
         }
-        assert_eq!(menu.pick(at + 1 + View::ALL.len()), None);
+        assert_eq!(menu.pick(at + 1 + switchable().len()), None);
     }
 
     /// The header carries two marks: the one in its gutter saying what the row
@@ -839,7 +855,7 @@ mod tests {
         assert!(dock.hide(View::Hardware));
         assert!(menu.relist(&dock));
         assert_eq!(fly_views(&menu), places, "no row moved");
-        for (step, view) in View::ALL.into_iter().enumerate() {
+        for (step, view) in switchable().into_iter().enumerate() {
             assert_eq!(
                 menu.pick(4 + step),
                 Some(Item::Widget(view, view == View::Hardware))

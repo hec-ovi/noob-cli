@@ -11,8 +11,11 @@ every view a tab in exactly one cell.
 ## Public surface
 
 ```rust
-pub enum View;               // the eight views; View::ALL is the one
-                             // canonical order every per-view array indexes by
+pub enum View;               // the nine views; View::ALL is the one
+                             // canonical order every per-view array indexes by.
+                             // View::Agent (one sub-agent's output) starts
+                             // hidden and is opened by clicking an agent,
+                             // never from the widget switches
 impl View { pub fn label(self) -> &'static str }
 pub enum Space;              // the four cells; row/column/index/at,
                              // in_column/in_row partners, neighbours
@@ -24,9 +27,9 @@ pub struct Dock;             // the whole arrangement: which view where,
 ## Invariants
 
 1. `View::ALL`'s order is stability API: scroll offsets, per-view arrays,
-   and the wire all index by it.
-2. Every view is in exactly one cell at all times; a move is a remove plus
-   an insert that can never drop or duplicate a tab.
+   and the wire all index by it. New views append.
+2. Every view is in exactly one cell or on the hidden list at all times; a
+   move is a remove plus an insert that can never drop or duplicate a tab.
 3. The grid never nests: two dividers, four spaces, no deeper structure.
 
 ## Dependencies

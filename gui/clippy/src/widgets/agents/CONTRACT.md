@@ -4,13 +4,17 @@ contractVersion: 1.0.0
 
 ## Purpose
 
-The agents widget: the detached fleet as list rows.
+The agents widget: the live fleet as list rows, each led by the bright
+`[N] Agent` a click means. Finished children are not rows: the state box
+removes them in the event that ends them.
 
 ## Surface
 
-One painter: props in, draw calls out. It reads frame.state.agents and the layout's
-panel, pushes rects and text into the scene, and owns nothing between
-frames. Extent questions (how many rows exist) go through
+One painter plus one resolver: `agents` draws the list from
+frame.state.agents; `agent_at(frame, panel, x, y)` answers which agent's
+ordinal a point is over, through the same rows and scroll window the
+painter draws with (a press on the head row or the news line under it both
+name that agent). Extent questions (how many rows exist) go through
 `view::scroll_extent`, which asks this box's row builders where they exist.
 
 ## Invariants

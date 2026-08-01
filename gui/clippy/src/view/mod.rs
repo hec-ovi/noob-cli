@@ -913,6 +913,9 @@ pub struct Shape<'a> {
     /// turns it into the rows that are actually on screen, so the drawing and
     /// the hit testing read one answer.
     pub file_first: usize,
+    /// The agent the output tab is on, by ordinal, so the tab is measured at
+    /// the width of the `[N] AGENT - OUTPUT` label it will be drawn with.
+    pub agent_tab: Option<usize>,
     pub column: f32,
     /// The width of one column at [`MENU_SIZE`], which is the size a menu's
     /// rows are written at. Its own number rather than `column`, because the
@@ -1417,7 +1420,7 @@ impl Layout {
             let widths: Vec<usize> = slot
                 .views
                 .iter()
-                .map(|v| v.label().chars().count())
+                .map(|v| tab_label(*v, shape.agent_tab).chars().count())
                 .collect();
             let laid = strip_tabs(
                 strip,
@@ -3238,6 +3241,17 @@ fn strip_arrows(scene: &mut Scene, frame: &Frame, space: Space) {
     }
 }
 
+/// What a view's tab says. Every view's own label, except the agent-output
+/// view, whose tab names the agent it is on: `[N] AGENT - OUTPUT`. One
+/// function for the layout's widths and the painter's glyphs, so a tab is
+/// never wider or narrower than the label drawn in it.
+pub(crate) fn tab_label(view: View, agent_tab: Option<usize>) -> String {
+    match (view, agent_tab) {
+        (View::Agent, Some(ordinal)) => format!("[{ordinal}] AGENT - OUTPUT"),
+        _ => view.label().to_string(),
+    }
+}
+
 fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
     let skin = frame.skin;
     let placed = frame.layout.placed(space);
@@ -3265,7 +3279,10 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
             skin.dim
         };
         scene.text(Text::rich(
-            vec![Run::tinted(view.label(), color)],
+            vec![Run::tinted(
+                tab_label(*view, frame.state.shown_agent),
+                color,
+            )],
             panel.row(SMALL * 0.6, Text::line_for(SMALL)),
             SMALL,
             color,
@@ -3300,6 +3317,7 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
         Some(View::Activity) => crate::widgets::activity::activity(scene, frame, panel),
         Some(View::Plan) => crate::widgets::plan::plan(scene, frame, panel),
         Some(View::Agents) => crate::widgets::agents::agents(scene, frame, panel),
+        Some(View::Agent) => crate::widgets::agent::agent(scene, frame, panel),
         Some(View::Hardware) => {
             crate::widgets::gauges::gauges(scene, frame, panel, View::Hardware, frame.monitor.hardware())
         }
@@ -3541,8 +3559,41 @@ pub fn scroll_extent(frame: &Frame, view: View, panel: Panel) -> Option<(Vec<usi
             crate::widgets::gauges::gauge_area(panel, frame.pane_size)?,
             frame.monitor.context(),
         ),
-        View::Output | View::Activity | View::Files => None,
+        View::Output | View::Activity | View::Files | View::Agent => None,
     }
+}
+
+/// Which list row is under a point of a list pane, by index into the same
+/// rows the painter draws. The window, the skip and the heights come from
+/// the one geometry [`list_pane`] draws with, so a press lands on the row
+/// the eye is on however the list is scrolled or wrapped.
+pub(crate) fn list_row_at(
+    frame: &Frame,
+    panel: Panel,
+    view: View,
+    rows: &[ListRow],
+    x: f32,
+    y: f32,
+) -> Option<usize> {
+    let inset = panel.inset(PAD);
+    if !inset.contains(x, y) {
+        return None;
+    }
+    let size = frame.pane_size;
+    let line = Text::line_for(size);
+    let fit = frame.layout.rows(panel, size);
+    let cols = cols_of(panel, frame.pane_column);
+    let heights: Vec<usize> = rows.iter().map(|row| row.rows(cols)).collect();
+    let window = frame.scrolls.window(view, &heights, fit);
+    let visual = ((y - inset.y) / line).floor().max(0.0) as usize + window.skip;
+    let mut above = 0usize;
+    for (at, tall) in heights.iter().enumerate().skip(window.first) {
+        if visual < above + tall {
+            return Some(at);
+        }
+        above += tall;
+    }
+    None
 }
 
 /// The tab under the pointer while it is being dragged, so the drag has
@@ -3557,7 +3608,7 @@ fn dragging(scene: &mut Scene, frame: &Frame) {
         return;
     };
     let skin = frame.skin;
-    let label = drag.view.label();
+    let label = tab_label(drag.view, frame.state.shown_agent);
     let w = (label.chars().count() as f32 + 3.0) * frame.column;
     let ghost = Panel::new(drag.at.0 - w * 0.5, drag.at.1 - TAB_H * 0.5, w, TAB_H);
     // Out of the window, letting go closes the widget, so the tab in the air says
@@ -3937,6 +3988,7 @@ mod tests {
             settings: None,
             file_labels: files.iter().map(|f| f.to_string()).collect(),
             file_first: first,
+            agent_tab: None,
             column: 8.0,
             menu_column: 7.0,
             pane_size: 13.0,
@@ -4691,6 +4743,117 @@ mod tests {
         assert!(!text_of(&build(&frame)).contains("press ESC again to cancel"));
     }
 
+    /// Clicking an agent's row opens that child's own output as a tab in
+    /// the top-left space: the strip reads the agent's number, the pane its
+    /// lines, and the AGENTS list leads every row with the number a click
+    /// means.
+    #[test]
+    fn a_chosen_agent_has_its_own_output_tab() {
+        let mut state = busy_state();
+        state.apply(noob_proto::Event::AgentSpawn {
+            agent_id: "kid".into(),
+            prompt: "look around".into(),
+            tools: "read".into(),
+        });
+        state.apply(noob_proto::Event::AgentOutput {
+            agent_id: "kid".into(),
+            line: "reading src/main.rs".into(),
+        });
+
+        // The list names every agent by its number: busy_state's own child
+        // is [1], the one spawned here is [2].
+        let mut listing = Dock::new();
+        listing.reveal(View::Agents);
+        let text = text_of(&render(&state, 1400.0, 900.0, &listing, &[]).scene);
+        assert!(text.contains("[1] Agent"), "{text}");
+        assert!(text.contains("[2] Agent"), "{text}");
+
+        // Chosen, the tab stands in the top-left space under the agent's
+        // number and carries that child's own lines, nobody else's.
+        assert!(state.show_agent(2));
+        let mut dock = Dock::new();
+        assert!(dock.unhide(View::Agent));
+        assert_eq!(dock.space_of(View::Agent), Some(Space::TopLeft));
+        let out = render(&state, 1400.0, 900.0, &dock, &[]);
+        let text = text_of(&out.scene);
+        assert!(text.contains("[2] AGENT - OUTPUT"), "{text}");
+        assert!(text.contains("reading src/main.rs"), "{text}");
+    }
+
+    /// A press on an agent's rows resolves to that agent, through the same
+    /// geometry the list is drawn with, and a press past the list resolves
+    /// to nothing.
+    #[test]
+    fn a_press_on_the_agents_list_names_the_agent_under_it() {
+        let mut state = busy_state();
+        for n in 1..=2 {
+            state.apply(noob_proto::Event::AgentSpawn {
+                agent_id: format!("kid-{n}"),
+                prompt: format!("task {n}"),
+                tools: "read".into(),
+            });
+            state.apply(noob_proto::Event::AgentOutput {
+                agent_id: format!("kid-{n}"),
+                line: format!("news {n}"),
+            });
+        }
+        let mut dock = Dock::new();
+        dock.reveal(View::Agents);
+        let shape = shape(&dock, &[]);
+        let layout = Layout::compute(1400.0, 900.0, &shape);
+        let skin = Skin::from(&Config::default());
+        let frame = Frame {
+            state: &state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &crate::prompt::Prompt::default(),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            clock: 0.0,
+            orb_morph: None,
+            drag: None,
+            hot: None,
+            trouble: None,
+            esc_armed: false,
+            selection: None,
+            menu: None,
+            picker: None,
+            settings: None,
+        };
+        let space = dock.space_of(View::Agents).expect("the pane is somewhere");
+        let panel = layout.placed(space).body;
+        let inset = panel.inset(PAD);
+        let line = Text::line_for(13.0);
+        // Each agent takes two rows: its head and its news line. Both name it.
+        let rows: Vec<Option<usize>> = (0..4)
+            .map(|row| {
+                crate::widgets::agents::agent_at(
+                    &frame,
+                    panel,
+                    inset.x + 4.0,
+                    inset.y + row as f32 * line + line * 0.5,
+                )
+            })
+            .collect();
+        assert_eq!(rows, vec![Some(1), Some(1), Some(2), Some(2)]);
+        assert_eq!(
+            crate::widgets::agents::agent_at(
+                &frame,
+                panel,
+                inset.x + 4.0,
+                inset.y + 20.0 * line,
+            ),
+            None,
+            "past the list is nobody"
+        );
+    }
+
     /// A message waiting behind the running turn is pinned into the OUTPUT
     /// pane as a tagged row; dispatching it takes the tag away.
     #[test]
@@ -4970,10 +5133,21 @@ mod tests {
     /// is exactly what this has to catch.
     #[test]
     fn every_view_carries_the_same_accent() {
-        let state = busy_state();
+        let mut state = busy_state();
+        // The agent-output view only stands in a space once an agent is
+        // chosen, so give it one and put it in.
+        state.apply(noob_proto::Event::AgentSpawn {
+            agent_id: "kid".into(),
+            prompt: "look".into(),
+            tools: "read".into(),
+        });
+        assert!(state.show_agent(1));
         let mut seen = Vec::new();
         for view in View::ALL {
             let mut dock = Dock::new();
+            if view == View::Agent {
+                assert!(dock.unhide(View::Agent));
+            }
             assert!(dock.reveal(view), "{view:?} is in no space");
             let out = render(&state, 1400.0, 900.0, &dock, &["a.rs"]);
             let tab = Space::ALL
@@ -7636,7 +7810,7 @@ mod tests {
         for gone in ["TALK", "OVERALL"] {
             assert!(!on_strip.contains(&gone), "{gone} still has a tab");
         }
-        assert_eq!(on_strip.len(), View::ALL.len(), "{on_strip:?}");
+        assert_eq!(on_strip.len(), View::ALL.len() - 1, "{on_strip:?}");
     }
 
     /// The conversation and what has been typed are on screen whichever tab is
@@ -7729,6 +7903,7 @@ mod tests {
             settings: None,
                 file_labels: vec![],
                 file_first: 0,
+                agent_tab: None,
                 column,
                 menu_column: 7.0,
                 pane_size: 13.0,
@@ -7833,6 +8008,7 @@ mod tests {
             settings: None,
             file_labels: vec![],
             file_first: 0,
+            agent_tab: None,
             column: 8.0,
             menu_column: 7.0,
             pane_size: 13.0,
@@ -10000,8 +10176,12 @@ mod tests {
             "opening the flyout moved a row of the column"
         );
         let layout = with_menu(&dock, &open, 1400.0, 900.0);
-        assert_eq!(layout.menu_fly_rows.len(), View::ALL.len());
-        for ((index, row), view) in layout.menu_fly_rows.iter().zip(View::ALL) {
+        let listed: Vec<View> = View::ALL
+            .into_iter()
+            .filter(|view| *view != View::Agent)
+            .collect();
+        assert_eq!(layout.menu_fly_rows.len(), listed.len());
+        for ((index, row), view) in layout.menu_fly_rows.iter().zip(listed) {
             let (x, y) = middle(*row);
             assert_eq!(layout.hit(x, y), Some(Hit::MenuRow(*index)));
             assert_eq!(open.pick(*index), Some(Item::Widget(view, false)));
@@ -10072,7 +10252,7 @@ mod tests {
         assert_eq!(layout.menu_rows.len(), 4, "a row of the column moved");
         assert_eq!(layout.menu.h, closed.menu.h, "the box changed size");
         assert_eq!(layout.menu.x, closed.menu.x, "the box moved sideways");
-        assert_eq!(layout.menu_fly_rows.len(), View::ALL.len());
+        assert_eq!(layout.menu_fly_rows.len(), View::ALL.len() - 1);
         // Every flyout row is in the flyout's box, in one column, and answers.
         for (index, row) in &layout.menu_fly_rows {
             assert_eq!(row.x, layout.menu_fly.x, "row {index} is in a second column");
@@ -10141,7 +10321,7 @@ mod tests {
         menu.scroll(menu.rows.len(), false, capacity);
         menu.fold(3, &dock);
         let layout = with_menu(&dock, &menu, w, short);
-        assert_eq!(layout.menu_fly_rows.len(), View::ALL.len());
+        assert_eq!(layout.menu_fly_rows.len(), View::ALL.len() - 1);
         assert!(layout.menu_fly.y >= 0.0);
     }
 
@@ -10531,15 +10711,16 @@ mod tests {
             .iter()
             .flat_map(|t| t.runs.iter().map(|r| r.text.clone()))
             .collect();
-        for view in View::ALL {
+        // Every switchable view; the agent-output one has no switch here.
+        for view in View::ALL.into_iter().filter(|view| *view != View::Agent) {
             assert!(
                 runs.iter().any(|text| text.contains(view.label())),
                 "{} is not on the overlay: {runs:?}",
                 view.label()
             );
         }
-        // Switches, marked in the gutter: a ticked box for the eight in the
-        // window, an empty one for the widget that is out.
+        // Switches, marked in the gutter: a ticked box for the widgets in
+        // the window, an empty one for the widget that is out.
         let empty = runs
             .iter()
             .filter(|text| *text == &icons::UNCHECKED.to_string());
@@ -10548,7 +10729,7 @@ mod tests {
             runs.iter()
                 .filter(|text| *text == &icons::CHECKED.to_string())
                 .count(),
-            View::ALL.len() - 1
+            View::ALL.len() - 2
         );
         // Everything is written inside one of the two boxes, and each box has
         // a surface under it on the overlay.

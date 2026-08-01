@@ -21,6 +21,10 @@ tags rather than here; this file starts where it was added.
 - A prompt typed while a turn runs queues behind it: a dim pinned
   `[queued]` row at the bottom of OUTPUT until the turn that takes it
   starts, then the plain `› message` record.
+- The AGENTS pane is the live fleet: rows lead with a bright `[N] Agent`,
+  clicking one opens that child's own output as a `[N] AGENT - OUTPUT` tab
+  in the top-left space, and a child that finishes leaves the list (its
+  report still reaches the conversation), closing its tab with it.
 
 ## 0.11.0 - 2026-08-01
 

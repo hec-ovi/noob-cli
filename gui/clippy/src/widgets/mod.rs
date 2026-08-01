@@ -3,6 +3,7 @@
 //! folder here.
 
 pub mod activity;
+pub mod agent;
 pub mod agents;
 pub mod context;
 pub mod files;
