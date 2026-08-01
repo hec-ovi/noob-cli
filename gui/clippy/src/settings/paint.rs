@@ -71,10 +71,10 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
     if list.w >= 1.0 {
         let title_cols = columns_in(list.w, design::column_for(column, size, design::PANEL_TITLE));
         scene.text(Text::rich(
-            vec![Run::tinted(clip(here, title_cols), skin.good)],
+            vec![Run::tinted(clip(here, title_cols), skin.heading)],
             Panel::new(list.x, content.y, list.w, title_line),
             title_size,
-            skin.good,
+            skin.heading,
         ));
     }
 
@@ -115,7 +115,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
             scene.rect(Panel::new(at.x, at.y, MARK_W, at.h).fill(skin.edge_focus));
         }
         let tint = match (chosen, frame.hot == Some(Hit::SettingsSection(*index))) {
-            (true, _) => skin.good,
+            (true, _) => skin.heading,
             (false, true) => skin.bright,
             (false, false) => skin.dim,
         };
@@ -268,7 +268,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     card,
                     &parts,
                     &table.title(),
-                    skin.good,
+                    skin.heading,
                     on,
                     skin,
                     size,
@@ -361,10 +361,10 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     if let Some(mark) = cells.get(crate::settings::SESSION_MARK) {
                         let hot = frame.hot == Some(Hit::SettingsMark(*index, table.first + step));
                         let tint = match (kept.marked, here) {
-                            // On the picked band the mark inverts, or a green
-                            // tick on the green band is a mark nobody can see.
+                            // On the picked band the mark inverts, or an accent
+                            // tick on the accent band is a mark nobody can see.
                             (true, true) => skin.picked_ink,
-                            (true, false) => skin.good,
+                            (true, false) => skin.heading,
                             (false, true) => skin.picked_ink,
                             (false, false) => skin.dim,
                         };
@@ -639,7 +639,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     card,
                     &parts,
                     palette.title,
-                    skin.good,
+                    skin.heading,
                     on,
                     skin,
                     size,
@@ -725,7 +725,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 let parts = settings_card_parts(at, line, size, column, list_cols, true);
                 let title_tint = match (entry.on, on) {
                     (_, true) => skin.bright,
-                    (true, false) => skin.good,
+                    (true, false) => skin.heading,
                     (false, false) => skin.dim,
                 };
                 settings_card_shell(
@@ -870,7 +870,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     at,
                     &parts,
                     &card.title,
-                    skin.good,
+                    skin.heading,
                     on,
                     skin,
                     size,
@@ -994,7 +994,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     box_,
                     &parts,
                     &paper.title,
-                    skin.good,
+                    skin.heading,
                     on,
                     skin,
                     size,
@@ -1121,7 +1121,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 box_,
                 &parts,
                 entry.map(|entry| entry.name.as_str()).unwrap_or_default(),
-                skin.good,
+                skin.heading,
                 false,
                 skin,
                 size,

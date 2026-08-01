@@ -135,6 +135,11 @@ pub struct Skin {
     pub orb: [f32; 4],
 
     pub title: [u8; 4],
+    /// The ink of a heading: the settings panel's title, a card's, the section
+    /// the rail is on, and the tick on a marked row. The theme's accent, so a
+    /// heading wears the window's own hue the way the tab border does; `good`
+    /// stays the ink of an outcome.
+    pub heading: [u8; 4],
     pub dim: [u8; 4],
     pub body: [u8; 4],
     pub bright: [u8; 4],
@@ -242,6 +247,7 @@ impl Skin {
             orb: rgba(config.accent, 1.0),
 
             title: text(config.text),
+            heading: text(config.accent),
             dim: text(config.dim),
             body: text(config.text),
             bright: text(config.bright),
@@ -741,6 +747,8 @@ mod tests {
                     "the picked band",
                     [skin.picked[0], skin.picked[1], skin.picked[2]],
                 ),
+                ("headings", of(skin.heading)),
+                ("the lit row", [skin.hot[0], skin.hot[1], skin.hot[2]]),
             ];
             for (what, rgb) in family {
                 for other in (0..3).filter(|other| *other != heavy) {
@@ -765,6 +773,7 @@ mod tests {
                 ("numbers", skin.number, noob.number),
                 ("keywords", skin.keyword, noob.keyword),
                 ("markup", skin.markup, noob.markup),
+                ("headings", skin.heading, noob.heading),
             ] {
                 assert_ne!(mine, matrix, "{name}: {what} is still the matrix tone");
             }
@@ -774,6 +783,7 @@ mod tests {
                 ("the pane", skin.panel, noob.panel),
                 ("the showing tab's border", skin.tab_accent, noob.tab_accent),
                 ("the picked band", skin.picked, noob.picked),
+                ("the lit row", skin.hot, noob.hot),
             ] {
                 assert_ne!(mine, matrix, "{name}: {what} is still the matrix fill");
             }

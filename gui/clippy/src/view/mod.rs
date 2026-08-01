@@ -12814,8 +12814,8 @@ mod tests {
         assert!(text.contains("noob debug prompt"), "{text}");
         assert!(text.contains("You are noob, a coding agent."), "{text}");
 
-        // The titles are the accent green, the way every heading on this panel
-        // is, so a block reads as a block rather than as more rows.
+        // The titles are the theme's accent, the way every heading on this
+        // panel is, so a block reads as a block rather than as more rows.
         let title = out
             .scene
             .texts
@@ -12823,7 +12823,7 @@ mod tests {
             .flat_map(|text| text.runs.iter())
             .find(|run| run.text.contains("THE PROMPT"))
             .expect("the prompt's title");
-        assert_eq!(title.color, Some(out.skin.good));
+        assert_eq!(title.color, Some(out.skin.heading));
     }
 
     /// A block of text is a card too, and it scrolls inside itself: its title
@@ -15007,8 +15007,8 @@ mod tests {
                 .next_back()
                 .unwrap_or_else(|| panic!("{name} is not drawn"))
         };
-        assert_eq!(tint_of(&out, "AGENT"), out.skin.good);
-        assert_ne!(tint_of(&out, "APPEARANCE"), out.skin.good);
+        assert_eq!(tint_of(&out, "AGENT"), out.skin.heading);
+        assert_ne!(tint_of(&out, "APPEARANCE"), out.skin.heading);
 
         // Pressing one changes what the list shows, which is the whole point of
         // a rail: the same panel, a different screen.
@@ -15023,7 +15023,7 @@ mod tests {
         let text = text_of(&out.scene);
         assert!(text.contains("THE WINDOW"), "{text}");
         assert!(!text.contains("api keys"), "the agent section is still up");
-        assert_eq!(tint_of(&out, "APPEARANCE"), out.skin.good);
+        assert_eq!(tint_of(&out, "APPEARANCE"), out.skin.heading);
     }
 
     /// Item F1: the rail hides no section, at the smallest window the window
@@ -15701,7 +15701,7 @@ mod tests {
     /// replaced them, since a title measured at one height and drawn at another
     /// would put every click below it on the wrong row.
     #[test]
-    fn the_settings_card_titles_are_the_accent_green_and_the_size_they_were_measured_at() {
+    fn the_settings_card_titles_are_the_heading_accent_and_the_size_they_were_measured_at() {
         let mut found = 0;
         let mut panel = a_panel_on(&Config::default(), crate::settings::APPEARANCE);
         // A section of cards is taller than any window, so each title is looked
@@ -15738,7 +15738,7 @@ mod tests {
                 .iter()
                 .find(|run| run.text.trim() == heading)
                 .expect("the run that was just found");
-            assert_eq!(run.color, Some(out.skin.good), "{heading}");
+            assert_eq!(run.color, Some(out.skin.heading), "{heading}");
             // Larger than the rows under it, and inside the row it was measured
             // into: 13pt is what everything else on the panel is drawn at.
             assert!(text.size > 13.0, "{heading} is drawn at {}", text.size);
@@ -15772,8 +15772,8 @@ mod tests {
         // Not the tint a field's value is written in, or a title is another
         // line of the card.
         let skin = shape.skin;
-        assert_ne!(skin.good, skin.body);
-        assert_ne!(skin.good, skin.title);
+        assert_ne!(skin.heading, skin.body);
+        assert_ne!(skin.heading, skin.title);
     }
 
     /// No row has a hairline under it any more, and a card carries a border

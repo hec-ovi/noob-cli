@@ -28,9 +28,13 @@ pub mod markdown;  // fn runs(text, &Skin) -> styled runs for the pane
    the other two share no tone with matrix; `good` stays green and `bad` a
    hot red in every theme, because they mean yes and no rather than the
    theme.
-3. Syntax scanning is line-local and total: an unknown language or a
+3. Selection and structure wear the accent: the showing tab's border, the
+   picked band and its picker mark, the lit-row hover, headings and card
+   titles all derive from the theme's accent, so they restyle with it.
+   `good` and `bad` are outcome inks only.
+4. Syntax scanning is line-local and total: an unknown language or a
    half-open token still colors something reasonable, never errors.
-4. Markdown never re-wraps: it styles runs, and the text-geometry layer
+5. Markdown never re-wraps: it styles runs, and the text-geometry layer
    wraps them; the two never both own line breaks.
 
 ## Dependencies
