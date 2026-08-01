@@ -11043,7 +11043,7 @@ mod tests {
             assert!(text.contains(wanted), "{wanted:?} is not on screen: {text}");
         }
 
-        // The row the cursor is on is a filled green band with the dark ink
+        // The row the cursor is on is a filled accent band with the dark ink
         // written over it. Item 4: the quiet band the file explorer marks its
         // open row with said almost nothing here.
         let (index, cursor_row) = layout.picker_rows[0];
@@ -11053,17 +11053,22 @@ mod tests {
             "the cursor's row has no band"
         );
         // And no other row is banded, or every row would read as the one. Only
-        // the full width of a row counts: `skin.mark_edge` is the same green,
-        // and the hairline box in front of every folder is not a band.
+        // a full width fill counts: `skin.mark_edge` is the same accent and the
+        // hairline box in front of every folder is not a band, and neither is
+        // an outline stroked in the focus colour.
         let banded = out
             .scene
             .rects
             .iter()
-            .filter(|rect| rect.rgba() == out.skin.picked && rect.xywh()[2] >= cursor_row.w - 0.01)
+            .filter(|rect| {
+                rect.extra()[3] == 0.0
+                    && rect.rgba() == out.skin.picked
+                    && rect.xywh()[2] >= cursor_row.w - 0.01
+            })
             .count();
         assert_eq!(banded, 1, "more than one row is banded");
-        // Everything written on that band is the dark ink. Green text on a
-        // green band is the one thing the whole palette is built to avoid.
+        // Everything written on that band is the dark ink. Accent text on the
+        // accent band is the one thing the whole palette is built to avoid.
         let ink: Vec<Option<[u8; 4]>> = out
             .scene
             .texts
@@ -11222,7 +11227,17 @@ mod tests {
             covered(&cold, sessions, sessions.h, cold.skin.button),
             "the mode that is not showing wears the band"
         );
-        assert!(!covered(&cold, sessions, sessions.h, cold.skin.picked));
+        // The band is a fill: the focus outline every one of these buttons
+        // wears is the same accent, and an outline is not a band.
+        assert!(!cold.scene.rects.iter().any(|rect| {
+            let [x, y, w, h] = rect.xywh();
+            rect.extra()[3] == 0.0
+                && rect.rgba() == cold.skin.picked
+                && (x - sessions.x).abs() < 0.01
+                && (y - sessions.y).abs() < 0.01
+                && (w - sessions.w).abs() < 0.01
+                && (h - sessions.h).abs() < 0.01
+        }));
         // And it is written in the ink that reads on that band.
         let ink: Vec<Option<[u8; 4]>> = cold
             .scene
