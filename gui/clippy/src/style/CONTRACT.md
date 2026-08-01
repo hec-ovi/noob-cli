@@ -1,6 +1,6 @@
 # style
 
-contractVersion: 1.0.0
+contractVersion: 1.1.0
 
 ## Purpose
 
@@ -22,9 +22,15 @@ pub mod markdown;  // fn runs(text, &Skin) -> styled runs for the pane
 
 1. The palette is a pure function of the config: same settings, same
    colors, no ambient state.
-2. Syntax scanning is line-local and total: an unknown language or a
+2. A theme is a whole palette: the text tints, the bar the title strip is
+   filled with, the pane, the syntax colors and the gauges all come off it.
+   Each theme leads with its own hue (matrix green, cool blue, red red) and
+   the other two share no tone with matrix; `good` stays green and `bad` a
+   hot red in every theme, because they mean yes and no rather than the
+   theme.
+3. Syntax scanning is line-local and total: an unknown language or a
    half-open token still colors something reasonable, never errors.
-3. Markdown never re-wraps: it styles runs, and the text-geometry layer
+4. Markdown never re-wraps: it styles runs, and the text-geometry layer
    wraps them; the two never both own line breaks.
 
 ## Dependencies

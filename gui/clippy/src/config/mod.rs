@@ -101,7 +101,8 @@ pub struct Config {
     /// The color panels are filled with, under the text. Black by default: a
     /// green panel under green text is the thing that makes it hard to read.
     pub panel: [u8; 3],
-    /// The title and status bars, which stay green so the window reads as noob.
+    /// The title and status bars: each theme's own deep tone, so the strip
+    /// across the top wears the theme with the rest of the window.
     pub bar: [u8; 3],
 
     /// One color per tool, in the order [`Kind`](crate::state::Kind) declares

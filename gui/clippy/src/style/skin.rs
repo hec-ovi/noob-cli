@@ -3,11 +3,12 @@
 //! **Everything is square.** No rounded corners anywhere. The primitive can
 //! draw them; the skin does not ask for them.
 //!
-//! **Dark under green, never green under green.** The panels are black at low
-//! alpha and the text is green. A green panel behind green text is what made
-//! the first version hard to read: the two greens fight, and lowering the
-//! opacity to see the desktop through it made the text worse rather than
-//! better. Black backs the text and the desktop shows through the black.
+//! **Dark under the ink, never ink under ink.** The panels are near black at
+//! low alpha and the text is the theme's own tint, green in the matrix theme.
+//! A green panel behind green text is what made the first version hard to
+//! read: the two greens fight, and lowering the opacity to see the desktop
+//! through it made the text worse rather than better. Near black backs the
+//! text in every theme and the desktop shows through it.
 //!
 //! **Transparency is a setting, not a constant.** [`Config::opacity`] scales
 //! every fill. When the compositor refuses alpha entirely, [`Skin::opaque`]
@@ -20,7 +21,8 @@ use crate::state::{Kind, Tone};
 pub struct Skin {
     /// The window body, behind every pane.
     pub backdrop: [f32; 4],
-    /// The title and status bars, which stay green so the window reads as noob.
+    /// The title and status bars, filled in the theme's own deep tone: the
+    /// strip across the top is the first surface a theme change shows on.
     pub bar: [f32; 4],
     /// A pane you read: dark, so green text sits on black.
     pub panel: [f32; 4],
@@ -694,6 +696,78 @@ mod tests {
                         "{name}: slot {slot} is still the matrix hue"
                     );
                 }
+            }
+        }
+    }
+
+    /// Three themes, three hues, read through the skin the painters use:
+    /// matrix leads with green, cool with blue, red with red, in every tint
+    /// the window is written in and on the bar the title strip is filled with.
+    /// And neither of the other two wears a single one of matrix's tones, so
+    /// picking a theme changes the window rather than a name in a file.
+    ///
+    /// `good` and `bad` are exempt from the hue rule on purpose: green is the
+    /// window's yes and a hot red its no in every theme, and both still have
+    /// to differ from matrix's pair. The tools are exempt from both: the first
+    /// twelve name tools across themes, and the prose pair is covered by
+    /// `body` and `bright`.
+    #[test]
+    fn each_theme_leads_with_its_own_hue_and_shares_no_tone_with_matrix() {
+        let of = |ink: [u8; 4]| [ink[0] as f32 / 255.0, ink[1] as f32 / 255.0, ink[2] as f32 / 255.0];
+        let noob = Skin::default();
+        for (name, heavy) in [("noob-matrix", 1), ("noob-cool", 2), ("noob-red", 0)] {
+            let skin = Skin::from(&crate::config::theme(name).expect(name));
+            let family: [(&str, [f32; 3]); 6] = [
+                ("the caret", [skin.caret[0], skin.caret[1], skin.caret[2]]),
+                ("the focus edge", [skin.edge_focus[0], skin.edge_focus[1], skin.edge_focus[2]]),
+                ("ordinary text", of(skin.body)),
+                ("quiet text", of(skin.dim)),
+                ("loud text", of(skin.bright)),
+                ("the bar", [skin.bar[0], skin.bar[1], skin.bar[2]]),
+            ];
+            for (what, rgb) in family {
+                for other in (0..3).filter(|other| *other != heavy) {
+                    assert!(
+                        rgb[heavy] > rgb[other],
+                        "{name}: {what} does not lead with its own hue: {rgb:?}"
+                    );
+                }
+            }
+        }
+        for name in ["noob-cool", "noob-red"] {
+            let skin = Skin::from(&crate::config::theme(name).expect(name));
+            for (what, mine, matrix) in [
+                ("ordinary text", skin.body, noob.body),
+                ("quiet text", skin.dim, noob.dim),
+                ("loud text", skin.bright, noob.bright),
+                ("the title ink", skin.title, noob.title),
+                ("it worked", skin.good, noob.good),
+                ("it failed", skin.bad, noob.bad),
+                ("comments", skin.comment, noob.comment),
+                ("strings", skin.string, noob.string),
+                ("numbers", skin.number, noob.number),
+                ("keywords", skin.keyword, noob.keyword),
+                ("markup", skin.markup, noob.markup),
+            ] {
+                assert_ne!(mine, matrix, "{name}: {what} is still the matrix tone");
+            }
+            for (what, mine, matrix) in [
+                ("the caret", skin.caret, noob.caret),
+                ("the bar", skin.bar, noob.bar),
+                ("the pane", skin.panel, noob.panel),
+            ] {
+                assert_ne!(mine, matrix, "{name}: {what} is still the matrix fill");
+            }
+        }
+        // The three bars are three different fills, so switching themes moves
+        // the title strip and not only the text on it.
+        let bars: Vec<[f32; 4]> = crate::config::THEMES
+            .iter()
+            .map(|name| Skin::from(&crate::config::theme(name).expect(name)).bar)
+            .collect();
+        for (i, a) in bars.iter().enumerate() {
+            for b in &bars[i + 1..] {
+                assert_ne!(a, b, "two themes fill the bar alike");
             }
         }
     }
