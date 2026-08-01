@@ -150,6 +150,9 @@
 //! an explicit colour beats the theme it belongs to, so a file carrying eight of
 //! them answered every theme change with the same window under a new name.
 
+pub mod paint;
+pub mod places;
+
 use std::path::{Path, PathBuf};
 
 use crate::agent::{self, Agent};

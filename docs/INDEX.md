@@ -15,7 +15,7 @@ package, the binary and everything a user sees are `no0b`.
 | What a frame looks like: panels, tabs, gauges, the title bar | `gui/clippy/src/view.rs` |
 | Colors, transparency, the palette | `gui/clippy/src/style/CONTRACT.md`, keys in `gui/clippy/src/config/CONTRACT.md` |
 | Settings file format and its defaults | `gui/clippy/src/config/CONTRACT.md` |
-| What the settings panel lists, and what changing a row writes | `gui/clippy/src/settings.rs`, drawn by `view::settings_panel`, routed in `gui/clippy/src/main.rs` |
+| What the settings panel lists, and what changing a row writes | `gui/clippy/src/settings/CONTRACT.md`, routed in `gui/clippy/src/main.rs` |
 | Mouse, keyboard, selection gestures, the window lifecycle | `gui/clippy/src/main.rs` |
 | What a right click offers and what a row does | `gui/clippy/src/menu/CONTRACT.md`, routed in `gui/clippy/src/main.rs` |
 | Choosing the folder the agent works in, and the folders NO0B remembers | `gui/clippy/src/picker.rs`, drawn by `view::folder_picker`, routed in `gui/clippy/src/main.rs` |
@@ -132,6 +132,8 @@ Boxes so far:
 - `gui/clippy/src/widgets/*` - one box per pane widget (output, activity,
   plan, agents, files, context, gauges), each a pure painter with its own
   contract.
+- [`gui/clippy/src/settings`](../gui/clippy/src/settings/CONTRACT.md) - the
+  settings panel reunited: model, places, and paint over one geometry.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,
