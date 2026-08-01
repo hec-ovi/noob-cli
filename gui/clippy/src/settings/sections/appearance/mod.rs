@@ -37,13 +37,13 @@ const LOOK_FIELDS: [(&str, &str, &str); 6] = [
     ),
     (
         "opacity",
-        "the panels",
-        "opacity. The panes, the bars and the menus: everything with words on it",
+        "widget windows",
+        "opacity. The widget windows: the panes, the bars and the menus, everything with words on it",
     ),
     (
         "window_opacity",
-        "the space around them",
-        "window_opacity. The empty space between the panes, where your desktop shows through",
+        "base application",
+        "window_opacity. The base application: the empty space between the panes, where your desktop shows through",
     ),
     (
         "font_size",
@@ -58,7 +58,7 @@ const LOOK_FIELDS: [(&str, &str, &str); 6] = [
     (
         "prompt_rows",
         "the box you type in",
-        "prompt_rows. How many rows tall it is, full or empty",
+        "prompt_rows. How many lines the input prompt has, full or empty",
     ),
 ];
 
@@ -363,18 +363,20 @@ pub fn rows(config: &Config, file: Option<&Path>) -> Vec<Row> {
         // The two transparencies together, because the whole of what makes
         // either of them readable is which surface it moves: one setting
         // called "opacity" with a backdrop pinned to 55% of it is what made
-        // "the empty spaces of noob" unreachable.
+        // "the empty spaces of noob" unreachable. The base application first,
+        // the widget windows second, which is the order he asked to read them
+        // in.
         Row::Card(Card {
-            title: String::from("HOW SOLID THE WINDOW IS"),
+            title: String::from("TRANSPARENCY"),
             fields: vec![
-                look_field(config, "opacity"),
                 look_field(config, "window_opacity"),
+                look_field(config, "opacity"),
             ],
             hint: None,
             does: None,
         }),
         Row::Card(Card {
-            title: String::from("THE PROMPT"),
+            title: String::from("INPUT PROMPT"),
             fields: vec![look_field(config, "prompt_rows")],
             hint: None,
             does: None,
@@ -1182,8 +1184,10 @@ font_size = 15   # mine
         let mut panel = Settings::open(&config, Some(&path), Agent::default());
         go_to(&mut panel, APPEARANCE);
 
-        // Both on one card, both named in words, and each sentence naming its
-        // own key: two sliders labelled "opacity" say nothing to anybody.
+        // Both on one card called TRANSPARENCY, base application first and the
+        // widget windows second, each sentence naming its own key: two sliders
+        // labelled "opacity" say nothing to anybody. "put TRANSPARENCY ...
+        // switch so first base and second widgets".
         let card = panel
             .rows()
             .iter()
@@ -1198,14 +1202,42 @@ font_size = 15   # mine
                 _ => None,
             })
             .expect("the card the two of them stand on");
+        assert_eq!(card.title, "TRANSPARENCY");
         assert_eq!(card.fields.len(), 2);
         assert_ne!(card.fields[0].label, card.fields[1].label);
-        assert!(card.fields[0].hint.as_deref().is_some_and(|said| said.starts_with("opacity.")));
+        assert_eq!(card.fields[0].label, "base application");
+        assert_eq!(card.fields[1].label, "widget windows");
         assert!(
-            card.fields[1]
+            card.fields[0]
                 .hint
                 .as_deref()
                 .is_some_and(|said| said.starts_with("window_opacity."))
+        );
+        assert!(card.fields[1].hint.as_deref().is_some_and(|said| said.starts_with("opacity.")));
+
+        // The prompt card is INPUT PROMPT and its row says what the number is:
+        // "how many lines the input prompt has".
+        let prompt = panel
+            .rows()
+            .iter()
+            .find_map(|row| match row {
+                Row::Card(card)
+                    if card.fields.iter().any(|field| {
+                        matches!(field.holds.as_ref(), Row::Setting { key, .. } if *key == "prompt_rows")
+                    }) =>
+                {
+                    Some(card.clone())
+                }
+                _ => None,
+            })
+            .expect("the input prompt card");
+        assert_eq!(prompt.title, "INPUT PROMPT");
+        assert!(
+            prompt.fields[0]
+                .hint
+                .as_deref()
+                .is_some_and(|said| said.contains("how many lines the input prompt has")
+                    || said.contains("How many lines the input prompt has"))
         );
 
         // Nudging it writes that key and nothing else, and the surface the
