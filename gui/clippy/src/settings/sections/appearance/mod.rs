@@ -17,10 +17,16 @@ use crate::settings::{Card, CardField, Doing, File, Kind, Palette, Row, Swatch};
 /// the palette instead, since it is what writes every colour under it.
 pub(crate) const THEME: &str = "theme";
 
-/// What the `theme` row says when the palette in the file is not one of the
-/// presets. Not a value that can be written: the writer refuses it, and the row
-/// only ever hands it back to itself.
-const CUSTOM: &str = "custom";
+/// What the `theme` row says when the palette is the user's own, and the one
+/// option of the themes card's right column. Pickable: the frame's `commit`
+/// routes it to `config::own_palette`, which writes every colour of the
+/// palette in hand into the file as the user's own lines.
+pub(crate) const CUSTOM: &str = "custom";
+
+/// The right column's choice list: custom alone, beside the three presets on
+/// the left. One option, because custom is not a preset to cycle through; it
+/// is the palette in hand, taken over.
+const CUSTOM_PICK: [&str; 1] = [CUSTOM];
 
 /// What to call each of the window's own settings in plain words, and the
 /// sentence under it.
@@ -306,6 +312,12 @@ fn palette_line(config: &Config) -> String {
 /// which preset the colours in hand match. A file that sets `theme = ice` and
 /// then one colour of its own is custom, which is exactly what it is.
 fn theme_name(config: &Config) -> &'static str {
+    // A palette with any colour line of its own is the user's, whatever its
+    // values happen to match: custom is ownership, and an owned copy of a
+    // preset is still owned. The custom option writes exactly this state.
+    if config.tuned {
+        return CUSTOM;
+    }
     let mine = colours(config);
     config::THEMES
         .into_iter()
@@ -404,10 +416,26 @@ fn colour_rows(config: &Config, file: Option<&Path>) -> Vec<Row> {
     let all = colours(config);
     // The control that writes every colour under it, first, out of the same
     // table the sizes are built from so the field is the field: same
-    // choices, same nudge, same writer.
+    // choices, same nudge, same writer. Two columns: the three presets on
+    // the left, custom on the right. "theme panel split into 2 columns, one
+    // is a drop select with 3 themes, and another one is custom, with all
+    // the options in colors" - the colour groups under the card are those
+    // options, and picking custom makes them the user's own to edit.
     let mut rows = vec![Row::Card(Card {
-        title: String::from("THE PALETTE"),
-        fields: vec![look_field(config, THEME)],
+        title: String::from("DEFAULT THEMES"),
+        fields: vec![
+            look_field(config, THEME),
+            CardField::setting(
+                CUSTOM,
+                THEME,
+                value_of(config, THEME, Kind::Choice(&CUSTOM_PICK)),
+                Kind::Choice(&CUSTOM_PICK),
+                File::Window,
+            )
+            .saying(
+                "your own palette: writes every colour of the current one into your file, ready to edit below",
+            ),
+        ],
         hint: Some(palette_line(config)),
         does: None,
     })];
@@ -513,6 +541,9 @@ mod tests {
             .filter(|key| !OFF_PANEL.contains(key))
             .collect();
         on_panel.sort_unstable();
+        // The theme is two fields of one card, the presets and custom, so its
+        // key appears twice; coverage is about presence, not multiplicity.
+        on_panel.dedup();
         known.sort_unstable();
         assert_eq!(on_panel, known);
         // And every name in that list is a key the file really carries, so a
@@ -653,7 +684,7 @@ mod tests {
             let Row::Card(card) = &rows[at] else {
                 panic!("{:?}", rows[at]);
             };
-            assert_eq!(card.title, "THE PALETTE");
+            assert_eq!(card.title, "DEFAULT THEMES");
             // The theme is the card's first field, so it is the one the keys
             // land on and the one a press can name.
             assert!(
@@ -960,6 +991,93 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// "add a new option custom: for a custom selection allow to set them up."
+    /// The themes card is two columns, the three presets on the left and custom
+    /// on the right. Picking custom takes two presses, because it writes a
+    /// whole palette of lines: the first arms with the footer saying so, the
+    /// second writes every colour of the palette in hand into the file as the
+    /// user's own live lines. The values do not move, the ownership does, the
+    /// row reads custom, and the swatches below are then edited over it.
+    #[test]
+    fn picking_custom_writes_the_whole_palette_into_the_file_as_the_users_own() {
+        let path = scratch("custom-palette");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, "theme = noob-cool\nfont_size = 15   # mine\n").expect("a file");
+        let mut config = Config::load_from(&path);
+        let mut panel = Settings::open(&config, Some(&path), Agent::default());
+        put_cursor(&mut panel, THEME);
+        let at = panel.cursor();
+
+        // The card is DEFAULT THEMES and custom is its second column: a one
+        // option choice beside the three presets, on the same key.
+        let Some(Row::Card(card)) = panel.row(at) else {
+            panic!("the theme is not on a card");
+        };
+        assert_eq!(card.title, "DEFAULT THEMES");
+        assert_eq!(card.fields.len(), 2);
+        assert_eq!(card.fields[1].label, CUSTOM);
+        match card.fields[1].holds.as_ref() {
+            Row::Setting {
+                key,
+                kind: Kind::Choice(names),
+                ..
+            } => {
+                assert_eq!(*key, THEME);
+                assert_eq!(names.to_vec(), vec![CUSTOM]);
+            }
+            other => panic!("the custom column is {other:?}"),
+        }
+
+        // The first press arms and writes nothing; the footer says what a
+        // second press would do.
+        assert!(panel.press_option(at, Side::Right, 0).is_none());
+        assert!(panel.says().contains("press custom again"), "{}", panel.says());
+        assert_eq!(Config::load_from(&path), config, "the file changed anyway");
+
+        // The second press is the write: every colour of the cool palette
+        // lands as a live line, values unchanged, and the row reads custom.
+        let change = panel
+            .press_option(at, Side::Right, 0)
+            .expect("the second press writes");
+        assert_eq!(change.value, CUSTOM);
+        config = commit(&path, &change).expect("the file takes it");
+        panel.refresh(&config);
+        assert_eq!(value(&panel, THEME), CUSTOM, "the row does not read custom");
+        assert!(config.tuned, "the palette is not the user's own");
+        assert_eq!(
+            colours(&config),
+            colours(&config::theme("noob-cool").expect("a preset")),
+            "picking custom moved the colours"
+        );
+        let text = std::fs::read_to_string(&path).expect("the file");
+        for (key, rgb) in colours(&config) {
+            let line = format!("{key} = #{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]);
+            assert!(text.contains(&line), "{line} is not a live line:\n{text}");
+        }
+        assert!(text.contains("font_size = 15   # mine"), "the rest of the file moved");
+
+        // The keyboard arms the same way: Enter on the custom column is the
+        // same two presses.
+        assert!(panel.cross(Side::Right));
+        assert!(panel.nudged(true).is_none(), "one nudge wrote a palette");
+        assert!(panel.says().contains("press custom again"), "{}", panel.says());
+        assert!(panel.nudged(true).is_some(), "the second nudge does not write");
+
+        // A preset pick is still the way back out: it clears the lines and the
+        // row names the preset again.
+        assert!(panel.cross(Side::Left));
+        put_cursor(&mut panel, THEME);
+        let back = panel
+            .press_option(panel.cursor(), Side::Left, 0)
+            .expect("a preset writes at once");
+        assert_eq!(back.value, "noob-matrix");
+        config = commit(&path, &back).expect("the file takes it");
+        panel.refresh(&config);
+        assert_eq!(value(&panel, THEME), "noob-matrix");
+        assert!(!config.tuned, "the preset did not take the lines back");
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// "PANES: remove, has no purpose." Neither group PANES held is anywhere on
     /// the panel: not as a row, not as a heading, not as a reading, and not as a
     /// word in any text the panel writes. The panel still opens on all five
@@ -1046,7 +1164,8 @@ mod tests {
             })
             .filter(|held| matches!(held, Row::Setting { file: File::Window, .. }))
             .count();
-        assert_eq!(settings, LOOKS.len());
+        // The six of the table, and the custom column riding beside the theme.
+        assert_eq!(settings, LOOKS.len() + 1);
         assert!(
             panel.rows().iter().any(|row| matches!(row, Row::Palette(_))),
             "the palette went with them"

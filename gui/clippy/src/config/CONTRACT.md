@@ -1,6 +1,6 @@
 # config
 
-contractVersion: 1.0.0
+contractVersion: 1.1.0
 
 ## Purpose
 
@@ -14,7 +14,12 @@ starts from.
 pub struct Config;           // every setting the window remembers: theme,
                              // opacity, text size, grid ratios, input rows,
                              // per-view state; parse() tolerant, write()
-                             // atomic via replace
+                             // atomic via replace. `tuned` says whether any
+                             // colour key was set explicitly (the palette is
+                             // then the user's own); colour_of(key) reads one
+pub fn own_palette(path);    // write every colour in hand into the file as a
+                             // live line under its own key, values unchanged:
+                             // what the panel's custom option does
 pub const LEFT_WIDTH/TOP_HEIGHT/SETTINGS_RAIL: f32;   // fresh-window
                              // divider defaults; dragged values persist
 pub const SPLIT_LOW/SPLIT_HIGH, RAIL_LOW/RAIL_HIGH: f32;  // drag clamps

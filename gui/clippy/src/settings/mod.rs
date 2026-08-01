@@ -202,7 +202,7 @@ pub use sections::appearance::OFF_PANEL;
 /// registry: a /command's bounds are the panel's own, read off one table
 /// rather than copied.
 pub(crate) use sections::agent::AGENT_SETTINGS;
-pub(crate) use sections::appearance::{LOOKS, THEME};
+pub(crate) use sections::appearance::{CUSTOM, LOOKS, THEME};
 
 /// What the panel's own heading calls a section.
 ///
@@ -1768,6 +1768,17 @@ impl Settings {
                 "press restore again to comment out every size, transparency and colour line in the settings file; anything else leaves them alone",
             );
         }
+        // The armed custom option under DEFAULT THEMES. It writes a whole
+        // palette of lines into the file, so the first press only says so.
+        if let Some(Row::Card(card)) = self.arming.and_then(|at| self.row(at))
+            && card.fields.iter().any(|field| {
+                matches!(field.holds.as_ref(), Row::Setting { key, .. } if *key == THEME)
+            })
+        {
+            return String::from(
+                "press custom again to write every colour of this palette into your settings file as your own lines; anything else leaves it alone",
+            );
+        }
         // The restore on a document block: it names the bak the file is
         // parked in, which is the one thing that makes the press safe to
         // confirm.
@@ -2033,6 +2044,33 @@ impl Settings {
             value: String::from(*names.get(at)?),
             file: *file,
         })
+    }
+
+    /// Press one option by pointer: the change that writes it, with the custom
+    /// option armed on the first press since it writes a whole palette of
+    /// lines. The footer says what the second press would do.
+    pub fn press_option(&mut self, index: usize, side: Side, at: usize) -> Option<Change> {
+        let change = self.choose_option(index, side, at)?;
+        self.armed_custom(index, change)
+    }
+
+    /// The keyboard's nudge, through the same custom arming the pointer gets:
+    /// Enter on the custom column arms first and writes second.
+    pub fn nudged(&mut self, forward: bool) -> Option<Change> {
+        let change = self.change(forward)?;
+        let index = self.cursor();
+        self.armed_custom(index, change)
+    }
+
+    /// Hold a change that picks custom until its second press; pass anything
+    /// else straight through, letting go of whatever was armed.
+    fn armed_custom(&mut self, index: usize, change: Change) -> Option<Change> {
+        if change.key == THEME && change.value == CUSTOM && self.arming != Some(index) {
+            self.arming = Some(index);
+            return None;
+        }
+        self.arming = None;
+        Some(change)
     }
 
     /// Where along its track the value of a row sits, for drawing the thumb.
@@ -3101,6 +3139,10 @@ fn hex(rgb: [u8; 3]) -> String {
 /// next is what the next launch will read.
 pub fn commit(path: &Path, change: &Change) -> Result<Config, String> {
     match change.key == THEME {
+        // Custom is not a preset: it writes every colour of the palette in
+        // hand into the file as the user's own lines, so the swatches under
+        // the card are edited over a palette that is theirs.
+        true if change.value == CUSTOM => config::own_palette(path)?,
         // A theme is not one line. An explicit colour beats the preset it
         // belongs to, so a file carrying eight of them answered every theme
         // change with the same window under a different name and the panel then
@@ -3614,7 +3656,9 @@ mod tests {
                 _ => Vec::new(),
             })
             .collect();
-        assert_eq!(held.len(), LOOKS.len(), "{held:?}");
+        // One more than the table: the custom column rides beside the theme on
+        // the same key.
+        assert_eq!(held.len(), LOOKS.len() + 1, "{held:?}");
 
         // Every section now carries something to land on; MCP's is the add
         // card's own fields.

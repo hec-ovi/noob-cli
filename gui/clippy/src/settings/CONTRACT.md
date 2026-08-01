@@ -1,6 +1,6 @@
 # settings
 
-contractVersion: 2.5.0
+contractVersion: 2.6.0
 
 ## Purpose
 
@@ -78,12 +78,16 @@ be `Which::Fixed`: only read, no toggle, no uninstall, no deed.
    drawn cut, and a control is drawn and pressable only while it is wholly
    on screen. Pointer presses never scroll the list; only keyboard movement
    reveals the cursor.
-7. A pressed swatch is edited through the frame's own line: the press opens
+7. The theme card's custom option arms on its first press (pointer or
+   keyboard, `press_option`/`nudged`) and on the second `commit` writes the
+   whole palette in hand into the window file as the user's own lines
+   (`config::own_palette`); a preset pick still clears them.
+8. A pressed swatch is edited through the frame's own line: the press opens
    the editing buffer on the colour's current hex value, Enter asks the
    config parser and commits the value under the swatch's key into the
    window file, and a value the parser refuses is said on the footer with
    nothing written. Escape or any cursor movement lets the press go.
-8. A prompt document is edited behind its enable-edition checkbox: ticking
+9. A prompt document is edited behind its enable-edition checkbox: ticking
    it opens the editor on the file's text (the shipped default when there is
    none), the block shows the buffer with a caret while it is open, nothing
    lands until Ctrl-S or the save button writes the whole file through the
@@ -106,7 +110,7 @@ drawn on the track, and the keyboard nudge keeps stepping by the plain step.
 
 ## Tests
 
-70 model tests drive key- and click-shaped calls with scratch files: the
+71 model tests drive key- and click-shaped calls with scratch files: the
 frame's 28 (cursor, rail, scroll, sliders, doc viewer, footer) in mod.rs,
 each section's in its own box. Scene-level placement and paint are asserted
 by the view box's rendered-scene tests.

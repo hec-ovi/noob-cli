@@ -9764,6 +9764,15 @@ mod tests {
         (panel.x + panel.w * 0.5, panel.y + panel.h * 0.5)
     }
 
+    /// The name one option box of the themes card carries: the presets down the
+    /// left column, custom alone on the right.
+    fn option_name(side: crate::settings::Side, option: usize) -> &'static str {
+        match side {
+            crate::settings::Side::Left => crate::config::THEMES[option],
+            crate::settings::Side::Right => "custom",
+        }
+    }
+
     /// The whole of what floating means, half one: an open menu takes the click
     /// that lands on it, even over a tab or a window button, and its margin
     /// swallows one rather than letting it through to what it covers.
@@ -15806,7 +15815,7 @@ mod tests {
         let rows = shape.layout.settings_capacity(13.0);
         let cols = shape.layout.settings_entry_columns(PANE_TEXT.1);
         for heading in [
-            "THE PALETTE",
+            "DEFAULT THEMES",
             "THE WINDOW'S OWN TONES",
             "THE CODE COLOURS",
             "THE TOOL MARKS",
@@ -16008,7 +16017,8 @@ mod tests {
         let panel = a_panel_on(&Config::default(), crate::settings::APPEARANCE);
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let options = &out.layout.settings_choices;
-        assert_eq!(options.len(), crate::config::THEMES.len(), "{options:?}");
+        // The three presets on the left column and custom on the right.
+        assert_eq!(options.len(), crate::config::THEMES.len() + 1, "{options:?}");
         for (index, side, option, at) in options {
             let over = |rect: &&noob_draw::Rect| {
                 let [x, y, w, h] = rect.xywh();
@@ -16017,10 +16027,11 @@ mod tests {
                     && (w - at.w).abs() < 0.01
                     && (h - at.h).abs() < 0.01
             };
+            let name = option_name(*side, *option);
             let set = matches!(
                 panel.cell(*index, *side),
                 Some(crate::settings::Row::Setting { value, .. })
-                    if value == crate::config::THEMES[*option]
+                    if value == name
             );
             let wanted = match set {
                 true => out.skin.button,
@@ -16648,11 +16659,13 @@ mod tests {
             let panel = a_panel_on(&config, crate::settings::APPEARANCE);
             let out = render_settings(&panel, 1400.0, 1200.0, None);
             let options = &out.layout.settings_choices;
-            assert_eq!(options.len(), crate::config::THEMES.len());
+            // The three presets, and custom in the column beside them.
+            assert_eq!(options.len(), crate::config::THEMES.len() + 1);
             let words = text_of(&out.scene);
             for name in crate::config::THEMES {
                 assert!(words.contains(name), "{name} is not drawn: {words}");
             }
+            assert!(words.contains("custom"), "custom is not drawn: {words}");
             for (index, side, option, at) in options {
                 // Each name inside its own box, so a name and the box that
                 // writes it cannot come apart.
@@ -16666,7 +16679,7 @@ mod tests {
                     })
                     .map(|(_, said)| said)
                     .unwrap_or_else(|| panic!("option {option} is drawn with no name"));
-                assert_eq!(said.trim(), crate::config::THEMES[*option]);
+                assert_eq!(said.trim(), option_name(*side, *option));
                 // And it is the press: the middle of the box answers as that
                 // option and no other.
                 let (x, y) = middle(*at);
@@ -16685,7 +16698,7 @@ mod tests {
                 });
                 assert_eq!(
                     filled,
-                    crate::config::THEMES[*option] == wearing,
+                    option_name(*side, *option) == wearing,
                     "{wearing}: option {option} is filled as {filled}"
                 );
             }

@@ -2231,18 +2231,21 @@ impl App {
             // next one along: the options are all on screen, so pressing the
             // one wanted is the whole gesture. The theme goes through the same
             // writer the arrow keys use, which is what clears the colour lines
-            // that were overriding it.
+            // that were overriding it; the custom option arms on its first
+            // press instead, with the footer saying what a second one writes.
             Hit::SettingsChoice(index, side, at) => {
                 let change = match self.settings.as_mut() {
                     Some(panel) => {
                         self.dirty |= panel.point_at(index, side);
-                        panel.choose_option(index, side, at)
+                        panel.press_option(index, side, at)
                     }
                     None => None,
                 };
                 if let Some(change) = change {
                     self.write_setting(&change);
                 }
+                // Armed or written, the footer changed either way.
+                self.dirty = true;
             }
             // A colour on the grid. Nothing is written: the panel says which key
             // in the settings file writes that colour, which is the one thing a
@@ -2458,7 +2461,10 @@ impl App {
     /// disagree about what a setting is, and a value the parser clamps shows up
     /// clamped rather than as what was asked for.
     fn change_setting(&mut self, forward: bool) {
-        let Some(change) = self.settings.as_ref().and_then(|panel| panel.change(forward)) else {
+        let Some(change) = self.settings.as_mut().and_then(|panel| panel.nudged(forward)) else {
+            // Nothing to write, but the nudge may have armed the custom option
+            // and put its warning on the footer.
+            self.dirty = true;
             return;
         };
         self.write_setting(&change);

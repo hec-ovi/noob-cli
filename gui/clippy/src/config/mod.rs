@@ -122,6 +122,12 @@ pub struct Config {
     pub show_activity: bool,
     pub show_files: bool,
 
+    /// Whether any colour key was set explicitly, by a line of the file or
+    /// through [`Config::apply`]. The palette is then the user's own, whatever
+    /// preset its values happen to match, and the panel names it custom: an
+    /// owned copy of a preset is still owned.
+    pub tuned: bool,
+
     /// Keys in the file this build does not know. Reported, never dropped.
     pub unknown: Vec<String>,
 }
@@ -159,6 +165,7 @@ impl Default for Config {
             syntax_markup: [0xba, 0xa0, 0xe8],
             show_activity: true,
             show_files: true,
+            tuned: false,
             unknown: Vec::new(),
         }
     }
@@ -664,7 +671,7 @@ impl Config {
     /// value the file would refuse to carry.
     pub fn apply(&mut self, key: &str, value: &str) -> bool {
         let name = canonical(key);
-        match name {
+        let known = match name {
             "opacity" => set(&mut self.opacity, number(value).map(|n| n.clamp(0.05, 1.0))),
             // Down to nothing, unlike the panels': the empty space has no text
             // in it, so a window whose gaps are fully see-through is still a
@@ -734,7 +741,45 @@ impl Config {
             // Including `theme`, which is not a slot: it is a whole palette,
             // resolved by [`Config::parse`] before any line lands on top of it.
             _ => false,
+        };
+        // A colour that landed marks the palette as the user's own, in the
+        // parser and in the live setter both, so the two cannot disagree about
+        // whose colours these are.
+        if known && colour_keys().contains(&name) {
+            self.tuned = true;
         }
+        known
+    }
+
+    /// The value one colour key carries right now, or nothing for a key that is
+    /// not a colour. The read half of [`Config::apply`]'s colour arms, for
+    /// whoever writes the palette out ([`own_palette`]).
+    pub fn colour_of(&self, key: &str) -> Option<[u8; 3]> {
+        let name = canonical(key);
+        Some(match name {
+            "accent" => self.accent,
+            "text" => self.text,
+            "dim" => self.dim,
+            "bright" => self.bright,
+            "good" => self.good,
+            "bad" => self.bad,
+            "panel" => self.panel,
+            "bar" => self.bar,
+            "syntax_comment" => self.syntax_comment,
+            "syntax_string" => self.syntax_string,
+            "syntax_number" => self.syntax_number,
+            "syntax_keyword" => self.syntax_keyword,
+            "syntax_markup" => self.syntax_markup,
+            _ => {
+                if let Some(at) = TOOL_KEYS.iter().position(|known| *known == name) {
+                    self.tools[at]
+                } else if let Some(at) = GAUGE_KEYS.iter().position(|known| *known == name) {
+                    self.gauges[at]
+                } else {
+                    return None;
+                }
+            }
+        })
     }
 }
 
@@ -851,6 +896,40 @@ pub fn write_setting(path: &Path, key: &str, value: Option<&str>) -> Result<(), 
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
     };
+    let next = match value {
+        Some(value) => placed(&old, &key, value),
+        None => {
+            let mut done = false;
+            let mut lines: Vec<String> = Vec::new();
+            for line in old.lines() {
+                if split(line).is_some_and(|(active, ..)| active == key) {
+                    // The reader takes the last line for a key, so a duplicate
+                    // left behind would win over the one just commented out.
+                    if done {
+                        continue;
+                    }
+                    done = true;
+                    lines.push(format!("# {}", line.trim_end()));
+                    continue;
+                }
+                lines.push(line.to_string());
+            }
+            if !done {
+                // Say so rather than rewriting the file and promising a restart
+                // that changes nothing.
+                return Err(format!("{key} is not set; nothing to unset"));
+            }
+            joined(lines)
+        }
+    };
+    replace_file(path, &next)
+}
+
+/// The text with `key = value` placed: a live line rewritten where it stands,
+/// a commented default uncommented in place so the value lands beside its own
+/// documentation, a missing key appended. The one placement rule, shared by
+/// [`write_setting`] and [`own_palette`].
+fn placed(old: &str, key: &str, value: &str) -> String {
     let mut done = false;
     let mut lines: Vec<String> = Vec::new();
     for line in old.lines() {
@@ -861,39 +940,60 @@ pub fn write_setting(path: &Path, key: &str, value: Option<&str>) -> Result<(), 
                 continue;
             }
             done = true;
-            lines.push(match value {
-                Some(value) => rewritten(line, &key, value),
-                None => format!("# {}", line.trim_end()),
-            });
+            lines.push(rewritten(line, key, value));
             continue;
         }
         lines.push(line.to_string());
     }
-    if !done && let Some(value) = value {
+    if !done {
         for line in lines.iter_mut() {
             let Some(bare) = uncommented(line) else {
                 continue;
             };
             if split(&bare).is_some_and(|(commented, ..)| commented == key) {
-                *line = rewritten(&bare, &key, value);
+                *line = rewritten(&bare, key, value);
                 done = true;
                 break;
             }
         }
     }
-    match (done, value) {
-        (false, Some(value)) => lines.push(format!("{key} = {value}")),
-        // Say so rather than rewriting the file and promising a restart that
-        // changes nothing.
-        (false, None) => return Err(format!("{key} is not set; nothing to unset")),
-        _ => {}
+    if !done {
+        lines.push(format!("{key} = {value}"));
     }
+    joined(lines)
+}
 
+fn joined(lines: Vec<String>) -> String {
     let mut next = lines.join("\n");
     if !next.is_empty() {
         next.push('\n');
     }
-    replace_file(path, &next)
+    next
+}
+
+/// Put the palette into the user's own hands: every colour the window is
+/// showing right now, written into the file as a live line under its own key.
+///
+/// What the panel's custom option does. The values are the ones in hand, the
+/// theme's plus any line already overriding it, so nothing on screen changes;
+/// the ownership does. With every colour key explicit the theme line decides
+/// nothing any more, the parser marks the palette as the user's own
+/// ([`Config::tuned`]), and the swatches are then edited over it one key at a
+/// time. One read and one rename however many colours there are.
+pub fn own_palette(path: &Path) -> Result<(), String> {
+    // Through the reader, so a missing file starts from the shipped defaults
+    // it would have been given anyway.
+    let config = Config::load_from(path);
+    let mut text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    for key in colour_keys() {
+        let Some(rgb) = config.colour_of(key) else {
+            return Err(format!("{key} is not a colour key"));
+        };
+        let value = format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]);
+        text = placed(&text, key, &value);
+    }
+    replace_file(path, &text)
 }
 
 /// Comment out every live line the listed keys own, in one pass.
@@ -1351,7 +1451,61 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(Config::parse(&live), Config::default());
+        // Uncommenting every colour line marks the palette as the user's own,
+        // which is correct and not what this test is about: the claim here is
+        // that the values match, so the mark is levelled before comparing.
+        let mut parsed = Config::parse(&live);
+        assert!(parsed.tuned, "37 explicit colour lines and nobody owns them");
+        parsed.tuned = false;
+        assert_eq!(parsed, Config::default());
+    }
+
+    /// Owning the palette writes every colour the window is showing into the
+    /// file as a live line, values unchanged, and the file then reads as the
+    /// user's own; picking a theme afterwards takes the lines back out.
+    #[test]
+    fn owning_the_palette_writes_every_colour_live_and_keeps_the_values() {
+        let scratch = Scratch::new("own-palette");
+        let path = scratch.conf();
+        std::fs::write(&path, "theme = noob-cool\nfont_size = 15   # mine\n").expect("a file");
+        let before = Config::load_from(&path);
+        assert!(!before.tuned, "a bare theme line is not ownership");
+
+        own_palette(&path).expect("the file takes it");
+        let owned = Config::load_from(&path);
+        assert!(owned.tuned, "the palette is not the user's own");
+        // The values did not move: only the ownership did.
+        for key in colour_keys() {
+            assert_eq!(owned.colour_of(key), before.colour_of(key), "{key} moved");
+        }
+        let text = std::fs::read_to_string(&path).expect("the file");
+        for key in colour_keys() {
+            let rgb = owned.colour_of(key).expect(key);
+            let line = format!("{key} = #{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]);
+            assert!(text.contains(&line), "{line} is not a live line:\n{text}");
+        }
+        // The rest of the file is untouched.
+        assert!(text.contains("font_size = 15   # mine"), "{text}");
+        assert_eq!(owned.font_size, 15.0);
+
+        // A theme pick is still the way back: it comments the lines out and
+        // the palette stops being owned.
+        pick_theme(&path, "noob-red").expect("the file takes it");
+        let back = Config::load_from(&path);
+        assert!(!back.tuned, "the theme did not take the lines out");
+        for key in colour_keys() {
+            assert_eq!(
+                back.colour_of(key),
+                theme("noob-red").expect("a preset").colour_of(key),
+                "{key} is not the preset's"
+            );
+        }
+        // And every colour key answers the getter; a non-colour does not.
+        for key in colour_keys() {
+            assert!(back.colour_of(key).is_some(), "{key} has no colour to read");
+        }
+        assert_eq!(back.colour_of("font_size"), None);
+        assert_eq!(back.colour_of("theme"), None);
     }
 
     #[test]
@@ -1718,6 +1872,7 @@ mod tests {
             syntax_markup,
             show_activity: _,
             show_files: _,
+            tuned: _,
             unknown: _,
         } = config;
         let flat = |rows: &[[u8; 3]]| rows.iter().flatten().copied().collect::<Vec<u8>>();
