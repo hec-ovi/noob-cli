@@ -15131,6 +15131,56 @@ mod tests {
         assert_eq!(tint_of(&out, "APPEARANCE"), out.skin.heading);
     }
 
+    /// "the line on each menu is too long, exceeding the size of the text."
+    /// The chosen section's band hugs its name: the mark, the text and a
+    /// breath of padding, never the whole cell. The press region is still the
+    /// full cell, so nothing got harder to hit.
+    #[test]
+    fn the_rail_band_hugs_the_chosen_name() {
+        // AGENT, the shortest name on the rail, so the gap between the name
+        // and the cell is the widest there is to prove the band lets it go.
+        let panel = a_panel_on(&Config::default(), crate::settings::AGENT);
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let (at, cell) = out
+            .layout
+            .settings_rail
+            .iter()
+            .find(|(index, _)| *index == panel.chosen())
+            .map(|(index, cell)| (*index, *cell))
+            .expect("the chosen section is on the rail");
+        let name = panel.section_names()[at];
+        let band = out
+            .scene
+            .rects
+            .iter()
+            .find(|rect| {
+                let [x, y, ..] = rect.xywh();
+                rect.rgba() == out.skin.strip
+                    && (x - cell.x).abs() < 0.01
+                    && (y - cell.y).abs() < 0.01
+            })
+            .unwrap_or_else(|| panic!("{name} has no band"));
+        // Wide enough for the mark and the name, with a breath of padding, and
+        // well short of the cell the old band filled.
+        let column = 8.0; // what render_settings hands the frame
+        let text = name.chars().count() as f32 * column;
+        let [_, _, w, _] = band.xywh();
+        assert!(w >= MARK_W + 3.0 + text, "the band does not cover {name}: {w}");
+        assert!(
+            w <= MARK_W + 3.0 + text + column * 2.0,
+            "the band runs past the text: {w} for {text} of name"
+        );
+        assert!(w < cell.w - column, "the band still fills the cell: {w} of {}", cell.w);
+        // The cell past the band is still the press (the cell's far edge
+        // belongs to the rail divider's grab, which is not the band's doing).
+        let past_band = cell.x + cell.w * 0.85;
+        assert!(past_band > cell.x + w, "nowhere past the band to probe");
+        assert_eq!(
+            out.layout.hit(past_band, cell.y + cell.h * 0.5),
+            Some(Hit::SettingsSection(at))
+        );
+    }
+
     /// Item F1: the rail hides no section, at the smallest window the window
     /// will open at and the largest text the settings file will carry.
     ///

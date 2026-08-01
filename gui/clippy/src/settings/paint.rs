@@ -110,8 +110,20 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
             continue;
         };
         let chosen = *index == panel.chosen();
+        let text_at = Panel::new(
+            at.x + MARK_W + 3.0,
+            at.y,
+            (at.w - MARK_W - 3.0).max(1.0),
+            at.h,
+        );
+        let shown = clip(name, columns_in(text_at.w, column));
         if chosen {
-            scene.rect(at.fill(skin.strip));
+            // The band hugs the name: the mark, the text and a breath of
+            // padding, never the whole cell. "the line on each menu is too
+            // long, exceeding the size of the text". The press region stays
+            // the full cell; only the paint tightened.
+            let band = (MARK_W + 3.0 + (shown.chars().count() as f32 + 1.0) * column).min(at.w);
+            scene.rect(Panel::new(at.x, at.y, band, at.h).fill(skin.strip));
             scene.rect(Panel::new(at.x, at.y, MARK_W, at.h).fill(skin.edge_focus));
         }
         let tint = match (chosen, frame.hot == Some(Hit::SettingsSection(*index))) {
@@ -119,21 +131,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
             (false, true) => skin.bright,
             (false, false) => skin.dim,
         };
-        let text_at = Panel::new(
-            at.x + MARK_W + 3.0,
-            at.y,
-            (at.w - MARK_W - 3.0).max(1.0),
-            at.h,
-        );
-        say(
-            scene,
-            vec![Run::tinted(
-                clip(name, columns_in(text_at.w, column)),
-                tint,
-            )],
-            text_at,
-            tint,
-        );
+        say(scene, vec![Run::tinted(shown, tint)], text_at, tint);
     }
     // The hairline between the rail and what it chose, so the two columns read
     // as two columns rather than as a list with a gap in it. Anchored off the
