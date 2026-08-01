@@ -22,19 +22,19 @@ use noob_draw::{Panel, Rect, Run, Scene, Text};
 use crate::dock::{Dock, Space, View};
 use crate::design::icons;
 use crate::menu::{MARKER_COLUMNS, Menu};
-use crate::monitor::{Gauge, Monitor};
+use crate::monitor::Monitor;
 use crate::picker::{Picker, Row as PickerRow};
 use crate::design;
 use crate::settings::{Row as SettingRow, Settings, Side};
 use crate::skin::Skin;
-use crate::state::{State, TodoState, Tone};
+use crate::state::State;
 
 pub const TITLE_H: f32 = 30.0;
 const INPUT_H: f32 = 36.0;
 const TAB_H: f32 = 22.0;
 const RESIZE_EDGE: f32 = 6.0;
 const GAP: f32 = 6.0;
-const PAD: f32 = 9.0;
+pub(crate) const PAD: f32 = 9.0;
 /// Columns the file view spends on its line-number gutter, on every row.
 const GUTTER: usize = 4;
 const SMALL: f32 = 12.0;
@@ -47,7 +47,7 @@ const BUTTON_W: f32 = 26.0;
 /// `[orb] NO0B \u{25b8} version` left to right. The orb sizes itself to whatever
 /// square it is handed, so this is the only number that decides how big it is.
 pub const ORB_W: f32 = TITLE_H;
-const LABEL_COLUMNS: usize = 9;
+pub(crate) const LABEL_COLUMNS: usize = 9;
 
 /// How tall a window has to be to be a title strip and nothing else.
 ///
@@ -89,8 +89,8 @@ fn strip_row(panel: Panel) -> Panel {
 /// width to spare and no height. Twenty dots to a row also puts a usable
 /// resolution on one row, a dot being a percent and a quarter, so a reading
 /// climbing under load moves dot by dot instead of in fifths of a row.
-const DOT_COLUMNS: usize = 20;
-const DOT_ROWS: usize = 4;
+pub(crate) const DOT_COLUMNS: usize = 20;
+pub(crate) const DOT_ROWS: usize = 4;
 /// How much larger the number beside a block is than the label. One: the same
 /// size as every other glyph in the window.
 ///
@@ -99,17 +99,17 @@ const DOT_ROWS: usize = 4;
 /// a number is the thing being read. The arithmetic that caps it against the room
 /// beside the block is kept, so raising this again cannot put a reading over the
 /// edge of a narrow pane.
-const BIG_READING: f32 = 1.0;
+pub(crate) const BIG_READING: f32 = 1.0;
 /// Rows the CONTEXT pane spends on its header before its readings start: the
 /// phase, then the three counts that say what this run has asked for. They stay
 /// put while the readings under them scroll.
-const CONTEXT_HEAD: usize = 4;
+pub(crate) const CONTEXT_HEAD: usize = 4;
 /// The smallest a dot shrinks to, across or down, when a pane has more readings
 /// than room. Below this the block stops reading as a block, so it is not drawn:
 /// too tall for its rows and they scroll off, too narrow for its columns and the
 /// pane draws numbers alone. A reading that scrolled off is honest and a number
 /// with no block is honest; a smear is not.
-const SMALL_DOT: f32 = 4.0;
+pub(crate) const SMALL_DOT: f32 = 4.0;
 const PROMPT_COLUMNS: usize = 2;
 /// The three dots that stand in for the prompt's marker while a turn runs: how
 /// big one is, the gap between two of them, and how far the raised one rises,
@@ -176,9 +176,9 @@ const MENU_PAD: f32 = 5.0;
 const MENU_GUTTER: usize = 2;
 /// Columns a row of the file explorer spends before its name: the type icon and
 /// the space after it.
-const ROW_ICON_COLUMNS: usize = 2;
+pub(crate) const ROW_ICON_COLUMNS: usize = 2;
 /// Columns a row spends on the changed mark, when it carries one.
-const ROW_MARK_COLUMNS: usize = 2;
+pub(crate) const ROW_MARK_COLUMNS: usize = 2;
 /// The widest the explorer column gets, however long the names in it are. Past
 /// this the list is spending the pane on directory prefixes nobody is reading.
 const LIST_MAX_COLUMNS: usize = 20;
@@ -451,7 +451,7 @@ fn picker_foot(line: f32) -> f32 {
 /// How wide the mark down the left of the selected row is. A tab's accent runs
 /// along its top edge because a strip is read left to right; a row is entered
 /// from the left, so its accent runs down that edge instead.
-const MARK_W: f32 = 2.0;
+pub(crate) const MARK_W: f32 = 2.0;
 
 /// How wide the caret standing in the gap a dragged tab would drop into is.
 ///
@@ -4523,7 +4523,7 @@ fn title_bar(scene: &mut Scene, frame: &Frame) {
 /// The cut lives on the fill as well as on the outline because they are the
 /// same shape twice. A square fill under a cut outline shows a triangle of the
 /// wrong colour poking out of the corner.
-fn panel_fill(panel: Panel, rgba: [f32; 4]) -> Rect {
+pub(crate) fn panel_fill(panel: Panel, rgba: [f32; 4]) -> Rect {
     panel.fill(rgba).chamfer(CUT, Rect::TOP_RIGHT)
 }
 
@@ -4532,7 +4532,7 @@ fn panel_fill(panel: Panel, rgba: [f32; 4]) -> Rect {
 /// The shader caps the reach at half the shorter side, so a short box loses a
 /// smaller corner than [`CUT`]. Anything that has to stop where the cut starts
 /// has to cap it the same way, or it stops short of a corner nothing took.
-fn cut_of(panel: Panel) -> f32 {
+pub(crate) fn cut_of(panel: Panel) -> f32 {
     CUT.min(panel.w * 0.5).min(panel.h * 0.5).max(0.0)
 }
 
@@ -4552,7 +4552,7 @@ fn cut_of(panel: Panel) -> f32 {
 /// row the right edge starts on, `top + cut`. The last rows are clipped to the
 /// box's right edge, so the stair narrows to a hairline exactly where a hairline
 /// right edge picks it up.
-fn cut_line(scene: &mut Scene, panel: Panel, rgba: [f32; 4], weight: f32) {
+pub(crate) fn cut_line(scene: &mut Scene, panel: Panel, rgba: [f32; 4], weight: f32) {
     let cut = cut_of(panel);
     if cut < weight {
         // A box squeezed smaller than the line is meant to be thick lost its
@@ -4572,7 +4572,7 @@ fn cut_line(scene: &mut Scene, panel: Panel, rgba: [f32; 4], weight: f32) {
 ///
 /// For a box that wants all four sides: the prompt, the picker, the menu. A
 /// pane's body uses [`pane_edges`] instead, which leaves the top one out.
-fn panel_edge(panel: Panel, rgba: [f32; 4]) -> Rect {
+pub(crate) fn panel_edge(panel: Panel, rgba: [f32; 4]) -> Rect {
     panel_fill(panel, rgba).stroke(1.0)
 }
 
@@ -4594,7 +4594,7 @@ fn panel_edge(panel: Panel, rgba: [f32; 4]) -> Rect {
 /// one material and a corner in a second colour reads as a second thing stuck on
 /// it; heavier because the diagonal is the mark that says what shape the pane is,
 /// and a hairline down it was lost against three hairline sides.
-fn pane_edges(scene: &mut Scene, panel: Panel, rgba: [f32; 4]) {
+pub(crate) fn pane_edges(scene: &mut Scene, panel: Panel, rgba: [f32; 4]) {
     let cut = cut_of(panel);
     scene.rect(panel.left_edge(rgba));
     scene.rect(panel.bottom_edge(rgba));
@@ -4776,19 +4776,19 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
 
     match slot.active() {
         None => {}
-        Some(View::Output) => output(scene, frame, panel),
-        Some(View::Activity) => activity(scene, frame, panel),
-        Some(View::Plan) => plan(scene, frame, panel),
-        Some(View::Agents) => agents(scene, frame, panel),
+        Some(View::Output) => crate::widgets::output::output(scene, frame, panel),
+        Some(View::Activity) => crate::widgets::activity::activity(scene, frame, panel),
+        Some(View::Plan) => crate::widgets::plan::plan(scene, frame, panel),
+        Some(View::Agents) => crate::widgets::agents::agents(scene, frame, panel),
         Some(View::Hardware) => {
-            gauges(scene, frame, panel, View::Hardware, frame.monitor.hardware())
+            crate::widgets::gauges::gauges(scene, frame, panel, View::Hardware, frame.monitor.hardware())
         }
         // The monitor's lists are named for the panes they feed, so a reading in
         // the wrong pane is a rename away from being obvious rather than two
         // files away.
-        Some(View::Context) => context(scene, frame, panel),
-        Some(View::Session) => gauges(scene, frame, panel, View::Session, frame.monitor.session()),
-        Some(View::Files) => files(scene, frame, panel),
+        Some(View::Context) => crate::widgets::context::context(scene, frame, panel),
+        Some(View::Session) => crate::widgets::gauges::gauges(scene, frame, panel, View::Session, frame.monitor.session()),
+        Some(View::Files) => crate::widgets::files::files(scene, frame, panel),
     }
 }
 
@@ -4797,7 +4797,7 @@ fn space_pane(scene: &mut Scene, frame: &Frame, space: Space) {
 /// One rectangle per visible line of the selection rather than one for the
 /// whole block, because the first and last lines start and stop mid-line and a
 /// single rectangle would cover text that is not selected.
-fn selection_band(scene: &mut Scene, frame: &Frame, panel: Panel, showing: Option<View>) {
+pub(crate) fn selection_band(scene: &mut Scene, frame: &Frame, panel: Panel, showing: Option<View>) {
     let (Some(selection), Some(view)) = (frame.selection, showing) else {
         return;
     };
@@ -4834,7 +4834,7 @@ fn selection_band(scene: &mut Scene, frame: &Frame, panel: Panel, showing: Optio
 ///
 /// One struct rather than nine arguments, because a band drawn with any of them
 /// off by one is a highlight over text the clipboard does not have.
-struct Painted {
+pub(crate) struct Painted {
     /// The rectangle the glyphs are in, already inset.
     content: Panel,
     rows: usize,
@@ -4853,7 +4853,7 @@ struct Painted {
 /// arithmetic rather than with a second copy of it: the two boxes differ in
 /// where they are and in nothing else, and a document highlighted by its own
 /// rule would be a highlight the copy disagreed with.
-fn paint_selection(
+pub(crate) fn paint_selection(
     scene: &mut Scene,
     selection: crate::select::Selection,
     pane: &crate::state::Pane,
@@ -4916,140 +4916,8 @@ fn paint_selection(
     }
 }
 
-fn text_box(scene: &mut Scene, frame: &Frame, panel: Panel, size: f32, runs: Vec<Run>) {
+pub(crate) fn text_box(scene: &mut Scene, frame: &Frame, panel: Panel, size: f32, runs: Vec<Run>) {
     scene.text(Text::rich(runs, panel.inset(PAD), size, frame.skin.body));
-}
-
-/// The OUTPUT pane: what the model said, as Markdown.
-fn output(scene: &mut Scene, frame: &Frame, panel: Panel) {
-    let (skin, state) = (frame.skin, frame.state);
-    let rows = frame.layout.rows(panel, frame.body_size);
-    let cols = cols_of(panel, frame.column);
-    let mut runs = Vec::new();
-    // A window that starts inside a fenced block has to know it is looking at
-    // code, so the state is carried in from the lines above it.
-    let mut fence = state.output.fence_before(rows, cols);
-    for line in state.output.visible(rows, cols) {
-        match line.tone {
-            // Only the model's prose is Markdown. What the human typed and
-            // what the harness noted are shown as written.
-            Tone::Body => crate::markdown::line(&line.text, &mut fence, skin, &mut runs),
-            tone => runs.push(Run::tinted(&line.text, skin.tone(tone))),
-        }
-        runs.push(Run::plain("\n"));
-    }
-    // The window may start partway down a wrapped line rather than dropping
-    // it, so the shaped buffer is scrolled by the rows that sit above.
-    //
-    // The box names its column count, so the renderer breaks the rows with the
-    // same `text-geometry` call the pane was measured with rather than wrapping
-    // them itself. Left to the shaper the columns drift by one per blank it
-    // swallows at a break, and the selection lands on the wrong glyphs.
-    scene.text(
-        Text::rich(runs, panel.inset(PAD), frame.body_size, frame.skin.body)
-            .scrolled(state.output.window(rows, cols).skip as f32)
-            .wrap_at(cols),
-    );
-    scrollbar(scene, skin, panel, state.output.thumb(rows, cols));
-}
-
-fn activity(scene: &mut Scene, frame: &Frame, panel: Panel) {
-    let (skin, state) = (frame.skin, frame.state);
-    let rows = frame.layout.rows(panel, frame.pane_size);
-    let cols = cols_of(panel, frame.pane_column);
-    let mut runs = Vec::new();
-    for line in state.activity.visible(rows, cols) {
-        // The clock column in front of a row is the subordinate part of it and
-        // is drawn in the dim tone: what the eye is looking down the list for
-        // is the tag and the subject, and a time in the call's own color would
-        // be competing with them for the row.
-        let (clock, rest) = line.split_gutter();
-        if !clock.is_empty() {
-            runs.push(Run::tinted(clock, skin.dim));
-        }
-        runs.push(Run::tinted(rest, skin.tone(line.tone)));
-        runs.push(Run::plain("\n"));
-    }
-    scene.text(
-        Text::rich(runs, panel.inset(PAD), frame.pane_size, frame.skin.body)
-            .scrolled(state.activity.window(rows, cols).skip as f32)
-            .wrap_at(cols),
-    );
-    scrollbar(scene, skin, panel, state.activity.thumb(rows, cols));
-}
-
-fn plan(scene: &mut Scene, frame: &Frame, panel: Panel) {
-    list_pane(scene, frame, panel, View::Plan, plan_rows(frame.state, frame.skin));
-}
-
-/// One row per todo, wrapped in whatever width the pane has.
-fn plan_rows(state: &State, skin: &Skin) -> Vec<ListRow> {
-    if state.plan.is_empty() {
-        return vec![ListRow::new(vec![Run::tinted("no plan yet", skin.dim)])];
-    }
-    state
-        .plan
-        .iter()
-        .map(|todo| {
-            let (mark, color) = match todo.state {
-                TodoState::Done => ("[x] ", skin.good),
-                TodoState::Active => ("[>] ", skin.bright),
-                TodoState::Pending => ("[ ] ", skin.dim),
-            };
-            ListRow::new(vec![
-                Run::tinted(mark, color),
-                Run::tinted(&todo.text, color),
-            ])
-        })
-        .collect()
-}
-
-/// The fleet: one child per row, and under each the last thing it said.
-fn agents(scene: &mut Scene, frame: &Frame, panel: Panel) {
-    list_pane(
-        scene,
-        frame,
-        panel,
-        View::Agents,
-        agent_rows(frame.state, frame.skin),
-    );
-}
-
-/// Two rows per child, and the second is where the news is.
-///
-/// A row alone is a name and a word, which for eight children at once tells you
-/// nothing about any of them: while a child runs the second row is that child's
-/// own output, and once it ends it is the reason it ended. Two rows each is also
-/// why this pane needs a scroll more than any other, a fleet of eight being
-/// sixteen rows.
-fn agent_rows(state: &State, skin: &Skin) -> Vec<ListRow> {
-    if state.agents.is_empty() {
-        return vec![ListRow::new(vec![Run::tinted(
-            "no sub-agents this session",
-            skin.dim,
-        )])];
-    }
-    let mut rows = Vec::new();
-    for agent in &state.agents {
-        let mut runs = vec![
-            Run::tinted(format!("{:<9}", agent.label), skin.dim),
-            Run::tinted(format!("{:<10}", agent.state), skin.tone(agent.tone)),
-        ];
-        // The tool set says whether this child can change anything, which is
-        // the one thing about a detached child worth knowing at a glance.
-        if !agent.tools.is_empty() {
-            runs.push(Run::tinted(format!("{:<10}", agent.tools), skin.dim));
-        }
-        runs.push(Run::tinted(clip(&agent.brief, 300), skin.body));
-        rows.push(ListRow::new(runs));
-        if !agent.last.is_empty() {
-            rows.push(ListRow::new(vec![Run::tinted(
-                format!("           {}", clip(&agent.last, 300)),
-                skin.dim,
-            )]));
-        }
-    }
-    rows
 }
 
 /// One logical line of a list pane: the runs that draw it, and the text they
@@ -5060,13 +4928,13 @@ fn agent_rows(state: &State, skin: &Skin) -> Vec<ListRow> {
 /// with. A row counted one way and drawn another is a pane that scrolls by a
 /// different number of rows than it has, and a row of prose with blanks in it
 /// wraps at a different place from a row of the same length without them.
-struct ListRow {
+pub(crate) struct ListRow {
     runs: Vec<Run>,
     text: String,
 }
 
 impl ListRow {
-    fn new(runs: Vec<Run>) -> ListRow {
+    pub(crate) fn new(runs: Vec<Run>) -> ListRow {
         let text = runs.iter().map(|run| run.text.as_str()).collect();
         ListRow { runs, text }
     }
@@ -5088,7 +4956,7 @@ impl ListRow {
 /// a list and a row of a transcript mean the same thing. A line partly scrolled
 /// off the top is drawn in full and offset by `skip` rather than dropped, which is
 /// what lets a wrapped todo scroll a row at a time.
-fn list_pane(scene: &mut Scene, frame: &Frame, panel: Panel, view: View, rows: Vec<ListRow>) {
+pub(crate) fn list_pane(scene: &mut Scene, frame: &Frame, panel: Panel, view: View, rows: Vec<ListRow>) {
     let size = frame.pane_size;
     let fit = frame.layout.rows(panel, size);
     let cols = cols_of(panel, frame.pane_column);
@@ -5136,543 +5004,19 @@ pub fn scroll_extent(frame: &Frame, view: View, panel: Panel) -> Option<(Vec<usi
         Some((rows.iter().map(|row| row.rows(cols)).collect(), fit))
     };
     match view {
-        View::Plan => lines(plan_rows(frame.state, frame.skin)),
-        View::Agents => lines(agent_rows(frame.state, frame.skin)),
-        View::Hardware => gauge_extent(frame, panel, frame.monitor.hardware()),
-        View::Session => gauge_extent(frame, panel, frame.monitor.session()),
+        View::Plan => lines(crate::widgets::plan::plan_rows(frame.state, frame.skin)),
+        View::Agents => lines(crate::widgets::agents::agent_rows(frame.state, frame.skin)),
+        View::Hardware => crate::widgets::gauges::gauge_extent(frame, panel, frame.monitor.hardware()),
+        View::Session => crate::widgets::gauges::gauge_extent(frame, panel, frame.monitor.session()),
         // The readings sit under the header, in a box of their own, and it is that
         // box they scroll in.
-        View::Context => gauge_extent(
+        View::Context => crate::widgets::gauges::gauge_extent(
             frame,
-            gauge_area(panel, frame.pane_size)?,
+            crate::widgets::gauges::gauge_area(panel, frame.pane_size)?,
             frame.monitor.context(),
         ),
         View::Output | View::Activity | View::Files => None,
     }
-}
-
-/// A monitor pane's content: one row per reading, in rows of the pane's own
-/// pitch rather than of one line. See [`gauges`].
-fn gauge_extent(frame: &Frame, panel: Panel, gauges: Vec<Gauge>) -> Option<(Vec<usize>, usize)> {
-    if gauges.is_empty() {
-        return None;
-    }
-    let grid = gauge_grid(
-        &gauges,
-        panel.inset(PAD),
-        frame.pane_size,
-        frame.pane_column,
-    );
-    Some((flat_heights(gauges.len()), grid.rows))
-}
-
-/// A label column, a block of dots, and the reading, laid out as three boxes
-/// rather than as one padded string.
-///
-/// One string with the bar's room spelled as spaces was the first attempt, and
-/// the readings landed on top of the bars: the spaces are the pane's column
-/// width and the bar was drawn in the transcript's, which is a different
-/// number. Three boxes at computed positions cannot drift apart.
-///
-/// The block is [`DOT_COLUMNS`] by [`DOT_ROWS`] dots in the metric's own colour,
-/// filling row by row from the bottom, so a row is 25% and a dot is 1.25%. Wide
-/// and short on purpose: see the constants. An unbounded reading draws no block
-/// at all, where it used to draw an empty track, so most of a pane was empty
-/// rectangles and the two rows that were filled read as noise. An unbounded row
-/// keeps the line pitch, because a tall empty row would push the rows that do
-/// have blocks off the bottom of the pane.
-///
-/// Twenty columns is a lot of width to ask a pane for, so the number is served
-/// first and the block takes what is left. What is left can be nothing: a pane
-/// dragged narrow enough that a dot would be under [`SMALL_DOT`] across draws no
-/// blocks at all and every row becomes a label and a number, which is a row this
-/// function already draws. That is the whole of the narrow case, and it is why
-/// the readings themselves are never clipped or shrunk: a block is only ever
-/// drawn in room the reading did not need.
-///
-/// The pane scrolls, so a reading past the bottom is reachable rather than
-/// dropped. It used to stop drawing at the last row that fitted, which for the
-/// hardware pane on a machine with two GPUs meant readings nothing could reach.
-/// Every row is the same height ([`Grid::pitch`]) for that reason: the scroll
-/// window is measured in rows of one height, and a pane whose rows differed could
-/// not say how many of itself were on screen. The cost is that an unbounded row in
-/// a pane that has blocks is as tall as a block row instead of one line, which is
-/// a pane of evenly pitched rows rather than a pane of two pitches.
-fn gauges(scene: &mut Scene, frame: &Frame, panel: Panel, view: View, gauges: Vec<Gauge>) {
-    let skin = frame.skin;
-    let content = panel.inset(PAD);
-
-    if gauges.is_empty() {
-        text_box(
-            scene,
-            frame,
-            panel,
-            frame.pane_size,
-            vec![Run::tinted("sampling\u{2026}", skin.dim)],
-        );
-        return;
-    }
-
-    let grid = gauge_grid(&gauges, content, frame.pane_size, frame.pane_column);
-    let heights = flat_heights(gauges.len());
-    let scrolls = frame.scrolls;
-    let window = scrolls.window(view, &heights, grid.rows);
-    let (label_w, gap, dot) = (grid.label_w, grid.gap, grid.dot);
-    let (block_h, pitch) = (grid.block_h, grid.pitch);
-    let cell = dot + gap;
-    let line = Text::line_for(frame.pane_size);
-
-    let mut y = content.y;
-    for gauge in gauges.iter().skip(window.first).take(window.count) {
-        // No block in a pane with no room for one, so the row is the label and
-        // the number, exactly as an unbounded reading is drawn.
-        let fraction = gauge.fraction().filter(|_| grid.blocked);
-        let row_h = pitch;
-        let (lit, unlit, ink) = skin.gauge_slot(gauge.hue);
-        scene.text(Text::rich(
-            vec![Run::tinted(gauge.label, skin.dim)],
-            Panel::new(
-                content.x,
-                y + ((row_h - line) * 0.5).floor(),
-                label_w.max(1.0),
-                line,
-            ),
-            frame.pane_size,
-            skin.dim,
-        ));
-        // The metric's own colour, so the number and its block are one reading.
-        // Nearly full is the one thing worth overriding it for: a block cannot
-        // warn, because a metric whose hue is already red has nowhere to go.
-        let tint = if fraction.is_some_and(|f| f > 0.85) {
-            skin.bad
-        } else {
-            ink
-        };
-        let (size, at_x) = match fraction {
-            Some(_) => (grid.reading, grid.read_x),
-            None => (frame.pane_size, content.x + label_w),
-        };
-        let read_line = Text::line_for(size);
-        scene.text(Text::rich(
-            vec![Run::tinted(gauge.reading(), tint)],
-            Panel::new(
-                at_x,
-                y + ((row_h - read_line) * 0.5).floor(),
-                (content.x + content.w - at_x).max(1.0),
-                read_line,
-            ),
-            size,
-            tint,
-        ));
-
-        if let Some(fraction) = fraction {
-            let filled = (fraction * (DOT_COLUMNS * DOT_ROWS) as f32).round() as usize;
-            let top = y + ((row_h - block_h) * 0.5).floor();
-            for index in 0..DOT_COLUMNS * DOT_ROWS {
-                let (row, col) = (index / DOT_COLUMNS, index % DOT_COLUMNS);
-                // Rows fill from the bottom, so the block reads as a level
-                // rising rather than as a staircase. Every dot is drawn, lit or
-                // not, which is what makes the block read as a block at 2%.
-                scene.rect(
-                    Panel::new(
-                        content.x + label_w + col as f32 * cell,
-                        top + block_h - (row + 1) as f32 * dot - row as f32 * gap,
-                        dot,
-                        dot,
-                    )
-                    .fill(if index < filled { lit } else { unlit })
-                    .radius(0.5 * dot),
-                );
-            }
-        }
-        y += row_h;
-    }
-    scrollbar(scene, skin, panel, scrolls.thumb(view, &heights, grid.rows));
-}
-
-/// How a monitor pane's rows are sized, worked out once for the pane rather than
-/// per row.
-///
-/// The wheel and the per-frame clamp need [`Grid::rows`] as much as the drawing
-/// does, and a second copy of this arithmetic at the call site is how a pane comes
-/// to scroll by a different number of rows than it drew.
-struct Grid {
-    /// The label column, as wide as the longest label in this pane.
-    label_w: f32,
-    dot: f32,
-    gap: f32,
-    /// Whether a block is drawn at all in this pane.
-    blocked: bool,
-    /// How tall the block is, or zero when it is not drawn. Its width is spent
-    /// rather than carried: what a caller needs is where the reading starts,
-    /// which is [`Grid::read_x`].
-    block_h: f32,
-    /// What every row of this pane is tall, block row or not.
-    pitch: f32,
-    /// The size a reading is drawn at, and where a bounded one starts.
-    reading: f32,
-    read_x: f32,
-    /// How many rows of this pane are on screen.
-    rows: usize,
-}
-
-fn gauge_grid(gauges: &[Gauge], content: Panel, size: f32, column: f32) -> Grid {
-    let line = Text::line_for(size);
-    // As wide as the longest label in this pane, so TOTAL TOOL CALLS is not
-    // clipped and a pane of short labels does not pay for one that has none.
-    let label_cols = gauges
-        .iter()
-        .map(|gauge| gauge.label.chars().count())
-        .max()
-        .unwrap_or(LABEL_COLUMNS)
-        .max(LABEL_COLUMNS)
-        + 1;
-    let label_w = label_cols as f32 * column;
-    let gap = (line * 0.12).round().max(1.0);
-    // The number is served first: it gets the room its longest reading needs at
-    // the pane's own size, and the block takes what is left, never more than half
-    // of it and never less than a legible dot. A block that pushed the number off
-    // the pane would be hiding the reading it exists to describe.
-    let widest = gauges
-        .iter()
-        .filter(|gauge| gauge.fraction().is_some())
-        .map(|gauge| gauge.reading().chars().count())
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    let needed = widest as f32 * column;
-    let free = (content.w - label_w - column).max(1.0);
-    let room = (free - needed).max(0.0).min(free * 0.5);
-    // As chunky as this pane can afford. A dot big enough to read as a block is
-    // the point of the shape, but a pane of thirteen readings cannot spend the
-    // same height per block as one of five. Past the floor the pane scrolls
-    // instead of shrinking further, which is what item 14 asked for.
-    //
-    // Not clamped up to anything: a pane with no room for a legible dot is meant
-    // to come out of here under [`SMALL_DOT`], which is what says no block.
-    let mut dot = (line * 0.34)
-        .round()
-        .min((room / DOT_COLUMNS as f32 - gap).floor());
-    let bounded = gauges.iter().any(|gauge| gauge.fraction().is_some());
-    let tall = |dot: f32| {
-        let block = dot * DOT_ROWS as f32 + gap * (DOT_ROWS - 1) as f32;
-        gauges.len() as f32 * (block + 2.0 * gap).max(line)
-    };
-    while dot > SMALL_DOT && tall(dot) > content.h {
-        dot -= 1.0;
-    }
-    // Whether this pane draws blocks at all. Either the dot is legible or the
-    // pane is too narrow (or too short, since the loop above stops at the same
-    // floor) to draw one, and then every reading is a number beside its label. A
-    // pane with nothing bounded in it has no block to draw either way, and must
-    // not pay a block's row height for the readings it does have.
-    let blocked = bounded && dot >= SMALL_DOT;
-    let (block_w, block_h) = match blocked {
-        true => (
-            (dot + gap) * DOT_COLUMNS as f32,
-            dot * DOT_ROWS as f32 + gap * (DOT_ROWS - 1) as f32,
-        ),
-        false => (0.0, 0.0),
-    };
-    // The size of the number beside a block, which at [`BIG_READING`] of one is
-    // the pane's own size and nothing else in this arithmetic bites. It is kept
-    // because it is what makes a larger reading safe: capped at the room left
-    // beside the block, so `1,048,576 / 2,097,152` in a pane dragged narrow comes
-    // out smaller rather than clipped halfway through, which reads as a different
-    // number. Floored, not rounded, because rounding up is what puts the last
-    // character over the edge.
-    let beside = (content.w - label_w - block_w - column).max(1.0);
-    let reading = (size * BIG_READING)
-        .min(size * beside / needed)
-        .floor()
-        .max(size);
-    let pitch = (block_h + 2.0 * gap).max(Text::line_for(reading));
-    Grid {
-        label_w,
-        dot,
-        gap,
-        blocked,
-        block_h,
-        pitch,
-        reading,
-        read_x: content.x + label_w + block_w + column,
-        rows: (content.h / pitch).floor().max(0.0) as usize,
-    }
-}
-
-/// The CONTEXT pane: what phase this run is in, what it has asked for, and how
-/// full it is.
-///
-/// The header is four rows with labels beside them, in the separation the phase
-/// row has had since the title strip was cut back. The three under the phase are
-/// counts that were readings in the list below until they were the three most
-/// worth reading first, so they came up here: a labelled row is easier to find
-/// than a dot block. The model and the workspace were up here too and are not
-/// any more, because the strip says the path again and the model is on the
-/// settings panel. The readings under the header are [`Monitor::context`], named
-/// for this pane.
-fn context(scene: &mut Scene, frame: &Frame, panel: Panel) {
-    let (skin, state) = (frame.skin, frame.state);
-    let content = panel.inset(PAD);
-    let line = Text::line_for(frame.pane_size);
-    // The failed count rides with the total rather than getting a row of its
-    // own: the two are one reading, and a pane that failed nothing still says
-    // so. It is where the DEBUG pane's count went when that pane was removed.
-    let calls = match state.failed_calls {
-        0 => crate::state::thousands(state.tool_calls as u64),
-        failed => format!(
-            "{} ({} failed)",
-            crate::state::thousands(state.tool_calls as u64),
-            crate::state::thousands(failed as u64)
-        ),
-    };
-    let rows: [(&str, String, [u8; 4]); CONTEXT_HEAD] = [
-        (
-            "PHASE",
-            match state.resumed {
-                true => format!("{} (resumed)", state.phase.word()),
-                false => state.phase.word().to_string(),
-            },
-            // The bad colour while a turn is running, which is the one tint in
-            // the palette that pulls the eye off whatever it was reading. It is
-            // not a fault: it is the reading that says the machine has the turn
-            // and anything you type is queued behind it.
-            if state.phase.busy() {
-                skin.bad
-            } else {
-                skin.body
-            },
-        ),
-        (
-            "TOTAL REQUESTS",
-            crate::state::thousands(state.requests as u64),
-            skin.body,
-        ),
-        (
-            "TOTAL TOOL CALLS",
-            calls,
-            // In the fault colour once something has failed, which is how the
-            // pane it came from read its own count. A run with nothing wrong
-            // with it reads the same as every other row.
-            match state.failed_calls {
-                0 => skin.body,
-                _ => skin.bad,
-            },
-        ),
-        (
-            "LAST PREFILL",
-            crate::state::thousands(state.last_prefill),
-            skin.body,
-        ),
-    ];
-    // As wide as the longest label, the way the readings below size theirs.
-    // Fixed at ten columns, "TOTAL TOOL CALLS" ran into its own number.
-    let label_cols = rows
-        .iter()
-        .map(|(label, _, _)| label.chars().count())
-        .max()
-        .unwrap_or(LABEL_COLUMNS)
-        .max(LABEL_COLUMNS)
-        + 1;
-    let label_w = label_cols as f32 * frame.pane_column;
-    for (index, (label, value, tint)) in rows.iter().enumerate() {
-        let y = content.y + index as f32 * line;
-        scene.text(Text::rich(
-            vec![Run::tinted(*label, skin.dim)],
-            Panel::new(content.x, y, label_w.max(1.0), line),
-            frame.pane_size,
-            skin.dim,
-        ));
-        // Clipped, not wrapped: the rows are at fixed heights, so a long value
-        // that wrapped would have its second row cut off by its own box.
-        let room = cols_of(panel, frame.pane_column).saturating_sub(label_cols + 1);
-        let text = match value.is_empty() {
-            true => String::from("\u{2014}"),
-            false => clip(value, room.max(1)),
-        };
-        scene.text(Text::rich(
-            vec![Run::tinted(text, *tint)],
-            Panel::new(
-                content.x + label_w,
-                y,
-                (content.w - label_w).max(1.0),
-                line,
-            ),
-            frame.pane_size,
-            *tint,
-        ));
-    }
-    // The readings start under the header, in the room that is left.
-    let Some(below) = gauge_area(panel, frame.pane_size) else {
-        return;
-    };
-    gauges(scene, frame, below, View::Context, frame.monitor.context());
-}
-
-/// The room the CONTEXT pane's readings get, under its header.
-///
-/// `None` when the pane is too short to hold even one reading under it. The
-/// header itself does not scroll: it is four rows saying what this run is
-/// doing and what it has asked for, and a monitor whose first rows scrolled
-/// away would be a monitor with no summary.
-fn gauge_area(panel: Panel, size: f32) -> Option<Panel> {
-    let line = Text::line_for(size);
-    let used = CONTEXT_HEAD as f32 * line + line * 0.5;
-    if panel.h - used < line {
-        return None;
-    }
-    Some(Panel::new(panel.x, panel.y + used, panel.w, panel.h - used))
-}
-
-/// The file view: the explorer column, and the open file beside it.
-fn files(scene: &mut Scene, frame: &Frame, panel: Panel) {
-    let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
-    if state.files.is_empty() {
-        scene.text(Text::rich(
-            vec![Run::tinted("no files touched yet", skin.dim)],
-            panel.inset(PAD),
-            frame.pane_size,
-            skin.dim,
-        ));
-        return;
-    }
-    if layout.file_list.w >= 1.0 {
-        explorer(scene, frame, layout.file_list);
-    }
-
-    let body = layout.file_diff;
-    if body.w < 1.0 || body.h < Text::line_for(frame.pane_size) + 2.0 * PAD {
-        return;
-    }
-    let rows = layout.rows(body, frame.pane_size);
-    let Some(file) = state.files.get(state.open_file) else {
-        return;
-    };
-
-    // A band behind every block header, drawn before the text. Without it a
-    // `write lines 17-17` reads as a line of the file rather than as the mark
-    // between two of them.
-    let content = body.inset(PAD);
-    let line = Text::line_for(frame.pane_size);
-    // Every row carries a four column gutter, so the text wraps in what is
-    // left rather than in the full width of the box.
-    let (cols, chrome) = text_columns(View::Files, body, frame.pane_column);
-    let first = file.pane.showing_from(rows, cols);
-    let shown = file.pane.visible(rows, cols);
-    for (step, entry) in shown.iter().enumerate() {
-        if !matches!(entry.tone, Tone::Call(_)) {
-            continue;
-        }
-        // A header that wraps gets a band as tall as it actually is, taken
-        // from the same arithmetic the text is laid out with.
-        let Some((top, height)) = file.pane.band_of(rows, cols, first + step) else {
-            continue;
-        };
-        let y = content.y + top as f32 * line;
-        let tall = height as f32 * line;
-        if y + tall > content.y + content.h {
-            break;
-        }
-        scene.rect(Panel::new(body.x + 1.0, y, (body.w - 2.0).max(1.0), tall).fill(skin.strip));
-    }
-
-    let syntax = crate::syntax::for_path(&file.path);
-    let mut runs = Vec::new();
-    for entry in &shown {
-        let base = skin.tone(entry.tone);
-        // The gutter, so a diff line says where in the file it landed. Exactly
-        // `chrome` columns of it, on this row and on every row this line
-        // continues onto.
-        match entry.number {
-            Some(number) => runs.push(Run::tinted(file_number(number, chrome), skin.comment)),
-            None if !entry.text.is_empty() => runs.push(Run::plain(" ".repeat(chrome))),
-            None => {}
-        }
-        // A removed line reads as removed first, so only what is there now is
-        // tokenized.
-        if matches!(entry.tone, Tone::Plus | Tone::Body) {
-            let (marker, rest) = entry.text.split_at(entry.text.len().min(2));
-            runs.push(Run::tinted(marker, base));
-            for (text, token) in crate::syntax::scan(rest, syntax) {
-                runs.push(Run::tinted(text, skin.token(token).unwrap_or(base)));
-            }
-        } else {
-            runs.push(Run::tinted(&entry.text, base));
-        }
-        runs.push(Run::plain("\n"));
-    }
-    // Broken into rows by the same call the pane counts them with, in the
-    // columns that are left once the gutter has been paid for, and the rows a
-    // line continues onto are indented past that gutter. Wrapping the gutter
-    // along with the text is what put every continuation row four columns out
-    // from the band, the caret and the clipboard.
-    scene.text(
-        Text::rich(runs, content, frame.pane_size, skin.body)
-            .wrap_at(cols)
-            .hanging(chrome),
-    );
-    scrollbar(scene, skin, body, file.pane.thumb(rows, cols));
-}
-
-/// The file list down the left of the pane, one row per file the agent has
-/// touched, the way an editor's explorer reads.
-///
-/// Flat, because the set behind it is flat: these are the files the agent has
-/// opened, not a filesystem. Nothing here groups by directory or expands, and a
-/// row is a file.
-fn explorer(scene: &mut Scene, frame: &Frame, list: Panel) {
-    let (skin, layout, state) = (frame.skin, frame.layout, frame.state);
-    // The one thing between the list and the file. The pane has a single surface
-    // and a single outline, so without this line the two columns read as one.
-    scene.rect(list.right_edge(skin.edge));
-    let line = Text::line_for(frame.pane_size);
-    let cols = cols_of(list, frame.pane_column);
-    for (index, row) in &layout.file_rows {
-        let Some(file) = state.files.get(*index) else {
-            continue;
-        };
-        let open = *index == state.open_file;
-        if open {
-            // A band across the row and a mark down its left edge, not a block
-            // in a colour of its own: the pane is already a surface, and a block
-            // standing on it is what made the old tabs read as buttons.
-            scene.rect(row.fill(skin.strip));
-            scene.rect(Panel::new(row.x, row.y, MARK_W, row.h).fill(skin.tab_accent));
-        }
-        // A file compaction dropped is still worth reading; it is just no longer
-        // what the agent is holding, and the row says which.
-        let tint = match (open, file.closed) {
-            (_, true) => skin.dim,
-            (true, false) => skin.bright,
-            (false, false) => skin.body,
-        };
-        let room = cols
-            .saturating_sub(ROW_ICON_COLUMNS + if file.changed { ROW_MARK_COLUMNS } else { 0 })
-            .max(1);
-        let mut runs = vec![
-            // The type mark, so a row is recognisable before it is read.
-            Run::icon(crate::design::icons::for_path(&file.path).to_string(), tint),
-            Run::tinted(format!(" {}", fit_name(&file.path, room)), tint),
-        ];
-        if file.changed {
-            runs.push(Run::tinted(" \u{2022}", skin.plus));
-        }
-        scene.text(Text::rich(
-            runs,
-            Panel::new(row.x + PAD, row.y, (row.w - 2.0 * PAD).max(1.0), line),
-            frame.pane_size,
-            tint,
-        ));
-    }
-    // The list is a scroll window like any other pane, so it says how much of
-    // itself is on screen the same way.
-    let rows = layout.rows(list, frame.pane_size);
-    scrollbar(
-        scene,
-        skin,
-        list,
-        crate::scroll::file_thumb(frame.file_scroll, state.files.len(), rows),
-    );
 }
 
 /// The folder picker: the whole window until a folder is chosen.
@@ -7161,7 +6505,7 @@ fn dragging(scene: &mut Scene, frame: &Frame) {
 
 /// The bar down the right edge of a pane. Absent when everything fits, because
 /// a scrollbar that is always full length says nothing.
-fn scrollbar(scene: &mut Scene, skin: &Skin, panel: Panel, thumb: Option<(f32, f32)>) {
+pub(crate) fn scrollbar(scene: &mut Scene, skin: &Skin, panel: Panel, thumb: Option<(f32, f32)>) {
     let Some((top, size)) = thumb else {
         return;
     };
@@ -7292,7 +6636,7 @@ fn input_row(scene: &mut Scene, frame: &Frame) {
 
 /// How many whole rows of text a box holds. One at the least: a box too short
 /// for a line still has a line in it, clipped, rather than dividing by nothing.
-fn rows_in(box_: Panel, line: f32) -> usize {
+pub(crate) fn rows_in(box_: Panel, line: f32) -> usize {
     ((box_.h / line.max(1.0)).floor() as usize).max(1)
 }
 
@@ -7343,7 +6687,7 @@ fn input_box(input: Panel, line: f32) -> Panel {
 }
 
 /// How many characters fit across a box of this width.
-fn columns_in(width: f32, column: f32) -> usize {
+pub(crate) fn columns_in(width: f32, column: f32) -> usize {
     ((width / column.max(1.0)).floor() as usize).max(1)
 }
 
@@ -7363,7 +6707,7 @@ fn columns_in(width: f32, column: f32) -> usize {
 /// the rows under it. Three digits and a blank is the usual answer; a file long
 /// enough spends the blank, and one longer still says it was cut rather than
 /// quietly showing a different line's number.
-fn file_number(number: u32, chrome: usize) -> String {
+pub(crate) fn file_number(number: u32, chrome: usize) -> String {
     let digits = number.to_string();
     let width = chrome.saturating_sub(1);
     if digits.chars().count() <= width {
@@ -7391,7 +6735,7 @@ pub fn text_columns(view: View, panel: Panel, column: f32) -> (usize, usize) {
 /// The one place a pane's width becomes a column count. Wrapping, hit testing
 /// and the selection band all have to agree on this number, so they all ask
 /// here rather than each dividing by the column width themselves.
-fn cols_of(panel: Panel, column: f32) -> usize {
+pub(crate) fn cols_of(panel: Panel, column: f32) -> usize {
     columns_in(panel.inset(PAD).w, column)
 }
 
@@ -7409,7 +6753,7 @@ pub fn input_height(rows: usize, line: f32) -> f32 {
     (rows.max(1) as f32 * line + 2.0 * INPUT_PAD + 2.0 * GAP).max(INPUT_H)
 }
 
-fn clip(text: &str, chars: usize) -> String {
+pub(crate) fn clip(text: &str, chars: usize) -> String {
     let mut out: String = text.chars().take(chars).collect();
     if text.chars().count() > chars {
         out.push('\u{2026}');
@@ -7454,7 +6798,7 @@ pub fn short_name(path: &str) -> String {
 /// still does not fit, its tail goes and an ellipsis says so. The tail rather
 /// than the head because the row already carries a type icon, so the extension
 /// is not what the last characters are needed for.
-fn fit_name(path: &str, cols: usize) -> String {
+pub(crate) fn fit_name(path: &str, cols: usize) -> String {
     let full = short_name(path);
     if full.chars().count() <= cols {
         return full;
@@ -7491,6 +6835,7 @@ fn short_path(path: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::state::Tone;
 
     fn shape<'a>(dock: &'a Dock, files: &[&str]) -> Shape<'a> {
         scrolled_shape(dock, files, 0)

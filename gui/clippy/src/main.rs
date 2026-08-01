@@ -42,6 +42,7 @@ mod style;
 #[allow(unused_imports)]
 use style::{markdown, skin, syntax};
 mod view;
+mod widgets;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

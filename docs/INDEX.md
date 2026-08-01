@@ -129,6 +129,9 @@ Boxes so far:
   out.
 - [`gui/clippy/src/state`](../gui/clippy/src/state/CONTRACT.md) - the pure
   reducer: events in, the conversation and metrics model out, bounded.
+- `gui/clippy/src/widgets/*` - one box per pane widget (output, activity,
+  plan, agents, files, context, gauges), each a pure painter with its own
+  contract.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,
