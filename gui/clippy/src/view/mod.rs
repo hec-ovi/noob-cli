@@ -9701,8 +9701,22 @@ mod tests {
         menu: &Menu,
         hot: Option<Hit>,
     ) -> Rendered {
+        render_menu_skinned(state, w, h, dock, menu, hot, Skin::from(&Config::default()))
+    }
+
+    /// The same menu under a palette of the caller's choosing, for the tests
+    /// that open one in another theme.
+    #[allow(clippy::too_many_arguments)]
+    fn render_menu_skinned(
+        state: &State,
+        w: f32,
+        h: f32,
+        dock: &Dock,
+        menu: &Menu,
+        hot: Option<Hit>,
+        skin: Skin,
+    ) -> Rendered {
         let layout = with_menu(dock, menu, w, h);
-        let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state,
             scrolls: &crate::scroll::Scrolls::default(),
@@ -10799,6 +10813,49 @@ mod tests {
         assert_eq!(lit(Some(Hit::MenuRow(0))), 1, "settings opens the panel");
         assert_eq!(lit(Some(Hit::MenuRow(2))), 1, "close acts");
         assert_eq!(lit(None), 0);
+    }
+
+    /// The lit row's band is the skin's hover, which is the theme's accent:
+    /// under every preset the menu answers the pointer in the window's own
+    /// hue, never in another theme's.
+    ///
+    /// Rendered per theme the way the title strip test is, so a band tinted
+    /// from anything but the skin shows up as a matrix colour in a red window.
+    #[test]
+    fn the_menus_lit_row_wears_the_theme_it_is_given() {
+        let dock = Dock::new();
+        let menu = Menu::for_widget((500.0, 400.0), View::Plan, Space::TopRight, false);
+        for name in crate::config::THEMES {
+            let config = crate::config::theme(name).expect(name);
+            let out = render_menu_skinned(
+                &busy_state(),
+                1400.0,
+                900.0,
+                &dock,
+                &menu,
+                Some(Hit::MenuRow(0)),
+                Skin::from(&config),
+            );
+            let box_ = out.layout.menu;
+            let band = out
+                .scene
+                .over_rects
+                .iter()
+                .find(|rect| {
+                    rect.rgba() == out.skin.hot && box_.contains(rect.xywh()[0], rect.xywh()[1])
+                })
+                .unwrap_or_else(|| panic!("{name}: the lit row has no band"));
+            // The band's hue is the theme's accent, off the config itself.
+            assert_eq!(
+                [band.rgba()[0], band.rgba()[1], band.rgba()[2]],
+                [
+                    config.accent[0] as f32 / 255.0,
+                    config.accent[1] as f32 / 255.0,
+                    config.accent[2] as f32 / 255.0,
+                ],
+                "{name}: the band is not the theme's accent"
+            );
+        }
     }
 
     /// A tab thrown out of the window is its own answer, not a miss: there is
