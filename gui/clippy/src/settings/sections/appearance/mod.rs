@@ -206,6 +206,7 @@ pub fn colours(config: &Config) -> Vec<(&'static str, [u8; 3])> {
         ("good", config.good),
         ("bad", config.bad),
         ("panel", config.panel),
+        ("background", config.background),
         ("bar", config.bar),
         ("syntax_comment", config.syntax_comment),
         ("syntax_string", config.syntax_string),
@@ -221,7 +222,7 @@ pub fn colours(config: &Config) -> Vec<(&'static str, [u8; 3])> {
 /// How many of [`colours`] are the window's own tones, and how many of the rest
 /// belong to the highlighter. The tools and the gauges are the two lists after
 /// them, and both name their own keys.
-const WINDOW_TONES: usize = 8;
+const WINDOW_TONES: usize = 9;
 const SYNTAX_TONES: usize = 5;
 
 /// What a colour actually colours, in words.
@@ -244,7 +245,8 @@ fn about(key: &str) -> &'static str {
         "bright" => "loud text",
         "good" => "it worked",
         "bad" => "it failed",
-        "panel" => "behind everything",
+        "panel" => "the widget windows",
+        "background" => "behind everything",
         "bar" => "the title bar",
         "syntax_comment" => "comments",
         "syntax_string" => "strings",

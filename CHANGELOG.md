@@ -27,6 +27,9 @@ tags rather than here; this file starts where it was added.
   report still reaches the conversation), closing its tab with it.
 - Scrollbars drag: every pane's track, the file explorer's included,
   follows a held pointer, alongside the wheel it already had.
+- The base application's background is its own colour (`background`,
+  "behind everything" on the palette), beside the widget windows' `panel`;
+  each theme tints both, and either can be overridden alone.
 
 ## 0.11.0 - 2026-08-01
 

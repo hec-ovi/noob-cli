@@ -205,12 +205,12 @@ impl Skin {
     pub fn from(config: &Config) -> Skin {
         let o = config.opacity;
         Skin {
-            // The empty space around and between the panes, on its own key. It
-            // was 55% of the panels' opacity, which meant the only way to see
-            // more of the desktop through the gaps was to make the text harder
-            // to read. The default is the number that ratio came to, so the
-            // window opens looking exactly as it did.
-            backdrop: rgba(config.panel, config.window_opacity),
+            // The empty space around and between the panes, on its own colour
+            // key and its own opacity key: the base application is tinted and
+            // thinned without touching the surface the text is read on. Both
+            // default to the panel's numbers, so the window opens looking
+            // exactly as it did.
+            backdrop: rgba(config.background, config.window_opacity),
             bar: rgba(config.bar, (o + 0.25).min(1.0)),
             panel: rgba(config.panel, o * 0.86),
             strip: rgba(config.panel, o * 0.97),
@@ -356,6 +356,25 @@ mod tests {
         assert!(luminance(skin.backdrop) < 0.05, "{:?}", skin.backdrop);
         let [_, g, ..] = skin.body;
         assert!(g > 150, "the text is green: {:?}", skin.body);
+    }
+
+    /// The base application's colour is its own key: tinting the floor
+    /// touches nothing the text is read on, and the panels' key still fills
+    /// the widget windows alone.
+    #[test]
+    fn the_base_and_the_panels_tint_independently() {
+        let tinted = Skin::from(&Config {
+            background: [0x40, 0x00, 0x00],
+            ..Config::default()
+        });
+        assert!(tinted.backdrop[0] > 0.0, "{:?}", tinted.backdrop);
+        assert_eq!(tinted.panel[0], 0.0, "the reading surface moved too");
+        let panes = Skin::from(&Config {
+            panel: [0x00, 0x00, 0x40],
+            ..Config::default()
+        });
+        assert!(panes.panel[2] > 0.0);
+        assert_eq!(panes.backdrop[2], 0.0, "the floor moved with the panes");
     }
 
     /// The reading surface is the most solid thing in the window, so the eye

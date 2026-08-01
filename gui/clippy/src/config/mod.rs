@@ -101,6 +101,10 @@ pub struct Config {
     /// The color panels are filled with, under the text. Black by default: a
     /// green panel under green text is the thing that makes it hard to read.
     pub panel: [u8; 3],
+    /// The base application: the empty space behind and between the panes.
+    /// Its own key, so the window's floor can be tinted without touching the
+    /// surface the text is read on; it opens the same black the panels do.
+    pub background: [u8; 3],
     /// The title and status bars: each theme's own deep tone, so the strip
     /// across the top wears the theme with the rest of the window.
     pub bar: [u8; 3],
@@ -155,6 +159,7 @@ impl Default for Config {
             good: [0x74, 0xd1, 0x94],
             bad: [0xe8, 0x7a, 0x6c],
             panel: [0x00, 0x00, 0x00],
+            background: [0x00, 0x00, 0x00],
             bar: [0x0e, 0x2e, 0x1e],
             tools: TOOLS,
             gauges: GAUGES,
@@ -363,6 +368,7 @@ pub fn theme(name: &str) -> Option<Config> {
                 good: [0x62, 0xd8, 0xa0],
                 bad: [0xf0, 0x74, 0x84],
                 panel: [0x02, 0x05, 0x0b],
+                background: [0x02, 0x05, 0x0b],
                 bar: [0x0f, 0x24, 0x3c],
                 tools: prose_tools(bright, text),
                 gauges: COOL_GAUGES,
@@ -390,6 +396,7 @@ pub fn theme(name: &str) -> Option<Config> {
                 good: [0x8f, 0xd8, 0x7a],
                 bad: [0xff, 0x8f, 0x5e],
                 panel: [0x0a, 0x03, 0x03],
+                background: [0x0a, 0x03, 0x03],
                 bar: [0x36, 0x11, 0x10],
                 tools: prose_tools(bright, text),
                 gauges: RED_GAUGES,
@@ -427,6 +434,7 @@ pub fn keys() -> Vec<&'static str> {
         "good",
         "bad",
         "panel",
+        "background",
         "bar",
         "syntax_comment",
         "syntax_string",
@@ -457,6 +465,7 @@ pub fn colour_keys() -> Vec<&'static str> {
         "good",
         "bad",
         "panel",
+        "background",
         "bar",
         "syntax_comment",
         "syntax_string",
@@ -718,6 +727,7 @@ impl Config {
             "good" => set(&mut self.good, color(value)),
             "bad" => set(&mut self.bad, color(value)),
             "panel" => set(&mut self.panel, color(value)),
+            "background" => set(&mut self.background, color(value)),
             "bar" => set(&mut self.bar, color(value)),
             "syntax_comment" => set(&mut self.syntax_comment, color(value)),
             "syntax_string" => set(&mut self.syntax_string, color(value)),
@@ -764,6 +774,7 @@ impl Config {
             "good" => self.good,
             "bad" => self.bad,
             "panel" => self.panel,
+            "background" => self.background,
             "bar" => self.bar,
             "syntax_comment" => self.syntax_comment,
             "syntax_string" => self.syntax_string,
@@ -1244,7 +1255,8 @@ theme = noob-matrix
 # bright = #cefadb        # what just happened, and what you typed
 # good   = #74d194        # a call that worked, and the showing tab's line
 # bad    = #e87a6c        # a call that did not, and a turn in flight
-# panel  = #000000        # panel fill under the text
+# panel  = #000000        # panel fill under the text: the widget windows
+# background = #000000    # the base application: the space behind the panes
 # bar    = #0e2e1e        # the title and status bars
 
 # One color per tool. These name the tools rather than the window, so a theme
@@ -1433,7 +1445,7 @@ mod tests {
         for key in keys() {
             assert!(named.contains(&key.to_string()), "{key} is undocumented");
         }
-        assert_eq!(keys().len(), 50, "a new key needs a line in the file");
+        assert_eq!(keys().len(), 51, "a new key needs a line in the file");
     }
 
     /// The commented colors are the noob theme spelled out. A stale hex there
@@ -1862,6 +1874,7 @@ mod tests {
             good,
             bad,
             panel,
+            background,
             bar,
             tools,
             gauges,
@@ -1884,6 +1897,7 @@ mod tests {
             ("good", good.to_vec()),
             ("bad", bad.to_vec()),
             ("panel", panel.to_vec()),
+            ("background", background.to_vec()),
             ("bar", bar.to_vec()),
             ("tools", flat(tools)),
             ("gauges", flat(gauges)),
