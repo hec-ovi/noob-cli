@@ -110,6 +110,10 @@ const ORB_EVERY: Duration = Duration::from_millis(33);
 /// rather than a click that wobbled.
 const DRAG_SLOP: f64 = 5.0;
 
+/// How long a first ESC keeps the cancel armed. The same window the CLI's
+/// dock gives its double-ESC, so the gesture is one habit across both.
+const ESC_CANCEL_WINDOW: Duration = Duration::from_secs(5);
+
 /// The window will not grow past this. Unbounded is not useful: a conversation
 /// at four thousand pixels wide is one long line per paragraph, and the panes
 /// stop being panes.
@@ -418,7 +422,7 @@ impl Morph {
 /// leave whichever ran last in charge, and the other one either wakes late or
 /// never wakes at all, which is a monitor that stops sampling as soon as
 /// something animates.
-fn soonest(deadlines: [Option<Instant>; 2]) -> Option<Instant> {
+fn soonest(deadlines: [Option<Instant>; 3]) -> Option<Instant> {
     deadlines.into_iter().flatten().min()
 }
 
@@ -967,6 +971,11 @@ struct App {
     skin: Skin,
     link: Option<Link>,
     trouble: Option<String>,
+    /// Armed until this instant by a first ESC that had nothing left to drop.
+    /// A second ESC inside the window cancels the turn; any other key, or the
+    /// window lapsing, disarms. One tap was too easy to spend by accident: a
+    /// key meant for a menu or a selection that had already gone cost a turn.
+    esc_armed: Option<Instant>,
 
     /// The folder named on the command line, until it has been connected to.
     /// Taken in `resumed`, because a folder given up front skips the picker.
@@ -1137,6 +1146,7 @@ impl App {
             skin,
             link: None,
             trouble: None,
+            esc_armed: None,
             workspace,
             session: None,
             picker: None,
@@ -2891,6 +2901,7 @@ impl App {
         if let Some(link) = self.link.as_mut() {
             link.send(Cmd::TurnCancel);
         }
+        self.esc_armed = None;
         self.state.status = String::from("cancelling");
         self.dirty = true;
     }
@@ -3821,6 +3832,12 @@ impl App {
             return;
         }
         let ctrl = self.modifiers.control_key();
+        // Any key that is not the second ESC stands down a pending cancel: the
+        // hand has moved on to something else, and the arm must not sit there
+        // waiting to spend a stray ESC minutes later.
+        if !matches!(event.logical_key.as_ref(), Key::Named(NamedKey::Escape)) {
+            self.dirty |= self.esc_armed.take().is_some();
+        }
         match event.logical_key.as_ref() {
             Key::Named(NamedKey::Enter) => self.submit(),
             Key::Named(NamedKey::Backspace) => self.dirty |= self.prompt.backspace(),
@@ -3842,14 +3859,23 @@ impl App {
                 self.dirty = true;
             }
             // Escape drops a selection first, then a half-typed line, and only
-            // cancels the turn when there is neither. Losing a typed prompt to
-            // a key meant for the agent is the worse mistake of the two, and
-            // losing a turn to one meant for a selection is worse still.
+            // reaches for the turn when there is neither. Losing a typed prompt
+            // to a key meant for the agent is the worse mistake of the two, and
+            // losing a turn to one meant for a selection is worse still. The
+            // turn itself takes two: the first ESC arms and the input row says
+            // so, the second inside the window cancels.
             Key::Named(NamedKey::Escape) => {
                 if self.selection.take().is_some() {
                     self.dirty = true;
                 } else if self.prompt.is_empty() {
-                    self.cancel();
+                    let now = Instant::now();
+                    if self.esc_armed.is_some_and(|until| now < until) {
+                        self.esc_armed = None;
+                        self.cancel();
+                    } else {
+                        self.esc_armed = Some(now + ESC_CANCEL_WINDOW);
+                        self.dirty = true;
+                    }
                 } else {
                     self.prompt.clear();
                     self.dirty = true;
@@ -4088,6 +4114,7 @@ impl App {
             drag: self.drag,
             hot: self.hot,
             trouble: self.trouble.as_deref(),
+            esc_armed: self.esc_armed.is_some(),
             selection: self.selection,
             scrolls: &self.scrolls,
             file_scroll: self.file_scroll,
@@ -4462,10 +4489,19 @@ impl ApplicationHandler<Wake> for App {
         let next = orb_deadline(now, self.state.phase.busy() || self.orb.moving(), self.next_orb);
         self.dirty |= next.is_some() && next != self.next_orb;
         self.next_orb = next;
+        // A first ESC nobody followed lapses here, taking its hint with it.
+        if self.esc_armed.is_some_and(|until| now >= until) {
+            self.esc_armed = None;
+            self.dirty = true;
+        }
         self.redraw();
-        // Both clocks, never one of them: the earlier deadline wins and the other
-        // is still there when it comes round.
-        event_loop.set_control_flow(match soonest([self.next_sample, self.next_orb]) {
+        // Every clock, never one of them: the earliest deadline wins and the
+        // others are still there when it comes round.
+        event_loop.set_control_flow(match soonest([
+            self.next_sample,
+            self.next_orb,
+            self.esc_armed,
+        ]) {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
         });
@@ -4930,11 +4966,11 @@ mod tests {
         let now = Instant::now();
         let (sample, orb) = (now + SAMPLE_EVERY, now + ORB_EVERY);
         assert!(ORB_EVERY < SAMPLE_EVERY, "the orb is the faster clock");
-        assert_eq!(soonest([Some(sample), Some(orb)]), Some(orb));
-        assert_eq!(soonest([Some(orb), Some(sample)]), Some(orb));
-        assert_eq!(soonest([None, Some(sample)]), Some(sample));
-        assert_eq!(soonest([Some(orb), None]), Some(orb));
-        assert_eq!(soonest([None, None]), None, "an idle window blocks");
+        assert_eq!(soonest([Some(sample), Some(orb), None]), Some(orb));
+        assert_eq!(soonest([Some(orb), Some(sample), None]), Some(orb));
+        assert_eq!(soonest([None, Some(sample), None]), Some(sample));
+        assert_eq!(soonest([Some(orb), None, None]), Some(orb));
+        assert_eq!(soonest([None, None, None]), None, "an idle window blocks");
     }
 
     /// The orb travels between its two formations over [`ORB_MORPH`] and is
@@ -6874,6 +6910,7 @@ mod tests {
             drag: None,
             hot: None,
             trouble: None,
+            esc_armed: false,
             selection: None,
             menu: None,
             picker: None,

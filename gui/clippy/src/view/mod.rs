@@ -2520,6 +2520,9 @@ pub struct Frame<'a> {
     pub hot: Option<Hit>,
     /// Shown in the title bar when the agent could not be reached.
     pub trouble: Option<&'a str>,
+    /// A first ESC has landed with nothing left for it to drop: the input row
+    /// says the second one is the one that cancels the turn.
+    pub esc_armed: bool,
     /// A drag over one of the text panes, drawn as a band under the glyphs.
     pub selection: Option<crate::select::Selection>,
     /// The open menu. The same one the layout was computed from, or the rows
@@ -3643,16 +3646,18 @@ fn input_row(scene: &mut Scene, frame: &Frame) {
     // box has one baseline, so a glyph cannot be lifted off it on its own.
     let busy = state.phase.busy();
     let marker = if busy { "  " } else { "\u{203a} " };
+    let mut runs = vec![
+        Run::tinted(marker.to_string(), skin.dim),
+        Run::tinted(frame.prompt.text(), skin.bright),
+    ];
+    // Armed, the empty prompt says what the second ESC does, in the colour
+    // that means stop. It sits where the eye already is: on the line the
+    // first ESC was aimed at.
+    if frame.esc_armed {
+        runs.push(Run::tinted("press ESC again to cancel", skin.bad));
+    }
     scene.text(
-        Text::rich(
-            vec![
-                Run::tinted(marker.to_string(), skin.dim),
-                Run::tinted(frame.prompt.text(), skin.bright),
-            ],
-            box_,
-            frame.body_size,
-            skin.bright,
-        )
+        Text::rich(runs, box_, frame.body_size, skin.bright)
         // Broken on the column the caret is placed by, so counting columns
         // lands on the glyph that is really there. This is the one box in the
         // window that is not wrapped at blanks: a row that ended early would
@@ -4245,6 +4250,7 @@ mod tests {
             drag: None,
             hot: None,
             trouble: None,
+            esc_armed: false,
             selection: None,
             menu: None,
             picker: None,
@@ -4362,6 +4368,7 @@ mod tests {
             drag: None,
             hot: None,
             trouble: None,
+            esc_armed: false,
             selection: None,
             menu: None,
             picker: None,
@@ -4618,6 +4625,7 @@ mod tests {
             drag,
             hot: None,
             trouble: None,
+            esc_armed: false,
             selection: None,
             menu: None,
             picker: None,
@@ -4636,6 +4644,45 @@ mod tests {
             .iter()
             .flat_map(|t| t.runs.iter().map(|r| r.text.as_str()))
             .collect()
+    }
+
+    /// A first ESC arms rather than cancels, and the armed frame is the one
+    /// that says so: the input row carries the second-tap hint, and an
+    /// unarmed frame makes no such promise anywhere.
+    #[test]
+    fn an_armed_cancel_writes_its_hint_into_the_input_row() {
+        let state = busy_state();
+        let dock = Dock::new();
+        let shape = shape(&dock, &[]);
+        let layout = Layout::compute(1400.0, 900.0, &shape);
+        let skin = Skin::from(&Config::default());
+        let mut frame = Frame {
+            state: &state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &crate::prompt::Prompt::default(),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            clock: 0.0,
+            orb_morph: None,
+            drag: None,
+            hot: None,
+            trouble: None,
+            esc_armed: true,
+            selection: None,
+            menu: None,
+            picker: None,
+            settings: None,
+        };
+        assert!(text_of(&build(&frame)).contains("press ESC again to cancel"));
+        frame.esc_armed = false;
+        assert!(!text_of(&build(&frame)).contains("press ESC again to cancel"));
     }
 
     /// Every cell that has tabs in it, which is not every cell of the grid: the
@@ -5593,6 +5640,7 @@ mod tests {
             drag: None,
             hot: None,
             trouble: None,
+            esc_armed: false,
             selection: Some(selection),
             menu: None,
             picker: None,
@@ -6990,6 +7038,7 @@ mod tests {
             drag: None,
             hot: None,
             trouble: None,
+            esc_armed: false,
             selection: Some(selection),
             menu: None,
             picker: None,
@@ -7106,6 +7155,7 @@ mod tests {
             drag: None,
             hot: None,
             trouble: None,
+            esc_armed: false,
             selection: None,
             menu: None,
             picker: None,
@@ -7308,6 +7358,7 @@ mod tests {
             drag: None,
             hot: None,
             trouble: None,
+            esc_armed: false,
             selection: None,
             menu: None,
             picker: None,
@@ -7421,6 +7472,7 @@ mod tests {
             drag: None,
             hot: None,
             trouble: None,
+            esc_armed: false,
             selection: Some(selection),
             menu: None,
             picker: None,
@@ -7683,6 +7735,7 @@ mod tests {
                 drag: None,
                 hot: None,
                 trouble: None,
+                esc_armed: false,
                 selection: None,
                 menu: None,
                 picker: None,
@@ -7786,6 +7839,7 @@ mod tests {
             drag: None,
             hot: None,
             trouble: None,
+            esc_armed: false,
             selection: None,
             menu: None,
             picker: None,
@@ -8271,6 +8325,7 @@ mod tests {
             drag: None,
             hot: None,
             trouble: None,
+            esc_armed: false,
             selection: None,
             menu: None,
             picker: None,
@@ -8480,6 +8535,7 @@ mod tests {
             drag: None,
             hot: None,
             trouble: None,
+            esc_armed: false,
             selection: None,
             menu: None,
             picker: None,
@@ -9061,6 +9117,7 @@ mod tests {
             drag: None,
             hot: None,
             trouble: None,
+            esc_armed: false,
             selection: None,
             menu: None,
             picker: None,
@@ -9748,6 +9805,7 @@ mod tests {
             drag: None,
             hot,
             trouble: None,
+            esc_armed: false,
             selection: None,
             menu: Some(menu),
             picker: None,
@@ -10569,6 +10627,7 @@ mod tests {
             drag: None,
             hot: None,
             trouble: None,
+            esc_armed: false,
             selection: None,
             menu: None,
             picker: None,
@@ -10787,6 +10846,7 @@ mod tests {
             drag: None,
             hot: None,
             trouble: None,
+            esc_armed: false,
             selection: None,
             menu: Some(&menu),
             picker: None,
@@ -10974,6 +11034,7 @@ mod tests {
             drag: None,
             hot,
             trouble: None,
+            esc_armed: false,
             selection: None,
             menu: None,
             picker: Some(picker),
@@ -12043,6 +12104,7 @@ mod tests {
             drag: None,
             hot: None,
             trouble: None,
+            esc_armed: false,
             selection: None,
             menu: Some(menu),
             picker: Some(picker),
@@ -12362,6 +12424,7 @@ mod tests {
             drag: None,
             hot,
             trouble: None,
+            esc_armed: false,
             selection,
             menu: None,
             picker: None,
