@@ -3804,6 +3804,35 @@ mod tests {
         assert!(stops.iter().any(|at| *at > grid), "the page never got past the grid");
     }
 
+    /// A press never scrolls the list. After the wheel the cursor can be a
+    /// screen away from the window, and revealing it on a pointer path is what
+    /// yanked the list back out from under a click: the row pressed is already
+    /// on screen, so there is nothing for a scroll to bring there. Only
+    /// keyboard movement reveals the cursor.
+    #[test]
+    fn a_press_on_a_visible_row_leaves_the_list_where_it_was() {
+        let config = Config::default();
+        let mut panel = over(&config);
+        go_to(&mut panel, APPEARANCE);
+        let rows = 10;
+        assert!(panel.scroll(3, true, rows, COLS), "the list scrolled down");
+        let was = panel.first();
+        assert!(was > 0, "the wheel did not move the window");
+        // The cursor stayed behind, above the window: the press that follows
+        // is exactly the one the reveal used to answer with a scroll.
+        let (first, count) = panel.window(rows, COLS);
+        let pressed = (first..first + count)
+            .find(|at| panel.row(*at).is_some_and(landable))
+            .expect("a row on screen can hold the cursor");
+        assert!(panel.point_at(pressed, Side::Left));
+        assert_eq!(panel.cursor(), pressed, "the press did not move the keys");
+        assert_eq!(panel.first(), was, "the press scrolled the list");
+        // A press that lands on nothing at all moves neither the keys nor the
+        // list: the stale cursor stays a screen away and the window stays put.
+        assert!(!panel.point_at(usize::MAX, Side::Left));
+        assert_eq!(panel.first(), was);
+    }
+
     /// The window is counted in rows of text and starts on a row, so a card
     /// nine rows tall never sits half on and half off the top of the list.
     ///

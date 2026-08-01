@@ -2115,7 +2115,11 @@ impl App {
             // press here has nothing behind it to reach.
             _ => {}
         }
-        self.reveal_settings_cursor();
+        // No reveal here, ever: the row pressed is already on screen, and a
+        // press that lands beside the rows (the margin, the document, the gap
+        // under a card) leaves the cursor where it was, which can be a screen
+        // away. Revealing that cursor scrolled the list back out from under
+        // the click. Only keyboard movement reveals the cursor.
     }
 
     /// Move the slider under the button to where the pointer is now, and take
