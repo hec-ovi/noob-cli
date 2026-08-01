@@ -11,7 +11,9 @@ use serde_json::{Value, json};
 use noob_provider::types::ToolSpec;
 
 use super::truncate::{floor_char_boundary, skill_cap_marker};
-use super::{ToolCtx, ToolOutcome, display_path, need_str};
+use super::{Core, SkillsState, ToolOutcome, display_path, need_str};
+#[cfg(test)]
+use super::ToolCtx;
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
@@ -24,11 +26,11 @@ pub fn spec() -> ToolSpec {
     }
 }
 
-pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
-    run_with(ctx, args, || INTERRUPTED.load(Ordering::SeqCst))
+pub fn run(core: &Core, skills: &SkillsState, can_delegate: bool, args: &Value) -> ToolOutcome {
+    run_with(core, skills, can_delegate, args, || INTERRUPTED.load(Ordering::SeqCst))
 }
 
-fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> ToolOutcome {
+fn run_with(core: &Core, skills: &SkillsState, can_delegate: bool, args: &Value, interrupted: impl Fn() -> bool) -> ToolOutcome {
     if interrupted() {
         return ToolOutcome::canceled();
     }
@@ -36,8 +38,8 @@ fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> Tool
         Ok(n) => n,
         Err(e) => return ToolOutcome::err(e),
     };
-    let Some(skill) = ctx.skills.iter().find(|s| s.name == name) else {
-        let available: Vec<&str> = ctx.skills.iter().map(|s| s.name.as_str()).collect();
+    let Some(skill) = skills.list.iter().find(|s| s.name == name) else {
+        let available: Vec<&str> = skills.list.iter().map(|s| s.name.as_str()).collect();
         return ToolOutcome::err(format!(
             "unknown skill {name:?}; available skills: {}",
             available.join(", ")
@@ -60,15 +62,15 @@ fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> Tool
 
     let mut shown = body;
     let mut marker = String::new();
-    if body.len() > ctx.caps.skill_bytes {
-        let cut = floor_char_boundary(body, ctx.caps.skill_bytes);
+    if body.len() > core.caps.skill_bytes {
+        let cut = floor_char_boundary(body, core.caps.skill_bytes);
         shown = &body[..cut];
         // Continue on the file line holding the cut (re-reading a partial
         // line beats losing it); file lines are 1-based.
         let next_line = frontmatter_lines + shown.matches('\n').count() + 1;
         marker = format!(
             "\n{}",
-            skill_cap_marker(&display_path(ctx, &skill.file), next_line)
+            skill_cap_marker(&display_path(&core.workspace, &skill.file), next_line)
         );
     }
     // The ~5k-token recommendation from the skills standard, echoed as a
@@ -82,13 +84,13 @@ fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> Tool
     });
 
     {
-        let mut loaded = ctx.loaded_skills.lock().unwrap();
+        let mut loaded = skills.loaded.lock().unwrap();
         if !loaded.iter().any(|n| n == name) {
             loaded.push(name.to_string());
         }
     }
 
-    let dir = display_path(ctx, &skill.dir);
+    let dir = display_path(&core.workspace, &skill.dir);
     let lines = shown.lines().count();
     // Skills are portable documents and may name another harness's tool
     // vocabulary. Give the model a mechanical mapping before the untrusted
@@ -97,7 +99,7 @@ fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> Tool
     // ctx.task is Some exactly when the subagent tool is registered here.
     // Advertising delegation where the schema is absent (a leaf child, the
     // depth ceiling) steered small models into refused calls.
-    let runtime = if ctx.task.is_some() {
+    let runtime = if can_delegate {
         "[noob runtime mapping: use subagent(prompt, tools, max_turns) for delegation; \
          dock subagents are already detached, so ignore model, description, and \
          run_in_background fields from other harnesses. Translate foreign web-tool \
@@ -140,7 +142,7 @@ mod tests {
     use crate::tools::test_ctx;
 
     fn install_skill(ctx: &mut ToolCtx, name: &str, body: &str) {
-        let dir = ctx.workspace.join(".noob/skills").join(name);
+        let dir = ctx.core.workspace.join(".noob/skills").join(name);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("SKILL.md");
         std::fs::write(
@@ -148,7 +150,7 @@ mod tests {
             format!("---\nname: {name}\ndescription: test skill\n---\n{body}"),
         )
         .unwrap();
-        ctx.skills.push(Skill {
+        ctx.skills.list.push(Skill {
             name: name.to_string(),
             description: "test skill".to_string(),
             dir,
@@ -177,7 +179,7 @@ mod tests {
             ancestor_skills: Vec::new(),
             background: None,
         });
-        let out = run(&ctx, &json!({"name": "pdf-tools"}));
+        let out = run(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({"name": "pdf-tools"}));
         assert!(!out.is_error, "{}", out.content);
         assert!(
             out.content
@@ -200,7 +202,7 @@ mod tests {
         // ceiling) the mapping must not advertise delegation the schema
         // cannot honor.
         ctx.task = None;
-        let leaf = run(&ctx, &json!({"name": "pdf-tools"}));
+        let leaf = run(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({"name": "pdf-tools"}));
         assert!(!leaf.is_error, "{}", leaf.content);
         assert!(
             leaf.content
@@ -215,12 +217,12 @@ mod tests {
         );
         assert!(out.warning.is_none());
         assert_eq!(
-            *ctx.loaded_skills.lock().unwrap(),
+            *ctx.skills.loaded.lock().unwrap(),
             vec!["pdf-tools".to_string()]
         );
         // Loading again does not duplicate the tracking entry.
-        run(&ctx, &json!({"name": "pdf-tools"}));
-        assert_eq!(ctx.loaded_skills.lock().unwrap().len(), 1);
+        run(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({"name": "pdf-tools"}));
+        assert_eq!(ctx.skills.loaded.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -228,31 +230,31 @@ mod tests {
         let (_tmp, mut ctx) = test_ctx();
         install_skill(&mut ctx, "alpha", "a\n");
         install_skill(&mut ctx, "beta", "b\n");
-        let out = run(&ctx, &json!({"name": "gamma"}));
+        let out = run(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({"name": "gamma"}));
         assert!(out.is_error);
         assert!(out.content.contains("unknown skill \"gamma\""));
         assert!(out.content.contains("alpha, beta"));
-        assert!(ctx.loaded_skills.lock().unwrap().is_empty());
+        assert!(ctx.skills.loaded.lock().unwrap().is_empty());
     }
 
     #[test]
     fn load_cancellation_is_structural() {
         let (_tmp, mut ctx) = test_ctx();
         install_skill(&mut ctx, "alpha", "body\n");
-        let out = run_with(&ctx, &json!({"name": "alpha"}), || true);
+        let out = run_with(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({"name": "alpha"}), || true);
         assert!(out.canceled);
         assert!(out.is_error);
-        assert!(ctx.loaded_skills.lock().unwrap().is_empty());
+        assert!(ctx.skills.loaded.lock().unwrap().is_empty());
     }
 
     #[test]
     fn uncapped_ctx_loads_the_whole_oversize_body() {
         let (_tmp, mut ctx) = test_ctx();
-        ctx.caps = crate::tools::truncate::Caps::uncapped();
+        ctx.core.caps = crate::tools::truncate::Caps::uncapped();
         // The same 30 KiB fixture that gets cut at 24 KiB under the defaults.
         let body: String = (0..3000).map(|i| format!("body line {i}\n")).collect();
         install_skill(&mut ctx, "big", &body);
-        let out = run(&ctx, &json!({"name": "big"}));
+        let out = run(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({"name": "big"}));
         assert!(!out.is_error);
         assert!(!out.content.contains("[skill body capped"));
         assert!(out.content.contains("body line 2999\n"));
@@ -267,7 +269,7 @@ mod tests {
         // 30 KiB body: past the 24 KiB cap and the ~5k-token recommendation.
         let body: String = (0..3000).map(|i| format!("body line {i}\n")).collect();
         install_skill(&mut ctx, "big", &body);
-        let out = run(&ctx, &json!({"name": "big"}));
+        let out = run(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({"name": "big"}));
         assert!(!out.is_error);
         assert!(out.content.len() < 25 * 1024 + 200);
         // The cap must deliver the leading ~24 KiB, not an empty stub.
@@ -329,11 +331,11 @@ mod tests {
     fn missing_name_and_missing_file_are_typed_errors() {
         let (_tmp, mut ctx) = test_ctx();
         install_skill(&mut ctx, "gone", "body\n");
-        let out = run(&ctx, &json!({}));
+        let out = run(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({}));
         assert!(out.is_error);
         assert!(out.content.contains("missing required parameter"));
-        std::fs::remove_file(&ctx.skills[0].file).unwrap();
-        let out = run(&ctx, &json!({"name": "gone"}));
+        std::fs::remove_file(&ctx.skills.list[0].file).unwrap();
+        let out = run(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({"name": "gone"}));
         assert!(out.is_error);
         assert!(out.content.contains("cannot read skill"));
     }

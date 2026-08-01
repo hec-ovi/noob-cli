@@ -427,10 +427,11 @@ impl Agent {
         // cycle's pin (the seen registry does not survive a resume).
         let mut files: Vec<String> = self
             .tool_ctx
+            .fs
             .seen
             .paths()
             .iter()
-            .map(|p| crate::tools::display_path(&self.tool_ctx, p))
+            .map(|p| crate::tools::display_path(&self.tool_ctx.core.workspace, p))
             .collect();
         for prev in find_files_pin(&self.items) {
             if !files.contains(&prev) {
@@ -451,7 +452,7 @@ impl Agent {
         // Deterministic re-listing (names only) so the model does not forget
         // what it loaded, even when the summarizer ignores its instructions
         // or the hard-drop path ran. Bodies are reloadable via the tool.
-        let loaded = self.tool_ctx.loaded_skills.lock().unwrap().join(", ");
+        let loaded = self.tool_ctx.skills.loaded.lock().unwrap().join(", ");
         if !loaded.is_empty() {
             spliced.push_str(&format!("\n[loaded skills: {loaded}]"));
         }
@@ -500,20 +501,20 @@ impl Agent {
         // that never hears this keeps showing pages the agent has forgotten.
         // Before the invalidation, not after, because the registry is what
         // says which files there were.
-        if self.tool_ctx.emitter.is_on() {
+        if self.tool_ctx.core.emitter.is_on() {
             // Only what is still in context. The registry is append-only, so
             // `paths()` is every file the session ever touched and a second
             // compaction would announce the end of files that ended two
             // compactions ago.
-            for path in self.tool_ctx.seen.fresh_paths() {
-                self.tool_ctx.emitter.send(Wire::FileClose {
-                    path: crate::tools::display_path(&self.tool_ctx, &path),
+            for path in self.tool_ctx.fs.seen.fresh_paths() {
+                self.tool_ctx.core.emitter.send(Wire::FileClose {
+                    path: crate::tools::display_path(&self.tool_ctx.core.workspace, &path),
                     // Compaction is not a tool call; nothing asked for this.
                     call_id: None,
                 });
             }
         }
-        self.tool_ctx.seen.invalidate_freshness();
+        self.tool_ctx.fs.seen.invalidate_freshness();
         self.adopt(items, ui);
     }
 
@@ -526,7 +527,8 @@ impl Agent {
         self.last_usage = None;
         self.chars_since_usage = self.items.iter().map(item_chars).sum();
         self.compact_backoff = 0;
-        self.tool_ctx.set_context(
+        self.tool_ctx.gauge.set(
+            &self.tool_ctx.core.emitter,
             self.context_estimate(),
             self.ctx_tokens,
             self.effective_compact_threshold(),

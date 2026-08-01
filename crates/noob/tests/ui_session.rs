@@ -116,7 +116,7 @@ fn resume_redisplays_the_prior_conversation() {
     let status = pty.finish();
 
     assert!(status.success(), "repl exit: {status:?};\n{}", pty.seen());
-    let plain = strip_ansi(&pty.seen());
+    let plain = strip_ansi(pty.seen());
     assert!(
         plain.contains("PRIORUSERLINE"),
         "prior user line not replayed:\n{plain}"

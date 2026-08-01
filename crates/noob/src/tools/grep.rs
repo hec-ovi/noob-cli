@@ -9,16 +9,18 @@ use noob_provider::http::INTERRUPTED;
 use serde_json::Value;
 
 use super::truncate::{clip_line, grep_trailer};
-use super::{ToolCtx, ToolOutcome, display_path, need_str, opt_bool, opt_str};
+use super::{Core, ToolOutcome, display_path, need_str, opt_bool, opt_str};
+#[cfg(test)]
+use super::ToolCtx;
 
 const CANCELED: &str = "grep canceled by user";
 
-pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
-    run_with(ctx, args, || INTERRUPTED.load(Ordering::SeqCst))
+pub fn run(core: &Core, args: &Value) -> ToolOutcome {
+    run_with(core, args, || INTERRUPTED.load(Ordering::SeqCst))
 }
 
-fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> ToolOutcome {
-    match run_inner(ctx, args, &interrupted) {
+fn run_with(core: &Core, args: &Value, interrupted: impl Fn() -> bool) -> ToolOutcome {
+    match run_inner(core, args, &interrupted) {
         Ok(out) => out,
         Err(msg) if msg == CANCELED => ToolOutcome::canceled_with(msg),
         Err(msg) => ToolOutcome::err(msg),
@@ -26,7 +28,7 @@ fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> Tool
 }
 
 fn run_inner(
-    ctx: &ToolCtx,
+    core: &Core,
     args: &Value,
     interrupted: &impl Fn() -> bool,
 ) -> Result<ToolOutcome, String> {
@@ -40,11 +42,11 @@ fn run_inner(
         })?;
 
     let root_raw = opt_str(args, "path")?.unwrap_or(".");
-    let root = super::guard::resolve_path(&ctx.workspace, root_raw);
+    let root = super::guard::resolve_path(&core.workspace, root_raw);
     if !root.exists() {
         return Err(format!(
             "cannot search {}: no such path; check it with ls",
-            display_path(ctx, &root)
+            display_path(&core.workspace, &root)
         ));
     }
 
@@ -74,7 +76,7 @@ fn run_inner(
             continue;
         }
         if !scan_file(
-            ctx,
+            core,
             entry.path(),
             &re,
             &mut total,
@@ -101,7 +103,7 @@ fn run_inner(
 
 #[allow(clippy::too_many_arguments)]
 fn scan_file(
-    ctx: &ToolCtx,
+    core: &Core,
     path: &Path,
     re: &regex::Regex,
     total: &mut usize,
@@ -117,7 +119,7 @@ fn scan_file(
         return true; // binary
     }
     let text = String::from_utf8_lossy(&bytes);
-    let rel = display_path(ctx, path);
+    let rel = display_path(&core.workspace, path);
     for line in text.lines() {
         if interrupted() {
             return false;
@@ -126,15 +128,15 @@ fn scan_file(
             continue;
         }
         *total += 1;
-        if *shown >= ctx.caps.grep_matches || *capped {
+        if *shown >= core.caps.grep_matches || *capped {
             continue;
         }
         // The byte cap is checked against the WHOLE rendered line before it
         // is appended, so the result can never overshoot the budget; the
         // first line that does not fit closes the output for good (shown
         // stays a contiguous prefix of the matches, as the trailer states).
-        let clipped = clip_line(line.trim_end(), ctx.caps.line_chars);
-        if out.len() + rel.len() + 2 + clipped.len() + 1 > ctx.caps.grep_bytes {
+        let clipped = clip_line(line.trim_end(), core.caps.line_chars);
+        if out.len() + rel.len() + 2 + clipped.len() + 1 > core.caps.grep_bytes {
             *capped = true;
             continue;
         }
@@ -154,23 +156,23 @@ mod tests {
     use serde_json::json;
 
     fn seed(ctx: &ToolCtx) {
-        std::fs::create_dir_all(ctx.workspace.join("src")).unwrap();
+        std::fs::create_dir_all(ctx.core.workspace.join("src")).unwrap();
         std::fs::write(
-            ctx.workspace.join("src/a.rs"),
+            ctx.core.workspace.join("src/a.rs"),
             "fn alpha() {}\nfn beta() {}\n",
         )
         .unwrap();
-        std::fs::write(ctx.workspace.join("notes.md"), "alpha note\n").unwrap();
-        std::fs::write(ctx.workspace.join(".gitignore"), "skipme/\n").unwrap();
-        std::fs::create_dir_all(ctx.workspace.join("skipme")).unwrap();
-        std::fs::write(ctx.workspace.join("skipme/x.rs"), "fn alpha() {}\n").unwrap();
+        std::fs::write(ctx.core.workspace.join("notes.md"), "alpha note\n").unwrap();
+        std::fs::write(ctx.core.workspace.join(".gitignore"), "skipme/\n").unwrap();
+        std::fs::create_dir_all(ctx.core.workspace.join("skipme")).unwrap();
+        std::fs::write(ctx.core.workspace.join("skipme/x.rs"), "fn alpha() {}\n").unwrap();
     }
 
     #[test]
     fn path_colon_line_no_line_numbers_and_gitignore_respected() {
         let (_t, ctx) = test_ctx();
         seed(&ctx);
-        let out = run(&ctx, &json!({"pattern": "alpha"}));
+        let out = run(&ctx.core, &json!({"pattern": "alpha"}));
         assert!(!out.is_error);
         assert_eq!(
             out.content,
@@ -182,20 +184,20 @@ mod tests {
     fn glob_filter_narrows_files() {
         let (_t, ctx) = test_ctx();
         seed(&ctx);
-        let out = run(&ctx, &json!({"pattern": "alpha", "glob": "*.rs"}));
+        let out = run(&ctx.core, &json!({"pattern": "alpha", "glob": "*.rs"}));
         assert_eq!(out.content, "src/a.rs: fn alpha() {}\n1 match");
     }
 
     #[test]
     fn ignore_case_flag_works() {
         let (_t, ctx) = test_ctx();
-        std::fs::write(ctx.workspace.join("f.txt"), "ALPHA\n").unwrap();
+        std::fs::write(ctx.core.workspace.join("f.txt"), "ALPHA\n").unwrap();
         assert!(
-            run(&ctx, &json!({"pattern": "alpha"}))
+            run(&ctx.core, &json!({"pattern": "alpha"}))
                 .content
                 .contains("no matches")
         );
-        let out = run(&ctx, &json!({"pattern": "alpha", "ignore_case": true}));
+        let out = run(&ctx.core, &json!({"pattern": "alpha", "ignore_case": true}));
         assert!(out.content.contains("f.txt: ALPHA"));
     }
 
@@ -203,8 +205,8 @@ mod tests {
     fn golden_cap_trailer_and_total_count() {
         let (_t, ctx) = test_ctx();
         let body: String = (0..312).map(|i| format!("needle {i}\n")).collect();
-        std::fs::write(ctx.workspace.join("big.txt"), body).unwrap();
-        let out = run(&ctx, &json!({"pattern": "needle"}));
+        std::fs::write(ctx.core.workspace.join("big.txt"), body).unwrap();
+        let out = run(&ctx.core, &json!({"pattern": "needle"}));
         assert!(
             out.content
                 .ends_with("312 matches, showing 100; narrow the pattern or add a glob")
@@ -223,8 +225,8 @@ mod tests {
         let body: String = (0..50)
             .map(|i| format!("needle{i:03}{}\n", "x".repeat(391)))
             .collect();
-        std::fs::write(ctx.workspace.join("big.txt"), body).unwrap();
-        let out = run(&ctx, &json!({"pattern": "needle"}));
+        std::fs::write(ctx.core.workspace.join("big.txt"), body).unwrap();
+        let out = run(&ctx.core, &json!({"pattern": "needle"}));
         assert!(!out.is_error);
         assert!(
             out.content
@@ -244,15 +246,15 @@ mod tests {
     #[test]
     fn uncapped_ctx_shows_every_match_unclipped() {
         let (_t, mut ctx) = test_ctx();
-        ctx.caps = super::super::truncate::Caps::uncapped();
+        ctx.core.caps = super::super::truncate::Caps::uncapped();
         let body: String = (0..312).map(|i| format!("needle {i}\n")).collect();
-        std::fs::write(ctx.workspace.join("big.txt"), body).unwrap();
+        std::fs::write(ctx.core.workspace.join("big.txt"), body).unwrap();
         std::fs::write(
-            ctx.workspace.join("long.txt"),
+            ctx.core.workspace.join("long.txt"),
             format!("needle {}\n", "y".repeat(700)),
         )
         .unwrap();
-        let out = run(&ctx, &json!({"pattern": "needle"}));
+        let out = run(&ctx.core, &json!({"pattern": "needle"}));
         assert!(out.content.ends_with("313 matches"), "{}", out.content);
         assert_eq!(out.content.lines().count(), 314);
         assert!(!out.content.contains("[line clipped;"));
@@ -263,14 +265,14 @@ mod tests {
     fn single_file_path_searches_just_that_file() {
         let (_t, ctx) = test_ctx();
         seed(&ctx);
-        let out = run(&ctx, &json!({"pattern": "beta", "path": "src/a.rs"}));
+        let out = run(&ctx.core, &json!({"pattern": "beta", "path": "src/a.rs"}));
         assert_eq!(out.content, "src/a.rs: fn beta() {}\n1 match");
     }
 
     #[test]
     fn bad_regex_names_the_remedy() {
         let (_t, ctx) = test_ctx();
-        let out = run(&ctx, &json!({"pattern": "fn ("}));
+        let out = run(&ctx.core, &json!({"pattern": "fn ("}));
         assert!(out.is_error);
         assert!(out.content.contains("bad regex"));
         assert!(out.content.contains("backslash"));
@@ -280,7 +282,7 @@ mod tests {
     fn zero_matches_is_not_an_error() {
         let (_t, ctx) = test_ctx();
         seed(&ctx);
-        let out = run(&ctx, &json!({"pattern": "does_not_exist_anywhere"}));
+        let out = run(&ctx.core, &json!({"pattern": "does_not_exist_anywhere"}));
         assert!(!out.is_error);
         assert!(out.content.contains("no matches"));
     }
@@ -288,8 +290,8 @@ mod tests {
     #[test]
     fn search_cancellation_is_structural() {
         let (_t, ctx) = test_ctx();
-        std::fs::write(ctx.workspace.join("a.txt"), "needle\n").unwrap();
-        let out = run_with(&ctx, &json!({"pattern": "needle"}), || true);
+        std::fs::write(ctx.core.workspace.join("a.txt"), "needle\n").unwrap();
+        let out = run_with(&ctx.core, &json!({"pattern": "needle"}), || true);
         assert!(out.canceled);
         assert!(out.is_error);
     }

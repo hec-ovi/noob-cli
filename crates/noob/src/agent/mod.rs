@@ -238,7 +238,7 @@ impl Agent {
                 .sum::<usize>();
         let replayed_chars: usize = items.iter().map(compact::item_chars).sum();
         recover_loaded_skills(&tool_ctx, &items);
-        let initial_skills = tool_ctx.skills.iter().map(|s| s.name.clone()).collect();
+        let initial_skills = tool_ctx.skills.list.iter().map(|s| s.name.clone()).collect();
         let agent = Agent {
             client,
             config_dir,
@@ -332,8 +332,8 @@ impl Agent {
                 *content = "[plan cleared from context]".to_string();
             }
         }
-        self.tool_ctx.todos.lock().unwrap().clear();
-        *self.tool_ctx.plan_timing.lock().unwrap() = tools::PlanTiming::default();
+        self.tool_ctx.plan.todos.lock().unwrap().clear();
+        *self.tool_ctx.plan.timing.lock().unwrap() = tools::PlanTiming::default();
         self.adopt(items, ui);
         updates
     }
@@ -383,12 +383,13 @@ impl Agent {
     /// (the `skill` tool also rejects it structurally). Returns (added,
     /// removed) names for the caller's summary line.
     pub fn reload_skills(&mut self, ui: &mut Ui) -> (Vec<String>, Vec<String>) {
-        let skill_paths = crate::config::skill_paths(&self.config_dir, &self.tool_ctx.workspace);
+        let skill_paths = crate::config::skill_paths(&self.config_dir, &self.tool_ctx.core.workspace);
         let fresh =
-            crate::skills::discover(&self.tool_ctx.workspace, &self.config_dir, &skill_paths);
+            crate::skills::discover(&self.tool_ctx.core.workspace, &self.config_dir, &skill_paths);
         let old: std::collections::HashSet<&str> = self
             .tool_ctx
             .skills
+            .list
             .iter()
             .map(|s| s.name.as_str())
             .collect();
@@ -401,6 +402,7 @@ impl Agent {
         let removed: Vec<String> = self
             .tool_ctx
             .skills
+            .list
             .iter()
             .filter(|s| !new.contains(s.name.as_str()))
             .map(|s| s.name.clone())
@@ -420,8 +422,8 @@ impl Agent {
             })
             .collect();
 
-        let had_none = self.tool_ctx.skills.is_empty();
-        self.tool_ctx.skills = fresh;
+        let had_none = self.tool_ctx.skills.list.is_empty();
+        self.tool_ctx.skills.list = fresh;
 
         // Register the skill tool once, on the transition from no skills to
         // some: an absent schema cannot be called, so a first-ever skill needs
@@ -429,7 +431,7 @@ impl Agent {
         // break, like plan mode); a session that already had skills keeps the
         // exact same wire tools and breaks nothing.
         if had_none
-            && !self.tool_ctx.skills.is_empty()
+            && !self.tool_ctx.skills.list.is_empty()
             && !self.tools.iter().any(|t| t.name == "skill")
         {
             let spec = tools::skill::spec();
@@ -466,7 +468,7 @@ impl Agent {
     /// server names for the caller's summary line.
     pub fn reload_mcp(&mut self, ui: &mut Ui) -> (Vec<String>, Vec<String>) {
         let (servers, warnings) =
-            crate::mcp::config::load(&self.tool_ctx.workspace, &self.config_dir);
+            crate::mcp::config::load(&self.tool_ctx.core.workspace, &self.config_dir);
         for warning in &warnings {
             ui.error(&format!("mcp: {warning}"));
         }
@@ -536,6 +538,7 @@ impl Agent {
         let current: std::collections::HashSet<&str> = self
             .tool_ctx
             .skills
+            .list
             .iter()
             .map(|s| s.name.as_str())
             .collect();
@@ -547,6 +550,7 @@ impl Agent {
         Some(
             self.tool_ctx
                 .skills
+                .list
                 .iter()
                 .map(|s| s.name.clone())
                 .collect(),
@@ -571,7 +575,8 @@ impl Agent {
     }
 
     fn sync_context(&self) {
-        self.tool_ctx.set_context(
+        self.tool_ctx.gauge.set(
+            &self.tool_ctx.core.emitter,
             self.context_estimate(),
             self.ctx_tokens,
             self.effective_compact_threshold(),
@@ -643,7 +648,7 @@ impl Agent {
     /// starting work again, and reusing the number would make two spans of
     /// activity indistinguishable.
     fn drive(&mut self, ui: &mut Ui) -> RunEnd {
-        let emitter = self.tool_ctx.emitter.clone();
+        let emitter = self.tool_ctx.core.emitter.clone();
         self.turn_seq += 1;
         let turn = self.turn_seq;
         emitter.send(Wire::TurnStart { turn });
@@ -663,7 +668,7 @@ impl Agent {
     }
 
     fn drive_rounds(&mut self, ui: &mut Ui) -> RunEnd {
-        let emitter = self.tool_ctx.emitter.clone();
+        let emitter = self.tool_ctx.core.emitter.clone();
         self.consec_errors = 0;
         self.last_rounds = 0;
         self.status_only_rounds = 0;
@@ -866,7 +871,7 @@ impl Agent {
                 let planned = self.gate_skills_write(planned, ui);
                 batch.push(planned);
                 if INTERRUPTED.load(Ordering::SeqCst) {
-                    self.tool_ctx.approved_skill_writes.lock().unwrap().clear();
+                    self.tool_ctx.grants.clear();
                     return self.finish_interrupt_mid_planning(ui, &turn.tool_calls, batch.len());
                 }
             }
@@ -985,7 +990,7 @@ impl Agent {
             // Approvals belong to this one planned batch. Successful tools
             // consumed their counts; cancellation or a crash must not leak an
             // unused grant into a later model turn.
-            self.tool_ctx.approved_skill_writes.lock().unwrap().clear();
+            self.tool_ctx.grants.clear();
 
             let mut nudge = false;
             for (call, outcome) in turn.tool_calls.iter().zip(&outcomes) {
@@ -1101,7 +1106,7 @@ impl Agent {
         &mut self,
         ui: &mut Ui,
     ) -> Option<crate::subagent::BackgroundHub> {
-        let emitter = self.tool_ctx.emitter.clone();
+        let emitter = self.tool_ctx.core.emitter.clone();
         let cfg = self.tool_ctx.task.as_mut()?;
         let hub = crate::subagent::BackgroundHub::with_emitter(cfg.concurrency, emitter);
         cfg.background = Some(hub.clone());
@@ -1323,7 +1328,7 @@ impl Agent {
         // open: none after a stream-level interrupt, some after one landed
         // mid-planning, all of a wave after one landed mid-batch. The emitter
         // knows which, so nothing here has to guess.
-        self.tool_ctx.emitter.cancel_open_calls();
+        self.tool_ctx.core.emitter.cancel_open_calls();
         INTERRUPTED.store(false, Ordering::SeqCst);
         ui.end_line();
         for call in pending_calls {
@@ -1381,7 +1386,7 @@ impl Agent {
         // Same key the write/edit tools re-check at execution time: the
         // filesystem-real target when it lands in a skills dir (catching a
         // symlinked route), else the lexical form.
-        let Some(target) = guard::skill_write_target(&self.tool_ctx.workspace, raw) else {
+        let Some(target) = guard::skill_write_target(&self.tool_ctx.core.workspace, raw) else {
             return planned;
         };
         if ui.ask(&format!(
@@ -1390,13 +1395,7 @@ impl Agent {
             // Record this exact target so the tool's execution-time re-check
             // passes; other paths (and a mid-batch symlink target) stay
             // unapproved and are refused there.
-            self.tool_ctx
-                .approved_skill_writes
-                .lock()
-                .unwrap()
-                .entry(target)
-                .and_modify(|count| *count = count.saturating_add(1))
-                .or_insert(1);
+            self.tool_ctx.grants.grant(target);
             return planned;
         }
         sched::Planned::Canned(
@@ -1633,9 +1632,9 @@ fn recover_loaded_skills(tool_ctx: &ToolCtx, items: &[Item]) {
             }
         }
     }
-    let mut loaded = tool_ctx.loaded_skills.lock().unwrap();
+    let mut loaded = tool_ctx.skills.loaded.lock().unwrap();
     for name in recovered {
-        if tool_ctx.skills.iter().any(|s| s.name == name) && !loaded.contains(&name) {
+        if tool_ctx.skills.list.iter().any(|s| s.name == name) && !loaded.contains(&name) {
             loaded.push(name);
         }
     }
@@ -2261,7 +2260,7 @@ mod tests {
         let ws = tmp.canonicalize().unwrap();
         let mut tool_ctx = ToolCtx::new(ws, crate::tools::guard::Sandbox::Container);
         for name in names {
-            tool_ctx.skills.push(crate::skills::Skill {
+            tool_ctx.skills.list.push(crate::skills::Skill {
                 name: name.to_string(),
                 description: "d".into(),
                 dir: tmp.join(name),
@@ -2314,7 +2313,7 @@ mod tests {
         ];
         let agent = test_agent(items, tool_ctx, tmp.path());
         assert_eq!(
-            *agent.tool_ctx.loaded_skills.lock().unwrap(),
+            *agent.tool_ctx.skills.loaded.lock().unwrap(),
             vec!["alpha".to_string()],
             "only the delivered body counts"
         );
@@ -2334,7 +2333,7 @@ mod tests {
         ];
         let agent = test_agent(items, tool_ctx, tmp.path());
         assert_eq!(
-            *agent.tool_ctx.loaded_skills.lock().unwrap(),
+            *agent.tool_ctx.skills.loaded.lock().unwrap(),
             vec!["alpha".to_string(), "beta".to_string()],
             "summary-line names recovered, unknown names dropped"
         );
@@ -2741,20 +2740,20 @@ mod tests {
             131_072,
         );
         let mut ui = crate::ui::Ui::new(crate::ui::Mode::Exec);
-        agent.tool_ctx.seen.record(&seen_path, stamp, true);
+        agent.tool_ctx.fs.seen.record(&seen_path, stamp, true);
 
         agent.clear_plan_history(&mut ui);
         assert!(
-            agent.tool_ctx.seen.stub_unchanged(&seen_path, stamp),
+            agent.tool_ctx.fs.seen.stub_unchanged(&seen_path, stamp),
             "clearing plan history must not disarm the read short-circuit"
         );
 
         // Undo the toggle the assertion above consumed, then compact.
-        agent.tool_ctx.seen.record(&seen_path, stamp, true);
-        agent.tool_ctx.seen.stub_unchanged(&seen_path, stamp);
+        agent.tool_ctx.fs.seen.record(&seen_path, stamp, true);
+        agent.tool_ctx.fs.seen.stub_unchanged(&seen_path, stamp);
         agent.adopt_compacted(vec![Item::User("[conversation summary]".into())], &mut ui);
         assert!(
-            !agent.tool_ctx.seen.stub_unchanged(&seen_path, stamp),
+            !agent.tool_ctx.fs.seen.stub_unchanged(&seen_path, stamp),
             "compaction drops tool bodies, so the stamp must stop being fresh"
         );
     }

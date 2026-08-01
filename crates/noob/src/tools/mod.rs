@@ -21,7 +21,7 @@ pub mod websearch;
 pub mod write;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -77,101 +77,137 @@ impl TodoStatus {
 
 /// Session-scoped state the tools share. Interior mutability because
 /// read-only tools run concurrently on scoped threads.
-pub struct ToolCtx {
+/// The shared core every tool sees: where it runs, what wall applies, how
+/// results are bounded, and the side channel.
+pub struct Core {
     /// Canonicalized working directory; the root of relative paths.
     pub workspace: PathBuf,
     pub sandbox: Sandbox,
-    /// The protocol side-channel. Off unless bootstrap turned it on, and a
-    /// no-op when off, so no tool's output changes by a byte because of it.
-    pub emitter: crate::emit::Emitter,
-    pub seen: SeenFiles,
-    /// Failed-edit counter per (path, old) for the escalation ladder.
-    pub edit_failures: Mutex<std::collections::HashMap<(PathBuf, u64), u32>>,
-    /// One-time "no sandbox" warning for the bash tool (workspace mode).
-    pub bash_warned: AtomicBool,
-    /// Skills discovered at session start; empty means the skill tool is
-    /// not registered. Set once at bootstrap, read-only afterwards.
-    pub skills: Vec<crate::skills::Skill>,
-    /// Names of skills loaded this session, in load order, for the
-    /// post-compaction re-listing.
-    pub loaded_skills: Mutex<Vec<String>>,
-    /// One execution grant per confirmed skills-dir write, counted by real
-    /// target path. Counts preserve two explicit approvals for two calls to
-    /// the same path while preventing either grant from leaking to a later
-    /// operation.
-    pub approved_skill_writes: Mutex<std::collections::HashMap<PathBuf, usize>>,
-    /// MCP manager; Some only when mcp.json configured at least one server
-    /// (and then mcp_connect/mcp_call are registered). Set at bootstrap.
-    pub mcp: Option<crate::mcp::Mcp>,
-    /// Whether the `websearch` tool is registered this session (the CLI was
-    /// on PATH at bootstrap). Read by the subagent tool, which must not offer
-    /// a web child a tool this session does not have. Set at bootstrap.
-    pub websearch: bool,
-    /// Sub-agent settings; Some only when the subagent tool is registered
-    /// (depth below the ceiling, full tool set). Set at bootstrap.
-    pub task: Option<crate::subagent::TaskCfg>,
-    /// The agentic checklist the `plan` tool maintains for this session.
-    /// Overwritten wholesale on each `plan` call; starts empty.
-    pub todos: Mutex<Vec<TodoItem>>,
-    /// Wall-clock lifecycle for the visible plan and each observed active item.
-    /// This is display state only and never enters a provider request except via
-    /// the rendered plan tool result.
-    pub(crate) plan_timing: Mutex<PlanTiming>,
     /// Truncation policy for every tool result (NOOB_TOOL_CAPS). Defaults to
     /// the shipped caps; bootstrap swaps in Caps::uncapped() when the setting
     /// says 0/off. Copy semantics, read-only after bootstrap.
     pub caps: truncate::Caps,
+    /// The protocol side-channel. Off unless bootstrap turned it on, and a
+    /// no-op when off, so no tool's output changes by a byte because of it.
+    pub emitter: crate::emit::Emitter,
+}
+
+/// File-tool state: staleness stamps, the edit escalation ladder, read dedup.
+pub struct FsState {
+    pub seen: SeenFiles,
+    /// Failed-edit counter per (path, old) for the escalation ladder.
+    pub edit_failures: Mutex<std::collections::HashMap<(PathBuf, u64), u32>>,
     /// NOOB_READ_DEDUP. False prints every `read` in full, even one the model
     /// already holds; the escape hatch for a model that distrusts the note.
     /// Set at bootstrap, read-only after.
     pub read_dedup: bool,
-    /// Context accounting shared with the model-callable `context` tool.
-    /// The agent refreshes the estimate at transcript boundaries; the tool
-    /// only reads these atomics, so concurrent read batches stay lock-free.
-    /// The threshold is the EFFECTIVE compaction trigger: 75% of the window,
-    /// raised while a failed or empty compaction is backing off, so the tool
-    /// never promises a compaction that the backoff is currently deferring.
-    context_used: AtomicU64,
-    context_total: AtomicU64,
-    context_threshold: AtomicU64,
-    /// Successful source-gathering `websearch` calls this session. The web
-    /// research gate counts these to tell a child that consulted sources
-    /// apart from one that answered from memory; failures and the
-    /// installation actions (init, doctor) never increment it.
-    evidence_calls: std::sync::atomic::AtomicUsize,
 }
 
-impl ToolCtx {
-    pub fn new(workspace: PathBuf, sandbox: Sandbox) -> ToolCtx {
-        ToolCtx {
-            workspace,
-            sandbox,
-            emitter: crate::emit::Emitter::default(),
-            seen: SeenFiles::new(),
-            edit_failures: Mutex::new(std::collections::HashMap::new()),
-            bash_warned: AtomicBool::new(false),
-            skills: Vec::new(),
-            loaded_skills: Mutex::new(Vec::new()),
-            approved_skill_writes: Mutex::new(std::collections::HashMap::new()),
-            mcp: None,
-            websearch: false,
-            task: None,
-            todos: Mutex::new(Vec::new()),
-            plan_timing: Mutex::new(PlanTiming::default()),
-            caps: truncate::Caps::default(),
-            read_dedup: true,
-            evidence_calls: std::sync::atomic::AtomicUsize::new(0),
-            context_used: AtomicU64::new(0),
-            context_total: AtomicU64::new(0),
-            context_threshold: AtomicU64::new(0),
+/// The skills-directory write gate: one execution grant per confirmed
+/// skills-dir write, counted by real target path. Counts preserve two
+/// explicit approvals for two calls to the same path while preventing either
+/// grant from leaking to a later operation.
+pub struct WriteGrants {
+    approved: Mutex<std::collections::HashMap<PathBuf, usize>>,
+}
+
+impl WriteGrants {
+    /// Execution-time half of the skills-dir write gate: refuse a write/edit
+    /// whose real target lands in a skills directory unless the user
+    /// confirmed exactly that target. Returns the refusal message, or None
+    /// when the write may proceed. Closes the plan-time-vs-execution-time
+    /// gap a same-batch symlink would otherwise open. Check only: the grant
+    /// is consumed by `consume` once the mutation has applied, so a call
+    /// that fails validation (stale file, missed edit) keeps it for the
+    /// retry; the batch-end clear in the agent still enforces
+    /// one-use-per-batch.
+    pub(crate) fn refusal(&self, workspace: &Path, raw: &str) -> Option<String> {
+        let target = guard::skill_write_target(workspace, raw)?;
+        if self.approved.lock().unwrap().contains_key(&target) {
+            return None;
+        }
+        Some(
+            "refused: writing into a skills directory needs the user's confirmation \
+             and it was not granted; leave skill files unchanged and continue \
+             without them"
+                .to_string(),
+        )
+    }
+
+    /// Consume exactly one grant for a skills-dir mutation that applied.
+    /// No-op for non-skills paths.
+    pub(crate) fn consume(&self, workspace: &Path, raw: &str) {
+        let Some(target) = guard::skill_write_target(workspace, raw) else {
+            return;
+        };
+        let mut approvals = self.approved.lock().unwrap();
+        if let std::collections::hash_map::Entry::Occupied(mut entry) = approvals.entry(target) {
+            if *entry.get() > 1 {
+                *entry.get_mut() -= 1;
+            } else {
+                entry.remove();
+            }
         }
     }
 
-    pub(crate) fn set_context(&self, used: u64, total: u64, threshold: u64) {
+    /// Record one user approval for this exact target.
+    pub(crate) fn grant(&self, target: PathBuf) {
+        self.approved
+            .lock()
+            .unwrap()
+            .entry(target)
+            .and_modify(|count| *count = count.saturating_add(1))
+            .or_insert(1);
+    }
+
+    /// Test seam: is a grant currently recorded for this exact target?
+    #[cfg(test)]
+    pub(crate) fn granted(&self, target: &Path) -> bool {
+        self.approved.lock().unwrap().contains_key(target)
+    }
+
+    /// Batch end: unspent grants never survive into the next batch.
+    pub(crate) fn clear(&self) {
+        self.approved.lock().unwrap().clear();
+    }
+}
+
+/// Session skills for the skill tool and the post-compaction re-listing.
+pub struct SkillsState {
+    /// Skills discovered at session start; empty means the skill tool is
+    /// not registered. Set once at bootstrap, read-only afterwards.
+    pub list: Vec<crate::skills::Skill>,
+    /// Names of skills loaded this session, in load order.
+    pub loaded: Mutex<Vec<String>>,
+}
+
+/// The plan tool's checklist and its display-only timing.
+pub struct PlanState {
+    /// Overwritten wholesale on each `plan` call; starts empty.
+    pub todos: Mutex<Vec<TodoItem>>,
+    /// Wall-clock lifecycle for the visible plan and each observed active
+    /// item. Display state only; never enters a provider request except via
+    /// the rendered plan tool result.
+    pub(crate) timing: Mutex<PlanTiming>,
+}
+
+/// Context accounting shared with the model-callable `context` tool. The
+/// agent refreshes the estimate at transcript boundaries; the tool only
+/// reads these atomics, so concurrent read batches stay lock-free. The
+/// threshold is the EFFECTIVE compaction trigger: 75% of the window, raised
+/// while a failed or empty compaction is backing off.
+pub struct ContextGauge {
+    used: AtomicU64,
+    total: AtomicU64,
+    threshold: AtomicU64,
+}
+
+impl ContextGauge {
+    pub(crate) fn set(&self, emitter: &crate::emit::Emitter, used: u64, total: u64, threshold: u64) {
         let before = (
-            self.context_used.swap(used, Ordering::Relaxed),
-            self.context_total.swap(total, Ordering::Relaxed),
-            self.context_threshold.swap(threshold, Ordering::Relaxed),
+            self.used.swap(used, Ordering::Relaxed),
+            self.total.swap(total, Ordering::Relaxed),
+            self.threshold.swap(threshold, Ordering::Relaxed),
         );
         // The agent refreshes at several boundaries that can land back to
         // back on the same numbers. A series wants the points where something
@@ -183,9 +219,9 @@ impl ToolCtx {
         // series rather than a reading. The `context` tool reads the same
         // atomics, but only when the model asks, which is rare and uneven; a
         // graph drawn from that would be a graph of the model's curiosity.
-        if self.emitter.is_on() {
+        if emitter.is_on() {
             let scale = (total > 0).then_some(total as f64);
-            self.emitter.metrics(
+            emitter.metrics(
                 "context",
                 vec![
                     noob_proto::Sample {
@@ -207,20 +243,96 @@ impl ToolCtx {
         }
     }
 
-    pub(crate) fn record_evidence_call(&self) {
-        self.evidence_calls.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn evidence_call_count(&self) -> usize {
-        self.evidence_calls.load(Ordering::Relaxed)
-    }
-
-    pub(crate) fn context(&self) -> (u64, u64, u64) {
+    pub(crate) fn read(&self) -> (u64, u64, u64) {
         (
-            self.context_used.load(Ordering::Relaxed),
-            self.context_total.load(Ordering::Relaxed),
-            self.context_threshold.load(Ordering::Relaxed),
+            self.used.load(Ordering::Relaxed),
+            self.total.load(Ordering::Relaxed),
+            self.threshold.load(Ordering::Relaxed),
         )
+    }
+}
+
+/// Successful source-gathering `websearch` calls this session. The web
+/// research gate counts these to tell a child that consulted sources apart
+/// from one that answered from memory; failures and the installation
+/// actions (init, doctor) never increment it.
+pub struct Evidence {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl Evidence {
+    pub(crate) fn record(&self) {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn count(&self) -> usize {
+        self.calls.load(Ordering::Relaxed)
+    }
+}
+
+/// The session's tool context: one shared core plus a slice per capability.
+/// Dispatch hands each tool only the slices its file declares, so what a
+/// tool can touch is its signature.
+pub struct ToolCtx {
+    pub core: Core,
+    pub fs: FsState,
+    pub grants: WriteGrants,
+    pub skills: SkillsState,
+    pub plan: PlanState,
+    pub gauge: ContextGauge,
+    pub evidence: Evidence,
+    /// One-time "no sandbox" warning for the bash tool (workspace mode).
+    pub bash_warned: AtomicBool,
+    /// MCP manager; Some only when mcp.json configured at least one server
+    /// (and then mcp_connect/mcp_call are registered). Set at bootstrap.
+    pub mcp: Option<crate::mcp::Mcp>,
+    /// Whether the `websearch` tool is registered this session (the CLI was
+    /// on PATH at bootstrap). Read by the subagent tool, which must not offer
+    /// a web child a tool this session does not have. Set at bootstrap.
+    pub websearch: bool,
+    /// Sub-agent settings; Some only when the subagent tool is registered
+    /// (depth below the ceiling, full tool set). Set at bootstrap.
+    pub task: Option<crate::subagent::TaskCfg>,
+}
+
+impl ToolCtx {
+    pub fn new(workspace: PathBuf, sandbox: Sandbox) -> ToolCtx {
+        ToolCtx {
+            core: Core {
+                workspace,
+                sandbox,
+                caps: truncate::Caps::default(),
+                emitter: crate::emit::Emitter::default(),
+            },
+            fs: FsState {
+                seen: SeenFiles::new(),
+                edit_failures: Mutex::new(std::collections::HashMap::new()),
+                read_dedup: true,
+            },
+            grants: WriteGrants {
+                approved: Mutex::new(std::collections::HashMap::new()),
+            },
+            skills: SkillsState {
+                list: Vec::new(),
+                loaded: Mutex::new(Vec::new()),
+            },
+            plan: PlanState {
+                todos: Mutex::new(Vec::new()),
+                timing: Mutex::new(PlanTiming::default()),
+            },
+            gauge: ContextGauge {
+                used: AtomicU64::new(0),
+                total: AtomicU64::new(0),
+                threshold: AtomicU64::new(0),
+            },
+            evidence: Evidence {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            },
+            bash_warned: AtomicBool::new(false),
+            mcp: None,
+            websearch: false,
+            task: None,
+        }
     }
 
     /// The fan-out cap for a group of task calls in one batch. A depth-1
@@ -233,51 +345,6 @@ impl ToolCtx {
             .map(|t| if t.depth == 0 { t.concurrency } else { 1 })
             .unwrap_or(1)
             .max(1)
-    }
-
-    /// Execution-time half of the skills-dir write gate: refuse a write/edit
-    /// whose real target lands in a skills directory unless the user
-    /// confirmed exactly that target. Returns the refusal message, or None
-    /// when the write may proceed. Closes the plan-time-vs-execution-time
-    /// gap a same-batch symlink would otherwise open. Check only: the grant
-    /// is consumed by `consume_skills_write_grant` once the mutation has
-    /// applied, so a call that fails validation (stale file, missed edit)
-    /// keeps it for the retry; the batch-end clear in the agent still
-    /// enforces one-use-per-batch.
-    pub(crate) fn skills_write_refusal(&self, raw: &str) -> Option<String> {
-        let target = guard::skill_write_target(&self.workspace, raw)?;
-        if self
-            .approved_skill_writes
-            .lock()
-            .unwrap()
-            .contains_key(&target)
-        {
-            return None;
-        }
-        Some(
-            "refused: writing into a skills directory needs the user's confirmation \
-             and it was not granted; leave skill files unchanged and continue \
-             without them"
-                .to_string(),
-        )
-    }
-
-    /// Consume exactly one grant for a skills-dir mutation that applied.
-    /// Counts preserve two explicit approvals for two calls to the same
-    /// path while preventing either grant from covering a third operation.
-    /// No-op for non-skills paths.
-    pub(crate) fn consume_skills_write_grant(&self, raw: &str) {
-        let Some(target) = guard::skill_write_target(&self.workspace, raw) else {
-            return;
-        };
-        let mut approvals = self.approved_skill_writes.lock().unwrap();
-        if let std::collections::hash_map::Entry::Occupied(mut entry) = approvals.entry(target) {
-            if *entry.get() > 1 {
-                *entry.get_mut() -= 1;
-            } else {
-                entry.remove();
-            }
-        }
     }
 }
 
@@ -526,7 +593,7 @@ pub fn dispatch(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
         } else {
             std::time::Duration::from_secs(30)
         };
-        match guard::workspace_write_lease(&ctx.workspace, wait, || {
+        match guard::workspace_write_lease(&ctx.core.workspace, wait, || {
             noob_provider::http::INTERRUPTED.load(Ordering::SeqCst)
         }) {
             Ok(lease) => Some(lease),
@@ -579,7 +646,7 @@ fn correct_path_arg(
     let Some(raw) = args.get("path").and_then(Value::as_str) else {
         return Ok((args.clone(), None));
     };
-    let found = paths::resolve_existing(&ctx.workspace, raw)?;
+    let found = paths::resolve_existing(&ctx.core.workspace, raw)?;
     let Some(note) = found.note else {
         return Ok((args.clone(), None));
     };
@@ -588,7 +655,7 @@ fn correct_path_arg(
     // the tool's own display and stamping stay in the shape it expects.
     let value = found
         .path
-        .strip_prefix(&ctx.workspace)
+        .strip_prefix(&ctx.core.workspace)
         .unwrap_or(found.path.as_path())
         .to_string_lossy()
         .into_owned();
@@ -613,21 +680,29 @@ fn dispatch_unlocked(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
 
 fn dispatch_resolved(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
     match name {
-        "read" => read::run(ctx, args),
-        "write" => write::run(ctx, args),
-        "edit" => edit::run(ctx, args),
-        "bash" => bash::run(ctx, args),
-        "context" => context::run(ctx, args),
-        "grep" => grep::run(ctx, args),
-        "glob" => glob::run(ctx, args),
-        "ls" => ls::run(ctx, args),
-        "skill" => skill::run(ctx, args),
+        "read" => read::run(&ctx.core, &ctx.fs, args),
+        "write" => write::run(&ctx.core, &ctx.fs, &ctx.grants, args),
+        "edit" => edit::run(&ctx.core, &ctx.fs, &ctx.grants, args),
+        "bash" => bash::run(&ctx.core, &ctx.bash_warned, args),
+        "context" => context::run(&ctx.gauge, args),
+        "grep" => grep::run(&ctx.core, args),
+        "glob" => glob::run(&ctx.core, args),
+        "ls" => ls::run(&ctx.core, args),
+        "skill" => skill::run(&ctx.core, &ctx.skills, ctx.task.is_some(), args),
         // `todo` accepts historical/replayed calls; only `plan` is registered.
-        "plan" | "todo" => todo::run(ctx, args),
-        "websearch" => websearch::run(ctx, args),
-        "mcp_connect" => mcp::run_connect(ctx, args),
-        "mcp_call" => mcp::run_call(ctx, args),
-        "subagent" => crate::subagent::run(ctx, args),
+        "plan" | "todo" => todo::run(&ctx.plan, args),
+        "websearch" => websearch::run(&ctx.core, &ctx.evidence, args),
+        "mcp_connect" => mcp::run_connect(ctx.mcp.as_ref(), &ctx.core.caps, args),
+        "mcp_call" => mcp::run_call(ctx.mcp.as_ref(), &ctx.core.caps, args),
+        "subagent" => crate::subagent::run(
+            &crate::subagent::SpawnEnv {
+                workspace: &ctx.core.workspace,
+                websearch: ctx.websearch,
+                task: ctx.task.as_ref(),
+                loaded_skills: &ctx.skills.loaded,
+            },
+            args,
+        ),
         other => ToolOutcome::err(format!(
             "unknown tool {other:?}; the available tools are listed in your tool schemas"
         ))
@@ -796,8 +871,8 @@ pub(crate) fn opt_bool(args: &Value, key: &str) -> Result<Option<bool>, String> 
 
 /// Render a path relative to the workspace when it is inside it (short,
 /// stable output for transcripts and summaries). The workspace itself is ".".
-pub(crate) fn display_path(ctx: &ToolCtx, path: &std::path::Path) -> String {
-    match path.strip_prefix(&ctx.workspace) {
+pub(crate) fn display_path(workspace: &std::path::Path, path: &std::path::Path) -> String {
+    match path.strip_prefix(workspace) {
         Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
         Ok(rel) => rel.display().to_string(),
         Err(_) => path.display().to_string(),
@@ -1044,7 +1119,7 @@ mod tests {
             background: None,
         });
         let child_lease =
-            guard::workspace_write_lease(&ctx.workspace, std::time::Duration::ZERO, || false)
+            guard::workspace_write_lease(&ctx.core.workspace, std::time::Duration::ZERO, || false)
                 .unwrap();
         let blocked = dispatch(
             &ctx,
@@ -1057,7 +1132,7 @@ mod tests {
                 .content
                 .contains("another parent or sub-agent mutation")
         );
-        assert!(!ctx.workspace.join("race.txt").exists());
+        assert!(!ctx.core.workspace.join("race.txt").exists());
 
         let concurrent_bash = dispatch(&ctx, "bash", &json!({"cmd": "pwd"}));
         assert!(
@@ -1085,7 +1160,7 @@ mod tests {
         };
         assert!(!written.is_error, "{}", written.content);
         assert_eq!(
-            std::fs::read_to_string(ctx.workspace.join("race.txt")).unwrap(),
+            std::fs::read_to_string(ctx.core.workspace.join("race.txt")).unwrap(),
             "parent"
         );
     }

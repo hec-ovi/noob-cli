@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use noob_provider::http::INTERRUPTED;
 use noob_provider::types::{Overrides, ToolSpec};
 
-use crate::tools::{ToolCtx, ToolOutcome, need_str, opt_str, opt_u64};
+use crate::tools::{ToolOutcome, need_str, opt_str, opt_u64};
 
 mod background;
 #[cfg(test)]
@@ -117,8 +117,18 @@ pub fn spec() -> ToolSpec {
     }
 }
 
-pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
-    let Some(cfg) = &ctx.task else {
+/// Everything the subagent tool needs from the session, as plain parameters.
+/// The tools box builds this at dispatch; this box never sees the tool
+/// context itself.
+pub struct SpawnEnv<'a> {
+    pub workspace: &'a std::path::Path,
+    pub websearch: bool,
+    pub task: Option<&'a TaskCfg>,
+    pub loaded_skills: &'a std::sync::Mutex<Vec<String>>,
+}
+
+pub fn run(env: &SpawnEnv, args: &Value) -> ToolOutcome {
+    let Some(cfg) = env.task else {
         return ToolOutcome::err(
             "sub-agents are not available here; do the work yourself with the other tools",
         );
@@ -208,7 +218,7 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
         Ok(_) => return ToolOutcome::err("parameter \"prompt\" is empty; resend the call"),
         Err(e) => return ToolOutcome::err(e),
     };
-    let web_available = ctx.websearch;
+    let web_available = env.websearch;
     let requested_tools_mode = match opt_str(args, "tools") {
         Ok(None) => "read-only".to_string(),
         Ok(Some(m @ ("read-only" | "web" | "all"))) => m.to_string(),
@@ -223,7 +233,7 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     // The installed research workflow explicitly assigns storage to the
     // parent. Small models sometimes still give that child `all`; recognize
     // the workflow's required brief and enforce its nonmutating web profile.
-    let research_investigation = research_investigation_loaded(ctx, &prompt);
+    let research_investigation = research_investigation_loaded(env.loaded_skills, &prompt);
     let tools_mode = if research_investigation && web_available {
         "web".to_string()
     } else {
@@ -243,7 +253,7 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
         Err(e) => return ToolOutcome::err(e),
     };
 
-    let excluded_skills = skill_exclusions(cfg, ctx, web_available);
+    let excluded_skills = skill_exclusions(cfg, env.loaded_skills, web_available);
     let request = TaskRequest {
         asked: prompt.clone(),
         prompt: child_prompt(prompt, web_available, tools_mode == "web"),
@@ -258,7 +268,7 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
         verbose: cfg.verbose,
         overrides: cfg.overrides.clone(),
         yolo: cfg.yolo,
-        workspace: ctx.workspace.clone(),
+        workspace: env.workspace.to_path_buf(),
         progress: None,
     };
     // Every dock child detaches. Full-tool children take the cross-process
@@ -270,9 +280,8 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     run_task(&run_cfg, &request, || INTERRUPTED.load(Ordering::SeqCst))
 }
 
-fn research_investigation_loaded(ctx: &ToolCtx, prompt: &str) -> bool {
-    if !ctx
-        .loaded_skills
+fn research_investigation_loaded(loaded: &std::sync::Mutex<Vec<String>>, prompt: &str) -> bool {
+    if !loaded
         .lock()
         .unwrap()
         .iter()
@@ -313,9 +322,9 @@ fn child_prompt(prompt: String, web_available: bool, web_only: bool) -> String {
     )
 }
 
-fn skill_exclusions(cfg: &TaskCfg, ctx: &ToolCtx, mcp_replaces_web_skill: bool) -> Vec<String> {
+fn skill_exclusions(cfg: &TaskCfg, loaded: &std::sync::Mutex<Vec<String>>, mcp_replaces_web_skill: bool) -> Vec<String> {
     let mut excluded = cfg.ancestor_skills.clone();
-    for name in ctx.loaded_skills.lock().unwrap().iter() {
+    for name in loaded.lock().unwrap().iter() {
         if !excluded.contains(name) {
             excluded.push(name.clone());
         }
@@ -826,6 +835,20 @@ mod tests {
     use super::*;
     use crate::tools::test_ctx;
 
+    /// Build the env the dispatch layer would: locals owned by the test.
+    fn env_of<'a>(
+        ws: &'a std::path::Path,
+        task: Option<&'a TaskCfg>,
+        loaded: &'a std::sync::Mutex<Vec<String>>,
+    ) -> SpawnEnv<'a> {
+        SpawnEnv {
+            workspace: ws,
+            websearch: false,
+            task,
+            loaded_skills: loaded,
+        }
+    }
+
     fn cfg() -> TaskCfg {
         TaskCfg {
             depth: 0,
@@ -843,31 +866,35 @@ mod tests {
     #[test]
     fn without_task_cfg_the_tool_refuses() {
         let (_tmp, ctx) = test_ctx();
-        let out = run(&ctx, &json!({"prompt": "do things"}));
+        let loaded = std::sync::Mutex::new(Vec::new());
+        let env = env_of(&ctx.core.workspace, None, &loaded);
+        let out = run(&env, &json!({"prompt": "do things"}));
         assert!(out.is_error);
         assert!(out.content.contains("not available here"));
     }
 
     #[test]
     fn argument_validation_teaches() {
-        let (_tmp, mut ctx) = test_ctx();
-        ctx.task = Some(cfg());
-        let out = run(&ctx, &json!({}));
+        let (_tmp, ctx) = test_ctx();
+        let task = cfg();
+        let loaded = std::sync::Mutex::new(Vec::new());
+        let env = env_of(&ctx.core.workspace, Some(&task), &loaded);
+        let out = run(&env, &json!({}));
         assert!(
             out.content
                 .contains("missing required parameter \"prompt\"")
         );
-        let out = run(&ctx, &json!({"prompt": "  "}));
+        let out = run(&env_of(&ctx.core.workspace, Some(&task), &loaded), &json!({"prompt": "  "}));
         assert!(out.content.contains("is empty"));
-        let out = run(&ctx, &json!({"prompt": "x", "tools": "everything"}));
+        let out = run(&env_of(&ctx.core.workspace, Some(&task), &loaded), &json!({"prompt": "x", "tools": "everything"}));
         assert!(out.content.contains("\"read-only\", \"web\", or \"all\""));
-        let out = run(&ctx, &json!({"prompt": "x", "tools": "web"}));
+        let out = run(&env_of(&ctx.core.workspace, Some(&task), &loaded), &json!({"prompt": "x", "tools": "web"}));
         assert!(
             out.is_error && out.content.contains("needs the websearch CLI on PATH"),
             "{}",
             out.content
         );
-        let out = run(&ctx, &json!({"prompt": "x", "cancel": "agent-1"}));
+        let out = run(&env_of(&ctx.core.workspace, Some(&task), &loaded), &json!({"prompt": "x", "cancel": "agent-1"}));
         assert!(out.is_error);
         assert!(out.content.contains("choose exactly one"));
 
@@ -882,29 +909,30 @@ mod tests {
 
     #[test]
     fn cancel_shape_stops_a_hub_job_and_refuses_cleanly_without_one() {
-        let (_tmp, mut ctx) = test_ctx();
-        ctx.task = Some(cfg());
+        let (_tmp, ctx) = test_ctx();
+        let mut task = cfg();
+        let loaded = std::sync::Mutex::new(Vec::new());
         // No hub on this surface: a clear refusal, never a spawn.
-        let out = run(&ctx, &json!({"cancel": "agent-1"}));
+        let env = env_of(&ctx.core.workspace, Some(&task), &loaded);
+        let out = run(&env, &json!({"cancel": "agent-1"}));
         assert!(out.is_error && out.content.contains("nothing to cancel"));
 
         let hub = BackgroundHub::new(1);
-        if let Some(task) = ctx.task.as_mut() {
-            task.background = Some(hub.clone());
-        }
-        let status = run(&ctx, &json!({"status": true}));
+        task.background = Some(hub.clone());
+        let env = env_of(&ctx.core.workspace, Some(&task), &loaded);
+        let status = run(&env, &json!({"status": true}));
         assert!(!status.is_error, "{}", status.content);
         assert!(status.content.contains("\"active\":0"));
         assert!(status.content.contains("do not poll"));
         // An unknown id is named as such, pointing back at the acks.
-        let out = run(&ctx, &json!({"cancel": "agent-9"}));
+        let out = run(&env_of(&ctx.core.workspace, Some(&task), &loaded), &json!({"cancel": "agent-9"}));
         assert!(out.is_error && out.content.contains("no active job"));
 
         // A blank cancel is "not canceling": it must fall through to the
         // spawn shape (live catch: the model padded its spawn call with
         // "cancel": "" and the spawn was rejected). With a blank prompt the
         // spawn path then reports the prompt, never a bad cancel id.
-        let out = run(&ctx, &json!({"cancel": "", "prompt": "  "}));
+        let out = run(&env_of(&ctx.core.workspace, Some(&task), &loaded), &json!({"cancel": "", "prompt": "  "}));
         assert!(out.content.contains("is empty"), "{}", out.content);
         assert!(!out.content.contains("no active job"), "{}", out.content);
 
@@ -915,7 +943,7 @@ mod tests {
             }
             crate::tools::ToolOutcome::canceled()
         });
-        let out = run(&ctx, &json!({"cancel": "agent-1"}));
+        let out = run(&env_of(&ctx.core.workspace, Some(&task), &loaded), &json!({"cancel": "agent-1"}));
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("canceling"));
         let results = hub.shutdown();
@@ -935,9 +963,11 @@ mod tests {
 
     #[test]
     fn bare_status_false_is_taught_not_mistaken_for_a_missing_prompt() {
-        let (_tmp, mut ctx) = test_ctx();
-        ctx.task = Some(cfg());
-        let out = run(&ctx, &json!({"status": false}));
+        let (_tmp, ctx) = test_ctx();
+        let task = cfg();
+        let loaded = std::sync::Mutex::new(Vec::new());
+        let env = env_of(&ctx.core.workspace, Some(&task), &loaded);
+        let out = run(&env, &json!({"status": false}));
         assert!(out.is_error);
         assert!(
             out.content.contains("status:false does nothing"),
@@ -950,16 +980,18 @@ mod tests {
             out.content
         );
         // Padded status:false alongside a real control still routes there.
-        let out = run(&ctx, &json!({"status": false, "cancel": "agent-1"}));
+        let out = run(&env_of(&ctx.core.workspace, Some(&task), &loaded), &json!({"status": false, "cancel": "agent-1"}));
         assert!(out.content.contains("nothing to cancel"), "{}", out.content);
     }
 
     #[test]
     fn status_digest_names_the_longest_running_child() {
-        let (_tmp, mut ctx) = test_ctx();
-        ctx.task = Some(cfg());
+        let (_tmp, ctx) = test_ctx();
+        let mut task = cfg();
+        let loaded = std::sync::Mutex::new(Vec::new());
         let hub = BackgroundHub::new(1);
-        if let Some(task) = ctx.task.as_mut() {
+        {
+            let task = &mut task;
             task.background = Some(hub.clone());
         }
         let _ack = hub.submit_with("probe".to_string(), |cancel| {
@@ -973,7 +1005,7 @@ mod tests {
             assert!(Instant::now() < deadline, "child never started running");
             std::thread::sleep(Duration::from_millis(5));
         }
-        let out = run(&ctx, &json!({"status": true}));
+        let out = run(&env_of(&ctx.core.workspace, Some(&task), &loaded), &json!({"status": true}));
         assert!(!out.is_error, "{}", out.content);
         assert!(
             out.summary.starts_with("1 active · 0 ready · agent-1 "),
@@ -991,13 +1023,15 @@ mod tests {
 
     #[test]
     fn loaded_and_ancestor_skills_are_excluded_from_descendants_once() {
-        let (_tmp, ctx) = test_ctx();
         let mut task = cfg();
         task.ancestor_skills = vec!["research".into(), "shared".into()];
-        *ctx.loaded_skills.lock().unwrap() =
-            vec!["shared".into(), "domain".into(), "research".into()];
+        let loaded = std::sync::Mutex::new(vec![
+            "shared".to_string(),
+            "domain".to_string(),
+            "research".to_string(),
+        ]);
         assert_eq!(
-            skill_exclusions(&task, &ctx, false),
+            skill_exclusions(&task, &loaded, false),
             vec!["research", "shared", "domain"]
         );
     }
@@ -1007,7 +1041,6 @@ mod tests {
         // A child that can call `websearch` must not also be handed the
         // web-search skill: the skill exists to teach a Bash-driven fallback,
         // and two ways to do one thing is how small models loop.
-        let (_tmp, ctx) = test_ctx();
         let prompt = child_prompt("research current facts".into(), true, true);
         assert!(prompt.starts_with("[noob child runtime:"));
         assert!(
@@ -1019,7 +1052,8 @@ mod tests {
         assert!(prompt.contains("stop gathering and return the synthesis"));
         assert!(prompt.contains("Do not create files"));
         assert!(prompt.ends_with("research current facts"));
-        assert!(skill_exclusions(&cfg(), &ctx, true).contains(&"web-search".to_string()));
+        let loaded = std::sync::Mutex::new(Vec::new());
+        assert!(skill_exclusions(&cfg(), &loaded, true).contains(&"web-search".to_string()));
         // Without the tool the brief is passed through untouched: the child
         // would only be told to call something it does not have.
         assert_eq!(
@@ -1030,13 +1064,12 @@ mod tests {
 
     #[test]
     fn a_research_investigation_brief_is_recognized() {
-        let (_tmp, ctx) = test_ctx();
-        *ctx.loaded_skills.lock().unwrap() = vec!["research".into()];
+        let loaded = std::sync::Mutex::new(vec!["research".to_string()]);
         assert!(research_investigation_loaded(
-            &ctx,
+            &loaded,
             "You have zero prior context. Run a CONTRARIAN pass. End with ## Sources."
         ));
-        assert!(!research_investigation_loaded(&ctx, "implement the parser"));
+        assert!(!research_investigation_loaded(&loaded, "implement the parser"));
     }
 
     #[test]

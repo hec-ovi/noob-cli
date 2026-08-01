@@ -11,23 +11,25 @@ use serde_json::Value;
 
 use super::guard::{FileStamp, fnv1a64, fnv1a64_extend};
 use super::truncate::{READ_LINE_CHAR_CAP, read_byte_cap_marker};
-use super::{ToolCtx, ToolOutcome, display_path, need_str, opt_u64};
+use super::{Core, FsState, ToolOutcome, display_path, need_str, opt_u64};
+#[cfg(test)]
+use super::ToolCtx;
 
-pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
-    match run_inner(ctx, args) {
+pub fn run(core: &Core, fs: &FsState, args: &Value) -> ToolOutcome {
+    match run_inner(core, fs, args) {
         Ok(out) => out,
         Err(msg) if msg == "canceled by user" => ToolOutcome::canceled(),
         Err(msg) => ToolOutcome::err(msg),
     }
 }
 
-fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
+fn run_inner(core: &Core, fs: &FsState, args: &Value) -> Result<ToolOutcome, String> {
     let raw = need_str(args, "path")?;
-    let path = super::guard::resolve_path(&ctx.workspace, raw);
+    let path = super::guard::resolve_path(&core.workspace, raw);
     let offset = opt_u64(args, "offset")?.unwrap_or(1).max(1) as usize;
-    let limit = opt_u64(args, "limit")?.unwrap_or(ctx.caps.read_lines as u64) as usize;
-    let limit = limit.clamp(1, ctx.caps.read_lines);
-    let shown_path = display_path(ctx, &path);
+    let limit = opt_u64(args, "limit")?.unwrap_or(core.caps.read_lines as u64) as usize;
+    let limit = limit.clamp(1, core.caps.read_lines);
+    let shown_path = display_path(&core.workspace, &path);
 
     // O_NONBLOCK prevents a path swapped to a FIFO between lookup and open
     // from waiting for a writer. fstat the opened handle, not the path, so the
@@ -51,7 +53,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     let mut last_emitted = offset.saturating_sub(1); // one-based, before page
     let mut capped = false;
     let mut line_no = 1usize;
-    let mut preview = LinePreview::with_cap(ctx.caps.line_chars);
+    let mut preview = LinePreview::with_cap(core.caps.line_chars);
     let mut hash = fnv1a64(&[]);
     let mut byte_count = 0u64;
     let mut saw_any = false;
@@ -94,7 +96,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
                     &mut capped,
                     line_no,
                     preview.finish(),
-                    ctx.caps.read_bytes,
+                    core.caps.read_bytes,
                 );
             }
             preview.clear();
@@ -118,7 +120,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
                 &mut capped,
                 line_no,
                 preview.finish(),
-                ctx.caps.read_bytes,
+                core.caps.read_bytes,
             );
         }
         line_no
@@ -140,15 +142,15 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     // Ask before recording: the question is whether the model held this
     // content in full BEFORE this call, so a first-ever read has nothing to
     // match against and prints.
-    let unchanged = full && ctx.read_dedup && ctx.seen.stub_unchanged(&path, current);
+    let unchanged = full && fs.read_dedup && fs.seen.stub_unchanged(&path, current);
     // Record the stamp of the full stream, not just the retained page.
-    ctx.seen.record(&path, current, full);
+    fs.seen.record(&path, current, full);
     // Here rather than at each return: this one point covers the three
     // success paths and the past-the-end refusal, and it is the moment the
     // file became something the agent is looking at.
-    if ctx.emitter.is_on() {
+    if core.emitter.is_on() {
         let call_id = crate::emit::current_call();
-        ctx.emitter.send(noob_proto::Event::FileOpen {
+        core.emitter.send(noob_proto::Event::FileOpen {
             path: shown_path.clone(),
             lines: u32::try_from(total).unwrap_or(u32::MAX),
             call_id: call_id.clone(),
@@ -156,7 +158,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         // A read past the end printed nothing, so there is no region to point
         // at; an inverted span would be worse than none.
         if total > 0 && last_emitted >= offset {
-            ctx.emitter.send(noob_proto::Event::FileSpan {
+            core.emitter.send(noob_proto::Event::FileSpan {
                 path: shown_path.clone(),
                 span: noob_proto::Span {
                     start: u32::try_from(offset).unwrap_or(u32::MAX),
@@ -345,7 +347,7 @@ mod tests {
     use serde_json::json;
 
     fn write(ctx: &ToolCtx, name: &str, content: &str) -> std::path::PathBuf {
-        let p = ctx.workspace.join(name);
+        let p = ctx.core.workspace.join(name);
         std::fs::write(&p, content).unwrap();
         p
     }
@@ -354,7 +356,7 @@ mod tests {
     fn plain_lines_with_header_and_no_line_numbers() {
         let (_t, ctx) = test_ctx();
         write(&ctx, "f.txt", "alpha\nbeta\ngamma\n");
-        let out = run(&ctx, &json!({"path": "f.txt"}));
+        let out = run(&ctx.core, &ctx.fs, &json!({"path": "f.txt"}));
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(out.content, "f.txt lines 1-3 of 3\nalpha\nbeta\ngamma\n");
         assert_eq!(out.summary, "read f.txt (3 of 3 lines)");
@@ -365,7 +367,7 @@ mod tests {
         let (_t, ctx) = test_ctx();
         let body: String = (1..=10).map(|i| format!("line{i}\n")).collect();
         write(&ctx, "f.txt", &body);
-        let out = run(&ctx, &json!({"path": "f.txt", "offset": 4, "limit": 2}));
+        let out = run(&ctx.core, &ctx.fs, &json!({"path": "f.txt", "offset": 4, "limit": 2}));
         assert_eq!(out.content, "f.txt lines 4-5 of 10\nline4\nline5\n");
     }
 
@@ -373,7 +375,7 @@ mod tests {
     fn offset_past_end_states_the_line_count() {
         let (_t, ctx) = test_ctx();
         write(&ctx, "f.txt", "one\n");
-        let out = run(&ctx, &json!({"path": "f.txt", "offset": 5}));
+        let out = run(&ctx.core, &ctx.fs, &json!({"path": "f.txt", "offset": 5}));
         assert!(out.is_error);
         assert!(
             out.content
@@ -384,7 +386,7 @@ mod tests {
     #[test]
     fn missing_file_names_the_remedy() {
         let (_t, ctx) = test_ctx();
-        let out = run(&ctx, &json!({"path": "nope.txt"}));
+        let out = run(&ctx.core, &ctx.fs, &json!({"path": "nope.txt"}));
         assert!(out.is_error);
         assert!(out.content.contains("check the path with ls or glob"));
     }
@@ -392,8 +394,8 @@ mod tests {
     #[test]
     fn binary_file_is_refused() {
         let (_t, ctx) = test_ctx();
-        std::fs::write(ctx.workspace.join("bin"), b"\x00\x01\x02").unwrap();
-        let out = run(&ctx, &json!({"path": "bin"}));
+        std::fs::write(ctx.core.workspace.join("bin"), b"\x00\x01\x02").unwrap();
+        let out = run(&ctx.core, &ctx.fs, &json!({"path": "bin"}));
         assert!(out.is_error);
         assert!(out.content.contains("looks binary"));
     }
@@ -403,11 +405,11 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
 
         let (_t, ctx) = test_ctx();
-        let path = ctx.workspace.join("pipe");
+        let path = ctx.core.workspace.join("pipe");
         let raw = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
         let started = std::time::Instant::now();
-        let out = run(&ctx, &json!({"path": "pipe"}));
+        let out = run(&ctx.core, &ctx.fs, &json!({"path": "pipe"}));
         assert!(out.is_error);
         assert!(
             out.content.contains("not a regular file"),
@@ -427,7 +429,7 @@ mod tests {
             .map(|i| format!("{i:03}{}\n", "x".repeat(600)))
             .collect();
         write(&ctx, "big.txt", &body);
-        let out = run(&ctx, &json!({"path": "big.txt"}));
+        let out = run(&ctx.core, &ctx.fs, &json!({"path": "big.txt"}));
         assert!(!out.is_error);
         assert!(out.content.contains("[line clipped; 603 chars total]"));
         assert!(
@@ -440,13 +442,13 @@ mod tests {
     #[test]
     fn uncapped_ctx_reads_the_whole_file_with_no_clipping() {
         let (_t, mut ctx) = test_ctx();
-        ctx.caps = super::super::truncate::Caps::uncapped();
+        ctx.core.caps = super::super::truncate::Caps::uncapped();
         // The same fixture that pages and clips under the default policy.
         let body: String = (0..200)
             .map(|i| format!("{i:03}{}\n", "x".repeat(600)))
             .collect();
         write(&ctx, "big.txt", &body);
-        let out = run(&ctx, &json!({"path": "big.txt"}));
+        let out = run(&ctx.core, &ctx.fs, &json!({"path": "big.txt"}));
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.starts_with("big.txt lines 1-200 of 200\n"));
         assert!(!out.content.contains("[line clipped;"));
@@ -459,14 +461,14 @@ mod tests {
         let (_t, ctx) = test_ctx();
         let body = format!("{}\ntail\n", "x".repeat(2 * 1024 * 1024));
         let path = write(&ctx, "huge-line.txt", &body);
-        let out = run(&ctx, &json!({"path": "huge-line.txt", "limit": 1}));
+        let out = run(&ctx.core, &ctx.fs, &json!({"path": "huge-line.txt", "limit": 1}));
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("2097152 chars total"));
         assert!(
             out.content.len() < 1_000,
             "only a bounded preview should survive"
         );
-        assert_eq!(ctx.seen.get(&path), Some(FileStamp::of(body.as_bytes())));
+        assert_eq!(ctx.fs.seen.get(&path), Some(FileStamp::of(body.as_bytes())));
     }
 
     #[test]
@@ -489,8 +491,8 @@ mod tests {
         let (_t, ctx) = test_ctx();
         let body: String = (1..=800).map(|i| format!("l{i}\n")).collect();
         let p = write(&ctx, "f.txt", &body);
-        run(&ctx, &json!({"path": "f.txt", "limit": 5}));
-        let stamp = ctx.seen.get(&p).expect("stamp recorded");
+        run(&ctx.core, &ctx.fs, &json!({"path": "f.txt", "limit": 5}));
+        let stamp = ctx.fs.seen.get(&p).expect("stamp recorded");
         assert_eq!(stamp, FileStamp::of(body.as_bytes()));
     }
 
@@ -498,7 +500,7 @@ mod tests {
     fn empty_file_reads_cleanly() {
         let (_t, ctx) = test_ctx();
         write(&ctx, "empty.txt", "");
-        let out = run(&ctx, &json!({"path": "empty.txt"}));
+        let out = run(&ctx.core, &ctx.fs, &json!({"path": "empty.txt"}));
         assert!(!out.is_error);
         assert_eq!(out.content, "empty.txt is empty (0 lines)");
     }
@@ -511,15 +513,15 @@ mod tests {
     fn read_right_after_the_write_tool_prints() {
         let (_t, ctx) = test_ctx();
         let body = "<!DOCTYPE html>\n<html>\nhi\n</html>\n";
-        let w = super::super::write::run(&ctx, &json!({"path": "g.html", "content": body}));
+        let w = super::super::write::run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "g.html", "content": body}));
         assert!(!w.is_error, "{}", w.content);
-        let r = run(&ctx, &json!({"path": "g.html"}));
+        let r = run(&ctx.core, &ctx.fs, &json!({"path": "g.html"}));
         assert!(
             r.content.contains("<!DOCTYPE html>"),
             "reading your own write back must print, got: {}",
             r.content
         );
-        let again = run(&ctx, &json!({"path": "g.html"}));
+        let again = run(&ctx.core, &ctx.fs, &json!({"path": "g.html"}));
         assert!(again.content.contains("unchanged"), "{}", again.content);
     }
 
@@ -527,17 +529,17 @@ mod tests {
     fn read_right_after_the_edit_tool_prints() {
         let (_t, ctx) = test_ctx();
         write(&ctx, "g.html", "one\ntwo\nthree\n");
-        run(&ctx, &json!({"path": "g.html"})); // establishes a full read
+        run(&ctx.core, &ctx.fs, &json!({"path": "g.html"})); // establishes a full read
         let e =
-            super::super::edit::run(&ctx, &json!({"path": "g.html", "old": "two", "new": "TWO"}));
+            super::super::edit::run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "g.html", "old": "two", "new": "TWO"}));
         assert!(!e.is_error, "{}", e.content);
-        let r = run(&ctx, &json!({"path": "g.html"}));
+        let r = run(&ctx.core, &ctx.fs, &json!({"path": "g.html"}));
         assert!(
             r.content.contains("TWO"),
             "reading your own edit back must print, got: {}",
             r.content
         );
-        let again = run(&ctx, &json!({"path": "g.html"}));
+        let again = run(&ctx.core, &ctx.fs, &json!({"path": "g.html"}));
         assert!(again.content.contains("unchanged"), "{}", again.content);
     }
 
@@ -545,9 +547,9 @@ mod tests {
     fn re_reading_unchanged_content_returns_a_stub() {
         let (_t, ctx) = test_ctx();
         write(&ctx, "f.txt", "alpha\nbeta\ngamma\n");
-        let first = run(&ctx, &json!({"path": "f.txt"}));
+        let first = run(&ctx.core, &ctx.fs, &json!({"path": "f.txt"}));
         assert!(first.content.contains("alpha"), "{}", first.content);
-        let second = run(&ctx, &json!({"path": "f.txt"}));
+        let second = run(&ctx.core, &ctx.fs, &json!({"path": "f.txt"}));
         assert!(!second.is_error, "{}", second.content);
         assert!(second.content.contains("unchanged"), "{}", second.content);
         assert!(
@@ -565,10 +567,10 @@ mod tests {
     #[test]
     fn dedup_can_be_switched_off_entirely() {
         let (_t, mut ctx) = test_ctx();
-        ctx.read_dedup = false;
+        ctx.fs.read_dedup = false;
         write(&ctx, "f.txt", "alpha\nbeta\n");
         for attempt in 1..=3 {
-            let out = run(&ctx, &json!({"path": "f.txt"}));
+            let out = run(&ctx.core, &ctx.fs, &json!({"path": "f.txt"}));
             assert!(
                 out.content.contains("alpha") && !out.content.contains("unchanged"),
                 "read {attempt} must print in full with dedup off: {}",
@@ -583,14 +585,14 @@ mod tests {
         // never stuck without the content, and it costs no schema tokens.
         let (_t, ctx) = test_ctx();
         write(&ctx, "f.txt", "alpha\nbeta\n");
-        run(&ctx, &json!({"path": "f.txt"})); // prints
-        let stub = run(&ctx, &json!({"path": "f.txt"}));
+        run(&ctx.core, &ctx.fs, &json!({"path": "f.txt"})); // prints
+        let stub = run(&ctx.core, &ctx.fs, &json!({"path": "f.txt"}));
         assert!(stub.content.contains("unchanged"), "{}", stub.content);
-        let insisted = run(&ctx, &json!({"path": "f.txt"}));
+        let insisted = run(&ctx.core, &ctx.fs, &json!({"path": "f.txt"}));
         assert!(insisted.content.contains("alpha"), "{}", insisted.content);
         assert!(!insisted.content.contains("unchanged"));
         // And it re-arms: the body is above again, so the next one stubs.
-        let again = run(&ctx, &json!({"path": "f.txt"}));
+        let again = run(&ctx.core, &ctx.fs, &json!({"path": "f.txt"}));
         assert!(again.content.contains("unchanged"), "{}", again.content);
     }
 
@@ -598,9 +600,9 @@ mod tests {
     fn changed_content_is_reprinted_not_stubbed() {
         let (_t, ctx) = test_ctx();
         let p = write(&ctx, "f.txt", "alpha\n");
-        run(&ctx, &json!({"path": "f.txt"}));
+        run(&ctx.core, &ctx.fs, &json!({"path": "f.txt"}));
         std::fs::write(&p, "alpha\nbeta\n").unwrap();
-        let out = run(&ctx, &json!({"path": "f.txt"}));
+        let out = run(&ctx.core, &ctx.fs, &json!({"path": "f.txt"}));
         assert!(
             out.content.contains("beta"),
             "a changed file must reprint: {}",
@@ -618,16 +620,16 @@ mod tests {
         // model's own write, which paging must not consume.)
         let (_t, ctx) = test_ctx();
         let body: String = (1..=20).map(|i| format!("line{i}\n")).collect();
-        super::super::write::run(&ctx, &json!({"path": "g.txt", "content": body}));
-        run(&ctx, &json!({"path": "g.txt", "offset": 5, "limit": 3}));
-        run(&ctx, &json!({"path": "g.txt", "offset": 12, "limit": 4}));
-        let first = run(&ctx, &json!({"path": "g.txt"}));
+        super::super::write::run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "g.txt", "content": body}));
+        run(&ctx.core, &ctx.fs, &json!({"path": "g.txt", "offset": 5, "limit": 3}));
+        run(&ctx.core, &ctx.fs, &json!({"path": "g.txt", "offset": 12, "limit": 4}));
+        let first = run(&ctx.core, &ctx.fs, &json!({"path": "g.txt"}));
         assert!(
             first.content.contains("line20"),
             "the read-back of a write prints even after paging, got: {}",
             first.content
         );
-        let whole = run(&ctx, &json!({"path": "g.txt"}));
+        let whole = run(&ctx.core, &ctx.fs, &json!({"path": "g.txt"}));
         assert!(
             whole.content.contains("unchanged"),
             "whole-file read after paged reads must still stub, got: {}",
@@ -641,9 +643,9 @@ mod tests {
         let body: String = (1..=10).map(|i| format!("line{i}\n")).collect();
         write(&ctx, "f.txt", &body);
         // First read shows only lines 1-3 but records the full-content stamp.
-        run(&ctx, &json!({"path": "f.txt", "limit": 3}));
+        run(&ctx.core, &ctx.fs, &json!({"path": "f.txt", "limit": 3}));
         // A whole-file read must print, the model never saw lines 4-10.
-        let out = run(&ctx, &json!({"path": "f.txt"}));
+        let out = run(&ctx.core, &ctx.fs, &json!({"path": "f.txt"}));
         assert!(out.content.contains("line10"), "{}", out.content);
         assert!(!out.content.contains("unchanged"));
     }
@@ -652,10 +654,10 @@ mod tests {
     fn compaction_invalidates_freshness_and_reprints() {
         let (_t, ctx) = test_ctx();
         write(&ctx, "f.txt", "alpha\nbeta\n");
-        run(&ctx, &json!({"path": "f.txt"}));
+        run(&ctx.core, &ctx.fs, &json!({"path": "f.txt"}));
         // Simulate a compaction pruning the earlier read body from context.
-        ctx.seen.invalidate_freshness();
-        let out = run(&ctx, &json!({"path": "f.txt"}));
+        ctx.fs.seen.invalidate_freshness();
+        let out = run(&ctx.core, &ctx.fs, &json!({"path": "f.txt"}));
         assert!(
             out.content.contains("alpha"),
             "must reprint after compaction: {}",

@@ -14,26 +14,28 @@ use serde_json::Value;
 
 use super::guard::{FileStamp, atomic_write, check_write_allowed, fnv1a64, resolve_path};
 use super::truncate::clip_line;
-use super::{ToolCtx, ToolOutcome, display_path, need_str, opt_bool};
+use super::{Core, FsState, WriteGrants, ToolOutcome, display_path, need_str, opt_bool};
+#[cfg(test)]
+use super::ToolCtx;
 
-pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
-    match run_inner(ctx, args) {
+pub fn run(core: &Core, fs: &FsState, grants: &WriteGrants, args: &Value) -> ToolOutcome {
+    match run_inner(core, fs, grants, args) {
         Ok(out) => out,
         Err(msg) => ToolOutcome::err(msg),
     }
 }
 
-fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
+fn run_inner(core: &Core, fs: &FsState, grants: &WriteGrants, args: &Value) -> Result<ToolOutcome, String> {
     let raw = need_str(args, "path")?;
     let old = need_str(args, "old")?;
     let new = need_str(args, "new")?;
     let all = opt_bool(args, "all")?.unwrap_or(false);
-    if let Some(refusal) = ctx.skills_write_refusal(raw) {
+    if let Some(refusal) = grants.refusal(&core.workspace, raw) {
         return Err(refusal);
     }
-    let path = resolve_path(&ctx.workspace, raw);
-    check_write_allowed(ctx.sandbox, &ctx.workspace, &path)?;
-    let shown = display_path(ctx, &path);
+    let path = resolve_path(&core.workspace, raw);
+    check_write_allowed(core.sandbox, &core.workspace, &path)?;
+    let shown = display_path(&core.workspace, &path);
 
     if old.is_empty() {
         return Err("old is empty; to create a new file use write".to_string());
@@ -44,7 +46,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
 
     let bytes = std::fs::read(&path)
         .map_err(|e| format!("cannot read {shown}: {e}; check the path with ls or glob"))?;
-    match ctx.seen.get(&path) {
+    match fs.seen.get(&path) {
         None => {
             return Err(format!(
                 "you have not read {shown} yet; edit needs the current content, read it first"
@@ -65,21 +67,21 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     match ladder(&text, old, new, all) {
         Ok(applied) => {
             atomic_write(&path, applied.content.as_bytes())?;
-            ctx.seen
+            fs.seen
                 .record_written(&path, FileStamp::of(applied.content.as_bytes()));
             // Both sides are alive here and nowhere else, so the frame carries
             // the diff itself. With `all`, scattered replacements collapse
             // into the one region that covers them.
-            if ctx.emitter.is_on() {
-                ctx.emitter.send(crate::emit::file_edit(
+            if core.emitter.is_on() {
+                core.emitter.send(crate::emit::file_edit(
                     shown.clone(),
                     &text,
                     &applied.content,
                     crate::emit::current_call(),
                 ));
             }
-            ctx.consume_skills_write_grant(raw);
-            ctx.edit_failures.lock().unwrap().remove(&fail_key);
+            grants.consume(&core.workspace, raw);
+            fs.edit_failures.lock().unwrap().remove(&fail_key);
             let n = applied.count;
             let mut msg = if n == 1 {
                 format!("edited {shown} (1 replacement")
@@ -97,7 +99,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
             Ok(ToolOutcome::ok(msg.clone(), msg))
         }
         Err(LadderFail::Ambiguous { stage, n }) => {
-            *ctx.edit_failures
+            *fs.edit_failures
                 .lock()
                 .unwrap()
                 .entry(fail_key)
@@ -114,12 +116,12 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
             ))
         }
         Err(LadderFail::Miss) => {
-            let mut fails = ctx.edit_failures.lock().unwrap();
+            let mut fails = fs.edit_failures.lock().unwrap();
             let count = fails.entry(fail_key).or_insert(0);
             *count += 1;
             let attempt = *count;
             drop(fails);
-            Err(teach(&shown, &text, old, attempt, ctx.caps.line_chars))
+            Err(teach(&shown, &text, old, attempt, core.caps.line_chars))
         }
     }
 }
@@ -621,12 +623,12 @@ mod tests {
     use serde_json::json;
 
     fn seed(ctx: &ToolCtx, name: &str, content: &str) {
-        std::fs::write(ctx.workspace.join(name), content).unwrap();
-        super::super::read::run(ctx, &json!({"path": name}));
+        std::fs::write(ctx.core.workspace.join(name), content).unwrap();
+        super::super::read::run(&ctx.core, &ctx.fs, &json!({"path": name}));
     }
 
     fn file(ctx: &ToolCtx, name: &str) -> String {
-        std::fs::read_to_string(ctx.workspace.join(name)).unwrap()
+        std::fs::read_to_string(ctx.core.workspace.join(name)).unwrap()
     }
 
     #[test]
@@ -634,7 +636,9 @@ mod tests {
         let (_t, ctx) = test_ctx();
         seed(&ctx, "f.rs", "fn a() {}\nfn b() {}\n");
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.rs", "old": "fn b()", "new": "fn c()"}),
         );
         assert!(!out.is_error, "{}", out.content);
@@ -647,7 +651,9 @@ mod tests {
         let (_t, ctx) = test_ctx();
         seed(&ctx, "f.rs", "x = 1;\nx = 1;\nx = 1;\n");
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.rs", "old": "x = 1;", "new": "x = 2;"}),
         );
         assert!(out.is_error);
@@ -664,7 +670,9 @@ mod tests {
         let (_t, ctx) = test_ctx();
         seed(&ctx, "f.rs", "old_name(1);\nold_name(2);\n");
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.rs", "old": "old_name", "new": "new_name", "all": true}),
         );
         assert_eq!(out.content, "edited f.rs (2 replacements)");
@@ -676,7 +684,9 @@ mod tests {
         let (_t, ctx) = test_ctx();
         seed(&ctx, "f.py", "def f():   \n    pass\t\n");
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.py", "old": "def f():\n    pass", "new": "def f():\n    return 1"}),
         );
         assert!(!out.is_error, "{}", out.content);
@@ -690,7 +700,9 @@ mod tests {
         // File has plain ASCII; the model pasted typographic characters.
         seed(&ctx, "f.md", "say \"hi\" - it's free\n");
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.md",
                 "old": "say \u{201C}hi\u{201D} \u{2014} it\u{2019}s\u{00A0}free",
                 "new": "say \"bye\""}),
@@ -710,7 +722,9 @@ mod tests {
         );
         // The dominant qwen failure: old written at the wrong depth.
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.rs",
                 "old": "if x {\n    do_it();\n}",
                 "new": "if x {\n    do_it();\n    log();\n}"}),
@@ -728,7 +742,9 @@ mod tests {
         let (_t, ctx) = test_ctx();
         seed(&ctx, "f.rs", "a();\nb();\n");
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.rs", "old": "    a();\n    b();", "new": "    c();"}),
         );
         assert!(!out.is_error, "{}", out.content);
@@ -747,7 +763,9 @@ mod tests {
              mod b {\n        if x {\n            go();\n        }\n}\n",
         );
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.rs", "old": "if x {\n    go();\n}", "new": "stop();"}),
         );
         assert!(out.is_error);
@@ -762,7 +780,9 @@ mod tests {
         // matches twice at stage A; the ladder must stop there, not descend.
         seed(&ctx, "f.txt", "word \nword\t\n");
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.txt", "old": "word\n", "new": "sword\n"}),
         );
         assert!(out.is_error);
@@ -773,8 +793,8 @@ mod tests {
     #[test]
     fn never_read_is_rejected_with_the_read_first_remedy() {
         let (_t, ctx) = test_ctx();
-        std::fs::write(ctx.workspace.join("f.rs"), "x\n").unwrap();
-        let out = run(&ctx, &json!({"path": "f.rs", "old": "x", "new": "y"}));
+        std::fs::write(ctx.core.workspace.join("f.rs"), "x\n").unwrap();
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "f.rs", "old": "x", "new": "y"}));
         assert!(out.is_error);
         assert!(
             out.content
@@ -786,8 +806,8 @@ mod tests {
     fn stale_file_is_rejected() {
         let (_t, ctx) = test_ctx();
         seed(&ctx, "f.rs", "x\n");
-        std::fs::write(ctx.workspace.join("f.rs"), "changed elsewhere\n").unwrap();
-        let out = run(&ctx, &json!({"path": "f.rs", "old": "x", "new": "y"}));
+        std::fs::write(ctx.core.workspace.join("f.rs"), "changed elsewhere\n").unwrap();
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "f.rs", "old": "x", "new": "y"}));
         assert!(out.is_error);
         assert!(out.content.contains("changed on disk since your last read"));
     }
@@ -797,7 +817,9 @@ mod tests {
         let (_t, ctx) = test_ctx();
         seed(&ctx, "f.rs", "let count = compute(items);\nreturn count;\n");
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.rs",
                 "old": "let count = compute(item);\nreturn count;",
                 "new": "let count = 0;"}),
@@ -816,13 +838,13 @@ mod tests {
         seed(&ctx, "f.txt", &body);
         // Line 1 anchors ("line number 30" exists); line 2 never matches.
         let call = json!({"path": "f.txt", "old": "line number 30\nEXTRA JUNK", "new": "x"});
-        let first = run(&ctx, &call);
+        let first = run(&ctx.core, &ctx.fs, &ctx.grants, &call);
         assert!(
             first.content.contains("Closest region"),
             "{}",
             first.content
         );
-        let second = run(&ctx, &call);
+        let second = run(&ctx.core, &ctx.fs, &ctx.grants, &call);
         assert!(
             second
                 .content
@@ -835,11 +857,13 @@ mod tests {
             .filter(|l| l.starts_with("line number"))
             .count();
         assert!((35..=40).contains(&shown), "shown {shown} lines");
-        let third = run(&ctx, &call);
+        let third = run(&ctx.core, &ctx.fs, &ctx.grants, &call);
         assert!(third.content.contains("re-read the file with read"));
         // A later success on this file removes its failure counter.
         let ok = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.txt", "old": "line number 30\n", "new": "thirty\n"}),
         );
         assert!(!ok.is_error, "{}", ok.content);
@@ -861,7 +885,7 @@ mod tests {
             "old": format!("line number 30 {}\nEXTRA JUNK", "z".repeat(900)),
             "new": "x"
         });
-        let first = run(&ctx, &call);
+        let first = run(&ctx.core, &ctx.fs, &ctx.grants, &call);
         assert!(first.is_error);
         assert!(
             first.content.len() < TEACH_REGION_BYTES + 2048,
@@ -873,7 +897,7 @@ mod tests {
             "{}",
             first.content
         );
-        let second = run(&ctx, &call);
+        let second = run(&ctx.core, &ctx.fs, &ctx.grants, &call);
         assert!(
             second
                 .content
@@ -899,36 +923,36 @@ mod tests {
     #[test]
     fn failed_edit_does_not_burn_the_skills_write_grant() {
         let (_t, ctx) = test_ctx();
-        std::fs::create_dir_all(ctx.workspace.join(".claude/skills/x")).unwrap();
+        std::fs::create_dir_all(ctx.core.workspace.join(".claude/skills/x")).unwrap();
         seed(&ctx, ".claude/skills/x/SKILL.md", "real content\n");
         let target =
-            super::super::guard::skill_write_target(&ctx.workspace, ".claude/skills/x/SKILL.md")
+            super::super::guard::skill_write_target(&ctx.core.workspace, ".claude/skills/x/SKILL.md")
                 .unwrap();
-        ctx.approved_skill_writes
-            .lock()
-            .unwrap()
-            .insert(target.clone(), 1);
+        ctx.grants.grant(target.clone());
         // A miss must not consume the one grant...
         let miss = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": ".claude/skills/x/SKILL.md", "old": "no such text", "new": "y"}),
         );
         assert!(miss.is_error);
         assert!(!miss.content.contains("refused"), "{}", miss.content);
         // ...so the corrected retry still applies, and only then consumes it.
         let ok = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": ".claude/skills/x/SKILL.md", "old": "real content", "new": "fixed"}),
         );
         assert!(!ok.is_error, "{}", ok.content);
         assert!(
-            !ctx.approved_skill_writes
-                .lock()
-                .unwrap()
-                .contains_key(&target)
+            !ctx.grants.granted(&target)
         );
         let refused = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": ".claude/skills/x/SKILL.md", "old": "fixed", "new": "again"}),
         );
         assert!(refused.is_error);
@@ -939,9 +963,9 @@ mod tests {
     fn empty_old_and_identical_old_new_are_rejected() {
         let (_t, ctx) = test_ctx();
         seed(&ctx, "f.rs", "x\n");
-        let out = run(&ctx, &json!({"path": "f.rs", "old": "", "new": "y"}));
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "f.rs", "old": "", "new": "y"}));
         assert!(out.content.contains("old is empty"));
-        let out = run(&ctx, &json!({"path": "f.rs", "old": "x", "new": "x"}));
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "f.rs", "old": "x", "new": "x"}));
         assert!(out.content.contains("old and new are identical"));
     }
 
@@ -950,7 +974,9 @@ mod tests {
         let (_t, ctx) = test_ctx();
         seed(&ctx, "f.rs", "keep\ndrop me\nkeep too\n");
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.rs", "old": "drop me\n", "new": ""}),
         );
         assert!(!out.is_error, "{}", out.content);
@@ -964,7 +990,9 @@ mod tests {
         // would also match the "word  " line; exact must win with 1 hit.
         seed(&ctx, "f.txt", "word\nother word  here\n");
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.txt", "old": "word\n", "new": "sword\n"}),
         );
         assert!(!out.is_error, "{}", out.content);
@@ -979,7 +1007,9 @@ mod tests {
         // greedily like match_indices, not corrupt the unmatched lines.
         seed(&ctx, "f.txt", "    a\n    b\n    a\n    b\n    a\n");
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.txt", "old": "a\nb\na", "new": "z", "all": true}),
         );
         assert!(!out.is_error, "{}", out.content);
@@ -992,7 +1022,9 @@ mod tests {
         let (_t, ctx) = test_ctx();
         seed(&ctx, "f.txt", &"    x\n".repeat(5));
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.txt", "old": "x\nx\nx\n", "new": "", "all": true}),
         );
         assert!(!out.is_error, "{}", out.content);
@@ -1005,13 +1037,13 @@ mod tests {
         // "a " occurs nowhere in "ab": the dropped trailing space must not
         // let the shadow match rewrite content the file does not contain.
         seed(&ctx, "f.txt", "ab\n");
-        let out = run(&ctx, &json!({"path": "f.txt", "old": "a ", "new": "X"}));
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "f.txt", "old": "a ", "new": "X"}));
         assert!(out.is_error, "false match applied: {}", out.content);
         assert_eq!(file(&ctx, "f.txt"), "ab\n");
         // But the legitimate case (trailing whitespace at a real line end)
         // still matches.
         seed(&ctx, "g.txt", "foo\n");
-        let out = run(&ctx, &json!({"path": "g.txt", "old": "foo ", "new": "bar"}));
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "g.txt", "old": "foo ", "new": "bar"}));
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(file(&ctx, "g.txt"), "bar\n");
     }
@@ -1024,7 +1056,9 @@ mod tests {
         // (over-rejecting here burns the model's retry budget for nothing).
         seed(&ctx, "f.md", "x \u{2014} y z\n");
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.md", "old": "x - y ", "new": "x-y"}),
         );
         assert!(!out.is_error, "{}", out.content);
@@ -1032,7 +1066,9 @@ mod tests {
 
         seed(&ctx, "g.py", "def f():\n    pass # comment\n");
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "g.py", "old": "def f():  \n    pass ", "new": "def g():\n    pass"}),
         );
         assert!(!out.is_error, "{}", out.content);
@@ -1048,7 +1084,9 @@ mod tests {
         // The last matched line's \r is consumed like any trailing
         // whitespace (new goes in verbatim); untouched lines keep CRLF.
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.txt", "old": "foo\nbar", "new": "baz"}),
         );
         assert!(!out.is_error, "{}", out.content);
@@ -1060,7 +1098,9 @@ mod tests {
         let (_t, ctx) = test_ctx();
         seed(&ctx, "f.txt", "if x {\r\n    go();\r\n    stop();\r\n}\r\n");
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.txt", "old": "go();\nstop();", "new": "go();\nwait();\nstop();"}),
         );
         assert!(!out.is_error, "{}", out.content);
@@ -1077,7 +1117,9 @@ mod tests {
         let (_t, ctx) = test_ctx();
         seed(&ctx, "f.rs", "{\n    a();\n    b();\n}\n");
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.rs", "old": "a();\nb();\n", "new": "c();\n"}),
         );
         assert!(!out.is_error, "{}", out.content);

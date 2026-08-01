@@ -445,7 +445,7 @@ mod tests {
     fn results_come_back_in_emission_order() {
         let (_t, ctx) = ctx();
         for name in ["a", "b", "c"] {
-            std::fs::write(ctx.workspace.join(name), format!("content {name}\n")).unwrap();
+            std::fs::write(ctx.core.workspace.join(name), format!("content {name}\n")).unwrap();
         }
         let out = run_batch(&ctx, vec![read("c"), read("a"), read("b")]);
         assert!(out[0].content.contains("content c"));
@@ -621,7 +621,7 @@ mod tests {
             ],
         );
         assert!(out.iter().all(|o| !o.is_error));
-        let log = std::fs::read_to_string(ctx.workspace.join("log.txt")).unwrap();
+        let log = std::fs::read_to_string(ctx.core.workspace.join("log.txt")).unwrap();
         // Sequential barriers: A finished (with its sleep) before B started.
         assert_eq!(log, "A\nB\nC\n");
     }
@@ -629,7 +629,7 @@ mod tests {
     #[test]
     fn reads_run_concurrently_but_a_mutation_is_a_barrier() {
         let (_t, ctx) = ctx();
-        std::fs::write(ctx.workspace.join("f"), "x\n").unwrap();
+        std::fs::write(ctx.core.workspace.join("f"), "x\n").unwrap();
         let started = Instant::now();
         // read, read, bash(sleep .2), read: total should be ~0.2s series;
         // the point is it completes and stays ordered.
@@ -650,7 +650,7 @@ mod tests {
     #[test]
     fn canned_outcomes_slot_in_without_execution() {
         let (_t, ctx) = ctx();
-        std::fs::write(ctx.workspace.join("f"), "x\n").unwrap();
+        std::fs::write(ctx.core.workspace.join("f"), "x\n").unwrap();
         let out = run_batch(
             &ctx,
             vec![
@@ -710,7 +710,7 @@ mod tests {
     fn more_reads_than_the_cap_still_complete() {
         let (_t, ctx) = ctx();
         for i in 0..20 {
-            std::fs::write(ctx.workspace.join(format!("f{i}")), "x\n").unwrap();
+            std::fs::write(ctx.core.workspace.join(format!("f{i}")), "x\n").unwrap();
         }
         let out = run_batch(&ctx, (0..20).map(|i| read(&format!("f{i}"))).collect());
         assert_eq!(out.len(), 20);

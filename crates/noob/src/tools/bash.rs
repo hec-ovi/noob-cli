@@ -4,12 +4,12 @@
 //! command-not-found hint, and the one-time no-sandbox warning.
 
 use std::process::Command;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::Value;
 
 use crate::exec;
-use super::{ToolCtx, ToolOutcome, fail, need_str, opt_u64};
+use super::{Core, ToolOutcome, fail, need_str, opt_u64};
 
 const DEFAULT_TIMEOUT_S: u64 = 120;
 const MAX_TIMEOUT_S: u64 = 600;
@@ -59,11 +59,11 @@ fn not_found_hint(code: i32, body: &str) -> Option<String> {
     })
 }
 
-pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
+pub fn run(core: &Core, warned: &AtomicBool, args: &Value) -> ToolOutcome {
     // Both sides are the outcome: a failure is classified where it is minted,
     // which is the only place that knows whether it was the model's argument,
     // the deadline, or the command's own exit status.
-    match run_inner(ctx, args) {
+    match run_inner(core, warned, args) {
         Ok(out) | Err(out) => out,
     }
 }
@@ -78,7 +78,7 @@ fn arg_error(message: String) -> ToolOutcome {
 // the usual advice (box the error) would only add an allocation to every
 // failure and leave the success just as large.
 #[allow(clippy::result_large_err)]
-fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, ToolOutcome> {
+fn run_inner(core: &Core, warned: &AtomicBool, args: &Value) -> Result<ToolOutcome, ToolOutcome> {
     let cmd = need_str(args, "cmd").map_err(arg_error)?;
     if cmd.trim().is_empty() {
         return Err(arg_error(
@@ -91,14 +91,14 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, ToolOutcome> {
         .clamp(1, MAX_TIMEOUT_S);
 
     let mut command = Command::new("bash");
-    command.arg("-c").arg(cmd).current_dir(&ctx.workspace);
+    command.arg("-c").arg(cmd).current_dir(&core.workspace);
     let run = match exec::run(
         command,
         "bash",
         timeout_s,
-        ctx.caps.bash_head,
-        ctx.caps.bash_tail,
-        crate::emit::Progress::for_current_call(&ctx.emitter),
+        core.caps.bash_head,
+        core.caps.bash_tail,
+        crate::emit::Progress::for_current_call(&core.emitter),
     ) {
         Ok(run) => run,
         Err(exec::RunError::Spawn(message)) => {
@@ -126,8 +126,8 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, ToolOutcome> {
     // One-time workspace-mode warning, UI-only (never in the transcript).
     // Attached only when a command actually ran, so an early parameter
     // error cannot consume the one-shot silently.
-    let warning = (ctx.sandbox == super::guard::Sandbox::Workspace
-        && !ctx.bash_warned.swap(true, Ordering::SeqCst))
+    let warning = (core.sandbox == super::guard::Sandbox::Workspace
+        && !warned.swap(true, Ordering::SeqCst))
     .then(|| "no sandbox: commands run directly on your host".to_string());
     let summary = format!(
         "bash {} ({:.1}s, exit {code})",
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn merged_output_in_order_and_exit_zero() {
         let (_t, ctx) = test_ctx();
-        let out = run(&ctx, &json!({"cmd": "echo one; echo two >&2; echo three"}));
+        let out = run(&ctx.core, &ctx.bash_warned, &json!({"cmd": "echo one; echo two >&2; echo three"}));
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(out.content, "one\ntwo\nthree\n");
         assert!(
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn a_missing_command_names_what_is_available() {
         let (_t, ctx) = test_ctx();
-        let out = run(&ctx, &json!({"cmd": "definitely-not-a-real-binary-xyz"}));
+        let out = run(&ctx.core, &ctx.bash_warned, &json!({"cmd": "definitely-not-a-real-binary-xyz"}));
         assert!(out.is_error, "{}", out.content);
         assert!(
             out.content.starts_with("exit code 127\n"),
@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn other_exit_codes_carry_no_inventory() {
         let (_t, ctx) = test_ctx();
-        let out = run(&ctx, &json!({"cmd": "echo 'file not found' >&2; exit 2"}));
+        let out = run(&ctx.core, &ctx.bash_warned, &json!({"cmd": "echo 'file not found' >&2; exit 2"}));
         assert!(out.is_error);
         assert!(!out.content.contains("available here:"), "{}", out.content);
     }
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn nonzero_exit_is_an_error_with_the_code_first() {
         let (_t, ctx) = test_ctx();
-        let out = run(&ctx, &json!({"cmd": "echo boom >&2; exit 3"}));
+        let out = run(&ctx.core, &ctx.bash_warned, &json!({"cmd": "echo boom >&2; exit 3"}));
         assert!(out.is_error);
         assert!(out.content.starts_with("exit code 3\n"));
         assert!(out.content.contains("boom"));
@@ -232,8 +232,8 @@ mod tests {
     #[test]
     fn runs_in_the_workspace() {
         let (_t, ctx) = test_ctx();
-        std::fs::write(ctx.workspace.join("marker.txt"), "").unwrap();
-        let out = run(&ctx, &json!({"cmd": "ls"}));
+        std::fs::write(ctx.core.workspace.join("marker.txt"), "").unwrap();
+        let out = run(&ctx.core, &ctx.bash_warned, &json!({"cmd": "ls"}));
         assert!(out.content.contains("marker.txt"));
     }
 
@@ -243,7 +243,8 @@ mod tests {
         let started = std::time::Instant::now();
         // The sleep is a CHILD of bash; only a group kill reaches it.
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.bash_warned,
             &json!({"cmd": "echo early; sleep 30", "timeout_s": 1}),
         );
         assert!(started.elapsed() < Duration::from_secs(5));
@@ -261,7 +262,7 @@ mod tests {
         use super::super::truncate::{BASH_HEAD, BASH_TAIL};
 
         let (_t, ctx) = test_ctx();
-        let out = run(&ctx, &json!({"cmd": "seq 1 20000"}));
+        let out = run(&ctx.core, &ctx.bash_warned, &json!({"cmd": "seq 1 20000"}));
         assert!(!out.is_error);
         assert!(out.content.len() <= BASH_HEAD + BASH_TAIL + 200);
         assert!(out.content.starts_with("1\n2\n"));
@@ -272,8 +273,8 @@ mod tests {
     #[test]
     fn uncapped_ctx_keeps_big_output_whole() {
         let (_t, mut ctx) = test_ctx();
-        ctx.caps = super::super::truncate::Caps::uncapped();
-        let out = run(&ctx, &json!({"cmd": "seq 1 20000"}));
+        ctx.core.caps = super::super::truncate::Caps::uncapped();
+        let out = run(&ctx.core, &ctx.bash_warned, &json!({"cmd": "seq 1 20000"}));
         assert!(!out.is_error);
         assert!(!out.content.contains("[output truncated:"));
         // seq 1..20000 is ~108 KiB; the whole stream survives.
@@ -285,7 +286,7 @@ mod tests {
     #[test]
     fn empty_output_is_stated() {
         let (_t, ctx) = test_ctx();
-        let out = run(&ctx, &json!({"cmd": "true"}));
+        let out = run(&ctx.core, &ctx.bash_warned, &json!({"cmd": "true"}));
         assert_eq!(out.content, "(no output)");
     }
 
@@ -295,7 +296,7 @@ mod tests {
         let started = std::time::Instant::now();
         // The backgrounded sleep inherits the pipe; without the grace+kill
         // the collector would wait 30s for EOF.
-        let out = run(&ctx, &json!({"cmd": "sleep 30 & echo started"}));
+        let out = run(&ctx.core, &ctx.bash_warned, &json!({"cmd": "sleep 30 & echo started"}));
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "hung on the background survivor"
@@ -316,7 +317,7 @@ mod tests {
         // The leader exits 7 before the straggler group kill; reaping is
         // deferred until after that kill (the zombie pins the pgid) and
         // the real exit code must survive the deferral.
-        let out = run(&ctx, &json!({"cmd": "sleep 30 & echo started; exit 7"}));
+        let out = run(&ctx.core, &ctx.bash_warned, &json!({"cmd": "sleep 30 & echo started; exit 7"}));
         assert!(out.is_error);
         assert!(out.content.starts_with("exit code 7\n"), "{}", out.content);
         assert!(out.content.contains("were killed"), "{}", out.content);
@@ -329,7 +330,7 @@ mod tests {
         // grandchildren reparent to it: a subreaper receives them the same
         // way without needing to be pid 1.
         unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1u64) };
-        let out = run(&ctx, &json!({"cmd": "echo $$; sleep 30 &"}));
+        let out = run(&ctx.core, &ctx.bash_warned, &json!({"cmd": "echo $$; sleep 30 &"}));
         assert!(!out.is_error, "{}", out.content);
         let leader: i32 = out.content.lines().next().unwrap().trim().parse().unwrap();
         // The backgrounded sleep was group-killed and reparented here; the
@@ -349,7 +350,7 @@ mod tests {
         // The escapee leaves the process group, survives the straggler
         // kill, and holds the pipe; the tool must return anyway and must
         // NOT claim it was killed.
-        let out = run(&ctx, &json!({"cmd": "setsid sleep 2 & echo hi"}));
+        let out = run(&ctx.core, &ctx.bash_warned, &json!({"cmd": "setsid sleep 2 & echo hi"}));
         assert!(started.elapsed() < Duration::from_secs(2), "did not detach");
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("hi"));
@@ -367,10 +368,11 @@ mod tests {
     #[test]
     fn a_detached_daemon_survives_with_a_clean_result() {
         let (_t, ctx) = test_ctx();
-        let pidfile = ctx.workspace.join("daemon.pid");
+        let pidfile = ctx.core.workspace.join("daemon.pid");
         let started = std::time::Instant::now();
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.bash_warned,
             &json!({"cmd": format!(
                 "setsid sh -c 'echo $$ > {p}; sleep 30' </dev/null >/dev/null 2>&1 & echo up",
                 p = pidfile.display()
@@ -406,17 +408,17 @@ mod tests {
     #[test]
     fn early_param_error_does_not_consume_the_sandbox_warning() {
         let (_t, mut ctx) = test_ctx();
-        ctx.sandbox = super::super::guard::Sandbox::Workspace;
-        let bad = run(&ctx, &json!({"cmd": "true", "timeout_s": "potato"}));
+        ctx.core.sandbox = super::super::guard::Sandbox::Workspace;
+        let bad = run(&ctx.core, &ctx.bash_warned, &json!({"cmd": "true", "timeout_s": "potato"}));
         assert!(bad.is_error);
         assert!(bad.warning.is_none());
-        let ok = run(&ctx, &json!({"cmd": "true"}));
+        let ok = run(&ctx.core, &ctx.bash_warned, &json!({"cmd": "true"}));
         assert_eq!(
             ok.warning.as_deref(),
             Some("no sandbox: commands run directly on your host")
         );
         // One-time: the second successful run stays quiet.
-        let again = run(&ctx, &json!({"cmd": "true"}));
+        let again = run(&ctx.core, &ctx.bash_warned, &json!({"cmd": "true"}));
         assert!(again.warning.is_none());
     }
 
@@ -426,7 +428,8 @@ mod tests {
         // >64 KiB (default pipe capacity) written at once: hangs if the
         // parent waits before draining.
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.bash_warned,
             &json!({"cmd": "head -c 300000 /dev/zero | tr '\\0' 'x'"}),
         );
         assert!(!out.is_error);

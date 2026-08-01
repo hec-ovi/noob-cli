@@ -5,24 +5,24 @@
 use serde_json::Value;
 
 use super::guard::{FileStamp, atomic_write, check_write_allowed, resolve_path};
-use super::{ToolCtx, ToolOutcome, display_path, need_str};
+use super::{Core, FsState, WriteGrants, ToolOutcome, display_path, need_str};
 
-pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
-    match run_inner(ctx, args) {
+pub fn run(core: &Core, fs: &FsState, grants: &WriteGrants, args: &Value) -> ToolOutcome {
+    match run_inner(core, fs, grants, args) {
         Ok(out) => out,
         Err(msg) => ToolOutcome::err(msg),
     }
 }
 
-fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
+fn run_inner(core: &Core, fs: &FsState, grants: &WriteGrants, args: &Value) -> Result<ToolOutcome, String> {
     let raw = need_str(args, "path")?;
     let content = need_str(args, "content")?;
-    if let Some(refusal) = ctx.skills_write_refusal(raw) {
+    if let Some(refusal) = grants.refusal(&core.workspace, raw) {
         return Err(refusal);
     }
-    let path = resolve_path(&ctx.workspace, raw);
-    check_write_allowed(ctx.sandbox, &ctx.workspace, &path)?;
-    let shown = display_path(ctx, &path);
+    let path = resolve_path(&core.workspace, raw);
+    check_write_allowed(core.sandbox, &core.workspace, &path)?;
+    let shown = display_path(&core.workspace, &path);
 
     if path.is_dir() {
         return Err(format!("{shown} is a directory; write needs a file path"));
@@ -37,7 +37,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
     };
     if let Some(current) = current.as_deref() {
         // The file exists: the staleness rules apply.
-        match ctx.seen.get(&path) {
+        match fs.seen.get(&path) {
             None => {
                 return Err(format!(
                     "{shown} already exists and you have not read it; read it first \
@@ -63,18 +63,18 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         .map(|before| rewrite_note(before, content.as_bytes()));
 
     atomic_write(&path, content.as_bytes())?;
-    ctx.seen
+    fs.seen
         .record_written(&path, FileStamp::of(content.as_bytes()));
-    ctx.consume_skills_write_grant(raw);
+    grants.consume(&core.workspace, raw);
     // After the write, so nothing is announced that did not land. A file that
     // did not exist has no before side; one that is not text is reported as
     // what it looked like, which is the honest answer for a diff view.
-    if ctx.emitter.is_on() {
+    if core.emitter.is_on() {
         let before = current
             .as_deref()
             .map(String::from_utf8_lossy)
             .unwrap_or_default();
-        ctx.emitter.send(crate::emit::file_edit(
+        core.emitter.send(crate::emit::file_edit(
             shown.clone(),
             &before,
             content,
@@ -126,11 +126,11 @@ mod tests {
     #[test]
     fn creates_new_files_and_parents() {
         let (_t, ctx) = test_ctx();
-        let out = run(&ctx, &json!({"path": "a/b/f.txt", "content": "hello"}));
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "a/b/f.txt", "content": "hello"}));
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(out.content, "wrote a/b/f.txt (5 bytes)");
         assert_eq!(
-            std::fs::read_to_string(ctx.workspace.join("a/b/f.txt")).unwrap(),
+            std::fs::read_to_string(ctx.core.workspace.join("a/b/f.txt")).unwrap(),
             "hello"
         );
     }
@@ -142,7 +142,7 @@ mod tests {
     fn a_mostly_copied_rewrite_says_edit_would_have_sent_less() {
         let (_t, ctx) = test_ctx();
         let before: String = (1..=40).map(|i| format!("line {i}\n")).collect();
-        let out = run(&ctx, &json!({"path": "f.txt", "content": before}));
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "f.txt", "content": before}));
         assert!(!out.is_error, "{}", out.content);
         // Change two lines out of forty, but send the whole file.
         let after: String = (1..=40)
@@ -154,7 +154,7 @@ mod tests {
                 }
             })
             .collect();
-        let out = run(&ctx, &json!({"path": "f.txt", "content": after}));
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "f.txt", "content": after}));
         assert!(!out.is_error, "{}", out.content);
         assert!(
             out.content.contains("2 of 40 lines differ"),
@@ -175,11 +175,15 @@ mod tests {
     fn a_real_rewrite_gets_no_note() {
         let (_t, ctx) = test_ctx();
         run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.txt", "content": "alpha\nbeta\ngamma\n"}),
         );
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.fs,
+            &ctx.grants,
             &json!({"path": "f.txt", "content": "totally\ndifferent\nthing\n"}),
         );
         assert!(!out.is_error, "{}", out.content);
@@ -189,19 +193,19 @@ mod tests {
     #[test]
     fn a_brand_new_file_gets_no_note() {
         let (_t, ctx) = test_ctx();
-        let out = run(&ctx, &json!({"path": "new.txt", "content": "one\ntwo\n"}));
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "new.txt", "content": "one\ntwo\n"}));
         assert_eq!(out.content, "wrote new.txt (8 bytes)");
     }
 
     #[test]
     fn refuses_overwrite_of_a_never_read_file() {
         let (_t, ctx) = test_ctx();
-        std::fs::write(ctx.workspace.join("f.txt"), "precious").unwrap();
-        let out = run(&ctx, &json!({"path": "f.txt", "content": "clobber"}));
+        std::fs::write(ctx.core.workspace.join("f.txt"), "precious").unwrap();
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "f.txt", "content": "clobber"}));
         assert!(out.is_error);
         assert!(out.content.contains("you have not read it; read it first"));
         assert_eq!(
-            std::fs::read_to_string(ctx.workspace.join("f.txt")).unwrap(),
+            std::fs::read_to_string(ctx.core.workspace.join("f.txt")).unwrap(),
             "precious"
         );
     }
@@ -214,10 +218,10 @@ mod tests {
         }
         use std::os::unix::fs::PermissionsExt;
         let (_t, ctx) = test_ctx();
-        let p = ctx.workspace.join("f.txt");
+        let p = ctx.core.workspace.join("f.txt");
         std::fs::write(&p, "precious").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o200)).unwrap();
-        let out = run(&ctx, &json!({"path": "f.txt", "content": "clobber"}));
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "f.txt", "content": "clobber"}));
         assert!(out.is_error, "{}", out.content);
         assert!(
             out.content.contains("cannot read f.txt before overwriting"),
@@ -231,11 +235,11 @@ mod tests {
     #[test]
     fn refuses_stale_overwrite_after_disk_change() {
         let (_t, ctx) = test_ctx();
-        let p = ctx.workspace.join("f.txt");
+        let p = ctx.core.workspace.join("f.txt");
         std::fs::write(&p, "v1").unwrap();
-        super::super::read::run(&ctx, &json!({"path": "f.txt"}));
+        super::super::read::run(&ctx.core, &ctx.fs, &json!({"path": "f.txt"}));
         std::fs::write(&p, "v2-from-elsewhere").unwrap();
-        let out = run(&ctx, &json!({"path": "f.txt", "content": "v3"}));
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "f.txt", "content": "v3"}));
         assert!(out.is_error);
         assert!(
             out.content
@@ -246,13 +250,13 @@ mod tests {
     #[test]
     fn overwrite_after_read_succeeds_and_updates_the_stamp() {
         let (_t, ctx) = test_ctx();
-        let p = ctx.workspace.join("f.txt");
+        let p = ctx.core.workspace.join("f.txt");
         std::fs::write(&p, "v1").unwrap();
-        super::super::read::run(&ctx, &json!({"path": "f.txt"}));
-        let out = run(&ctx, &json!({"path": "f.txt", "content": "v2"}));
+        super::super::read::run(&ctx.core, &ctx.fs, &json!({"path": "f.txt"}));
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "f.txt", "content": "v2"}));
         assert!(!out.is_error, "{}", out.content);
         // A second write without re-reading is fine: we know what we wrote.
-        let out = run(&ctx, &json!({"path": "f.txt", "content": "v3"}));
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "f.txt", "content": "v3"}));
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "v3");
     }
@@ -260,8 +264,8 @@ mod tests {
     #[test]
     fn workspace_mode_refuses_outside_writes() {
         let (_t, mut ctx) = test_ctx();
-        ctx.sandbox = super::super::guard::Sandbox::Workspace;
-        let out = run(&ctx, &json!({"path": "/tmp/outside.txt", "content": "x"}));
+        ctx.core.sandbox = super::super::guard::Sandbox::Workspace;
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &json!({"path": "/tmp/outside.txt", "content": "x"}));
         assert!(out.is_error);
         assert!(out.content.contains("outside the workspace"));
     }
@@ -269,25 +273,25 @@ mod tests {
     #[test]
     fn skills_dir_write_is_refused_unless_the_target_was_approved() {
         let (_t, ctx) = test_ctx();
-        std::fs::create_dir_all(ctx.workspace.join(".claude/skills/x")).unwrap();
+        std::fs::create_dir_all(ctx.core.workspace.join(".claude/skills/x")).unwrap();
         let args = json!({"path": ".claude/skills/x/SKILL.md", "content": "y"});
         // Unapproved: refused at execution time, nothing written.
-        let out = run(&ctx, &args);
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &args);
         assert!(out.is_error);
         assert!(out.content.contains("refused"), "{}", out.content);
-        assert!(!ctx.workspace.join(".claude/skills/x/SKILL.md").exists());
+        assert!(!ctx.core.workspace.join(".claude/skills/x/SKILL.md").exists());
         // Approve exactly this real target (what the agent gate records on
         // grant) and the write proceeds.
         let target =
-            super::super::guard::skill_write_target(&ctx.workspace, ".claude/skills/x/SKILL.md")
+            super::super::guard::skill_write_target(&ctx.core.workspace, ".claude/skills/x/SKILL.md")
                 .unwrap();
-        ctx.approved_skill_writes.lock().unwrap().insert(target, 1);
-        let out = run(&ctx, &args);
+        ctx.grants.grant(target);
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &args);
         assert!(!out.is_error, "{}", out.content);
-        assert!(ctx.workspace.join(".claude/skills/x/SKILL.md").exists());
+        assert!(ctx.core.workspace.join(".claude/skills/x/SKILL.md").exists());
         // The confirmation is scoped to that one operation, not the rest of
         // the session. A second write needs a fresh explicit grant.
-        let out = run(&ctx, &args);
+        let out = run(&ctx.core, &ctx.fs, &ctx.grants, &args);
         assert!(out.is_error);
         assert!(out.content.contains("refused"), "{}", out.content);
     }

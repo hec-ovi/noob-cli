@@ -1,6 +1,6 @@
 # subagent
 
-contractVersion: 1.0.0
+contractVersion: 2.0.0
 
 ## Purpose
 
@@ -21,7 +21,10 @@ whole IPC surface; only the result string enters the parent transcript.
 ```rust
 pub fn spec() -> ToolSpec;   // prompt | status | cancel; tools mode
                              // read-only (default) | web | all; max_turns
-pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome;
+pub struct SpawnEnv<'a>;     // everything the tool needs, as plain params:
+                             // workspace, websearch, task, loaded_skills.
+                             // The tools box builds it at dispatch
+pub fn run(env: &SpawnEnv, args: &Value) -> ToolOutcome;
 
 pub const MAX_DEPTH: u32 = 2;         // depth 0 and 1 spawn; at 2 the tool
                                       // is not registered at all
@@ -79,7 +82,8 @@ bounded stderr tail attached when verbose.
 
 ## Dependencies
 
-Contracts: the tools box (`ToolCtx`, `ToolOutcome`, arg readers),
+Contracts: the tools box (`ToolOutcome` and the arg readers; the session
+context itself never crosses this boundary),
 [`crates/noob-provider/CONTRACT.md`](../../../noob-provider/CONTRACT.md)
 (`Overrides`, `ToolSpec`, the interrupt flag),
 [`crates/noob-proto/CONTRACT.md`](../../../noob-proto/CONTRACT.md) and

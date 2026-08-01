@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use noob_provider::types::ToolSpec;
 
-use super::{TodoItem, TodoStatus, ToolCtx, ToolOutcome};
+use super::{PlanState, TodoItem, TodoStatus, ToolOutcome};
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
@@ -29,7 +29,7 @@ pub fn spec() -> ToolSpec {
     }
 }
 
-pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
+pub fn run(plan: &PlanState, args: &Value) -> ToolOutcome {
     let raw = match args.get("todos") {
         None | Some(Value::Null) => {
             return ToolOutcome::err(
@@ -87,7 +87,7 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
         .filter(|t| t.status == TodoStatus::Completed)
         .count();
     let now = std::time::Instant::now();
-    let mut timing = ctx.plan_timing.lock().unwrap();
+    let mut timing = plan.timing.lock().unwrap();
     if parsed.is_empty() {
         *timing = super::PlanTiming::default();
     } else {
@@ -127,7 +127,7 @@ pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
     drop(timing);
 
     // Overwrite the whole list: the model always sends the full current plan.
-    *ctx.todos.lock().unwrap() = parsed;
+    *plan.todos.lock().unwrap() = parsed;
 
     ToolOutcome::ok(content, format!("plan: {done}/{total} done"))
 }
@@ -181,7 +181,7 @@ mod tests {
     fn overwrites_the_list_and_reports_progress() {
         let (_tmp, ctx) = test_ctx();
         let out = run(
-            &ctx,
+            &ctx.plan,
             &json!({"todos": [
                 {"content": "research the codebase", "status": "completed"},
                 {"content": "write the todo tool", "status": "in_progress"},
@@ -195,12 +195,12 @@ mod tests {
         assert!(out.content.contains("[x] research the codebase"));
         assert!(out.content.contains("[~] write the todo tool"));
         assert!(out.content.contains("[ ] add tests"));
-        assert_eq!(ctx.todos.lock().unwrap().len(), 3);
+        assert_eq!(ctx.plan.todos.lock().unwrap().len(), 3);
 
         // A second call overwrites the whole list (not appends) and the
         // progress re-renders with the advanced status.
         let out = run(
-            &ctx,
+            &ctx.plan,
             &json!({"todos": [
                 {"content": "research the codebase", "status": "completed"},
                 {"content": "write the todo tool", "status": "completed"},
@@ -211,7 +211,7 @@ mod tests {
         assert!(out.content.contains("[x] write the todo tool"));
         assert!(out.content.contains("[~] add tests"));
         assert_eq!(
-            ctx.todos.lock().unwrap().len(),
+            ctx.plan.todos.lock().unwrap().len(),
             3,
             "list was overwritten, not grown"
         );
@@ -221,7 +221,7 @@ mod tests {
     fn bad_status_is_a_typed_error_that_teaches() {
         let (_tmp, ctx) = test_ctx();
         let out = run(
-            &ctx,
+            &ctx.plan,
             &json!({"todos": [{"content": "x", "status": "doing"}]}),
         );
         assert!(out.is_error);
@@ -232,36 +232,36 @@ mod tests {
         );
         assert!(out.content.contains("in_progress"));
         // A rejected call never touched the stored list.
-        assert!(ctx.todos.lock().unwrap().is_empty());
+        assert!(ctx.plan.todos.lock().unwrap().is_empty());
     }
 
     #[test]
     fn missing_pieces_are_typed_errors() {
         let (_tmp, ctx) = test_ctx();
         assert!(
-            run(&ctx, &json!({}))
+            run(&ctx.plan, &json!({}))
                 .content
                 .contains("missing required parameter \"todos\"")
         );
         assert!(
-            run(&ctx, &json!({"todos": "nope"}))
+            run(&ctx.plan, &json!({"todos": "nope"}))
                 .content
                 .contains("must be an array")
         );
-        let out = run(&ctx, &json!({"todos": [{"status": "pending"}]}));
+        let out = run(&ctx.plan, &json!({"todos": [{"status": "pending"}]}));
         assert!(
             out.content
                 .contains("todos[0] is missing a string \"content\""),
             "{}",
             out.content
         );
-        let out = run(&ctx, &json!({"todos": [{"content": "  "}]}));
+        let out = run(&ctx.plan, &json!({"todos": [{"content": "  "}]}));
         assert!(
             out.content.contains("todos[0].content is empty"),
             "{}",
             out.content
         );
-        let out = run(&ctx, &json!({"todos": [{"content": "a"}]}));
+        let out = run(&ctx.plan, &json!({"todos": [{"content": "a"}]}));
         assert!(
             out.content
                 .contains("todos[0] is missing a string \"status\""),
@@ -274,13 +274,13 @@ mod tests {
     fn empty_list_clears_the_plan() {
         let (_tmp, ctx) = test_ctx();
         run(
-            &ctx,
+            &ctx.plan,
             &json!({"todos": [{"content": "a", "status": "pending"}]}),
         );
-        let out = run(&ctx, &json!({"todos": []}));
+        let out = run(&ctx.plan, &json!({"todos": []}));
         assert!(!out.is_error);
         assert_eq!(out.summary, "plan: 0/0 done");
-        assert!(ctx.todos.lock().unwrap().is_empty());
+        assert!(ctx.plan.todos.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -298,12 +298,12 @@ mod tests {
     fn completed_items_report_their_own_elapsed_time() {
         let (_tmp, ctx) = test_ctx();
         run(
-            &ctx,
+            &ctx.plan,
             &json!({"todos": [{"content": "measure me", "status": "in_progress"}]}),
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
         let out = run(
-            &ctx,
+            &ctx.plan,
             &json!({"todos": [{"content": "measure me", "status": "completed"}]}),
         );
         assert!(

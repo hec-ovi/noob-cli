@@ -11,11 +11,13 @@ use serde_json::{Value, json};
 use noob_provider::http::INTERRUPTED;
 use noob_provider::types::ToolSpec;
 
-use crate::mcp::{ConnectInfo, schema};
+use crate::mcp::{ConnectInfo, Mcp, schema};
 
 use super::truncate::{Caps, head_tail_with, mcp_cap};
 use super::untrusted::wrap as wrap_untrusted;
-use super::{ToolCtx, ToolOutcome, need_str};
+use super::{ToolOutcome, need_str};
+#[cfg(test)]
+use super::ToolCtx;
 
 /// STABLE structural marker prefixed (before the untrusted wrapper, so it is
 /// trusted text) to an mcp_call result whose server reported isError:true.
@@ -48,12 +50,12 @@ pub fn call_spec() -> ToolSpec {
     }
 }
 
-pub fn run_connect(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
+pub fn run_connect(mcp: Option<&Mcp>, caps: &Caps, args: &Value) -> ToolOutcome {
     let requested_server = match need_str(args, "server") {
         Ok(s) => s,
         Err(e) => return ToolOutcome::err(e),
     };
-    let Some(mcp) = &ctx.mcp else {
+    let Some(mcp) = mcp else {
         return ToolOutcome::err(no_servers());
     };
     let server = resolve_server_name(mcp, requested_server);
@@ -67,7 +69,7 @@ pub fn run_connect(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
         Ok(info) => {
             let n = info.tools.len();
             ToolOutcome::ok(
-                render_catalog(&server, &info, &ctx.caps),
+                render_catalog(&server, &info, caps),
                 format!("mcp_connect {server} ({n} tools)"),
             )
         }
@@ -76,12 +78,12 @@ pub fn run_connect(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
         // error.message, an HTTP error body); wrapped like any result.
         Err(e) => ToolOutcome::err(wrap_untrusted(
             &format!("MCP server {server:?}"),
-            &mcp_cap(&e, &ctx.caps),
+            &mcp_cap(&e, caps),
         )),
     }
 }
 
-pub fn run_call(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
+pub fn run_call(mcp: Option<&Mcp>, caps: &Caps, args: &Value) -> ToolOutcome {
     let requested_server = match need_str(args, "server") {
         Ok(s) => s,
         Err(e) => return ToolOutcome::err(e),
@@ -109,7 +111,7 @@ pub fn run_call(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
             ));
         }
     };
-    let Some(mcp) = &ctx.mcp else {
+    let Some(mcp) = mcp else {
         return ToolOutcome::err(no_servers());
     };
     let server = resolve_server_name(mcp, requested_server);
@@ -149,7 +151,7 @@ pub fn run_call(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
             let (text, is_error) = render_result(&result);
             let wrapped = wrap_untrusted(
                 &format!("MCP server {server:?}"),
-                &mcp_cap(&text, &ctx.caps),
+                &mcp_cap(&text, caps),
             );
             let (content, flag) = if is_error {
                 (format!("{TOOL_ERROR_MARKER}{wrapped}"), " (tool error)")
@@ -174,7 +176,7 @@ pub fn run_call(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
         // error.message, an HTTP error body); wrapped like any result.
         Err(e) => ToolOutcome::err(wrap_untrusted(
             &format!("MCP server {server:?}"),
-            &mcp_cap(&e, &ctx.caps),
+            &mcp_cap(&e, caps),
         )),
     }
 }
@@ -357,7 +359,7 @@ mod tests {
     fn connect_renders_the_catalog_inside_untrusted_delimiters() {
         let server = McpHttpServer::start(echo_tools());
         let (_tmp, ctx) = ctx_with_server(&server);
-        let out = run_connect(&ctx, &json!({"server": "mock"}));
+        let out = run_connect(ctx.mcp.as_ref(), &ctx.core.caps, &json!({"server": "mock"}));
         assert!(!out.is_error, "{}", out.content);
         assert!(
             out.content.starts_with(
@@ -396,7 +398,7 @@ mod tests {
             .collect();
         let server = McpHttpServer::start(tools);
         let (_tmp, ctx) = ctx_with_server(&server);
-        let out = run_connect(&ctx, &json!({"server": "mock"}));
+        let out = run_connect(ctx.mcp.as_ref(), &ctx.core.caps, &json!({"server": "mock"}));
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.starts_with("connected to mock: 400 tools"));
         assert!(
@@ -430,10 +432,11 @@ mod tests {
             "content": [{"type": "text", "text": big}], "isError": false
         }));
         let (_tmp, mut ctx) = ctx_with_server(&server);
-        ctx.caps = super::super::truncate::Caps::uncapped();
-        run_connect(&ctx, &json!({"server": "mock"}));
+        ctx.core.caps = super::super::truncate::Caps::uncapped();
+        run_connect(ctx.mcp.as_ref(), &ctx.core.caps, &json!({"server": "mock"}));
         let out = run_call(
-            &ctx,
+            ctx.mcp.as_ref(),
+            &ctx.core.caps,
             &json!({"server": "mock", "tool": "echo", "args": {"text": "ignored"}}),
         );
         assert!(!out.is_error, "{}", out.content);
@@ -445,9 +448,10 @@ mod tests {
     fn call_validates_client_side_before_the_wire() {
         let server = McpHttpServer::start(echo_tools());
         let (_tmp, ctx) = ctx_with_server(&server);
-        run_connect(&ctx, &json!({"server": "mock"}));
+        run_connect(ctx.mcp.as_ref(), &ctx.core.caps, &json!({"server": "mock"}));
         let out = run_call(
-            &ctx,
+            ctx.mcp.as_ref(),
+            &ctx.core.caps,
             &json!({"server": "mock", "tool": "echo", "args": {"text": 5}}),
         );
         assert!(out.is_error);
@@ -469,9 +473,10 @@ mod tests {
     fn call_round_trip_wraps_the_result() {
         let server = McpHttpServer::start(echo_tools());
         let (_tmp, ctx) = ctx_with_server(&server);
-        run_connect(&ctx, &json!({"server": "mock"}));
+        run_connect(ctx.mcp.as_ref(), &ctx.core.caps, &json!({"server": "mock"}));
         let out = run_call(
-            &ctx,
+            ctx.mcp.as_ref(),
+            &ctx.core.caps,
             &json!({"server": "mock", "tool": "echo", "args": {"text": "ping"}}),
         );
         assert!(!out.is_error, "{}", out.content);
@@ -488,7 +493,7 @@ mod tests {
     fn unconnected_and_unknown_servers_teach_the_next_move() {
         let server = McpHttpServer::start(echo_tools());
         let (_tmp, ctx) = ctx_with_server(&server);
-        let out = run_call(&ctx, &json!({"server": "mock", "tool": "echo", "args": {}}));
+        let out = run_call(ctx.mcp.as_ref(), &ctx.core.caps, &json!({"server": "mock", "tool": "echo", "args": {}}));
         assert!(out.is_error);
         assert!(
             out.content
@@ -496,7 +501,7 @@ mod tests {
             "{}",
             out.content
         );
-        let out = run_call(&ctx, &json!({"server": "ghost", "tool": "echo"}));
+        let out = run_call(ctx.mcp.as_ref(), &ctx.core.caps, &json!({"server": "ghost", "tool": "echo"}));
         assert!(out.content.contains("unknown MCP server \"ghost\""));
         assert!(out.content.contains("configured servers: mock"));
     }
@@ -505,11 +510,12 @@ mod tests {
     fn normalized_server_aliases_resolve_but_ambiguous_names_do_not() {
         let server = McpHttpServer::start(echo_tools());
         let (_tmp, ctx) = ctx_with_server(&server);
-        let out = run_connect(&ctx, &json!({"server": "M_O-C-K"}));
+        let out = run_connect(ctx.mcp.as_ref(), &ctx.core.caps, &json!({"server": "M_O-C-K"}));
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(out.summary, "mcp_connect mock (1 tools)");
         let out = run_call(
-            &ctx,
+            ctx.mcp.as_ref(),
+            &ctx.core.caps,
             &json!({"server": "m_o-c_k", "tool": "echo", "args": {"text": "alias"}}),
         );
         assert!(!out.is_error, "{}", out.content);
@@ -535,8 +541,8 @@ mod tests {
     fn unknown_tool_lists_available_and_suggests_reconnect() {
         let server = McpHttpServer::start(echo_tools());
         let (_tmp, ctx) = ctx_with_server(&server);
-        run_connect(&ctx, &json!({"server": "mock"}));
-        let out = run_call(&ctx, &json!({"server": "mock", "tool": "nope", "args": {}}));
+        run_connect(ctx.mcp.as_ref(), &ctx.core.caps, &json!({"server": "mock"}));
+        let out = run_call(ctx.mcp.as_ref(), &ctx.core.caps, &json!({"server": "mock", "tool": "nope", "args": {}}));
         assert!(out.is_error);
         assert!(out.content.contains("unknown tool \"nope\" on mock"));
         assert!(out.content.contains("available tools: echo"));
@@ -549,9 +555,10 @@ mod tests {
             "content": [{"type": "text", "text": "quota exhausted"}], "isError": true
         }));
         let (_tmp, ctx) = ctx_with_server(&server);
-        run_connect(&ctx, &json!({"server": "mock"}));
+        run_connect(ctx.mcp.as_ref(), &ctx.core.caps, &json!({"server": "mock"}));
         let out = run_call(
-            &ctx,
+            ctx.mcp.as_ref(),
+            &ctx.core.caps,
             &json!({"server": "mock", "tool": "echo", "args": {"text": "x"}}),
         );
         assert!(out.is_error);
@@ -579,7 +586,7 @@ mod tests {
             },
             timeout: Duration::from_secs(1),
         }]));
-        let out = run_connect(&ctx, &json!({"server": "mock"}));
+        let out = run_connect(ctx.mcp.as_ref(), &ctx.core.caps, &json!({"server": "mock"}));
         assert!(out.is_error);
         assert!(
             out.content
@@ -596,7 +603,7 @@ mod tests {
         );
         // Client-side teaching errors stay unwrapped: they carry no server
         // bytes and the model must read them as instructions.
-        let out = run_connect(&ctx, &json!({"server": "ghost"}));
+        let out = run_connect(ctx.mcp.as_ref(), &ctx.core.caps, &json!({"server": "ghost"}));
         assert!(
             out.content.starts_with("unknown MCP server"),
             "{}",
@@ -627,9 +634,10 @@ mod tests {
     fn args_as_a_json_string_are_tolerated() {
         let server = McpHttpServer::start(echo_tools());
         let (_tmp, ctx) = ctx_with_server(&server);
-        run_connect(&ctx, &json!({"server": "mock"}));
+        run_connect(ctx.mcp.as_ref(), &ctx.core.caps, &json!({"server": "mock"}));
         let out = run_call(
-            &ctx,
+            ctx.mcp.as_ref(),
+            &ctx.core.caps,
             &json!({"server": "mock", "tool": "echo", "args": "{\"text\":\"str\"}"}),
         );
         assert!(!out.is_error, "{}", out.content);
@@ -659,7 +667,7 @@ mod tests {
     #[test]
     fn no_configured_servers_is_a_typed_error() {
         let (_tmp, ctx) = test_ctx();
-        let out = run_connect(&ctx, &json!({"server": "x"}));
+        let out = run_connect(ctx.mcp.as_ref(), &ctx.core.caps, &json!({"server": "x"}));
         assert!(out.is_error);
         assert!(out.content.contains("no MCP servers are configured"));
     }

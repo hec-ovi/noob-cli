@@ -12,16 +12,16 @@ use noob_provider::http::INTERRUPTED;
 use serde_json::Value;
 
 use super::truncate::{LIST_ENTRY_CAP, list_trailer_with};
-use super::{ToolCtx, ToolOutcome, display_path, opt_str};
+use super::{Core, ToolOutcome, display_path, opt_str};
 
 const CANCELED: &str = "ls canceled by user";
 
-pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
-    run_with(ctx, args, || INTERRUPTED.load(Ordering::SeqCst))
+pub fn run(core: &Core, args: &Value) -> ToolOutcome {
+    run_with(core, args, || INTERRUPTED.load(Ordering::SeqCst))
 }
 
-fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> ToolOutcome {
-    match run_inner(ctx, args, interrupted) {
+fn run_with(core: &Core, args: &Value, interrupted: impl Fn() -> bool) -> ToolOutcome {
+    match run_inner(core, args, interrupted) {
         Ok(out) => out,
         Err(msg) if msg == CANCELED => ToolOutcome::canceled_with(msg),
         Err(msg) => ToolOutcome::err(msg),
@@ -29,17 +29,17 @@ fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> Tool
 }
 
 fn run_inner(
-    ctx: &ToolCtx,
+    core: &Core,
     args: &Value,
     interrupted: impl Fn() -> bool,
 ) -> Result<ToolOutcome, String> {
     let raw = opt_str(args, "path")?.unwrap_or(".");
-    let path = super::guard::resolve_path(&ctx.workspace, raw);
-    let shown = display_path(ctx, &path);
+    let path = super::guard::resolve_path(&core.workspace, raw);
+    let shown = display_path(&core.workspace, &path);
 
     let entries = std::fs::read_dir(&path)
         .map_err(|e| format!("cannot list {shown}: {e}; check the path"))?;
-    let entry_cap = ctx.caps.list_entries;
+    let entry_cap = core.caps.list_entries;
     let mut names: Vec<String> = Vec::with_capacity(entry_cap.min(LIST_ENTRY_CAP));
     let mut total = 0usize;
     for entry in entries.flatten() {
@@ -90,10 +90,10 @@ mod tests {
     #[test]
     fn sorted_with_dir_slash() {
         let (_t, ctx) = test_ctx();
-        std::fs::create_dir(ctx.workspace.join("sub")).unwrap();
-        std::fs::write(ctx.workspace.join("b.txt"), "").unwrap();
-        std::fs::write(ctx.workspace.join("a.txt"), "").unwrap();
-        let out = run(&ctx, &json!({}));
+        std::fs::create_dir(ctx.core.workspace.join("sub")).unwrap();
+        std::fs::write(ctx.core.workspace.join("b.txt"), "").unwrap();
+        std::fs::write(ctx.core.workspace.join("a.txt"), "").unwrap();
+        let out = run(&ctx.core, &json!({}));
         assert!(!out.is_error);
         assert_eq!(out.content, ".:\na.txt\nb.txt\nsub/");
         assert_eq!(out.summary, "ls . (3 entries)");
@@ -104,9 +104,9 @@ mod tests {
         // A model must never have to guess the base path of a bare name: the
         // header line carries the directory it asked for.
         let (_t, ctx) = test_ctx();
-        std::fs::create_dir(ctx.workspace.join("cfg")).unwrap();
-        std::fs::write(ctx.workspace.join("cfg/contract.md"), "").unwrap();
-        let out = run(&ctx, &json!({"path": "cfg"}));
+        std::fs::create_dir(ctx.core.workspace.join("cfg")).unwrap();
+        std::fs::write(ctx.core.workspace.join("cfg/contract.md"), "").unwrap();
+        let out = run(&ctx.core, &json!({"path": "cfg"}));
         assert_eq!(out.content, "cfg:\ncontract.md");
     }
 
@@ -114,9 +114,9 @@ mod tests {
     fn entry_cap_appends_the_count_trailer() {
         let (_t, ctx) = test_ctx();
         for i in 0..250 {
-            std::fs::write(ctx.workspace.join(format!("f{i:03}")), "").unwrap();
+            std::fs::write(ctx.core.workspace.join(format!("f{i:03}")), "").unwrap();
         }
-        let out = run(&ctx, &json!({}));
+        let out = run(&ctx.core, &json!({}));
         assert!(
             out.content
                 .ends_with("250 entries, showing 200; list a subdirectory instead"),
@@ -132,11 +132,11 @@ mod tests {
     #[test]
     fn uncapped_ctx_lists_every_entry() {
         let (_t, mut ctx) = test_ctx();
-        ctx.caps = super::super::truncate::Caps::uncapped();
+        ctx.core.caps = super::super::truncate::Caps::uncapped();
         for i in 0..250 {
-            std::fs::write(ctx.workspace.join(format!("f{i:03}")), "").unwrap();
+            std::fs::write(ctx.core.workspace.join(format!("f{i:03}")), "").unwrap();
         }
-        let out = run(&ctx, &json!({}));
+        let out = run(&ctx.core, &json!({}));
         assert!(!out.content.contains("showing"), "{}", out.content);
         assert_eq!(out.content.lines().count(), 251);
         assert!(out.content.contains("f249"));
@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn missing_dir_is_a_remedy_error() {
         let (_t, ctx) = test_ctx();
-        let out = run(&ctx, &json!({"path": "nope"}));
+        let out = run(&ctx.core, &json!({"path": "nope"}));
         assert!(out.is_error);
         assert!(out.content.contains("cannot list nope"));
     }
@@ -153,16 +153,16 @@ mod tests {
     #[test]
     fn empty_dir_says_so() {
         let (_t, ctx) = test_ctx();
-        std::fs::create_dir(ctx.workspace.join("void")).unwrap();
-        let out = run(&ctx, &json!({"path": "void"}));
+        std::fs::create_dir(ctx.core.workspace.join("void")).unwrap();
+        let out = run(&ctx.core, &json!({"path": "void"}));
         assert_eq!(out.content, "void is empty");
     }
 
     #[test]
     fn directory_walk_cancellation_is_structural() {
         let (_t, ctx) = test_ctx();
-        std::fs::write(ctx.workspace.join("a.txt"), "").unwrap();
-        let out = run_with(&ctx, &json!({}), || true);
+        std::fs::write(ctx.core.workspace.join("a.txt"), "").unwrap();
+        let out = run_with(&ctx.core, &json!({}), || true);
         assert!(out.canceled);
         assert!(out.is_error);
     }

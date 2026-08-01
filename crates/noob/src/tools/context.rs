@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use noob_provider::types::ToolSpec;
 
-use super::{ToolCtx, ToolOutcome};
+use super::{ContextGauge, ToolOutcome};
 
 pub fn spec() -> ToolSpec {
     ToolSpec {
@@ -18,8 +18,8 @@ pub fn spec() -> ToolSpec {
     }
 }
 
-pub fn run(ctx: &ToolCtx, _args: &Value) -> ToolOutcome {
-    let (used, total, threshold) = ctx.context();
+pub fn run(gauge: &ContextGauge, _args: &Value) -> ToolOutcome {
+    let (used, total, threshold) = gauge.read();
     ToolOutcome::ok(
         report(used, total, threshold),
         format!("context: {}/{}", token_label(used), token_label(total)),
@@ -64,8 +64,8 @@ mod tests {
     #[test]
     fn reports_the_shared_estimate_total_and_threshold() {
         let (_tmp, ctx) = test_ctx();
-        ctx.set_context(83_153, 131_072, 98_304);
-        let out = run(&ctx, &json!({}));
+        ctx.gauge.set(&ctx.core.emitter, 83_153, 131_072, 98_304);
+        let out = run(&ctx.gauge, &json!({}));
         assert!(!out.is_error);
         assert!(
             out.content.contains("83.2k / 131.1k tokens (63%)"),
@@ -82,16 +82,16 @@ mod tests {
         // 75% mark; the tool must report the trigger that will actually
         // fire, not a threshold the session already crossed uneventfully.
         let (_tmp, ctx) = test_ctx();
-        ctx.set_context(110_000, 131_072, 115_000);
-        let out = run(&ctx, &json!({}));
+        ctx.gauge.set(&ctx.core.emitter, 110_000, 131_072, 115_000);
+        let out = run(&ctx.gauge, &json!({}));
         assert!(
             out.content.contains("115.0k (75% + backoff)"),
             "{}",
             out.content
         );
         // A zero/stale threshold never reports below the 75% floor.
-        ctx.set_context(10_000, 131_072, 0);
-        let out = run(&ctx, &json!({}));
+        ctx.gauge.set(&ctx.core.emitter, 10_000, 131_072, 0);
+        let out = run(&ctx.gauge, &json!({}));
         assert!(out.content.contains("98.3k (75%)"), "{}", out.content);
     }
 

@@ -214,13 +214,13 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
     // know which tree the paths in every later frame are relative to.
     let workspace_label = workspace.to_string_lossy().into_owned();
     let mut tool_ctx = ToolCtx::new(workspace, sandbox);
-    tool_ctx.caps = if config::tool_caps_lifted(&config_dir) {
+    tool_ctx.core.caps = if config::tool_caps_lifted(&config_dir) {
         tools::truncate::Caps::uncapped()
     } else {
         tools::truncate::Caps::default()
     };
-    tool_ctx.read_dedup = config::read_dedup(&config_dir);
-    tool_ctx.skills = discovered;
+    tool_ctx.fs.read_dedup = config::read_dedup(&config_dir);
+    tool_ctx.skills.list = discovered;
     tool_ctx.websearch = websearch;
     if !mcp_servers.is_empty() && (!boot.read_only || boot.web_only) {
         tool_ctx.mcp = Some(mcp::Mcp::new(mcp_servers));
@@ -272,7 +272,7 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
         model: model_name,
         resumed: !replayed.is_empty(),
     });
-    tool_ctx.emitter = emitter;
+    tool_ctx.core.emitter = emitter;
     let mut agent = Agent::new(
         Client::new(Timeouts::default()),
         config_dir.clone(),
@@ -562,7 +562,7 @@ fn cmd_repl(args: &[String]) -> ExitCode {
     // session they belong to. Ungated: the hint below it is behind an
     // interactive check because it is display policy, and a watcher needs to
     // know the session ended whatever surface the human was on.
-    agent.tool_ctx.emitter.send(noob_proto::Event::SessionEnd {
+    agent.tool_ctx.core.emitter.send(noob_proto::Event::SessionEnd {
         id: agent
             .session
             .as_ref()
@@ -731,7 +731,7 @@ fn handle_skills(args: &str, agent: &mut Agent, ui: &mut Ui) {
     let rest = parts.next().unwrap_or("").trim();
     let _workspace_lease = if matches!(verb, "add" | "remove" | "rm") {
         match tools::guard::workspace_write_lease(
-            &agent.tool_ctx.workspace,
+            &agent.tool_ctx.core.workspace,
             std::time::Duration::ZERO,
             || INTERRUPTED.load(Ordering::SeqCst),
         ) {
@@ -759,19 +759,20 @@ fn handle_skills(args: &str, agent: &mut Agent, ui: &mut Ui) {
     };
     match verb {
         "" | "list" => {
-            if agent.tool_ctx.skills.is_empty() {
+            if agent.tool_ctx.skills.list.is_empty() {
                 ui.note("no skills installed; /skills add <path|git-url> to install one");
                 return;
             }
             let lines: Vec<String> = agent
                 .tool_ctx
                 .skills
+                .list
                 .iter()
                 .map(|s| format!("  {}: {}", s.name, skills::clip_description(&s.description)))
                 .collect();
             ui.note(&format!(
                 "skills ({}):\n{}",
-                agent.tool_ctx.skills.len(),
+                agent.tool_ctx.skills.list.len(),
                 lines.join("\n")
             ));
         }
@@ -784,7 +785,7 @@ fn handle_skills(args: &str, agent: &mut Agent, ui: &mut Ui) {
                 ui.error("usage: /skills add <path|git-url>");
                 return;
             }
-            match skills::install(&agent.tool_ctx.workspace, rest) {
+            match skills::install(&agent.tool_ctx.core.workspace, rest) {
                 Ok(name) => {
                     ui.note(&format!("installed skill {name}"));
                     let (added, removed) = agent.reload_skills(ui);
@@ -801,6 +802,7 @@ fn handle_skills(args: &str, agent: &mut Agent, ui: &mut Ui) {
             let dir = agent
                 .tool_ctx
                 .skills
+                .list
                 .iter()
                 .find(|s| s.name == rest)
                 .map(|s| s.dir.clone());
@@ -808,7 +810,7 @@ fn handle_skills(args: &str, agent: &mut Agent, ui: &mut Ui) {
                 None => ui.error(&format!(
                     "no installed skill named {rest:?}; /skills lists them"
                 )),
-                Some(dir) => match skills::remove(&agent.tool_ctx.workspace, &dir) {
+                Some(dir) => match skills::remove(&agent.tool_ctx.core.workspace, &dir) {
                     Ok(()) => {
                         let (added, removed) = agent.reload_skills(ui);
                         skills_delta(ui, &added, &removed);
@@ -827,7 +829,7 @@ fn handle_mcp(args: &str, agent: &mut Agent, ui: &mut Ui) {
     let mut parts = args.splitn(2, char::is_whitespace);
     let verb = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
-    let project = mcp::config::project_path(&agent.tool_ctx.workspace);
+    let project = mcp::config::project_path(&agent.tool_ctx.core.workspace);
     match verb {
         "" | "list" => {
             let Some(mgr) = &agent.tool_ctx.mcp else {
@@ -1009,12 +1011,13 @@ fn status(agent: &Agent, ui: &mut Ui) {
         ),
         None => "last turn: no usage reported yet".to_string(),
     };
-    let skills_line = if agent.tool_ctx.skills.is_empty() {
+    let skills_line = if agent.tool_ctx.skills.list.is_empty() {
         String::new()
     } else {
         let names: Vec<&str> = agent
             .tool_ctx
             .skills
+            .list
             .iter()
             .map(|s| s.name.as_str())
             .collect();
@@ -1550,7 +1553,7 @@ fn cmd_child() -> ExitCode {
 /// the web). The FINAL transcript is deliberately NOT re-scanned: child-side
 /// compaction can summarize evidence items away and abort a compliant child.
 fn evidence_calls(agent: &Agent) -> usize {
-    agent.tool_ctx.evidence_call_count()
+    agent.tool_ctx.evidence.count()
 }
 
 /// The single stdout line; everything else this process printed went to

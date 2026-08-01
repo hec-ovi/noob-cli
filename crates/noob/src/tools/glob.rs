@@ -10,16 +10,16 @@ use noob_provider::http::INTERRUPTED;
 use serde_json::Value;
 
 use super::truncate::{LIST_ENTRY_CAP, list_trailer};
-use super::{ToolCtx, ToolOutcome, need_str};
+use super::{Core, ToolOutcome, need_str};
 
 const CANCELED: &str = "glob canceled by user";
 
-pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
-    run_with(ctx, args, || INTERRUPTED.load(Ordering::SeqCst))
+pub fn run(core: &Core, args: &Value) -> ToolOutcome {
+    run_with(core, args, || INTERRUPTED.load(Ordering::SeqCst))
 }
 
-fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> ToolOutcome {
-    match run_inner(ctx, args, interrupted) {
+fn run_with(core: &Core, args: &Value, interrupted: impl Fn() -> bool) -> ToolOutcome {
+    match run_inner(core, args, interrupted) {
         Ok(out) => out,
         Err(msg) if msg == CANCELED => ToolOutcome::canceled_with(msg),
         Err(msg) => ToolOutcome::err(msg),
@@ -27,12 +27,12 @@ fn run_with(ctx: &ToolCtx, args: &Value, interrupted: impl Fn() -> bool) -> Tool
 }
 
 fn run_inner(
-    ctx: &ToolCtx,
+    core: &Core,
     args: &Value,
     interrupted: impl Fn() -> bool,
 ) -> Result<ToolOutcome, String> {
     let pattern = need_str(args, "pattern")?;
-    let mut over = ignore::overrides::OverrideBuilder::new(&ctx.workspace);
+    let mut over = ignore::overrides::OverrideBuilder::new(&core.workspace);
     over.add(pattern).map_err(|e| {
         format!("bad glob pattern {pattern:?}: {e}; use gitignore syntax, e.g. src/**/*.rs")
     })?;
@@ -42,10 +42,10 @@ fn run_inner(
 
     // Retain only the entries that can be shown while still counting every
     // match. This keeps a huge workspace from becoming a huge allocation.
-    let entry_cap = ctx.caps.list_entries;
+    let entry_cap = core.caps.list_entries;
     let mut hits: Vec<(SystemTime, String)> = Vec::with_capacity(entry_cap.min(LIST_ENTRY_CAP));
     let mut total = 0usize;
-    let walk = ignore::WalkBuilder::new(&ctx.workspace)
+    let walk = ignore::WalkBuilder::new(&core.workspace)
         .overrides(over)
         .sort_by_file_path(|a, b| a.cmp(b))
         .hidden(false)
@@ -66,7 +66,7 @@ fn run_inner(
             .unwrap_or(SystemTime::UNIX_EPOCH);
         let rel = entry
             .path()
-            .strip_prefix(&ctx.workspace)
+            .strip_prefix(&core.workspace)
             .unwrap_or(entry.path());
         total = total.saturating_add(1);
         let candidate = (mtime, rel.display().to_string());
@@ -120,14 +120,14 @@ mod tests {
     #[test]
     fn matches_recursively_and_respects_gitignore() {
         let (_t, ctx) = test_ctx();
-        std::fs::create_dir_all(ctx.workspace.join("src/deep")).unwrap();
-        std::fs::create_dir_all(ctx.workspace.join("target")).unwrap();
-        std::fs::write(ctx.workspace.join(".gitignore"), "target/\n").unwrap();
-        std::fs::write(ctx.workspace.join("src/a.rs"), "").unwrap();
-        std::fs::write(ctx.workspace.join("src/deep/b.rs"), "").unwrap();
-        std::fs::write(ctx.workspace.join("target/junk.rs"), "").unwrap();
-        std::fs::write(ctx.workspace.join("readme.md"), "").unwrap();
-        let out = run(&ctx, &json!({"pattern": "*.rs"}));
+        std::fs::create_dir_all(ctx.core.workspace.join("src/deep")).unwrap();
+        std::fs::create_dir_all(ctx.core.workspace.join("target")).unwrap();
+        std::fs::write(ctx.core.workspace.join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(ctx.core.workspace.join("src/a.rs"), "").unwrap();
+        std::fs::write(ctx.core.workspace.join("src/deep/b.rs"), "").unwrap();
+        std::fs::write(ctx.core.workspace.join("target/junk.rs"), "").unwrap();
+        std::fs::write(ctx.core.workspace.join("readme.md"), "").unwrap();
+        let out = run(&ctx.core, &json!({"pattern": "*.rs"}));
         assert!(!out.is_error, "{}", out.content);
         let mut lines: Vec<&str> = out.content.lines().collect();
         lines.sort();
@@ -137,19 +137,19 @@ mod tests {
     #[test]
     fn newest_first_by_mtime() {
         let (_t, ctx) = test_ctx();
-        std::fs::write(ctx.workspace.join("old.rs"), "").unwrap();
-        std::fs::write(ctx.workspace.join("new.rs"), "").unwrap();
+        std::fs::write(ctx.core.workspace.join("old.rs"), "").unwrap();
+        std::fs::write(ctx.core.workspace.join("new.rs"), "").unwrap();
         let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-        let f = std::fs::File::open(ctx.workspace.join("old.rs")).unwrap();
+        let f = std::fs::File::open(ctx.core.workspace.join("old.rs")).unwrap();
         f.set_modified(old_time).unwrap();
-        let out = run(&ctx, &json!({"pattern": "*.rs"}));
+        let out = run(&ctx.core, &json!({"pattern": "*.rs"}));
         assert_eq!(out.content, "new.rs\nold.rs");
     }
 
     #[test]
     fn zero_matches_names_the_next_action() {
         let (_t, ctx) = test_ctx();
-        let out = run(&ctx, &json!({"pattern": "*.zig"}));
+        let out = run(&ctx.core, &json!({"pattern": "*.zig"}));
         assert!(!out.is_error);
         assert!(out.content.contains("try a broader pattern or ls"));
     }
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn bad_pattern_is_a_remedy_error() {
         let (_t, ctx) = test_ctx();
-        let out = run(&ctx, &json!({"pattern": "{unclosed"}));
+        let out = run(&ctx.core, &json!({"pattern": "{unclosed"}));
         assert!(out.is_error);
         assert!(out.content.contains("bad glob pattern"));
     }
@@ -165,8 +165,8 @@ mod tests {
     #[test]
     fn walk_cancellation_is_structural() {
         let (_t, ctx) = test_ctx();
-        std::fs::write(ctx.workspace.join("a.txt"), "").unwrap();
-        let out = run_with(&ctx, &json!({"pattern": "*.txt"}), || true);
+        std::fs::write(ctx.core.workspace.join("a.txt"), "").unwrap();
+        let out = run_with(&ctx.core, &json!({"pattern": "*.txt"}), || true);
         assert!(out.canceled);
         assert!(out.is_error);
     }
@@ -176,14 +176,14 @@ mod tests {
         let (_t, ctx) = test_ctx();
         let same_time = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
         for i in 0..230 {
-            let path = ctx.workspace.join(format!("f{i:03}.txt"));
+            let path = ctx.core.workspace.join(format!("f{i:03}.txt"));
             std::fs::write(&path, "").unwrap();
             std::fs::File::open(path)
                 .unwrap()
                 .set_modified(same_time)
                 .unwrap();
         }
-        let out = run(&ctx, &json!({"pattern": "*.txt"}));
+        let out = run(&ctx.core, &json!({"pattern": "*.txt"}));
         assert!(
             out.content
                 .ends_with("230 files, showing 200; narrow the pattern")
@@ -196,11 +196,11 @@ mod tests {
     #[test]
     fn uncapped_ctx_returns_every_match() {
         let (_t, mut ctx) = test_ctx();
-        ctx.caps = super::super::truncate::Caps::uncapped();
+        ctx.core.caps = super::super::truncate::Caps::uncapped();
         for i in 0..230 {
-            std::fs::write(ctx.workspace.join(format!("f{i:03}.txt")), "").unwrap();
+            std::fs::write(ctx.core.workspace.join(format!("f{i:03}.txt")), "").unwrap();
         }
-        let out = run(&ctx, &json!({"pattern": "*.txt"}));
+        let out = run(&ctx.core, &json!({"pattern": "*.txt"}));
         assert!(!out.content.contains("showing"), "{}", out.content);
         assert_eq!(out.content.lines().count(), 230);
         assert!(out.content.contains("f229.txt"));

@@ -20,7 +20,7 @@ use noob_provider::types::ToolSpec;
 
 use super::truncate::mcp_cap;
 use super::untrusted;
-use super::{ToolCtx, ToolOutcome, need_str, opt_u64};
+use super::{Core, Evidence, ToolOutcome, need_str, opt_u64};
 
 /// The command noob shells out to. Installed in the runtime image as a uv
 /// tool; on a host it comes from `uv tool install websearch-skill`.
@@ -126,8 +126,8 @@ pub fn spec() -> ToolSpec {
     }
 }
 
-pub fn run(ctx: &ToolCtx, args: &Value) -> ToolOutcome {
-    match run_inner(ctx, args) {
+pub fn run(core: &Core, evidence: &Evidence, args: &Value) -> ToolOutcome {
+    match run_inner(core, evidence, args) {
         Ok(out) => out,
         Err(message) if message.starts_with("websearch canceled") => {
             ToolOutcome::canceled_with(message)
@@ -301,8 +301,8 @@ fn default_timeout_for(action: &str, argv: &[String]) -> u64 {
     }
 }
 
-fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
-    let (action, argv, evidence) = build_argv(args)?;
+fn run_inner(core: &Core, evidence: &Evidence, args: &Value) -> Result<ToolOutcome, String> {
+    let (action, argv, gathered) = build_argv(args)?;
     let default_timeout = default_timeout_for(&action, &argv);
 
     let timeout_s = opt_u64(args, "timeout_s")?
@@ -316,14 +316,14 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         ));
     };
     let mut command = Command::new(program);
-    command.args(&argv).current_dir(&ctx.workspace);
+    command.args(&argv).current_dir(&core.workspace);
     let run = match crate::exec::run(
         command,
         PROGRAM,
         timeout_s,
-        ctx.caps.mcp_head,
-        ctx.caps.mcp_tail,
-        crate::emit::Progress::for_current_call(&ctx.emitter),
+        core.caps.mcp_head,
+        core.caps.mcp_tail,
+        crate::emit::Progress::for_current_call(&core.emitter),
     ) {
         Ok(run) => run,
         Err(crate::exec::RunError::Spawn(message)) => {
@@ -357,15 +357,15 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         // problems", not "the tool broke", so the body is the answer either way.
         let mut out = ToolOutcome::err(untrusted::wrap(
             "the web (websearch)",
-            &mcp_cap(&run.body, &ctx.caps),
+            &mcp_cap(&run.body, &core.caps),
         ))
         .classed(super::fail::EXIT_STATUS)
         .coded(run.code);
         out.summary = summary;
         return Ok(out);
     }
-    if evidence {
-        ctx.record_evidence_call();
+    if gathered {
+        evidence.record();
     }
     let body = if run.body.trim().is_empty() {
         "(no output)".to_string()
@@ -373,7 +373,7 @@ fn run_inner(ctx: &ToolCtx, args: &Value) -> Result<ToolOutcome, String> {
         run.body
     };
     Ok(ToolOutcome::ok(
-        untrusted::wrap("the web (websearch)", &mcp_cap(&body, &ctx.caps)),
+        untrusted::wrap("the web (websearch)", &mcp_cap(&body, &core.caps)),
         summary,
     ))
 }
@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn a_value_that_looks_like_a_flag_is_refused() {
         let (_tmp, ctx) = test_ctx();
-        let out = run(&ctx, &json!({"action": "search", "query": "--json"}));
+        let out = run(&ctx.core, &ctx.evidence, &json!({"action": "search", "query": "--json"}));
         assert!(out.is_error);
         assert!(
             out.content.contains("must not start with '-'"),
@@ -469,7 +469,7 @@ mod tests {
     #[test]
     fn an_unknown_action_lists_the_real_ones() {
         let (_tmp, ctx) = test_ctx();
-        let out = run(&ctx, &json!({"action": "rm-rf"}));
+        let out = run(&ctx.core, &ctx.evidence, &json!({"action": "rm-rf"}));
         assert!(out.is_error);
         assert!(out.content.contains("unknown action"), "{}", out.content);
         assert!(
@@ -483,7 +483,7 @@ mod tests {
     fn fetch_requires_an_absolute_http_url() {
         let (_tmp, ctx) = test_ctx();
         for url in ["file:///etc/passwd", "example.com/page"] {
-            let out = run(&ctx, &json!({"action": "fetch", "url": url}));
+            let out = run(&ctx.core, &ctx.evidence, &json!({"action": "fetch", "url": url}));
             assert!(out.is_error, "{url} was accepted");
             assert!(
                 out.content.contains("absolute http(s) URL"),
@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn a_missing_required_field_names_it() {
         let (_tmp, ctx) = test_ctx();
-        let out = run(&ctx, &json!({"action": "search"}));
+        let out = run(&ctx.core, &ctx.evidence, &json!({"action": "search"}));
         assert!(out.is_error);
         assert!(out.content.contains("query"), "{}", out.content);
     }
@@ -505,7 +505,8 @@ mod tests {
     fn a_control_character_is_refused() {
         let (_tmp, ctx) = test_ctx();
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.evidence,
             &json!({"action": "search", "query": "rust\nownership"}),
         );
         assert!(out.is_error);
@@ -516,7 +517,8 @@ mod tests {
     fn an_out_of_range_count_is_refused() {
         let (_tmp, ctx) = test_ctx();
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.evidence,
             &json!({"action": "search", "query": "rust", "max_results": 5000}),
         );
         assert!(out.is_error);
@@ -527,7 +529,8 @@ mod tests {
     fn a_bad_freshness_is_refused_before_the_process_starts() {
         let (_tmp, ctx) = test_ctx();
         let out = run(
-            &ctx,
+            &ctx.core,
+            &ctx.evidence,
             &json!({"action": "search", "query": "rust", "freshness": "yesterday"}),
         );
         assert!(out.is_error);
@@ -556,7 +559,7 @@ mod tests {
     #[test]
     fn a_validation_error_never_records_evidence() {
         let (_tmp, ctx) = test_ctx();
-        run(&ctx, &json!({"action": "search", "query": "--flag"}));
-        assert_eq!(ctx.evidence_call_count(), 0);
+        run(&ctx.core, &ctx.evidence, &json!({"action": "search", "query": "--flag"}));
+        assert_eq!(ctx.evidence.count(), 0);
     }
 }
