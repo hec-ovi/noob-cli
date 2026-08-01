@@ -39,7 +39,7 @@ package, the binary and everything a user sees are `no0b`.
 |---|---|
 | The wire protocol between agent and window | `crates/noob-proto/CONTRACT.md`, shapes in `crates/noob-proto/schema/` |
 | What the agent can do: tools and their schemas | `crates/noob/src/tools/CONTRACT.md` |
-| The system prompt and what goes into it | `crates/noob/src/agent/prompt.rs` |
+| The system prompt and what goes into it | `crates/noob/src/agent/CONTRACT.md`, texts in `crates/noob/prompts/` |
 | Sessions on disk, resume | `crates/noob/src/session/CONTRACT.md` |
 | Endpoint, keys, sandbox detection | `crates/noob/src/config/CONTRACT.md` |
 | Talking to a model server | `crates/noob-provider/CONTRACT.md` |
@@ -90,6 +90,12 @@ Boxes so far:
 - [`crates/noob/src/tools`](../crates/noob/src/tools/CONTRACT.md) - the tool
   registry: specs, dispatch rails, per-capability context slices, shared
   write/truncation policy.
+- [`crates/noob/src/agent`](../crates/noob/src/agent/CONTRACT.md) - the
+  agentic loop: rounds, batches, plan mode, compaction, all reported through
+  the ui turn surface.
+- [`crates/noob/src/ui`](../crates/noob/src/ui/CONTRACT.md) - the four
+  output surfaces behind one turn surface; the dock; headless bytes never
+  change.
 - [`gui/noob-gpu`](../gui/noob-gpu/CONTRACT.md) - adapter, device, surface:
   acquire, present, resize, transparency probing.
 - [`gui/noob-draw`](../gui/noob-draw/CONTRACT.md) - drawing vocabulary: panels,

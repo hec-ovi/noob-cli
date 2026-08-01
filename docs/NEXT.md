@@ -53,8 +53,9 @@ The rounds, each ending green and committed, one agent per box:
    platform-neutral so second implementations can exist.
 6. The tool registry partitions: the ToolCtx god-object becomes per-capability
    contexts; file tools, the shell tool, and the web tool box separately.
-7. The agent loop emits events instead of holding the UI; agent and terminal-UI
-   boxes (core, dock, editor, textkit) form against that seam.
+7. The agent and ui boxes freeze their seam: the ui multiplexes the four
+   output surfaces behind one fixed turn surface (the method set the agent
+   may call), stated in both contracts.
 8. Entry points: serve (the contract the GUI consumes) and the CLI shell.
 9. GUI leaf boxes: dock model, prompt, selection, scroll, orb, design,
    transcript model, style, menu, monitor, config, agent-files, link, sessions.
