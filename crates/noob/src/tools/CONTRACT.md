@@ -14,8 +14,8 @@ only its slices.
 
 ```rust
 pub struct ToolCtx {            // built once at bootstrap
-    pub core: Core,             // workspace, sandbox, caps, emitter:
-                                // what nearly every tool needs
+    pub core: Core,             // workspace, sandbox, folder lock, caps,
+                                // emitter: what nearly every tool needs
     pub fs: FsState,            // seen-file stamps, edit escalation, dedup
     pub grants: WriteGrants,    // the skills-dir write gate
     pub skills: SkillsState,    // discovered list + loaded names
@@ -68,6 +68,12 @@ is the closed class set; every classified error also says what to do next.
   write/edit path admission, `FileStamp` staleness, the workspace write
   lease, `atomic_write` (temp + fsync + rename, writes THROUGH symlinks,
   preserves mode), and the skills-dir target rule behind `WriteGrants`.
+- The folder lock: in workspace mode `Core.lockdown` holds the exec box's
+  `Lockdown` when the kernel provides one, and bash hands it to every run,
+  so a model-typed command cannot write outside the workspace and temp. A
+  locked command's toolchain caches (cargo, go, npm, XDG) are redirected
+  under the temp tree so builds keep working. bash's one-time UI notice
+  states whichever is true: folder-locked, or no sandbox at all.
 - `truncate`: `Caps` (every cap in one struct, `uncapped()` lifts all),
   head+tail truncation with honest markers, line clipping, the frozen
   trailer phrasings.

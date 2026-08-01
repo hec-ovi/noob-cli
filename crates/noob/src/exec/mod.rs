@@ -12,6 +12,9 @@
 use std::time::Duration;
 
 mod buffer;
+mod lockdown;
+pub(crate) use lockdown::Lockdown;
+pub(crate) use lockdown::support as lockdown_support;
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]

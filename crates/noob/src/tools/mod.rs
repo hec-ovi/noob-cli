@@ -83,6 +83,10 @@ pub struct Core {
     /// Canonicalized working directory; the root of relative paths.
     pub workspace: PathBuf,
     pub sandbox: Sandbox,
+    /// The folder lock for model-typed commands, built once per boot in
+    /// workspace mode when the kernel provides it. None means bash runs
+    /// unlocked and its one-time warning stays honest about that.
+    pub lockdown: Option<crate::exec::Lockdown>,
     /// Truncation policy for every tool result (NOOB_TOOL_CAPS). Defaults to
     /// the shipped caps; bootstrap swaps in Caps::uncapped() when the setting
     /// says 0/off. Copy semantics, read-only after bootstrap.
@@ -299,6 +303,9 @@ impl ToolCtx {
     pub fn new(workspace: PathBuf, sandbox: Sandbox) -> ToolCtx {
         ToolCtx {
             core: Core {
+                lockdown: (sandbox == Sandbox::Workspace)
+                    .then(|| crate::exec::Lockdown::for_workspace(&workspace).ok())
+                    .flatten(),
                 workspace,
                 sandbox,
                 caps: truncate::Caps::default(),

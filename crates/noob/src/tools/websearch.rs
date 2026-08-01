@@ -324,6 +324,9 @@ fn run_inner(core: &Core, evidence: &Evidence, args: &Value) -> Result<ToolOutco
         core.caps.mcp_head,
         core.caps.mcp_tail,
         crate::emit::Progress::for_current_call(&core.emitter),
+        // Not model-typed: a fixed argv against a user-installed tool that
+        // manages its own state under $HOME. The folder lock is bash's.
+        None,
     ) {
         Ok(run) => run,
         Err(crate::exec::RunError::Spawn(message)) => {

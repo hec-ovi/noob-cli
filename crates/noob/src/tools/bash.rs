@@ -47,6 +47,20 @@ fn available() -> &'static str {
     })
 }
 
+/// Where a locked command's toolchain caches go: one tree per user under
+/// temp, inside the lock. Covers cargo, go, npm, and everything honoring
+/// XDG_CACHE_HOME (pip, uv, go-build); a tool with its own idea of $HOME
+/// fails visibly and the model routes around it.
+fn cache_env() -> [(&'static str, std::path::PathBuf); 4] {
+    let base = std::env::temp_dir().join(format!("noob-cache-{}", unsafe { libc::getuid() }));
+    [
+        ("XDG_CACHE_HOME", base.join("xdg")),
+        ("CARGO_HOME", base.join("cargo")),
+        ("GOPATH", base.join("go")),
+        ("npm_config_cache", base.join("npm")),
+    ]
+}
+
 /// Exit 127 is "command not found". Answer the question the model is about to
 /// spend a round asking.
 fn not_found_hint(code: i32, body: &str) -> Option<String> {
@@ -92,6 +106,16 @@ fn run_inner(core: &Core, warned: &AtomicBool, args: &Value) -> Result<ToolOutco
 
     let mut command = Command::new("bash");
     command.arg("-c").arg(cmd).current_dir(&core.workspace);
+    if core.lockdown.is_some() {
+        // A locked command still builds: the caches toolchains insist on
+        // writing land under the temp tree the lock allows instead of $HOME,
+        // which it does not. The same trade the container made when HOME was
+        // /tmp/noob-home; the price is a cold cache after a reboot.
+        for (name, dir) in cache_env() {
+            let _ = std::fs::create_dir_all(&dir);
+            command.env(name, &dir);
+        }
+    }
     let run = match exec::run(
         command,
         "bash",
@@ -99,6 +123,7 @@ fn run_inner(core: &Core, warned: &AtomicBool, args: &Value) -> Result<ToolOutco
         core.caps.bash_head,
         core.caps.bash_tail,
         crate::emit::Progress::for_current_call(&core.emitter),
+        core.lockdown.as_ref(),
     ) {
         Ok(run) => run,
         Err(exec::RunError::Spawn(message)) => {
@@ -123,12 +148,15 @@ fn run_inner(core: &Core, warned: &AtomicBool, args: &Value) -> Result<ToolOutco
     };
     let (mut body, code, elapsed) = (run.body, run.code, run.elapsed);
 
-    // One-time workspace-mode warning, UI-only (never in the transcript).
+    // One-time workspace-mode notice, UI-only (never in the transcript).
     // Attached only when a command actually ran, so an early parameter
     // error cannot consume the one-shot silently.
     let warning = (core.sandbox == super::guard::Sandbox::Workspace
         && !warned.swap(true, Ordering::SeqCst))
-    .then(|| "no sandbox: commands run directly on your host".to_string());
+    .then(|| match &core.lockdown {
+        Some(_) => "commands are folder-locked to the workspace (landlock)".to_string(),
+        None => "no sandbox: commands run directly on your host".to_string(),
+    });
     let summary = format!(
         "bash {} ({:.1}s, exit {code})",
         brief(cmd),
@@ -420,6 +448,63 @@ mod tests {
         // One-time: the second successful run stays quiet.
         let again = run(&ctx.core, &ctx.bash_warned, &json!({"cmd": "true"}));
         assert!(again.warning.is_none());
+    }
+
+    /// The folder lock the contract promises: in workspace mode a command
+    /// the model types cannot write outside the workspace, while the
+    /// workspace itself and the pipe carve-outs (/dev/stdout, process
+    /// substitution) keep working. The deny target must be user-writable
+    /// and outside every allowed tree, so $HOME is probed with an unlocked
+    /// canary first; without such a place, or without Landlock, the test
+    /// says it skipped rather than passing on nothing.
+    #[test]
+    fn workspace_mode_folder_locks_commands() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let ctx = crate::tools::ToolCtx::new(ws, super::super::guard::Sandbox::Workspace);
+        if ctx.core.lockdown.is_none() {
+            eprintln!("skipped: this kernel offers no folder lock");
+            return;
+        }
+
+        let inside = run(
+            &ctx.core,
+            &ctx.bash_warned,
+            &json!({"cmd": "echo held > inside.txt && cat inside.txt && echo pipe > /dev/stdout && { echo sub > >(cat); wait; }"}),
+        );
+        assert!(!inside.is_error, "{}", inside.content);
+        assert!(inside.content.contains("held"));
+        assert!(inside.content.contains("pipe"));
+        assert!(inside.content.contains("sub"));
+
+        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+            eprintln!("skipped deny half: no HOME to probe");
+            return;
+        };
+        // A HOME inside an allowed tree (the dev container parks it under
+        // /tmp) cannot serve as the deny target.
+        if ["/tmp", "/var/tmp", "/dev/shm"]
+            .iter()
+            .any(|allowed| home.starts_with(allowed))
+        {
+            eprintln!("skipped deny half: HOME sits inside the lock's temp allowance");
+            return;
+        }
+        let target = home.join(format!(".noob-lock-canary-{}", std::process::id()));
+        if std::fs::write(&target, b"canary").is_err() {
+            eprintln!("skipped deny half: HOME is not writable here");
+            return;
+        }
+        std::fs::remove_file(&target).unwrap();
+        let escaped = run(
+            &ctx.core,
+            &ctx.bash_warned,
+            &json!({"cmd": format!("echo escaped > '{}'", target.display())}),
+        );
+        let leaked = target.exists();
+        let _ = std::fs::remove_file(&target);
+        assert!(escaped.is_error, "a write outside the workspace must fail");
+        assert!(!leaked, "the locked command wrote outside the workspace");
     }
 
     #[test]

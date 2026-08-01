@@ -29,6 +29,7 @@ pub(crate) fn run(
     head: usize,
     tail: usize,
     progress: Option<crate::emit::Progress>,
+    lockdown: Option<&super::Lockdown>,
 ) -> Result<Run, RunError> {
     // One pipe; the child gets its write end as BOTH stdout and stderr, so
     // interleaving matches what a terminal would show. O_CLOEXEC is load-
@@ -64,11 +65,19 @@ pub(crate) fn run(
     };
 
     command.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
+    // The ruleset outlives the closure through the Copy fd: the Lockdown is
+    // held by the caller for the whole call, so the fd stays open across
+    // spawn. A failure to apply fails the spawn; the lock never silently
+    // degrades to an unlocked run.
+    let lock_fd = lockdown.map(super::Lockdown::raw_fd);
     unsafe {
         use std::os::unix::process::CommandExt;
         // New session = new process group; kill(-pgid) reaches every child.
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             libc::setsid();
+            if let Some(fd) = lock_fd {
+                super::lockdown::apply(fd)?;
+            }
             Ok(())
         });
     }

@@ -42,8 +42,14 @@ pub fn run() -> ExitCode {
     checks.extend(check_endpoint(&config_dir));
     checks.extend(check_mcp(&workspace, &config_dir));
     checks.push(check_workspace(&workspace));
-    let (_, sandbox_label) = config::detect_sandbox(&config_dir, false);
+    let (sandbox_mode, sandbox_label) = config::detect_sandbox(&config_dir, false);
     checks.push(Check::Ok(format!("sandbox: {sandbox_label}")));
+    if sandbox_mode == config::SandboxMode::Workspace {
+        checks.push(match crate::exec::lockdown_support() {
+            Ok(mechanism) => Check::Ok(format!("commands folder-locked ({mechanism})")),
+            Err(reason) => Check::Warn(format!("commands not folder-locked: {reason}")),
+        });
+    }
 
     let mut failed = false;
     for check in &checks {
