@@ -7,6 +7,6 @@
 
 pub mod agent;
 pub mod appearance;
-pub mod sessions;
 pub mod mcp;
+pub mod sessions;
 pub mod skills;

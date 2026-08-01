@@ -23,7 +23,7 @@ package, the binary and everything a user sees are `no0b`.
 | The conversation and metrics model: what an event does to state | `gui/clippy/src/state/CONTRACT.md` |
 | Where a pane that is a list is scrolled to, and what clamps it | `gui/clippy/src/scroll/CONTRACT.md`, content measured by `view::scroll_extent` |
 | Which readings the monitors show | `gui/clippy/src/monitor/CONTRACT.md` |
-| Which skills and MCP servers the panel lists, and what turning one off or removing it does on disk | `gui/clippy/src/agent/CONTRACT.md`, listed by `gui/clippy/src/settings.rs` |
+| Which skills and MCP servers the panel lists, and what turning one off or removing it does on disk | `gui/clippy/src/agent/CONTRACT.md`, listed by `gui/clippy/src/settings/sections/skills/CONTRACT.md` and `gui/clippy/src/settings/sections/mcp/CONTRACT.md` |
 | What a tool call is remembered as, and what the popup over an activity row shows | `gui/clippy/src/state/CONTRACT.md`, drawn by `view::call_popup` |
 | Talking to the agent process | `gui/clippy/src/link/CONTRACT.md` |
 | Drawing primitives: rects, corners, text, anything the shader does | `gui/noob-draw/src/lib.rs` |
@@ -133,7 +133,18 @@ Boxes so far:
   plan, agents, files, context, gauges), each a pure painter with its own
   contract.
 - [`gui/clippy/src/settings`](../gui/clippy/src/settings/CONTRACT.md) - the
-  settings panel reunited: model, places, and paint over one geometry.
+  settings panel: the frame (rail, cursor, shared row vocabulary, write-back)
+  over five nested section boxes, with places and paint on one geometry.
+  - [`settings/sections/agent`](../gui/clippy/src/settings/sections/agent/CONTRACT.md) -
+    the CLI's file as cards, the AGENTS.md and prompt blocks.
+  - [`settings/sections/sessions`](../gui/clippy/src/settings/sections/sessions/CONTRACT.md) -
+    the saved conversations table, its columns and cells.
+  - [`settings/sections/skills`](../gui/clippy/src/settings/sections/skills/CONTRACT.md) -
+    the installed list and the validate-then-install cycle.
+  - [`settings/sections/mcp`](../gui/clippy/src/settings/sections/mcp/CONTRACT.md) -
+    the configured servers and the add-a-server card.
+  - [`settings/sections/appearance`](../gui/clippy/src/settings/sections/appearance/CONTRACT.md) -
+    the window's looks, the palette, the restore.
 - [`gui/clippy/src/picker`](../gui/clippy/src/picker/CONTRACT.md) - the
   startup chooser reunited: model, places, and paint over one geometry.
 - [`gui/clippy/src/view`](../gui/clippy/src/view/CONTRACT.md) - layout, hit
