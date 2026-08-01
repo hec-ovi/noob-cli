@@ -83,7 +83,7 @@ Boxes so far:
   discovery, the L1 index, install and remove with staged atomic publish.
 - [`crates/noob/src/exec`](../crates/noob/src/exec/CONTRACT.md) - the one
   process runner: merged bounded output, the child tree as one killable
-  unit, no residue.
+  unit, the Landlock folder lock, no residue.
 - [`crates/noob/src/term`](../crates/noob/src/term/CONTRACT.md) - the
   terminal backend: raw mode with guaranteed restore, bytes to keys, size,
   signals.
