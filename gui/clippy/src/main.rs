@@ -6809,11 +6809,14 @@ mod tests {
         let box_ = layout.call_popup;
         assert!(box_.w >= 1.0 && box_.h >= 1.0, "it has a box: {box_:?}");
         assert_eq!(layout.hit(box_.x + 4.0, box_.y + 4.0), Some(Hit::CallPopup));
-        assert_eq!(middle(box_), (W * 0.5, H * 0.5), "centred on the window");
+        // Full panel: the whole surface under the title strip, a margin in
+        // from every edge, rather than a note sized to its lines.
+        assert!(box_.w >= W * 0.9, "{box_:?}");
+        assert!(box_.y + box_.h >= H * 0.9, "{box_:?}");
 
         // A press outside it is not the popup's, so `App::click` closes the
         // popup and stops there.
-        let outside = layout.hit(box_.x - 8.0, box_.y + box_.h * 0.5);
+        let outside = layout.hit(box_.x - 2.0, box_.y + box_.h * 0.5);
         assert!(!matches!(outside, Some(Hit::CallPopup)), "{outside:?}");
 
         // And with nothing open there is no region at all, so nothing can be

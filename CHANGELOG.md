@@ -30,6 +30,11 @@ tags rather than here; this file starts where it was added.
 - The base application's background is its own colour (`background`,
   "behind everything" on the palette), beside the widget windows' `panel`;
   each theme tints both, and either can be overridden alone.
+- ACTIVITY is a list again: exactly one row per call, ending in a chevron
+  that says it opens, recolored when the call fails. Progress, summaries
+  and failure details live on the call's popup, now a full-panel view with
+  one styled block per section (invoked, when, generated, returned,
+  detail), each with its own tone bar; live progress moves the status line.
 
 ## 0.11.0 - 2026-08-01
 

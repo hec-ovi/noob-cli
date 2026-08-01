@@ -552,6 +552,17 @@ impl Pane {
             .map_or_else(|| self.fence.clone(), |line| line.fence.clone())
     }
 
+    /// Change one line's tone in place, keeping its text and so its
+    /// geometry: how a call's row comes to say it failed without the pane
+    /// gaining a row.
+    pub fn retone(&mut self, absolute: usize, tone: Tone) {
+        if let Some(index) = absolute.checked_sub(self.dropped)
+            && let Some(line) = self.lines.get_mut(index)
+        {
+            line.tone = tone;
+        }
+    }
+
     /// Where the thumb sits and how tall it is, as fractions of the track, or
     /// `None` when everything fits and there is nothing to indicate.
     ///
@@ -850,11 +861,8 @@ pub struct Call {
     /// Whether this call was in flight at the same time as another one inside
     /// the same turn.
     pub parallel: bool,
-    /// The absolute activity line its start row was written to.
+    /// The absolute activity line its one row was written to.
     pub line: usize,
-    /// The block of rows its end wrote, as the first one and how many. `None`
-    /// until it ends.
-    pub tail: Option<(usize, usize)>,
 }
 
 /// One cell of the popup: a heading and the lines under it.
@@ -870,9 +878,9 @@ pub struct Cell {
 }
 
 impl Call {
-    /// Whether an activity row belongs to this call.
+    /// Whether an activity row belongs to this call: a call is one row.
     fn owns(&self, line: usize) -> bool {
-        line == self.line || self.tail.is_some_and(|(at, n)| line >= at && line < at + n)
+        line == self.line
     }
 
     /// How long it ran, in whatever the window can honestly say.
@@ -1028,21 +1036,6 @@ impl Call {
         }
     }
 
-    /// The whole popup as lines and their tones, which is all the drawing needs.
-    ///
-    /// Built here rather than in the view so the one place that decides what the
-    /// popup says is the one place that can be tested without a window.
-    pub fn popup_lines(&self) -> Vec<(String, Tone)> {
-        let mut out = vec![(self.heading(), Tone::Bright)];
-        for cell in self.cells() {
-            out.push((String::new(), Tone::Dim));
-            out.push((cell.label.to_string(), Tone::Dim));
-            for line in cell.lines {
-                out.push((line, cell.tone));
-            }
-        }
-        out
-    }
 }
 
 /// A block of text as lines, bounded, with a last line saying what was left out.
@@ -1418,16 +1411,13 @@ impl State {
                 };
                 self.status = self.phase.word().to_lowercase();
                 // Close anything left open, so a row cannot show as running
-                // after the turn that owned it has ended.
-                let stragglers: Vec<(String, usize)> = self
-                    .open
-                    .drain()
-                    .map(|(_, open)| (open.brief, open.call))
-                    .collect();
-                let stamp = self.stamp(at);
-                for (brief, ordinal) in stragglers {
-                    let at_line = self.activity.last();
-                    self.note(&stamp, format!("       {brief} never reported back"), Tone::Bad);
+                // after the turn that owned it has ended. The row goes to the
+                // failure colour and the reason waits on its popup, the same
+                // shape every other ending has.
+                let stragglers: Vec<usize> =
+                    self.open.drain().map(|(_, open)| open.call).collect();
+                for ordinal in stragglers {
+                    let mut row = None;
                     if let Some(index) = ordinal.checked_sub(self.calls_dropped)
                         && let Some(call) = self.calls.get_mut(index)
                     {
@@ -1437,7 +1427,10 @@ impl State {
                         call.ended = at;
                         call.done = true;
                         call.summary = String::from("never reported back");
-                        call.tail = Some((at_line, 1));
+                        row = Some(call.line);
+                    }
+                    if let Some(row) = row {
+                        self.activity.retone(row, Tone::Bad);
                     }
                 }
             }
@@ -1470,9 +1463,12 @@ impl State {
                 // be written rather than the one after it.
                 let line = self.activity.last();
                 let stamp = self.stamp(at);
+                // One row per call, ending in the chevron that says a row
+                // opens: everything else about the call lives on the popup a
+                // press on this row raises.
                 self.note(
                     &stamp,
-                    format!("{:>5}  {}", kind.tag(), subject(kind, &brief, &args)),
+                    format!("{:>5}  {} \u{25b8}", kind.tag(), subject(kind, &brief, &args)),
                     Tone::Call(kind),
                 );
                 let ordinal = self.remember_call(Call {
@@ -1492,7 +1488,6 @@ impl State {
                     output: Vec::new(),
                     parallel: false,
                     line,
-                    tail: None,
                 });
                 // Every call still open started before this one and has not come
                 // back, so this one and all of them were in flight together. The
@@ -1520,21 +1515,23 @@ impl State {
                 );
             }
             Event::ToolProgress { call_id, line } => {
-                let open = self.open.get(&call_id);
-                let kind = open.map_or(Kind::Other, |o| o.kind);
-                // The live stdout tap is the only thing resembling a return
-                // value the wire carries for a call that works, so it is kept
-                // rather than only printed. Bounded: a build log is thousands of
-                // lines and the popup shows a screenful.
-                if let Some(ordinal) = open.map(|o| o.call)
-                    && let Some(index) = ordinal.checked_sub(self.calls_dropped)
+                // The live stdout tap is the call's own news, never the
+                // pane's: a websearch or a build printing every step buried
+                // the list of calls under one call's chatter. It accumulates
+                // on the popup's RETURNED block, bounded, and the status
+                // line carries the latest of it while the call runs. A line
+                // for a call this window never saw open changes nothing.
+                let Some(ordinal) = self.open.get(&call_id).map(|o| o.call) else {
+                    return false;
+                };
+                if let Some(index) = ordinal.checked_sub(self.calls_dropped)
                     && let Some(call) = self.calls.get_mut(index)
-                    && call.output.len() < CELL_LINES
                 {
-                    call.output.push(line.clone());
+                    if call.output.len() < CELL_LINES {
+                        call.output.push(line.clone());
+                    }
+                    self.status = format!("{} {}", call.name, line);
                 }
-                let stamp = self.stamp(at);
-                self.note(&stamp, format!("       {line}"), Tone::Call(kind));
             }
             Event::ToolEnd {
                 call_id,
@@ -1543,49 +1540,24 @@ impl State {
                 error,
             } => {
                 let ordinal = self.open.remove(&call_id).map(|open| open.call);
-                let tail_at = self.activity.last();
-                let stamp = self.stamp(at);
-                match &error {
-                    None => self.note(&stamp, format!("       {summary}"), Tone::Good),
-                    Some(error) => {
-                        // Counted whether or not this window saw the call
-                        // start: an end frame with an error on it is a call
-                        // that failed either way.
-                        self.failed_calls += 1;
-                        self.note(&stamp, format!("       {summary}"), Tone::Bad);
-                        // The class and the number the system gave, when the
-                        // failure was minted with them. `exit_status 3` is the
-                        // whole answer often enough to be worth its own line.
-                        self.note(&stamp, format!("       {}", fault(error)), Tone::Bad);
-                        self.note(&stamp, format!("       {}", error.message), Tone::Bad);
-                        if let Some(detail) = error.detail.as_deref() {
-                            let mut rest = detail
-                                .lines()
-                                .skip(1)
-                                .filter(|line| !line.trim().is_empty());
-                            for line in rest.by_ref().take(DETAIL_LINES) {
-                                self.note(&stamp, format!("       {line}"), Tone::Dim);
-                            }
-                            if rest.next().is_some() {
-                                self.note(&stamp, "       …", Tone::Dim);
-                            }
-                        }
-                        // What to do next, last, where the eye ends up.
-                        if let Some(remedy) = error.remedy.as_deref() {
-                            self.note(&stamp, format!("    -> {remedy}"), Tone::Bright);
-                        }
-                    }
+                // Counted whether or not this window saw the call start: an
+                // end frame with an error on it is a call that failed either
+                // way.
+                if error.is_some() {
+                    self.failed_calls += 1;
                 }
-                // Complete the record the start frame opened. Only reachable
-                // when this window saw that start: an end for a call it never
-                // saw has nothing to attach to and is already counted above.
-                let tail = (tail_at, self.activity.last() - tail_at);
+                // How the call ended writes no rows: the summary, the fault
+                // and the remedy are the popup's RETURNED and DETAIL blocks,
+                // behind the one row the call already has. A failure recolors
+                // that row, so the list still says at a glance which call to
+                // press.
                 let failed = error.map(|error| Fault {
                     fault: fault(&error),
                     message: error.message,
                     detail: error.detail,
                     remedy: error.remedy,
                 });
+                let mut failed_row = None;
                 if let Some(index) = ordinal.and_then(|o| o.checked_sub(self.calls_dropped))
                     && let Some(call) = self.calls.get_mut(index)
                 {
@@ -1594,7 +1566,12 @@ impl State {
                     call.elapsed_ms = Some(elapsed_ms);
                     call.summary = summary;
                     call.error = failed;
-                    call.tail = Some(tail);
+                    if call.error.is_some() {
+                        failed_row = Some(call.line);
+                    }
+                }
+                if let Some(row) = failed_row {
+                    self.activity.retone(row, Tone::Bad);
                 }
             }
 
@@ -1952,7 +1929,6 @@ fn invoked(kind: Kind, name: &str, args: &noob_proto::Value) -> String {
 
 const SUBJECT_CHARS: usize = 96;
 const DIFF_LINES: usize = 60;
-const DETAIL_LINES: usize = 6;
 const MAX_FILES: usize = 40;
 /// How many calls the window keeps the whole record of. Deep enough that a
 /// failure is still there to be clicked several minutes after it scrolled past,
@@ -2171,8 +2147,11 @@ mod tests {
             args: serde_json::json!({"path": deep}),
         });
         let line = &texts(&state.activity)[0];
-        assert!(line.chars().count() <= SUBJECT_CHARS + 8, "{line}");
-        assert!(line.ends_with("calc.py"), "the end is what identifies it: {line}");
+        assert!(line.chars().count() <= SUBJECT_CHARS + 10, "{line}");
+        assert!(
+            line.ends_with("calc.py \u{25b8}"),
+            "the end is what identifies it, then the press chevron: {line}"
+        );
         assert!(line.contains('\u{2026}'), "{line}");
     }
 
@@ -2424,8 +2403,9 @@ mod tests {
         assert_eq!(state.agents[0].state, "unknown");
     }
 
-    /// A failure carries its class, the number the system gave it, and what to
-    /// do next. This is the row that used to read `error: exit code 1`.
+    /// A failure keeps the pane to the call's one row and recolors it; the
+    /// class, the number the system gave it and what to do next are the
+    /// popup's DETAIL block, behind the row a press opens.
     #[test]
     fn a_failed_call_shows_its_class_and_what_to_do_about_it() {
         let mut state = State::new();
@@ -2442,14 +2422,20 @@ mod tests {
                 remedy: Some("available here: python3 node".into()),
             }),
         });
-        let shown: Vec<&str> = state
-            .activity
-            .visible(200, 200)
-            .iter()
-            .map(|line| line.text.trim())
-            .collect();
-        assert!(shown.contains(&"exit_status 127"), "{shown:?}");
-        assert!(shown.contains(&"-> available here: python3 node"), "{shown:?}");
+        let rows = state.activity.visible(200, 200);
+        assert_eq!(rows.len(), 1, "one call, one row: {:?}", texts(&state.activity));
+        assert_eq!(rows[0].tone, Tone::Bad, "the row itself says it failed");
+        let call = state.call(0).expect("the record");
+        let detail = call
+            .cells()
+            .into_iter()
+            .find(|cell| cell.label == "DETAIL")
+            .expect("the detail block");
+        assert!(detail.lines.contains(&String::from("exit_status 127")), "{detail:?}");
+        assert!(
+            detail.lines.contains(&String::from("-> available here: python3 node")),
+            "{detail:?}"
+        );
     }
 
     /// Two calls in flight together are marked as such; two that took turns are
@@ -2553,9 +2539,8 @@ mod tests {
 
         let first = state.call_at_line(0).expect("the first row is the read");
         assert_eq!(state.call(first).expect("held").call_id, "a");
-        // Its summary row, written when it ended, belongs to it too.
-        assert_eq!(state.call_at_line(1), Some(first));
-        let second = state.call_at_line(2).expect("the third row is the bash");
+        // A call is one row: its ending wrote no more of them.
+        let second = state.call_at_line(1).expect("the second row is the bash");
         assert_eq!(state.call(second).expect("held").call_id, "b");
         assert_eq!(state.call_at_line(99), None, "a row nobody wrote");
     }
@@ -2588,8 +2573,7 @@ mod tests {
         assert!(line.split_gutter().1.starts_with(" bash"), "{line:?}");
     }
 
-    /// Two calls a minute apart are two different readings, and every row of a
-    /// call is stamped: the row it started on and the row it came back on.
+    /// Two calls a minute apart are two different readings on their own rows.
     #[test]
     fn two_calls_a_minute_apart_carry_two_different_times() {
         let mut state = State::new();
@@ -2613,35 +2597,30 @@ mod tests {
         );
         let rows = texts(&state.activity);
         assert!(rows[0].starts_with("09:00:00  "), "{rows:?}");
-        assert!(rows[1].starts_with("09:00:04  "), "{rows:?}");
-        assert!(rows[2].starts_with("09:01:01  "), "{rows:?}");
-        assert_ne!(&rows[0][..8], &rows[2][..8], "a minute apart, two clocks");
+        assert!(rows[1].starts_with("09:01:01  "), "{rows:?}");
+        assert_ne!(&rows[0][..8], &rows[1][..8], "a minute apart, two clocks");
     }
 
-    /// A row no call wrote still draws, and carries the time its own line
-    /// arrived: a progress line belongs to a call that is still running and to
-    /// no row of the record, and a line pushed by anything but a frame has no
-    /// clock behind it at all.
+    /// Progress belongs to its call, never to the pane: a running call's
+    /// lines accumulate on its record for the popup, and progress for a call
+    /// this window never saw open is dropped rather than invented a row.
     #[test]
-    fn a_row_with_no_call_behind_it_still_draws() {
+    fn progress_lands_on_the_call_and_never_on_the_pane() {
         let mut state = State::new();
         state.day_zero = Some(60);
-        state.apply_at(
+        assert!(!state.apply_at(
             Event::ToolProgress {
                 call_id: "never opened".into(),
                 line: "compiling no0b".into(),
             },
             Some(5.0),
-        );
-        assert_eq!(state.call_at_line(0), None, "no call owns this row");
-        let rows = texts(&state.activity);
-        assert!(rows[0].starts_with("00:01:05  "), "{rows:?}");
-        assert!(rows[0].contains("compiling no0b"), "{rows:?}");
+        ));
+        assert_eq!(state.activity.visible(200, 200).len(), 0, "no row was invented");
 
-        // A note the window says for itself has no call and no frame behind it
-        // and is stamped all the same, so the column runs down the whole list.
+        // A note the window says for itself has no call behind it and is
+        // stamped all the same, so the column runs down the whole list.
         state.noted(Some(70.0), "could not reach the clipboard", Tone::Bad);
-        let line = state.activity.line(1).expect("held");
+        let line = state.activity.line(0).expect("held");
         assert_eq!(
             line.split_gutter(),
             ("00:02:10  ", "could not reach the clipboard")
@@ -2650,7 +2629,7 @@ mod tests {
         // And anything pushed straight into the pane keeps the shape it was
         // given, clock column and all, which is none.
         state.activity.say("older than the clock", Tone::Dim);
-        let line = state.activity.line(2).expect("held");
+        let line = state.activity.line(1).expect("held");
         assert_eq!(line.gutter, 0);
         assert_eq!(line.split_gutter(), ("", "older than the clock"));
     }
@@ -2950,10 +2929,11 @@ mod tests {
         }));
     }
 
-    /// Live output from a running command scrolls under the call that made it,
-    /// in the call's own colour, so two concurrent tools cannot be confused.
+    /// Live output from a running command accumulates on the call for its
+    /// popup and moves the status line; the pane keeps the call's one row,
+    /// so two concurrent tools cannot bury the list under their chatter.
     #[test]
-    fn a_running_command_scrolls_its_output_under_its_own_row() {
+    fn a_running_command_keeps_its_output_on_its_own_record() {
         let mut state = State::new();
         state.apply(tool_start("b", "bash", serde_json::json!({"cmd": "cargo build"})));
         for line in ["compiling noob", "compiling no0b"] {
@@ -2962,15 +2942,10 @@ mod tests {
                 line: line.into(),
             });
         }
-        let shown: Vec<(String, Tone)> = state
-            .activity
-            .visible(200, 200)
-            .iter()
-            .map(|line| (line.text.trim().to_string(), line.tone))
-            .collect();
-        assert_eq!(shown[1].0, "compiling noob");
-        assert_eq!(shown[1].1, Tone::Call(Kind::Bash), "{shown:?}");
-        assert_eq!(shown[2].0, "compiling no0b");
+        assert_eq!(state.activity.visible(200, 200).len(), 1, "one call, one row");
+        let call = state.call(0).expect("the record");
+        assert_eq!(call.output, ["compiling noob", "compiling no0b"]);
+        assert_eq!(state.status, "bash compiling no0b", "the latest line is the status");
     }
 
     /// Compaction ends a file's life in the model's context. The page stays
@@ -3069,10 +3044,10 @@ mod tests {
         );
     }
 
-    /// A failure says what broke. This is the same failure that used to render
-    /// as a bare `exit code 1`.
+    /// A failure says what broke on its popup, bounded. This is the same
+    /// failure that used to render as a bare `exit code 1`.
     #[test]
-    fn a_failure_shows_its_message_and_a_bounded_tail() {
+    fn a_failure_shows_its_message_and_a_bounded_body() {
         let mut state = State::new();
         state.apply(tool_start(
             "x",
@@ -3080,7 +3055,7 @@ mod tests {
             serde_json::json!({"cmd": "cargo test"}),
         ));
         let detail = std::iter::once(String::from("exit code 1"))
-            .chain((0..50).map(|n| format!("trace line {n}")))
+            .chain((0..80).map(|n| format!("trace line {n}")))
             .collect::<Vec<_>>()
             .join("\n");
         state.apply(Event::ToolEnd {
@@ -3095,14 +3070,26 @@ mod tests {
                 remedy: None,
             }),
         });
-        let lines = texts(&state.activity);
+        // The pane keeps the one recolored row; the popup carries the rest.
+        assert_eq!(texts(&state.activity).len(), 1);
+        let call = state.call(0).expect("the record");
+        let flat: Vec<String> = call.cells().into_iter().flat_map(|c| c.lines).collect();
         assert!(
-            lines.iter().any(|l| l.contains("could not compile")),
-            "{lines:?}"
+            flat.iter().any(|l| l.contains("could not compile")),
+            "{flat:?}"
         );
-        assert!(lines.iter().any(|l| l.contains("trace line 0")), "{lines:?}");
-        assert!(lines.last().unwrap().contains('…'), "{lines:?}");
-        assert!(lines.len() < 20, "the tail is bounded: {}", lines.len());
+        let returned = call
+            .cells()
+            .into_iter()
+            .find(|cell| cell.label == "RETURNED")
+            .expect("the returned block");
+        assert!(returned.lines.iter().any(|l| l.contains("trace line 0")), "{returned:?}");
+        assert!(returned.lines.last().unwrap().contains('…'), "{returned:?}");
+        assert!(
+            returned.lines.len() <= CELL_LINES + 2,
+            "the body is bounded: {}",
+            returned.lines.len()
+        );
     }
 
     #[test]
@@ -3235,11 +3222,13 @@ mod tests {
             interrupted: Some(true),
         });
         assert_eq!(state.phase, Phase::Interrupted);
-        assert!(
-            texts(&state.activity)
-                .iter()
-                .any(|l| l.contains("never reported back"))
-        );
+        // The abandoned call's row goes to the failure colour and the reason
+        // waits on its popup, the same shape every other ending has.
+        let line = state.activity.line(0).expect("the call's row");
+        assert_eq!(line.tone, Tone::Bad);
+        let call = state.call(0).expect("the record");
+        assert!(call.done, "the turn that owned it has ended");
+        assert_eq!(call.summary, "never reported back");
     }
 
     /// The budget was one string in the title strip and is a set of monitor

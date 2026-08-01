@@ -1080,7 +1080,7 @@ impl Layout {
         // Only in the shape that has panes. The three takeovers below collapse
         // it along with every other pane region.
         let call_popup = match shape.popup {
-            Some(call) => place_popup(call, shape.pane_column, shape.pane_size, width, height),
+            Some(_) => place_popup(width, height),
             None => nowhere(),
         };
 
@@ -2291,41 +2291,23 @@ fn in_cut(panel: Panel, x: f32, y: f32) -> bool {
     (panel.x + panel.w - x) + (y - panel.y) < cut_of(panel)
 }
 
-/// How wide the activity popup is, in columns, and how much margin it keeps
-/// inside its box.
-///
-/// Wide enough for a pretty-printed argument object and a stack trace without
-/// wrapping every line of them, and capped again below against the window: a box
-/// wider than what it is floating over is not a popup.
-const POPUP_COLUMNS: usize = 88;
+/// The margin the activity popup keeps inside its box, and inside each block.
 const POPUP_PAD: f32 = 10.0;
 
-/// Where the activity popup sits and how big it is.
+/// Where the activity popup sits: the whole surface under the title strip,
+/// a margin in from every edge.
 ///
-/// Centred, because it is about one row rather than opened at a point: a menu
-/// belongs to the pixel it was opened on and this belongs to the call. As tall
-/// as its contents up to nine tenths of the window, which is where it stops
-/// growing and starts clipping. Nothing inside it scrolls, so the cells are
-/// bounded at the source (`state::CELL_LINES`) rather than here.
-fn place_popup(call: &crate::state::Call, column: f32, size: f32, width: f32, height: f32) -> Panel {
-    let column = column.max(1.0);
-    let line = Text::line_for(size);
-    let room = (((width * 0.9 - POPUP_PAD * 2.0) / column).floor() as usize).max(8);
-    let cols = POPUP_COLUMNS.min(room);
-    let rows: usize = call
-        .popup_lines()
-        .iter()
-        .map(|(text, _)| text_geometry::rows_in(text, cols, crate::state::PANE_WRAP).len())
-        .sum();
-    let w = (cols as f32 * column + POPUP_PAD * 2.0).min(width);
-    let h = (rows as f32 * line + POPUP_PAD * 2.0)
-        .min(height * 0.9)
-        .max(line);
+/// It was a floating note sized to its lines. Full panel now, so the call's
+/// blocks have the room a pretty-printed argument object and a stack trace
+/// need, and the window behind it stops competing with them. Nothing inside
+/// it scrolls; the cells are bounded at the source (`state::CELL_LINES`).
+fn place_popup(width: f32, height: f32) -> Panel {
+    let margin = 2.0 * GAP;
     Panel::new(
-        ((width - w) * 0.5).max(0.0),
-        ((height - h) * 0.5).max(0.0),
-        w,
-        h,
+        margin,
+        TITLE_H + margin,
+        (width - margin * 2.0).max(1.0),
+        (height - TITLE_H - margin * 2.0).max(1.0),
     )
 }
 
@@ -2802,10 +2784,10 @@ fn overlay(scene: &mut Scene, frame: &Frame) {
     }
 }
 
-/// One activity row opened out: what was invoked, when, what the model
-/// generated, what came back and the detail.
+/// One activity row opened out, full panel: what was invoked, when, what the
+/// model generated, what came back and the detail, each a block of its own.
 ///
-/// What it says is [`crate::state::Call::popup_lines`]; this only puts it on the
+/// What it says is [`crate::state::Call::cells`]; this only puts it on the
 /// screen. On the floating layer with `over_rect`/`over_text` for the reason the
 /// menu is: a box pushed onto the base layer is painted before every glyph in
 /// the window and comes out underneath the pane text it is covering.
@@ -2819,14 +2801,53 @@ fn call_popup(scene: &mut Scene, frame: &Frame) {
     }
     scene.over_rect(panel_fill(box_, skin.menu));
     scene.over_rect(panel_edge(box_, skin.edge_focus));
-    let text = box_.inset(POPUP_PAD);
-    let cols = cols_of(text, frame.pane_column);
-    let mut runs = Vec::new();
-    for (line, tone) in call.popup_lines() {
-        runs.push(Run::tinted(line, skin.tone(tone)));
-        runs.push(Run::plain("\n"));
+    let inside = box_.inset(POPUP_PAD);
+    let line = Text::line_for(frame.pane_size);
+    // The heading, alone at the top: the tool, its target, how it stands.
+    scene.over_text(Text::rich(
+        vec![Run::tinted(call.heading(), skin.bright)],
+        inside.row(0.0, line),
+        frame.pane_size,
+        skin.bright,
+    ));
+    // Then one block per cell, each a surface of its own: a bar down the
+    // left in the cell's tone, its label over its lines, and air between
+    // blocks. What was asked, when it ran, what the model generated, what
+    // came back and the failure detail read as five separate things because
+    // they are drawn as five separate things.
+    let mut y = inside.y + line * 2.0;
+    for cell in call.cells() {
+        let label_pad = 2usize;
+        let cols = cols_of(inside, frame.pane_column).saturating_sub(label_pad).max(8);
+        let rows: usize = cell
+            .lines
+            .iter()
+            .map(|text| text_geometry::rows_in(text, cols, crate::state::PANE_WRAP).len())
+            .sum();
+        let h = (rows + 1) as f32 * line + POPUP_PAD;
+        let bottom = box_.y + box_.h - POPUP_PAD;
+        if y + line >= bottom {
+            break;
+        }
+        let block = Panel::new(inside.x, y, inside.w, h.min(bottom - y));
+        let tone = skin.tone(cell.tone);
+        let bar = tone.map(|c| f32::from(c) / 255.0);
+        scene.over_rect(block.fill(skin.panel));
+        scene.over_rect(Panel::new(block.x, block.y, MARK_W, block.h).fill(bar));
+        let text = Panel::new(
+            block.x + label_pad as f32 * frame.pane_column,
+            block.y + POPUP_PAD * 0.5,
+            (block.w - label_pad as f32 * frame.pane_column - POPUP_PAD).max(1.0),
+            (block.h - POPUP_PAD * 0.5).max(1.0),
+        );
+        let mut runs = vec![Run::tinted(cell.label, skin.dim), Run::plain("\n")];
+        for entry in &cell.lines {
+            runs.push(Run::tinted(entry, tone));
+            runs.push(Run::plain("\n"));
+        }
+        scene.over_text(Text::rich(runs, text, frame.pane_size, skin.body).wrap_at(cols));
+        y += block.h + GAP;
     }
-    scene.over_text(Text::rich(runs, text, frame.pane_size, skin.body).wrap_at(cols));
 }
 
 /// The rectangle a lit menu row is painted with: its own band, less the two
