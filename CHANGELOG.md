@@ -5,10 +5,30 @@ tags rather than here; this file starts where it was added.
 
 ## 0.11.0 - 2026-08-01
 
-The window's settings grow up: a redesigned panel, sections as boxes, and a
-command for everything.
+The window's settings grow up: a redesigned panel, sections as boxes, a
+command for everything, and the whole authored prompt in the user's hands.
 
 ### Added
+
+- The system prompt is the user's: `AGENTS.md` then `TOOLS.md` in the config
+  directory, each replacing its embedded default wholesale, merged in that
+  order with the generated runtime lines (working directory, platform,
+  skills, MCP) appended last. `noob debug env` prints that runtime tail
+  byte-identically; `noob doctor` names which text is in effect. The shipped
+  tools text ends by saying the tools are the basic set, adjust at your
+  discretion.
+- The SYSTEM PROMPT page shows the three layers in order: both files
+  editable behind an enable-edition checkbox with save, a two-press restore
+  that parks the old file as `.bak` beside it, and a load action that fills
+  the editor from any `.md` on disk; the environment block sits under them
+  read-only with the reason it cannot be edited.
+- Sliders carry magnetic stops with visible ticks: the context window snaps
+  at 64k, 128k and 256k, and max sub-agents (the row previously called
+  tasks at once; the command is `/set_max_subagents`) at 3 and 5.
+- DEFAULT THEMES offers CUSTOM beside the three presets: two presses write
+  every colour of the palette in hand into the settings file as the user's
+  own lines, every swatch stays editable, and the row honestly reads custom
+  whenever a written colour overrides its preset.
 
 - The system prompt is two user-owned files in the config directory:
   `AGENTS.md` carries the main prompt and `TOOLS.md` the tool guidance,
@@ -61,6 +81,11 @@ command for everything.
   red, and the title strip wears the theme too.
 - AGENT reads CONNECTION, MODEL, LIMITS and THE SETTINGS FILE, in plain
   words.
+- APPEARANCE speaks plainly too: TRANSPARENCY with base application before
+  widget windows, INPUT PROMPT saying how many lines it has, and the rail's
+  chosen band hugs its name instead of running the cell.
+- The widgets flyout opens on rollover, and the menu boxes keep a column of
+  slack so no widget name can wrap out of its row.
 
 ## 0.10.0 - 2026-08-01
 
