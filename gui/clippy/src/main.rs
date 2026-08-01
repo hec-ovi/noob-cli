@@ -2888,19 +2888,17 @@ impl App {
                 self.copy_prompt();
             }
             (Item::Paste, _) => self.paste(),
-            // A group header: the rows it holds go in under it and the menu
+            // The panel is a takeover, so the menu goes with the press. It
+            // opens on whatever section its rail was left on; the rail is
+            // where a section is chosen.
+            (Item::Settings, _) => {
+                self.open_settings();
+            }
+            // The flyout header: its rows come out beside it and the menu
             // stays open over them, which is the whole of what the row is for.
-            (Item::Settings(_) | Item::Widgets(_), _) => {
+            (Item::Widgets(_), _) => {
                 menu.fold(index, &self.dock);
                 self.menu = Some(menu);
-            }
-            // One section of the panel, which opens the panel on that section.
-            // The panel is a takeover, so the menu goes with the press.
-            (Item::Section(at), _) => {
-                self.open_settings();
-                if let Some(settings) = self.settings.as_mut() {
-                    settings.choose(at);
-                }
             }
             (Item::CopySelection, _) => {
                 self.copy_selection();

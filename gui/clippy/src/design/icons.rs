@@ -49,7 +49,6 @@ pub const TABS_RIGHT: char = '\u{eab6}';
 /// the same chevron the tab strip walks with, on purpose: one mark in the
 /// window means there is more of this that way.
 pub const SUBMENU: char = '\u{eab6}';
-pub const SUBMENU_OPEN: char = '\u{eab4}';
 
 /// The two states of a row that is a switch rather than a destination: the
 /// widget is in the window, or it is out. Boxed rather than a bare tick, so the
@@ -162,7 +161,6 @@ mod tests {
             TABS_LEFT,
             TABS_RIGHT,
             SUBMENU,
-            SUBMENU_OPEN,
             CHECKED,
             UNCHECKED,
             FILE,

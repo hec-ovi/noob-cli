@@ -166,6 +166,9 @@ pub const MENU_SIZE: f32 = SMALL;
 /// One row of a menu. Taller than a tab: a tab is read, a menu row is aimed at,
 /// and 22 pixels is already tight for a pointer.
 const MENU_ROW_H: f32 = 24.0;
+/// The border hairline a menu's rows sit flush against, top and bottom: the
+/// lit row's band runs to the frame, with no dark strip between them.
+const MENU_EDGE: f32 = 1.0;
 /// The margin around a menu's rows, top and bottom and on either side of a
 /// label. Also what keeps the first row off the pointer that opened it.
 const MENU_PAD: f32 = 5.0;
@@ -852,10 +855,13 @@ pub struct Layout {
     /// settings panel's rows do, because the menu scrolls: the third panel down
     /// is not always the third row.
     ///
-    /// One box. The widget list used to be a second one beside it; it is a
-    /// group that opens in place now, and its rows are rows of this list.
+    /// Two boxes at most: the menu's own column, and the widgets flyout
+    /// beside its header while it is open. The flyout's rows carry their
+    /// global place in the same menu, so a hit is one number either way.
     pub menu: Panel,
     pub menu_rows: Vec<(usize, Panel)>,
+    pub menu_fly: Panel,
+    pub menu_fly_rows: Vec<(usize, Panel)>,
     /// The one call the activity list was clicked into, on the same floating
     /// layer as the menu and under it. Empty when nothing is open, and empty
     /// under every takeover: the panel and the picker cover the pane it was
@@ -1038,9 +1044,12 @@ impl Layout {
             None => MenuPlaces {
                 box_: nowhere(),
                 rows: Vec::new(),
+                fly: nowhere(),
+                fly_rows: Vec::new(),
             },
         };
         let (menu, menu_rows) = (places.box_, places.rows);
+        let (menu_fly, menu_fly_rows) = (places.fly, places.fly_rows);
         // Only in the shape that has panes. The three takeovers below collapse
         // it along with every other pane region.
         let call_popup = match shape.popup {
@@ -1103,6 +1112,8 @@ impl Layout {
                 settings_close: nowhere(),
                 menu,
                 menu_rows,
+                menu_fly,
+                menu_fly_rows,
                 call_popup: nowhere(),
             };
         }
@@ -1165,6 +1176,8 @@ impl Layout {
                 settings_close: nowhere(),
                 menu,
                 menu_rows,
+                menu_fly,
+                menu_fly_rows,
                 call_popup: nowhere(),
             };
         }
@@ -1228,6 +1241,8 @@ impl Layout {
                 settings_close: places.close,
                 menu,
                 menu_rows,
+                menu_fly,
+                menu_fly_rows,
                 call_popup: nowhere(),
             };
         }
@@ -1482,6 +1497,8 @@ impl Layout {
             settings_close: nowhere(),
             menu,
             menu_rows,
+            menu_fly,
+            menu_fly_rows,
             call_popup,
         }
     }
@@ -1511,6 +1528,16 @@ impl Layout {
             }
             // The margin above the first row and below the last swallows the
             // press rather than letting it through to a pane.
+            return Some(Hit::Menu);
+        }
+        // The widgets flyout is the same overlay: its rows answer by their
+        // global place in the menu, and its box swallows what its rows do not.
+        if self.menu_fly.w >= 1.0 && self.menu_fly.contains(x, y) {
+            for (index, row) in &self.menu_fly_rows {
+                if row.contains(x, y) {
+                    return Some(Hit::MenuRow(*index));
+                }
+            }
             return Some(Hit::Menu);
         }
         // Under the menu on the same layer, and above everything else. A menu
@@ -2084,11 +2111,13 @@ impl Layout {
     }
 }
 
-/// The box an open menu puts on screen, and where every row on screen is inside
-/// it.
+/// The boxes an open menu puts on screen, and where every row on screen is
+/// inside them: the menu's own column, and the widgets flyout while open.
 struct MenuPlaces {
     box_: Panel,
     rows: Vec<(usize, Panel)>,
+    fly: Panel,
+    fly_rows: Vec<(usize, Panel)>,
 }
 
 /// Where an open menu's box is, and where each of its rows on screen is inside
@@ -2099,11 +2128,15 @@ struct MenuPlaces {
 /// not merely invisible: no pointer can reach it, so the rows down there cannot
 /// be picked at all.
 ///
-/// One box, whatever is open inside it. A group's rows are rows of the same
-/// menu, so they are placed in the same column at the same stride and the box
-/// grows to hold them. That is what replaced the flyout, which could hold
-/// exactly one submenu and hung it off a row named in two places that did not
-/// know about each other.
+/// Two boxes at most: the menu's own column, and the widgets flyout beside
+/// its header while it is open. The flyout hangs off the header's row, out
+/// to the right, or out to the left when the right has no room; its rows
+/// carry their global place in the same menu.
+///
+/// The rows sit flush against the box's border: the first row starts at the
+/// hairline and the last ends at it, so a lit row's band runs to the frame
+/// with no dark strip breaking it. The padding a menu needs is inside the
+/// row, in front of its text, not around the block of rows.
 ///
 /// The window is the last word on both axes. A menu wider than the surface is
 /// cut to it rather than run off the right edge, and one with more rows than
@@ -2116,26 +2149,58 @@ struct MenuPlaces {
 /// filled in another.
 fn place_menu(menu: &Menu, column: f32, width: f32, height: f32) -> MenuPlaces {
     let column = column.max(1.0);
+    let main = menu.main_len();
     let w = ((menu.width_chars() + MENU_GUTTER) as f32 * column + MENU_PAD * 2.0).min(width.max(1.0));
-    let room = (((height - MENU_PAD * 2.0) / MENU_ROW_H).floor() as usize).max(1);
-    let shown = menu.rows.len().min(room);
-    let h = shown as f32 * MENU_ROW_H + MENU_PAD * 2.0;
+    let room = (((height - MENU_EDGE * 2.0) / MENU_ROW_H).floor() as usize).max(1);
+    let shown = main.min(room);
+    let h = shown as f32 * MENU_ROW_H + MENU_EDGE * 2.0;
     let x = menu.at.0.min(width - w).max(0.0);
     let y = menu.at.1.min(height - h).max(0.0);
     // Where in the menu the box starts. Clamped here rather than in the model,
     // so a wheel that ran past the end does not leave the box half empty.
-    let first = menu.first.min(menu.rows.len().saturating_sub(shown));
-    let rows = (0..shown)
-        .map(|step| {
-            (
-                first + step,
-                Panel::new(x, y + MENU_PAD + step as f32 * MENU_ROW_H, w, MENU_ROW_H),
-            )
-        })
+    let first = menu.first.min(main.saturating_sub(shown));
+    let row_at = |box_x: f32, box_y: f32, box_w: f32, step: usize| {
+        Panel::new(
+            box_x,
+            box_y + MENU_EDGE + step as f32 * MENU_ROW_H,
+            box_w,
+            MENU_ROW_H,
+        )
+    };
+    let rows: Vec<(usize, Panel)> = (0..shown)
+        .map(|step| (first + step, row_at(x, y, w, step)))
         .collect();
+    let box_ = Panel::new(x, y, w, h);
+    let (fly, fly_rows) = match menu.fly_start {
+        None => (nowhere(), Vec::new()),
+        Some(fly_start) => {
+            let count = menu.rows.len() - fly_start;
+            let fw = ((menu.fly_width_chars() + MENU_GUTTER) as f32 * column + MENU_PAD * 2.0)
+                .min(width.max(1.0));
+            let fh = count as f32 * MENU_ROW_H + MENU_EDGE * 2.0;
+            // Top-aligned with the header's row, on whichever side has room.
+            let anchor = menu.fly_anchor().unwrap_or(first);
+            let anchor_y = rows
+                .iter()
+                .find(|(index, _)| *index == anchor)
+                .map(|(_, panel)| panel.y - MENU_EDGE)
+                .unwrap_or(y);
+            let fx = match x + w + fw <= width {
+                true => x + w,
+                false => (x - fw).max(0.0),
+            };
+            let fy = anchor_y.min(height - fh).max(0.0);
+            let fly_rows = (0..count)
+                .map(|step| (fly_start + step, row_at(fx, fy, fw, step)))
+                .collect();
+            (Panel::new(fx, fy, fw, fh), fly_rows)
+        }
+    };
     MenuPlaces {
-        box_: Panel::new(x, y, w, h),
+        box_,
         rows,
+        fly,
+        fly_rows,
     }
 }
 
@@ -2647,6 +2712,18 @@ fn overlay(scene: &mut Scene, frame: &Frame) {
     // brightened them for exactly the height of the pointer, which reads as the
     // outline coming apart where the pointer is.
     scene.over_rect(panel_edge(layout.menu, skin.edge_focus));
+    // The widgets flyout: the same overlay, one box further out.
+    if layout.menu_fly.w >= 1.0 {
+        scene.over_rect(panel_fill(layout.menu_fly, skin.menu));
+        let fly_chars = menu.fly_width_chars();
+        for (index, panel) in &layout.menu_fly_rows {
+            let Some(row) = menu.rows.get(*index) else {
+                continue;
+            };
+            menu_row(scene, frame, *row, *index, *panel, fly_chars, layout.menu_fly);
+        }
+        scene.over_rect(panel_edge(layout.menu_fly, skin.edge_focus));
+    }
 }
 
 /// One activity row opened out: what was invoked, when, what the model
@@ -2690,7 +2767,7 @@ fn call_popup(scene: &mut Scene, frame: &Frame) {
 /// diagonals are at 45 degrees, so a cut that short reproduces the box's own
 /// exactly from where the row begins.
 fn menu_hot_box(row: Panel, box_: Panel, rgba: [f32; 4]) -> Rect {
-    let edge = 1.0;
+    let edge = MENU_EDGE;
     let fill = Panel::new(
         row.x + edge,
         row.y,
@@ -2698,8 +2775,8 @@ fn menu_hot_box(row: Panel, box_: Panel, rgba: [f32; 4]) -> Rect {
         row.h.max(1.0),
     )
     .fill(rgba);
-    match row.y <= box_.y + MENU_PAD + 0.01 {
-        true => fill.chamfer((cut_of(box_) - MENU_PAD - edge).max(0.0), Rect::TOP_RIGHT),
+    match row.y <= box_.y + edge + 0.01 {
+        true => fill.chamfer((cut_of(box_) - edge * 2.0).max(0.0), Rect::TOP_RIGHT),
         false => fill,
     }
 }
@@ -2759,12 +2836,10 @@ fn menu_row(
         panel.h,
     );
     // One column of the box, off the same arithmetic the chevron's own box uses,
-    // so an indent and a chevron cannot drift apart at any font size.
+    // so the label and the chevron cannot drift apart at any font size.
     let column = text.w / (chars + MENU_GUTTER) as f32;
-    let step = column * (row.depth * crate::menu::INDENT_COLUMNS) as f32;
-    let inside = Panel::new(text.x + step, text.y, (text.w - step).max(1.0), text.h);
     let line = Text::line_for(MENU_SIZE);
-    scene.over_text(Text::rich(runs, inside.row(0.0, line), MENU_SIZE, tint));
+    scene.over_text(Text::rich(runs, text.row(0.0, line), MENU_SIZE, tint));
 
     let Some(mark) = row.item.marker() else {
         return;
@@ -9642,9 +9717,11 @@ mod tests {
         assert!(probed > 4, "the probe covered nothing");
 
         // And a pixel just inside the diagonal on the same rows still is the
-        // menu, so the rejection is the notch and not the whole corner.
-        let (x, y) = (box_.x + box_.w - cut - 1.0, box_.y + 1.0);
-        assert_eq!(layout.hit(x, y), Some(Hit::Menu));
+        // menu, so the rejection is the notch and not the whole corner. The
+        // rows sit flush against the border now, so that pixel is the first
+        // row itself.
+        let (x, y) = (box_.x + box_.w - cut - 1.0, box_.y + 1.5);
+        assert_eq!(layout.hit(x, y), Some(Hit::MenuRow(0)));
     }
 
     /// The row under the pointer is the row that acts, and a greyed one acts
@@ -9671,7 +9748,7 @@ mod tests {
         assert_eq!(
             picked(&Menu::for_widget(at, View::Plan, Space::TopRight, true)),
             vec![
-                Some(Item::Settings(false)),
+                Some(Item::Settings),
                 Some(Item::CopySelection),
                 Some(Item::Close),
                 Some(Item::Widgets(false)),
@@ -9682,25 +9759,44 @@ mod tests {
         assert_eq!(
             picked(&Menu::for_widget(at, View::Plan, Space::TopRight, false)),
             vec![
-                Some(Item::Settings(false)),
+                Some(Item::Settings),
                 None,
                 Some(Item::Close),
                 Some(Item::Widgets(false)),
             ],
             "a row with nothing to copy is drawn and refuses to act"
         );
-        // With a group open, its rows are rows of the same list, in the same
-        // box, under the header that opened them.
+        // With the flyout open, the column's rows stay exactly where they
+        // were, and the flyout's rows answer in their own box beside it.
         let mut open = Menu::for_widget(at, View::Plan, Space::TopRight, false);
         open.fold(3, &dock);
-        let mut want = vec![
-            Some(Item::Settings(false)),
-            None,
-            Some(Item::Close),
-            Some(Item::Widgets(true)),
-        ];
-        want.extend(View::ALL.into_iter().map(|v| Some(Item::Widget(v, false))));
-        assert_eq!(picked(&open), want);
+        assert_eq!(
+            picked(&open),
+            vec![
+                Some(Item::Settings),
+                None,
+                Some(Item::Close),
+                Some(Item::Widgets(true)),
+            ],
+            "opening the flyout moved a row of the column"
+        );
+        let layout = with_menu(&dock, &open, 1400.0, 900.0);
+        assert_eq!(layout.menu_fly_rows.len(), View::ALL.len());
+        for ((index, row), view) in layout.menu_fly_rows.iter().zip(View::ALL) {
+            let (x, y) = middle(*row);
+            assert_eq!(layout.hit(x, y), Some(Hit::MenuRow(*index)));
+            assert_eq!(open.pick(*index), Some(Item::Widget(view, false)));
+        }
+        // The flyout hangs beside the column, top-aligned with its header,
+        // and never over it.
+        assert!(layout.menu_fly.x >= layout.menu.x + layout.menu.w - 0.5);
+        let header = layout
+            .menu_rows
+            .iter()
+            .find(|(index, _)| *index == 3)
+            .map(|(_, panel)| panel.y)
+            .expect("the header is on screen");
+        assert!((layout.menu_fly.y + MENU_EDGE - header).abs() < 0.6);
     }
 
     /// A menu opened in the corner has to stay on the surface. The part that
@@ -9725,11 +9821,10 @@ mod tests {
         }
     }
 
-    /// A group opens into the same box, under the header that opened it, and
-    /// the box grows to hold it. It used to be a second box flown out to the
-    /// side, which could hold exactly one submenu.
+    /// Opening the flyout moves nothing: the column keeps its four rows and
+    /// its box, and the widgets answer in a second box beside the header.
     #[test]
-    fn a_group_opens_into_the_menus_own_box_under_its_header() {
+    fn the_flyout_opens_beside_the_header_and_moves_no_row() {
         use crate::menu::Item;
         let dock = Dock::new();
         let (w, h) = (1400.0, 900.0);
@@ -9737,10 +9832,11 @@ mod tests {
         let shut = Menu::for_widget(at, View::Plan, Space::TopLeft, false);
         let closed = with_menu(&dock, &shut, w, h);
         assert_eq!(closed.menu_rows.len(), 4);
+        assert!(closed.menu_fly.w < 1.0, "a shut flyout has no box");
 
         // Opened the way the pointer opens it: whatever row the press lands on
         // is the row that folds, so the layout and the model cannot disagree
-        // about which group was pressed.
+        // about which header was pressed.
         let mut menu = shut.clone();
         let header = closed
             .menu_rows
@@ -9754,33 +9850,25 @@ mod tests {
         };
         assert!(menu.fold(pressed, &dock));
         let layout = with_menu(&dock, &menu, w, h);
-        assert_eq!(
-            layout.menu_rows.len(),
-            4 + View::ALL.len(),
-            "the group's rows are rows of the same list"
-        );
-        assert!(
-            layout.menu.h > closed.menu.h,
-            "the box did not grow to hold them"
-        );
-        assert_eq!(layout.menu.x, closed.menu.x, "and it did not move sideways");
-
-        // Every row is in the one box, in one column, at one stride.
-        let opener = layout.menu_rows[3].1;
-        for (index, row) in &layout.menu_rows {
-            assert_eq!(row.x, layout.menu.x, "row {index} is in a second column");
-            assert_eq!(row.w, layout.menu.w);
-            assert!(row.y >= layout.menu.y && row.y + row.h <= layout.menu.y + layout.menu.h);
-            if *index > 3 {
-                assert!(row.y >= opener.y + opener.h, "row {index} is not under the header");
-            }
+        assert_eq!(layout.menu_rows.len(), 4, "a row of the column moved");
+        assert_eq!(layout.menu.h, closed.menu.h, "the box changed size");
+        assert_eq!(layout.menu.x, closed.menu.x, "the box moved sideways");
+        assert_eq!(layout.menu_fly_rows.len(), View::ALL.len());
+        // Every flyout row is in the flyout's box, in one column, and answers.
+        for (index, row) in &layout.menu_fly_rows {
+            assert_eq!(row.x, layout.menu_fly.x, "row {index} is in a second column");
+            assert_eq!(row.w, layout.menu_fly.w);
+            assert!(
+                row.y >= layout.menu_fly.y
+                    && row.y + row.h <= layout.menu_fly.y + layout.menu_fly.h
+            );
             let (x, y) = middle(*row);
             assert_eq!(layout.hit(x, y), Some(Hit::MenuRow(*index)));
         }
         assert_eq!(menu.pick(pressed), Some(Item::Widgets(true)));
 
-        // A second press on the same row shuts it again, and the box is back to
-        // what it opened as.
+        // A second press on the same row shuts it again, and the flyout's box
+        // goes with it.
         let again = with_menu(&dock, &menu, w, h);
         let (px, py) = middle(again.menu_rows[pressed].1);
         assert_eq!(again.hit(px, py), Some(Hit::MenuRow(pressed)));
@@ -9789,35 +9877,22 @@ mod tests {
         let back = with_menu(&dock, &shut_again, w, h);
         assert_eq!(back.menu_rows.len(), closed.menu_rows.len());
         assert_eq!(back.menu.h, closed.menu.h);
-
-        // Both groups out at once, which is the thing two boxes could not do.
-        let mut both = menu.clone();
-        both.fold(0, &dock);
-        let layout = with_menu(&dock, &both, w, h);
-        assert_eq!(
-            layout.menu_rows.len(),
-            4 + View::ALL.len() + crate::settings::SECTIONS.len()
-        );
-        for (index, row) in &layout.menu_rows {
-            let (x, y) = middle(*row);
-            assert_eq!(layout.hit(x, y), Some(Hit::MenuRow(*index)));
-        }
+        assert!(back.menu_fly.w < 1.0);
     }
 
-    /// A menu with both groups out is taller than a short window, so it shows
-    /// what there is room for and scrolls through the rest. Rows past the
-    /// bottom used to be dropped: not placed, not drawn and not reachable, with
-    /// nothing on screen saying so.
+    /// A menu opened near the bottom of a very short window shows what there
+    /// is room for and scrolls through the rest. Rows past the bottom used to
+    /// be dropped: not placed, not drawn and not reachable, with nothing on
+    /// screen saying so.
     #[test]
     fn a_menu_too_tall_for_the_window_scrolls_instead_of_dropping_rows() {
         let dock = Dock::new();
-        let (w, short) = (900.0, 200.0);
+        let (w, short) = (900.0, 60.0);
         let mut menu = Menu::for_widget((w - 2.0, short - 2.0), View::Plan, Space::TopLeft, false);
-        menu.fold(3, &dock);
         let layout = with_menu(&dock, &menu, w, short);
         let placed: Vec<usize> = layout.menu_rows.iter().map(|(i, _)| *i).collect();
         assert!(
-            placed.len() < menu.rows.len(),
+            placed.len() < menu.main_len(),
             "this window is not short enough to prove anything"
         );
         assert_eq!(placed.first().copied(), Some(0));
@@ -9833,7 +9908,7 @@ mod tests {
         let placed: Vec<usize> = layout.menu_rows.iter().map(|(i, _)| *i).collect();
         assert_eq!(
             placed.last().copied(),
-            Some(menu.rows.len() - 1),
+            Some(menu.main_len() - 1),
             "the last row is reachable"
         );
         assert_ne!(placed.first().copied(), Some(0));
@@ -9843,6 +9918,12 @@ mod tests {
             assert_eq!(layout.hit(x, y), Some(Hit::MenuRow(*index)));
             assert!(menu.pick(*index).is_some(), "row {index} is on screen and does nothing");
         }
+        // The flyout stays whole and inside the window even here.
+        menu.scroll(menu.rows.len(), false, capacity);
+        menu.fold(3, &dock);
+        let layout = with_menu(&dock, &menu, w, short);
+        assert_eq!(layout.menu_fly_rows.len(), View::ALL.len());
+        assert!(layout.menu_fly.y >= 0.0);
     }
 
     /// The box is measured in columns of the size its rows are written at.
@@ -9935,14 +10016,14 @@ mod tests {
             // The first row on screen is the one the box's corner is taken out
             // of, and it is taken out at the same 45 degrees.
             let cut = lit[0].extra()[1];
-            match row.y <= box_.y + MENU_PAD + 0.01 {
+            match row.y <= box_.y + MENU_EDGE + 0.01 {
                 true => {
                     assert!(cut > 0.0, "the first row painted over the cut corner");
                     // The two diagonals start at the same x on the row's own
                     // first line, and both run at 45 degrees, so they are the
                     // same line.
                     assert!(
-                        (x + rw - cut - (box_.x + box_.w - cut_of(box_) + MENU_PAD)).abs() < 0.01,
+                        (x + rw - cut - (box_.x + box_.w - cut_of(box_) + MENU_EDGE)).abs() < 0.01,
                         "the row's diagonal does not follow the box's"
                     );
                 }
@@ -10017,15 +10098,16 @@ mod tests {
         assert!(edge > lit, "the border is painted under the lit row");
     }
 
-    /// A group's rows are written one step in from the rows above them, and
-    /// their header's chevron turns down while they are out.
+    /// The flyout is a second box beside the column: its rows are written in
+    /// it, its text clears both of its borders by the padding token, and the
+    /// header's chevron keeps pointing out to the side where the rows are.
     #[test]
-    fn an_open_groups_rows_are_indented_and_its_chevron_turns_down() {
+    fn the_open_flyout_is_a_box_beside_the_column() {
         use crate::menu::Item;
         let dock = Dock::new();
         let (w, h) = (1400.0, 900.0);
         let mut menu = Menu::for_widget((400.0, 300.0), View::Plan, Space::TopLeft, false);
-        menu.fold(0, &dock);
+        menu.fold(3, &dock);
         let out = render_menu(&busy_state(), w, h, &dock, &menu, None);
 
         let written = |label: &str| -> Panel {
@@ -10036,18 +10118,24 @@ mod tests {
                 .unwrap_or_else(|| panic!("{label} is not drawn"))
                 .at
         };
-        let header = written("Settings");
-        for name in crate::settings::SECTIONS {
-            let row = written(name);
+        // Every widget's label is written inside the flyout's box, not the
+        // column's.
+        let (column, fly) = (out.layout.menu, out.layout.menu_fly);
+        assert!(fly.w >= 1.0, "the flyout has no box");
+        for view in crate::dock::View::ALL {
+            let row = written(view.label());
             assert!(
-                row.x > header.x + 1.0,
-                "{name} is not written in from its header: {row:?} against {header:?}"
+                row.x >= fly.x && row.x + row.w <= fly.x + fly.w + 0.01,
+                "{} is not written in the flyout: {row:?} against {fly:?}",
+                view.label()
             );
         }
-        // Every row of the menu clears the border by the padding token, however
-        // far in it is written.
-        let box_ = out.layout.menu;
+        // Text clears the borders by the padding token in both boxes.
         for text in &out.scene.over_texts {
+            let box_ = match text.at.x >= fly.x - 0.01 && fly.w >= 1.0 {
+                true => fly,
+                false => column,
+            };
             assert!(
                 text.at.x >= box_.x + MENU_PAD - 0.01,
                 "{:?} touches the left border",
@@ -10060,23 +10148,17 @@ mod tests {
             );
         }
 
-        // The chevron on an open group points down, and on a shut one right.
+        // The chevron points out to the side in both states: that is where
+        // the rows go, and where they are.
         let marks: Vec<&str> = out
             .scene
             .over_texts
             .iter()
             .flat_map(|t| t.runs.iter().map(|r| r.text.as_str()))
-            .filter(|t| *t == icons::SUBMENU.to_string() || *t == icons::SUBMENU_OPEN.to_string())
+            .filter(|t| *t == icons::SUBMENU.to_string())
             .collect();
-        assert_eq!(
-            marks,
-            vec![
-                icons::SUBMENU_OPEN.to_string().as_str(),
-                icons::SUBMENU.to_string().as_str()
-            ],
-            "the open group's chevron did not turn"
-        );
-        assert_eq!(menu.pick(0), Some(Item::Settings(true)));
+        assert_eq!(marks.len(), 1, "the header keeps its one side chevron");
+        assert_eq!(menu.pick(3), Some(Item::Widgets(true)));
     }
 
     /// The row that opens a group is marked twice: the mark in the gutter in
@@ -10099,10 +10181,9 @@ mod tests {
                 .find(|(index, _)| matches!(menu.pick(*index), Some(Item::Widgets(_))))
                 .map(|(_, panel)| *panel)
                 .expect("the Widgets row is on screen");
-            let want = match open {
-                true => icons::SUBMENU_OPEN,
-                false => icons::SUBMENU,
-            };
+            // The same side chevron in both states: the rows fly out to the
+            // side, and that is where the mark points.
+            let want = icons::SUBMENU;
             let marks: Vec<&Text> = out
                 .scene
                 .over_texts
@@ -10182,8 +10263,8 @@ mod tests {
                 .and_then(|text| text.runs.last().and_then(|run| run.color))
                 .unwrap_or_else(|| panic!("{label} is not drawn"))
         };
-        assert_eq!(ink("Settings"), out.skin.bright);
         assert_eq!(ink("Widgets"), out.skin.bright);
+        assert_eq!(ink("Settings"), out.skin.body, "Settings acts; it is not a header");
         assert_eq!(ink("Copy selection"), out.skin.body);
         assert_eq!(ink("Close this widget"), out.skin.body);
         assert_ne!(out.skin.bright, out.skin.body);
@@ -10235,25 +10316,31 @@ mod tests {
                 .count(),
             View::ALL.len() - 1
         );
-        // Everything is written inside the one box, which has a surface under
-        // it on the overlay.
+        // Everything is written inside one of the two boxes, and each box has
+        // a surface under it on the overlay.
+        let fly = out.layout.menu_fly;
         for text in &out.scene.over_texts {
+            let inside = |b: Panel| {
+                text.at.y >= b.y - 0.01
+                    && text.at.y + text.at.h <= b.y + b.h + 0.01
+                    && text.at.x >= b.x - 0.01
+                    && text.at.x + text.at.w <= b.x + b.w + 0.01
+            };
             assert!(
-                text.at.y >= box_.y - 0.01
-                    && text.at.y + text.at.h <= box_.y + box_.h + 0.01
-                    && text.at.x >= box_.x - 0.01
-                    && text.at.x + text.at.w <= box_.x + box_.w + 0.01,
-                "{:?} is outside {box_:?}",
+                inside(box_) || inside(fly),
+                "{:?} is outside {box_:?} and {fly:?}",
                 text.at
             );
         }
-        assert!(
-            out.scene
-                .over_rects
-                .iter()
-                .any(|r| r.xywh() == [box_.x, box_.y, box_.w, box_.h] && r.extra()[3] == 0.0),
-            "the menu has no surface"
-        );
+        for b in [box_, fly] {
+            assert!(
+                out.scene
+                    .over_rects
+                    .iter()
+                    .any(|r| r.xywh() == [b.x, b.y, b.w, b.h] && r.extra()[3] == 0.0),
+                "a menu box has no surface"
+            );
+        }
     }
 
     /// Every row of the menu is drawn with a mark in its gutter, and it is the
@@ -10266,11 +10353,15 @@ mod tests {
         let dock = Dock::hiding(&[View::Hardware]);
         let mut widget = Menu::for_widget((400.0, 300.0), View::Plan, Space::TopLeft, true);
         widget.fold(3, &dock);
-        widget.fold(0, &dock);
         for menu in [widget, Menu::for_input((400.0, 300.0), true)] {
             let out = render_menu(&busy_state(), 1400.0, 900.0, &dock, &menu, None);
             let mut seen = 0;
-            for (index, panel) in &out.layout.menu_rows {
+            let placed = out
+                .layout
+                .menu_rows
+                .iter()
+                .chain(out.layout.menu_fly_rows.iter());
+            for (index, panel) in placed {
                 let item = menu.rows[*index].item;
                 let icon = item.icon().expect("every row has a mark");
                 let line = out
@@ -10498,7 +10589,8 @@ mod tests {
             .collect();
         let base = text_of(&out.scene);
         for (label, tint) in [
-            ("Settings", out.skin.bright),
+            ("Widgets", out.skin.bright),
+            ("Settings", out.skin.body),
             ("Copy selection", out.skin.dim),
             ("Close this widget", out.skin.body),
         ] {

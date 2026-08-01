@@ -13,43 +13,28 @@
 //! that grows a row when there is a selection moves every row under it, and the
 //! pointer has to read the whole thing again to find the one it came for.
 //!
-//! ## Groups
+//! ## The widgets flyout
 //!
-//! The pane's menu is not a flat list of acts. It is a few named groups that
-//! open, and the rows inside a group only exist while that group is open. Two
-//! of them: Settings, holding one row per section of the settings panel, and
-//! Widgets, holding one row per widget. A group's rows are inserted into
-//! [`Menu::rows`] straight under their header, one step further in
-//! ([`Row::depth`]), so the whole menu is still one list and a row is still one
-//! number wherever it is drawn.
+//! The pane's menu is a flat list of acts plus one group: Widgets, holding
+//! one switch per widget. Opening it does not move a single row of the menu:
+//! its rows go into a second box beside the header ([`Menu::fly_start`]
+//! marks where they begin in [`Menu::rows`]), so the column the pointer has
+//! already read stays exactly where it was. Settings is an act like any
+//! other: it opens the settings panel, and the panel's own rail is where a
+//! section is chosen.
 //!
-//! This replaced a flyout: the widget list used to be a second box beside the
-//! menu, and it was the only thing in the menu that could open at all. Two
-//! boxes at two anchors could hold exactly one submenu between them (one split
-//! point, one scroll offset, one anchor hardwired to the last row), so a second
-//! group was not expressible. A group that opens in place is one box, one
-//! scroll and any number of groups, and it is what a long menu has to be to
-//! read as a few names rather than as one column of everything.
-//!
-//! The cost is real and is paid on purpose: opening a group moves the rows
-//! under it. Which is why a group opens from the row's own mark (a chevron that
-//! turns down), why the rows it inserts are indented, and why the keyboard
-//! walks the menu too, so a group can be opened and shut without the pointer
-//! having to re-read the column each time.
+//! One list still: the flyout's rows are appended after the menu's own, so a
+//! row is one number wherever it is drawn and the keyboard walks straight
+//! from the column into the flyout and back.
 
 use crate::dock::{Dock, Space, View};
 use crate::design::icons;
-use crate::settings::SECTIONS;
 
 /// Columns a row reserves at its end for the group marker: the mark and the
-/// space in front of it. Reserved in [`Menu::width_chars`] rather than left to
-/// the drawing, or a long label and the marker would be written over each other.
+/// space in front of it. Reserved in the width the box is measured from
+/// rather than left to the drawing, or a long label and the marker would be
+/// written over each other.
 pub const MARKER_COLUMNS: usize = 2;
-
-/// Columns a row inside an open group is written in from the rows above it, per
-/// step of depth. Two, which is the gutter every row already spends on its own
-/// mark, so a child's mark starts where its parent's label does.
-pub const INDENT_COLUMNS: usize = 2;
 
 /// One thing a menu can do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,17 +43,9 @@ pub enum Item {
     Copy,
     /// Put the clipboard into the prompt.
     Paste,
-    /// The group holding one row per section of the settings panel. Carries
-    /// whether it is open.
-    ///
-    /// It used to be one row that opened the panel on whatever section it was
-    /// last left on. Every section of that panel is a destination, and a menu
-    /// that can only reach the first of them is a menu that makes you go and
-    /// find the rest.
-    Settings(bool),
-    /// One section of the settings panel, by its place in
-    /// [`crate::settings::SECTIONS`]. Opens the panel with that section chosen.
-    Section(usize),
+    /// Open the settings panel. One act: the panel's rail is where a section
+    /// is chosen, so the menu does not repeat that list.
+    Settings,
     /// Copy what is selected in the pane the menu opened over.
     CopySelection,
     /// Take the pane out of the window, via `Dock::hide`.
@@ -98,10 +75,7 @@ impl Item {
         match self {
             Item::Copy => "Copy",
             Item::Paste => "Paste",
-            Item::Settings(_) => "Settings",
-            // The section's own name, as the rail beside the panel writes it,
-            // so the row and the place it lands on read as the same thing.
-            Item::Section(at) => SECTIONS.get(at).copied().unwrap_or(""),
+            Item::Settings => "Settings",
             Item::CopySelection => "Copy selection",
             Item::Close => "Close this widget",
             Item::Widgets(_) => "Widgets",
@@ -145,7 +119,7 @@ impl Item {
     /// written in, and [`Menu::fold`] reads it to know what a press does.
     pub fn group(self) -> Option<bool> {
         match self {
-            Item::Settings(open) | Item::Widgets(open) => Some(open),
+            Item::Widgets(open) => Some(open),
             _ => None,
         }
     }
@@ -162,10 +136,7 @@ impl Item {
     /// to compile here rather than shipping with a blank gutter nobody notices.
     pub fn icon(self) -> Option<char> {
         match self {
-            // The gear on the group, and the same gear on every section inside
-            // it. A child of a group is that group, so a second mark there
-            // would say the row is a different kind of thing.
-            Item::Settings(_) | Item::Section(_) => Some(icons::SETTINGS),
+            Item::Settings => Some(icons::SETTINGS),
             // Both copies wear the same mark, the prompt's and the pane's. They
             // are the same act on two different things, and a prompt menu with a
             // mark on Paste and none on Copy above it reads as half drawn.
@@ -197,42 +168,27 @@ impl Item {
     /// of how a row that opens is told apart from a row that acts, along with
     /// the weight its label is written in.
     ///
-    /// A chevron pointing right while the group is shut and down while it is
-    /// open, which is what every other tree on the desktop says and what a row
-    /// whose rows appear underneath it has to say: the same right-pointing
-    /// chevron in both states said the rows were out to the side, which is
-    /// where they used to be and no longer are.
+    /// A right-pointing chevron either way: the flyout opens out to the side,
+    /// and that is where the mark points, open or shut.
     ///
     /// At the end rather than in the gutter in front, which is where the icons
     /// above go: a mark in the gutter says what this row is, a mark at the end
-    /// says what pressing it does to the rows under it.
+    /// says that pressing it opens something.
     pub fn marker(self) -> Option<char> {
-        match self.group() {
-            Some(true) => Some(icons::SUBMENU_OPEN),
-            Some(false) => Some(icons::SUBMENU),
-            None => None,
-        }
+        self.group().map(|_| icons::SUBMENU)
     }
 }
 
-/// One row: an item, whether it can be picked right now, and how far in it is.
+/// One row: an item, and whether it can be picked right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Row {
     pub item: Item,
     pub enabled: bool,
-    /// 0 for a row of the menu itself, 1 for a row inside an open group. What
-    /// the drawing indents by, so a group's rows read as belonging to the
-    /// header above them rather than as more of the menu.
-    pub depth: usize,
 }
 
 impl Row {
     fn act(item: Item, enabled: bool) -> Row {
-        Row {
-            item,
-            enabled,
-            depth: 0,
-        }
+        Row { item, enabled }
     }
 }
 
@@ -264,9 +220,15 @@ pub struct Menu {
     /// a menu opened near an edge still fits on screen.
     pub at: (f32, f32),
     pub target: Target,
-    /// Every row on it, in the order they are drawn: the menu's own rows, with
-    /// each open group's rows inserted straight under their header.
+    /// Every row on it: the menu's own rows first, then, while the widgets
+    /// flyout is open, its rows appended after them ([`Menu::fly_start`]).
+    /// One list, so a row is one number wherever it is drawn.
     pub rows: Vec<Row>,
+    /// Where the flyout's rows begin in [`Menu::rows`], while it is open.
+    /// The layout puts everything from here on in a second box beside the
+    /// header instead of under it, so opening the flyout never moves a row
+    /// the pointer has already read.
+    pub fly_start: Option<usize>,
     /// Which row the box starts at, when the window is too short to hold all of
     /// them. Kept here rather than in the layout because it outlives a frame:
     /// the wheel moves it and the next frame draws from it.
@@ -293,16 +255,16 @@ impl Menu {
         )
     }
 
-    /// A pane's menu: two groups and two acts.
+    /// A pane's menu: three acts and the widgets flyout.
     ///
-    /// Settings opens shut, and so does Widgets. A menu that opened with every
-    /// group already out is the wall of rows the groups exist to stop being.
+    /// The flyout opens shut. A menu that opened with it already out is the
+    /// wall of rows the flyout exists to stop being.
     pub fn for_widget(at: (f32, f32), view: View, space: Space, has_selection: bool) -> Menu {
         Menu::of(
             at,
             Target::Widget(view, space),
             vec![
-                Row::act(Item::Settings(false), true),
+                Row::act(Item::Settings, true),
                 Row::act(Item::CopySelection, has_selection),
                 Row::act(Item::Close, true),
                 Row::act(Item::Widgets(false), true),
@@ -352,9 +314,15 @@ impl Menu {
             at,
             target,
             rows,
+            fly_start: None,
             first: 0,
             cursor: None,
         }
+    }
+
+    /// How many rows belong to the menu's own column, flyout excluded.
+    pub fn main_len(&self) -> usize {
+        self.fly_start.unwrap_or(self.rows.len())
     }
 
     /// The widget the menu was opened over, if it was opened over one. What
@@ -367,12 +335,13 @@ impl Menu {
         }
     }
 
-    /// Open the group at `index`, or shut it again. Anything that is not a
-    /// group header leaves the menu alone.
+    /// Open the flyout from the group header at `index`, or shut it again.
+    /// Anything that is not a group header leaves the menu alone.
     ///
-    /// Open, its rows go in straight under it, one step further in. Shut, every
-    /// row under it that is further in comes back out, which takes a nested
-    /// group's rows with it because they are further in still.
+    /// Open, its rows are appended after the menu's own and `fly_start` marks
+    /// where they begin; the layout puts them in a box beside the header.
+    /// Shut, everything from `fly_start` on comes off. Either way, not one
+    /// row of the menu's own column moves.
     pub fn fold(&mut self, index: usize, dock: &Dock) -> bool {
         let Some(row) = self.rows.get(index) else {
             return false;
@@ -380,71 +349,31 @@ impl Menu {
         let Some(open) = row.item.group() else {
             return false;
         };
-        let depth = row.depth;
-        let item = row.item;
-        // Whatever this group had out goes first, open or shut: shutting is
-        // only this half, and opening a group that somehow already had rows
-        // would double them.
-        let end = self.end_of(index);
-        self.rows.drain(index + 1..end);
-        self.rows[index].item = match item {
-            Item::Settings(_) => Item::Settings(!open),
-            Item::Widgets(_) => Item::Widgets(!open),
-            other => other,
-        };
-        if !open {
-            let inside: Vec<Row> = match item {
-                Item::Settings(_) => (0..SECTIONS.len())
-                    .map(|at| Row {
-                        item: Item::Section(at),
-                        enabled: true,
-                        depth: depth + 1,
-                    })
-                    .collect(),
-                // Nothing on it is greyed: every row is a switch and every
-                // switch can be thrown either way.
-                _ => View::ALL
-                    .into_iter()
-                    .map(|view| Row {
-                        item: Item::Widget(view, dock.is_hidden(view)),
-                        enabled: true,
-                        depth: depth + 1,
-                    })
-                    .collect(),
-            };
-            self.rows.splice(index + 1..index + 1, inside);
+        if let Some(fly) = self.fly_start.take() {
+            self.rows.truncate(fly);
         }
-        // The rows moved, so anything counted against them is stale. The
-        // cursor follows the header only when the keys had it: a group opened
-        // by the pointer must not light a row the keys are not on.
-        self.first = 0;
+        self.rows[index].item = Item::Widgets(!open);
+        if !open {
+            self.fly_start = Some(self.rows.len());
+            // Nothing on it is greyed: every row is a switch and every
+            // switch can be thrown either way.
+            self.rows.extend(View::ALL.into_iter().map(|view| Row {
+                item: Item::Widget(view, dock.is_hidden(view)),
+                enabled: true,
+            }));
+        }
+        // The cursor follows the header only when the keys had it: a flyout
+        // opened by the pointer must not light a row the keys are not on.
         if self.cursor.is_some() {
             self.cursor = Some(index);
         }
         true
     }
 
-    /// One past the last row belonging to the group at `index`: every row after
-    /// it that is further in.
-    fn end_of(&self, index: usize) -> usize {
-        let depth = self.rows[index].depth;
-        let mut end = index + 1;
-        while self.rows.get(end).is_some_and(|row| row.depth > depth) {
-            end += 1;
-        }
-        end
-    }
-
-    /// Which group row `index` is inside, if any: the nearest header above it
-    /// that is one step further out.
-    pub fn parent_of(&self, index: usize) -> Option<usize> {
-        let depth = self.rows.get(index)?.depth;
-        if depth == 0 {
-            return None;
-        }
-        self.rows[..index]
-            .iter()
-            .rposition(|row| row.depth < depth && row.item.group().is_some())
+    /// The row the flyout hangs off: the one open group header.
+    pub fn fly_anchor(&self) -> Option<usize> {
+        self.fly_start?;
+        self.rows.iter().position(|row| row.item.group() == Some(true))
     }
 
     /// Read the widget rows' marks off the dock again, keeping the group open
@@ -467,9 +396,10 @@ impl Menu {
     }
 
     /// Move the menu, when the window is too short to hold every row. `rows` is
-    /// how many are on screen, which only the layout knows.
+    /// how many are on screen, which only the layout knows. Scrolling is the
+    /// menu's own column; the flyout is short enough to always show whole.
     pub fn scroll(&mut self, by: usize, down: bool, rows: usize) -> bool {
-        let most = self.rows.len().saturating_sub(rows);
+        let most = self.main_len().saturating_sub(rows);
         let next = match down {
             true => (self.first + by).min(most),
             false => self.first.saturating_sub(by).min(most),
@@ -515,22 +445,27 @@ impl Menu {
         }
     }
 
-    /// Bring the cursor's row on screen, when `rows` of the menu are showing.
+    /// Bring the cursor's row on screen, when `rows` of the menu's own column
+    /// are showing. A cursor in the flyout needs no scrolling: the flyout is
+    /// always shown whole.
     pub fn show(&mut self, rows: usize) {
         let Some(at) = self.cursor else {
             return;
         };
+        if self.fly_start.is_some_and(|fly| at >= fly) {
+            return;
+        }
         let rows = rows.max(1);
         if at < self.first {
             self.first = at;
         } else if at >= self.first + rows {
             self.first = at + 1 - rows;
         }
-        self.first = self.first.min(self.rows.len().saturating_sub(rows));
+        self.first = self.first.min(self.main_len().saturating_sub(rows));
     }
 
-    /// What the right arrow does: open the group the cursor is on, and step
-    /// into it when it is already open.
+    /// What the right arrow does: open the flyout from the header the cursor
+    /// is on, and step into its first row when it is already open.
     pub fn unfold_here(&mut self, dock: &Dock, rows: usize) -> bool {
         let Some(at) = self.cursor else {
             return false;
@@ -541,13 +476,19 @@ impl Menu {
                 self.show(rows);
                 true
             }
-            Some(true) => self.walk(true, rows),
+            Some(true) => {
+                let Some(fly) = self.fly_start else {
+                    return false;
+                };
+                self.cursor = Some(fly);
+                true
+            }
             None => false,
         }
     }
 
-    /// What the left arrow does: shut the group the cursor is on, or step out
-    /// to the header of the group it is inside.
+    /// What the left arrow does: shut the flyout from its header, or step out
+    /// of it back to that header.
     pub fn fold_here(&mut self, dock: &Dock, rows: usize) -> bool {
         let Some(at) = self.cursor else {
             return false;
@@ -557,12 +498,11 @@ impl Menu {
             self.show(rows);
             return true;
         }
-        let Some(parent) = self.parent_of(at) else {
-            return false;
-        };
-        self.cursor = Some(parent);
-        self.show(rows);
-        true
+        if self.fly_start.is_some_and(|fly| at >= fly) {
+            self.cursor = self.fly_anchor();
+            return true;
+        }
+        false
     }
 
     /// Press the delete row at `index`. `true` means delete it now.
@@ -634,20 +574,25 @@ impl Menu {
             .map(|row| row.item)
     }
 
-    /// The longest row in the menu, in characters: how far in it is written,
-    /// its label, and the room kept at the end of a row that opens a group.
-    /// What the layout sizes the box from, so every row is as wide as the
-    /// widest one.
-    ///
-    /// Measured over every row including the ones inside open groups, because
-    /// they are in the same box now. A group that opened wider than its menu
-    /// would be written off the edge of it.
+    /// The longest row of the menu's own column, in characters: its label and
+    /// the room kept at the end of a row that opens the flyout. What the
+    /// layout sizes the box from, so every row is as wide as the widest one.
     pub fn width_chars(&self) -> usize {
-        self.rows
-            .iter()
+        Menu::widest(&self.rows[..self.main_len()])
+    }
+
+    /// The longest row of the open flyout, sizing its own box the same way.
+    pub fn fly_width_chars(&self) -> usize {
+        match self.fly_start {
+            Some(fly) => Menu::widest(&self.rows[fly..]),
+            None => 0,
+        }
+    }
+
+    fn widest(rows: &[Row]) -> usize {
+        rows.iter()
             .map(|row| {
-                row.depth * INDENT_COLUMNS
-                    + row.item.sizing_label().chars().count()
+                row.item.sizing_label().chars().count()
                     + match row.item.marker() {
                         Some(_) => MARKER_COLUMNS,
                         None => 0,
@@ -666,9 +611,16 @@ mod tests {
         menu.rows.iter().map(|row| row.item).collect()
     }
 
-    /// How many rows are inside open groups.
-    fn opened(menu: &Menu) -> usize {
-        menu.rows.iter().filter(|row| row.depth > 0).count()
+    /// The rows the open flyout holds, as views, in order.
+    fn fly_views(menu: &Menu) -> Vec<View> {
+        let fly = menu.fly_start.expect("the flyout is open");
+        menu.rows[fly..]
+            .iter()
+            .map(|row| match row.item {
+                Item::Widget(view, _) => view,
+                other => panic!("{other:?} is not a widget row"),
+            })
+            .collect()
     }
 
     #[test]
@@ -681,38 +633,33 @@ mod tests {
         assert_eq!(menu.pick(2), None, "there is no third row");
     }
 
-    /// Two groups and two acts, both groups shut.
-    ///
-    /// This asserted `Item::Settings` with no state on it, back when that row
-    /// opened the panel rather than opening a group.
+    /// Three acts and the flyout's header, the flyout shut.
     #[test]
-    fn a_pane_gets_a_settings_group_a_copy_a_close_and_a_widgets_group() {
+    fn a_pane_gets_settings_copy_close_and_the_widgets_header() {
         let menu = Menu::for_widget((10.0, 10.0), View::Plan, Space::TopRight, true);
         assert_eq!(
             items(&menu),
             vec![
-                Item::Settings(false),
+                Item::Settings,
                 Item::CopySelection,
                 Item::Close,
                 Item::Widgets(false)
             ]
         );
         assert_eq!(menu.target, Target::Widget(View::Plan, Space::TopRight));
+        assert_eq!(menu.pick(0), Some(Item::Settings));
         assert_eq!(menu.pick(1), Some(Item::CopySelection));
         assert_eq!(menu.pick(2), Some(Item::Close));
         assert_eq!(menu.pick(3), Some(Item::Widgets(false)));
-        assert_eq!(opened(&menu), 0, "both groups open shut");
-        for row in &menu.rows {
-            assert_eq!(row.depth, 0, "nothing is inside a group yet");
-        }
+        assert_eq!(menu.fly_start, None, "the flyout opens shut");
+        assert_eq!(menu.main_len(), 4);
     }
 
-    /// The correction this round: the widget list is a group that opens under
-    /// its own header, in the same box, rather than a second box out to the
-    /// side. Shut it is one row, open it is that row and every widget under it,
-    /// one step further in.
+    /// The correction this round: opening the widget list moves nothing. Its
+    /// rows are appended after the menu's own and drawn in a box beside the
+    /// header, so the column the pointer already read stays where it was.
     #[test]
-    fn the_widget_row_opens_into_one_row_per_widget_and_shuts_again() {
+    fn the_widget_header_opens_a_flyout_and_shuts_again() {
         let dock = Dock::new();
         let mut menu = Menu::for_widget((10.0, 10.0), View::Plan, Space::TopLeft, false);
         let shut = items(&menu);
@@ -720,150 +667,82 @@ mod tests {
 
         assert!(menu.fold(at, &dock));
         assert_eq!(menu.rows[at].item, Item::Widgets(true));
-        assert_eq!(opened(&menu), View::ALL.len());
-        assert_eq!(menu.rows.len(), shut.len() + View::ALL.len());
+        assert_eq!(menu.fly_start, Some(shut.len()));
+        assert_eq!(menu.main_len(), shut.len(), "no row of the column moved");
+        assert_eq!(&items(&menu)[..3], &shut[..3]);
         assert_eq!(
-            menu.rows[at + 1..]
-                .iter()
-                .map(|row| {
-                    assert_eq!(row.depth, 1, "a widget row is inside the group");
-                    match row.item {
-                        Item::Widget(view, _) => view,
-                        other => panic!("{other:?} is not a widget row"),
-                    }
-                })
-                .collect::<Vec<_>>(),
+            fly_views(&menu),
             View::ALL.to_vec(),
             "the list is in the one order, so it is in the same place every time"
         );
+        assert_eq!(menu.fly_anchor(), Some(at));
         // Eight rows, and none of them is the pane of failed calls: the list is
         // built from `View::ALL`, so a variant left behind would still be
         // switchable from here with nothing to draw.
-        assert_eq!(opened(&menu), 8);
-        for row in &menu.rows[at + 1..] {
-            let Item::Widget(view, _) = row.item else {
-                panic!("{:?} is not a widget row", row.item)
-            };
+        assert_eq!(fly_views(&menu).len(), 8);
+        for view in fly_views(&menu) {
             assert_ne!(view.label(), "DEBUG");
         }
 
         assert!(menu.fold(at, &dock));
-        assert_eq!(opened(&menu), 0);
+        assert_eq!(menu.fly_start, None);
         assert_eq!(items(&menu), shut, "it shuts back to what it opened as");
     }
 
-    /// The settings group holds one row per section of the panel, in rail
-    /// order, and each of them names the section it lands on.
+    /// Settings acts; it is not a group, and neither is anything on the
+    /// prompt's menu. Only the widgets header opens.
     #[test]
-    fn the_settings_row_opens_into_one_row_per_section_of_the_panel() {
-        let dock = Dock::new();
-        let mut menu = Menu::for_widget((10.0, 10.0), View::Plan, Space::TopLeft, false);
-        assert!(menu.fold(0, &dock));
-        assert_eq!(menu.rows[0].item, Item::Settings(true));
-        assert_eq!(opened(&menu), SECTIONS.len());
-        for (at, name) in SECTIONS.iter().enumerate() {
-            let row = menu.rows[1 + at];
-            assert_eq!(row.item, Item::Section(at));
-            assert_eq!(row.depth, 1);
-            assert_eq!(row.item.label(), *name);
-            assert_eq!(menu.pick(1 + at), Some(Item::Section(at)));
-            assert_eq!(row.item.marker(), None, "a section is a place, not a group");
-        }
-        // The rows below it kept their order and their meaning, one group's
-        // worth further down.
-        assert_eq!(
-            menu.pick(1 + SECTIONS.len() + 2),
-            Some(Item::Widgets(false))
-        );
-        assert!(menu.fold(0, &dock));
-        assert_eq!(opened(&menu), 0);
-    }
-
-    /// Two groups in one menu, which is the thing the flyout could not do: one
-    /// box, one scroll, and each group's rows under its own header.
-    #[test]
-    fn both_groups_open_at_once_and_each_shuts_on_its_own() {
-        let dock = Dock::new();
-        let mut menu = Menu::for_widget((10.0, 10.0), View::Plan, Space::TopLeft, false);
-        menu.fold(0, &dock);
-        let widgets = menu
-            .rows
-            .iter()
-            .position(|row| matches!(row.item, Item::Widgets(_)))
-            .expect("the widgets row is still there");
-        menu.fold(widgets, &dock);
-        assert_eq!(opened(&menu), SECTIONS.len() + View::ALL.len());
-        assert_eq!(menu.rows[0].item, Item::Settings(true));
-        assert_eq!(menu.rows[widgets].item, Item::Widgets(true));
-        // Shutting the first one takes its own rows and leaves the other's.
-        menu.fold(0, &dock);
-        assert_eq!(opened(&menu), View::ALL.len());
-        assert_eq!(menu.rows[0].item, Item::Settings(false));
-        let widgets = menu
-            .rows
-            .iter()
-            .position(|row| row.item == Item::Widgets(true))
-            .expect("the widgets group is still open");
-        assert_eq!(menu.rows[widgets + 1].depth, 1);
-    }
-
-    /// A row that is not a group header does not open, and neither does a row
-    /// that is not there.
-    #[test]
-    fn nothing_but_a_group_header_opens() {
+    fn nothing_but_the_widgets_header_opens() {
         let dock = Dock::new();
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, true);
+        assert!(!menu.fold(0, &dock), "Settings acts, it does not open");
         assert!(!menu.fold(1, &dock), "Copy selection is not a group");
         assert!(!menu.fold(99, &dock), "there is no row 99");
-        assert_eq!(opened(&menu), 0);
+        assert_eq!(menu.fly_start, None);
+        assert_eq!(Item::Settings.group(), None);
+        assert_eq!(Item::Settings.marker(), None, "an act keeps no room at its end");
         let mut prompt = Menu::for_input((0.0, 0.0), false);
         assert!(!prompt.fold(0, &dock));
         assert!(!prompt.fold(1, &dock));
-        assert_eq!(opened(&prompt), 0);
+        assert_eq!(prompt.fly_start, None);
     }
 
-    /// The marker is written after the label, so the row has to be wide enough
-    /// for both, and a row inside a group has to be wide enough for its indent
-    /// as well.
+    /// The marker is written after the label, so the header row has to be wide
+    /// enough for both, and the flyout is measured as its own box.
     #[test]
-    fn a_row_that_opens_keeps_room_at_its_end_and_an_open_group_keeps_its_indent() {
+    fn each_box_is_as_wide_as_its_own_longest_row() {
         let dock = Dock::new();
-        let menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
+        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
         let widgets = "Widgets".chars().count();
         assert!(
             menu.width_chars() >= widgets + MARKER_COLUMNS,
             "the marker and the label would collide"
         );
-        // With a label longer than every other row's, the width is that row's.
-        let mut wide = menu.clone();
-        wide.rows.retain(|row| matches!(row.item, Item::Widgets(_)));
-        assert_eq!(wide.width_chars(), widgets + MARKER_COLUMNS);
+        assert_eq!(menu.fly_width_chars(), 0, "a shut flyout is no box at all");
+        let column = menu.width_chars();
+        menu.fold(3, &dock);
+        assert_eq!(
+            menu.width_chars(),
+            column,
+            "opening the flyout does not widen the column"
+        );
+        let widest = View::ALL
+            .into_iter()
+            .map(|view| view.label().chars().count())
+            .max()
+            .expect("there are widgets");
+        assert_eq!(menu.fly_width_chars(), widest);
         // A row with no marker keeps no room, or every menu would be two
         // columns wider than it needs to be.
         let plain = Menu::for_input((0.0, 0.0), false);
         assert_eq!(plain.width_chars(), Item::Paste.label().chars().count());
-
-        // Open the sections and the widest row is a section name written one
-        // indent in, if that is longer than any top level row.
-        let mut open = menu.clone();
-        open.fold(0, &dock);
-        let widest = SECTIONS
-            .iter()
-            .map(|name| name.chars().count())
-            .max()
-            .expect("there are sections");
-        assert_eq!(
-            open.width_chars(),
-            menu.width_chars().max(widest + INDENT_COLUMNS),
-            "a group's rows are measured in the same box as the menu's"
-        );
     }
 
-    /// Every row of a group is a switch, and a switch has to say which way it
-    /// is set before it is pressed: a tick in a box for a widget in the window,
-    /// an empty box for one that is out.
+    /// Every row of the flyout is a switch, and a switch has to say which way
+    /// it is set before it is pressed: a tick in a box for a widget in the
+    /// window, an empty box for one that is out.
     #[test]
-    fn the_list_marks_what_is_closed_and_every_row_of_it_can_be_picked() {
+    fn the_flyout_marks_what_is_closed_and_every_row_of_it_can_be_picked() {
         let dock = Dock::hiding(&[View::Hardware, View::Files]);
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
         let at = 3;
@@ -893,28 +772,16 @@ mod tests {
         assert_eq!(menu.pick(at + 1 + View::ALL.len()), None);
     }
 
-    /// A group header carries two marks: the one in its gutter saying what the
-    /// row is, and the chevron at its end saying it opens. The chevron turns
-    /// down while the group is open, because its rows are underneath it now.
-    ///
-    /// It asserted the same right-pointing chevron in both states, which is
-    /// what a row whose rows fly out to the side says and is no longer what
-    /// these rows do.
+    /// The header carries two marks: the one in its gutter saying what the row
+    /// is, and the chevron at its end saying it opens. The chevron points out
+    /// to the side in both states, because that is where the rows go.
     #[test]
-    fn a_group_header_carries_a_mark_in_its_gutter_and_a_chevron_that_turns() {
+    fn the_header_carries_a_mark_in_its_gutter_and_a_side_chevron() {
         assert_eq!(Item::Widgets(false).marker(), Some(icons::SUBMENU));
-        assert_eq!(Item::Widgets(true).marker(), Some(icons::SUBMENU_OPEN));
-        assert_eq!(Item::Settings(false).marker(), Some(icons::SUBMENU));
-        assert_eq!(Item::Settings(true).marker(), Some(icons::SUBMENU_OPEN));
-        assert_ne!(
-            icons::SUBMENU,
-            icons::SUBMENU_OPEN,
-            "a group that is open and one that is shut have to be told apart"
-        );
+        assert_eq!(Item::Widgets(true).marker(), Some(icons::SUBMENU));
         for open in [false, true] {
             assert_eq!(Item::Widgets(open).icon(), Some(icons::WIDGETS));
             assert_eq!(Item::Widgets(open).group(), Some(open));
-            assert_eq!(Item::Settings(open).group(), Some(open));
             assert_ne!(
                 icons::WIDGETS,
                 icons::SUBMENU,
@@ -924,7 +791,7 @@ mod tests {
         for item in [
             Item::Copy,
             Item::Paste,
-            Item::Section(0),
+            Item::Settings,
             Item::CopySelection,
             Item::Close,
             Item::Widget(View::Output, false),
@@ -940,46 +807,30 @@ mod tests {
     /// just switched says what it did rather than what it used to say. The rows
     /// keep their places, so the pointer is still over the row it pressed.
     #[test]
-    fn the_list_reads_its_marks_off_the_dock_again_without_moving_a_row() {
+    fn the_flyout_reads_its_marks_off_the_dock_again_without_moving_a_row() {
         let mut dock = Dock::new();
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
         menu.fold(3, &dock);
-        let places: Vec<View> = menu.rows[4..]
-            .iter()
-            .map(|row| match row.item {
-                Item::Widget(view, _) => view,
-                other => panic!("{other:?} is not a widget row"),
-            })
-            .collect();
+        let places = fly_views(&menu);
 
         assert!(dock.hide(View::Hardware));
         assert!(menu.relist(&dock));
-        assert_eq!(
-            menu.rows[4..]
-                .iter()
-                .map(|row| match row.item {
-                    Item::Widget(view, _) => view,
-                    other => panic!("{other:?} is not a widget row"),
-                })
-                .collect::<Vec<_>>(),
-            places,
-            "no row moved"
-        );
+        assert_eq!(fly_views(&menu), places, "no row moved");
         for (step, view) in View::ALL.into_iter().enumerate() {
             assert_eq!(
                 menu.pick(4 + step),
                 Some(Item::Widget(view, view == View::Hardware))
             );
         }
-        // Nothing to read, either because the group is shut or because the menu
-        // has no widget row at all.
+        // Nothing to read, either because the flyout is shut or because the
+        // menu has no widget row at all.
         menu.fold(3, &dock);
         assert!(!menu.relist(&dock));
         assert!(!Menu::for_input((0.0, 0.0), false).relist(&dock));
     }
 
-    /// Every row but a group's acts on the widget the menu was opened over, so
-    /// the menu has to be able to say which one that is.
+    /// Every row but the header acts on the widget the menu was opened over,
+    /// so the menu has to be able to say which one that is.
     #[test]
     fn a_menu_names_the_widget_it_was_opened_over() {
         let menu = Menu::for_widget((0.0, 0.0), View::Agents, Space::TopRight, false);
@@ -987,38 +838,30 @@ mod tests {
         assert_eq!(Menu::for_input((0.0, 0.0), false).target_view(), None);
     }
 
-    /// Both groups out is seventeen rows, which does not fit under a menu
-    /// opened near the bottom of a short window, so the menu scrolls, and it
-    /// cannot be scrolled off either end.
+    /// Scrolling moves the menu's own column and stops at both ends; the
+    /// flyout is always shown whole, so opening it adds nothing to scroll.
     #[test]
-    fn the_menu_scrolls_and_stops_at_both_ends() {
+    fn scrolling_is_the_menus_own_column() {
         let dock = Dock::new();
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
         assert!(
             !menu.scroll(1, true, 4),
             "a menu that fits has nothing to scroll"
         );
-        menu.fold(3, &dock);
-        let rows = menu.rows.len();
-        assert!(menu.scroll(2, true, 3));
-        assert_eq!(menu.first, 2);
         assert!(menu.scroll(99, true, 3));
-        assert_eq!(menu.first, rows - 3, "it stops at the last row");
-        assert!(!menu.scroll(4, true, 3));
+        assert_eq!(menu.first, 1, "it stops at the last row of the column");
         assert!(menu.scroll(99, false, 3));
         assert_eq!(menu.first, 0);
         assert!(!menu.scroll(1, false, 3));
-        // A menu that is entirely on screen does not move at all.
-        assert!(!menu.scroll(1, true, rows));
-        // And folding it away puts the menu back at the top.
-        menu.scroll(4, true, 3);
         menu.fold(3, &dock);
-        assert_eq!(menu.first, 0);
+        assert!(
+            !menu.scroll(1, true, 4),
+            "the flyout added nothing to scroll through"
+        );
     }
 
     /// The keyboard walks the menu, skips the rows that cannot act, and stops
-    /// at both ends. There was no keyboard route at all before: a keystroke
-    /// with a menu open only put it away.
+    /// at both ends.
     #[test]
     fn the_keys_walk_the_menu_and_skip_what_cannot_act() {
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
@@ -1061,75 +904,64 @@ mod tests {
         assert_eq!(menu.cursor, Some(0));
     }
 
-    /// A group opens and shuts from the keyboard, and the left arrow steps out
-    /// to the header when the cursor is already inside one.
+    /// The flyout opens and shuts from the keyboard: right opens it from the
+    /// header and steps in, left steps back out to the header and shuts it.
     #[test]
-    fn the_arrows_open_and_shut_a_group() {
+    fn the_arrows_open_the_flyout_step_in_and_out_and_shut_it() {
         let dock = Dock::new();
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
-        menu.walk(true, 20);
-        assert_eq!(menu.cursor, Some(0));
+        menu.cursor = Some(3);
 
-        assert!(menu.unfold_here(&dock, 20), "right did not open the group");
-        assert_eq!(menu.rows[0].item, Item::Settings(true));
-        assert_eq!(menu.cursor, Some(0), "the cursor stayed on the header");
+        assert!(menu.unfold_here(&dock, 20), "right did not open the flyout");
+        assert_eq!(menu.rows[3].item, Item::Widgets(true));
+        assert_eq!(menu.cursor, Some(3), "the cursor stayed on the header");
 
-        // Right again on an open group steps into it, onto its first row.
+        // Right again steps into the flyout, onto its first row.
         assert!(menu.unfold_here(&dock, 20));
-        assert_eq!(menu.cursor, Some(1));
-        assert_eq!(menu.rows[1].item, Item::Section(0));
+        assert_eq!(menu.cursor, Some(4));
+        assert!(matches!(menu.rows[4].item, Item::Widget(..)));
         assert!(
             !menu.unfold_here(&dock, 20),
-            "a row that is not a group does not open"
+            "a row that is not a header does not open"
         );
 
         // Left from inside steps out to the header; left again shuts it.
         assert!(menu.fold_here(&dock, 20));
-        assert_eq!(menu.cursor, Some(0));
+        assert_eq!(menu.cursor, Some(3));
         assert!(menu.fold_here(&dock, 20));
-        assert_eq!(menu.rows[0].item, Item::Settings(false));
-        assert_eq!(opened(&menu), 0);
+        assert_eq!(menu.rows[3].item, Item::Widgets(false));
+        assert_eq!(menu.fly_start, None);
         assert!(
             !menu.fold_here(&dock, 20),
-            "a shut group at the top level has nothing to close"
+            "a shut flyout has nothing to close"
         );
     }
 
-    /// A cursor walked past the bottom of a short window brings the menu with
-    /// it, and one walked back up brings it back.
+    /// A cursor walked past the bottom of a short window brings the column
+    /// with it, and a cursor in the flyout never scrolls the column: the
+    /// flyout is beside it, always whole.
     #[test]
-    fn walking_past_the_end_of_a_short_menu_scrolls_it() {
+    fn walking_keeps_the_cursor_on_screen_and_the_flyout_leaves_first_alone() {
         let dock = Dock::new();
-        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
-        menu.fold(3, &dock);
-        let rows = 4;
-        for _ in 0..menu.rows.len() {
+        let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, true);
+        let rows = 3;
+        for expect in [0usize, 1, 2, 3] {
             menu.walk(true, rows);
-            let at = menu.cursor.expect("the cursor is somewhere");
+            assert_eq!(menu.cursor, Some(expect));
+            let at = expect;
             assert!(
                 at >= menu.first && at < menu.first + rows,
                 "row {at} is off screen: first {}",
                 menu.first
             );
         }
-        assert_eq!(menu.cursor, Some(menu.rows.len() - 1));
-        for _ in 0..menu.rows.len() {
-            menu.walk(false, rows);
-            let at = menu.cursor.expect("the cursor is somewhere");
-            assert!(at >= menu.first && at < menu.first + rows, "row {at}");
-        }
-        assert_eq!(menu.first, 0);
-    }
-
-    /// The prompt's menu has no widgets to list and no settings group: there is
-    /// no pane behind it.
-    #[test]
-    fn the_prompt_menu_has_no_group_at_all() {
-        let dock = Dock::new();
-        let mut menu = Menu::for_input((0.0, 0.0), false);
-        assert!(!menu.fold(0, &dock));
-        assert_eq!(items(&menu), vec![Item::Copy, Item::Paste]);
-        assert_eq!(opened(&menu), 0);
+        assert_eq!(menu.first, 1, "the column followed the cursor down");
+        menu.fold(3, &dock);
+        menu.cursor = Some(3);
+        let first = menu.first;
+        assert!(menu.walk(true, rows), "down crosses into the flyout");
+        assert_eq!(menu.cursor, Some(4));
+        assert_eq!(menu.first, first, "the flyout does not scroll the column");
     }
 
     /// The row is there either way, so the menu does not change shape under a
@@ -1161,20 +993,16 @@ mod tests {
         }
     }
 
-    /// The settings row acts, in every menu that has it, and carries its mark.
-    ///
-    /// This asserted the row opened the panel on its own. It opens a group of
-    /// five sections now, and every one of them opens the panel.
+    /// The settings row acts, in every menu that has it, and carries the gear.
     #[test]
-    fn the_settings_row_is_a_group_and_carries_its_mark() {
+    fn the_settings_row_acts_and_carries_the_gear() {
         for has_selection in [false, true] {
             let menu = Menu::for_widget((0.0, 0.0), View::Files, Space::BottomRight, has_selection);
-            assert_eq!(menu.rows[0].item, Item::Settings(false));
+            assert_eq!(menu.rows[0].item, Item::Settings);
             assert!(menu.rows[0].enabled);
-            assert_eq!(menu.pick(0), Some(Item::Settings(false)));
+            assert_eq!(menu.pick(0), Some(Item::Settings));
         }
-        assert_eq!(Item::Settings(false).icon(), Some(icons::SETTINGS));
-        assert_eq!(Item::Section(0).icon(), Some(icons::SETTINGS));
+        assert_eq!(Item::Settings.icon(), Some(icons::SETTINGS));
         // This asserted `Item::Close.icon() == None`. The close row has its own
         // cross now, and it is a different codepoint from the window button that
         // shuts the application: the same mark on both would say the same thing.
@@ -1192,7 +1020,6 @@ mod tests {
         let dock = Dock::hiding(&[View::Hardware]);
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, true);
         menu.fold(3, &dock);
-        menu.fold(0, &dock);
         let prompt = Menu::for_input((0.0, 0.0), true);
         let session = Menu::for_session((0.0, 0.0), 0, false);
         for row in menu
@@ -1216,9 +1043,7 @@ mod tests {
         assert_eq!(Item::Widgets(true).icon(), Some(icons::WIDGETS));
 
         // A copy row and a paste row that look alike are two coin flips, and the
-        // two switch states have to stay clear of all of them. The gear is not
-        // in this list: it is deliberately worn by the settings group and by
-        // every section inside it, which are the same thing at two depths.
+        // two switch states have to stay clear of all of them.
         let marks = [
             icons::COPY,
             icons::PASTE,
@@ -1251,48 +1076,15 @@ mod tests {
             vec![Item::OpenSession, Item::DeleteSession(false)]
         );
         assert_eq!(menu.target, Target::Session(3));
-        assert_eq!(menu.at, (40.0, 90.0));
         assert_eq!(menu.pick(0), Some(Item::OpenSession));
         assert_eq!(menu.pick(1), Some(Item::DeleteSession(false)));
-        assert_eq!(menu.pick(2), None, "there is no third row");
-        assert_eq!(opened(&menu), 0, "a session menu has no group");
-        assert_eq!(menu.target_view(), None, "and it is not a widget");
 
-        // A session whose folder has been deleted cannot be resumed anywhere,
-        // so Open is greyed. Delete still acts: that row is the reason the menu
-        // was opened over a session like this one.
-        let dead = Menu::for_session((40.0, 90.0), 3, true);
-        assert_eq!(items(&dead), items(&menu), "the shape changed");
-        assert_eq!(dead.pick(0), None);
-        assert_eq!(dead.pick(1), Some(Item::DeleteSession(false)));
-
-        // Marked, like every other row, and not with a mark that already means
-        // something else. Open wears the picker's own confirm glyph because it
-        // is the same act reached another way.
-        assert_eq!(Item::OpenSession.icon(), Some(icons::CONFIRM));
-        assert_eq!(Item::DeleteSession(false).icon(), Some(icons::TRASH));
-        assert_eq!(Item::DeleteSession(true).icon(), Some(icons::TRASH));
-        assert_ne!(icons::TRASH, icons::CLOSE_WIDGET, "delete is not close");
-        for item in [Item::OpenSession, Item::DeleteSession(false)] {
-            assert_eq!(item.marker(), None, "{item:?} does not open");
-        }
-        let dock = Dock::new();
-        let mut menu = menu;
-        assert!(!menu.fold(0, &dock), "there is no group to open");
-        assert_eq!(
-            menu.width_chars(),
-            Item::DeleteSession(false).label().chars().count()
-        );
+        let gone = Menu::for_session((40.0, 90.0), 3, true);
+        assert_eq!(items(&gone), items(&menu), "the shape changed");
+        assert_eq!(gone.pick(0), None, "a session with no folder cannot open");
+        assert_eq!(gone.pick(1), Some(Item::DeleteSession(false)));
     }
 
-    /// The right click's Delete asks before it acts, the way the settings
-    /// panel's delete does. The first press only changes what the row says; the
-    /// second one on the same row is the delete.
-    ///
-    /// Before this the picker was the unguarded half of the pair: the panel
-    /// asked twice and the menu removed the transcript on the first press, so
-    /// somebody who had learned the panel's question lost a conversation to a
-    /// right click that never asked one.
     #[test]
     fn the_delete_row_asks_before_it_acts() {
         let mut menu = Menu::for_session((40.0, 90.0), 3, false);
