@@ -4111,6 +4111,66 @@ mod tests {
         }
     }
 
+    /// The title strip wears the theme: its fill is the skin's bar and its
+    /// writing is the skin's own inks, under every preset.
+    ///
+    /// "this should also change the bar top where no0b has version". Rendered
+    /// under all three themes rather than only the green one, so a tint
+    /// hardcoded anywhere in the strip shows up as a matrix colour in a red
+    /// window.
+    #[test]
+    fn the_title_strip_wears_the_theme_it_is_given() {
+        let state = busy_state();
+        for name in crate::config::THEMES {
+            let config = crate::config::theme(name).expect(name);
+            let out = render_skinned(
+                &state,
+                &crate::scroll::Scrolls::default(),
+                1400.0,
+                900.0,
+                &Dock::new(),
+                &[],
+                &Monitor::new(),
+                None,
+                Skin::from(&config),
+            );
+            let (skin, strip) = (&out.skin, out.layout.title);
+            // The strip's own fill is the theme's bar, exactly where the
+            // layout put the strip.
+            assert!(
+                out.scene.rects.iter().any(|rect| {
+                    rect.rgba() == skin.bar && rect.xywh() == [strip.x, strip.y, strip.w, strip.h]
+                }),
+                "{name}: the strip is not filled with the theme's bar"
+            );
+            // The name is the theme's loud ink and the version its title ink.
+            let title = out
+                .scene
+                .texts
+                .iter()
+                .find(|text| text.runs.iter().any(|run| run.text.contains("NO0B")))
+                .unwrap_or_else(|| panic!("{name}: the strip does not name the window"));
+            assert_eq!(title.runs[0].color, Some(skin.bright), "{name}: the name");
+            assert_eq!(title.runs[1].color, Some(skin.title), "{name}: the version");
+            // The window buttons come off the skin too: the quiet pair in the
+            // theme's dim ink, close in its title ink.
+            for (glyph, ink, what) in [
+                (crate::design::icons::MINIMIZE, skin.dim, "minimize"),
+                (crate::design::icons::MAXIMIZE, skin.dim, "maximize"),
+                (crate::design::icons::CLOSE, skin.title, "close"),
+            ] {
+                let button = out
+                    .scene
+                    .texts
+                    .iter()
+                    .flat_map(|text| text.runs.iter())
+                    .find(|run| run.icon && run.text.contains(glyph))
+                    .unwrap_or_else(|| panic!("{name}: no {what} button drawn"));
+                assert_eq!(button.color, Some(ink), "{name}: the {what} button's ink");
+            }
+        }
+    }
+
     /// Every dot of the orb in a scene.
     ///
     /// A rectangle a few pixels across inside the title strip is one. It used to
@@ -4491,9 +4551,35 @@ mod tests {
         monitor: &Monitor,
         drag: Option<Drag>,
     ) -> Rendered {
+        render_skinned(
+            state,
+            scrolls,
+            w,
+            h,
+            dock,
+            files,
+            monitor,
+            drag,
+            Skin::from(&Config::default()),
+        )
+    }
+
+    /// The same scene under a palette of the caller's choosing, for the tests
+    /// that render one of the other themes.
+    #[allow(clippy::too_many_arguments)]
+    fn render_skinned(
+        state: &State,
+        scrolls: &crate::scroll::Scrolls,
+        w: f32,
+        h: f32,
+        dock: &Dock,
+        files: &[&str],
+        monitor: &Monitor,
+        drag: Option<Drag>,
+        skin: Skin,
+    ) -> Rendered {
         let shape = shape(dock, files);
         let layout = Layout::compute(w, h, &shape);
-        let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state,
             scrolls,
