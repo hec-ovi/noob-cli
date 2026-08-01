@@ -68,5 +68,5 @@ install box (the validate check).
 Inline: the registry's shape, the completeness sweeps (settings keys, agent
 keys, themes, colour keys, sections, deeds, card buttons), parsing good, bad
 and unknown, snapshot naming, the validate rule, `/help` whole and single,
-and a theme and a transparency landing in a real file through the panel's
-own commit (9 tests).
+the usage notes, and a theme and a transparency landing in a real file
+through the panel's own commit (10 tests).
