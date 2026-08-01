@@ -189,6 +189,9 @@ pub use sections::sessions::{
 /// branches on it before any write.
 pub use sections::skills::SKILL_SOURCE;
 
+/// The MCP add card's two field keys, re-exported the same way.
+pub use sections::mcp::{SERVER_HOW, SERVER_NAME};
+
 /// What the panel's own heading calls a section.
 ///
 /// The rail's word for every section but [`SESSIONS`], whose rail word says the
@@ -995,11 +998,6 @@ pub const UNSET: &str = "not set";
 /// is there and nothing more.
 pub const SECRET: &str = "set, and not shown here";
 
-/// The add-a-server card's two fields, held on the panel the way the skill
-/// source is: keys of the model, never written into any file themselves.
-pub const SERVER_NAME: &str = "server name";
-pub const SERVER_HOW: &str = "server command";
-
 /// The key that picks a preset, named here because two places want it: the
 /// field is built out of [`LOOKS`] with the sizes and then stands at the top of
 /// the palette instead, since it is what writes every colour under it.
@@ -1400,9 +1398,9 @@ pub struct Settings {
     /// The skills section's own state: the install field, the validate
     /// verdict and the install cycle ([`sections::skills::SkillsSection`]).
     skills: sections::skills::SkillsSection,
-    /// The add-a-server card's two fields, until its button writes them.
-    server_name: String,
-    server_how: String,
+    /// The MCP section's own state: the add card's two fields
+    /// ([`sections::mcp::McpSection`]).
+    mcp: sections::mcp::McpSection,
 }
 
 impl Settings {
@@ -1424,8 +1422,7 @@ impl Settings {
             // The skills box decides its own opening state, the web-search
             // suggestion included.
             skills: sections::skills::SkillsSection::new(&agent.skills),
-            server_name: String::new(),
-            server_how: String::new(),
+            mcp: sections::mcp::McpSection::default(),
             agent,
         };
         panel.sections = panel.build(config);
@@ -1482,10 +1479,7 @@ impl Settings {
         let Some(typed) = self.editing.take() else {
             return false;
         };
-        match key == SERVER_NAME {
-            true => self.server_name = typed.trim().to_string(),
-            false => self.server_how = typed.trim().to_string(),
-        }
+        self.mcp.keep_edit(key, typed);
         self.sections = self.build(config);
         true
     }
@@ -1508,21 +1502,19 @@ impl Settings {
     /// first, so the deed carries what is on screen.
     pub fn add_server_deed(&mut self, config: &Config) -> Option<Deed> {
         self.keep_server_edit(config);
-        let (name, how) = (self.server_name.clone(), self.server_how.clone());
-        if name.is_empty() || how.is_empty() {
-            self.say_trouble(String::from(
-                "a server needs its name and its command or url",
-            ));
-            return None;
+        match self.mcp.add_deed() {
+            Ok(deed) => Some(deed),
+            Err(why) => {
+                self.say_trouble(why);
+                None
+            }
         }
-        Some(Deed::AddServer { name, how })
     }
 
     /// After the deed landed: the card goes back to empty, ready for the next
     /// one. On a refusal the fields keep what was typed.
     pub fn clear_server_fields(&mut self) {
-        self.server_name.clear();
-        self.server_how.clear();
+        self.mcp.clear();
     }
 
     /// Say that an install has started, so the section says so while it runs.
@@ -1682,7 +1674,7 @@ impl Settings {
                     AGENT => sections::agent::rows(&self.agent, &self.prompt),
                     SESSIONS => sections::sessions::rows(&self.agent),
                     SKILLS => self.skills.rows(&self.agent),
-                    MCP => self.mcp_rows(),
+                    MCP => self.mcp.rows(&self.agent),
                     APPEARANCE => self.appearance_rows(config),
                     // A name on the rail with no builder behind it opens on
                     // nothing, which `every_section_is_reachable` fails on. The
@@ -1694,74 +1686,6 @@ impl Settings {
                 Section::new(name, rows)
             })
             .collect()
-    }
-
-    /// The MCP servers, out of the two files the CLI merges.
-    ///
-    /// The same two columns the skills are: a row per server with what it is
-    /// underneath, and that server's entry out of its own file beside them.
-    fn mcp_rows(&self) -> Vec<Row> {
-        let mcp = &self.agent.mcp;
-        // The two files, as one card of two fields. They go side by side while
-        // the panel is wide enough for both to keep their columns and stack
-        // when it is not, which is the whole of what the panel does about a
-        // narrow window: cards are full width, their contents reflow.
-        //
-        // Said in full rather than shown as an empty list, which reads as a
-        // panel that failed to load one.
-        let hint = match (mcp.any_file, mcp.servers.is_empty() && mcp.trouble.is_empty()) {
-            (false, _) | (true, true) => "none configured yet: the next session loads what is added",
-            (true, false) => "a project .noob/mcp.json wins for a server named in both files",
-        };
-        // The configured list first, the add card under it: what is running
-        // is the section's subject, and adding one is the act at the bottom.
-        let mut rows = Vec::new();
-        for server in &mcp.servers {
-            rows.push(Row::Entry(Entry {
-                name: server.name.clone(),
-                about: server.how.clone(),
-                under: server_under(server, self.mcp_file(server.project)),
-                on: server.on,
-                what: Which::Server {
-                    project: server.project,
-                },
-                // A server is a few lines somebody wrote in a file, and taking
-                // those lines out is the one thing this list could not do. It
-                // is the same two-press uninstall a skill carries, and it goes
-                // through the same rename, so a press that fails leaves the
-                // file exactly as it was.
-                removable: true,
-                doc: server_doc(server),
-            }));
-        }
-        rows.push(Row::Card(Card {
-            does: Some(Doing::AddServer),
-            title: String::from("ADD A SERVER"),
-            fields: vec![
-                CardField::text("name", SERVER_NAME, self.server_name.clone())
-                    .saying("what the agent's tools call it"),
-                CardField::text("command or url", SERVER_HOW, self.server_how.clone())
-                    .saying("a command line to start it, or an http(s) address it already answers on"),
-            ],
-            hint: Some(format!(
-                "written into {}, which the agent reads in every project{}",
-                match &mcp.global {
-                    Some(path) => path.display().to_string(),
-                    None => String::from("nowhere: no config directory"),
-                },
-                match hint.is_empty() {
-                    true => String::new(),
-                    false => format!("; {hint}"),
-                }
-            )),
-        }));
-        for why in &mcp.trouble {
-            rows.push(Row::Note {
-                text: why.clone(),
-                bad: true,
-            });
-        }
-        rows
     }
 
     /// Everything about what the window looks like, as cards: how big the text
@@ -2535,10 +2459,7 @@ impl Settings {
     /// Which `mcp.json` a server belongs to, which is the only file a toggle on
     /// its row writes.
     pub fn mcp_file(&self, project: bool) -> Option<&Path> {
-        match project {
-            true => self.agent.mcp.project.as_deref(),
-            false => self.agent.mcp.global.as_deref(),
-        }
+        sections::mcp::file(&self.agent, project)
     }
 
     /// What turning the entry on one row on or off means on the disk, or
@@ -3166,33 +3087,6 @@ fn last_top(heights: &[usize], rows: usize) -> usize {
         }
     }
     0
-}
-
-/// The third line of a server's row: which of the two files its entry is in,
-/// and where that file is. The same place a skill's row says where it was found.
-fn server_under(server: &agent::Server, file: Option<&Path>) -> String {
-    let where_ = match server.project {
-        true => "project",
-        false => "global",
-    };
-    match file {
-        Some(path) => format!("{where_}: {}", path.display()),
-        None => format!("{where_} file"),
-    }
-}
-
-/// What the column beside the list shows for a server: its entry out of the
-/// file, exactly as the file carries it.
-///
-/// Fenced as JSON so the highlighter reads it the way it reads any other code
-/// block: the whole column is Markdown, and a skill's own document is the thing
-/// it was built for. No heading of its own: the column is titled with the name
-/// now, and a document that opened with the same name said it twice.
-fn server_doc(server: &agent::Server) -> Vec<String> {
-    let mut out = vec![String::from("```json")];
-    out.extend(server.entry.lines().map(str::to_string));
-    out.push(String::from("```"));
-    out
 }
 
 /// Whether the cursor stops on a row. A cursor that lands where nothing can
@@ -5415,45 +5309,6 @@ something_else = keep me
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A malformed mcp.json is a line on the panel, not a panel that will not
-    /// open. The servers from the file that did parse are still listed.
-    #[test]
-    fn a_broken_mcp_file_is_a_line_on_the_panel() {
-        let dir = scratch_dir("broken");
-        std::fs::create_dir_all(dir.join("work/.noob")).expect("a scratch directory");
-        std::fs::write(dir.join("mcp.json"), "{\"servers\": {").expect("a file");
-        std::fs::write(
-            dir.join("work/.noob/mcp.json"),
-            r#"{"servers": {"docs": {"url": "http://localhost:9000/mcp"}}}"#,
-        )
-        .expect("a file");
-        let agent = Agent::read(
-            Some(&dir),
-            Some(&dir.join("work")),
-            crate::sessions::Listing::default(),
-        );
-        let mut panel = Settings::open(&Config::default(), None, agent);
-        go_to(&mut panel, MCP);
-        let rows = panel.rows();
-        assert!(
-            rows.iter().any(|row| matches!(row, Row::Entry(entry)
-                if entry.name == "docs"
-                    // The name, what it is and where it came from, each on a
-                    // line of its own rather than one run of text.
-                    && entry.about == "http://localhost:9000/mcp"
-                    && entry.under.contains("project")
-                    && entry.under.contains("mcp.json")
-                    && entry.on)),
-            "{rows:?}"
-        );
-        assert!(
-            rows.iter().any(|row| matches!(row, Row::Note { text, bad }
-                if *bad && text.contains("not valid JSON"))),
-            "the broken file is not reported: {rows:?}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// The column beside the list is counted in the rows it is drawn as, not in
     /// the lines the file has: one long paragraph is many rows in a narrow
     /// column, and it used to be one line that was cut off at the edge.
@@ -5591,212 +5446,4 @@ something_else = keep me
         assert_eq!(panel.doc_first(30, 8), 0);
     }
 
-    /// A server's row toggles the same way, in its own file, and a server that
-    /// is off is still a row rather than a server that disappeared.
-    #[test]
-    fn turning_a_server_off_moves_its_entry_in_its_own_file() {
-        let dir = scratch_dir("server-toggle");
-        std::fs::write(
-            dir.join("mcp.json"),
-            r#"{"servers": {"docs": {"url": "http://localhost:9000/mcp"}}}"#,
-        )
-        .expect("a file");
-        let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
-        let mut panel = Settings::open(&Config::default(), None, read());
-        go_to(&mut panel, MCP);
-        let at = panel.cursor();
-        assert!(
-            matches!(panel.row(at), Some(Row::Entry(entry)) if entry.on && entry.removable),
-            "{:?}",
-            panel.row(at)
-        );
-        // The entry itself is what the column beside the list shows.
-        let showing = panel.showing().expect("something to show");
-        assert!(showing.doc.iter().any(|line| line.contains("localhost:9000")), "{:?}", showing.doc);
-
-        let deed = panel.toggle(at).expect("an entry toggles");
-        assert_eq!(
-            deed,
-            Deed::TurnServer {
-                name: String::from("docs"),
-                project: false,
-                on: false,
-            }
-        );
-        let file = panel.mcp_file(false).expect("a global file").to_path_buf();
-        assert_eq!(file, dir.join("mcp.json"));
-        agent::set_server(&file, "docs", false).expect("it moves");
-        panel.adopt_agent(read(), &Config::default());
-        go_to(&mut panel, MCP);
-        assert!(
-            matches!(panel.row(panel.cursor()), Some(Row::Entry(entry)) if !entry.on),
-            "{:?}",
-            panel.row(panel.cursor())
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The uninstall a skill has is on a server's row too, takes two presses,
-    /// names the file rather than a directory, and the row is gone once the deed
-    /// has been done.
-    ///
-    /// This used to assert the opposite: that a server had no uninstall and
-    /// `uninstall` answered nothing on its row. It is written the other way
-    /// round now because the button is there, which is the whole of this change.
-    #[test]
-    fn a_server_is_uninstalled_out_of_its_file_and_leaves_the_list() {
-        let dir = scratch_dir("server-remove");
-        std::fs::write(
-            dir.join("mcp.json"),
-            r#"{"servers": {"docs": {"url": "http://localhost:9000/mcp"}, "shell": {"command": "mcp-shell"}}, "timeout_s": 30}"#,
-        )
-        .expect("a file");
-        let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
-        let mut panel = Settings::open(&Config::default(), None, read());
-        go_to(&mut panel, MCP);
-        // The rows are sorted by name, so the first entry is "docs".
-        let at = panel.cursor();
-        assert!(
-            matches!(panel.row(at), Some(Row::Entry(entry)) if entry.name == "docs" && entry.removable),
-            "{:?}",
-            panel.row(at)
-        );
-
-        // One press arms it and says what would go, in the words of what would
-        // actually happen: nothing about a directory.
-        assert_eq!(panel.uninstall(at), None, "one press removed a server");
-        assert_eq!(panel.arming(), Some(at));
-        let said = panel.says();
-        assert!(said.contains("press uninstall again"), "{said}");
-        assert!(said.contains("docs") && said.contains("mcp.json"), "{said}");
-        assert!(!said.contains("directory"), "a server has no directory: {said}");
-
-        let deed = panel.uninstall(at).expect("the second press is the deed");
-        assert_eq!(
-            deed,
-            Deed::RemoveServer {
-                name: String::from("docs"),
-                project: false,
-            }
-        );
-        assert_eq!(panel.arming(), None, "it stayed armed after it fired");
-
-        // What `main` does with it, and then what the panel does with the disk.
-        let file = panel.mcp_file(false).expect("a global file").to_path_buf();
-        agent::remove_server(&file, "docs").expect("it goes");
-        panel.adopt_agent(read(), &Config::default());
-        go_to(&mut panel, MCP);
-        let names: Vec<String> = panel
-            .here()
-            .rows
-            .iter()
-            .filter_map(|row| match row {
-                Row::Entry(entry) => Some(entry.name.clone()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(names, vec![String::from("shell")], "the row is still listed");
-        // And nothing else in the file went with it.
-        let text = std::fs::read_to_string(&file).expect("the file");
-        let root: serde_json::Value = serde_json::from_str(&text).expect("still JSON");
-        assert_eq!(root["timeout_s"], 30, "{text}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A server that was turned off first still uninstalls, out of the key it
-    /// was moved to, and the file it was in keeps everything else.
-    #[test]
-    fn a_server_that_is_off_uninstalls_too() {
-        let dir = scratch_dir("server-remove-off");
-        std::fs::write(
-            dir.join("mcp.json"),
-            r#"{"servers": {"docs": {"url": "http://localhost:9000/mcp"}, "shell": {"command": "mcp-shell"}}}"#,
-        )
-        .expect("a file");
-        let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
-        let mut panel = Settings::open(&Config::default(), None, read());
-        let file = panel.mcp_file(false).expect("a global file").to_path_buf();
-        agent::set_server(&file, "docs", false).expect("it moves out of the way");
-        panel.adopt_agent(read(), &Config::default());
-        go_to(&mut panel, MCP);
-        let at = panel.cursor();
-        assert!(
-            matches!(panel.row(at), Some(Row::Entry(entry)) if entry.name == "docs" && !entry.on && entry.removable),
-            "{:?}",
-            panel.row(at)
-        );
-
-        assert_eq!(panel.uninstall(at), None);
-        assert_eq!(
-            panel.uninstall(at),
-            Some(Deed::RemoveServer {
-                name: String::from("docs"),
-                project: false,
-            }),
-            "a server that is off asks for a different deed"
-        );
-        agent::remove_server(&file, "docs").expect("an off server goes too");
-        panel.adopt_agent(read(), &Config::default());
-        go_to(&mut panel, MCP);
-        assert!(
-            !panel
-                .here()
-                .rows
-                .iter()
-                .any(|row| matches!(row, Row::Entry(entry) if entry.name == "docs")),
-            "the row came back"
-        );
-        let root: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&file).expect("the file"))
-                .expect("still JSON");
-        assert!(root["servers"]["shell"]["command"].is_string());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A removal that fails leaves the file and the row exactly as they were,
-    /// and says why on the footer.
-    #[test]
-    fn a_failed_removal_leaves_the_file_and_the_row_where_they_were() {
-        let dir = scratch_dir("server-remove-fails");
-        let path = dir.join("mcp.json");
-        let whole = "{\"servers\": {\"docs\": {\"url\": \"http://localhost:9000/mcp\"}}}";
-        std::fs::write(&path, whole).expect("a file");
-        let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
-        let mut panel = Settings::open(&Config::default(), None, read());
-        go_to(&mut panel, MCP);
-        let at = panel.cursor();
-        assert_eq!(panel.uninstall(at), None);
-        let deed = panel.uninstall(at).expect("the deed");
-
-        // Somebody edited the file to something that will not parse in between
-        // the press and the write, which is the shape every failure here has:
-        // the removal refuses and the file it refused on is untouched.
-        std::fs::write(&path, "{\"servers\": {\"docs\":").expect("a file");
-        let Deed::RemoveServer { name, project } = &deed else {
-            panic!("{deed:?}");
-        };
-        let file = panel.mcp_file(*project).expect("a global file").to_path_buf();
-        let why = agent::remove_server(&file, name).expect_err("it cannot be done");
-        assert!(why.contains("not valid JSON"), "{why}");
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("the file"),
-            "{\"servers\": {\"docs\":",
-            "the refusal rewrote the file"
-        );
-
-        // The panel says why and the row it was on is still the row it was on.
-        panel.say_trouble(why);
-        assert!(
-            panel.trouble().is_some_and(|why| why.contains("not valid JSON")),
-            "{:?}",
-            panel.trouble()
-        );
-        assert!(
-            matches!(panel.row(at), Some(Row::Entry(entry)) if entry.name == "docs"),
-            "{:?}",
-            panel.row(at)
-        );
-        assert_eq!(panel.arming(), None, "it stayed armed after it fired");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }
