@@ -154,10 +154,9 @@ pub struct Skin {
     ///
     /// It was a hue each, nine of them, and nine hues on nine tabs is a
     /// harlequin strip: what a tab says is its label, and the accent's one job
-    /// is saying which of them you are looking at. Green, and the good colour
-    /// rather than the theme's accent, for the reason the drop target and the
-    /// picked row are green: the accent is whatever the theme is, and a showing
-    /// tab in the noob-red theme's accent would read as a warning.
+    /// is saying which of them you are looking at. The theme's accent, solid:
+    /// the mark that says which tab is showing wears the window's own hue, the
+    /// same hue the focus edge and the caret carry, in every theme.
     pub tab_accent: [f32; 4],
 
     /// The gauge palette. A monitor reading names the slot it wants, so a block
@@ -256,7 +255,7 @@ impl Skin {
             // in, so the two cannot drift.
             tools: config.tools.map(text),
 
-            tab_accent: rgba(config.good, 1.0),
+            tab_accent: rgba(config.accent, 1.0),
 
             gauges: config.gauges.map(|color| rgba(color, 1.0)),
             // Faint enough to sit behind the lit dots without reading as one of
@@ -717,13 +716,17 @@ mod tests {
         let noob = Skin::default();
         for (name, heavy) in [("noob-matrix", 1), ("noob-cool", 2), ("noob-red", 0)] {
             let skin = Skin::from(&crate::config::theme(name).expect(name));
-            let family: [(&str, [f32; 3]); 6] = [
+            let family: Vec<(&str, [f32; 3])> = vec![
                 ("the caret", [skin.caret[0], skin.caret[1], skin.caret[2]]),
                 ("the focus edge", [skin.edge_focus[0], skin.edge_focus[1], skin.edge_focus[2]]),
                 ("ordinary text", of(skin.body)),
                 ("quiet text", of(skin.dim)),
                 ("loud text", of(skin.bright)),
                 ("the bar", [skin.bar[0], skin.bar[1], skin.bar[2]]),
+                (
+                    "the showing tab's border",
+                    [skin.tab_accent[0], skin.tab_accent[1], skin.tab_accent[2]],
+                ),
             ];
             for (what, rgb) in family {
                 for other in (0..3).filter(|other| *other != heavy) {
@@ -755,6 +758,7 @@ mod tests {
                 ("the caret", skin.caret, noob.caret),
                 ("the bar", skin.bar, noob.bar),
                 ("the pane", skin.panel, noob.panel),
+                ("the showing tab's border", skin.tab_accent, noob.tab_accent),
             ] {
                 assert_ne!(mine, matrix, "{name}: {what} is still the matrix fill");
             }
@@ -772,30 +776,28 @@ mod tests {
         }
     }
 
-    /// The accent is the good colour, solid, and it is the same colour whatever
-    /// a theme does to the rest of the window.
+    /// The showing tab's border is the theme's accent, solid, in every theme:
+    /// the same hue the focus edge carries, so the mark that says "this one"
+    /// speaks in the window's own colour under noob-cool and noob-red too.
     ///
-    /// Solid because a two pixel line at half weight is a line nobody sees, and
-    /// the good colour because that is the window's yes: the same green the drop
-    /// target and the picked row are, so the three marks that mean "this one"
-    /// are one colour between them.
+    /// Solid because a two pixel line at half weight is a line nobody sees.
     #[test]
-    fn the_tab_accent_is_the_good_colour_and_every_theme_has_one() {
+    fn the_tab_accent_is_the_theme_s_accent_and_every_theme_has_one() {
         for name in crate::config::THEMES {
             let config = crate::config::theme(name).expect(name);
             let skin = Skin::from(&config);
             assert_eq!(skin.tab_accent[3], 1.0, "{name}");
-            assert_eq!(skin.tab_accent, skin.drop_mark, "{name}");
             assert_eq!(
                 skin.tab_accent,
                 [
-                    config.good[0] as f32 / 255.0,
-                    config.good[1] as f32 / 255.0,
-                    config.good[2] as f32 / 255.0,
+                    config.accent[0] as f32 / 255.0,
+                    config.accent[1] as f32 / 255.0,
+                    config.accent[2] as f32 / 255.0,
                     1.0
                 ],
                 "{name}"
             );
+            assert_eq!(skin.tab_accent[..3], skin.edge_focus[..3], "{name}: two accents");
             // Bright enough to see against the surface it is drawn on, which is
             // the pane's own fill.
             assert!(

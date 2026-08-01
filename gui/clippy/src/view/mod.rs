@@ -4717,9 +4717,9 @@ mod tests {
                 tab.w,
                 cut_of(*tab)
             );
-            // And it is not the focus edge, which is the other coloured line a
-            // pane can carry and is the theme's accent rather than the green.
-            assert_ne!(out.skin.tab_accent, out.skin.edge_focus);
+            // The same accent the focus edge carries: one hue for every mark
+            // that says "this one", so the border follows the theme.
+            assert_eq!(out.skin.tab_accent[..3], out.skin.edge_focus[..3]);
         }
     }
 
@@ -15754,18 +15754,9 @@ mod tests {
             found += 1;
         }
         assert_eq!(found, 5);
-        // The same green the tab wears, and not the tint a field's value is
-        // written in, or a title is another line of the card.
+        // Not the tint a field's value is written in, or a title is another
+        // line of the card.
         let skin = shape.skin;
-        assert_eq!(
-            [
-                skin.good[0] as f32 / 255.0,
-                skin.good[1] as f32 / 255.0,
-                skin.good[2] as f32 / 255.0,
-                1.0
-            ],
-            skin.tab_accent
-        );
         assert_ne!(skin.good, skin.body);
         assert_ne!(skin.good, skin.title);
     }
