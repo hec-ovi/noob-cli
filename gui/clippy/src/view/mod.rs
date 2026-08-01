@@ -1905,7 +1905,10 @@ impl Layout {
     pub fn settings_rail_ratio_at(&self, x: f32) -> f32 {
         let divider = self.settings_rail_divider;
         let track = divider.track;
-        let room = (track.w - GAP).max(1.0);
+        // The list stands PAD in from the line, so the room the two sides
+        // share is a padding smaller than the track; the same subtraction the
+        // placement makes, or the line stops landing under the pointer.
+        let room = (track.w - GAP - PAD).max(1.0);
         held((x - track.x - GAP * 0.5) / room, room, divider.floor)
     }
 
@@ -13069,19 +13072,30 @@ mod tests {
             "the card's title is not drawn in the card title role"
         );
 
-        // The heading at the top of the panel names what this section lists. It
-        // said SETTINGS SESSIONS: the rail's own word, over a rail already
-        // marked with it, saying nothing about what was underneath.
+        // Two heads over two columns: the gear and SETTINGS over the rail, and
+        // the section's own title inside the body it titles, on the same top
+        // line, starting where the list starts.
         let heading = out
             .scene
             .texts
             .iter()
-            .find(|text| text.runs.iter().any(|run| run.text == " SETTINGS "))
-            .expect("the panel says what it is");
-        let words: String = heading.runs.iter().map(|run| run.text.as_str()).collect();
+            .find(|text| text.runs.iter().any(|run| run.text == " SETTINGS"))
+            .expect("the rail says what the panel is");
+        let title = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| {
+                text.runs
+                    .iter()
+                    .any(|run| run.text.contains(crate::settings::SESSION_TITLE))
+                    && (text.at.y - heading.at.y).abs() < 0.01
+            })
+            .expect("the body is titled with what this section lists");
         assert!(
-            words.ends_with(crate::settings::SESSION_TITLE),
-            "the heading is {words:?}"
+            title.at.x >= out.layout.settings_list.x - 0.01,
+            "the section title is not inside the body: {:?}",
+            title.at
         );
 
         // The three buttons stand in the card's footer, centred as one group,
@@ -14894,8 +14908,8 @@ mod tests {
 
         let y = layout.settings_list.y + 30.0;
         // The hairline the eye reads as the line, and both ends of the band
-        // around it.
-        let drawn = layout.settings_list.x - (GAP * 0.5).floor();
+        // around it. The list stands its own padding in from the line.
+        let drawn = layout.settings_list.x - PAD - (GAP * 0.5).floor();
         for x in [
             drawn,
             divider.band.x + 0.5,
@@ -14940,14 +14954,14 @@ mod tests {
             seen.push(list.x);
             // Under the pointer rather than near it, to the pixel the width was
             // floored to.
-            let drawn = list.x - GAP * 0.5;
+            let drawn = list.x - PAD - GAP * 0.5;
             assert!((drawn - x).abs() <= 1.5, "{x}: the line landed at {drawn}");
 
-            // Every name ends where the gap begins, and every row starts on the
-            // far side of it.
+            // Every name ends where the gap begins, and every row starts a
+            // padding past the far side of it.
             for (index, at) in &layout.settings_rail {
                 assert!(
-                    (at.x + at.w + GAP - list.x).abs() <= 0.01,
+                    (at.x + at.w + GAP + PAD - list.x).abs() <= 0.01,
                     "name {index} at {at:?} against a list at {}",
                     list.x
                 );

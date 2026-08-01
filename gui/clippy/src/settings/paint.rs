@@ -43,33 +43,40 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
         scene.text(Text::rich(runs, at, size, tint));
     };
 
-    // The heading, and which section it is showing. The rail says that as well,
-    // in the column below; this is the one line at the top that reads as a
-    // sentence, so a window photographed mid-thought says where it was.
+    // Two heads over two columns. The rail is headed by the panel's own name,
+    // the gear and SETTINGS, aligned with the section names under it; the
+    // section's title is written inside the body it titles, over the cards,
+    // so MCP names the list beside the rail rather than riding the panel.
     //
     // The section's title rather than the rail's word for it, because on
-    // SESSIONS the two are not the same thing: SETTINGS SESSIONS over a rail
-    // already marked SESSIONS said the panel twice and the list under it not at
-    // all. `Settings::title` is where that mapping lives.
+    // SESSIONS the two are not always the same thing; `Settings::title` is
+    // where that mapping lives.
     //
-    // In the panel title role, which is the largest text in the window: a
-    // heading the same size as the settings under it is not a heading, and
-    // "which panel am I on" was the first thing that could not be answered at a
-    // glance.
+    // Both in the panel title role, which is the largest text in the window: a
+    // heading the same size as the settings under it is not a heading.
+    let list = layout.settings_list;
     let here = panel.title();
     let title_size = design::panel_title_size(size);
     let title_line = Text::line_for(title_size);
-    let title_cols = columns_in(content.w, design::column_for(column, size, design::PANEL_TITLE));
+    let rail_head_w = (list.x - PAD - content.x).max(1.0);
     scene.text(Text::rich(
         vec![
             Run::icon(icons::SETTINGS.to_string(), skin.bright),
-            Run::tinted(" SETTINGS ", skin.bright),
-            Run::tinted(clip(here, title_cols.saturating_sub(11)), skin.good),
+            Run::tinted(" SETTINGS", skin.bright),
         ],
-        Panel::new(content.x, content.y, content.w, title_line),
+        Panel::new(content.x + MARK_W + 3.0, content.y, rail_head_w, title_line),
         title_size,
         skin.bright,
     ));
+    if list.w >= 1.0 {
+        let title_cols = columns_in(list.w, design::column_for(column, size, design::PANEL_TITLE));
+        scene.text(Text::rich(
+            vec![Run::tinted(clip(here, title_cols), skin.good)],
+            Panel::new(list.x, content.y, list.w, title_line),
+            title_size,
+            skin.good,
+        ));
+    }
 
     // The mark and nothing under it. It stood on a filled block while the
     // pointer was on it, which is a button, and the panel is a takeover with no
@@ -97,7 +104,6 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
     // state for it to be in. Each name is drawn in its own box, which is where
     // the wrap put it: one column when they all fit down the rail, more columns
     // beside it when they do not (see [`settings_rail_cells`]).
-    let list = layout.settings_list;
     let names = panel.section_names();
     for (index, at) in &layout.settings_rail {
         let Some(name) = names.get(*index) else {
@@ -130,9 +136,13 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
         );
     }
     // The hairline between the rail and what it chose, so the two columns read
-    // as two columns rather than as a list with a gap in it.
+    // as two columns rather than as a list with a gap in it. Anchored off the
+    // rail's edge, not the list's: the list stands its own padding in from
+    // this line.
     if list.w >= 1.0 && list.h >= 1.0 {
-        scene.rect(Panel::new(list.x - (GAP * 0.5).floor(), list.y, 1.0, list.h).fill(skin.edge));
+        scene.rect(
+            Panel::new(list.x - PAD - (GAP * 0.5).floor(), list.y, 1.0, list.h).fill(skin.edge),
+        );
     }
 
     // The width a card's body has, in columns, which is what the model counted
@@ -504,9 +514,10 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     // number it is at beside it. Nineteen presses of an arrow
                     // key from one end of opacity to the other is not a control.
                     Some(track) if track.w >= 1.0 => {
-                        if frame.hot == Some(Hit::SettingsSlider(*index, *side)) {
-                            scene.rect(track.fill(skin.hot));
-                        }
+                        // No band behind a pointed-at slider: a track-sized
+                        // background read as a selection effect nobody asked
+                        // for. The grip says where the pointer's attention is.
+                        let hot = frame.hot == Some(Hit::SettingsSlider(*index, *side));
                         let thick = (line * 0.3).floor().max(2.0);
                         let up = ((line - thick) * 0.5).floor();
                         let at = panel.fraction(*index, *side).unwrap_or(0.0);
@@ -518,7 +529,8 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                             Panel::new(track.x, track.y + up, (track.w * at).floor(), thick)
                                 .fill(skin.gauge),
                         );
-                        // The grip: a bar at the position, tall enough to press.
+                        // The grip: a bar at the position, tall enough to
+                        // press, brighter while the pointer is on the track.
                         let grip = CARET_W;
                         scene.rect(
                             Panel::new(
@@ -527,7 +539,10 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                                 grip,
                                 (line - 2.0).max(1.0),
                             )
-                            .fill(skin.edge_focus),
+                            .fill(match hot {
+                                true => skin.gauge,
+                                false => skin.edge_focus,
+                            }),
                         );
                         let number = Panel::new(
                             track.x + track.w + column,

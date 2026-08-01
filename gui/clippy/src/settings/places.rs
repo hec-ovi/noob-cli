@@ -821,8 +821,18 @@ pub(crate) fn settings_rail_cells(body: Panel, rail_w: f32, line: f32, names: us
     let names = names.max(1);
     // A body shorter than a line still gets one row of names rather than none,
     // cut to the room there is: a rail drawn over the footer is worse than a
-    // short one, and a rail with nothing on it is the bug itself.
-    let tall = line.min(body.h).max(1.0);
+    // short one, and a rail with nothing on it is the bug itself. Half a line
+    // of air per row when the column has room for it: the rail is a resting
+    // column of five names, not a packed list. When it does not (a huge font
+    // in a small window), the rows pack back to a line each so the names keep
+    // their width instead of wrapping into slivers.
+    let roomy = line * 1.5;
+    let tall = match body.h >= names as f32 * roomy {
+        true => roomy,
+        false => line,
+    }
+    .min(body.h)
+    .max(1.0);
     let down = ((body.h / tall).floor() as usize).max(1);
     let across = names.div_ceil(down);
     let wide = (rail_w / across as f32).floor().max(1.0);
@@ -995,22 +1005,29 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
     // share of the grid: a fraction off the settings file, held so neither the
     // names nor the settings beside them are squeezed below the room the names
     // need. Floored to a whole pixel so the line does not sit on a half one.
-    let room = (body.w - GAP).max(1.0);
+    let room = (body.w - GAP - PAD).max(1.0);
     let rail_floor = settings_rail_floor(column);
-    let rail_w = (room * held(shape.settings_rail, room, rail_floor)).floor();
+    // Floored to a whole pixel, then held to the floor again: the flooring
+    // can shave the clamped width under it by a fraction that reads as a
+    // whole column lost.
+    let rail_w = (room * held(shape.settings_rail, room, rail_floor))
+        .floor()
+        .max(rail_floor.ceil().min(room));
     let rail = settings_rail_cells(body, rail_w, line, panel.section_names().len());
+    // The list stands its own padding in from the divider, the same margin it
+    // keeps on its right, so the cards are not glued to the draggable line.
     let list = Panel::new(
-        body.x + rail_w + GAP,
+        body.x + rail_w + GAP + PAD,
         body.y,
-        (body.w - rail_w - GAP).max(0.0),
+        (body.w - rail_w - GAP - PAD).max(0.0),
         body.h,
     );
     // What the rail is dragged by. The gap between the two, plus [`GRAB`] on the
-    // rail's side of it and a single pixel on the list's: the list's rows start
-    // at its own left edge, and a band that reached into them would take the
-    // press that puts the cursor on a row.
+    // rail's side of it and a single pixel past the hairline: the list's rows
+    // stand a padding further right, and a band that reached into them would
+    // take the press that puts the cursor on a row.
     let divider = Divider {
-        band: Panel::new(list.x - GAP - GRAB, body.y, GAP + GRAB + 1.0, body.h),
+        band: Panel::new(body.x + rail_w - GRAB, body.y, GAP + GRAB + 1.0, body.h),
         track: body,
         floor: rail_floor,
     };

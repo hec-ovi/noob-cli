@@ -2793,6 +2793,10 @@ impl Settings {
         self.dragging = None;
         self.picked = None;
         self.arming = None;
+        // A refusal belongs to the section it was said on. Left standing, it
+        // burns at the foot of every other section as a warning about nothing
+        // on screen.
+        self.trouble = None;
         self.rewind_doc();
         moved
     }
