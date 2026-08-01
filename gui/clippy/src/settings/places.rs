@@ -447,11 +447,19 @@ pub(crate) fn settings_card_field(
     ));
     let hot_value = frame.hot == Some(Hit::SettingsValue(index, side));
     let typing = here.then(|| panel.editing()).flatten();
-    // The border is the whole of what says a value can be changed. A reading is
-    // the same shape without one, so the two are told apart without pressing
-    // either. A choice draws its options instead of a box, so it gets neither.
     let options = settings_choices_of(field.holds.as_ref());
-    let boxed = field.editable() && options.is_none();
+    let track = frame
+        .layout
+        .settings_tracks
+        .iter()
+        .find(|(row, half, _)| *row == index && *half == side)
+        .map(|(_, _, track)| *track);
+    // The border is the whole of what says a value is typed or nudged in
+    // place. A reading is the same shape without one, so the two are told
+    // apart without pressing either. A choice draws its options instead of a
+    // box, and a slider is its own control: the bare track is its resting
+    // look, and boxing it made it read as an input.
+    let boxed = field.editable() && options.is_none() && track.is_none();
     if boxed {
         scene.rect(panel_fill(input_at, skin.input));
         if hot_value {
@@ -474,12 +482,6 @@ pub(crate) fn settings_card_field(
         ),
         false => input_at,
     };
-    let track = frame
-        .layout
-        .settings_tracks
-        .iter()
-        .find(|(row, half, _)| *row == index && *half == side)
-        .map(|(_, _, track)| *track);
     let value = panel.preview(index, side).unwrap_or_else(|| field.value());
     // A choice, drawn as all of its options with the one that is set filled in:
     // a choice the user cannot see the options of is a choice they will not
@@ -529,11 +531,10 @@ pub(crate) fn settings_card_field(
     }
     match (field.holds.as_ref(), track) {
         // A number with a range is a position on a track, with the number it is
-        // at against the right edge of the same box.
+        // at against the right edge of the same room. Nothing changes on
+        // rollover: a slider that lights up under a passing pointer read as a
+        // selection effect nobody asked for, the same rule the flat rows keep.
         (SettingRow::Setting { .. }, Some(track)) if track.w >= 1.0 => {
-            if frame.hot == Some(Hit::SettingsSlider(index, side)) {
-                scene.rect(track.fill(skin.hot));
-            }
             let thick = (line * 0.3).floor().max(2.0);
             let up = ((line - thick) * 0.5).floor();
             let along = panel.fraction(index, side).unwrap_or(0.0);

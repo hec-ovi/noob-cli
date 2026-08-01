@@ -12687,6 +12687,60 @@ mod tests {
         }
     }
 
+    /// A slider is a bare track: no input box behind it at rest, and neither
+    /// rollover nor the cursor adds one rectangle to it.
+    ///
+    /// The flat rows kept this rule already; the card fields did not. A card
+    /// slider stood in the filled, edged, cut-cornered box a typed value
+    /// wears, and the track lit under the pointer: an input's costume on a
+    /// control that is dragged, and a rollover effect nobody asked for.
+    #[test]
+    fn a_card_slider_is_a_bare_track_that_rollover_does_not_change() {
+        let panel = a_panel_on(&Config::default(), crate::settings::APPEARANCE);
+        let out = render_settings(&panel, 1400.0, 1000.0, None);
+        assert!(!out.layout.settings_tracks.is_empty(), "no slider to look at");
+        let holds = |out: &Rendered, track: Panel, rgba: [f32; 4]| {
+            let (cx, cy) = middle(track);
+            out.scene.rects.iter().any(|rect| {
+                let [x, y, w, h] = rect.xywh();
+                rect.rgba() == rgba && cx >= x && cx <= x + w && cy >= y && cy <= y + h
+            })
+        };
+        for (_, _, track) in &out.layout.settings_tracks {
+            // The track is drawn, and nothing boxes it: not the input's fill,
+            // not a hover band.
+            assert!(holds(&out, *track, out.skin.gauge_track), "no track at {track:?}");
+            for rgba in [out.skin.input, out.skin.hot] {
+                assert!(
+                    !holds(&out, *track, rgba),
+                    "a slider stands in a box: {rgba:?} behind {track:?}"
+                );
+            }
+        }
+        // Pointing at the track, or at the value beside it, changes not one
+        // rectangle of the scene.
+        let (index, side, _) = out.layout.settings_tracks[0];
+        let resting: Vec<([f32; 4], [f32; 4])> = out
+            .scene
+            .rects
+            .iter()
+            .map(|rect| (rect.xywh(), rect.rgba()))
+            .collect();
+        for hot in [
+            Hit::SettingsSlider(index, side),
+            Hit::SettingsValue(index, side),
+        ] {
+            let lit = render_settings(&panel, 1400.0, 1000.0, Some(hot));
+            let now: Vec<([f32; 4], [f32; 4])> = lit
+                .scene
+                .rects
+                .iter()
+                .map(|rect| (rect.xywh(), rect.rgba()))
+                .collect();
+            assert_eq!(now, resting, "{hot:?} changed the slider's look");
+        }
+    }
+
     /// The two documents draw where they live: the global AGENTS.md on the
     /// SYSTEM PROMPT section, the whole prompt under the AGENT cards. Both
     /// draw their title and their text.
