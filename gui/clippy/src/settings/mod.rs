@@ -243,9 +243,9 @@ pub enum Kind {
 }
 
 /// How close a drag has to pass a detent to snap to it, as a fraction of the
-/// whole track. Wide enough to feel magnetic, narrow enough that two detents
-/// a tenth of the track apart keep the room between them.
-const SNAP: f32 = 0.05;
+/// whole track. Narrow on purpose: at a twentieth of the track the magnet
+/// grabbed values a whole region away and dragging near a stop felt fought.
+const SNAP: f32 = 0.025;
 
 impl Kind {
     /// Where along a track a value sits, 0 at the low end and 1 at the high.
