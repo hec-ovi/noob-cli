@@ -3,7 +3,7 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
-## Unreleased
+## 0.11.1 - 2026-08-01
 
 - Round budgets are unbounded by default: an instruction runs until it
   finishes or is cancelled (`NOOB_MAX_ROUNDS`, 0 = no limit), and so does
