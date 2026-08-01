@@ -1,6 +1,6 @@
 # agent-files
 
-contractVersion: 1.0.0
+contractVersion: 1.1.0
 
 ## Purpose
 
@@ -18,6 +18,10 @@ pub const OWNED: [&str; 2];               // the keys the window edits freely
 pub const AGENTS_MD: &str;  pub const AGENTS_CAP: u64;   // 16 KiB read cap
 pub const OFF: &str;  pub const DISABLED: &str;          // on-disk toggles
 pub fn is_secret(key: &str) -> bool;      // by name, wrong in the safe way
+pub fn write_instructions(path: &Path, text: &str) -> Result<(), String>;
+                                          // the whole AGENTS.md at once, by
+                                          // the same atomic rename as every
+                                          // write here
 // plus the read/toggle/remove operations the settings panel calls
 ```
 
@@ -39,5 +43,5 @@ and [`crates/noob/src/skills/CONTRACT.md`](../../../../crates/noob/src/skills/CO
 
 ## Tests
 
-Inline: config-dir rule, secret naming, frontmatter reads, toggles (16
-tests).
+Inline: config-dir rule, secret naming, frontmatter reads, toggles, the
+whole-file instructions write (17 tests).

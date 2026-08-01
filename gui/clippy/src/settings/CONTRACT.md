@@ -18,7 +18,7 @@ its folder alone:
 - [`sections/agent`](sections/agent/CONTRACT.md) - the CLI's file as cards,
   the assembled-prompt block.
 - [`sections/prompt`](sections/prompt/CONTRACT.md) - the global AGENTS.md
-  as one document, with the starter offer.
+  as one document, edited in place, with the starter offer.
 - [`sections/sessions`](sections/sessions/CONTRACT.md) - the saved
   conversations table, its columns and cells.
 - [`sections/skills`](sections/skills/CONTRACT.md) - the installed list and
@@ -64,7 +64,9 @@ by re-export: `SESSION_COLUMNS` and the table constants, `SKILL_SOURCE`,
    selecting text in it follows the select box's rules.
 5. A section box produces `Vec<Row>` from the frame's shared vocabulary and
    holds only its own state; the cursor, the scroll, the editing buffer and
-   every write stay in the frame.
+   every write stay in the frame. The one multiline buffer, the system
+   prompt's document editor, is that section's own state: the frame routes
+   keys to it and its save is still a Deed done in `main`.
 6. The list scrolls by rows of text, not by rows of the list: a wheel notch
    slides a few of them, a card can stand partly past either edge and is
    drawn cut, and a control is drawn and pressable only while it is wholly
@@ -75,6 +77,11 @@ by re-export: `SESSION_COLUMNS` and the table constants, `SKILL_SOURCE`,
    config parser and commits the value under the swatch's key into the
    window file, and a value the parser refuses is said on the footer with
    nothing written. Escape or any cursor movement lets the press go.
+8. The system prompt's document is edited in place: Enter on the block opens
+   the editor, the block shows the buffer with a caret while it is open,
+   nothing lands until Ctrl-S writes the whole file through the agent-files
+   box, and Escape leaves the file untouched. A failed write keeps the
+   buffer, with the reason on the footer.
 
 ## Dependencies
 
@@ -85,7 +92,7 @@ box (colors), the state box (the doc pane type).
 
 ## Tests
 
-60 model tests drive key- and click-shaped calls with scratch files: the
+66 model tests drive key- and click-shaped calls with scratch files: the
 frame's 28 (cursor, rail, scroll, sliders, doc viewer, footer) in mod.rs,
 each section's in its own box. Scene-level placement and paint are asserted
 by the view box's rendered-scene tests.

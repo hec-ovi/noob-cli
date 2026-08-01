@@ -799,6 +799,10 @@ enum Control {
     /// Mark every conversation on the table, which is what Ctrl-A means in
     /// every list anybody has ever used.
     MarkAll,
+    /// Write the system prompt's document from its editor, which is what
+    /// Ctrl-S means in every editor anybody has ever used. Enter cannot be
+    /// the save there, because Enter is how a line breaks.
+    Save,
     Nothing,
 }
 
@@ -813,6 +817,7 @@ fn control_in_settings(key: Key<&str>) -> Control {
         Key::Character("q") => Control::Quit,
         Key::Character("c") => Control::Copy,
         Key::Character("a") => Control::MarkAll,
+        Key::Character("s") => Control::Save,
         _ => Control::Nothing,
     }
 }
@@ -1559,6 +1564,9 @@ impl App {
                         }
                     }
                 }
+                // The document editor's save. With no editor open there is
+                // nothing to write, and nothing happens.
+                Control::Save => self.save_instructions(),
                 Control::Nothing => {}
             }
             return;
@@ -1590,6 +1598,39 @@ impl App {
             self.dirty = true;
             return;
         }
+        // The document editor takes the whole keyboard the same way: Enter is
+        // a newline, the arrows are the caret, Escape abandons the edit with
+        // the file untouched, and the save is Ctrl-S, answered above with the
+        // other control keys.
+        if panel.editing_instructions() {
+            let config = self.config.clone();
+            match event.logical_key.as_ref() {
+                Key::Named(NamedKey::Escape) => self.dirty |= panel.cancel_instructions(&config),
+                Key::Named(NamedKey::Backspace) => {
+                    self.dirty |= panel.instructions_backspace(&config);
+                }
+                Key::Named(NamedKey::Enter) => self.dirty |= panel.instructions_newline(&config),
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.dirty |= panel.instructions_step(false, &config);
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    self.dirty |= panel.instructions_step(true, &config);
+                }
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.dirty |= panel.instructions_cross(false, &config);
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    self.dirty |= panel.instructions_cross(true, &config);
+                }
+                _ => {
+                    if let Some(text) = event.text.as_ref() {
+                        self.dirty |= panel.type_instructions(text, &config);
+                    }
+                }
+            }
+            self.reveal_settings_cursor();
+            return;
+        }
         // The two keys that move the panel rather than the row: the rail, and
         // the crossing of a form row. Answered first and on their own, because
         // both of them are arrow keys or a key an arrow key used to be, and the
@@ -1604,6 +1645,7 @@ impl App {
         }
         let mut nudge = None;
         let mut edit = false;
+        let mut edit_doc = false;
         let mut flip = None;
         let mut make = None;
         // Which conversation the keys are on, when they are on the table at
@@ -1652,8 +1694,12 @@ impl App {
                     Some(settings::Row::Field { .. }) => edit = true,
                     Some(settings::Row::Entry(_)) => flip = Some(panel.cursor()),
                     // A block with nothing in it offers to write the file it
-                    // was looking for.
-                    Some(settings::Row::Paper(_)) => make = Some(panel.cursor()),
+                    // was looking for; the system prompt's document opens its
+                    // editor instead, and any other block answers nothing.
+                    Some(settings::Row::Paper(paper)) => match paper.offer.is_some() {
+                        true => make = Some(panel.cursor()),
+                        false => edit_doc = true,
+                    },
                     // Enter marks the conversation the keys are on, the same as
                     // space: enter on a row of a list is expected to do
                     // something to that row, and marking it is the one thing
@@ -1694,6 +1740,12 @@ impl App {
         }
         if edit {
             self.dirty |= panel.edit();
+        }
+        if edit_doc {
+            let config = self.config.clone();
+            if let Some(panel) = self.settings.as_mut() {
+                self.dirty |= panel.edit_instructions(&config);
+            }
         }
         if let Some(index) = flip {
             let deed = self.settings.as_ref().and_then(|panel| panel.toggle(index));
@@ -1778,6 +1830,18 @@ impl App {
             return;
         };
         self.write_agent_setting(&path, key, &value);
+    }
+
+    /// Write the whole instructions file from the document editor, and read
+    /// the agent back. Ctrl-S, because Enter there is how a line breaks.
+    /// With no editor open there is no deed and nothing happens.
+    fn save_instructions(&mut self) {
+        let deed = self
+            .settings
+            .as_ref()
+            .and_then(Settings::finish_instructions);
+        self.do_deed(deed);
+        self.dirty = true;
     }
 
     /// Write one setting into the agent's own file and read the whole file back.
@@ -1875,6 +1939,11 @@ impl App {
             // The path came off the block that offered it, which read it off the
             // agent's own config directory: nothing here spells one out.
             settings::Deed::StartInstructions { path } => agent::start_instructions(path),
+            // The editor's save: the whole file at once, by the same rename
+            // every write in the agent box arrives by.
+            settings::Deed::SaveInstructions { path, text } => {
+                agent::write_instructions(path, text)
+            }
             // Both handled above: a set of conversations cannot answer with one
             // result, since some of it can land and the rest fail, and a
             // restore writes the window's own file rather than the agent's.
@@ -1889,6 +1958,12 @@ impl App {
                     // refusal keeps what was typed.
                     if matches!(&deed, settings::Deed::AddServer { .. }) {
                         panel.clear_server_fields();
+                    }
+                    // A landed save closes the editor, so the block shows the
+                    // file read back; a refusal keeps the buffer, with the
+                    // reason on the footer.
+                    if matches!(&deed, settings::Deed::SaveInstructions { .. }) {
+                        panel.end_instructions_edit();
                     }
                     panel.adopt_agent(agent, &config);
                 }
@@ -5488,6 +5563,9 @@ mod tests {
         // And the key every list is selected with, which the table of saved
         // conversations reads and nothing else on the panel does.
         assert_eq!(control_in_settings(Key::Character("a")), Control::MarkAll);
+        // And the key every editor saves with, which the system prompt's
+        // document editor reads and nothing else on the panel does.
+        assert_eq!(control_in_settings(Key::Character("s")), Control::Save);
         // Nothing else has a meaning here: the panel owns the keyboard, so a
         // key that fell through would fall through to nothing.
         for key in [

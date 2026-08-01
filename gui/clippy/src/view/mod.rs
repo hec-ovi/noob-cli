@@ -12333,10 +12333,10 @@ mod tests {
     /// The end of the section that is showing, for a test about a row near the
     /// bottom of a list longer than a window.
     ///
-    /// A section of cards is taller than the panel: the AGENT section is five
-    /// cards and two blocks, and the blocks are the last two rows of it. The
-    /// window clamps whatever this asks for to the last screenful it can start
-    /// on, which is exactly what the wheel does.
+    /// A section of cards is taller than the panel: the AGENT section is its
+    /// cards with the prompt block as the last row of it. The window clamps
+    /// whatever this asks for to the last screenful it can start on, which is
+    /// exactly what the wheel does.
     fn scrolled_to_the_end(panel: &mut Settings) {
         let rows = 8;
         while panel.scroll(4, true, rows, 80) {}
@@ -12526,8 +12526,8 @@ mod tests {
         }
     }
 
-    /// An agent with instructions of its own and a prompt already read, for the
-    /// two blocks at the bottom of the AGENT section.
+    /// An agent with instructions of its own, for the system prompt section's
+    /// document and the block at the bottom of the AGENT section.
     fn an_agent_with_instructions() -> crate::agent::Agent {
         crate::agent::Agent {
             instructions: crate::agent::Instructions {

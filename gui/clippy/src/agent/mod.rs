@@ -612,6 +612,22 @@ pub fn start_instructions(path: &Path) -> Result<(), String> {
     std::fs::write(path, STARTER).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
+/// Write the whole global `AGENTS.md`, for the panel's editor.
+///
+/// The counterpart of [`start_instructions`] for a file that is being edited
+/// rather than started: the whole text lands at once, through the same
+/// rename every write here arrives by, so a crash mid-write cannot leave
+/// half of somebody's instructions. The directory is created on the way when
+/// it is missing, and a file that ends without a newline is given one,
+/// because that is how every writer here leaves a file.
+pub fn write_instructions(path: &Path, text: &str) -> Result<(), String> {
+    let mut whole = String::from(text);
+    if !whole.is_empty() && !whole.ends_with('\n') {
+        whole.push('\n');
+    }
+    crate::config::replace_file(path, &whole)
+}
+
 /// The head of a file as text, or nothing when it cannot be read. Lossy, since
 /// the cap can land in the middle of a character.
 fn head_of(path: &Path, cap: u64) -> Option<String> {
@@ -1162,6 +1178,38 @@ mod tests {
         std::fs::write(&path, "mine\n").expect("a file");
         assert!(start_instructions(&path).is_err());
         assert_eq!(std::fs::read_to_string(&path).expect("the file"), "mine\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The panel's editor saves the whole file at once: what was handed in is
+    /// what the agent reads back, a missing directory is made on the way, and
+    /// a write that cannot land leaves whatever was there untouched.
+    #[test]
+    fn the_whole_instructions_file_is_written_at_once() {
+        let dir = temp("write-instructions");
+        let path = dir.join("fresh").join(AGENTS_MD);
+        write_instructions(&path, "# Mine\n\nbe brief").expect("a new file");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the file"),
+            "# Mine\n\nbe brief\n",
+            "the file ends in the newline every writer here leaves"
+        );
+        assert_eq!(
+            read_instructions(path.parent()).body,
+            ["# Mine", "", "be brief"]
+        );
+
+        // Written again, the file is the new text whole: nothing of the old
+        // one survives into it.
+        write_instructions(&path, "shorter\n").expect("the file takes it");
+        assert_eq!(read_instructions(path.parent()).body, ["shorter"]);
+
+        // A path that cannot be written refuses and touches nothing: here the
+        // file's name is taken by a directory.
+        let blocked = dir.join(AGENTS_MD);
+        std::fs::create_dir_all(&blocked).expect("a directory in the way");
+        assert!(write_instructions(&blocked, "text").is_err());
+        assert!(blocked.is_dir(), "the refusal replaced the directory");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

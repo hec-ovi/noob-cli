@@ -824,6 +824,10 @@ pub enum Deed {
     /// Write a starter `AGENTS.md` where the agent looks for one. Only ever
     /// asked for by a block that found nothing there.
     StartInstructions { path: PathBuf },
+    /// Write the whole `AGENTS.md` at once, from the system prompt section's
+    /// editor. The path came off the agent's own config directory, the same
+    /// place the read came from.
+    SaveInstructions { path: PathBuf, text: String },
     /// Delete saved conversations: each transcript and the line about it in the
     /// note beside them. Named by the ids the rows carry, which came off the
     /// reader rather than off anything drawn.
@@ -1121,6 +1125,9 @@ pub struct Settings {
     /// The MCP section's own state: the add card's two fields
     /// ([`sections::mcp::McpSection`]).
     mcp: sections::mcp::McpSection,
+    /// The system prompt section's own state: the document's editor, while it
+    /// is open ([`sections::prompt::PromptSection`]).
+    prompt_section: sections::prompt::PromptSection,
 }
 
 impl Settings {
@@ -1143,6 +1150,7 @@ impl Settings {
             // suggestion included.
             skills: sections::skills::SkillsSection::new(&agent.skills),
             mcp: sections::mcp::McpSection::default(),
+            prompt_section: sections::prompt::PromptSection::default(),
             agent,
         };
         panel.sections = panel.build(config);
@@ -1329,6 +1337,7 @@ impl Settings {
         self.dragging = None;
         self.unpick();
         self.arming = None;
+        let held_paper = self.prompt_section.editing();
         for (section, place) in self.sections.iter_mut().zip(places) {
             let Place {
                 cursor,
@@ -1346,10 +1355,14 @@ impl Settings {
             section.side = side;
             // Where each block of text was left, so a write somewhere else on
             // the panel does not scroll the prompt back to its first line under
-            // whoever was reading it.
-            for (at, was) in papers {
-                if let Some(Row::Paper(paper)) = section.rows.get_mut(at) {
-                    paper.first = was.min(paper.most());
+            // whoever was reading it. Not while the system prompt's document
+            // is being edited: its block follows the caret, and putting the
+            // old scroll back would pull the text out from under it.
+            if !(held_paper && section.name == PROMPT) {
+                for (at, was) in papers {
+                    if let Some(Row::Paper(paper)) = section.rows.get_mut(at) {
+                        paper.first = was.min(paper.most());
+                    }
                 }
             }
             // The same for a table, marks and all. Pruned by the rebuild itself:
@@ -1394,7 +1407,7 @@ impl Settings {
             .map(|name| {
                 let rows = match name {
                     AGENT => sections::agent::rows(&self.agent, &self.prompt),
-                    PROMPT => sections::prompt::rows(&self.agent),
+                    PROMPT => self.prompt_section.rows(&self.agent),
                     SESSIONS => sections::sessions::rows(&self.agent),
                     SKILLS => self.skills.rows(&self.agent),
                     MCP => self.mcp.rows(&self.agent),
@@ -1729,6 +1742,12 @@ impl Settings {
     /// the section key to be guessed is how somebody who has raised the font too
     /// far ends up with no way back to APPEARANCE.
     pub fn hint(&self) -> &'static str {
+        // The document editor takes the whole keyboard, so the legend is the
+        // whole story: how a line breaks, how the file is written, and how
+        // the edit is left without touching it.
+        if self.editing_instructions() {
+            return "type it \u{2022} enter breaks the line \u{2022} ctrl+s writes the file \u{2022} esc leaves the file as it was";
+        }
         if self.editing.is_some() {
             // The one field on the panel Enter does not write a file with.
             return match self.at_cursor() {
@@ -1775,14 +1794,21 @@ impl Settings {
                     "left and right nudge it \u{2022} shift left and right cross the card \u{2022} tab and shift-tab change section"
                 }
             },
-            Some(Row::Paper(paper)) => match paper.offer.is_some() {
-                true => {
-                    "enter writes a starter AGENTS.md there \u{2022} tab and shift-tab change section"
+            Some(Row::Paper(paper)) => {
+                match (paper.offer.is_some(), self.here().name == PROMPT && !paper.bad) {
+                    (true, _) => {
+                        "enter writes a starter AGENTS.md there \u{2022} tab and shift-tab change section"
+                    }
+                    // The system prompt's own document, which is the one block
+                    // on the panel that can be typed into.
+                    (false, true) => {
+                        "enter edits it \u{2022} page up and page down read it \u{2022} tab and shift-tab change section"
+                    }
+                    (false, false) => {
+                        "page up and page down read it \u{2022} up and down leave it \u{2022} tab and shift-tab change section"
+                    }
                 }
-                false => {
-                    "page up and page down read it \u{2022} up and down leave it \u{2022} tab and shift-tab change section"
-                }
-            },
+            }
             // The install field. Enter on it starts typing, and the sentence
             // under the field already says what a source is, so the legend
             // says what happens when the typing ends.
@@ -2339,6 +2365,122 @@ impl Settings {
     pub fn make(&self, index: usize) -> Option<Deed> {
         let path = self.paper(index)?.offer.clone()?;
         Some(Deed::StartInstructions { path })
+    }
+
+    /// Whether the system prompt's document is being edited with its section
+    /// on screen, which is the one state the whole keyboard belongs to it in.
+    ///
+    /// The section has to be showing: the editor survives a walk to another
+    /// section and back, but its keys and its legend belong only to the block
+    /// that is on screen.
+    pub fn editing_instructions(&self) -> bool {
+        self.prompt_section.editing() && self.here().name == PROMPT
+    }
+
+    /// Open the editor on the document under the cursor.
+    ///
+    /// Only the system prompt section's own block, with a file to edit: an
+    /// empty block offers the starter instead ([`Settings::make`]), and a file
+    /// the CLI cuts at its cap is refused with the reason, because saving the
+    /// capped text would quietly lose the tail of the file.
+    pub fn edit_instructions(&mut self, config: &Config) -> bool {
+        if self.here().name != PROMPT || self.editing.is_some() {
+            return false;
+        }
+        let Some(Row::Paper(paper)) = self.at_cursor() else {
+            return false;
+        };
+        if paper.offer.is_some() || self.prompt_section.editing() {
+            return false;
+        }
+        let it = &self.agent.instructions;
+        if it.path.is_none() {
+            self.trouble = Some(String::from(
+                "there is no config directory to keep instructions in",
+            ));
+            return false;
+        }
+        if it.capped {
+            self.trouble = Some(format!(
+                "the file goes past the {} KiB the CLI reads; edit it outside so the rest is kept",
+                agent::AGENTS_CAP / 1024
+            ));
+            return false;
+        }
+        let body = it.body.clone();
+        self.prompt_section.begin(&body);
+        self.refresh(config);
+        true
+    }
+
+    /// One rebuild per editor change, so the block shows the buffer: the same
+    /// rows-are-rebuilt rule everything else on the panel follows.
+    fn edited_instructions(&mut self, moved: bool, config: &Config) -> bool {
+        if moved {
+            self.refresh(config);
+        }
+        moved
+    }
+
+    /// Type into the document's caret.
+    pub fn type_instructions(&mut self, text: &str, config: &Config) -> bool {
+        let moved = self.prompt_section.insert(text);
+        self.edited_instructions(moved, config)
+    }
+
+    /// Break the line at the caret, which is what Enter means in a document.
+    pub fn instructions_newline(&mut self, config: &Config) -> bool {
+        let moved = self.prompt_section.newline();
+        self.edited_instructions(moved, config)
+    }
+
+    /// Take the character before the caret back off.
+    pub fn instructions_backspace(&mut self, config: &Config) -> bool {
+        let moved = self.prompt_section.backspace();
+        self.edited_instructions(moved, config)
+    }
+
+    /// The caret one line up or down.
+    pub fn instructions_step(&mut self, down: bool, config: &Config) -> bool {
+        let moved = self.prompt_section.step(down);
+        self.edited_instructions(moved, config)
+    }
+
+    /// The caret one character along, over line ends.
+    pub fn instructions_cross(&mut self, right: bool, config: &Config) -> bool {
+        let moved = self.prompt_section.cross(right);
+        self.edited_instructions(moved, config)
+    }
+
+    /// Abandon the edit: the buffer goes and the block reads the file again,
+    /// which has not changed.
+    pub fn cancel_instructions(&mut self, config: &Config) -> bool {
+        let moved = self.prompt_section.cancel();
+        self.edited_instructions(moved, config)
+    }
+
+    /// The save, as the deed that writes the whole file. The editor stays
+    /// open until the write lands ([`Settings::end_instructions_edit`]), so a
+    /// refusal loses nothing.
+    pub fn finish_instructions(&self) -> Option<Deed> {
+        let text = self.prompt_section.take()?;
+        let path = self.agent.instructions.path.clone()?;
+        Some(Deed::SaveInstructions { path, text })
+    }
+
+    /// The save landed: the editor closes, and the block shows what the file
+    /// read back really says.
+    pub fn end_instructions_edit(&mut self) {
+        self.prompt_section.end();
+    }
+
+    /// Where the document's caret is while it is being edited, as a line of
+    /// the block on `index` and the character along it, for whoever draws it.
+    pub fn instructions_caret(&self, index: usize) -> Option<(usize, usize)> {
+        if self.here().name != PROMPT || !matches!(self.row(index), Some(Row::Paper(_))) {
+            return None;
+        }
+        self.prompt_section.caret()
     }
 
     /// The entry the column beside the list is showing: the one under the

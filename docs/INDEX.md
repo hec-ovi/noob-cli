@@ -138,7 +138,8 @@ Boxes so far:
   - [`settings/sections/agent`](../gui/clippy/src/settings/sections/agent/CONTRACT.md) -
     the CLI's file as cards, the assembled-prompt block.
   - [`settings/sections/prompt`](../gui/clippy/src/settings/sections/prompt/CONTRACT.md) -
-    the global AGENTS.md as one document, with the starter offer.
+    the global AGENTS.md as one document, edited in place, with the starter
+    offer.
   - [`settings/sections/sessions`](../gui/clippy/src/settings/sections/sessions/CONTRACT.md) -
     the saved conversations table, its columns and cells.
   - [`settings/sections/skills`](../gui/clippy/src/settings/sections/skills/CONTRACT.md) -

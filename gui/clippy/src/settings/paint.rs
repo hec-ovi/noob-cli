@@ -1053,12 +1053,39 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 let mut fence = crate::markdown::fence_after(
                     paper.body.iter().take(paper.first).map(String::as_str),
                 );
+                // While the document is being edited its lines are drawn raw:
+                // the formatter eats the marks, and a caret counted on the
+                // characters would stand beside glyphs that are not them.
+                let editing = panel.instructions_caret(*index);
                 for (step, at) in paper.body.iter().skip(paper.first).take(held).enumerate() {
                     let box_ = Panel::new(text.x, text.y + step as f32 * line, text.w, line);
                     let mut runs = Vec::new();
-                    crate::markdown::line(&clip(at, body_cols), &mut fence, skin, &mut runs);
+                    match editing.is_some() {
+                        true => runs.push(Run::tinted(clip(at, body_cols), skin.bright)),
+                        false => {
+                            crate::markdown::line(&clip(at, body_cols), &mut fence, skin, &mut runs)
+                        }
+                    }
                     if let Some(text) = held_text(Text::rich(runs, box_, size, skin.body)) {
                         scene.text(text);
+                    }
+                }
+                // The caret, where the typing lands: the same bar every field
+                // on this panel draws, at the character it stands before.
+                if let Some((on, col)) = editing
+                    && on >= paper.first
+                    && on < paper.first + held
+                {
+                    let x = (text.x + col.min(body_cols) as f32 * column)
+                        .min(text.x + text.w - 2.0);
+                    let at = Panel::new(
+                        x,
+                        text.y + (on - paper.first) as f32 * line,
+                        2.0,
+                        line,
+                    );
+                    if keep.holds(at) {
+                        scene.rect(at.fill(skin.caret));
                     }
                 }
                 // Its own bar, down the card's right padding and only as far as
