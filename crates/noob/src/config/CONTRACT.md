@@ -30,10 +30,15 @@ pub fn write_setting(config_dir: &Path, name: &str, value: Option<&str>)
 pub fn skill_paths(config_dir: &Path, workspace: &Path) -> Vec<PathBuf>;
     // NOOB_SKILL_PATHS, colon split, relative entries against the workspace
 pub fn ctx_tokens(config_dir: &Path) -> u64;             // floor 4096, default 131072
-pub fn task_concurrency(config_dir: &Path, default: usize) -> usize;  // 1..=16
-pub fn task_max_turns(config_dir: &Path, default: u32) -> u32;        // 1..=50
+pub fn max_rounds(config_dir: &Path, default: u32) -> u32;
+    // NOOB_MAX_ROUNDS, the user agent's rounds per input; 0 is unbounded
+pub fn task_concurrency(config_dir: &Path, default: usize) -> usize;  // 1..=64
+pub fn task_max_turns(config_dir: &Path, default: u32) -> u32;
+    // per-child round budget; 0 is unbounded
+pub fn task_tools(config_dir: &Path, default: &str) -> String;
+    // read-only | web | all: the mode a spawn gets when the model omits it
 pub fn task_wall_clock(config_dir: &Path, default_s: u64) -> Duration;
-    // 0 disables, ceiling 3600; the caller passes its shipped default
+    // 0 disables; the caller passes its shipped default
 pub fn read_dedup(config_dir: &Path) -> bool;            // on unless 0/off/false/no
 pub fn tool_caps_lifted(config_dir: &Path) -> bool;      // true when 0/off/false/no
 

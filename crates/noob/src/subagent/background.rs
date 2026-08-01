@@ -14,7 +14,7 @@ use noob_proto::{AgentState, Event as Wire};
 use super::{RunCfg, TaskRequest, run_task};
 use crate::tools::ToolOutcome;
 
-const MAX_JOBS: usize = 64;
+const MAX_JOBS: usize = 256;
 const PROGRESS_KEEP_BYTES: usize = 2 * 1024;
 const PROGRESS_KEEP_LINES: usize = 12;
 type Runner = Box<dyn FnOnce(Arc<AtomicBool>) -> ToolOutcome + Send + 'static>;
@@ -1347,7 +1347,11 @@ mod tests {
         }
         let overflow = hub.submit_with("overflow".to_string(), |_| ToolOutcome::canceled());
         assert!(overflow.is_error);
-        assert!(overflow.content.contains("64 background sub-agents"));
+        assert!(
+            overflow
+                .content
+                .contains(&format!("{MAX_JOBS} background sub-agents"))
+        );
         gate.store(true, Ordering::SeqCst);
         let results = hub.shutdown();
         assert_eq!(results.len(), MAX_JOBS);

@@ -21,7 +21,7 @@ use crate::settings::{Card, CardField, File, Kind, Row, SECRET, UNSET};
 /// [`crate::agent`], the two request shapes and the thinking switch are what
 /// `noob-provider` refuses anything else for, and the probe is what a missing
 /// base URL really does.
-const AGENT_FIELDS: [(&str, &str, &str); 7] = [
+const AGENT_FIELDS: [(&str, &str, &str); 11] = [
     (
         agent::ENDPOINT,
         "endpoint",
@@ -53,9 +53,29 @@ const AGENT_FIELDS: [(&str, &str, &str); 7] = [
         "NOOB_CTX. Tokens a session is budgeted before the CLI compacts it",
     ),
     (
+        agent::MAX_ROUNDS,
+        "rounds per input",
+        "NOOB_MAX_ROUNDS. Inference rounds one instruction may take; 0 is no limit",
+    ),
+    (
         agent::TASK_CONCURRENCY,
         "max sub-agents",
-        "NOOB_TASK_CONCURRENCY. How many sub-agent tasks may run at once, capped at sixteen",
+        "NOOB_TASK_CONCURRENCY. How many sub-agent tasks may run at once, capped at sixty-four",
+    ),
+    (
+        agent::TASK_MAX_TURNS,
+        "sub-agent rounds",
+        "NOOB_TASK_MAX_TURNS. Inference rounds each sub-agent gets; 0 is no limit",
+    ),
+    (
+        agent::TASK_TOOLS,
+        "sub-agent tools",
+        "NOOB_TASK_TOOLS. What a sub-agent may touch when the model does not choose",
+    ),
+    (
+        agent::TASK_WALL_CLOCK,
+        "sub-agent seconds",
+        "NOOB_TASK_WALL_CLOCK_S. Seconds before a sub-agent is stopped; 0 is no limit",
     ),
 ];
 
@@ -84,7 +104,7 @@ fn agent_has_a_field(key: &str) -> bool {
 /// right end of the concurrency track is the maximum the agent will honour and
 /// there is nothing to guess. Every other key in that file is listed as a
 /// reading, because the window does not know what the CLI would accept for it.
-pub(crate) const AGENT_SETTINGS: [(&str, Kind); 2] = [
+pub(crate) const AGENT_SETTINGS: [(&str, Kind); 6] = [
     (
         agent::CTX,
         Kind::Number {
@@ -93,6 +113,16 @@ pub(crate) const AGENT_SETTINGS: [(&str, Kind); 2] = [
             high: agent::CTX_HIGH,
             places: 0,
             stops: &agent::CTX_STOPS,
+        },
+    ),
+    (
+        agent::MAX_ROUNDS,
+        Kind::Number {
+            step: agent::ROUNDS_STEP,
+            low: agent::ROUNDS_LOW,
+            high: agent::ROUNDS_HIGH,
+            places: 0,
+            stops: &agent::ROUNDS_STOPS,
         },
     ),
     (
@@ -105,7 +135,31 @@ pub(crate) const AGENT_SETTINGS: [(&str, Kind); 2] = [
             stops: &agent::TASK_CONCURRENCY_STOPS,
         },
     ),
+    (
+        agent::TASK_MAX_TURNS,
+        Kind::Number {
+            step: agent::ROUNDS_STEP,
+            low: agent::ROUNDS_LOW,
+            high: agent::ROUNDS_HIGH,
+            places: 0,
+            stops: &agent::ROUNDS_STOPS,
+        },
+    ),
+    (agent::TASK_TOOLS, Kind::Choice(&CHOICE_TASK_TOOLS)),
+    (
+        agent::TASK_WALL_CLOCK,
+        Kind::Number {
+            step: agent::WALL_CLOCK_STEP,
+            low: agent::WALL_CLOCK_LOW,
+            high: agent::WALL_CLOCK_HIGH,
+            places: 0,
+            stops: &agent::WALL_CLOCK_STOPS,
+        },
+    ),
 ];
+
+/// [`agent::TASK_TOOLS_CHOICES`] with the static shape `Kind::Choice` wants.
+const CHOICE_TASK_TOOLS: [&str; 3] = agent::TASK_TOOLS_CHOICES;
 
 /// What the CLI uses for one of its own settings when the file does not carry
 /// it. Read off the CLI rather than chosen here: a row that shows a number the
@@ -114,6 +168,9 @@ fn agent_default(key: &str) -> String {
     match key {
         agent::CTX => agent::CTX_DEFAULT.to_string(),
         agent::TASK_CONCURRENCY => agent::TASK_CONCURRENCY_DEFAULT.to_string(),
+        agent::MAX_ROUNDS | agent::TASK_MAX_TURNS => agent::ROUNDS_DEFAULT.to_string(),
+        agent::TASK_TOOLS => agent::TASK_TOOLS_DEFAULT.to_string(),
+        agent::TASK_WALL_CLOCK => agent::WALL_CLOCK_DEFAULT.to_string(),
         // Unreachable through AGENT_SETTINGS, and a number is the honest answer
         // for a row that says it is one.
         _ => String::from("0"),
@@ -135,7 +192,7 @@ fn agent_default(key: &str) -> String {
 /// them is the card rather than a line.
 pub fn rows(agent: &Agent) -> Vec<Row> {
     let mut unset = Vec::new();
-    let mut numbers = Vec::new();
+    let mut controls = Vec::new();
     for (key, kind) in AGENT_SETTINGS {
         let value = match agent.setting(key) {
             Some(value) => value.to_string(),
@@ -145,10 +202,14 @@ pub fn rows(agent: &Agent) -> Vec<Row> {
             }
         };
         let (label, hint) = agent_says(key);
-        numbers.push(CardField::setting(label, key, value, kind, File::Agent).saying(hint));
+        controls.push(CardField::setting(label, key, value, kind, File::Agent).saying(hint));
     }
-    let tasks = numbers.pop().expect("both of the agent's numbers");
-    let ctx = numbers.pop().expect("both of the agent's numbers");
+    // AGENT_SETTINGS order. A card carries at most two controls (the two
+    // halves a press can name), so the six become three pairs.
+    let mut it = controls.into_iter();
+    let (ctx, rounds) = (it.next().expect("six controls"), it.next().expect("six controls"));
+    let (tasks, task_rounds) = (it.next().expect("six controls"), it.next().expect("six controls"));
+    let (task_tools, wall_clock) = (it.next().expect("six controls"), it.next().expect("six controls"));
     let mut rows = vec![
         // The endpoint first, because an agent pointed at nothing is the
         // one state this window cannot work in, and its credential beside
@@ -187,7 +248,7 @@ pub fn rows(agent: &Agent) -> Vec<Row> {
         Row::Card(Card {
         does: None,
             title: String::from("LIMITS"),
-            fields: vec![ctx, tasks],
+            fields: vec![ctx, rounds],
             hint: match unset.is_empty() {
                 true => None,
                 // A slider showing a number nobody wrote, with nothing
@@ -197,6 +258,21 @@ pub fn rows(agent: &Agent) -> Vec<Row> {
                     unset.join(" and ")
                 )),
             },
+        }),
+        // The fleet on cards of its own: how many children and what each may
+        // touch, then the two budgets that stop one. Every budget's 0 is the
+        // CLI's "no limit", and it is the default on all of them.
+        Row::Card(Card {
+        does: None,
+            title: String::from("MULTI-AGENT"),
+            fields: vec![tasks, task_tools],
+            hint: None,
+        }),
+        Row::Card(Card {
+        does: None,
+            title: String::from("MULTI-AGENT BUDGETS"),
+            fields: vec![task_rounds, wall_clock],
+            hint: Some(String::from("0 means no limit, and it is the default")),
         }),
         Row::Card(Card {
         does: None,
@@ -395,8 +471,9 @@ mod tests {
         );
 
         // Both ends of the concurrency track are the CLI's own: one at the
-        // bottom, and at the top the sixteen it caps itself at, so the maximum
-        // is somewhere the pointer can be dropped rather than a number to guess.
+        // bottom, and at the top the sixty-four it caps itself at, so the
+        // maximum is somewhere the pointer can be dropped rather than a
+        // number to guess.
         put_cursor(&mut panel, agent::TASK_CONCURRENCY);
         let at = panel.cursor();
         assert!(panel.slide(at, panel.side(), 0.0));
@@ -407,7 +484,7 @@ mod tests {
             most,
             Change {
                 key: agent::TASK_CONCURRENCY,
-                value: String::from("16"),
+                value: String::from("64"),
                 file: File::Agent,
             }
         );
@@ -422,9 +499,9 @@ mod tests {
         // nothing else in the file moves.
         write_endpoint(&env, most.key, &most.value).expect("the file takes it");
         panel.adopt_agent(read(), &Config::default());
-        assert_eq!(value(&panel, agent::TASK_CONCURRENCY), "16");
+        assert_eq!(value(&panel, agent::TASK_CONCURRENCY), "64");
         let after = std::fs::read_to_string(&env).expect("the file");
-        assert!(after.contains("NOOB_TASK_CONCURRENCY=16"), "{after}");
+        assert!(after.contains("NOOB_TASK_CONCURRENCY=64"), "{after}");
         assert!(after.contains("# two at a time"), "the comment is gone: {after}");
         assert!(after.contains("NOOB_CTX=262144"), "{after}");
         assert!(
@@ -481,21 +558,22 @@ mod tests {
             "a detent bent the arrow keys"
         );
 
-        // The concurrency track: near five means five. At the narrow snap
-        // window the magnet on an integer track is gentle by design; the
+        // The concurrency track: near sixteen means sixteen. At the narrow
+        // snap window the magnet on an integer track is gentle by design; the
         // context track above is where snapping visibly beats the step.
         put_cursor(&mut panel, agent::TASK_CONCURRENCY);
         let at = panel.cursor();
         assert!(panel.slide(at, panel.side(), 0.26));
-        assert_eq!(panel.preview(at, panel.side()), Some("5"));
+        assert_eq!(panel.preview(at, panel.side()), Some("16"));
         panel.drop_slider();
 
-        // And every checkpoint is a tick on its track, in track order.
+        // And every checkpoint is a tick on its track, in track order. The
+        // one choice among the controls has no track to tick.
         for (key, kind) in AGENT_SETTINGS {
-            let ticks = kind.stop_fractions();
             let Kind::Number { stops, .. } = kind else {
-                panic!("{key} is not a track");
+                continue;
             };
+            let ticks = kind.stop_fractions();
             assert_eq!(ticks.len(), stops.len(), "{key} loses ticks");
             assert!(
                 ticks.windows(2).all(|pair| pair[0] < pair[1]),
@@ -568,7 +646,14 @@ mod tests {
             .collect();
         assert_eq!(
             titles,
-            ["CONNECTION", "MODEL", "LIMITS", "THE SETTINGS FILE"],
+            [
+                "CONNECTION",
+                "MODEL",
+                "LIMITS",
+                "MULTI-AGENT",
+                "MULTI-AGENT BUDGETS",
+                "THE SETTINGS FILE"
+            ],
             "{titles:?}"
         );
 
@@ -650,7 +735,7 @@ mod tests {
         assert!(!panel.cross(Side::Left), "it is already in that field");
         assert!(panel.cross(Side::Right));
         assert!(
-            matches!(panel.at_cursor(), Some(Row::Setting { key, .. }) if *key == agent::TASK_CONCURRENCY)
+            matches!(panel.at_cursor(), Some(Row::Setting { key, .. }) if *key == agent::MAX_ROUNDS)
         );
 
         // And the cards of readings hold no cursor at all: a row the arrow keys
@@ -670,6 +755,11 @@ mod tests {
 
         // Up and down walk the cards that can be set, and every one of them is
         // reachable from the top.
+        let fleet = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, Row::Card(card) if card.title == "MULTI-AGENT"))
+            .expect("the multi-agent card");
         assert!(panel.jump(false));
         let mut seen = vec![panel.cursor()];
         while panel.step(true) {
@@ -677,7 +767,7 @@ mod tests {
         }
         assert_eq!(
             seen,
-            vec![0, numbers],
+            vec![0, numbers, fleet, fleet + 1],
             "the keyboard cannot walk the section: {seen:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);

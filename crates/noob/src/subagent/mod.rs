@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use noob_provider::http::INTERRUPTED;
 use noob_provider::types::{Overrides, ToolSpec};
 
-use crate::tools::{ToolOutcome, need_str, opt_str, opt_u64};
+use crate::tools::{ToolOutcome, need_str, opt_str};
 
 mod background;
 #[cfg(test)]
@@ -28,7 +28,17 @@ pub use background::{BackgroundHub, JobsSnapshot, ReadyResult};
 /// spawn; at depth 2 the subagent tool is simply not registered.
 pub const MAX_DEPTH: u32 = 2;
 pub const DEFAULT_CONCURRENCY: usize = 4;
-pub const DEFAULT_MAX_TURNS: u32 = 25;
+/// Per-child inference-round budget. 0 means no limit, and it is the
+/// default: a bounded child dies mid-task with nothing to show, which costs
+/// more than the rounds the bound was saving. What actually stops a child is
+/// finishing, a cancel, or the parent exiting; NOOB_TASK_MAX_TURNS still
+/// caps it for the tests and for anyone who wants a ceiling back.
+pub const DEFAULT_MAX_TURNS: u32 = 0;
+/// Tools a child gets when the model does not say: every tool. The narrower
+/// modes exist for the model to choose deliberately; a padded or omitted
+/// field must not strand a child that was asked to edit files in a
+/// read-only harness. NOOB_TASK_TOOLS restores a narrower default.
+pub const DEFAULT_TOOLS: &str = "all";
 /// Per-child wall clock; the parent kills the whole process group on expiry.
 /// 0 means no limit: the child runs until it finishes or is interrupted.
 pub const DEFAULT_WALL_CLOCK_S: u64 = 0;
@@ -49,7 +59,10 @@ pub struct TaskCfg {
     /// This process's depth (NOOB_DEPTH, 0 for the user's agent).
     pub depth: u32,
     pub concurrency: usize,
+    /// Per-child round budget; 0 is unbounded.
     pub max_turns: u32,
+    /// The tools mode a spawn gets when the model omits `tools`.
+    pub tools_default: String,
     pub wall_clock: Duration,
     /// Surface bounded child stderr as `[subagent] ...` after the child exits.
     pub verbose: bool,
@@ -103,8 +116,7 @@ pub fn spec() -> ToolSpec {
         parameters: json!({"type": "object", "properties": {
             "prompt": {"type": "string", "description": "complete standalone instructions"},
             "tools": {"type": "string", "enum": ["read-only", "web", "all"],
-                      "description": "default read-only; web adds the websearch tool without mutations; all adds Bash and file changes"},
-            "max_turns": {"type": "integer"},
+                      "description": "read-only limits to inspection; web adds the websearch tool without mutations; all (the default) adds Bash and file changes"},
             "status": {"type": "boolean",
                        "description": "true returns one current snapshot; reports still arrive automatically"},
             "cancel": {"type": "string",
@@ -220,7 +232,7 @@ pub fn run(env: &SpawnEnv, args: &Value) -> ToolOutcome {
     };
     let web_available = env.websearch;
     let requested_tools_mode = match opt_str(args, "tools") {
-        Ok(None) => "read-only".to_string(),
+        Ok(None) => cfg.tools_default.clone(),
         Ok(Some(m @ ("read-only" | "web" | "all"))) => m.to_string(),
         Ok(Some(other)) => {
             return ToolOutcome::err(format!(
@@ -246,12 +258,10 @@ pub fn run(env: &SpawnEnv, args: &Value) -> ToolOutcome {
              web through Bash",
         );
     }
-    // Both sides enforce the turn cap: the parent clamps the request here,
-    // the child clamps again against its own environment.
-    let max_turns = match opt_u64(args, "max_turns") {
-        Ok(requested) => child_round_budget(requested, cfg.max_turns, research_investigation),
-        Err(e) => return ToolOutcome::err(e),
-    };
+    // The round budget is the session's setting alone. The tool schema
+    // carries no per-spawn cap: models pad optional fields, and a padded low
+    // cap starved children into cap aborts mid-task.
+    let max_turns = cfg.max_turns;
 
     let excluded_skills = skill_exclusions(cfg, env.loaded_skills, web_available);
     let request = TaskRequest {
@@ -318,7 +328,7 @@ fn child_prompt(prompt: String, web_available: bool, web_only: bool) -> String {
          {{\"action\":\"search\",\"query\":\"...\"}} and \
          {{\"action\":\"fetch\",\"url\":\"...\"}} to read the sources you found. Use the \
          minimum evidence required by the brief; once its requirements are met, stop gathering \
-         and return the synthesis before the turn budget.{mutation_rule}]\n\n{prompt}"
+         and return the synthesis.{mutation_rule}]\n\n{prompt}"
     )
 }
 
@@ -532,22 +542,6 @@ fn run_task(
         ToolOutcome::err(format!("sub-agent error: {result}"))
     };
     with_progress(outcome, verbose, progress)
-}
-
-fn clamp_max_turns(requested: u64, configured: u32) -> u32 {
-    requested.clamp(1, u64::from(configured.max(1))) as u32
-}
-
-/// The rounds a child is granted. A recognized research-workflow brief gets
-/// the full configured budget regardless of the requested value: small
-/// models pad optional fields, and a padded low cap starved a live research
-/// child into a cap abort mid-investigation. Every other child keeps the
-/// requested cap, clamped to the configured ceiling.
-fn child_round_budget(requested: Option<u64>, configured: u32, research: bool) -> u32 {
-    match requested {
-        Some(n) if !research => clamp_max_turns(n, configured),
-        _ => configured,
-    }
 }
 
 enum ChildInputError {
@@ -879,6 +873,7 @@ mod tests {
             depth: 0,
             concurrency: DEFAULT_CONCURRENCY,
             max_turns: DEFAULT_MAX_TURNS,
+            tools_default: String::from("all"),
             wall_clock: Duration::from_secs(DEFAULT_WALL_CLOCK_S),
             verbose: false,
             overrides: Overrides::default(),
@@ -973,17 +968,6 @@ mod tests {
         assert!(out.content.contains("canceling"));
         let results = hub.shutdown();
         assert!(results.iter().all(|r| r.outcome.canceled));
-    }
-
-    #[test]
-    fn research_children_get_the_full_round_budget_despite_padded_caps() {
-        // Ordinary children keep their requested cap, clamped to the ceiling.
-        assert_eq!(child_round_budget(Some(3), 25, false), 3);
-        assert_eq!(child_round_budget(Some(99), 25, false), 25);
-        assert_eq!(child_round_budget(None, 25, false), 25);
-        // A recognized research brief ignores a padded low cap entirely.
-        assert_eq!(child_round_budget(Some(3), 25, true), 25);
-        assert_eq!(child_round_budget(None, 25, true), 25);
     }
 
     #[test]
@@ -1149,12 +1133,6 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "the refusal must not wait on a spawned child"
         );
-    }
-
-    #[test]
-    fn oversized_turn_request_clamps_before_narrowing() {
-        assert_eq!(clamp_max_turns(u64::MAX, 20), 20);
-        assert_eq!(clamp_max_turns(0, 20), 1);
     }
 
     #[test]

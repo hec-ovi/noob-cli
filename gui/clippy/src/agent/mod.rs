@@ -102,6 +102,18 @@ pub const CTX: &str = "NOOB_CTX";
 /// How many sub-agent tasks the CLI runs at once.
 pub const TASK_CONCURRENCY: &str = "NOOB_TASK_CONCURRENCY";
 
+/// The user agent's inference rounds per input; 0 is unbounded.
+pub const MAX_ROUNDS: &str = "NOOB_MAX_ROUNDS";
+
+/// Each sub-agent's inference-round budget; 0 is unbounded.
+pub const TASK_MAX_TURNS: &str = "NOOB_TASK_MAX_TURNS";
+
+/// The tools a sub-agent gets when the model does not choose.
+pub const TASK_TOOLS: &str = "NOOB_TASK_TOOLS";
+
+/// Seconds a sub-agent may run before the CLI kills it; 0 is no limit.
+pub const TASK_WALL_CLOCK: &str = "NOOB_TASK_WALL_CLOCK_S";
+
 /// The settings in the agent's file the panel owns: the ones it draws as
 /// controls rather than listing as readings, and the ones [`crate::link`] clears
 /// out of the child's environment so the file is what the agent reads.
@@ -109,7 +121,14 @@ pub const TASK_CONCURRENCY: &str = "NOOB_TASK_CONCURRENCY";
 /// The endpoint is not one of them. It is typed rather than nudged, and a
 /// machine that points the agent somewhere with an exported `NOOB_BASE_URL` is
 /// a machine doing that on purpose.
-pub const OWNED: [&str; 2] = [CTX, TASK_CONCURRENCY];
+pub const OWNED: [&str; 6] = [
+    CTX,
+    MAX_ROUNDS,
+    TASK_CONCURRENCY,
+    TASK_MAX_TURNS,
+    TASK_TOOLS,
+    TASK_WALL_CLOCK,
+];
 
 /// The CLI's own bounds for [`CTX`], read off `crates/noob/src/config/mod.rs`:
 /// anything under 4096 is refused there and silently becomes the default, so
@@ -126,15 +145,37 @@ pub const CTX_DEFAULT: u32 = 131_072;
 pub const CTX_STOPS: [f32; 3] = [65_536.0, 131_072.0, 262_144.0];
 
 /// The CLI's own bounds for [`TASK_CONCURRENCY`]: at least one, and capped at
-/// sixteen there, so the right end of this track is the maximum the agent will
-/// honour rather than a number to guess at.
+/// sixty-four there, so the right end of this track is the maximum the agent
+/// will honour rather than a number to guess at.
 pub const TASK_CONCURRENCY_LOW: f32 = 1.0;
-pub const TASK_CONCURRENCY_HIGH: f32 = 16.0;
+pub const TASK_CONCURRENCY_HIGH: f32 = 64.0;
 pub const TASK_CONCURRENCY_STEP: f32 = 1.0;
 /// What the CLI uses when the key is not set (`subagent::DEFAULT_CONCURRENCY`).
 pub const TASK_CONCURRENCY_DEFAULT: u32 = 4;
-/// The two counts worth reaching for: detents on the panel's track.
-pub const TASK_CONCURRENCY_STOPS: [f32; 2] = [3.0, 5.0];
+/// The counts worth reaching for: detents on the panel's track.
+pub const TASK_CONCURRENCY_STOPS: [f32; 3] = [4.0, 8.0, 16.0];
+
+/// Round budgets: 0 is the CLI's "no limit" and its default for both the
+/// user agent ([`MAX_ROUNDS`]) and each child ([`TASK_MAX_TURNS`]). The top
+/// is the panel's own: the CLI accepts far more, and a track has to end
+/// somewhere.
+pub const ROUNDS_LOW: f32 = 0.0;
+pub const ROUNDS_HIGH: f32 = 200.0;
+pub const ROUNDS_STEP: f32 = 1.0;
+pub const ROUNDS_DEFAULT: u32 = 0;
+pub const ROUNDS_STOPS: [f32; 2] = [25.0, 50.0];
+
+/// What a spawned child may touch when the model does not say
+/// (`subagent::DEFAULT_TOOLS`).
+pub const TASK_TOOLS_CHOICES: [&str; 3] = ["read-only", "web", "all"];
+pub const TASK_TOOLS_DEFAULT: &str = "all";
+
+/// The wall clock in seconds; 0 is the CLI's "no limit" and its default.
+pub const WALL_CLOCK_LOW: f32 = 0.0;
+pub const WALL_CLOCK_HIGH: f32 = 7_200.0;
+pub const WALL_CLOCK_STEP: f32 = 30.0;
+pub const WALL_CLOCK_DEFAULT: u32 = 0;
+pub const WALL_CLOCK_STOPS: [f32; 2] = [600.0, 1_800.0];
 
 /// The agent's config directory.
 ///

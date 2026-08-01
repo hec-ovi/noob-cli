@@ -567,7 +567,9 @@ mod tests {
             })
             .collect();
         of_agent.sort_unstable();
-        assert_eq!(of_agent, vec![agent::CTX, agent::TASK_CONCURRENCY]);
+        let mut owned = agent::OWNED.to_vec();
+        owned.sort_unstable();
+        assert_eq!(of_agent, owned);
 
         // And nothing retired sneaked in with them: those keys are dead in the
         // file, and the writer refuses them, so a row for one would be a row

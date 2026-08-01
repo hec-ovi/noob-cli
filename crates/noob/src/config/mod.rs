@@ -20,8 +20,10 @@ pub const EDITABLE: &[(&str, &str)] = &[
     ("reasoning", "NOOB_REASONING"),
     ("ctx", "NOOB_CTX"),
     ("autodetect", "NOOB_AUTODETECT"),
+    ("max-rounds", "NOOB_MAX_ROUNDS"),
     ("task-concurrency", "NOOB_TASK_CONCURRENCY"),
     ("task-max-turns", "NOOB_TASK_MAX_TURNS"),
+    ("task-tools", "NOOB_TASK_TOOLS"),
     ("task-wall-clock", "NOOB_TASK_WALL_CLOCK_S"),
     ("tool-caps", "NOOB_TOOL_CAPS"),
     ("read-dedup", "NOOB_READ_DEDUP"),
@@ -213,9 +215,15 @@ fn validate_setting(name: &str, value: &str) -> Result<(), String> {
             .filter(|&n| n >= 4_096)
             .map(|_| ())
             .ok_or_else(|| "ctx must be an integer of at least 4096".to_string()),
-        "task-concurrency" => range(1, 16),
-        "task-max-turns" => range(1, 50),
-        "task-wall-clock" => range(1, 3_600),
+        "task-concurrency" => range(1, 64),
+        // 0 is "no limit" for every budget below, and it is the shipped
+        // default: the CLI must not fail a task on its own restriction.
+        "max-rounds" => range(0, 1_000_000),
+        "task-max-turns" => range(0, 1_000_000),
+        "task-tools" if !matches!(value, "read-only" | "web" | "all") => {
+            Err("task-tools must be read-only, web, or all".to_string())
+        }
+        "task-wall-clock" => range(0, 86_400),
         "autodetect" | "tool-caps" | "read-dedup" | "reasoning"
             if !matches!(
                 value.to_ascii_lowercase().as_str(),
@@ -271,17 +279,35 @@ pub fn task_concurrency(config_dir: &Path, default: usize) -> usize {
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|&n| n >= 1)
         .unwrap_or(default)
-        .min(16)
+        .min(64)
 }
 
-/// NOOB_TASK_MAX_TURNS: per-child inference-round cap (P6). A loop budget,
-/// never an output-token cap. The caller passes its shipped default.
+/// NOOB_MAX_ROUNDS: the user agent's inference rounds per input. A loop
+/// budget, never an output-token cap; 0 is unbounded and is the shipped
+/// default, because a hard cap aborts a long task mid-flight and the human
+/// already holds the real brake (Ctrl-C, double-ESC).
+pub fn max_rounds(config_dir: &Path, default: u32) -> u32 {
+    setting(config_dir, "NOOB_MAX_ROUNDS")
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(default)
+}
+
+/// NOOB_TASK_MAX_TURNS: per-child inference-round budget (P6). A loop
+/// budget, never an output-token cap; 0 is unbounded and is the shipped
+/// default. The caller passes its shipped default.
 pub fn task_max_turns(config_dir: &Path, default: u32) -> u32 {
     setting(config_dir, "NOOB_TASK_MAX_TURNS")
         .and_then(|v| v.trim().parse::<u32>().ok())
-        .filter(|&n| n >= 1)
         .unwrap_or(default)
-        .min(50)
+}
+
+/// NOOB_TASK_TOOLS: the tools mode a child gets when the model omits the
+/// `tools` field. The model's own explicit choice always wins.
+pub fn task_tools(config_dir: &Path, default: &str) -> String {
+    setting(config_dir, "NOOB_TASK_TOOLS")
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| matches!(v.as_str(), "read-only" | "web" | "all"))
+        .unwrap_or_else(|| default.to_string())
 }
 
 /// NOOB_TASK_WALL_CLOCK_S: per-child wall clock before the parent kills the
@@ -291,8 +317,7 @@ pub fn task_max_turns(config_dir: &Path, default: u32) -> u32 {
 pub fn task_wall_clock(config_dir: &Path, default_s: u64) -> std::time::Duration {
     let secs = setting(config_dir, "NOOB_TASK_WALL_CLOCK_S")
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(default_s)
-        .min(3_600);
+        .unwrap_or(default_s);
     std::time::Duration::from_secs(secs)
 }
 
@@ -448,16 +473,25 @@ mod tests {
                 .contains("4096")
         );
         assert!(
-            write_setting(tmp.path(), "task-concurrency", Some("17"))
+            write_setting(tmp.path(), "task-concurrency", Some("65"))
                 .unwrap_err()
-                .contains("16")
+                .contains("64")
         );
         assert!(
             write_setting(tmp.path(), "api-style", Some("magic"))
                 .unwrap_err()
                 .contains("chat")
         );
+        assert!(
+            write_setting(tmp.path(), "task-tools", Some("everything"))
+                .unwrap_err()
+                .contains("read-only")
+        );
         assert!(!tmp.path().join(".env").exists());
+        // 0 means unbounded for the round budgets, so it must be writable.
+        assert!(write_setting(tmp.path(), "task-max-turns", Some("0")).is_ok());
+        assert!(write_setting(tmp.path(), "max-rounds", Some("0")).is_ok());
+        assert!(write_setting(tmp.path(), "task-wall-clock", Some("0")).is_ok());
     }
 
     #[test]
@@ -622,7 +656,7 @@ mod tests {
     /// and unset or unparseable values fall back to the caller's default,
     /// not to some arbitrary cap the user never asked for.
     #[test]
-    fn the_wall_clock_honors_the_default_the_value_and_the_ceiling() {
+    fn the_wall_clock_honors_the_default_and_the_value() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join(".env"), "").unwrap();
         assert_eq!(task_wall_clock(tmp.path(), 0), std::time::Duration::ZERO);
@@ -630,7 +664,9 @@ mod tests {
             task_wall_clock(tmp.path(), 30),
             std::time::Duration::from_secs(30)
         );
-        for (set, want) in [("0", 0), ("45", 45), ("99999", 3_600)] {
+        // No ceiling: a two-hour research fleet with a configured wall clock
+        // keeps the wall clock it configured.
+        for (set, want) in [("0", 0), ("45", 45), ("99999", 99_999)] {
             std::fs::write(
                 tmp.path().join(".env"),
                 format!("NOOB_TASK_WALL_CLOCK_S={set}\n"),

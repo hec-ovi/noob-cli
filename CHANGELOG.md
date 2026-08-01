@@ -3,6 +3,25 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## Unreleased
+
+- Round budgets are unbounded by default: an instruction runs until it
+  finishes or is cancelled (`NOOB_MAX_ROUNDS`, 0 = no limit), and so does
+  each sub-agent (`NOOB_TASK_MAX_TURNS`, 0 = no limit). The subagent tool
+  schema carries no per-spawn round cap, so a model padding the field
+  cannot starve its own child. Sub-agents get every tool unless the model
+  narrows the mode (`NOOB_TASK_TOOLS`, default all), the wall clock keeps
+  whatever value is configured (no hidden 1-hour ceiling), concurrency may
+  be set up to 64, and a session holds up to 256 background jobs. The
+  window's AGENT section gains MULTI-AGENT cards and `/set_max_rounds`,
+  `/set_subagent_rounds`, `/set_subagent_tools`, `/set_subagent_seconds`.
+- Cancelling a turn in the window takes two escapes: the first arms and the
+  input row says so, the second inside five seconds cancels; any other key
+  or the window lapsing stands the arm down.
+- A prompt typed while a turn runs queues behind it: a dim pinned
+  `[queued]` row at the bottom of OUTPUT until the turn that takes it
+  starts, then the plain `› message` record.
+
 ## 0.11.0 - 2026-08-01
 
 The window's settings grow up: a redesigned panel, sections as boxes, a

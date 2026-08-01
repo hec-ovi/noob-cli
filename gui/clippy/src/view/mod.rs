@@ -12557,7 +12557,7 @@ mod tests {
     #[test]
     fn the_settings_panel_takes_the_whole_window() {
         let panel = a_settings_panel(&Config::default());
-        let out = render_settings(&panel, 1205.0, 791.0, None);
+        let out = render_settings(&panel, 1205.0, 1600.0, None);
         let layout = &out.layout;
         assert!(layout.in_settings);
         assert!(!layout.picking, "the two takeovers are different shapes");
@@ -12574,9 +12574,9 @@ mod tests {
         // it: sixty rows in a picker-sized box is six rows and a lot of margin.
         let box_ = layout.settings;
         assert!(box_.y >= TITLE_H, "it starts below the strip: {box_:?}");
-        assert!(box_.y + box_.h <= 791.0 && box_.x + box_.w <= 1205.0, "{box_:?}");
+        assert!(box_.y + box_.h <= 1600.0 && box_.x + box_.w <= 1205.0, "{box_:?}");
         assert!(box_.w >= 1205.0 - 4.0 * GAP, "not a takeover: {box_:?}");
-        assert!(box_.h >= 791.0 - TITLE_H - 4.0 * GAP, "not a takeover: {box_:?}");
+        assert!(box_.h >= 1600.0 - TITLE_H - 4.0 * GAP, "not a takeover: {box_:?}");
 
         assert_eq!(
             layout.hit(box_.x + 1.0, box_.y + box_.h - 1.0),
@@ -12595,7 +12595,7 @@ mod tests {
     fn every_settings_row_lands_where_it_is_drawn() {
         for section in crate::settings::SECTIONS {
             let panel = a_panel_on(&Config::default(), section);
-            let out = render_settings(&panel, 1400.0, 900.0, None);
+            let out = render_settings(&panel, 1400.0, 1600.0, None);
             let layout = &out.layout;
             assert!(!layout.settings_rows.is_empty(), "{section} draws no rows");
             for (index, side, row) in &layout.settings_rows {
@@ -12763,7 +12763,7 @@ mod tests {
     #[test]
     fn the_agent_cards_draw_a_labelled_field_for_everything_they_hold() {
         let panel = a_panel_on(&Config::default(), crate::settings::AGENT);
-        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let out = render_settings(&panel, 1400.0, 1600.0, None);
         let layout = &out.layout;
         let line = Text::line_for(PANE_TEXT.0);
         let cols = layout.settings_entry_columns(PANE_TEXT.1);
@@ -16513,10 +16513,13 @@ mod tests {
             text_of(&out.scene)
         );
 
-        // And both of them are tracks, so the maximum concurrency is a place to
-        // drop the pointer rather than a number to type. Both of them are
-        // fields of the one card that says what the agent gets.
+        // And every number among them is a track, so the maximum concurrency
+        // is a place to drop the pointer rather than a number to type. The
+        // one choice (the sub-agent tools mode) has no track to draw.
         for key in crate::agent::OWNED {
+            if key == crate::agent::TASK_TOOLS {
+                continue;
+            }
             let (index, side) = panel
                 .rows()
                 .iter()

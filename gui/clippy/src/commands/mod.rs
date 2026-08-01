@@ -124,7 +124,7 @@ pub(crate) enum Does {
 
 /// Every command, in the order the COMMANDS section lists them: the agent's
 /// own settings first, then each section's acts, the panel itself, and help.
-pub const ALL: [Command; 24] = [
+pub const ALL: [Command; 28] = [
     Command {
         name: "set_endpoint",
         about: "point the agent at a model server",
@@ -159,12 +159,65 @@ pub const ALL: [Command; 24] = [
         about: "the most sub-agent tasks the CLI runs at once",
         help: &[
             "Writes NOOB_TASK_CONCURRENCY in the agent's .env, capped at",
-            "sixteen the way the AGENT section's slider is. The CLI reads",
-            "it on its next request.",
+            "sixty-four the way the AGENT section's slider is. The CLI",
+            "reads it on its next request.",
         ],
         args: &[Arg::of("count", Shape::Value)],
         does: Does::Set {
             key: crate::agent::TASK_CONCURRENCY,
+            file: File::Agent,
+        },
+    },
+    Command {
+        name: "set_max_rounds",
+        about: "inference rounds one instruction may take; 0 is no limit",
+        help: &[
+            "Writes NOOB_MAX_ROUNDS in the agent's .env. 0, the default,",
+            "lets an instruction run until it finishes or is cancelled.",
+        ],
+        args: &[Arg::of("rounds", Shape::Value)],
+        does: Does::Set {
+            key: crate::agent::MAX_ROUNDS,
+            file: File::Agent,
+        },
+    },
+    Command {
+        name: "set_subagent_rounds",
+        about: "inference rounds each sub-agent gets; 0 is no limit",
+        help: &[
+            "Writes NOOB_TASK_MAX_TURNS in the agent's .env. 0, the",
+            "default, lets a sub-agent run until it reports back.",
+        ],
+        args: &[Arg::of("rounds", Shape::Value)],
+        does: Does::Set {
+            key: crate::agent::TASK_MAX_TURNS,
+            file: File::Agent,
+        },
+    },
+    Command {
+        name: "set_subagent_tools",
+        about: "what a sub-agent may touch when the model does not choose",
+        help: &[
+            "Writes NOOB_TASK_TOOLS in the agent's .env: read-only, web,",
+            "or all. all is the default; a spawn naming its own mode",
+            "always wins.",
+        ],
+        args: &[Arg::of("mode", Shape::Value)],
+        does: Does::Set {
+            key: crate::agent::TASK_TOOLS,
+            file: File::Agent,
+        },
+    },
+    Command {
+        name: "set_subagent_seconds",
+        about: "seconds before a sub-agent is stopped; 0 is no limit",
+        help: &[
+            "Writes NOOB_TASK_WALL_CLOCK_S in the agent's .env. 0, the",
+            "default, never stops a working sub-agent on the clock.",
+        ],
+        args: &[Arg::of("seconds", Shape::Value)],
+        does: Does::Set {
+            key: crate::agent::TASK_WALL_CLOCK,
             file: File::Agent,
         },
     },

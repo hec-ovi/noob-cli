@@ -172,6 +172,7 @@ mod tests {
             depth: 0,
             concurrency: crate::subagent::DEFAULT_CONCURRENCY,
             max_turns: crate::subagent::DEFAULT_MAX_TURNS,
+            tools_default: String::from("all"),
             wall_clock: std::time::Duration::from_secs(crate::subagent::DEFAULT_WALL_CLOCK_S),
             verbose: false,
             overrides: Default::default(),

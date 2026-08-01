@@ -111,8 +111,8 @@ command talk to a window that is already open, and a files tree.
 
 The sandbox has no `docker` binary and no socket, so an agent asked to start
 anything containerized has no path at all. It does not fail cleanly either: it
-tries pip, then a public instance, then a source install, and burns the
-fifty-round cap (`TURN_CAP`, `crates/noob/src/agent/mod.rs:32`) before saying so.
+tries pip, then a public instance, then a source install, and burns rounds
+before saying so.
 Web search was the case that surfaced this, and it got a targeted fix upstream
 (`websearch searxng up` installs SearXNG as a plain process instead), but the
 general gap is still there for databases, message queues, and anything else the

@@ -20,7 +20,10 @@ whole IPC surface; only the result string enters the parent transcript.
 
 ```rust
 pub fn spec() -> ToolSpec;   // prompt | status | cancel; tools mode
-                             // read-only (default) | web | all; max_turns
+                             // read-only | web | all (default all via
+                             // NOOB_TASK_TOOLS). No per-spawn round cap:
+                             // models pad optional fields, and a padded
+                             // low cap starved children mid-task
 pub struct SpawnEnv<'a>;     // everything the tool needs, as plain params:
                              // workspace, websearch, task, loaded_skills.
                              // The tools box builds it at dispatch
@@ -29,15 +32,17 @@ pub fn run(env: &SpawnEnv, args: &Value) -> ToolOutcome;
 pub const MAX_DEPTH: u32 = 2;         // depth 0 and 1 spawn; at 2 the tool
                                       // is not registered at all
 pub const DEFAULT_CONCURRENCY: usize = 4;
-pub const DEFAULT_MAX_TURNS: u32 = 25;
+pub const DEFAULT_MAX_TURNS: u32 = 0;      // 0: no round limit
+pub const DEFAULT_TOOLS: &str = "all";     // when the model omits `tools`
 pub const DEFAULT_WALL_CLOCK_S: u64 = 0;   // 0: no limit
 
 pub struct TaskCfg;          // session-scoped settings, resolved at
                              // bootstrap: depth, concurrency, max_turns,
-                             // wall_clock, verbose, overrides, yolo,
-                             // ancestor_skills, optional BackgroundHub
+                             // tools_default, wall_clock, verbose,
+                             // overrides, yolo, ancestor_skills,
+                             // optional BackgroundHub
 
-pub struct BackgroundHub;    // session-scoped detached jobs, cap 64
+pub struct BackgroundHub;    // session-scoped detached jobs, cap 256
 impl BackgroundHub {
     pub fn new(concurrency: usize) -> BackgroundHub;
     pub fn with_emitter(concurrency: usize, emitter: Emitter) -> BackgroundHub;

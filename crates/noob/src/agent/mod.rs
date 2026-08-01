@@ -29,7 +29,6 @@ use crate::tools::{self, ToolCtx, ToolOutcome};
 use crate::ui::Ui;
 
 /// Locked breaker thresholds (ARCHITECTURE.md, agent loop).
-const TURN_CAP: u32 = 50;
 const DOOM_WINDOW: usize = 12;
 const DOOM_REPEATS: usize = 3;
 /// Tools the repeat intercept never touches: their results are time-varying
@@ -141,8 +140,10 @@ pub struct Agent {
     pub(crate) session_warning: Option<String>,
     /// NOOB_CTX: the context window compaction budgets against.
     pub ctx_tokens: u64,
-    /// Inference rounds allowed per user input. TURN_CAP for the user's
-    /// agent; children run under their (smaller) task turn cap.
+    /// Inference rounds allowed per user input; 0 is unbounded and is the
+    /// default. NOOB_MAX_ROUNDS caps the user's agent, NOOB_TASK_MAX_TURNS
+    /// the children; the doom-loop breaker and the interrupt are what stop a
+    /// stuck run, not an arbitrary round count.
     pub max_rounds: u32,
     /// Rounds the last `run_input` actually used (the child reports it).
     pub last_rounds: u32,
@@ -255,7 +256,7 @@ impl Agent {
             session,
             session_warning: None,
             ctx_tokens,
-            max_rounds: TURN_CAP,
+            max_rounds: 0,
             last_rounds: 0,
             turn_seq: 0,
             fixed_chars,
@@ -675,7 +676,15 @@ impl Agent {
         self.cap_status_batch = false;
         let mut emergency_used = false;
 
-        for round in 0..self.max_rounds {
+        // 0 is unbounded: the loop then runs until the input completes, the
+        // human interrupts, or a breaker (doom loop, consecutive errors)
+        // trips. u32::MAX here is not a cap anyone meets; it keeps the
+        // bounded and unbounded cases one loop.
+        let limit = match self.max_rounds {
+            0 => u32::MAX,
+            n => n,
+        };
+        for round in 0..limit {
             self.last_rounds = round + 1;
             // A bounded child approaching its cap gets one explicit budget
             // nudge before this round's request, so its remaining rounds go
@@ -1985,6 +1994,7 @@ mod tests {
             depth: 0,
             concurrency: 2,
             max_turns: 10,
+            tools_default: String::from("all"),
             wall_clock: std::time::Duration::from_secs(30),
             verbose: false,
             overrides: noob_provider::types::Overrides::default(),

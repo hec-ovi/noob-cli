@@ -232,6 +232,7 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
             depth,
             concurrency: config::task_concurrency(&config_dir, subagent::DEFAULT_CONCURRENCY),
             max_turns: config::task_max_turns(&config_dir, subagent::DEFAULT_MAX_TURNS),
+            tools_default: config::task_tools(&config_dir, subagent::DEFAULT_TOOLS),
             wall_clock: config::task_wall_clock(&config_dir, subagent::DEFAULT_WALL_CLOCK_S),
             verbose: boot.verbose,
             overrides: ov.clone(),
@@ -286,6 +287,8 @@ fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), String> {
         session,
         config::ctx_tokens(&config_dir),
     );
+    // 0 (the default) is unbounded; NOOB_MAX_ROUNDS puts a ceiling back.
+    agent.max_rounds = config::max_rounds(&config_dir, 0);
     let orphaned = agent.repair_orphaned_background_results();
     if orphaned > 0 {
         agent.show_session_warning(ui);
@@ -1335,14 +1338,19 @@ fn cmd_child() -> ExitCode {
          questions (nobody can answer), and NEVER idle in sleep or polling loops: \
          goal done, report, stop.",
     );
-    // Both sides enforce the turn cap: the parent clamped its request; the
-    // child clamps that against its own environment's ceiling.
+    // Both sides can bound the child; 0 on either side is "no bound there".
+    // The tighter of the two nonzero budgets wins, so a parent's setting
+    // cannot be escaped and a child's own environment still counts.
     let env_cap = config::task_max_turns(&agent.config_dir, subagent::DEFAULT_MAX_TURNS);
-    agent.max_rounds = task_obj
+    let sent = task_obj
         .get("max_turns")
         .and_then(serde_json::Value::as_u64)
-        .map(|n| (n as u32).clamp(1, env_cap))
-        .unwrap_or(env_cap);
+        .map_or(0, |n| n as u32);
+    agent.max_rounds = match (sent, env_cap) {
+        (0, env) => env,
+        (sent, 0) => sent,
+        (sent, env) => sent.min(env),
+    };
     // A child that runs out of rounds mid-gathering delivers nothing; nudge
     // it to write the report while budget remains (also covers the web
     // evidence-gate correction run, which reuses the unused budget).
@@ -1358,8 +1366,12 @@ fn cmd_child() -> ExitCode {
     // original child budget. Aborts and interrupts are terminal and pass
     // through untouched.
     if web_only && matches!(&end, RunEnd::Completed(_)) && evidence_calls(&agent) < 2 {
-        let remaining = original_round_cap.saturating_sub(total_rounds);
-        if remaining == 0 {
+        // An unbounded child (cap 0) always has budget for the correction.
+        let remaining = match original_round_cap {
+            0 => 0,
+            cap => cap.saturating_sub(total_rounds),
+        };
+        if original_round_cap > 0 && remaining == 0 {
             end = RunEnd::Aborted(format!(
                 "web research returned without the required 2 websearch evidence calls, and the original {original_round_cap}-round budget is exhausted"
             ));

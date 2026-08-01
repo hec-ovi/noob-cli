@@ -14,12 +14,16 @@ frontmatter, mcp.json entries, and the on/off conventions.
 ```rust
 pub fn config_dir() -> Option<PathBuf>;   // the AGENT's rule: NOOB_CONFIG_DIR,
                                           // /config when present, ~/.config/noob
-pub const ENDPOINT/API_KEY/MODEL/API_STYLE/REASONING/CTX/TASK_CONCURRENCY: &str;
-pub const OWNED: [&str; 2];               // the keys the window edits freely
+pub const ENDPOINT/API_KEY/MODEL/API_STYLE/REASONING/CTX/MAX_ROUNDS/
+          TASK_CONCURRENCY/TASK_MAX_TURNS/TASK_TOOLS/TASK_WALL_CLOCK: &str;
+pub const OWNED: [&str; 6];               // the keys the window edits freely
 pub const AGENTS_MD/TOOLS_MD: &str;  pub const AGENTS_CAP: u64;  // 16 KiB cap
 pub const AGENTS_DEFAULT/TOOLS_DEFAULT: &str;  // the CLI's shipped texts,
                                           // included from its own sources
-pub const CTX_STOPS/TASK_CONCURRENCY_STOPS: [f32; _];  // slider detents
+pub const CTX_STOPS/TASK_CONCURRENCY_STOPS/ROUNDS_STOPS/WALL_CLOCK_STOPS:
+          [f32; _];                       // slider detents; every budget's
+                                          // low end is the CLI's 0, no limit
+pub const TASK_TOOLS_CHOICES: [&str; 3];  // read-only | web | all
 pub const OFF: &str;  pub const DISABLED: &str;          // on-disk toggles
 pub fn is_secret(key: &str) -> bool;      // by name, wrong in the safe way
 pub fn read_tools(dir) -> Instructions;   // TOOLS.md, read like AGENTS.md

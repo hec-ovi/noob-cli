@@ -363,7 +363,11 @@ mod tests {
         cleared.sort_unstable();
         assert_eq!(
             cleared,
-            ["NOOB_CTX", "NOOB_TASK_CONCURRENCY"],
+            {
+                let mut owned = crate::agent::OWNED.to_vec();
+                owned.sort_unstable();
+                owned
+            },
             "the settings the panel writes are not left to the file"
         );
         assert!(
@@ -451,7 +455,11 @@ mod tests {
         cleared.sort_unstable();
         assert_eq!(
             cleared,
-            ["NOOB_CTX", "NOOB_TASK_CONCURRENCY"],
+            {
+                let mut owned = crate::agent::OWNED.to_vec();
+                owned.sort_unstable();
+                owned
+            },
             "the serve child and the env read different settings"
         );
         // The same treatment `serve` gets, which is what makes the two the

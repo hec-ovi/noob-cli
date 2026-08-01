@@ -58,8 +58,10 @@ renders and never decides.
 
 ## Invariants
 
-1. Inference rounds per input are capped (`TURN_CAP` 50 for the user's
-   agent; children clamp their own budget against it).
+1. Inference rounds per input are unbounded by default; NOOB_MAX_ROUNDS
+   caps the user's agent and NOOB_TASK_MAX_TURNS the children (0 is
+   unbounded on both). What stops a stuck run is the doom-loop breaker,
+   the error breaker, and the interrupt, not a round count.
 2. The request prefix is byte-stable across a session: system prompt, tool
    array, and replayed transcript extend byte-exactly, so the provider's
    prompt cache keeps working. Anything that would change the prefix

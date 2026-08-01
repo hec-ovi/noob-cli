@@ -11,7 +11,7 @@ dispatcher parses, with `/help` over all of it.
 ## Public surface
 
 ```rust
-pub const ALL: [Command; 24];    // the registry, in the order the section
+pub const ALL: [Command; 28];    // the registry, in the order the section
                                  // lists it: one entry per command
 pub struct Command;              // name, about (one line), help (the long
                                  // story), args, and what running it means

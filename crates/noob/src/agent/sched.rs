@@ -516,6 +516,7 @@ mod tests {
             depth: 0,
             concurrency: 2,
             max_turns: 10,
+            tools_default: String::from("all"),
             wall_clock: Duration::from_secs(30),
             verbose: false,
             overrides: Default::default(),
