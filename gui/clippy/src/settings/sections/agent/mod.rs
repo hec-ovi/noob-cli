@@ -55,8 +55,8 @@ const AGENT_FIELDS: [(&str, &str, &str); 7] = [
     ),
     (
         agent::TASK_CONCURRENCY,
-        "tasks at once",
-        "NOOB_TASK_CONCURRENCY. Sub-agent tasks at once, capped at sixteen",
+        "max sub-agents",
+        "NOOB_TASK_CONCURRENCY. How many sub-agent tasks may run at once, capped at sixteen",
     ),
 ];
 
@@ -340,6 +340,10 @@ mod tests {
         // it in the sentence under it rather than standing in for the name.
         assert!(text.contains("context window 262144"), "{text}");
         assert!(text.contains("NOOB_CTX."), "{text}");
+        // The concurrency row is named for what it caps, not for a phrase
+        // nobody could map to the key.
+        assert!(text.contains("max sub-agents"), "{text}");
+        assert!(text.contains("sub-agent tasks may run at once"), "{text}");
         assert!(!text.contains("sk-secret"), "a credential is on the panel: {text}");
         assert!(text.contains(&format!("api key {SECRET}")), "{text}");
         assert_eq!(panel.agent_file(), Some(dir.join(".env").as_path()));

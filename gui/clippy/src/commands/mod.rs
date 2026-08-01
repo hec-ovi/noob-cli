@@ -155,8 +155,8 @@ pub const ALL: [Command; 24] = [
         },
     },
     Command {
-        name: "set_tasks_at_once",
-        about: "sub-agent tasks the CLI runs at once",
+        name: "set_max_subagents",
+        about: "the most sub-agent tasks the CLI runs at once",
         help: &[
             "Writes NOOB_TASK_CONCURRENCY in the agent's .env, capped at",
             "sixteen the way the AGENT section's slider is. The CLI reads",
