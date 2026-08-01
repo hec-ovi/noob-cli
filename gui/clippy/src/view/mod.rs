@@ -12563,7 +12563,7 @@ mod tests {
         for wanted in [
             "endpoint",
             "context window",
-            "the agent's file",
+            "THE SETTINGS FILE",
             "http://localhost:8080/v1",
             crate::agent::ENDPOINT,
             crate::agent::CTX,

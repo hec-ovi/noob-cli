@@ -1877,7 +1877,7 @@ impl Settings {
             // it, because that is the other half of reaching a server.
             Row::Card(Card {
             does: None,
-                title: String::from("WHERE THE MODEL IS"),
+                title: String::from("CONNECTION"),
                 fields: vec![
                     CardField::text(
                         "endpoint",
@@ -1892,7 +1892,7 @@ impl Settings {
             }),
             Row::Card(Card {
             does: None,
-                title: String::from("WHICH MODEL IT ASKS FOR"),
+                title: String::from("MODEL"),
                 fields: [agent::MODEL, agent::API_STYLE, agent::REASONING]
                     .into_iter()
                     .map(|key| {
@@ -1903,29 +1903,29 @@ impl Settings {
                 // Said once, on the card, rather than three times under three
                 // fields that cannot be typed into.
                 hint: Some(String::from(
-                    "read out of the file: the endpoint is the one line this window types into",
+                    "read from the settings file; edit them there, or export the variable",
                 )),
             }),
             Row::Card(Card {
             does: None,
-                title: String::from("WHAT THE AGENT GETS"),
+                title: String::from("LIMITS"),
                 fields: vec![ctx, tasks],
                 hint: match unset.is_empty() {
                     true => None,
                     // A slider showing a number nobody wrote, with nothing
                     // saying so, is a window inventing a setting.
                     false => Some(format!(
-                        "not in the file yet: {}. Until then these read what the CLI falls back to, and nudging one writes the line",
+                        "{} not set: showing the built-in default; changing it writes the line",
                         unset.join(" and ")
                     )),
                 },
             }),
             Row::Card(Card {
             does: None,
-                title: String::from("THE FILE ALL OF THIS IS IN"),
+                title: String::from("THE SETTINGS FILE"),
                 fields: vec![
                     CardField::reading(
-                        "the agent's file",
+                        "file",
                         match (&self.agent.env_path, self.agent.env_exists) {
                             // Not there yet is worth saying: an agent configured
                             // entirely by environment has no file at all, and the
@@ -5977,7 +5977,7 @@ something_else = keep me
             agent::TASK_CONCURRENCY_DEFAULT.to_string()
         );
         let text = said(&panel);
-        assert!(text.contains("not in the file yet"), "{text}");
+        assert!(text.contains("not set: showing the built-in default"), "{text}");
         assert!(text.contains(agent::CTX), "{text}");
         assert!(text.contains(agent::TASK_CONCURRENCY), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -6020,10 +6020,10 @@ something_else = keep me
         assert_eq!(
             titles,
             [
-                "WHERE THE MODEL IS",
-                "WHICH MODEL IT ASKS FOR",
-                "WHAT THE AGENT GETS",
-                "THE FILE ALL OF THIS IS IN",
+                "CONNECTION",
+                "MODEL",
+                "LIMITS",
+                "THE SETTINGS FILE",
                 "GLOBAL INSTRUCTIONS \u{2022} AGENTS.md",
                 "THE PROMPT THE AGENT GETS",
             ],
@@ -6086,7 +6086,7 @@ something_else = keep me
         let numbers = panel
             .rows()
             .iter()
-            .position(|row| matches!(row, Row::Card(card) if card.title == "WHAT THE AGENT GETS"))
+            .position(|row| matches!(row, Row::Card(card) if card.title == "LIMITS"))
             .expect("the card of numbers");
         assert!(panel.point_at(numbers, Side::Left));
         assert!(
