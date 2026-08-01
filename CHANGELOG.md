@@ -3,16 +3,62 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
-## 0.10.0 - 2026-08-01
+## 0.11.0 - 2026-08-01
 
-The Linux install is a native package.
+The window's settings grow up: a redesigned panel, sections as boxes, and a
+command for everything.
 
 ### Added
 
 - Slash commands in the NO0B prompt: every settings-panel capability has a
   `/command` (endpoint, limits, skills, MCP servers, sessions, theme, fonts,
-  transparency, colours), `/help` lists them and `/help <name>` explains
-  one, and a COMMANDS section on the settings rail shows the same registry.
+  transparency, colours), `/help` lists them and `/help <name>` explains one,
+  and a read-only COMMANDS section on the settings rail shows the same
+  registry. A line starting with `/` never reaches the agent, and a settings
+  capability without a command fails a test.
+- A SYSTEM PROMPT section: the global `AGENTS.md` as one document, editable
+  in place with a real caret, Ctrl+S saving the whole file by rename, Esc
+  leaving it untouched, and the starter-file offer when there is none. AGENT
+  keeps the inference settings.
+- The SKILLS install is a two-step cycle: validate answers what the typed
+  source would install (or why it would not), and only a source that checks
+  out gets the install button. The standard web-search skill is suggested in
+  the field when it is not installed.
+- MCP has an ADD A SERVER card writing the global `mcp.json`: a name and a
+  command line or an http(s) address; a taken name is refused rather than
+  replaced.
+- Every colour swatch in APPEARANCE is settable: a press opens the value in
+  hand as a hex line, Enter writes the key the swatch names, a refused value
+  is said on the footer and nothing lands.
+
+### Changed
+
+- The settings panel is a frame over seven nested section boxes, each with
+  its own contract, so a change to one section is a change in one folder.
+- The right-click menu: Settings is one row that opens the panel, the widget
+  list flies out to the side on rollover without moving a row, and the hover
+  band runs to the frame.
+- The panel's geometry: the section titles its own body, the gear and
+  SETTINGS head the rail, the list stands a padding off the drag divider,
+  cards keep a gutter between their halves and double room off their
+  borders, sliders are margined and ignore a passing pointer, the rail
+  breathes, and the close cross sits in its corner.
+- The settings list scrolls by rows of text: cut cards draw clipped instead
+  of popping whole, controls press only where whole, and a click never
+  scrolls the list.
+- SESSIONS is called SESSIONS, its table cells stand off their rules, its
+  buttons hang on the footer's right end, the table takes the room under it,
+  and the checkbox inverts on the picked band.
+- The three themes each lead with their own hue, cool in blue and red in
+  red, and the title strip wears the theme too.
+- AGENT reads CONNECTION, MODEL, LIMITS and THE SETTINGS FILE, in plain
+  words.
+
+## 0.10.0 - 2026-08-01
+
+The Linux install is a native package.
+
+### Added
 
 - Releases carry a deb and a tarball per architecture (amd64 and arm64), one
   static musl binary inside, built and published on tag by the release
