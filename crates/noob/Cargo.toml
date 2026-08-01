@@ -11,9 +11,25 @@ repository.workspace = true
 noob-proto.workspace = true
 noob-provider.workspace = true
 serde_json.workspace = true
-libc.workspace = true
 regex.workspace = true
 ignore.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# One crate for the whole Win32 surface the term and exec boxes need. It is
+# target-gated, so the Linux graph and its 45-crate gate never see it.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
 
 [dev-dependencies]
 noob-testkit.workspace = true
