@@ -110,6 +110,10 @@ pub const CTX_HIGH: f32 = 1_048_576.0;
 pub const CTX_STEP: f32 = 4096.0;
 /// What the CLI uses when the key is not set.
 pub const CTX_DEFAULT: u32 = 131_072;
+/// The context windows models actually ship with: detents on the panel's
+/// track, so a drag lands on 64k, 128k or 256k instead of four thousand
+/// either side of one.
+pub const CTX_STOPS: [f32; 3] = [65_536.0, 131_072.0, 262_144.0];
 
 /// The CLI's own bounds for [`TASK_CONCURRENCY`]: at least one, and capped at
 /// sixteen there, so the right end of this track is the maximum the agent will
@@ -119,6 +123,8 @@ pub const TASK_CONCURRENCY_HIGH: f32 = 16.0;
 pub const TASK_CONCURRENCY_STEP: f32 = 1.0;
 /// What the CLI uses when the key is not set (`subagent::DEFAULT_CONCURRENCY`).
 pub const TASK_CONCURRENCY_DEFAULT: u32 = 4;
+/// The two counts worth reaching for: detents on the panel's track.
+pub const TASK_CONCURRENCY_STOPS: [f32; 2] = [3.0, 5.0];
 
 /// The agent's config directory.
 ///

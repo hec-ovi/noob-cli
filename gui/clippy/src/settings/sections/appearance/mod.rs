@@ -115,6 +115,7 @@ pub(crate) const LOOKS: [(&str, Kind); 6] = [
             low: 0.05,
             high: 1.0,
             places: 2,
+            stops: &[],
         },
     ),
     // The window's own, which goes all the way to nothing: the empty space has
@@ -126,6 +127,7 @@ pub(crate) const LOOKS: [(&str, Kind); 6] = [
             low: 0.0,
             high: 1.0,
             places: 2,
+            stops: &[],
         },
     ),
     (
@@ -135,6 +137,7 @@ pub(crate) const LOOKS: [(&str, Kind); 6] = [
             low: 8.0,
             high: 40.0,
             places: 0,
+            stops: &[],
         },
     ),
     (
@@ -144,6 +147,7 @@ pub(crate) const LOOKS: [(&str, Kind); 6] = [
             low: 8.0,
             high: 40.0,
             places: 0,
+            stops: &[],
         },
     ),
     (
@@ -153,6 +157,7 @@ pub(crate) const LOOKS: [(&str, Kind); 6] = [
             low: 1.0,
             high: 24.0,
             places: 0,
+            stops: &[],
         },
     ),
 ];

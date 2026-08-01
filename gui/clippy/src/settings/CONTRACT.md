@@ -96,9 +96,13 @@ Contracts: the view box (Frame, Shape, chrome vocabulary), the config box
 sessions box (the table rows), the design box (scales, icons), the style
 box (colors), the state box (the doc pane type).
 
+A slider's `Kind::Number` can carry detents (`stops`): while a drag passes
+within a small window of one the value snaps to it, each detent is a tick
+drawn on the track, and the keyboard nudge keeps stepping by the plain step.
+
 ## Tests
 
-68 model tests drive key- and click-shaped calls with scratch files: the
+69 model tests drive key- and click-shaped calls with scratch files: the
 frame's 28 (cursor, rail, scroll, sliders, doc viewer, footer) in mod.rs,
 each section's in its own box. Scene-level placement and paint are asserted
 by the view box's rendered-scene tests.

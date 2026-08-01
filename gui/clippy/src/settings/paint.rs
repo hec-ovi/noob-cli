@@ -532,7 +532,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     );
                 }
             }
-            SettingRow::Setting { key, value, .. } => {
+            SettingRow::Setting { key, value, kind, .. } => {
                 let tint = if on { skin.bright } else { skin.body };
                 say(
                     scene,
@@ -565,6 +565,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                             Panel::new(track.x, track.y + up, (track.w * at).floor(), thick)
                                 .fill(skin.gauge),
                         );
+                        settings_track_ticks(scene, track, *kind, line, skin);
                         // The grip: a bar at the position, tall enough to
                         // press, brighter while the pointer is on the track.
                         let grip = CARET_W;

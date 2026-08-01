@@ -17,8 +17,9 @@ pub fn rows(agent: &Agent, prompt: &Assembled) -> Vec<Row>
                                  // snapshot and the prompt state handed in
 pub(crate) const AGENT_SETTINGS: [(&str, Kind); 2]
                                  // NOOB_CTX and NOOB_TASK_CONCURRENCY as
-                                 // tracks, bounds read off the CLI; the frame's
-                                 // slider test walks them
+                                 // tracks, bounds and detents read off the
+                                 // CLI box (64k/128k/256k and 3/5); the
+                                 // frame's slider test walks them
 ```
 
 ## Invariants
@@ -41,5 +42,5 @@ the snapshot, the key names and the bounds.
 ## Tests
 
 Inline: the section's cards, the walkable keyboard, the prompt block, the
-defaults, and the failed-prompt reason (7 tests), driven through the
-frame's `Settings`.
+defaults, the magnetic checkpoints, and the failed-prompt reason (8 tests),
+driven through the frame's `Settings`.

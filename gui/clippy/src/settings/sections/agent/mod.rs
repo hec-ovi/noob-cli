@@ -93,6 +93,7 @@ pub(crate) const AGENT_SETTINGS: [(&str, Kind); 2] = [
             low: agent::CTX_LOW,
             high: agent::CTX_HIGH,
             places: 0,
+            stops: &agent::CTX_STOPS,
         },
     ),
     (
@@ -102,6 +103,7 @@ pub(crate) const AGENT_SETTINGS: [(&str, Kind); 2] = [
             low: agent::TASK_CONCURRENCY_LOW,
             high: agent::TASK_CONCURRENCY_HIGH,
             places: 0,
+            stops: &agent::TASK_CONCURRENCY_STOPS,
         },
     ),
 ];
@@ -482,6 +484,67 @@ mod tests {
             },
         );
         assert!(wrong.is_err(), "the window's file took a setting of the agent's");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The two tracks are magnetic: a drag passing near a checkpoint snaps to
+    /// it, each checkpoint is a tick on the track, and the keyboard nudge
+    /// still steps by the CLI's own unit rather than jumping detent to detent.
+    #[test]
+    fn the_agent_sliders_snap_to_their_checkpoints() {
+        let dir = scratch_dir("agent-detents");
+        std::fs::write(dir.join(".env"), "NOOB_CTX=131072\nNOOB_TASK_CONCURRENCY=2\n")
+            .expect("a file");
+        let mut panel = Settings::open(
+            &Config::default(),
+            None,
+            Agent::read(Some(&dir), None, crate::sessions::Listing::default()),
+        );
+
+        // The context window: a drag two steps past 128k lands on 128k.
+        put_cursor(&mut panel, agent::CTX);
+        let at = panel.cursor();
+        assert!(panel.slide(at, panel.side(), 0.13));
+        assert_eq!(panel.preview(at, panel.side()), Some("131072"));
+        // Far from every checkpoint the plain step is the only snap.
+        assert!(panel.slide(at, panel.side(), 0.5));
+        let free = panel.preview(at, panel.side()).expect("a value");
+        assert!(
+            !agent::CTX_STOPS.iter().any(|stop| free == stop.to_string()),
+            "{free} snapped with no detent near"
+        );
+        panel.drop_slider();
+        // The nudge is the CLI's own step, from a detent as from anywhere.
+        assert_eq!(
+            panel.change(true).expect("a nudge").value,
+            "135168",
+            "a detent bent the arrow keys"
+        );
+
+        // The concurrency track: near five means five, where the plain step
+        // would have said four.
+        put_cursor(&mut panel, agent::TASK_CONCURRENCY);
+        let at = panel.cursor();
+        assert!(panel.slide(at, panel.side(), 0.22));
+        assert_eq!(panel.preview(at, panel.side()), Some("5"));
+        panel.drop_slider();
+
+        // And every checkpoint is a tick on its track, in track order.
+        for (key, kind) in AGENT_SETTINGS {
+            let ticks = kind.stop_fractions();
+            let Kind::Number { stops, .. } = kind else {
+                panic!("{key} is not a track");
+            };
+            assert_eq!(ticks.len(), stops.len(), "{key} loses ticks");
+            assert!(
+                ticks.windows(2).all(|pair| pair[0] < pair[1]),
+                "{key}: the ticks are out of order"
+            );
+            assert!(
+                ticks.iter().all(|tick| (0.0..=1.0).contains(tick)),
+                "{key}: a tick is off the track"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

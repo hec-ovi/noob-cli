@@ -238,8 +238,18 @@ pub enum Kind {
         high: f32,
         /// Decimals to write. Zero, so `font_size` is `14` rather than `14.0`.
         places: usize,
+        /// Detents: the values a drag snaps to when it passes near one, each
+        /// drawn as a tick on the track. Empty for a track with none. The
+        /// keyboard nudge ignores them; a detent is for the pointer, which
+        /// cannot land on a round number by itself.
+        stops: &'static [f32],
     },
 }
+
+/// How close a drag has to pass a detent to snap to it, as a fraction of the
+/// whole track. Wide enough to feel magnetic, narrow enough that two detents
+/// a tenth of the track apart keep the room between them.
+const SNAP: f32 = 0.05;
 
 impl Kind {
     /// Where along a track a value sits, 0 at the low end and 1 at the high.
@@ -262,13 +272,16 @@ impl Kind {
     /// the arrow keys reach and the two cannot disagree about what opacity is.
     /// `the_slider_maps_a_position_to_a_value_and_back` walks the whole track
     /// and fails if a position and its value ever drift by more than the one
-    /// step that snapping costs.
+    /// step that snapping costs. A detent wins over the step: a position
+    /// within [`SNAP`] of one is that value, which is what makes it magnetic
+    /// under a drag.
     pub fn at(self, fraction: f32) -> Option<String> {
         let Kind::Number {
             step,
             low,
             high,
             places,
+            stops,
         } = self
         else {
             return None;
@@ -277,8 +290,26 @@ impl Kind {
             return None;
         }
         let raw = low + fraction.clamp(0.0, 1.0) * (high - low);
+        if let Some(stop) = stops
+            .iter()
+            .find(|stop| (raw - **stop).abs() <= (high - low) * SNAP)
+        {
+            return Some(format!("{stop:.places$}"));
+        }
         let value = (low + ((raw - low) / step).round() * step).clamp(low, high);
         Some(format!("{value:.places$}"))
+    }
+
+    /// Where each detent sits along the track, 0 to 1, for the ticks drawn on
+    /// it. Empty for a kind with none, so a track without detents draws none.
+    pub fn stop_fractions(self) -> Vec<f32> {
+        let Kind::Number { stops, .. } = self else {
+            return Vec::new();
+        };
+        stops
+            .iter()
+            .filter_map(|stop| self.fraction(*stop))
+            .collect()
     }
 }
 
@@ -1927,6 +1958,7 @@ impl Settings {
                 low,
                 high,
                 places,
+                ..
             } => {
                 let now = value.parse::<f32>().unwrap_or(*low);
                 let next = (now + if forward { *step } else { -*step }).clamp(*low, *high);
@@ -3569,6 +3601,7 @@ mod tests {
                 low,
                 high,
                 places,
+                stops,
             } = kind
             else {
                 unreachable!("filtered to the numbers")
@@ -3582,11 +3615,19 @@ mod tests {
                     number >= low - f32::EPSILON && number <= high + f32::EPSILON,
                     "{value} is outside {low}..{high}"
                 );
-                let back = kind.fraction(number).expect("and back");
-                assert!(
-                    (back - fraction).abs() <= a_step,
-                    "{fraction} became {value}, which is at {back}: more than the one step of {a_step} snapping costs"
-                );
+                // Inside a detent's window the position means the detent, which
+                // is the magnet; everywhere else the step is the only snap.
+                let raw = low + fraction * (high - low);
+                match stops.iter().find(|stop| (raw - **stop).abs() <= (high - low) * SNAP) {
+                    Some(stop) => assert_eq!(number, *stop, "{fraction} missed its detent"),
+                    None => {
+                        let back = kind.fraction(number).expect("and back");
+                        assert!(
+                            (back - fraction).abs() <= a_step,
+                            "{fraction} became {value}, which is at {back}: more than the one step of {a_step} snapping costs"
+                        );
+                    }
+                }
             }
             // Both ends are reachable, which is what a track has to be able to
             // say: an opacity slider that cannot reach 1 is a window that can
@@ -3620,6 +3661,7 @@ mod tests {
             low: 0.05,
             high: 1.0,
             places: 2,
+            stops: &[],
         };
         assert_eq!(panel.fraction(at, panel.side()), opacity.fraction(0.5));
 

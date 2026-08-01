@@ -534,7 +534,7 @@ pub(crate) fn settings_card_field(
         // at against the right edge of the same room. Nothing changes on
         // rollover: a slider that lights up under a passing pointer read as a
         // selection effect nobody asked for, the same rule the flat rows keep.
-        (SettingRow::Setting { .. }, Some(track)) if track.w >= 1.0 => {
+        (SettingRow::Setting { kind, .. }, Some(track)) if track.w >= 1.0 => {
             let thick = (line * 0.3).floor().max(2.0);
             let up = ((line - thick) * 0.5).floor();
             let along = panel.fraction(index, side).unwrap_or(0.0);
@@ -543,6 +543,7 @@ pub(crate) fn settings_card_field(
                 Panel::new(track.x, track.y + up, (track.w * along).floor(), thick)
                     .fill(skin.gauge),
             );
+            settings_track_ticks(scene, track, *kind, line, skin);
             scene.rect(
                 Panel::new(
                     track.x + ((track.w - CARET_W) * along).floor(),
@@ -618,6 +619,26 @@ pub(crate) fn settings_card_field(
         }
     }
     settings_card_hint(scene, field, slot, line, size, column, skin);
+}
+
+/// The ticks on a slider's track, one per detent: a mark at each value the
+/// drag snaps to, so the checkpoints can be seen before the thumb feels them.
+///
+/// Drawn where the fractions say, off the same [`crate::settings::Kind`] the
+/// snap itself reads, so a tick and the value it magnets to cannot drift.
+pub(crate) fn settings_track_ticks(
+    scene: &mut Scene,
+    track: Panel,
+    kind: crate::settings::Kind,
+    line: f32,
+    skin: &Skin,
+) {
+    let tall = (line * 0.6).floor().max(4.0);
+    let up = ((line - tall) * 0.5).floor();
+    for at in kind.stop_fractions() {
+        let x = track.x + ((track.w - 1.0) * at).floor();
+        scene.rect(Panel::new(x, track.y + up, 1.0, tall).fill(skin.edge_focus));
+    }
 }
 
 /// The sentence under a field, in the hint role: what this field decides, and
