@@ -79,20 +79,16 @@
 //! session cannot disagree. [`Deed`] is what a press asks for and `main` is
 //! what does it, the same way a [`Change`] is written there and not here.
 //!
-//! **The agent's section is cards, and it shows what the agent is really
-//! told.** Four things anybody opens it for were seven rows apart, with a
-//! heading and three notes standing between them, and half of what was left
-//! was a raw environment key over a value with nothing saying what either
-//! meant. It is five cards now ([`Row::Card`]): where the model is, which model
-//! it asks for, what the agent gets, the file all of it is written in, and
-//! whatever else that file carries. Every field is a plain-words label over its
-//! value with the key and what it decides in one sentence under it, and the
-//! shifted arrow crosses between the two fields of a card because the plain
-//! arrow keys are the nudge. Under the cards is one block ([`Row::Paper`]), a
-//! card itself: the whole assembled prompt out of `noob debug prompt`, and
-//! while the command has not answered the block says it is waiting. The global
-//! `AGENTS.md`, one capped layer of that prompt, is the [`PROMPT`] section's
-//! own document.
+//! **The agent's section is cards.** Four things anybody opens it for were
+//! seven rows apart, with a heading and three notes standing between them, and
+//! half of what was left was a raw environment key over a value with nothing
+//! saying what either meant. It is cards now ([`Row::Card`]): where the model
+//! is, which model it asks for, what the agent gets, the file all of it is
+//! written in, and whatever else that file carries. Every field is a
+//! plain-words label over its value with the key and what it decides in one
+//! sentence under it, and the shifted arrow crosses between the two fields of
+//! a card because the plain arrow keys are the nudge. The prompt's own files
+//! are the [`PROMPT`] section's documents.
 //!
 //! **Two of the agent's own settings are controls, not readings.** Everything
 //! in the CLI's `.env` was listed as text with the endpoint as the only thing
@@ -576,8 +572,8 @@ pub fn card_hints(card: &Card) -> Vec<bool> {
 
 /// A block of text on the panel, with a title over it.
 ///
-/// Its own row rather than one row per line: the assembled prompt is thousands
-/// of lines, and a section that carried them would be a text file with four
+/// Its own row rather than one row per line: a document can be hundreds of
+/// lines, and a section that carried them would be a text file with four
 /// settings buried at the top of it. The block is a fixed [`PAPER_LINES`] tall
 /// and scrolls inside itself, so the rows under it stay where they are.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1103,22 +1099,6 @@ struct Place {
     tables: Vec<(usize, usize, usize, Vec<String>)>,
 }
 
-/// What `noob debug prompt` answered, which is the only place the whole
-/// assembled prompt exists.
-///
-/// Not a file and not a frame: the protocol carries no prompt, and `AGENTS.md`
-/// is one capped layer of one. The window runs the CLI's own subcommand off the
-/// interface thread and this is what comes back.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Assembled {
-    /// The command has been started and has not answered yet.
-    Waiting,
-    /// It printed a prompt, read in the folder named.
-    Got { at: String, body: Vec<String> },
-    /// It failed, and why.
-    Failed { at: String, why: String },
-}
-
 pub struct Settings {
     sections: Vec<Section>,
     /// Which section the rail is on, which is the one whose rows are beside it.
@@ -1158,8 +1138,6 @@ pub struct Settings {
     /// Why the last change did not land. Cleared by the next refresh, since a
     /// refresh only happens after a write that worked.
     trouble: Option<String>,
-    /// The whole prompt the agent is given, once the CLI has printed it.
-    prompt: Assembled,
     /// The skills section's own state: the install field, the validate
     /// verdict and the install cycle ([`sections::skills::SkillsSection`]).
     skills: sections::skills::SkillsSection,
@@ -1186,7 +1164,6 @@ impl Settings {
             arming: None,
             file: file.map(PathBuf::from),
             trouble: None,
-            prompt: Assembled::Waiting,
             // The skills box decides its own opening state, the web-search
             // suggestion included.
             skills: sections::skills::SkillsSection::new(&agent.skills),
@@ -1314,24 +1291,6 @@ impl Settings {
         self.refresh(config);
     }
 
-    /// Take what `noob debug prompt` answered, from the thread that ran it.
-    ///
-    /// The rows are rebuilt rather than patched, the same as every other thing
-    /// that arrives: the block says what the command said, and nothing about it
-    /// is assembled here.
-    pub fn adopt_prompt(
-        &mut self,
-        at: String,
-        answer: Result<Vec<String>, String>,
-        config: &Config,
-    ) {
-        self.prompt = match answer {
-            Ok(body) => Assembled::Got { at, body },
-            Err(why) => Assembled::Failed { at, why },
-        };
-        self.refresh(config);
-    }
-
     /// Rebuild the rows from the files as they now read, keeping the cursor
     /// where it was. Called after a change has been written and read back.
     pub fn refresh(&mut self, config: &Config) {
@@ -1447,7 +1406,7 @@ impl Settings {
             .into_iter()
             .map(|name| {
                 let rows = match name {
-                    AGENT => sections::agent::rows(&self.agent, &self.prompt),
+                    AGENT => sections::agent::rows(&self.agent),
                     PROMPT => self.prompt_section.rows(&self.agent),
                     SESSIONS => sections::sessions::rows(&self.agent),
                     SKILLS => self.skills.rows(&self.agent),
@@ -4288,24 +4247,20 @@ mod tests {
     /// nothing once the block was at its end.
     #[test]
     fn the_wheel_over_a_block_reads_it_and_goes_on_to_the_list_at_its_end() {
-        let dir = scratch_dir("agent-block-wheel");
+        let dir = scratch_dir("prompt-block-wheel");
+        let long: Vec<String> = (0..PAPER_LINES * 3).map(|at| format!("line {at}")).collect();
+        std::fs::write(dir.join(crate::agent::AGENTS_MD), long.join("\n")).expect("a file");
         let mut panel = Settings::open(
             &Config::default(),
             None,
             Agent::read(Some(&dir), None, crate::sessions::Listing::default()),
         );
-        go_to(&mut panel, AGENT);
-        panel.adopt_prompt(
-            String::from("/home/hec/workspace/noob-cli"),
-            Ok((0..PAPER_LINES * 3).map(|at| format!("line {at}")).collect()),
-            &Config::default(),
-        );
-        go_to(&mut panel, AGENT);
+        go_to(&mut panel, PROMPT);
         let at = panel
             .rows()
             .iter()
-            .position(|row| matches!(row, Row::Paper(paper) if paper.title.contains("PROMPT")))
-            .expect("the prompt block");
+            .position(|row| matches!(row, Row::Paper(paper) if !paper.body.is_empty()))
+            .expect("the document block");
         let (rows, cols) = (12, 80);
 
         // Over the block: the block moves and the section does not.
@@ -4342,25 +4297,17 @@ mod tests {
     /// block did.
     #[test]
     fn a_block_says_how_much_of_it_is_off_screen_and_a_short_one_says_nothing() {
-        let dir = scratch_dir("agent-block-extent");
-        let mut panel = Settings::open(
-            &Config::default(),
-            None,
-            Agent::read(Some(&dir), None, crate::sessions::Listing::default()),
-        );
-        go_to(&mut panel, AGENT);
+        let dir = scratch_dir("prompt-block-extent");
+        let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
         let body: Vec<String> = (0..PAPER_LINES * 4).map(|at| format!("line {at}")).collect();
-        panel.adopt_prompt(
-            String::from("/home/hec/workspace/noob-cli"),
-            Ok(body.clone()),
-            &Config::default(),
-        );
-        go_to(&mut panel, AGENT);
+        std::fs::write(dir.join(crate::agent::AGENTS_MD), body.join("\n")).expect("a file");
+        let mut panel = Settings::open(&Config::default(), None, read());
+        go_to(&mut panel, PROMPT);
         let at = panel
             .rows()
             .iter()
-            .position(|row| matches!(row, Row::Paper(paper) if paper.title.contains("PROMPT")))
-            .expect("the prompt block");
+            .position(|row| matches!(row, Row::Paper(paper) if !paper.body.is_empty()))
+            .expect("the document block");
 
         // A quarter of it is on screen, so the thumb is a quarter of the track
         // and it starts at the top.
@@ -4396,12 +4343,9 @@ mod tests {
 
         // And a block that is already all on screen has no bar at all.
         let short: Vec<String> = (0..PAPER_LINES - 2).map(|at| format!("line {at}")).collect();
-        panel.adopt_prompt(
-            String::from("/home/hec/workspace/noob-cli"),
-            Ok(short),
-            &Config::default(),
-        );
-        go_to(&mut panel, AGENT);
+        std::fs::write(dir.join(crate::agent::AGENTS_MD), short.join("\n")).expect("a file");
+        panel.adopt_agent(read(), &Config::default());
+        go_to(&mut panel, PROMPT);
         assert_eq!(
             panel.paper(at).expect("the block").thumb(PAPER_LINES),
             None,

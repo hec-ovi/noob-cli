@@ -15,8 +15,7 @@ rectangles.
 One folder, one contract each; a design change to one section happens inside
 its folder alone:
 
-- [`sections/agent`](sections/agent/CONTRACT.md) - the CLI's file as cards,
-  the assembled-prompt block.
+- [`sections/agent`](sections/agent/CONTRACT.md) - the CLI's file as cards.
 - [`sections/prompt`](sections/prompt/CONTRACT.md) - the global AGENTS.md
   as one document, edited in place, with the starter offer.
 - [`sections/sessions`](sections/sessions/CONTRACT.md) - the saved
@@ -102,7 +101,7 @@ drawn on the track, and the keyboard nudge keeps stepping by the plain step.
 
 ## Tests
 
-69 model tests drive key- and click-shaped calls with scratch files: the
+67 model tests drive key- and click-shaped calls with scratch files: the
 frame's 28 (cursor, rail, scroll, sliders, doc viewer, footer) in mod.rs,
 each section's in its own box. Scene-level placement and paint are asserted
 by the view box's rendered-scene tests.

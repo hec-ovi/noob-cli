@@ -1,13 +1,12 @@
 //! The AGENT section: what the CLI is pointed at, out of the file the CLI
-//! owns, and the whole assembled prompt under it.
+//! owns.
 //!
 //! One of the settings panel's nested section boxes. It builds rows out of the
 //! shared vocabulary in [`crate::settings`] and owns the plain-words names for
-//! the agent's env keys; the frame owns the cursor, the writes, and the
-//! [`Assembled`] prompt state it hands in here.
+//! the agent's env keys; the frame owns the cursor and the writes.
 
 use crate::agent::{self, Agent};
-use crate::settings::{Assembled, Card, CardField, File, Kind, Paper, Row, SECRET, UNSET};
+use crate::settings::{Card, CardField, File, Kind, Row, SECRET, UNSET};
 
 /// The keys of the agent's file this section draws a field of its own for: what
 /// to call each one in plain words, and the sentence under it.
@@ -125,8 +124,7 @@ fn agent_default(key: &str) -> String {
 ///
 /// Cards, in the order somebody meeting this window needs them: where the
 /// model is, which model it is, how much the agent gets, the file all of it
-/// is written in, and whatever else that file carries. Then the whole
-/// assembled prompt, a card as well.
+/// is written in, and whatever else that file carries.
 ///
 /// "actually is awful as is now, unclear because has too many lines
 /// between". It was a two column form of raw environment keys with three
@@ -135,7 +133,7 @@ fn agent_default(key: &str) -> String {
 /// act on. Every field is a plain-words label over its value now, with the
 /// key and what it decides in one sentence under it, and the space between
 /// them is the card rather than a line.
-pub fn rows(agent: &Agent, prompt: &Assembled) -> Vec<Row> {
+pub fn rows(agent: &Agent) -> Vec<Row> {
     let mut unset = Vec::new();
     let mut numbers = Vec::new();
     for (key, kind) in AGENT_SETTINGS {
@@ -248,9 +246,6 @@ pub fn rows(agent: &Agent, prompt: &Assembled) -> Vec<Row> {
             )),
         }));
     }
-    // The prompt last, and nothing under it: it is a screenful, and a field
-    // below it is a field nobody scrolls to.
-    rows.push(Row::Paper(prompt_paper(prompt)));
     rows
 }
 
@@ -267,52 +262,13 @@ fn env_says(agent: &Agent, key: &str) -> String {
     }
 }
 
-/// The whole prompt, exactly as the CLI assembles it.
-///
-/// The global `AGENTS.md` (the SYSTEM PROMPT section's own document) is one
-/// layer of this: the prompt also carries the CLI's own base instructions,
-/// the environment block, the project's own AGENTS.md, the skills resolver
-/// and the MCP line. Only `noob debug prompt` returns all of it, so that is
-/// what this block shows, and while it is running or after it has failed the
-/// block says which of the two happened.
-fn prompt_paper(prompt: &Assembled) -> Paper {
-    let title = String::from("THE PROMPT THE AGENT GETS");
-    match prompt {
-        Assembled::Waiting => Paper {
-            title,
-            under: String::from("running noob debug prompt\u{2026}"),
-            body: Vec::new(),
-            first: 0,
-            offer: None,
-            bad: false,
-        },
-        Assembled::Got { at, body } => Paper {
-            title,
-            under: format!("noob debug prompt, run in {at}"),
-            body: body.clone(),
-            first: 0,
-            offer: None,
-            bad: false,
-        },
-        Assembled::Failed { at, why } => Paper {
-            title,
-            under: format!("{why} (run in {at})"),
-            body: Vec::new(),
-            first: 0,
-            offer: None,
-            bad: true,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
     use crate::settings::testing::*;
     use crate::settings::{
-        card_is_reachable, commit, landable, lines, paper_body_lines, write_endpoint, Change,
-        Settings, Side, AGENT, PAPER_LINES,
+        card_is_reachable, commit, landable, write_endpoint, Change, Settings, Side, AGENT,
     };
     use std::path::Path;
 
@@ -600,25 +556,18 @@ mod tests {
         );
         go_to(&mut panel, AGENT);
 
-        // Cards, in the order somebody needs them, and the prompt last.
+        // Cards, in the order somebody needs them.
         let titles: Vec<String> = panel
             .rows()
             .iter()
             .map(|row| match row {
                 Row::Card(card) => card.title.clone(),
-                Row::Paper(paper) => paper.title.clone(),
                 other => panic!("the section carries a loose row: {other:?}"),
             })
             .collect();
         assert_eq!(
             titles,
-            [
-                "CONNECTION",
-                "MODEL",
-                "LIMITS",
-                "THE SETTINGS FILE",
-                "THE PROMPT THE AGENT GETS",
-            ],
+            ["CONNECTION", "MODEL", "LIMITS", "THE SETTINGS FILE"],
             "{titles:?}"
         );
 
@@ -718,8 +667,8 @@ mod tests {
             );
         }
 
-        // Up and down walk the cards that can be set and the prompt block, and
-        // every one of them is reachable from the top.
+        // Up and down walk the cards that can be set, and every one of them is
+        // reachable from the top.
         assert!(panel.jump(false));
         let mut seen = vec![panel.cursor()];
         while panel.step(true) {
@@ -727,22 +676,19 @@ mod tests {
         }
         assert_eq!(
             seen,
-            vec![0, numbers, numbers + 2],
+            vec![0, numbers],
             "the keyboard cannot walk the section: {seen:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Every key of the agent's file is on a card above the prompt block, the
-    /// one this window has no control for included.
+    /// Every key of the agent's file is on a card, the one this window has no
+    /// control for included.
     ///
-    /// The rest of the environment used to be pushed on after the block, which
-    /// left it about thirty lines under the rows it reads with: the section went
-    /// form, a document, and then more form. A key the window has never heard of
-    /// is still a key the agent reads, so it is on the last card rather than
-    /// dropped.
+    /// A key the window has never heard of is still a key the agent reads, so
+    /// it is on the last card rather than dropped.
     #[test]
-    fn the_agent_cards_keep_every_key_above_the_block() {
+    fn the_agent_cards_keep_every_key() {
         let dir = scratch_dir("agent-form-order");
         std::fs::write(
             dir.join(".env"),
@@ -756,26 +702,13 @@ mod tests {
         );
         go_to(&mut panel, AGENT);
         let rows = panel.rows().to_vec();
-        let first_block = rows
-            .iter()
-            .position(|row| matches!(row, Row::Paper(_)))
-            .unwrap_or_else(|| panic!("there is no block at all: {rows:?}"));
-        assert!(
-            matches!(&rows[first_block], Row::Paper(paper) if paper.title.contains("PROMPT")),
-            "the block is not the prompt: {:?}",
-            rows[first_block]
-        );
         // Every key in the file: the four with a field of their own by the name
         // and the sentence that field carries, and the one nothing here knows
         // about by its own key, on the card that holds the rest of the file.
         for key in ["NOOB_API_KEY", "NOOB_MODEL", "NOOB_TIMEOUT"] {
-            let at = rows
-                .iter()
-                .position(|row| says(row).contains(key))
-                .unwrap_or_else(|| panic!("{key} is not on the section: {rows:?}"));
             assert!(
-                at < first_block,
-                "{key} is row {at}, under the block at {first_block}"
+                rows.iter().any(|row| says(row).contains(key)),
+                "{key} is not on the section: {rows:?}"
             );
         }
         let rest = rows
@@ -793,127 +726,7 @@ mod tests {
             ["NOOB_TIMEOUT"],
             "a key with a field of its own is listed twice"
         );
-        assert!(
-            rows[first_block..].iter().all(|row| matches!(row, Row::Paper(_))),
-            "there is a card under the blocks: {:?}",
-            &rows[first_block..]
-        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The block under the form: the whole prompt the agent gets.
-    ///
-    /// The prompt carries the CLI's base instructions, the environment block,
-    /// both AGENTS.md layers, the skills resolver and the MCP line, and only
-    /// `noob debug prompt` returns all of it. The block is a fixed height and
-    /// reads with the page keys, so a prompt a thousand lines long does not
-    /// turn the section into a text file.
-    #[test]
-    fn the_agent_section_carries_the_whole_prompt() {
-        let dir = scratch_dir("agent-prompt-block");
-        let mut panel = Settings::open(
-            &Config::default(),
-            None,
-            Agent::read(Some(&dir), None, crate::sessions::Listing::default()),
-        );
-        go_to(&mut panel, AGENT);
-
-        let block = |panel: &Settings, title: &str| -> Paper {
-            panel
-                .rows()
-                .iter()
-                .find_map(|row| match row {
-                    Row::Paper(paper) if paper.title.contains(title) => Some(paper.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| panic!("there is no {title} block: {:?}", panel.rows()))
-        };
-        // Until the CLI answers, the prompt block says it is being read rather
-        // than drawing an empty box.
-        assert!(
-            block(&panel, "PROMPT").under.contains("running"),
-            "{}",
-            block(&panel, "PROMPT").under
-        );
-        let body: Vec<String> = (0..PAPER_LINES * 3).map(|at| format!("line {at}")).collect();
-        panel.adopt_prompt(
-            String::from("/home/hec/workspace/noob-cli"),
-            Ok(body.clone()),
-            &Config::default(),
-        );
-        go_to(&mut panel, AGENT);
-        let whole = block(&panel, "PROMPT");
-        assert_eq!(whole.body, body);
-        assert!(whole.under.contains("/home/hec/workspace/noob-cli"), "{}", whole.under);
-
-        // A block is the same height whatever is in it, which is what keeps the
-        // rows under it where the clicks below them are tested for. It is a card
-        // like every other row of the section: its title in the header, where
-        // the text came from and the text itself in the body.
-        let at = panel
-            .rows()
-            .iter()
-            .position(|row| matches!(row, Row::Paper(paper) if paper.title.contains("PROMPT")))
-            .expect("the prompt block");
-        let tall = crate::design::card_row_lines(paper_body_lines(), false);
-        assert!(tall > PAPER_LINES, "a block shows fewer lines than it holds");
-        assert_eq!(lines(panel.row(at).expect("the row"), COLS), tall);
-        assert_eq!(panel.heights(COLS)[at], tall, "the model and the window disagree");
-
-        // And it is read with the page keys: the cursor is on it, the block
-        // moves and the list under it does not.
-        assert!(panel.point_at(at, Side::Left));
-        assert!(panel.hint().contains("page"), "{}", panel.hint());
-        let was = panel.first();
-        assert!(panel.page(20, true));
-        assert_eq!(panel.paper(at).expect("the block").first, PAPER_LINES);
-        assert_eq!(panel.cursor(), at, "reading the block walked the list");
-        assert_eq!(panel.first(), was, "reading the block scrolled the section");
-        assert!(panel.page(20, false));
-        assert_eq!(panel.paper(at).expect("the block").first, 0);
-        assert!(!panel.page(20, false), "it scrolled past its own first line");
-
-        // Home and End take it the whole way, which is the pair of keys every
-        // other scrolling thing in this window answers. The wheel used to be the
-        // only route to the end of a block.
-        assert!(panel.jump(true));
-        assert_eq!(
-            panel.paper(at).expect("the block").first,
-            body.len() - PAPER_LINES,
-            "End did not reach the last screenful"
-        );
-        assert_eq!(panel.first(), was, "reading the block scrolled the section");
-        assert!(!panel.jump(true), "it jumped past its own last screenful");
-        assert!(panel.jump(false));
-        assert_eq!(panel.paper(at).expect("the block").first, 0);
-        assert!(!panel.jump(false), "it jumped past its own first line");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A prompt the CLI would not print says why instead of showing nothing.
-    #[test]
-    fn a_failed_prompt_says_why() {
-        let dir = scratch_dir("agent-prompt-failed");
-        let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
-        let mut panel = Settings::open(&Config::default(), None, read());
-        go_to(&mut panel, AGENT);
-        panel.adopt_prompt(
-            String::from("/tmp/work"),
-            Err(String::from("noob debug prompt failed: no such subcommand")),
-            &Config::default(),
-        );
-        go_to(&mut panel, AGENT);
-        let prompt = panel
-            .rows()
-            .iter()
-            .find_map(|row| match row {
-                Row::Paper(paper) if paper.title.contains("PROMPT") => Some(paper),
-                _ => None,
-            })
-            .expect("the prompt block");
-        assert!(prompt.bad, "a failure is not marked as one");
-        assert!(prompt.under.contains("no such subcommand"), "{}", prompt.under);
-        assert!(prompt.under.contains("/tmp/work"), "{}", prompt.under);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

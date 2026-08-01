@@ -1006,17 +1006,12 @@ struct App {
     /// is being dragged. The same cycle again, on the panel: the value follows
     /// the pointer and the file is written once, when the button comes up.
     sliding: Option<(usize, settings::Side)>,
-    /// The thread reading the whole prompt out of the CLI, while it is still
-    /// reading it. Dropped as soon as it answers, so a panel opened twice does
-    /// not take the first run's answer for the second one's.
-    asking: Option<std::sync::mpsc::Receiver<link::Asked>>,
     /// The thread installing a skill, while it is still installing it: the
     /// source it was given, and the name it landed under or why it did not.
     ///
-    /// Its own thread for the same reason the prompt has one, only more so: a
-    /// clone is given two minutes and the interface is one thread. Some, so a
-    /// second press while one is running is refused rather than starting a race
-    /// between two installs for one directory.
+    /// Its own thread because a clone is given two minutes and the interface
+    /// is one thread. Some, so a second press while one is running is refused
+    /// rather than starting a race between two installs for one directory.
     installing: Option<std::sync::mpsc::Receiver<(String, Result<String, String>)>>,
     /// Whether the running install was asked for by a /command, so its
     /// answer goes to the transcript rather than only to a panel that may
@@ -1146,7 +1141,6 @@ impl App {
             holding: None,
             sizing: None,
             sliding: None,
-            asking: None,
             installing: None,
             install_from_command: false,
             selecting: false,
@@ -1420,57 +1414,6 @@ impl App {
             self.settings_path().as_deref(),
             self.read_agent(),
         ));
-        self.ask_for_prompt();
-        self.dirty = true;
-    }
-
-    /// Ask the CLI what the whole prompt is, on a thread of its own.
-    ///
-    /// The panel shows what the agent is really told, and the only thing that
-    /// knows that is the CLI: `noob debug prompt` prints the artifact a session
-    /// sends. It reads a config directory, a workspace and every skill on the
-    /// machine, so it runs off the interface thread and wakes the event loop
-    /// when it answers, the same way the agent's own output arrives. A slow
-    /// endpoint or a big skills directory cannot hold up a frame.
-    fn ask_for_prompt(&mut self) {
-        let program = std::env::var("NOOB_BIN").unwrap_or_else(|_| String::from("noob"));
-        // The folder the session is running in, since the project's own
-        // AGENTS.md, its skills and its mcp.json are all found relative to it. A
-        // window with no folder open yet asks in the one the process is in,
-        // which is where a session started now would run.
-        let workspace = match self.state.workspace.is_empty() {
-            false => PathBuf::from(&self.state.workspace),
-            true => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        };
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.asking = Some(rx);
-        let proxy = self.proxy.clone();
-        let at = workspace.display().to_string();
-        std::thread::spawn(move || {
-            let answer = match link::prompt_command(&program, &workspace, &agent::OWNED).output() {
-                Ok(out) => link::prompt_from(out.status.success(), &out.stdout, &out.stderr),
-                Err(e) => Err(format!(
-                    "cannot run {program:?}: {e}; is noob on PATH, or set NOOB_BIN"
-                )),
-            };
-            let _ = tx.send((at, answer));
-            let _ = proxy.send_event(Wake);
-        });
-    }
-
-    /// Take what that thread answered, if it has.
-    fn take_prompt(&mut self) {
-        let Some(rx) = self.asking.as_ref() else {
-            return;
-        };
-        let Ok((at, answer)) = rx.try_recv() else {
-            return;
-        };
-        self.asking = None;
-        let config = self.config.clone();
-        if let Some(panel) = self.settings.as_mut() {
-            panel.adopt_prompt(at, answer, &config);
-        }
         self.dirty = true;
     }
 
@@ -1479,9 +1422,8 @@ impl App {
     ///
     /// Never through [`App::do_deed`], which is synchronous: a clone is given
     /// two minutes and a window frozen for two minutes is a window that has
-    /// crashed as far as anybody watching it is concerned. The same shape the
-    /// prompt block runs in instead: a thread, a channel, and a wake of the
-    /// event loop when it answers.
+    /// crashed as far as anybody watching it is concerned. A thread, a
+    /// channel, and a wake of the event loop when it answers.
     /// Answer the validate press: what the typed source would install, or
     /// why it would not, said under the card. Synchronous on purpose: the
     /// check reads a string and at most a local directory.
@@ -2698,12 +2640,8 @@ impl App {
 
     fn drain(&mut self) {
         // Before the agent's own frames and outside the check for one: the
-        // prompt is read whether or not a session is running, and the panel can
-        // be open on a window that has no agent at all.
-        self.take_prompt();
-        // The same, for the skill being installed: it answers on its own thread
-        // and wakes the loop, and a window with no agent running still has to
-        // pick the answer up.
+        // skill being installed answers on its own thread and wakes the loop,
+        // and a window with no agent running still has to pick the answer up.
         self.take_install();
         let Some(link) = self.link.as_mut() else {
             return;

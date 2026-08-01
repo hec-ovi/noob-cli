@@ -21,8 +21,6 @@ impl Link {
     pub fn shutdown(&mut self);
 }
 pub fn command_for(...);     // which noob binary, and its argv
-pub fn prompt_command(program: &str, workspace: &Path, clear: &[&str]) -> Command;
-pub fn prompt_from(ok: bool, stdout: &[u8], stderr: &[u8]) -> Result<Vec<String>, String>;
 ```
 
 ## Invariants
@@ -41,4 +39,4 @@ surface it drives; nothing deeper in the CLI).
 
 ## Tests
 
-Inline: frame decode paths, trouble surfacing, prompt parsing (5 tests).
+Inline: frame decode paths, trouble surfacing, a missing binary (3 tests).

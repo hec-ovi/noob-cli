@@ -264,8 +264,7 @@ fn file_card(agent: &Agent) -> Card {
 
 /// The document itself, under the file's own name.
 ///
-/// Not called the prompt. It is one capped layer of one; the whole assembled
-/// prompt is the AGENT section's block, out of `noob debug prompt`.
+/// Not called the prompt: it is one capped layer of one.
 fn document(agent: &Agent) -> Paper {
     let it = &agent.instructions;
     let title = String::from("AGENTS.md");

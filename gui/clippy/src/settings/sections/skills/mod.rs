@@ -25,10 +25,9 @@ pub const WEBSEARCH_SUGGESTION: &str = "hec-ovi/websearch-skill";
 
 /// What the install of a skill is doing.
 ///
-/// The same three states the assembled prompt has
-/// ([`crate::settings::Assembled`]), for the same reason: a clone is given two
-/// minutes, so the panel has to be able to say it is running, and a failure has
-/// to be readable rather than a window that did nothing.
+/// Three states, because a clone is given two minutes, so the panel has to be
+/// able to say it is running, and a failure has to be readable rather than a
+/// window that did nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Installing {
     /// It has been started and has not answered yet.

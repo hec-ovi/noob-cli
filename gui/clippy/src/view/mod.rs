@@ -12621,7 +12621,7 @@ mod tests {
     }
 
     /// An agent with instructions of its own, for the system prompt section's
-    /// document and the block at the bottom of the AGENT section.
+    /// document.
     fn an_agent_with_instructions() -> crate::agent::Agent {
         crate::agent::Agent {
             instructions: crate::agent::Instructions {
@@ -12647,12 +12647,7 @@ mod tests {
     /// be named with.
     #[test]
     fn the_agent_cards_draw_a_labelled_field_for_everything_they_hold() {
-        let mut panel = a_panel_on(&Config::default(), crate::settings::AGENT);
-        panel.adopt_prompt(
-            String::from("/home/hec/workspace/noob-cli"),
-            Ok(vec![String::from("You are noob.")]),
-            &Config::default(),
-        );
+        let panel = a_panel_on(&Config::default(), crate::settings::AGENT);
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let layout = &out.layout;
         let line = Text::line_for(PANE_TEXT.0);
@@ -12813,11 +12808,10 @@ mod tests {
         }
     }
 
-    /// The two documents draw where they live: the global AGENTS.md on the
-    /// SYSTEM PROMPT section, the whole prompt under the AGENT cards. Both
-    /// draw their title and their text.
+    /// The document draws where it lives: the global AGENTS.md on the SYSTEM
+    /// PROMPT section, with its title, its path and its text.
     #[test]
-    fn the_system_prompt_draws_the_document_and_the_agent_draws_the_prompt() {
+    fn the_system_prompt_draws_the_document() {
         let mut panel = Settings::open(
             &Config::default(),
             None,
@@ -12844,42 +12838,15 @@ mod tests {
         assert!(text.contains("Global instructions"), "{text}");
         assert!(!text.contains("# Global instructions"), "{text}");
 
-        // And the prompt on the AGENT section, under a title of its own that
-        // says where it came from. The file is never called the prompt: it is
-        // one layer of it.
-        let at = panel
-            .section_names()
-            .iter()
-            .position(|name| *name == crate::settings::AGENT)
-            .expect("the agent section");
-        panel.choose(at);
-        panel.adopt_prompt(
-            String::from("/home/hec/workspace/noob-cli"),
-            Ok(vec![
-                String::from("You are noob, a coding agent."),
-                String::new(),
-                String::from("# Global instructions (AGENTS.md)"),
-            ]),
-            &Config::default(),
-        );
-        // The block is the last row of a section of cards, so the list is
-        // wound to its end to look at it.
-        scrolled_to_the_end(&mut panel);
-        let out = render_settings(&panel, 1400.0, 1200.0, None);
-        let text = text_of(&out.scene);
-        assert!(text.contains("THE PROMPT THE AGENT GETS"), "{text}");
-        assert!(text.contains("noob debug prompt"), "{text}");
-        assert!(text.contains("You are noob, a coding agent."), "{text}");
-
-        // The titles are the theme's accent, the way every heading on this
-        // panel is, so a block reads as a block rather than as more rows.
+        // The title is the theme's accent, the way every heading on this
+        // panel is, so the block reads as a block rather than as more rows.
         let title = out
             .scene
             .texts
             .iter()
             .flat_map(|text| text.runs.iter())
-            .find(|run| run.text.contains("THE PROMPT"))
-            .expect("the prompt's title");
+            .find(|run| run.text == "AGENTS.md")
+            .expect("the document's title");
         assert_eq!(title.color, Some(out.skin.heading));
     }
 
@@ -12892,16 +12859,22 @@ mod tests {
     /// of prose reading as loose text between two cards.
     #[test]
     fn a_document_is_a_card_that_scrolls_inside_itself() {
-        let mut panel = a_panel_on(&Config::default(), crate::settings::AGENT);
         let body: Vec<String> = (0..crate::settings::PAPER_LINES * 3)
-            .map(|at| format!("line {at} of the prompt"))
+            .map(|at| format!("line {at} of the document"))
             .collect();
-        panel.adopt_prompt(
-            String::from("/home/hec/workspace/noob-cli"),
-            Ok(body.clone()),
-            &Config::default(),
-        );
-        scrolled_to_the_end(&mut panel);
+        let mut agent = an_agent();
+        agent.instructions = crate::agent::Instructions {
+            path: Some(std::path::PathBuf::from("/home/hec/.config/noob/AGENTS.md")),
+            body: body.clone(),
+            capped: false,
+        };
+        let mut panel = Settings::open(&Config::default(), None, agent);
+        let section = panel
+            .section_names()
+            .iter()
+            .position(|name| *name == crate::settings::PROMPT)
+            .expect("the system prompt section");
+        panel.choose(section);
         let out = render_settings(&panel, 1400.0, 1200.0, None);
         let line = Text::line_for(PANE_TEXT.0);
         let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
@@ -12910,9 +12883,9 @@ mod tests {
             .rows()
             .iter()
             .position(|row| {
-                matches!(row, crate::settings::Row::Paper(paper) if paper.title.contains("PROMPT"))
+                matches!(row, crate::settings::Row::Paper(paper) if !paper.body.is_empty())
             })
-            .expect("the prompt block");
+            .expect("the document block");
         let row = out
             .layout
             .settings_rows
@@ -12945,9 +12918,7 @@ mod tests {
             .scene
             .texts
             .iter()
-            .find(|text| {
-                text.runs.iter().any(|run| run.text.contains("THE PROMPT"))
-            })
+            .find(|text| text.runs.iter().any(|run| run.text == "AGENTS.md"))
             .expect("the title");
         assert!(
             (title.at.y - parts.title.y).abs() < 0.01,
@@ -12968,7 +12939,8 @@ mod tests {
         // Paged, the text moves and the card does not: the same box, the same
         // title, another twelve lines. A block that walked the list under it
         // would take the rows below it with it.
-        assert!(panel.point_at(at, Side::Left));
+        panel.point_at(at, Side::Left);
+        assert_eq!(panel.cursor(), at);
         assert!(panel.page(20, true), "the block did not scroll");
         let after = render_settings(&panel, 1400.0, 1200.0, None);
         let moved = after
@@ -12991,10 +12963,9 @@ mod tests {
         );
     }
 
-    /// A file that is not there is an offer to write one, and a command that
-    /// failed is the reason it failed. Neither is an empty box.
+    /// A file that is not there is an offer to write one, not an empty box.
     #[test]
-    fn a_missing_file_and_a_failed_command_are_said_on_their_own_block() {
+    fn a_missing_file_is_said_on_its_own_block() {
         // `an_agent` has no AGENTS.md at all, so the SYSTEM PROMPT section
         // says where one would go and what the key would do.
         let out = render_settings(
@@ -13010,27 +12981,6 @@ mod tests {
             text.contains("The agent reads this file first"),
             "the block is empty: {text}"
         );
-
-        // And the prompt block carries the reason, in the colour this window
-        // uses for something that went wrong.
-        let mut panel = a_panel_on(&Config::default(), crate::settings::AGENT);
-        panel.adopt_prompt(
-            String::from("/home/hec/workspace/noob-cli"),
-            Err(String::from("noob debug prompt failed: no such subcommand")),
-            &Config::default(),
-        );
-        scrolled_to_the_end(&mut panel);
-        let out = render_settings(&panel, 1400.0, 1200.0, None);
-        let text = text_of(&out.scene);
-        assert!(text.contains("no such subcommand"), "{text}");
-        let why = out
-            .scene
-            .texts
-            .iter()
-            .flat_map(|text| text.runs.iter())
-            .find(|run| run.text.contains("no such subcommand"))
-            .expect("the reason");
-        assert_eq!(why.color, Some(out.skin.bad));
     }
 
     /// The skills section is two columns: the entries down the left, and the
@@ -14484,14 +14434,38 @@ mod tests {
             && inner.y + inner.h <= outer.y + outer.h + 0.01
     }
 
-    /// The AGENT section with a prompt long enough that both of its blocks
-    /// scroll, which is the section the overlap was reported on, scrolled to
-    /// the end so the blocks are the rows on screen.
-    fn a_wordy_agent_panel() -> Settings {
-        let mut panel = a_panel_on(&Config::default(), crate::settings::AGENT);
-        panel.adopt_prompt(
-            String::from("/home/hec/workspace/noob-cli"),
-            Ok((0..200).map(|at| format!("prompt line {at}")).collect()),
+    /// The SKILLS section with an install answer long enough that its block
+    /// scrolls, over a list long enough that the panel scrolls too, wound to
+    /// the end so the block is among the rows on screen.
+    fn a_wordy_install_panel() -> Settings {
+        let mut agent = an_agent();
+        agent.skills[0].about = String::from(A_LONG_ABOUT);
+        agent.skills[0].doc = vec![String::from(A_LONG_DOC_LINE)];
+        for extra in 1..6 {
+            let mut skill = agent.skills[0].clone();
+            skill.name = format!("skill{extra}");
+            skill.dir = format!("skill{extra}");
+            agent.skills.push(skill);
+        }
+        let mut panel = Settings::open(
+            &Config::default(),
+            Some(std::path::Path::new("/home/hec/.config/noob/no0b.conf")),
+            agent.clone(),
+        );
+        let at = panel
+            .section_names()
+            .iter()
+            .position(|name| *name == crate::settings::SKILLS)
+            .expect("SKILLS is a section");
+        panel.choose(at);
+        panel.begin_install(String::from("owner/skill"), &Config::default());
+        panel.adopt_install(
+            String::from("owner/skill"),
+            Err((0..200)
+                .map(|at| format!("clone line {at}"))
+                .collect::<Vec<String>>()
+                .join("\n")),
+            agent,
             &Config::default(),
         );
         scrolled_to_the_end(&mut panel);
@@ -14545,7 +14519,7 @@ mod tests {
     #[test]
     fn no_two_scrollbars_on_the_settings_panel_share_a_pixel() {
         let panels = [
-            ("AGENT", a_wordy_agent_panel()),
+            ("INSTALL", a_wordy_install_panel()),
             ("SESSIONS", a_long_sessions_panel()),
             ("SKILLS", a_wordy_skills_panel()),
             (
@@ -14604,7 +14578,7 @@ mod tests {
     /// list: what it reports is the whole section, not one card of it.
     #[test]
     fn the_list_s_bar_stands_in_a_gutter_the_cards_are_kept_out_of() {
-        let panel = a_wordy_agent_panel();
+        let panel = a_wordy_install_panel();
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let list = out.layout.settings_list;
         let cards = settings_list_rows(list);
@@ -14646,7 +14620,7 @@ mod tests {
     /// item exists for.
     #[test]
     fn a_block_of_text_carries_its_own_bar_and_a_short_one_carries_none() {
-        let mut panel = a_wordy_agent_panel();
+        let mut panel = a_wordy_install_panel();
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let line = Text::line_for(PANE_TEXT.0);
         let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
@@ -14655,9 +14629,9 @@ mod tests {
             .settings_rows
             .iter()
             .find(|(index, _, _)| {
-                matches!(panel.row(*index), Some(SettingRow::Paper(paper)) if paper.title.contains("PROMPT"))
+                matches!(panel.row(*index), Some(SettingRow::Paper(paper)) if paper.title.contains("INSTALL"))
             })
-            .expect("the section carries the assembled prompt");
+            .expect("the section carries the install block");
         let card = settings_card(row, line);
         let parts = settings_card_parts(card, line, PANE_TEXT.0, PANE_TEXT.1, cols, false);
         let text = settings_paper_text(&parts, line);
@@ -14715,11 +14689,7 @@ mod tests {
 
         // A block that fits its box draws nothing, so a bar here means there is
         // more of it.
-        panel.adopt_prompt(
-            String::from("/home/hec/workspace/noob-cli"),
-            Ok(vec![String::from("the whole prompt, on one line")]),
-            &Config::default(),
-        );
+        panel.begin_install(String::from("owner/skill"), &Config::default());
         let short = render_settings(&panel, 1400.0, 900.0, None);
         let (tracks, _) = bars_of(&short);
         let (_, row) = *short
@@ -14727,7 +14697,7 @@ mod tests {
             .settings_rows
             .iter()
             .find(|(index, _, _)| {
-                matches!(panel.row(*index), Some(SettingRow::Paper(paper)) if paper.title.contains("PROMPT"))
+                matches!(panel.row(*index), Some(SettingRow::Paper(paper)) if paper.title.contains("INSTALL"))
             })
             .map(|(index, _, row)| (*index, *row))
             .as_ref()
