@@ -40,6 +40,7 @@
 //! session to carry on in it, so the one path that starts an agent starts both
 //! kinds.
 
+pub mod metrics;
 pub mod paint;
 pub mod places;
 

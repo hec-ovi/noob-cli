@@ -2508,26 +2508,26 @@ impl App {
             Hit::SettingsAct(index, act) => {
                 let deed = match self.settings.as_mut() {
                     Some(panel) => match act {
-                        view::Act::All => {
+                        settings::Act::All => {
                             self.dirty |= panel.mark_all(index, true);
                             None
                         }
-                        view::Act::None => {
+                        settings::Act::None => {
                             self.dirty |= panel.mark_all(index, false);
                             None
                         }
                         // Both of these arm on the first press and act on the
                         // second: one deletes transcripts, the other takes
                         // lines out of a file somebody may have edited by hand.
-                        view::Act::Forget | view::Act::Restore => panel.uninstall(index),
+                        settings::Act::Forget | settings::Act::Restore => panel.uninstall(index),
                         // The two buttons under the skills table, on the row
                         // the keys are on: the move that turns one off, and the
                         // delete, which arms first the way every delete here
                         // does.
-                        view::Act::Turn => panel.turn_row(index),
-                        view::Act::Uninstall => panel.uninstall(index),
+                        settings::Act::Turn => panel.turn_row(index),
+                        settings::Act::Uninstall => panel.uninstall(index),
                         // The add card's button: the deed writes the file.
-                        view::Act::AddServer => {
+                        settings::Act::AddServer => {
                             let config = self.config.clone();
                             panel.cancel_edit_elsewhere(settings::SERVER_NAME, settings::SERVER_HOW);
                             self.dirty |= panel.point_at(index, settings::Side::Left);
@@ -2535,7 +2535,7 @@ impl App {
                         }
                         // The validate half of the install card's button:
                         // answered here and now, on the panel.
-                        view::Act::Validate => {
+                        settings::Act::Validate => {
                             let elsewhere = !matches!(
                                 panel.at_cursor(),
                                 Some(settings::Row::Field { key, .. })
@@ -2549,7 +2549,7 @@ impl App {
                         }
                         // The enable-edition checkbox on a prompt document:
                         // ticked opens the editor, ticked again drops it.
-                        view::Act::EditPrompt => {
+                        settings::Act::EditPrompt => {
                             let config = self.config.clone();
                             self.dirty |= panel.toggle_edition(index, &config);
                             None
@@ -2558,27 +2558,27 @@ impl App {
                         // Ctrl-S asks for. Both it and the restore stand there
                         // with edition off, drawn dim, and a dim button does
                         // nothing when it is pressed.
-                        view::Act::SavePrompt => match panel.edition_on(index) {
+                        settings::Act::SavePrompt => match panel.edition_on(index) {
                             true => panel.finish_instructions(),
                             false => None,
                         },
                         // The restore beside it: armed on the first press,
                         // acted on the second, like every button that loses
                         // something.
-                        view::Act::RestorePrompt => match panel.edition_on(index) {
+                        settings::Act::RestorePrompt => match panel.edition_on(index) {
                             true => panel.restore_prompt(index),
                             false => None,
                         },
                         // The load beside those: opens the path line; Enter
                         // then reads the file ([`App::load_prompt_md`]).
-                        view::Act::LoadPrompt => {
+                        settings::Act::LoadPrompt => {
                             self.dirty |= panel.begin_load(index);
                             None
                         }
                         // The install card's own button. Not a deed: a deed is
                         // done here and now, and this is a clone with two
                         // minutes to answer in.
-                        view::Act::Install => {
+                        settings::Act::Install => {
                             // An edit running on another row is dropped rather
                             // than carried onto this one, the way Escape drops
                             // it: the address that gets installed is the one in
@@ -2596,7 +2596,7 @@ impl App {
                         }
                         // The credential's own button: dots, or the value.
                         // Nothing on a disk changes.
-                        view::Act::Reveal => {
+                        settings::Act::Reveal => {
                             let config = self.config.clone();
                             panel.flip_key(&config);
                             self.dirty = true;
@@ -2604,13 +2604,13 @@ impl App {
                         }
                         // The connection card's button, answered by a process
                         // ([`App::check_connection`]).
-                        view::Act::Check => {
+                        settings::Act::Check => {
                             self.dirty |= panel.point_at(index, settings::Side::Left);
                             None
                         }
                         // The way back under it: the address the CLI would
                         // have found on its own, written as a line.
-                        view::Act::DefaultEndpoint => {
+                        settings::Act::DefaultEndpoint => {
                             panel.cancel_edit();
                             self.dirty |= panel.point_at(index, settings::Side::Left);
                             None
@@ -2618,16 +2618,16 @@ impl App {
                     },
                     None => None,
                 };
-                if matches!(act, view::Act::Install) {
+                if matches!(act, settings::Act::Install) {
                     self.start_install();
                 }
-                if matches!(act, view::Act::Validate) {
+                if matches!(act, settings::Act::Validate) {
                     self.validate_source();
                 }
-                if matches!(act, view::Act::Check) {
+                if matches!(act, settings::Act::Check) {
                     self.check_connection();
                 }
-                if matches!(act, view::Act::DefaultEndpoint) {
+                if matches!(act, settings::Act::DefaultEndpoint) {
                     self.default_endpoint();
                 }
                 self.do_deed(deed);

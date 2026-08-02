@@ -13,8 +13,38 @@ use crate::state::{State, Tone, TodoState};
 use crate::style::skin::Skin;
 #[allow(clippy::wildcard_imports)]
 use crate::view::*;
+use crate::widgets::context::CONTEXT_HEAD;
+use crate::widgets::LABEL_COLUMNS;
 
 
+/// A gauge is a block of dots: twenty across and four down is 0 to 100 percent,
+/// so one row is 25 percent and one dot is 1.25.
+///
+/// Wide and short, which is the shape the panes were asked for. Eight by five
+/// was the shape before and it stood the hardware pane on end: six readings each
+/// five rows tall is a column of stacks, tall and narrow, in a pane that has
+/// width to spare and no height. Twenty dots to a row also puts a usable
+/// resolution on one row, a dot being a percent and a quarter, so a reading
+/// climbing under load moves dot by dot instead of in fifths of a row.
+pub(crate) const DOT_COLUMNS: usize = 20;
+pub(crate) const DOT_ROWS: usize = 4;
+
+/// How much larger the number beside a block is than the label. One: the same
+/// size as every other glyph in the window.
+///
+/// It was one and a half, and at that size the readings were the loudest thing on
+/// screen, which is not what a monitor is for. The metric's own tint is what says
+/// a number is the thing being read. The arithmetic that caps it against the room
+/// beside the block is kept, so raising this again cannot put a reading over the
+/// edge of a narrow pane.
+pub(crate) const BIG_READING: f32 = 1.0;
+
+/// The smallest a dot shrinks to, across or down, when a pane has more readings
+/// than room. Below this the block stops reading as a block, so it is not drawn:
+/// too tall for its rows and they scroll off, too narrow for its columns and the
+/// pane draws numbers alone. A reading that scrolled off is true and a number
+/// with no block is true; a smear is not.
+pub(crate) const SMALL_DOT: f32 = 4.0;
 
 /// A monitor pane's content: one row per reading, in rows of the pane's own
 /// pitch rather than of one line. See [`gauges`].

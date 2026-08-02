@@ -11,3 +11,8 @@ pub mod gauges;
 pub mod output;
 pub mod plan;
 pub mod popup;
+
+/// How wide the label beside a reading is, in columns: the widest label the
+/// monitors carry with a space after it. Shared by the meters and the context
+/// pane, which is why it sits with the widgets rather than inside either.
+pub(crate) const LABEL_COLUMNS: usize = 9;

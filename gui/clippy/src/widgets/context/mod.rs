@@ -12,7 +12,12 @@ use crate::state::{State, Tone, TodoState};
 use crate::style::skin::Skin;
 #[allow(clippy::wildcard_imports)]
 use crate::view::*;
+use crate::widgets::LABEL_COLUMNS;
 
+/// Rows the CONTEXT pane spends on its header before its readings start: the
+/// phase, then the three counts that say what this run has asked for. They stay
+/// put while the readings under them scroll.
+pub(crate) const CONTEXT_HEAD: usize = 4;
 
 
 /// The CONTEXT pane: what phase this run is in, what it has asked for, and how

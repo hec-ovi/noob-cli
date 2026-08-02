@@ -9,6 +9,7 @@ use crate::design::icons;
 use crate::settings::{Row as SettingRow, Side};
 #[allow(clippy::wildcard_imports)]
 use crate::settings::places::*;
+use crate::settings::Act;
 #[allow(clippy::wildcard_imports)]
 use crate::view::*;
 

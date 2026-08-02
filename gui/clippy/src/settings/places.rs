@@ -7,6 +7,7 @@ use noob_draw::{Panel, Run, Scene, Text};
 #[allow(unused_imports)]
 use crate::design;
 use crate::style::skin::Skin;
+use crate::settings::Act;
 use crate::settings::{Row as SettingRow, Settings, Side};
 #[allow(clippy::wildcard_imports)]
 use crate::view::*;

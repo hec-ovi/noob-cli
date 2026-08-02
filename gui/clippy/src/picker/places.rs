@@ -7,6 +7,8 @@ use noob_draw::{Panel, Text};
 use crate::design::{self, icons};
 use crate::picker::Picker;
 #[allow(clippy::wildcard_imports)]
+use crate::picker::metrics::*;
+#[allow(clippy::wildcard_imports)]
 use crate::view::*;
 
 

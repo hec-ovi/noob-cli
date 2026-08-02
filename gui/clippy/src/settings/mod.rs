@@ -429,6 +429,63 @@ pub struct Group {
     pub title: String,
 }
 
+/// What a button in a card's footer asks for.
+///
+/// All of them in one enum, so a press is one hit with an answer on it rather
+/// than a region per button that the routing has to keep in the same order as
+/// the layout. Which is which is decided where they are placed, and read where
+/// they are drawn.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Act {
+    /// Mark every conversation on the list, not only the ones on screen.
+    All,
+    /// Take the mark off every one of them.
+    None,
+    /// Delete what is marked, or the row the keys are on when nothing is. Two
+    /// presses, like every other delete on this panel.
+    Forget,
+    /// Turn the skill the keys are on off, or back on. A move on the disk: the
+    /// directory goes to the sibling of the skills folder the agent does not
+    /// read, and comes back the same way.
+    Turn,
+    /// Delete the skill the keys are on. Two presses, like every other delete
+    /// on this panel.
+    Uninstall,
+    /// Say what the typed source would install, without installing it. The
+    /// same button as Install, one step earlier.
+    Validate,
+    /// Install what has been typed into the card this button stands in. The one
+    /// action on the panel that starts something the window then waits for.
+    Install,
+    /// Write the typed server into the global mcp.json.
+    AddServer,
+    /// Take every appearance line out of the settings file, so the window goes
+    /// back to what it ships with. Two presses, like every other button that
+    /// loses something.
+    Restore,
+    /// The enable-edition checkbox on a prompt document block: ticked opens
+    /// the editor on the document, ticked again drops the buffer.
+    EditPrompt,
+    /// Write the document block's buffer as its own file, the same save
+    /// Ctrl-S does.
+    SavePrompt,
+    /// Park the block's file in the `.bak` beside it and write the shipped
+    /// default in its place. Two presses, like every button that loses
+    /// something.
+    RestorePrompt,
+    /// Open the line an `.md` path is typed into, to load that file into the
+    /// editor as an unsaved edit.
+    LoadPrompt,
+    /// Write what is typed into the connection card, then ask the CLI whether
+    /// that endpoint answers.
+    Check,
+    /// Show the credential on the card this button stands in, or cover it
+    /// again when it is already showing.
+    Reveal,
+    /// Write the endpoint the CLI would have found on its own.
+    DefaultEndpoint,
+}
+
 /// What the button in a card's footer does.
 ///
 /// Named here rather than in the drawing, because it is what the card is for:
