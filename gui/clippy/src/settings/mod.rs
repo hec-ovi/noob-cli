@@ -202,6 +202,9 @@ pub use sections::appearance::OFF_PANEL;
 /// registry: a /command's bounds are the panel's own, read off one table
 /// rather than copied.
 pub(crate) use sections::agent::AGENT_SETTINGS;
+/// The words the connection card's status can carry, so `main` names them
+/// rather than spelling them again.
+pub(crate) use sections::agent::{ASKING, OFFLINE, ONLINE};
 pub(crate) use sections::appearance::{CUSTOM, LOOKS, THEME};
 
 /// What the panel's own heading calls a section.

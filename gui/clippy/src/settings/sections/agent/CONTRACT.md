@@ -30,8 +30,8 @@ pub(crate) const AGENT_SETTINGS: [(&str, Kind); 8]
 
 ## The cards
 
-CONNECTION (endpoint, api style, what the last check answered; its button
-writes what is typed and asks), BACK TO THE DEFAULT ENDPOINT (one button,
+CONNECTION (endpoint, api style, and a status that is `online`, `offline`
+or not checked yet; its button writes what is typed and asks), BACK TO THE DEFAULT ENDPOINT (one button,
 writing `crate::agent::ENDPOINT_DEFAULT`), CREDENTIAL (the key as dots, its
 button shows it), MODEL (model, reasoning), LIMITS, MULTI-AGENT,
 MULTI-AGENT BUDGETS, THE SETTINGS FILE, and THE REST OF THE FILE when the
@@ -52,8 +52,9 @@ file carries keys this window has no control for.
 5. Everything the CLI accepts a value for is set from here. A number with
    CLI bounds is a track showing the CLI's default until it is written; a
    choice with no default reads UNSET until it is.
-6. The connection card reports what it was told and never a verdict of its
-   own: before any check it says so.
+6. The connection card's status is one word: whether the agent can reach a
+   model server. Before any check it says so instead of guessing, and why a
+   check could not run at all is the frame's footer, never the status.
 7. The endpoint's way back writes the address the CLI's autodetect would
    have found first, llama.cpp's own port, and the card says which address
    that is rather than leaving it to be discovered.

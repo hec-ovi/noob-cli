@@ -20,8 +20,8 @@ tags rather than here; this file starts where it was added.
 - The AGENT section sets everything the CLI takes a value for. The model
   and the endpoint are typed into, the request shape and the thinking
   switch are lists, and the connection card has a button that writes what
-  is typed and then asks `noob doctor` whether that endpoint answers,
-  reporting the line it came back with. The credential is a run of dots
+  is typed and then asks `noob doctor` whether that endpoint answers: the
+  status beside it reads online or offline and nothing else. The credential is a run of dots
   with an eye beside it that shows it.
 - The endpoint has a way back: one button under the connection card writes
   `http://localhost:8080/v1`, llama.cpp's own port and the first address the

@@ -27,10 +27,9 @@ pub fn env_from(ok: bool, stdout: &[u8], stderr: &[u8]) -> Result<Vec<String>, S
                              // noob debug env, run and read the way serve
                              // is started, for the panel's environment block
 pub fn doctor_command(program: &str, workspace: &Path, clear: &[&str]) -> Command;
-pub fn health_from(ok: bool, stdout: &[u8], stderr: &[u8]) -> String;
+pub fn online_from(stdout: &[u8]) -> bool;
                              // noob doctor, run the same way, read down to
-                             // the one line about the endpoint: the failure
-                             // when there is one, otherwise what answered
+                             // one answer: did the endpoint answer
 ```
 
 ## Invariants

@@ -1119,7 +1119,7 @@ struct App {
     asking: Option<std::sync::mpsc::Receiver<link::Asked>>,
     /// The thread asking the CLI whether the endpoint answers, while it is
     /// still asking. Dropped the moment it does, for the same reason.
-    checking: Option<std::sync::mpsc::Receiver<String>>,
+    checking: Option<std::sync::mpsc::Receiver<(bool, Option<String>)>>,
     /// The thread installing a skill, while it is still installing it: the
     /// source it was given, and the name it landed under or why it did not.
     ///
@@ -1594,7 +1594,7 @@ impl App {
         }
         if let Some(panel) = self.settings.as_mut() {
             let config = self.config.clone();
-            panel.adopt_health(String::from("asking..."), &config);
+            panel.adopt_health(String::from(settings::ASKING), &config);
         }
         let program = std::env::var("NOOB_BIN").unwrap_or_else(|_| String::from("noob"));
         let workspace = match self.state.workspace.is_empty() {
@@ -1605,9 +1605,17 @@ impl App {
         self.checking = Some(rx);
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
+            // Two words on the card and the reason on the footer: a card that
+            // answers "can you reach the model" with a paragraph about HTTP
+            // is answering a question nobody asked.
             let answer = match link::doctor_command(&program, &workspace, &agent::OWNED).output() {
-                Ok(out) => link::health_from(out.status.success(), &out.stdout, &out.stderr),
-                Err(e) => format!("cannot run {program:?}: {e}; is noob on PATH, or set NOOB_BIN"),
+                Ok(out) => (link::online_from(&out.stdout), None),
+                Err(e) => (
+                    false,
+                    Some(format!(
+                        "cannot run {program:?}: {e}; is noob on PATH, or set NOOB_BIN"
+                    )),
+                ),
             };
             let _ = tx.send(answer);
             let _ = proxy.send_event(Wake);
@@ -1639,13 +1647,23 @@ impl App {
         let Some(rx) = self.checking.as_ref() else {
             return;
         };
-        let Ok(answer) = rx.try_recv() else {
+        let Ok((online, trouble)) = rx.try_recv() else {
             return;
         };
         self.checking = None;
         let config = self.config.clone();
         if let Some(panel) = self.settings.as_mut() {
-            panel.adopt_health(answer, &config);
+            let word = match online {
+                true => settings::ONLINE,
+                false => settings::OFFLINE,
+            };
+            panel.adopt_health(String::from(word), &config);
+            // A check that could not be run at all is still offline on the
+            // card; why it could not is the footer's, where every other
+            // reason on this panel goes.
+            if let Some(why) = trouble {
+                panel.say_trouble(why);
+            }
         }
         self.dirty = true;
     }

@@ -8,10 +8,17 @@
 use crate::agent::{self, Agent};
 use crate::settings::{Card, CardField, Doing, File, Kind, Row, SECRET, UNSET};
 
-/// What the connection card says before anybody has pressed its button. Not a
-/// verdict: the window has asked nothing yet, and a card that said "ok" off no
-/// evidence would be the worst line on the panel.
-const NOT_CHECKED: &str = "not checked yet";
+/// The four things the connection card's status can say.
+///
+/// Two words for the answer and nothing else. The card asks one question, can
+/// the agent reach a model server, and a status line that answered it with an
+/// HTTP code and a model name was answering three other questions nobody had.
+/// [`NOT_CHECKED`] because a card that said "offline" before anybody pressed
+/// anything would be a verdict off no evidence.
+pub(crate) const NOT_CHECKED: &str = "not checked yet";
+pub(crate) const ASKING: &str = "asking\u{2026}";
+pub(crate) const ONLINE: &str = "online";
+pub(crate) const OFFLINE: &str = "offline";
 
 /// The keys of the agent's file this section draws a field of its own for: what
 /// to call each one in plain words, and the short line under it.
@@ -230,7 +237,7 @@ pub fn rows(agent: &Agent, health: Option<&str>, show_key: bool) -> Vec<Row> {
                     agent.endpoint().unwrap_or_default().to_string(),
                 ),
                 api_style,
-                CardField::reading("answered", String::from(health.unwrap_or(NOT_CHECKED))),
+                CardField::reading("status", String::from(health.unwrap_or(NOT_CHECKED))),
             ],
             hint: Some(String::from(
                 "empty endpoint: the CLI probes :8080 :8090 :11434 :1234 :8000. check writes what is typed, then asks",
@@ -429,14 +436,16 @@ mod tests {
         go_to(&mut panel, AGENT);
         assert!(!said(&panel).contains("sk-secret"), "it never went back");
 
-        // What the connection check answered lands on the card that asked.
-        assert!(said(&panel).contains("not checked yet"));
-        panel.adopt_health(
-            String::from("http://localhost:8080/v1 answers /models (HTTP 200)"),
-            &Config::default(),
-        );
+        // What the connection check answered lands on the card that asked, as
+        // one word: the card asks whether the agent can reach a model server
+        // and that has two answers.
+        assert!(said(&panel).contains(NOT_CHECKED));
+        panel.adopt_health(String::from(ONLINE), &Config::default());
         go_to(&mut panel, AGENT);
-        assert!(said(&panel).contains("answers /models (HTTP 200)"), "{text}");
+        assert!(said(&panel).contains("status online"), "{}", said(&panel));
+        panel.adopt_health(String::from(OFFLINE), &Config::default());
+        go_to(&mut panel, AGENT);
+        assert!(said(&panel).contains("status offline"), "{}", said(&panel));
 
         // The endpoint is the one thing here that is typed into rather than
         // nudged, and it is where the section opens: the first field of the
