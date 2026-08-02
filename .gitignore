@@ -31,3 +31,6 @@
 
 # release artifacts
 /dist/
+
+# a packaged artifact belongs to a release, never to the tree
+/noob_*.deb
