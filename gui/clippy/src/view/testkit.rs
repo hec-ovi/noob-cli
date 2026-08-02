@@ -8,13 +8,23 @@
 use super::*;
 use crate::config::Config;
 use crate::monitor::Monitor;
-use crate::state::{State, Tone};
+use crate::state::State;
 
 pub(crate) struct Rendered {
     pub(crate) scene: Scene,
     pub(crate) layout: Layout,
     pub(crate) skin: Skin,
 }
+/// A shape at a chosen column and pane size, for the tests that measure a
+/// block against the room its pane has.
+pub(crate) fn sized_shape<'a>(dock: &'a Dock, column: f32, pane_column: f32) -> Shape<'a> {
+    Shape {
+        column,
+        pane_column,
+        ..shape(dock, &[])
+    }
+}
+
 pub(crate) fn render(state: &State, w: f32, h: f32, dock: &Dock, files: &[&str]) -> Rendered {
     render_with(state, w, h, dock, files, &Monitor::new(), None)
 }
