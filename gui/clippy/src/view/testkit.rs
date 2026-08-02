@@ -9,6 +9,7 @@ use super::*;
 use crate::config::Config;
 use crate::monitor::Monitor;
 use crate::state::State;
+use noob_draw::Rect;
 
 pub(crate) struct Rendered {
     pub(crate) scene: Scene,
