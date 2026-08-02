@@ -1615,6 +1615,25 @@ impl App {
         self.dirty = true;
     }
 
+    /// Answer the restore under the connection card: the endpoint goes back
+    /// to the address the CLI would have autodetected, through the same write
+    /// the field itself goes through.
+    fn default_endpoint(&mut self) {
+        let Some(path) = self
+            .settings
+            .as_ref()
+            .and_then(Settings::agent_file)
+            .map(std::path::Path::to_path_buf)
+        else {
+            if let Some(panel) = self.settings.as_mut() {
+                panel.say_trouble(String::from("there is no config directory to write it in"));
+            }
+            self.dirty = true;
+            return;
+        };
+        self.write_agent_setting(&path, agent::ENDPOINT, agent::ENDPOINT_DEFAULT);
+    }
+
     /// Take what the connection check answered, if it has.
     fn take_health(&mut self) {
         let Some(rx) = self.checking.as_ref() else {
@@ -2576,6 +2595,13 @@ impl App {
                             self.dirty |= panel.point_at(index, settings::Side::Left);
                             None
                         }
+                        // The way back under it: the address the CLI would
+                        // have found on its own, written as a line.
+                        view::Act::DefaultEndpoint => {
+                            panel.cancel_edit();
+                            self.dirty |= panel.point_at(index, settings::Side::Left);
+                            None
+                        }
                     },
                     None => None,
                 };
@@ -2587,6 +2613,9 @@ impl App {
                 }
                 if matches!(act, view::Act::Check) {
                     self.check_connection();
+                }
+                if matches!(act, view::Act::DefaultEndpoint) {
+                    self.default_endpoint();
                 }
                 self.do_deed(deed);
             }

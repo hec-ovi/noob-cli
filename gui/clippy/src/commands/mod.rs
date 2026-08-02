@@ -638,6 +638,9 @@ mod tests {
                 Doing::Validate | Doing::Install => Some("skill_install"),
                 Doing::AddServer => Some("mcp_add"),
                 Doing::Restore => Some("restore_appearance"),
+                // The endpoint's own restore writes the line `/set_endpoint`
+                // writes, with the value filled in.
+                Doing::DefaultEndpoint => Some("set_endpoint"),
                 // The two buttons that write nothing: one asks the CLI a
                 // question about the endpoint the endpoint command already
                 // writes, and the other uncovers a value that is on screen
@@ -697,6 +700,7 @@ mod tests {
             Doing::AddServer,
             Doing::Restore,
             Doing::Check,
+            Doing::DefaultEndpoint,
             Doing::Reveal,
             Doing::Hide,
         ] {

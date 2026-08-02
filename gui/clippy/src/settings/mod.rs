@@ -413,6 +413,9 @@ pub enum Doing {
     /// the endpoint answers. The one button on this panel whose answer comes
     /// back from a process.
     Check,
+    /// Put the endpoint back to the address the CLI would have found on its
+    /// own.
+    DefaultEndpoint,
     /// Show the credential this card holds, in place of its dots.
     Reveal,
     /// Cover it again. The same button, once it is showing.
@@ -428,6 +431,7 @@ impl Doing {
             Doing::AddServer => "add",
             Doing::Restore => "restore",
             Doing::Check => "check",
+            Doing::DefaultEndpoint => "default",
             Doing::Reveal => "show",
             Doing::Hide => "hide",
         }

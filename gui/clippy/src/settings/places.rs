@@ -185,6 +185,7 @@ pub(crate) fn settings_act_for(doing: crate::settings::Doing) -> Act {
         crate::settings::Doing::AddServer => Act::AddServer,
         crate::settings::Doing::Restore => Act::Restore,
         crate::settings::Doing::Check => Act::Check,
+        crate::settings::Doing::DefaultEndpoint => Act::DefaultEndpoint,
         crate::settings::Doing::Reveal | crate::settings::Doing::Hide => Act::Reveal,
     }
 }

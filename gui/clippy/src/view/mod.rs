@@ -515,6 +515,8 @@ pub enum Act {
     /// Show the credential on the card this button stands in, or cover it
     /// again when it is already showing.
     Reveal,
+    /// Write the endpoint the CLI would have found on its own.
+    DefaultEndpoint,
 }
 
 /// Something the pointer can land on. Returned by [`Layout::hit`] so every
@@ -16794,7 +16796,10 @@ mod tests {
             .expect("the agent section");
         panel.choose(at);
 
-        let out = render_settings(&panel, 1400.0, 1200.0, None);
+        // Tall enough for the whole section: every track has to be drawn to
+        // be checked, and this is about what a number looks like rather than
+        // about how a short window scrolls.
+        let out = render_settings(&panel, 1400.0, 2000.0, None);
         assert!(
             text_of(&out.scene).contains("1048576"),
             "the context window is not drawn as the number it is: {}",

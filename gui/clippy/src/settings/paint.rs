@@ -439,7 +439,8 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                         | Act::RestorePrompt
                         | Act::LoadPrompt
                         | Act::Check
-                        | Act::Reveal => continue,
+                        | Act::Reveal
+                        | Act::DefaultEndpoint => continue,
                     };
                     settings_button(
                         scene,

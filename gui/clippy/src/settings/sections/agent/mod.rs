@@ -237,6 +237,18 @@ pub fn rows(agent: &Agent, health: Option<&str>, show_key: bool) -> Vec<Row> {
             )),
             does: Some(Doing::Check),
         }),
+        // The way back, under the field it writes and shaped like every other
+        // restore on this panel: its own card, its own button, and the value
+        // it writes said in words rather than left to be discovered.
+        Row::Card(Card {
+            title: String::from("BACK TO THE DEFAULT ENDPOINT"),
+            fields: Vec::new(),
+            hint: Some(format!(
+                "writes {}, llama.cpp's own port and the first address the CLI probes",
+                agent::ENDPOINT_DEFAULT
+            )),
+            does: Some(Doing::DefaultEndpoint),
+        }),
         // The credential on a card of its own, because the one button it has
         // is the one that shows it.
         Row::Card(Card {
@@ -698,6 +710,7 @@ mod tests {
             titles,
             [
                 "CONNECTION",
+                "BACK TO THE DEFAULT ENDPOINT",
                 "CREDENTIAL",
                 "MODEL",
                 "LIMITS",
@@ -828,14 +841,57 @@ mod tests {
         while panel.step(true) {
             seen.push(panel.cursor());
         }
-        // Every card down to the last budget, the credential's button among
-        // them: the settings file at the end is the one card with nothing to
-        // do on it.
+        // Every card down to the last budget: the restore's button and the
+        // credential's are stops of their own, and the settings file at the
+        // end is the one card with nothing to do on it.
         assert_eq!(
             seen,
-            vec![0, 1, 2, numbers, fleet, fleet + 1],
+            vec![0, 1, 2, 3, numbers, fleet, fleet + 1],
             "the keyboard cannot walk the section: {seen:?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The way back to the endpoint the CLI would have found on its own.
+    ///
+    /// It is a card with one button, the shape every other restore on this
+    /// panel has, and what it writes is llama.cpp's own port: the first
+    /// address `autodetect_base_url` probes, so an agent that has never been
+    /// pointed anywhere ends up there too.
+    #[test]
+    fn the_endpoint_has_a_way_back_to_the_default() {
+        let dir = scratch_dir("agent-default-endpoint");
+        let env = dir.join(".env");
+        std::fs::write(&env, "NOOB_BASE_URL=http://elsewhere:9999/v1
+").expect("a file");
+        let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
+        let mut panel = Settings::open(&Config::default(), None, read());
+        go_to(&mut panel, AGENT);
+
+        let at = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, Row::Card(card) if card.does == Some(Doing::DefaultEndpoint)))
+            .expect("the restore is on the section");
+        let Some(Row::Card(card)) = panel.row(at) else {
+            panic!("no card at {at}");
+        };
+        assert_eq!(card.does.expect("an action").word(), "default");
+        assert!(
+            card.hint.as_deref().unwrap_or_default().contains(agent::ENDPOINT_DEFAULT),
+            "the card does not say what it writes: {:?}",
+            card.hint
+        );
+        assert_eq!(agent::ENDPOINT_DEFAULT, "http://localhost:8080/v1");
+        // It stands under the connection card, which is the field it writes.
+        assert!(matches!(panel.row(at - 1), Some(Row::Card(card)) if card.title == "CONNECTION"));
+
+        // The write itself is main's, through the same writer the field goes
+        // through, and what comes back is the file.
+        write_endpoint(&env, agent::ENDPOINT, agent::ENDPOINT_DEFAULT).expect("the file takes it");
+        panel.adopt_agent(read(), &Config::default());
+        go_to(&mut panel, AGENT);
+        assert!(said(&panel).contains(agent::ENDPOINT_DEFAULT), "{}", said(&panel));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

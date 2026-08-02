@@ -80,6 +80,13 @@ const MCP_BYTES: u64 = 1024 * 1024;
 /// The key the panel lets anybody edit: where the model lives.
 pub const ENDPOINT: &str = "NOOB_BASE_URL";
 
+/// What the endpoint goes back to. Read off the CLI, as every default here
+/// is: it is the first address `autodetect_base_url` probes, which is
+/// llama.cpp's own port, so an unset agent on a machine running llama.cpp
+/// ends up here anyway. Written out rather than left unset because a line
+/// somebody can read beats a probe nobody can see.
+pub const ENDPOINT_DEFAULT: &str = "http://localhost:8080/v1";
+
 /// The credential the endpoint is called with. Never drawn: the panel says
 /// whether it is set ([`is_secret`] covers it by name as well).
 pub const API_KEY: &str = "NOOB_API_KEY";

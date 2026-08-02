@@ -23,6 +23,9 @@ tags rather than here; this file starts where it was added.
   is typed and then asks `noob doctor` whether that endpoint answers,
   reporting the line it came back with. The credential is a run of dots
   with an eye beside it that shows it.
+- The endpoint has a way back: one button under the connection card writes
+  `http://localhost:8080/v1`, llama.cpp's own port and the first address the
+  CLI probes when nothing is set.
 - A slider's number stands clear of the end of its track.
 - A prompt document keeps its load, restore and save in the footer whether
   or not edition is on, dim while it is off; the enable-edition checkbox no
