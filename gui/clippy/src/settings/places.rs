@@ -54,7 +54,7 @@ pub(crate) struct SettingsPlaces {
 ///
 /// One answer for the row that names the columns and for every row under it, so
 /// a cell cannot drift out from under its own header. One box per entry of
-/// [`crate::settings::SESSION_COLUMNS`], in that order, so the name of a column,
+/// the table's own columns, in that order, so the name of a column,
 /// the cell under it and the alignment they share are all read off the same
 /// index. The widths come from the model; the one written as zero there is the
 /// first message, which takes whatever is left of the row.
@@ -67,11 +67,16 @@ pub(crate) struct SettingsPlaces {
 /// Cell by cell rather than one space padded string, which is what the picker's
 /// list does: this table has a column that is a mark and a line between every
 /// pair of columns, and both of those need each cell's own x.
-pub(crate) fn settings_session_cells(row: Panel, column: f32) -> Vec<Panel> {
+pub(crate) fn settings_session_cells(
+    row: Panel,
+    column: f32,
+    columns: &[(&str, usize, crate::settings::Align)],
+) -> Vec<Panel> {
     let right = row.x + row.w;
     let mut out = Vec::new();
     let mut at = row.x;
-    for (_, wide, _) in crate::settings::SESSION_COLUMNS {
+    for (_, wide, _) in columns {
+        let wide = *wide;
         let room = (right - at).max(0.0);
         let want = match wide {
             0 => room,
@@ -132,8 +137,18 @@ const SETTING_ACT_COLUMNS: usize = 13;
 /// floating in the middle of it. Nothing at all in a footer too narrow to
 /// hold the three of them side by side, since a button drawn over another
 /// one is a press nobody can aim.
-pub(crate) fn settings_act_boxes(footer: Panel, line: f32, column: f32) -> Vec<(Act, Panel)> {
-    let acts = [Act::All, Act::None, Act::Forget];
+pub(crate) fn settings_act_boxes(
+    footer: Panel,
+    line: f32,
+    column: f32,
+    of: crate::settings::TableOf,
+) -> Vec<(Act, Panel)> {
+    let acts: &[Act] = match of {
+        crate::settings::TableOf::Sessions => &[Act::All, Act::None, Act::Forget],
+        // No marks on the skills table, so nothing to select: the two buttons
+        // act on the row the keys are on.
+        crate::settings::TableOf::Skills => &[Act::Turn, Act::Uninstall],
+    };
     let wide = SETTING_ACT_COLUMNS as f32 * column;
     let step = design::step(line);
     let whole = wide * acts.len() as f32 + step * (acts.len() - 1) as f32;
@@ -141,11 +156,11 @@ pub(crate) fn settings_act_boxes(footer: Panel, line: f32, column: f32) -> Vec<(
         return Vec::new();
     }
     let x = footer.x + footer.w - whole;
-    acts.into_iter()
+    acts.iter()
         .enumerate()
         .map(|(step_at, act)| {
             (
-                act,
+                *act,
                 Panel::new(x + step_at as f32 * (wide + step), footer.y, wide, footer.h),
             )
         })
@@ -205,12 +220,7 @@ const SETTING_EDIT_COLUMNS: usize = 18;
 /// press on it is tested for; buttons that do not fit the footer are dropped
 /// as a group, since a button drawn over the checkbox is a press nobody can
 /// aim.
-pub(crate) fn settings_paper_acts(
-    footer: Panel,
-    line: f32,
-    column: f32,
-    load: bool,
-) -> Vec<(Act, Panel)> {
+pub(crate) fn settings_paper_acts(footer: Panel, line: f32, column: f32) -> Vec<(Act, Panel)> {
     if footer.w < 1.0 || footer.h < 1.0 {
         return Vec::new();
     }
@@ -219,11 +229,7 @@ pub(crate) fn settings_paper_acts(
         Act::EditPrompt,
         Panel::new(footer.x, footer.y, check_w, footer.h),
     )];
-    let mut acts: Vec<Act> = Vec::new();
-    if load {
-        acts.push(Act::LoadPrompt);
-    }
-    acts.push(Act::RestorePrompt);
+    let mut acts: Vec<Act> = vec![Act::LoadPrompt, Act::RestorePrompt];
     acts.push(Act::SavePrompt);
     let wide = SETTING_DOING_COLUMNS as f32 * column;
     let step = design::step(line);
@@ -304,12 +310,18 @@ pub(crate) fn settings_palette_slots(body: Panel, line: f32, cells: usize, acros
 ///
 /// Takes the text after it has been clipped to what the box holds, because what
 /// the right edge is measured back from is what is really drawn.
-pub(crate) fn settings_session_ink(at: Panel, step: usize, shown: &str, column: f32) -> Panel {
+pub(crate) fn settings_session_ink(
+    at: Panel,
+    step: usize,
+    shown: &str,
+    column: f32,
+    columns: &[(&str, usize, crate::settings::Align)],
+) -> Panel {
     // Off the rules on both sides: a cell whose text touches the hairline
     // beside it reads as text stuck to a line, header and data alike.
     let pad = (column * 0.75).floor();
     let right = matches!(
-        crate::settings::SESSION_COLUMNS.get(step),
+        columns.get(step),
         Some((_, _, crate::settings::Align::Right))
     );
     if !right {
@@ -519,7 +531,36 @@ pub(crate) fn settings_card_field(
     // apart without pressing either. A choice draws its options instead of a
     // box, and a slider is its own control: the bare track is its resting
     // look, and boxing it made it read as an input.
-    let boxed = field.editable() && options.is_none() && track.is_none();
+    let boxed = field.editable() && options.is_none() && track.is_none() && !field.link;
+    // A link: the chain in front of the address and a dotted rule under it, in
+    // the accent every link in this window wears. No box, because the thing it
+    // holds is an address rather than a setting.
+    if field.link {
+        let ink = match typing.is_some() || here || hot_value {
+            true => skin.bright,
+            false => skin.body,
+        };
+        scene.text(Text::rich(
+            vec![Run::icon(crate::design::icons::LINK.to_string(), ink)],
+            Panel::new(input_at.x, input_at.y, column * 2.0, input_at.h),
+            size,
+            ink,
+        ));
+        settings_dotted_rule(
+            scene,
+            Panel::new(
+                input_at.x,
+                (input_at.y + input_at.h - 1.0).floor(),
+                input_at.w,
+                1.0,
+            ),
+            column,
+            match typing.is_some() || here {
+                true => skin.edge_focus,
+                false => skin.edge,
+            },
+        );
+    }
     if boxed {
         scene.rect(panel_fill(input_at, skin.input));
         if hot_value {
@@ -533,14 +574,21 @@ pub(crate) fn settings_card_field(
             },
         ));
     }
-    let room = match boxed {
-        true => Panel::new(
+    let room = match (boxed, field.link) {
+        (true, _) => Panel::new(
             input_at.x + INPUT_PAD,
             input_at.y,
             (input_at.w - INPUT_PAD * 2.0).max(1.0),
             input_at.h,
         ),
-        false => input_at,
+        // Past the chain, which stands where the box's padding would.
+        (_, true) => Panel::new(
+            input_at.x + column * 2.0,
+            input_at.y,
+            (input_at.w - column * 2.0).max(1.0),
+            input_at.h,
+        ),
+        _ => input_at,
     };
     let value = panel.preview(index, side).unwrap_or_else(|| field.value());
     // A choice, drawn as all of its options with the one that is set filled in:
@@ -613,10 +661,14 @@ pub(crate) fn settings_card_field(
                 )
                 .fill(skin.edge_focus),
             );
+            // A gap between the track and its number: the two run together
+            // otherwise, and the room for it is already taken off the track's
+            // own width above.
+            let gap = column * SETTING_TRACK_GAP_COLUMNS;
             let number = Panel::new(
-                track.x + track.w,
+                track.x + track.w + gap,
                 input_at.y,
-                (input_at.x + input_at.w - INPUT_PAD - track.x - track.w).max(1.0),
+                (input_at.x + input_at.w - INPUT_PAD - track.x - track.w - gap).max(1.0),
                 input_at.h,
             );
             scene.text(Text::rich(
@@ -858,6 +910,22 @@ pub(crate) fn settings_card_shell(
     }
     if parts.rule.w >= 1.0 && parts.rule.y + 1.0 <= card.y + card.h && held.holds(parts.rule) {
         scene.rect(parts.rule.fill(skin.edge));
+    }
+}
+
+/// The rule under a link: a dash every other column, which is what a dotted
+/// underline is at this size. Whole pixels, or the dashes land on half ones and
+/// read as a grey line.
+pub(crate) fn settings_dotted_rule(scene: &mut Scene, at: Panel, column: f32, edge: [f32; 4]) {
+    if at.w < 1.0 || at.h < 1.0 {
+        return;
+    }
+    let dash = (column * 0.5).floor().max(1.0);
+    let step = dash * 2.0;
+    let mut x = at.x;
+    while x + dash <= at.x + at.w {
+        scene.rect(Panel::new(x.floor(), at.y, dash, at.h).fill(edge));
+        x += step;
     }
 }
 
@@ -1474,8 +1542,15 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
                         continue;
                     };
                     picks.push((index, on, shown));
-                    if let Some(mark) = settings_session_cells(*at, column)
-                        .get(crate::settings::SESSION_MARK)
+                    if let Some(mark) = table
+                        .of
+                        .mark()
+                        .and_then(|cell| {
+                            settings_session_cells(*at, column, table.columns)
+                                .get(cell)
+                                .copied()
+                        })
+                        .as_ref()
                         && mark.w >= 1.0
                         && let Some(mark) = clip.cut(*mark)
                     {
@@ -1485,7 +1560,7 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
                 let inside = parts.footer.y >= card.y
                     && parts.footer.y + parts.footer.h <= card.y + card.h + 0.01;
                 if inside {
-                    for (act, at) in settings_act_boxes(parts.footer, line, column) {
+                    for (act, at) in settings_act_boxes(parts.footer, line, column, table.of) {
                         if clip.holds(at) {
                             acts.push((index, act, at));
                         }
@@ -1547,9 +1622,9 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
             // has no footer left inside itself, the same rule every card's
             // buttons follow. A block with no footer places nothing.
             SettingRow::Paper(paper) => {
-                let Some(acts_of) = paper.does else {
+                if !paper.does {
                     continue;
-                };
+                }
                 let card = settings_card(row, line);
                 let parts =
                     settings_card_parts(card, line, shape.pane_size, column, entry_cols, true);
@@ -1557,7 +1632,7 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
                     && parts.footer.y + parts.footer.h <= card.y + card.h + 0.01;
                 if inside {
                     for (act, at) in
-                        settings_paper_acts(parts.footer, line, column, acts_of.load)
+                        settings_paper_acts(parts.footer, line, column)
                     {
                         if clip.holds(at) {
                             acts.push((index, act, at));

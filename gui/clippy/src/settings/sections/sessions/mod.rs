@@ -49,10 +49,6 @@ pub const SESSION_COLUMNS: [(&str, usize, Align); 6] = [
 /// How many of [`SESSION_COLUMNS`] carry text. The first one is the mark.
 pub const SESSION_CELLS: usize = SESSION_COLUMNS.len() - 1;
 
-/// Which column of [`SESSION_COLUMNS`] the mark stands in, and where the text
-/// cells start.
-pub const SESSION_MARK: usize = 0;
-pub const SESSION_FIRST_CELL: usize = SESSION_MARK + 1;
 
 /// How many conversations are on screen inside the table at once.
 ///
@@ -110,7 +106,8 @@ pub fn rows(agent: &Agent) -> Vec<Row> {
     })];
     if !empty {
         rows.push(Row::Table(Table {
-            names: SESSION_COLUMNS.iter().map(|(name, ..)| *name).collect(),
+            of: crate::settings::TableOf::Sessions,
+            columns: &SESSION_COLUMNS,
             rows: agent
                 .sessions
                 .sessions
@@ -119,6 +116,8 @@ pub fn rows(agent: &Agent) -> Vec<Row> {
                     id: saved.id.clone(),
                     cells: session_cells(saved, agent.now).to_vec(),
                     marked: false,
+                    on: None,
+                    doc: Vec::new(),
                 })
                 .collect(),
             first: 0,
@@ -282,7 +281,7 @@ mod tests {
 
         // Every column has a name over it, and the header is one row of the
         // section rather than a word floated above the list.
-        let header = table.names.clone();
+        let header: Vec<&str> = table.columns.iter().map(|(name, ..)| *name).collect();
         assert_eq!(
             header,
             SESSION_COLUMNS.iter().map(|(name, ..)| *name).collect::<Vec<_>>()
@@ -291,8 +290,8 @@ mod tests {
         // Every column that carries text is named. The first one is the mark,
         // and a word over a column of ticks describes a control that says what
         // it is by being one.
-        assert!(header[SESSION_MARK].is_empty(), "the mark is headed by a word");
-        for name in &header[SESSION_FIRST_CELL..] {
+        assert!(header[0].is_empty(), "the mark is headed by a word");
+        for name in &header[1..] {
             assert!(!name.is_empty(), "a column with no name");
         }
 

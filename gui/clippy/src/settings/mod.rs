@@ -181,8 +181,7 @@ pub const SECTIONS: [&str; 7] = [AGENT, PROMPT, SESSIONS, SKILLS, MCP, COMMANDS,
 /// The sessions section's own vocabulary, re-exported so the frame, the
 /// painter and the panel's callers keep one `settings::` path to it.
 pub use sections::sessions::{
-    table_body_lines, Align, SESSION_COLUMNS, SESSION_FIRST_CELL, SESSION_MARK, SESSION_TITLE,
-    TABLE_ROWS,
+    table_body_lines, Align, SESSION_COLUMNS, SESSION_TITLE, TABLE_ROWS,
 };
 
 /// The skills section's field key, re-exported for the same reason: `main`
@@ -372,6 +371,18 @@ pub enum Row {
     Card(Card),
 }
 
+/// What the column beside a list is showing: the title over it, and the
+/// document under it.
+///
+/// A borrow of whatever the cursor is on rather than a kind of its own, because
+/// two different rows can be the thing being shown: an entry, and one row of a
+/// table that carries a document.
+#[derive(Clone, Copy, Debug)]
+pub struct Shown<'a> {
+    pub name: &'a str,
+    pub doc: &'a [String],
+}
+
 /// A group of related settings, drawn in a box of its own.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Card {
@@ -497,6 +508,9 @@ pub struct CardField {
     /// drag and an edit are the one code path they were when these were rows of
     /// their own ([`control`] is what hands this to the keys).
     pub holds: Box<Row>,
+    /// Whether what it holds is an address, which is drawn as a link rather
+    /// than as an input box. Typed into exactly the same way.
+    pub link: bool,
 }
 
 impl CardField {
@@ -514,6 +528,16 @@ impl CardField {
     /// A field that is typed into. The one on this panel is the endpoint.
     pub fn text(label: &str, key: &'static str, value: String) -> CardField {
         CardField::of(label, Row::Field { key, value })
+    }
+
+    /// The same, for a field whose value is an address somebody would
+    /// recognise: drawn as a link, with the chain in front of it and a dotted
+    /// rule under it instead of the box every other typed field wears.
+    pub fn link(label: &str, key: &'static str, value: String) -> CardField {
+        CardField {
+            link: true,
+            ..CardField::text(label, key, value)
+        }
     }
 
     /// A field that is a setting of a file: a number on a track, held to the
@@ -541,6 +565,7 @@ impl CardField {
             label: String::from(label),
             hint: None,
             holds: Box::new(holds),
+            link: false,
         }
     }
 
@@ -632,18 +657,9 @@ pub struct Paper {
     pub first: usize,
     /// The footer a document that is edited here carries, or nothing on a
     /// block that is only read.
-    pub does: Option<PaperActs>,
+    pub does: bool,
     /// Whether `under` is something wrong rather than something explained.
     pub bad: bool,
-}
-
-/// The footer of an editable document block: the enable-edition checkbox, and
-/// which optional actions stand beside the save and the restore.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PaperActs {
-    /// Whether the footer also offers loading an `.md` file from disk into
-    /// the editor.
-    pub load: bool,
 }
 
 impl Paper {
@@ -689,7 +705,8 @@ impl Paper {
 /// would put every click under it on another row.
 pub const PAPER_LINES: usize = 12;
 
-/// The saved conversations, as a table in the body of one card.
+/// A list of things in the body of one card: the saved conversations, and the
+/// installed skills.
 ///
 /// The rows scroll inside the body rather than down the panel, so the header
 /// naming the columns and the buttons under them stay where they are however far
@@ -698,9 +715,14 @@ pub const PAPER_LINES: usize = 12;
 /// first scrolling back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Table {
-    /// What each column is called, in order, out of [`SESSION_COLUMNS`].
-    pub names: Vec<&'static str>,
-    /// One conversation per entry, newest first, the way the reader read them.
+    /// What is listed, which is what its buttons do and whether its rows are
+    /// marked.
+    pub of: TableOf,
+    /// The columns, in order: the name, the width in columns and how the cell
+    /// is aligned. One list, read by the row builder, the layout and the
+    /// drawing, so a header and the cells under it cannot come apart.
+    pub columns: &'static [(&'static str, usize, Align)],
+    /// One thing per row, in the order they are read.
     pub rows: Vec<Kept>,
     /// Which row the body starts on.
     pub first: usize,
@@ -710,17 +732,51 @@ pub struct Table {
     pub cursor: usize,
 }
 
-/// One saved conversation on the table: the cells that are drawn, the id a
-/// delete needs, and whether it is one of the ones marked.
+/// Which list a table is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableOf {
+    /// The conversations already had: marked a row at a time and deleted in a
+    /// batch.
+    Sessions,
+    /// The skills installed under the agent's `skills/`: turned off and
+    /// uninstalled a row at a time, with the row under the cursor written out
+    /// in the column beside the table.
+    Skills,
+}
+
+impl TableOf {
+    /// Which column carries the mark, on a table whose rows are marked at all.
+    pub fn mark(self) -> Option<usize> {
+        match self {
+            TableOf::Sessions => Some(0),
+            TableOf::Skills => None,
+        }
+    }
+
+    /// The first column that carries text.
+    pub fn first_cell(self) -> usize {
+        self.mark().map_or(0, |at| at + 1)
+    }
+}
+
+/// One row of a table: the cells that are drawn, the id an action names, and
+/// whether it is one of the ones marked.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Kept {
-    /// The name of its transcript on the disk. What a delete names, so what goes
-    /// is what the reader read rather than a path parsed back out of the words
-    /// on screen.
+    /// What an action on this row names: a transcript's name on the disk, or a
+    /// skill's directory. So what goes is what the reader read rather than a
+    /// path parsed back out of the words on screen.
     pub id: String,
-    /// [`SESSION_CELLS`] of them, in [`SESSION_COLUMNS`] order after the mark.
+    /// One per column that carries text, in the table's own column order.
     pub cells: Vec<String>,
     pub marked: bool,
+    /// Whether this row is something the table's own buttons act on, and
+    /// whether it is on. Nothing for a row they do not act on: a conversation,
+    /// and the web search the CLI ships with.
+    pub on: Option<bool>,
+    /// The document the column beside the table shows while the cursor is on
+    /// this row: a skill's own `SKILL.md`. A conversation has none.
+    pub doc: Vec<String>,
 }
 
 impl Table {
@@ -732,9 +788,11 @@ impl Table {
     /// many are about to be deleted is the one thing the header can say that
     /// nothing else on the panel does.
     pub fn title(&self) -> String {
-        let all = match self.rows.len() {
-            1 => String::from("1 SESSION"),
-            many => format!("{many} SESSIONS"),
+        let all = match (self.of, self.rows.len()) {
+            (TableOf::Sessions, 1) => String::from("1 SESSION"),
+            (TableOf::Sessions, many) => format!("{many} SESSIONS"),
+            (TableOf::Skills, 1) => String::from("1 SKILL INSTALLED"),
+            (TableOf::Skills, many) => format!("{many} SKILLS INSTALLED"),
         };
         match self.chosen() {
             0 => all,
@@ -902,8 +960,6 @@ pub struct Entry {
 /// Which kind of entry it is, and what naming it on the disk takes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Which {
-    /// A skill, named by the directory it lives in.
-    Skill { dir: String },
     /// A server, named by [`Entry::name`] inside one of the two `mcp.json`
     /// files. Which file is the whole of what `project` says.
     Server { project: bool },
@@ -1035,7 +1091,7 @@ pub fn lines(row: &Row, cols: usize) -> usize {
         // text came from and the text itself in the body. A footer only on a
         // document that is edited here, for the checkbox and the actions.
         Row::Paper(paper) => {
-            crate::design::card_row_lines(paper_body_lines(), paper.does.is_some())
+            crate::design::card_row_lines(paper_body_lines(), paper.does)
         }
         // A table is a card as well: the column names and the rows in the body,
         // and the buttons that act on what is marked in the footer. A fixed
@@ -1328,7 +1384,7 @@ impl Settings {
             loading: false,
             // The skills box decides its own opening state, the web-search
             // suggestion included.
-            skills: sections::skills::SkillsSection::new(&agent.skills),
+            skills: sections::skills::SkillsSection::new(),
             mcp: sections::mcp::McpSection::default(),
             prompt_section: sections::prompt::PromptSection::default(),
             health: None,
@@ -1899,6 +1955,17 @@ impl Settings {
         // question that does not say what is about to go, and the whole of what
         // a confirmation is for is saying that.
         if let Some(Row::Table(table)) = self.arming.and_then(|at| self.row(at)) {
+            // A skill goes by its directory, which is what a delete takes off
+            // the disk, rather than by the name its front matter gave it.
+            if table.of == TableOf::Skills {
+                let dir = table
+                    .at_cursor()
+                    .map(|row| row.id.clone())
+                    .unwrap_or_default();
+                return format!(
+                    "press uninstall again to delete the {dir} directory; anything else leaves it alone"
+                );
+            }
             let taking = table.taking();
             if taking.len() > 1 {
                 return format!(
@@ -1954,7 +2021,6 @@ impl Settings {
             // "delete https://github.com/..." is not what would happen; a
             // server is an entry in a file and no directory is going anywhere.
             let what = match &entry.what {
-                Which::Skill { dir } => format!("delete the {dir} directory"),
                 Which::Server { .. } => {
                     format!("take {} out of its mcp.json", entry.name)
                 }
@@ -2040,7 +2106,7 @@ impl Settings {
                     "left and right nudge it \u{2022} shift left and right cross the card \u{2022} tab and shift-tab change section"
                 }
             },
-            Some(Row::Paper(paper)) => match paper.does.is_some() {
+            Some(Row::Paper(paper)) => match paper.does {
                 // A document that is edited here: the checkbox is the way in,
                 // and Enter is its keyboard.
                 true => {
@@ -2074,9 +2140,6 @@ impl Settings {
                 (false, _) => {
                     "up and down move \u{2022} enter turns it on and off \u{2022} tab and shift-tab change section"
                 }
-                (true, Which::Skill { .. }) => {
-                    "enter turns it on and off \u{2022} uninstall deletes its directory \u{2022} tab and shift-tab change section"
-                }
                 (true, Which::Server { .. }) => {
                     "enter turns it on and off in its file \u{2022} uninstall takes it out \u{2022} tab and shift-tab change section"
                 }
@@ -2084,9 +2147,14 @@ impl Settings {
             // The one row on the panel whose keys are not the panel's own, so
             // the legend names all four of them: nothing else says that space
             // marks a conversation or that delete takes every marked one.
-            Some(Row::Table(_)) => {
-                "up and down pick a session \u{2022} space marks it \u{2022} delete removes what is marked \u{2022} tab and shift-tab change section"
-            }
+            Some(Row::Table(table)) => match table.of {
+                TableOf::Sessions => {
+                    "up and down pick a session \u{2022} space marks it \u{2022} delete removes what is marked \u{2022} tab and shift-tab change section"
+                }
+                TableOf::Skills => {
+                    "up and down pick a skill \u{2022} the buttons turn it off and uninstall it \u{2022} tab and shift-tab change section"
+                }
+            },
             _ => "up and down move \u{2022} tab and shift-tab change section \u{2022} esc closes",
         }
     }
@@ -2414,10 +2482,6 @@ impl Settings {
             return None;
         };
         Some(match &entry.what {
-            Which::Skill { dir } => Deed::TurnSkill {
-                dir: dir.clone(),
-                on: !entry.on,
-            },
             Which::Server { project } => Deed::TurnServer {
                 name: entry.name.clone(),
                 project: *project,
@@ -2425,6 +2489,20 @@ impl Settings {
             },
             // A command's row has nothing to turn.
             Which::Fixed => return None,
+        })
+    }
+
+    /// Turn the skill the table's cursor is on off, or back on. Nothing on a
+    /// row the table's buttons do not act on.
+    pub fn turn_row(&mut self, index: usize) -> Option<Deed> {
+        let Some(Row::Table(table)) = self.row(index) else {
+            return None;
+        };
+        let row = table.at_cursor()?;
+        let on = row.on?;
+        Some(Deed::TurnSkill {
+            dir: row.id.clone(),
+            on: !on,
         })
     }
 
@@ -2440,10 +2518,6 @@ impl Settings {
     pub fn uninstall(&mut self, index: usize) -> Option<Deed> {
         let deed = match self.row(index) {
             Some(Row::Entry(entry)) if entry.removable => match &entry.what {
-                Which::Skill { dir } => Deed::RemoveSkill {
-                    dir: dir.clone(),
-                    on: entry.on,
-                },
                 Which::Server { project } => Deed::RemoveServer {
                     name: entry.name.clone(),
                     project: *project,
@@ -2455,9 +2529,21 @@ impl Settings {
             // presses, because it is the same kind of act: the transcripts are
             // gone and nothing here can put them back. What it takes is whatever
             // is marked, or the row the keys are on when nothing is.
-            Some(Row::Table(table)) => match table.taking() {
-                ids if ids.is_empty() => return None,
-                ids => Deed::ForgetSessions { ids },
+            Some(Row::Table(table)) => match table.of {
+                TableOf::Sessions => match table.taking() {
+                    ids if ids.is_empty() => return None,
+                    ids => Deed::ForgetSessions { ids },
+                },
+                // One skill, the one the keys are on: the rows are not marked,
+                // because turning one off and deleting one are things done to a
+                // skill and not to a batch of them.
+                TableOf::Skills => match table.at_cursor() {
+                    Some(row) if row.on.is_some() => Deed::RemoveSkill {
+                        dir: row.id.clone(),
+                        on: row.on.unwrap_or(false),
+                    },
+                    _ => return None,
+                },
             },
             // A card whose own action loses something: the restore under the
             // palette, which takes lines out of a file somebody may have edited
@@ -2709,10 +2795,7 @@ impl Settings {
         if self.here().name != PROMPT || self.editing.is_some() {
             return false;
         }
-        let loads = matches!(
-            self.paper(index),
-            Some(Paper { does: Some(acts), .. }) if acts.load
-        );
+        let loads = matches!(self.paper(index), Some(Paper { does: true, .. }));
         if !loads {
             return false;
         }
@@ -2857,15 +2940,29 @@ impl Settings {
     /// The entry the column beside the list is showing: the one under the
     /// cursor, or the first in the section when the cursor is not on one, so
     /// the column has something in it the moment the section opens.
-    pub fn showing(&self) -> Option<&Entry> {
+    pub fn showing(&self) -> Option<Shown<'_>> {
         let here = self.here();
-        match here.rows.get(here.cursor) {
-            Some(Row::Entry(entry)) => Some(entry),
-            _ => here.rows.iter().find_map(|row| match row {
-                Row::Entry(entry) => Some(entry),
-                _ => None,
+        fn shown(row: &Row) -> Option<Shown<'_>> {
+            match row {
+            Row::Entry(entry) => Some(Shown {
+                name: entry.name.as_str(),
+                doc: entry.doc.as_slice(),
             }),
+            // A table whose rows carry a document of their own: the row the
+            // keys are on is what the column beside it is about.
+            Row::Table(table) => table.at_cursor().filter(|row| !row.doc.is_empty()).map(
+                |row| Shown {
+                    name: row.cells.first().map_or("", String::as_str),
+                    doc: row.doc.as_slice(),
+                },
+            ),
+                _ => None,
+            }
         }
+        here.rows
+            .get(here.cursor)
+            .and_then(shown)
+            .or_else(|| here.rows.iter().find_map(shown))
     }
 
     /// How many rows of a `cols` wide column each line of the showing document
@@ -2876,11 +2973,11 @@ impl Settings {
     /// line counted as its own text and drawn as the rendered one drifts by a
     /// row as soon as it is near the width of the column.
     pub fn doc_heights(&self, cols: usize) -> Vec<usize> {
-        let Some(entry) = self.showing() else {
+        let Some(shown) = self.showing() else {
             return Vec::new();
         };
         let mut fence = crate::markdown::Fence::default();
-        entry
+        shown
             .doc
             .iter()
             .map(|line| {
@@ -2904,8 +3001,7 @@ impl Settings {
     /// Its capacity is the whole document, so nothing falls off the front and a
     /// line's number in the pane is its number in the file.
     pub fn doc_pane(&self) -> crate::state::Pane {
-        let empty: Vec<String> = Vec::new();
-        let doc = self.showing().map_or(&empty, |entry| &entry.doc);
+        let doc = self.showing().map(|shown| shown.doc).unwrap_or_default();
         let mut pane = crate::state::Pane::new(doc.len().max(1)).rendered();
         for text in doc {
             pane.push(crate::state::Line::new(
@@ -3521,7 +3617,9 @@ pub(crate) mod testing {
         match row {
                 Row::Note { text, .. } => text.clone(),
                 Row::Table(table) => {
-                    let mut out = vec![table.title(), table.names.join(" ")];
+                    let names: Vec<&str> =
+                        table.columns.iter().map(|(name, ..)| *name).collect();
+                    let mut out = vec![table.title(), names.join(" ")];
                     out.extend(table.rows.iter().map(|row| row.cells.join("  ")));
                     out.join("\n")
                 }
@@ -3605,6 +3703,15 @@ pub(crate) mod testing {
         };
         let mut panel = Settings::open(&Config::default(), None, agent);
         go_to(&mut panel, SKILLS);
+        // On the skill itself: the row above it is the web search the CLI ships
+        // with, whose own document is not the one under test.
+        let at = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, Row::Table(_)))
+            .expect("the installed table");
+        panel.point_at(at, Side::Left);
+        panel.step(true);
         panel
     }
 }
@@ -4580,22 +4687,22 @@ mod tests {
     /// row and let the wheel run off the end of the list.
     #[test]
     fn the_window_counts_an_entry_as_the_rows_its_description_wrapped_to() {
-        let dir = scratch_dir("wrapping-skill");
-        let skills = dir.join("skills");
-        std::fs::create_dir_all(skills.join("coding")).expect("a directory");
+        // A configured server, which is what an entry is: a name, a
+        // description long enough to wrap, and where it was read from.
+        let dir = scratch_dir("wrapping-server");
         std::fs::write(
-            skills.join("coding").join("SKILL.md"),
-            format!("---\nname: coding\ndescription: {A_WRAPPING_ABOUT}\n---\n\n# Changing code\n"),
+            dir.join("mcp.json"),
+            format!("{{\"servers\": {{\"docs\": {{\"url\": \"{A_WRAPPING_ABOUT}\"}}}}}}"),
         )
         .expect("a file");
         let agent = Agent::read(Some(&dir), None, crate::sessions::Listing::default());
         let mut panel = Settings::open(&Config::default(), None, agent);
-        go_to(&mut panel, SKILLS);
+        go_to(&mut panel, MCP);
         let at = panel
             .rows()
             .iter()
             .position(|row| matches!(row, Row::Entry(_)))
-            .expect("the skill is on the list");
+            .expect("the server is on the list");
 
         // Wide enough for the description on one row of the card's own body,
         // which is narrower than the list by the border and the padding.
@@ -4626,17 +4733,16 @@ mod tests {
             "the wrapped card did not grow by the rows it wrapped to"
         );
 
-        // And the window counts it: the section is the install form, the line
-        // naming the list, and the entry under them. In a list one row of text
-        // short of all three, the entry is still on screen with its last row
-        // cut by the bottom, and one step of the wheel cuts the first card by
-        // one row of text instead: the rows of text the entry wrapped to are
-        // the rows the scroll walks through.
-        assert_eq!(panel.rows().len(), 3, "{:?}", panel.rows());
+        // And the window counts it: the section is the entry and the card that
+        // adds one. In a list one row of text short of both, the entry is still
+        // on screen with its last row cut by the bottom, and one step of the
+        // wheel cuts the first card by one row of text instead: the rows of
+        // text the entry wrapped to are the rows the scroll walks through.
+        assert_eq!(panel.rows().len(), 2, "{:?}", panel.rows());
         let both: usize = panel.heights(wide).iter().sum();
         let whole = text_geometry::Window {
             first: 0,
-            count: 3,
+            count: 2,
             skip: 0,
         };
         assert_eq!(panel.window(both, wide), whole, "the section fits");
@@ -4650,7 +4756,7 @@ mod tests {
             panel.window(both - 1, wide),
             text_geometry::Window {
                 first: 0,
-                count: 3,
+                count: 2,
                 skip: 1,
             },
             "the scroll did not walk into the first card"
@@ -4781,9 +4887,12 @@ mod tests {
         let agent = Agent::read(Some(&dir), Some(&work), crate::sessions::Listing::default());
         let mut panel = Settings::open(&Config::default(), None, agent);
 
+        // SKILLS is not here: its list is never empty, because the web search
+        // the CLI ships with is a row of it whether or not anything has been
+        // installed beside it.
         for (section, wanted) in [
             (MCP, "none configured"),
-            (SKILLS, "none installed"),
+            (SKILLS, "a skill is a directory"),
             (SESSIONS, "none saved yet"),
             (AGENT, "the CLI probes :8080"),
         ] {

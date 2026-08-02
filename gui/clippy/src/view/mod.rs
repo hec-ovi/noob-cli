@@ -484,6 +484,13 @@ pub enum Act {
     /// Delete what is marked, or the row the keys are on when nothing is. Two
     /// presses, like every other delete on this panel.
     Forget,
+    /// Turn the skill the keys are on off, or back on. A move on the disk: the
+    /// directory goes to the sibling of the skills folder the agent does not
+    /// read, and comes back the same way.
+    Turn,
+    /// Delete the skill the keys are on. Two presses, like every other delete
+    /// on this panel.
+    Uninstall,
     /// Say what the typed source would install, without installing it. The
     /// same button as Install, one step earlier.
     Validate,
@@ -12751,6 +12758,21 @@ mod tests {
                     String::from("Read the file before writing it."),
                 ],
             }],
+            // One configured server, so the section that lists them has an
+            // entry the way the fixture's skills directory has a skill.
+            mcp: crate::agent::Mcp {
+                global: Some(std::path::PathBuf::from("/home/hec/.config/noob/mcp.json")),
+                project: None,
+                any_file: true,
+                servers: vec![crate::agent::Server {
+                    name: String::from("docs"),
+                    how: String::from("http://localhost:9000/mcp"),
+                    project: false,
+                    on: true,
+                    entry: String::from("{ \"url\": \"http://localhost:9000/mcp\" }"),
+                }],
+                trouble: Vec::new(),
+            },
             // Where the global AGENTS.md and TOOLS.md would go, with nothing
             // in either: the machine this fixture stands for has never
             // written one, so the blocks show the shipped defaults.
@@ -13443,7 +13465,8 @@ mod tests {
     /// printed with its marks in.
     #[test]
     fn the_skills_section_puts_the_skill_beside_the_list() {
-        let panel = a_panel_on(&Config::default(), crate::settings::SKILLS);
+        let mut panel = a_panel_on(&Config::default(), crate::settings::SKILLS);
+        on_the_installed_skill(&mut panel);
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let layout = &out.layout;
         let (list, doc) = (layout.settings_list, layout.settings_doc);
@@ -13479,13 +13502,13 @@ mod tests {
             "the title over the box is not text to select"
         );
 
-        // What is drawn: the name and the repository on the left, the document
-        // on the right, and no Markdown marks in it.
+        // What is drawn: the row on the left, the document on the right, and
+        // no Markdown marks in it.
         let text = text_of(&out.scene);
         assert!(text.contains("coding"), "{text}");
         assert!(
-            text.contains("https://github.com/someone/coding"),
-            "the repository is not under the name: {text}"
+            text.contains("https://github.com/someone/cod"),
+            "the row does not say where the skill came from: {text}"
         );
         assert!(
             text.contains("Read the file before writing it."),
@@ -13622,7 +13645,7 @@ mod tests {
 
         // Every column has its name over it, and the name starts exactly where
         // the cells under it start.
-        let names = settings_session_cells(names_at, column);
+        let names = settings_session_cells(names_at, column, table.columns);
         assert_eq!(names.len(), crate::settings::SESSION_COLUMNS.len());
         let text_at = |out: &Rendered, at: Panel| -> String {
             out.scene
@@ -13642,7 +13665,7 @@ mod tests {
         // (`settings_session_ink`), so the written x is asked from the same
         // helper the painter uses rather than recomputed here.
         let written_at = |at: Panel, step: usize, text: &str| -> f32 {
-            settings_session_ink(at, step, text, column).x
+            settings_session_ink(at, step, text, column, table.columns).x
         };
         for (step, (name, _, _)) in crate::settings::SESSION_COLUMNS.iter().enumerate() {
             if name.is_empty() {
@@ -13658,9 +13681,9 @@ mod tests {
         // same edge the name above it is written against.
         for (on, at) in &picks {
             let cells = table.rows[*on].cells.clone();
-            let places = settings_session_cells(*at, column);
+            let places = settings_session_cells(*at, column, table.columns);
             for (step, cell) in cells.iter().enumerate() {
-                let step = step + crate::settings::SESSION_FIRST_CELL;
+                let step = step + table.of.first_cell();
                 assert!(
                     (places[step].x - names[step].x).abs() < 0.01,
                     "row {on} column {step} is not under its header"
@@ -13996,7 +14019,7 @@ mod tests {
     /// the cursor there rather than deleting a skill.
     #[test]
     fn an_entry_carries_a_toggle_and_an_uninstall_of_its_own() {
-        let panel = a_panel_on(&Config::default(), crate::settings::SKILLS);
+        let panel = a_wordy_servers_panel();
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let layout = &out.layout;
         let entries: Vec<usize> = layout
@@ -14007,7 +14030,7 @@ mod tests {
             })
             .map(|(index, _, _)| *index)
             .collect();
-        assert_eq!(entries.len(), 1, "the one skill is not a row of its own");
+        assert_eq!(entries.len(), 2, "the servers are not rows of their own");
         let index = entries[0];
         let row = layout
             .settings_rows
@@ -14069,20 +14092,51 @@ mod tests {
 
     /// The skills section with one skill whose description and whose document
     /// are both longer than the room they are given.
-    fn a_wordy_skills_panel() -> Settings {
+
+    /// A panel on the section whose rows are entries, with a description long
+    /// enough to wrap and a document beside it: the configured MCP servers.
+    ///
+    /// The entries of the panel are the servers. The skills are a table now,
+    /// and every rule about an entry (its card, its two buttons, the column
+    /// beside it) is asserted here, on the list that has them.
+    fn an_agent_with_servers() -> crate::agent::Agent {
         let mut agent = an_agent();
-        agent.skills[0].about = String::from(A_LONG_ABOUT);
-        agent.skills[0].doc = vec![String::from(A_LONG_DOC_LINE)];
+        agent.mcp = crate::agent::Mcp {
+            global: Some(std::path::PathBuf::from("/home/hec/.config/noob/mcp.json")),
+            project: None,
+            any_file: true,
+            servers: vec![
+                crate::agent::Server {
+                    name: String::from("docs"),
+                    how: String::from(A_LONG_ABOUT),
+                    project: false,
+                    on: true,
+                    entry: String::from(A_LONG_DOC_LINE),
+                },
+                crate::agent::Server {
+                    name: String::from("shell"),
+                    how: String::from("http://localhost:9001/mcp"),
+                    project: false,
+                    on: false,
+                    entry: String::from("{ \"url\": \"http://localhost:9001/mcp\" }"),
+                },
+            ],
+            trouble: Vec::new(),
+        };
+        agent
+    }
+
+    fn a_wordy_servers_panel() -> Settings {
         let mut panel = Settings::open(
             &Config::default(),
             Some(std::path::Path::new("/home/hec/.config/noob/no0b.conf")),
-            agent,
+            an_agent_with_servers(),
         );
         let at = panel
             .section_names()
             .iter()
-            .position(|name| *name == crate::settings::SKILLS)
-            .expect("SKILLS is a section");
+            .position(|name| *name == crate::settings::MCP)
+            .expect("MCP is a section");
         panel.choose(at);
         panel
     }
@@ -14145,7 +14199,7 @@ mod tests {
     /// have a strip of their own.
     #[test]
     fn an_entry_is_a_card_with_its_name_its_words_and_its_path_in_it() {
-        let panel = a_wordy_skills_panel();
+        let panel = a_wordy_servers_panel();
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let line = Text::line_for(PANE_TEXT.0);
         let (index, row) = the_entry_row(&out, &panel);
@@ -14165,7 +14219,7 @@ mod tests {
             .expect("the title");
         assert_eq!(
             title.runs.iter().map(|run| run.text.as_str()).collect::<String>(),
-            "coding"
+            "docs"
         );
         assert_eq!(title.size, design::card_title_size(PANE_TEXT.0));
         assert!(title.size > PANE_TEXT.0, "the title is not bigger than a value");
@@ -14192,7 +14246,7 @@ mod tests {
             .expect("the path");
         assert_eq!(
             under.runs.iter().map(|run| run.text.as_str()).collect::<String>(),
-            "https://github.com/someone/coding"
+            "global: /home/hec/.config/noob/mcp.json"
         );
         assert_eq!(under.size, design::hint_size(PANE_TEXT.0));
         assert!(under.size < PANE_TEXT.0, "the path is not quieter than the words");
@@ -14234,7 +14288,7 @@ mod tests {
     /// space.
     #[test]
     fn the_buttons_of_a_card_stand_in_its_footer() {
-        let panel = a_wordy_skills_panel();
+        let panel = a_wordy_servers_panel();
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let line = Text::line_for(PANE_TEXT.0);
         let (index, row) = the_entry_row(&out, &panel);
@@ -14318,28 +14372,10 @@ mod tests {
     /// description cannot be one row of the column and the second short enough
     /// that it is.
     fn a_wrapping_skills_panel() -> Settings {
-        let mut agent = an_agent();
-        agent.skills[0].about = String::from(A_WRAPPING_ABOUT);
-        agent.skills.push(crate::agent::Skill {
-            dir: String::from("web-search"),
-            name: String::from("web-search"),
-            about: String::from("Searches the live web."),
-            repo: Some(String::from("https://github.com/someone/web-search")),
-            path: std::path::PathBuf::from("/home/hec/.config/noob/skills/web-search"),
-            on: true,
-            doc: vec![String::from("# Searching")],
-        });
-        let mut panel = Settings::open(
-            &Config::default(),
-            Some(std::path::Path::new("/home/hec/.config/noob/no0b.conf")),
-            agent,
-        );
-        let at = panel
-            .section_names()
-            .iter()
-            .position(|name| *name == crate::settings::SKILLS)
-            .expect("SKILLS is a section");
-        panel.choose(at);
+        let mut agent = an_agent_with_servers();
+        agent.mcp.servers[0].how = String::from(A_WRAPPING_ABOUT);
+        let mut panel = a_wordy_servers_panel();
+        panel.adopt_agent(agent, &Config::default());
         panel
     }
 
@@ -14433,7 +14469,7 @@ mod tests {
         let cols = design::card_cols(out.layout.settings_entry_columns(PANE_TEXT.1));
         let wrapped = crate::settings::about_rows(A_WRAPPING_ABOUT, cols);
         let rows = the_entry_rows(&out, &panel);
-        assert_eq!(rows.len(), 2, "two skills are two cards");
+        assert_eq!(rows.len(), 2, "two servers are two cards");
         let ((_, first), (_, second)) = (rows[0], rows[1]);
         assert!(
             second.y >= first.y + first.h - 0.01,
@@ -14448,13 +14484,13 @@ mod tests {
                 first_parts.body.x,
                 first_parts.body.y + wrapped as f32 * line + design::tight(line)
             ),
-            "https://github.com/someone/coding"
+            "global: /home/hec/.config/noob/mcp.json"
         );
         // And the next name is under the whole of the first card, with the
         // space between two cards left between them.
         assert_eq!(
             line_of(&out, second_parts.title.x, second_parts.title.y),
-            "web-search"
+            "shell"
         );
         assert!(
             second.y >= first_card.y + first_card.h + design::apart(line) - 1.01,
@@ -14472,13 +14508,13 @@ mod tests {
         let panel = a_wrapping_skills_panel();
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let rows = the_entry_rows(&out, &panel);
-        assert_eq!(rows.len(), 2, "two skills are two rows");
+        assert_eq!(rows.len(), 2, "two servers are two rows");
         let named = |index: usize| match panel.row(index) {
             Some(crate::settings::Row::Entry(entry)) => entry.name.clone(),
             other => panic!("row {index} is {other:?}"),
         };
-        assert_eq!(named(rows[0].0), "coding");
-        assert_eq!(named(rows[1].0), "web-search");
+        assert_eq!(named(rows[0].0), "docs");
+        assert_eq!(named(rows[1].0), "shell");
         for (index, row) in rows {
             let (x, y) = middle(row);
             assert_eq!(
@@ -14504,7 +14540,7 @@ mod tests {
     /// the shaper's bounds took the last letter off it.
     #[test]
     fn the_uninstall_sits_inside_the_row_with_room_for_its_word() {
-        let panel = a_wordy_skills_panel();
+        let panel = a_wordy_servers_panel();
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let (index, row) = the_entry_row(&out, &panel);
         let remove = out
@@ -14544,12 +14580,13 @@ mod tests {
     /// read through. The border says the same thing and leaves the words alone.
     #[test]
     fn the_entry_under_the_cursor_is_the_card_with_the_focus_border() {
-        let mut panel = a_wordy_skills_panel();
+        let mut panel = a_wordy_servers_panel();
         // The section opens on the install form, so the cursor is walked down
         // to the entry this test is about.
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let (index, _) = the_entry_row(&out, &panel);
-        assert!(panel.point_at(index, crate::settings::Side::Left));
+        panel.point_at(index, crate::settings::Side::Left);
+        assert_eq!(panel.cursor(), index, "the entry cannot hold the cursor");
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let (index, row) = the_entry_row(&out, &panel);
         let (card, _) = the_card(&out, row, true);
@@ -14665,7 +14702,7 @@ mod tests {
     /// right of the card, and pressed where it is drawn.
     #[test]
     fn the_install_button_is_filled_and_stands_in_the_card_s_footer() {
-        let panel = a_wordy_skills_panel();
+        let panel = a_panel_on(&Config::default(), crate::settings::SKILLS);
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let (index, row) = the_card_row(&out, &panel);
         let (card, parts) = the_card(&out, row, true);
@@ -14717,7 +14754,7 @@ mod tests {
     /// one divider under it and the text in its body.
     #[test]
     fn the_document_is_a_card_whose_header_names_the_skill() {
-        let panel = a_wordy_skills_panel();
+        let panel = a_wordy_servers_panel();
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let layout = &out.layout;
         let line = Text::line_for(13.0);
@@ -14742,7 +14779,7 @@ mod tests {
             .expect("the header");
         assert_eq!(
             title.runs.iter().map(|run| run.text.as_str()).collect::<String>(),
-            "coding"
+            "docs"
         );
         assert_eq!(title.size, design::card_title_size(PANE_TEXT.0));
 
@@ -14814,16 +14851,18 @@ mod tests {
     /// list stays where it was.
     #[test]
     fn the_document_scrolls_inside_its_own_box() {
-        let mut panel = a_wordy_skills_panel();
+        let mut panel = a_wordy_servers_panel();
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let cols = out.layout.settings_doc_columns(8.0);
         let rows = out.layout.settings_doc_rows(13.0);
         assert!(rows > 1, "the box holds more than a line");
 
         // A document longer than any window, scrolled past its first screenful.
-        let long: Vec<String> = (0..200).map(|n| format!("line {n} of it")).collect();
-        let mut agent = an_agent();
-        agent.skills[0].doc = long;
+        let mut agent = an_agent_with_servers();
+        agent.mcp.servers[0].entry = (0..200)
+            .map(|n| format!("line {n} of it"))
+            .collect::<Vec<String>>()
+            .join("\n");
         panel.adopt_agent(agent, &Config::default());
         let before = render_settings(&panel, 1400.0, 900.0, None);
         let first_row = before.layout.settings_rows[0];
@@ -14981,7 +15020,7 @@ mod tests {
         let panels = [
             ("INSTALL", a_wordy_install_panel()),
             ("SESSIONS", a_long_sessions_panel()),
-            ("SKILLS", a_wordy_skills_panel()),
+            ("SKILLS", a_wordy_servers_panel()),
             (
                 "APPEARANCE",
                 a_panel_on(&Config::default(), crate::settings::APPEARANCE),
@@ -15249,7 +15288,20 @@ mod tests {
         ];
         let mut panel = a_panel_on(&Config::default(), crate::settings::SKILLS);
         panel.adopt_agent(agent, &Config::default());
+        on_the_installed_skill(&mut panel);
         panel
+    }
+
+    /// Put the keys on the first installed skill of the table, which is the row
+    /// under the web search the CLI ships with.
+    fn on_the_installed_skill(panel: &mut Settings) {
+        let at = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, crate::settings::Row::Table(_)))
+            .expect("the installed table");
+        panel.point_at(at, crate::settings::Side::Left);
+        panel.step(true);
     }
 
     /// The pixel in the middle of one drawn cell of the document.
@@ -15390,6 +15442,7 @@ mod tests {
         let mut agent = an_agent();
         agent.skills[0].doc = (0..200).map(|n| format!("line {n} of it")).collect();
         panel.adopt_agent(agent, &Config::default());
+        on_the_installed_skill(&mut panel);
         let layout = render_settings(&panel, 1400.0, 900.0, None).layout;
         let cols = layout.settings_doc_columns(8.0);
         let rows = layout.settings_doc_rows(13.0);
@@ -15429,14 +15482,17 @@ mod tests {
     /// the clipboard does not have.
     #[test]
     fn the_document_pane_holds_what_the_column_draws() {
-        let panel = a_wordy_skills_panel();
+        let panel = a_wordy_servers_panel();
         let layout = render_settings(&panel, 1400.0, 900.0, None).layout;
         let cols = layout.settings_doc_columns(8.0);
         let rows = layout.settings_doc_rows(13.0);
         let pane = panel.doc_pane_at(cols, rows);
         assert_eq!(pane.window(rows, cols), panel.doc_window(cols, rows));
         let heights = panel.doc_heights(cols);
-        assert!(heights[0] > 1, "the long line has to wrap for this to prove anything");
+        assert!(
+            heights.iter().any(|tall| *tall > 1),
+            "no line wraps, so this proves nothing"
+        );
         for (line, tall) in heights.iter().enumerate() {
             assert_eq!(pane.rows_of_line(line, cols).len(), *tall, "line {line}");
         }
@@ -16545,7 +16601,7 @@ mod tests {
         let sections = [
             crate::settings::APPEARANCE,
             crate::settings::AGENT,
-            crate::settings::SKILLS,
+            crate::settings::MCP,
             crate::settings::SESSIONS,
         ];
         let (mut values, mut toggles, mut removes) = (0, 0, 0);
@@ -16697,7 +16753,7 @@ mod tests {
             (crate::settings::AGENT, "http://localhost:8080/v1"),
             (crate::settings::SESSIONS, "rebuild the settings panel"),
             (crate::settings::SKILLS, "coding"),
-            (crate::settings::MCP, "none configured"),
+            (crate::settings::MCP, "ADD A SERVER"),
             (crate::settings::APPEARANCE, "theme"),
             (crate::settings::APPEARANCE, "opacity"),
             (crate::settings::APPEARANCE, "pane_font_size"),

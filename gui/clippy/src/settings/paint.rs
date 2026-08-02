@@ -310,13 +310,15 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 // nothing else drew them as one more row of the list.
                 if let Some(band) = keep.cut(names_at) {
                     scene.rect(band.fill(skin.strip));
-                    let names = settings_session_cells(names_at, column);
-                    for (step, (at, name)) in names.iter().zip(&table.names).enumerate() {
+                    let names = settings_session_cells(names_at, column, table.columns);
+                    for (step, (at, (name, ..))) in
+                        names.iter().zip(table.columns).enumerate()
+                    {
                         if at.w < column {
                             continue;
                         }
                         let shown = clip(name, columns_in(at.w, column).saturating_sub(2));
-                        let ink = settings_session_ink(*at, step, &shown, column);
+                        let ink = settings_session_ink(*at, step, &shown, column, table.columns);
                         hold_say(
                             scene,
                             vec![Run::tinted(shown, skin.dim)],
@@ -345,19 +347,18 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                         true => skin.picked_ink,
                         false => skin.body,
                     };
-                    let cells = settings_session_cells(*at, column);
-                    for (step, (box_, text)) in cells
-                        .iter()
-                        .skip(crate::settings::SESSION_FIRST_CELL)
-                        .zip(&kept.cells)
-                        .enumerate()
+                    let cells = settings_session_cells(*at, column, table.columns);
+                    let first_cell = table.of.first_cell();
+                    for (step, (box_, text)) in
+                        cells.iter().skip(first_cell).zip(&kept.cells).enumerate()
                     {
                         if box_.w < column {
                             continue;
                         }
-                        let step = step + crate::settings::SESSION_FIRST_CELL;
+                        let step = step + first_cell;
                         let shown = clip(text, columns_in(box_.w, column).saturating_sub(2));
-                        let room = settings_session_ink(*box_, step, &shown, column);
+                        let room =
+                            settings_session_ink(*box_, step, &shown, column, table.columns);
                         hold_say(
                             scene,
                             vec![Run::tinted(shown, ink)],
@@ -370,7 +371,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     // ones about to go: the whole of what multi selection is is
                     // being able to see which rows are in it without pressing
                     // anything.
-                    if let Some(mark) = cells.get(crate::settings::SESSION_MARK) {
+                    if let Some(mark) = table.of.mark().and_then(|at| cells.get(at)) {
                         let hot = frame.hot == Some(Hit::SettingsMark(*index, table.first + step));
                         let tint = match (kept.marked, here) {
                             // On the picked band the mark inverts, or an accent
@@ -427,7 +428,13 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     if at != index {
                         continue;
                     }
-                    let armed = *act == Act::Forget && panel.arming() == Some(*index);
+                    let armed = matches!(act, Act::Forget | Act::Uninstall)
+                        && panel.arming() == Some(*index);
+                    // What the two skill buttons act on: the row the keys are
+                    // on, when that row is a skill installed here. The shipped
+                    // web search is neither turned off nor uninstalled, so both
+                    // buttons are dim while the cursor is on it.
+                    let acting = table.at_cursor().and_then(|row| row.on);
                     let (kind, tint, word) = match act {
                         Act::All => (ButtonKind::Secondary, skin.body, String::from("select all")),
                         Act::None => {
@@ -441,6 +448,31 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                                 (false, 0) => String::from("delete"),
                                 (false, many) => format!("delete {many}"),
                             },
+                        ),
+                        Act::Turn => (
+                            ButtonKind::Secondary,
+                            match acting.is_some() {
+                                true => skin.body,
+                                false => skin.dim,
+                            },
+                            String::from(match acting {
+                                Some(true) => "turn off",
+                                _ => "turn on",
+                            }),
+                        ),
+                        Act::Uninstall => (
+                            match acting.is_some() {
+                                true => ButtonKind::Danger,
+                                false => ButtonKind::Secondary,
+                            },
+                            match acting.is_some() {
+                                true => skin.bad,
+                                false => skin.dim,
+                            },
+                            String::from(match armed {
+                                true => "sure?",
+                                false => "uninstall",
+                            }),
                         ),
                         // A card's or a document's own action, which no table
                         // has one of. Each is drawn by the row it stands in.
@@ -1055,7 +1087,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
             SettingRow::Paper(paper) => {
                 let box_ = settings_card(*row, line);
                 let parts =
-                    settings_card_parts(box_, line, size, column, list_cols, paper.does.is_some());
+                    settings_card_parts(box_, line, size, column, list_cols, paper.does);
                 // The text starts under the line saying where it came from, and
                 // runs to the bottom of the body. How many lines that really is
                 // rather than [`crate::settings::PAPER_LINES`], because a block
@@ -1232,7 +1264,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 // The footer of a document that is edited here: the
                 // enable-edition checkbox, and the actions the layout placed.
                 // Drawn off the same boxes the presses are tested in.
-                if paper.does.is_some() {
+                if paper.does {
                     let ticked = panel.edition_on(*index);
                     for (at, act, box2) in &layout.settings_acts {
                         if at != index {
@@ -1298,10 +1330,17 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                                     true => skin.bad,
                                     false => skin.dim,
                                 };
+                                // The red outline only while the word in it is
+                                // red: a red box around a dim word says the
+                                // button is live and the word says it is not.
+                                let kind = match ticked {
+                                    true => ButtonKind::Danger,
+                                    false => ButtonKind::Secondary,
+                                };
                                 settings_button(
                                     scene,
                                     *box2,
-                                    ButtonKind::Danger,
+                                    kind,
                                     vec![Run::tinted(
                                         match armed {
                                             true => "sure?",
@@ -1355,7 +1394,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 scene,
                 box_,
                 &parts,
-                entry.map(|entry| entry.name.as_str()).unwrap_or_default(),
+                entry.map(|shown| shown.name).unwrap_or_default(),
                 skin.heading,
                 false,
                 skin,

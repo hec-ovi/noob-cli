@@ -8,7 +8,99 @@
 //! lands here and the rows are rebuilt from it.
 
 use crate::agent::{self, Agent};
-use crate::settings::{Card, CardField, Doing, Entry, Paper, Row, Which};
+use crate::settings::{Align, Card, CardField, Doing, Kept, Paper, Row, Table, TableOf};
+
+/// The columns of the installed list, in order: the name, the width in columns
+/// and how the cell is aligned. Zero is the column that takes whatever is left
+/// of the row.
+///
+/// The names live here because they are what the section says about itself, and
+/// the widths live with them so the header and the cells under it cannot come
+/// apart.
+pub const SKILL_COLUMNS: [(&str, usize, Align); 4] = [
+    ("skill", 22, Align::Left),
+    ("on", 5, Align::Left),
+    ("where it is", 34, Align::Left),
+    ("what it is for", 0, Align::Left),
+];
+
+/// One row per installed skill, with the web search the CLI ships with at the
+/// top of them.
+///
+/// The shipped one is read off the machine rather than off the skills
+/// directory: it is a tool of the CLI's own, so the row says whether the agent
+/// has it and where it came from, and nothing on it can be turned off from
+/// here.
+fn skill_rows(agent: &Agent) -> Vec<Kept> {
+    let mut rows = vec![Kept {
+        id: String::new(),
+        cells: vec![
+            String::from("web search"),
+            String::from(match crate::agent::websearch_on() {
+                true => "yes",
+                false => "no",
+            }),
+            String::from("shipped with noob"),
+            String::from(
+                "searches the web and reads pages, through the websearch program on PATH",
+            ),
+        ],
+        marked: false,
+        on: None,
+        doc: websearch_doc(),
+    }];
+    rows.extend(agent.skills.iter().map(|skill| Kept {
+        id: skill.dir.clone(),
+        cells: vec![
+            skill.name.clone(),
+            String::from(match skill.on {
+                true => "yes",
+                false => "no",
+            }),
+            match &skill.repo {
+                Some(repo) => repo.clone(),
+                // Nothing on disk records the repository of an installed skill,
+                // so where it is is the truthful cell.
+                None => skill.path.display().to_string(),
+            },
+            skill.about.clone(),
+        ],
+        marked: false,
+        on: Some(skill.on),
+        doc: skill.doc.clone(),
+    }));
+    rows
+}
+
+/// What the column beside the table says about the shipped web search: what it
+/// is, and what to do when the row says the agent does not have it.
+fn websearch_doc() -> Vec<String> {
+    let mut out = vec![
+        String::from("# web search"),
+        String::new(),
+        String::from(
+            "Ships with noob rather than being installed here: the CLI registers its \
+             `websearch` tool when the `websearch` program is on PATH, and a sub-agent \
+             given `web` tools has this and nothing else.",
+        ),
+        String::new(),
+    ];
+    match crate::agent::websearch_on() {
+        true => out.push(String::from(
+            "It is on. `websearch searxng up` starts the instance the searches run through.",
+        )),
+        false => out.extend([
+            String::from("It is off: the program is not on PATH."),
+            String::new(),
+            String::from("    uv tool install websearch-skill"),
+            String::new(),
+            String::from(
+                "`NOOB_WEBSEARCH` names another program to run instead, or turns the tool off.",
+            ),
+        ]),
+    }
+    out
+}
 
 /// The key the install field carries.
 ///
@@ -18,10 +110,6 @@ use crate::settings::{Card, CardField, Doing, Entry, Paper, Row, Which};
 /// into it under whatever key it was given. `main` branches on this before the
 /// write and starts an install instead.
 pub const SKILL_SOURCE: &str = "skill source";
-
-/// The standard skill the fresh field suggests: web search, by the same
-/// owner/name shorthand `skills add` takes.
-pub const WEBSEARCH_SUGGESTION: &str = "hec-ovi/websearch-skill";
 
 /// What the install of a skill is doing.
 ///
@@ -58,21 +146,15 @@ pub struct SkillsSection {
 }
 
 impl SkillsSection {
-    /// Fresh state over what is installed.
-    ///
-    /// The standard skill, suggested: a fresh config has no web search at
-    /// all, and the field offering `skills add`'s own shorthand for it is
-    /// how the list says so without lying about what is installed.
-    pub fn new(skills: &[agent::Skill]) -> SkillsSection {
-        let mut section = SkillsSection {
+    /// Fresh state over what is installed. The field starts empty: the web
+    /// search a fresh config wants is the CLI's own tool, and it is a row of
+    /// the list rather than something to install here.
+    pub fn new() -> SkillsSection {
+        SkillsSection {
             source: String::new(),
             checked: None,
             install: None,
-        };
-        if skills.iter().all(|skill| skill.name != "web-search") {
-            section.source = String::from(WEBSEARCH_SUGGESTION);
         }
-        section
     }
 
     /// What is in the install field right now. Only the tests want it on its
@@ -149,7 +231,7 @@ impl SkillsSection {
                     "fetching it, reading its SKILL.md and putting it in place.",
                 )],
                 first: 0,
-                does: None,
+                does: false,
                 bad: false,
             },
             Installing::Done { source, said, bad } => Paper {
@@ -160,7 +242,7 @@ impl SkillsSection {
                 },
                 body: said.clone(),
                 first: 0,
-                does: None,
+                does: false,
                 bad: *bad,
             },
         })
@@ -183,8 +265,6 @@ impl SkillsSection {
         // last one rather than as the way to add another: "must be extremely
         // clear a install a skill, IS A FORM. AND UNDER A LIST".
         let mut rows = Vec::new();
-        let suggesting = self.source == WEBSEARCH_SUGGESTION
-            && agent.skills.iter().all(|skill| skill.name != "web-search");
         rows.push(Row::Card(Card {
             beside: false,
             group: None,
@@ -196,13 +276,8 @@ impl SkillsSection {
             }),
             title: String::from("INSTALL A SKILL"),
             fields: vec![
-                CardField::text("repository or folder", SKILL_SOURCE, self.source.clone())
-                    .saying(match suggesting {
-                        true => {
-                            "the standard web-search skill, suggested; validate and install it, or type another source"
-                        }
-                        false => "a git address, an owner/name, or a folder with a SKILL.md in it",
-                    }),
+                CardField::link("repository or folder", SKILL_SOURCE, self.source.clone())
+                    .saying("a git address, an owner/name, or a folder with a SKILL.md in it"),
                 CardField::reading(
                     "installed in",
                     match &agent.skills_at {
@@ -212,10 +287,10 @@ impl SkillsSection {
                 )
                 .saying("the agent reads this folder in every project, not just this one"),
             ],
-            hint: Some(String::from(match agent.skills.is_empty() {
-                true => "none installed yet: a skill is a directory in there with a SKILL.md in it",
-                false => "turning one off moves its directory beside that one, where the agent does not look; uninstall deletes it",
-            })),
+            hint: Some(String::from(
+                "a skill is a directory in there with a SKILL.md in it; turning one off moves it \
+                 beside that folder, where the agent does not look, and uninstall deletes it",
+            )),
         }));
         // The validate button's verdict, under the card it answers, for the
         // source the field still holds; a verdict about something no longer
@@ -234,35 +309,17 @@ impl SkillsSection {
         if let Some(paper) = self.install_paper() {
             rows.push(Row::Paper(paper));
         }
-        // Then what is installed, under a line that says that is what it is:
-        // a list with no heading over it, under a card, is a list nothing
-        // introduces.
-        rows.push(Row::Note {
-            text: match agent.skills.len() {
-                0 => String::from("INSTALLED: none yet"),
-                1 => String::from("INSTALLED: one skill"),
-                many => format!("INSTALLED: {many} skills"),
-            },
-            bad: false,
-        });
-        for skill in &agent.skills {
-            rows.push(Row::Entry(Entry {
-                name: skill.name.clone(),
-                about: skill.about.clone(),
-                under: match &skill.repo {
-                    Some(repo) => repo.clone(),
-                    // Nothing on disk records the repository of an installed
-                    // skill, so where it is is the truthful second line.
-                    None => skill.path.display().to_string(),
-                },
-                on: skill.on,
-                what: Which::Skill {
-                    dir: skill.dir.clone(),
-                },
-                removable: true,
-                doc: skill.doc.clone(),
-            }));
-        }
+        // Then what is installed, as a table in a card of its own: one row per
+        // skill, the columns naming themselves, and the row under the cursor
+        // written out in the column beside it. One card headed with the count,
+        // the way the conversations are listed.
+        rows.push(Row::Table(Table {
+            of: TableOf::Skills,
+            columns: &SKILL_COLUMNS,
+            rows: skill_rows(agent),
+            first: 0,
+            cursor: 0,
+        }));
         rows
     }
 }
@@ -309,15 +366,40 @@ mod tests {
     }
 
     /// Every name on the list, in order.
+    /// The installed skills the table lists, without the web search the CLI
+    /// ships with, which is the one row that is not a directory here.
     fn the_skills(panel: &Settings) -> Vec<String> {
+        the_table(panel)
+            .rows
+            .iter()
+            .filter(|row| row.on.is_some())
+            .map(|row| row.cells[0].clone())
+            .collect()
+    }
+
+    /// Put the keys on the row of the table that lists one skill.
+    fn on_the_skill(panel: &mut Settings, name: &str) {
+        let at = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, Row::Table(_)))
+            .expect("the installed table");
+        panel.point_at(at, crate::settings::Side::Left);
+        while the_table(panel).at_cursor().map(|row| row.cells[0].as_str()) != Some(name) {
+            assert!(panel.step(true), "{name} is not a row of the table");
+        }
+    }
+
+    /// The section's one table.
+    fn the_table(panel: &Settings) -> &Table {
         panel
             .rows()
             .iter()
-            .filter_map(|row| match row {
-                Row::Entry(entry) => Some(entry.name.clone()),
+            .find_map(|row| match row {
+                Row::Table(table) => Some(table),
                 _ => None,
             })
-            .collect()
+            .expect("the installed table")
     }
 
     /// The skills section lists what is on the disk: a row per skill, the
@@ -355,38 +437,56 @@ mod tests {
         let agent = Agent::read(Some(&dir), None, crate::sessions::Listing::default());
         let mut panel = Settings::open(&Config::default(), None, agent);
         go_to(&mut panel, SKILLS);
-        let listed: Vec<&Entry> = panel
-            .rows()
+
+        // One table, headed by the count, with the web search the CLI ships
+        // with first and every installed directory under it. The name, whether
+        // the agent loads it, where it is and what it is for are four columns,
+        // which is what the list of three-line cards was.
+        let table = the_table(&panel);
+        assert_eq!(
+            table.columns.iter().map(|(name, ..)| *name).collect::<Vec<_>>(),
+            ["skill", "on", "where it is", "what it is for"]
+        );
+        assert!(table.title().contains("SKILLS INSTALLED"), "{}", table.title());
+        let listed: Vec<(&str, &str, &str)> = table
+            .rows
             .iter()
-            .filter_map(|row| match row {
-                Row::Entry(entry) => Some(entry),
-                _ => None,
+            .skip(1)
+            .map(|row| {
+                (
+                    row.cells[0].as_str(),
+                    row.cells[1].as_str(),
+                    row.cells[2].as_str(),
+                )
             })
             .collect();
-        // The name is the name and the description is its own line: the two
-        // used to be one run of text joined by two spaces, which is what put the
-        // description on the name's line for the buttons to cut off.
+        // The shipped row first, whose on-cell is read off the machine this
+        // runs on rather than off the skills directory.
+        assert_eq!(table.rows[0].cells[0], "web search");
+        assert_eq!(table.rows[0].cells[2], "shipped with noob");
         assert_eq!(
-            listed
-                .iter()
-                .map(|entry| (entry.name.as_str(), entry.about.as_str(), entry.on))
-                .collect::<Vec<_>>(),
+            listed,
             vec![
-                ("coding", "Changing code that already exists.", true),
-                ("noisy", "Talks too much.", false),
-                ("web-search", "Search the web.", true),
-            ]
+                ("coding", "yes", skills.join("coding").display().to_string().leak() as &str),
+                (
+                    "noisy",
+                    "no",
+                    agent::skills_off(&skills)
+                        .join("noisy")
+                        .display()
+                        .to_string()
+                        .leak() as &str
+                ),
+                ("web-search", "yes", "https://github.com/someone/web-search"),
+            ],
+            "the table does not list what is on the disk"
         );
-        // Nothing the CLI writes records a repository, so a skill that names one
-        // says it and every other one says where it was found.
-        assert_eq!(listed[0].under, skills.join("coding").display().to_string());
+        // The shipped row is not a directory: nothing turns it off or deletes
+        // it, and every installed one is both.
         assert_eq!(
-            listed[1].under,
-            agent::skills_off(&skills).join("noisy").display().to_string(),
-            "a skill that is off says where it went"
+            table.rows.iter().map(|row| row.on).collect::<Vec<_>>(),
+            vec![None, Some(true), Some(false), Some(true)]
         );
-        assert_eq!(listed[2].under, "https://github.com/someone/web-search");
-        assert!(listed.iter().all(|entry| entry.removable));
         assert!(
             said(&panel).contains(&skills.display().to_string()),
             "the panel does not say where they live"
@@ -400,17 +500,18 @@ mod tests {
             "the section does not open on the install form: {:?}",
             panel.at_cursor()
         );
-        // The column beside the list is the skill under the cursor, and the
-        // first of them while the cursor is still on the form: a column that
-        // went blank until somebody walked into the list would be a column
-        // nobody knew was a document.
-        assert_eq!(panel.showing().expect("something to show").name, "coding");
-        let first = panel
+        // The column beside the table is the row the keys are on, and the first
+        // row while the cursor is still on the form: a column that went blank
+        // until somebody walked into the list would be a column nobody knew was
+        // a document.
+        assert_eq!(panel.showing().expect("something to show").name, "web search");
+        let at = panel
             .rows()
             .iter()
-            .position(|row| matches!(row, Row::Entry(_)))
+            .position(|row| matches!(row, Row::Table(_)))
             .expect("the skills are listed");
-        assert!(panel.point_at(first, crate::settings::Side::Left));
+        assert!(panel.point_at(at, crate::settings::Side::Left));
+        assert!(panel.step(true), "the keys do not walk the table");
         let showing = panel.showing().expect("something to show");
         assert_eq!(showing.name, "coding");
         assert_eq!(
@@ -422,8 +523,6 @@ mod tests {
             ],
             "the front matter is not the document"
         );
-        assert!(panel.step(true), "the cursor walks the entries");
-        assert_eq!(panel.showing().expect("the next one").name, "noisy");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -471,11 +570,14 @@ mod tests {
         );
 
         // What is typed is what is installed, whether the edit was ended with
-        // Enter or left running when the button was pressed. The cursor walks
-        // down past the list onto the card's field.
-        while !matches!(panel.at_cursor(), Some(Row::Field { key, .. }) if *key == SKILL_SOURCE) {
-            assert!(panel.step(true), "the install field is not reachable");
-        }
+        // Enter or left running when the button was pressed. The field is the
+        // top of the section, which is where the cursor opens.
+        panel.point_at(at, crate::settings::Side::Left);
+        assert!(
+            matches!(panel.at_cursor(), Some(Row::Field { key, .. }) if *key == SKILL_SOURCE),
+            "the install field is not the card's first: {:?}",
+            panel.at_cursor()
+        );
         assert!(panel.edit());
         // The field opens holding the standard suggestion; typing another
         // source starts by taking it out, the way a person would.
@@ -579,16 +681,17 @@ mod tests {
         let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
         let mut panel = Settings::open(&Config::default(), None, read());
         go_to(&mut panel, SKILLS);
-        // The section opens on the form, and the list is under it.
+        // The section opens on the form; the table is under it, and the keys
+        // walk its rows once the cursor is on it. The first row is the web
+        // search the CLI ships with, and the installed skill is under it.
         let at = panel
             .rows()
             .iter()
-            .position(|row| matches!(row, Row::Entry(_)))
+            .position(|row| matches!(row, Row::Table(_)))
             .expect("the skill is listed");
-        assert!(panel.point_at(at, crate::settings::Side::Left));
-        assert!(matches!(panel.row(at), Some(Row::Entry(entry)) if entry.on));
+        on_the_skill(&mut panel, "coding");
 
-        let deed = panel.toggle(at).expect("an entry toggles");
+        let deed = panel.turn_row(at).expect("the row turns off");
         assert_eq!(
             deed,
             Deed::TurnSkill {
@@ -596,19 +699,25 @@ mod tests {
                 on: false,
             }
         );
+        // Nothing turns off the shipped row: it is a tool of the CLI's own, and
+        // the buttons say so by doing nothing on it.
+        let table = the_table(&panel);
+        assert_eq!(table.rows[0].on, None, "the shipped row can be turned off");
+
         // What `main` does with it, and then what the panel does with the disk.
         agent::set_skill(panel.skills_at().expect("a skills directory"), "coding", false)
             .expect("it moves");
         panel.adopt_agent(read(), &Config::default());
         go_to(&mut panel, SKILLS);
-        assert!(
-            matches!(panel.row(panel.cursor()), Some(Row::Entry(entry)) if !entry.on),
-            "the row still says it is on: {:?}",
-            panel.row(panel.cursor())
+        on_the_skill(&mut panel, "coding");
+        assert_eq!(
+            the_table(&panel).at_cursor().expect("a row").on,
+            Some(false),
+            "the row still says it is on"
         );
         assert!(!skills.join("coding").exists());
 
-        let back = panel.toggle(panel.cursor()).expect("and back");
+        let back = panel.turn_row(at).expect("and back");
         assert_eq!(
             back,
             Deed::TurnSkill {
@@ -620,12 +729,12 @@ mod tests {
             .expect("it comes back");
         panel.adopt_agent(read(), &Config::default());
         go_to(&mut panel, SKILLS);
-        assert!(matches!(panel.row(panel.cursor()), Some(Row::Entry(entry)) if entry.on));
+        on_the_skill(&mut panel, "coding");
+        assert_eq!(the_table(&panel).at_cursor().expect("a row").on, Some(true));
         assert!(skills.join("coding/SKILL.md").is_file());
 
         // And the uninstall beside it takes two presses and names the same
         // directory: the only thing on this panel that cannot be undone.
-        let at = panel.cursor();
         assert_eq!(panel.uninstall(at), None, "one press deleted a skill");
         assert_eq!(panel.arming(), Some(at));
         assert!(

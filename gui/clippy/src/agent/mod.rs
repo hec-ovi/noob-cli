@@ -395,6 +395,38 @@ pub struct Skill {
     pub doc: Vec<String>,
 }
 
+/// The web search the CLI ships with, which is a tool of its own rather than a
+/// directory under `skills/`.
+///
+/// The CLI registers its `websearch` tool when the `websearch` program is on
+/// PATH, and answers with the web when it is. So the row is read off the same
+/// thing the CLI reads: the program's presence, or the override that names one
+/// somewhere else (or turns it off). Listed with the skills because that is
+/// what it is to whoever is reading the panel: a capability the agent either
+/// has or does not.
+pub const WEBSEARCH_PROGRAM: &str = "websearch";
+pub const WEBSEARCH_OVERRIDE: &str = "NOOB_WEBSEARCH";
+
+/// Whether the agent has web search, and what to say about where it came from.
+pub fn websearch_on() -> bool {
+    match std::env::var(WEBSEARCH_OVERRIDE) {
+        Ok(value) => {
+            let value = value.trim().to_ascii_lowercase();
+            !matches!(value.as_str(), "" | "0" | "off" | "no" | "false")
+        }
+        Err(_) => on_path(WEBSEARCH_PROGRAM),
+    }
+}
+
+/// Whether a program is somewhere on PATH, which is how the CLI resolves the
+/// ones it shells out to.
+fn on_path(program: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| dir.join(program).is_file())
+}
+
 /// Every skill directory under `at`, by directory name, marked `on` or not.
 ///
 /// A directory with no `SKILL.md`, or one whose front matter is missing or

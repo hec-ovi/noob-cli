@@ -18,7 +18,7 @@
 //! through the agent-files box, so nothing in this file touches a disk.
 
 use crate::agent::{self, Agent, Instructions};
-use crate::settings::{EnvBlock, Paper, PaperActs, Row, PAPER_LINES};
+use crate::settings::{EnvBlock, Paper, Row, PAPER_LINES};
 
 /// Which of the two user-owned prompt files a row or an editor is about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,10 +114,12 @@ impl Editor {
 impl PromptSection {
     /// The file a row of the section is, or nothing for the rows that are not
     /// one of the two.
+    /// Which file a row of this section is edited from. Only AGENTS.md: the row
+    /// under TOOLS.md is read out here and changed in the file itself, so no
+    /// key and no press opens an editor on it.
     pub(crate) fn file_at(index: usize) -> Option<PromptFile> {
         match index {
             0 => Some(PromptFile::Agents),
-            1 => Some(PromptFile::Tools),
             _ => None,
         }
     }
@@ -319,10 +321,10 @@ impl PromptSection {
     /// means.
     ///
     /// TOOLS.md is the description the model works its tools from, so a word
-    /// changed in it costs a tool rather than a paragraph. The title wears the
-    /// asterisk and the line under it stays to one clause: a paragraph of
-    /// warning on a block somebody reads every day is a paragraph they stop
-    /// seeing.
+    /// changed in it costs a tool rather than a paragraph. It is read out here
+    /// and edited in the file itself: the title wears the asterisk and the line
+    /// under it stays to one clause: a paragraph of warning on a block somebody
+    /// reads every day is a paragraph they stop seeing.
     fn marked(file: PromptFile) -> String {
         match file {
             PromptFile::Tools => format!("{} *", file.name()),
@@ -332,7 +334,7 @@ impl PromptSection {
 
     fn caution(file: PromptFile) -> &'static str {
         match file {
-            PromptFile::Tools => " \u{2022} * an edit here can cost the agent a tool",
+            PromptFile::Tools => " \u{2022} * read out here: an edit costs the agent a tool, so it is made in the file",
             PromptFile::Agents => "",
         }
     }
@@ -342,9 +344,10 @@ impl PromptSection {
     /// while there is not.
     fn file_paper(&self, file: PromptFile, agent: &Agent) -> Paper {
         let title = Self::marked(file);
-        let acts = Some(PaperActs {
-            load: file == PromptFile::Agents,
-        });
+        // Only AGENTS.md is written from here. TOOLS.md is the description the
+        // model works its tools from: it is read out and dragged over like any
+        // other block here, and changed in the file itself.
+        let acts = file == PromptFile::Agents;
         if let Some((editing, editor)) = self.editing.as_ref()
             && *editing == file
         {
@@ -367,7 +370,7 @@ impl PromptSection {
                 under: String::from("nowhere: no config directory to keep one in"),
                 body: Vec::new(),
                 first: 0,
-                does: None,
+                does: false,
                 bad: true,
             };
         };
@@ -419,7 +422,7 @@ fn env_paper(env: &EnvBlock) -> Paper {
             under: String::from("running noob debug env\u{2026}"),
             body: Vec::new(),
             first: 0,
-            does: None,
+            does: false,
             bad: false,
         },
         EnvBlock::Got { at, body } => Paper {
@@ -429,7 +432,7 @@ fn env_paper(env: &EnvBlock) -> Paper {
             ),
             body: body.clone(),
             first: 0,
-            does: None,
+            does: false,
             bad: false,
         },
         EnvBlock::Failed { at, why } => Paper {
@@ -437,7 +440,7 @@ fn env_paper(env: &EnvBlock) -> Paper {
             under: format!("{why} (run in {at})"),
             body: Vec::new(),
             first: 0,
-            does: None,
+            does: false,
             bad: true,
         },
     }
@@ -630,7 +633,7 @@ say");
         assert!(panel.edition_on(0));
         assert!(!panel.edition_on(1));
         assert_eq!(panel.instructions_caret(0), Some((0, 0)));
-        assert_eq!(panel.instructions_caret(1), None, "a caret on the block not being edited");
+        assert_eq!(panel.instructions_caret(1), None, "a caret on the block that is only read");
         assert!(panel.type_instructions("gone ", &config));
         assert!(panel.hint().contains("ctrl+s writes the file"), "{}", panel.hint());
 
@@ -650,19 +653,17 @@ say");
             "an abandoned edit reached the file"
         );
 
-        // And enabling edition on one file drops an edit running on the other:
-        // one keyboard, one caret.
-        assert!(panel.toggle_edition(0, &config));
-        assert!(panel.toggle_edition(1, &config));
-        assert!(panel.edition_on(1));
-        assert!(!panel.edition_on(0));
+        // And the tools block takes no editor at all: it is read out here and
+        // changed in the file itself.
+        assert!(!panel.toggle_edition(1, &config), "TOOLS.md opened an editor");
+        assert!(!panel.edition_on(1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Two independent editors: each block saves its own file and only that
-    /// file, through the same whole-file deed.
+    /// One editor, on AGENTS.md: it saves its own file, and the block beside it
+    /// is read out with nothing to press.
     #[test]
-    fn each_block_saves_its_own_file() {
+    fn the_agents_block_saves_its_file_and_the_tools_block_is_read_out() {
         let config = Config::default();
         let dir = scratch_dir("prompt-two-files");
         let agents = dir.join(agent::AGENTS_MD);
@@ -672,28 +673,14 @@ say");
         let mut panel = Settings::open(&config, None, read(&dir));
         go_to(&mut panel, PROMPT);
 
-        // TOOLS.md first: the deed names the tools file, and landing it
-        // changes nothing about AGENTS.md.
-        assert!(panel.toggle_edition(1, &config));
-        assert!(panel.type_instructions("more ", &config));
-        let deed = panel.finish_instructions().expect("something to save");
-        let Deed::SaveInstructions { path, text } = &deed else {
-            panic!("{deed:?}");
-        };
-        assert_eq!(path, &tools);
-        assert_eq!(text, "more tools text");
-        agent::write_instructions(path, text).expect("the file takes it");
-        panel.end_instructions_edit();
-        panel.adopt_agent(read(&dir), &config);
-        go_to(&mut panel, PROMPT);
-        assert_eq!(
-            std::fs::read_to_string(&agents).expect("the file"),
-            "agents text\n",
-            "saving TOOLS.md touched AGENTS.md"
-        );
-        assert_eq!(panel.paper(1).expect("the block").body, ["more tools text"]);
+        // The tools block: the file's own text, no footer to act in, and no
+        // editor behind it.
+        let tools_block = panel.paper(1).expect("the block");
+        assert_eq!(tools_block.body, ["tools text"]);
+        assert!(!tools_block.does, "TOOLS.md offers edition");
+        assert!(!panel.toggle_edition(1, &config), "TOOLS.md opened an editor");
 
-        // AGENTS.md the same way round.
+        // AGENTS.md is the one that writes.
         assert!(panel.toggle_edition(0, &config));
         assert!(panel.type_instructions("first ", &config));
         let deed = panel.finish_instructions().expect("something to save");
@@ -704,7 +691,7 @@ say");
         agent::write_instructions(path, text).expect("the file takes it");
         assert_eq!(
             std::fs::read_to_string(&tools).expect("the file"),
-            "more tools text\n",
+            "tools text\n",
             "saving AGENTS.md touched TOOLS.md"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -717,22 +704,22 @@ say");
     fn restore_arms_then_parks_a_bak_and_writes_the_default() {
         let config = Config::default();
         let dir = scratch_dir("prompt-restore");
-        let path = dir.join(agent::TOOLS_MD);
+        let path = dir.join(agent::AGENTS_MD);
         std::fs::write(&path, "mine\n").expect("a file");
         let mut panel = Settings::open(&config, None, read(&dir));
         go_to(&mut panel, PROMPT);
 
         // The action stands in the enabled footer, and it takes two presses.
-        assert_eq!(panel.restore_prompt(1), None, "restore acted with edition off");
-        assert!(panel.toggle_edition(1, &config));
-        assert_eq!(panel.restore_prompt(1), None, "one press acted");
+        assert_eq!(panel.restore_prompt(0), None, "restore acted with edition off");
+        assert!(panel.toggle_edition(0, &config));
+        assert_eq!(panel.restore_prompt(0), None, "one press acted");
         assert!(panel.says().contains(".bak"), "{}", panel.says());
-        let deed = panel.restore_prompt(1).expect("the second press acts");
+        let deed = panel.restore_prompt(0).expect("the second press acts");
         let Deed::RestorePrompt { path: to, default } = &deed else {
             panic!("{deed:?}");
         };
         assert_eq!(to, &path);
-        assert_eq!(*default, agent::TOOLS_DEFAULT);
+        assert_eq!(*default, agent::AGENTS_DEFAULT);
 
         // The disk half, as main does it: the bak first, then the default.
         agent::restore_prompt(to, default).expect("the restore lands");
@@ -740,14 +727,14 @@ say");
         panel.adopt_agent(read(&dir), &config);
         go_to(&mut panel, PROMPT);
         assert_eq!(
-            std::fs::read_to_string(dir.join("TOOLS.md.bak")).expect("the bak"),
+            std::fs::read_to_string(dir.join("AGENTS.md.bak")).expect("the bak"),
             "mine\n"
         );
-        let paper = panel.paper(1).expect("the block");
+        let paper = panel.paper(0).expect("the block");
         assert!(!paper.under.contains("not written yet"), "{}", paper.under);
         assert_eq!(
             paper.body.join("\n"),
-            agent::TOOLS_DEFAULT.trim_end_matches('\n')
+            agent::AGENTS_DEFAULT.trim_end_matches('\n')
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -821,7 +808,7 @@ say");
             &config,
         );
         go_to(&mut panel, PROMPT);
-        assert_eq!(panel.paper(2).expect("the block").does, None, "the block offers edition");
+        assert!(!panel.paper(2).expect("the block").does, "the block offers edition");
         assert!(panel.point_at(2, crate::settings::Side::Left));
         assert!(!panel.toggle_edition(2, &config), "edition opened on the environment");
         assert!(!panel.type_instructions("x", &config));
@@ -917,7 +904,7 @@ say");
         go_to(&mut nowhere, PROMPT);
         let paper = nowhere.paper(0).expect("the block");
         assert!(paper.bad, "no config directory is not marked as trouble");
-        assert_eq!(paper.does, None, "it offers edition with nowhere to save");
+        assert!(!paper.does, "it offers edition with nowhere to save");
         assert!(!nowhere.toggle_edition(0, &config));
         let _ = std::fs::remove_dir_all(&dir);
     }

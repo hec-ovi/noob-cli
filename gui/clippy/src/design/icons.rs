@@ -87,6 +87,10 @@ pub const SEARCH: char = '\u{ea6d}';
 /// On the button that confirms a choice, and on the menu row that opens the
 /// session under the pointer: the same act, so the same mark.
 pub const CONFIRM: char = '\u{eab2}';
+/// On a field whose value is an address rather than a setting: the chain every
+/// other application puts on a link.
+pub const LINK: char = '\u{eb15}';
+
 /// On the menu row that deletes a session.
 ///
 /// A bin, which is what every other list on the desktop puts on that row. The
@@ -165,6 +169,7 @@ mod tests {
             EYE_OFF,
             COPY,
             PASTE,
+            LINK,
             WIDGETS,
             CLOSE_WIDGET,
             TABS_LEFT,

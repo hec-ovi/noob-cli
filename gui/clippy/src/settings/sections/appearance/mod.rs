@@ -1157,7 +1157,8 @@ mod tests {
                 Row::Reading { label, .. } => vec![label.as_str()],
                 Row::Note { text, .. } => vec![text.as_str()],
                 Row::Table(table) => {
-                    let mut said = table.names.clone();
+                    let mut said: Vec<&str> =
+                        table.columns.iter().map(|(name, ..)| *name).collect();
                     said.extend(
                         table
                             .rows

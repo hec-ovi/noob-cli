@@ -2520,6 +2520,12 @@ impl App {
                         // second: one deletes transcripts, the other takes
                         // lines out of a file somebody may have edited by hand.
                         view::Act::Forget | view::Act::Restore => panel.uninstall(index),
+                        // The two buttons under the skills table, on the row
+                        // the keys are on: the move that turns one off, and the
+                        // delete, which arms first the way every delete here
+                        // does.
+                        view::Act::Turn => panel.turn_row(index),
+                        view::Act::Uninstall => panel.uninstall(index),
                         // The add card's button: the deed writes the file.
                         view::Act::AddServer => {
                             let config = self.config.clone();
