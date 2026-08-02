@@ -985,6 +985,48 @@ fn spot_in_doc(
     (pane.last() > 0).then(|| spot_in_rows(&pane, rows, cols, row, at))
 }
 
+/// Where in a document block on the settings list the pointer is: the row it
+/// is on, and the character along it.
+///
+/// The block's text box is worked out with the same three calls the painter
+/// draws it with, so a drag lands on the character under the pointer rather
+/// than on one a rounding away.
+fn spot_in_paper(
+    layout: &view::Layout,
+    panel: &settings::Settings,
+    index: usize,
+    x: f32,
+    y: f32,
+    size: f32,
+    column: f32,
+) -> Option<select::Spot> {
+    use settings::places::{settings_card, settings_card_parts, settings_paper_text};
+    let line = noob_draw::Text::line_for(size);
+    let (_, _, row) = *layout
+        .settings_rows
+        .iter()
+        .find(|(at, _, _)| *at == index)?;
+    let card = settings_card(row, line);
+    let cols = layout.settings_entry_columns(column);
+    let parts = settings_card_parts(card, line, size, column, cols, true);
+    let text = settings_paper_text(&parts, line);
+    if text.w < 1.0 || text.h < 1.0 || !holds(text, x, y) {
+        return None;
+    }
+    let rows = (text.h / line).floor().max(1.0) as usize;
+    let body_cols = view::columns_in(text.w, column);
+    let at_row = (((y - text.y) / line).floor().max(0.0) as usize).min(rows.saturating_sub(1));
+    let at_col = (((x - text.x) / column).round().max(0.0) as usize).min(body_cols);
+    let pane = panel.paper_pane_at(index, rows);
+    (pane.last() > 0).then(|| spot_in_rows(&pane, rows, body_cols, at_row, at_col))
+}
+
+/// Whether a box holds a point. The layout's own hit tests are private to it,
+/// and this is the one place outside them that has to ask.
+fn holds(box_: noob_draw::Panel, x: f32, y: f32) -> bool {
+    x >= box_.x && x < box_.x + box_.w && y >= box_.y && y < box_.y + box_.h
+}
+
 struct App {
     window: Option<Arc<Window>>,
     gpu: Option<noob_gpu::Gpu>,
@@ -2323,6 +2365,17 @@ impl App {
             Hit::SettingsRow(index, side) => {
                 if let Some(panel) = self.settings.as_mut() {
                     self.dirty |= panel.point_at(index, side);
+                }
+                // A press in a document block's text is the start of a drag
+                // over it, the way a press in a pane is: these are the two
+                // files the prompt is made of, and nothing could be copied
+                // out of either.
+                let paper = self
+                    .settings
+                    .as_ref()
+                    .is_some_and(|panel| panel.paper(index).is_some());
+                if paper {
+                    self.begin_paper_selection(index);
                 }
             }
             // The value is the control, so clicking it does what the right arrow
@@ -3691,10 +3744,12 @@ impl App {
     /// or a press that moves the cursor puts other text under the same line
     /// numbers, and a band left behind would be over words nobody highlighted.
     fn forget_doc_selection(&mut self) {
-        if self
-            .selection
-            .is_some_and(|selection| selection.at == select::Where::SettingsDoc)
-        {
+        if self.selection.is_some_and(|selection| {
+            matches!(
+                selection.at,
+                select::Where::SettingsDoc | select::Where::SettingsPaper(_)
+            )
+        }) {
             self.selection = None;
             self.dirty = true;
         }
@@ -3762,6 +3817,30 @@ impl App {
         self.dirty = true;
     }
 
+    /// A press inside one of the list's own document blocks: the prompt's
+    /// files, which are read here far more often than they are written.
+    fn begin_paper_selection(&mut self, index: usize) {
+        let layout = self.layout();
+        let spot = self.paper_spot_at(&layout, index);
+        self.selection =
+            spot.map(|spot| select::Selection::new(select::Where::SettingsPaper(index), spot));
+        self.selecting = self.selection.is_some();
+        self.dirty = true;
+    }
+
+    /// The character of one document block under the pointer.
+    fn paper_spot_at(&self, layout: &view::Layout, index: usize) -> Option<select::Spot> {
+        spot_in_paper(
+            layout,
+            self.settings.as_ref()?,
+            index,
+            self.cursor.x as f32,
+            self.cursor.y as f32,
+            self.config.pane_font_size,
+            self.pane_column,
+        )
+    }
+
     /// The character of the settings document under the pointer.
     fn doc_spot_at(&self, layout: &view::Layout) -> Option<select::Spot> {
         spot_in_doc(
@@ -3823,6 +3902,7 @@ impl App {
                 None => return,
             },
             select::Where::SettingsDoc => self.doc_spot_at(&layout),
+            select::Where::SettingsPaper(index) => self.paper_spot_at(&layout, index),
             select::Where::CallPopup => {
                 let frame = self.frame(&layout);
                 crate::widgets::popup::spot_at(&frame, self.cursor.x as f32, self.cursor.y as f32)
@@ -3865,6 +3945,12 @@ impl App {
             // and where the column happens to be scrolled to is none of it.
             select::Where::SettingsDoc => match self.settings.as_ref() {
                 Some(panel) => selection.text(&panel.doc_pane()),
+                None => return false,
+            },
+            // The same, off the block the band was painted over: the whole of
+            // its text, whatever the block happens to be scrolled to.
+            select::Where::SettingsPaper(index) => match self.settings.as_ref() {
+                Some(panel) => selection.text(&panel.paper_pane(index)),
                 None => return false,
             },
             // Off the popup's own document, whole lines included however the

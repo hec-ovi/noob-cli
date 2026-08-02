@@ -49,6 +49,11 @@ pub enum Where {
     /// document into, which is why everything below still takes a
     /// [`crate::state::Pane`].
     SettingsDoc,
+    /// One of the document blocks in the list itself, by the row it is on:
+    /// the prompt's own files, which are read far more often than they are
+    /// edited and were the one text on the panel nothing could be copied out
+    /// of.
+    SettingsPaper(usize),
 }
 
 /// A drag in progress, or a finished one.
@@ -75,7 +80,7 @@ impl Selection {
         match self.at {
             Where::Pane(view) => Some(view),
             Where::CallPopup => None,
-            Where::SettingsDoc => None,
+            Where::SettingsDoc | Where::SettingsPaper(_) => None,
         }
     }
 

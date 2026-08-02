@@ -2796,6 +2796,34 @@ impl Settings {
         pane
     }
 
+    /// One document block as a pane, so a drag over it can be resolved and
+    /// copied the way a drag over any other text in this window is.
+    ///
+    /// Clipped rather than wrapped, because that is how the block draws its
+    /// lines: one row each, cut at the width of the card.
+    pub fn paper_pane(&self, index: usize) -> crate::state::Pane {
+        let empty = Vec::new();
+        let body = self.paper(index).map_or(&empty, |paper| &paper.body);
+        let mut pane = crate::state::Pane::new(body.len().max(1)).clipped();
+        for text in body {
+            pane.push(crate::state::Line::new(
+                text.clone(),
+                crate::state::Tone::Body,
+            ));
+        }
+        pane
+    }
+
+    /// The same, wound to where the block is scrolled, so the row under the
+    /// pointer is the row the pane resolves.
+    pub fn paper_pane_at(&self, index: usize, rows: usize) -> crate::state::Pane {
+        let mut pane = self.paper_pane(index);
+        let first = self.paper(index).map_or(0, |paper| paper.first);
+        let heights = vec![1usize; pane.last()];
+        pane.scrollback = text_geometry::scrollback_for(&heights, rows, first);
+        pane
+    }
+
     /// The same, scrolled to where the column is drawn, so the row a pointer is
     /// over is the row the pane resolves.
     ///

@@ -32,6 +32,10 @@ pub fn PromptSection::rows(&self, agent: &Agent, env: &EnvBlock) -> Vec<Row>
 pub fn PromptSection::editing(&self) -> bool
 ```
 
+The frame turns a block into a pane for selection and copying
+(`Settings::paper_pane`, `paper_pane_at`), since a drag is the window's
+business and not the section's.
+
 ## Invariants
 
 1. No I/O here: rows come from the `Agent` snapshot, the shipped default
@@ -53,6 +57,9 @@ pub fn PromptSection::editing(&self) -> bool
 6. The environment block never offers edition: it is computed by the CLI
    for each request, and its `under` line says so.
 7. No config directory is said as trouble, never offered and never edited.
+8. A block's text is selected with the pointer and copied like any other
+   text in the window: the drag resolves against the block's own lines at
+   the scroll it is read at.
 
 ## Dependencies
 

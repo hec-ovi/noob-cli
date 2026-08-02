@@ -29,6 +29,8 @@ tags rather than here; this file starts where it was added.
   longer fills in under the pointer; the load opens on the folder the
   document lives in and shows the path being typed where the document's own
   path is; and TOOLS.md says on the block what editing it costs.
+- The prompt's document blocks are text you can drag over and copy, the way
+  every other body of text in the window is.
 - Installing a skill is the form at the top of its section, with the
   installed list under it.
 - The colour of the base application and the colour of the widget windows

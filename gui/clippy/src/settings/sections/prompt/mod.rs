@@ -448,6 +448,54 @@ mod tests {
         Agent::read(Some(dir), None, crate::sessions::Listing::default())
     }
 
+    /// The two files are read here far more often than they are written, and
+    /// nothing could be taken out of either: a drag over a block resolves
+    /// against the block's own text, and a copy returns what was dragged over.
+    #[test]
+    fn a_document_block_is_text_a_drag_can_be_copied_out_of() {
+        let dir = scratch_dir("prompt-select");
+        std::fs::write(
+            dir.join(crate::agent::AGENTS_MD),
+            "keep the diff small
+say which file you read
+",
+        )
+        .expect("a file");
+        let mut panel = Settings::open(&Config::default(), None, read(&dir));
+        go_to(&mut panel, PROMPT);
+        let at = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, Row::Paper(paper) if paper.title == crate::agent::AGENTS_MD))
+            .expect("the AGENTS.md block");
+
+        let pane = panel.paper_pane(at);
+        let mut drag = crate::select::Selection::new(
+            crate::select::Where::SettingsPaper(at),
+            crate::select::Spot::new(0, 5),
+        );
+        drag.extend(crate::select::Spot::new(1, 3));
+        assert_eq!(drag.text(&pane), "the diff small
+say");
+
+        // And the block's own scroll is what a row under the pointer is
+        // resolved against, so a drag over the second screenful of a long
+        // file does not copy the first.
+        let long: Vec<String> = (0..PAPER_LINES * 2).map(|n| format!("line {n}")).collect();
+        std::fs::write(dir.join(crate::agent::AGENTS_MD), long.join("
+")).expect("a file");
+        panel.adopt_agent(read(&dir), &Config::default());
+        go_to(&mut panel, PROMPT);
+        assert!(panel.scroll_paper(at, PAPER_LINES, true));
+        let wound = panel.paper_pane_at(at, PAPER_LINES);
+        assert_eq!(
+            wound.visible(PAPER_LINES, 80).first().map(|line| line.text.clone()),
+            Some(format!("line {PAPER_LINES}")),
+            "the pane is not wound to where the block is read"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The section is on the rail between AGENT and SESSIONS and it stacks the
     /// three layers in assembly order: AGENTS.md, TOOLS.md, the environment
     /// block, with the order named under them. Files that are there show their

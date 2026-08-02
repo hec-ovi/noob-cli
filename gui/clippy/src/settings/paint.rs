@@ -1072,6 +1072,28 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 let mut fence = crate::markdown::fence_after(
                     paper.body.iter().take(paper.first).map(String::as_str),
                 );
+                // The band under the glyphs of a drag over this block, before
+                // the text and not after it: a highlight painted over the
+                // characters it covers hides them.
+                if let Some(selection) = frame.selection
+                    && selection.at == crate::select::Where::SettingsPaper(*index)
+                    && !selection.is_empty()
+                {
+                    paint_selection(
+                        scene,
+                        selection,
+                        &panel.paper_pane_at(*index, held),
+                        Painted {
+                            content: text,
+                            rows: held,
+                            cols: body_cols,
+                            chrome: 0,
+                            size,
+                            column,
+                            tint: skin.select,
+                        },
+                    );
+                }
                 // While the document is being edited its lines are drawn raw:
                 // the formatter eats the marks, and a caret counted on the
                 // characters would stand beside glyphs that are not them.
