@@ -71,4 +71,4 @@ from the link box's `noob doctor` reader, through the frame.
 Inline: the section's cards, the credential's two states, the health line,
 the walkable keyboard, the tracks and their defaults, the magnetic
 checkpoints, the way back to the default endpoint, and every key kept on a
-card (7 tests), driven through the frame's `Settings`.
+card (9 tests), driven through the frame's `Settings`.

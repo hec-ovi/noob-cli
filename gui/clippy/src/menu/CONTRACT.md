@@ -47,5 +47,4 @@ Contracts: the dock box (`View`, `Space`) and the design box (icons).
 ## Tests
 
 Inline: flyout open and shut, pick indices, grey rules, keyboard walk,
-widths (23 tests). The two-box placement, band, and hit rules are proven
-in the view box's rendered-scene tests.
+widths (43 tests). Its drawing is asserted in `paint.rs`, on a window rendered through `view::testkit`.

@@ -71,4 +71,4 @@ default shown and owned by saving, the edition gate, the one editor with the
 read-out block beside it, the armed restore with its bak, the load into the
 editor, the
 read-only environment, the caret-following scroll, and the refused write
-with the cap (9 tests), driven through the frame's `Settings`.
+with the cap (13 tests), driven through the frame's `Settings`.

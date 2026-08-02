@@ -29,5 +29,4 @@ Panel, Run), the state box (what it reads), the style box (colors).
 
 ## Tests
 
-Scene-level: the view box's rendered-scene tests assert every widget's
-visible behavior through `build`, the real entry point.
+Scene-level: this box renders its own window through `view::testkit` and reads what was drawn (3 tests in all here).

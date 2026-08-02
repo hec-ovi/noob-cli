@@ -37,5 +37,4 @@ remembered folders it starts from).
 
 ## Tests
 
-The model's tests live in mod.rs over a test tree; scene-level placement
-and paint are asserted by the view box's rendered-scene tests.
+The model's tests live in mod. Placement and paint are asserted here, on a window rendered through `view::testkit`.

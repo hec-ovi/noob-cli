@@ -30,5 +30,4 @@ state box (the chosen agent and its pane), the style box (colors).
 
 ## Tests
 
-Scene-level: the view box's rendered-scene tests assert the widget's
-visible behavior through `build`, the real entry point.
+Scene-level: this box renders its own window through `view::testkit` and reads what was drawn (1 tests in all here).

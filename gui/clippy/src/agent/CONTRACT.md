@@ -16,7 +16,7 @@ pub fn config_dir() -> Option<PathBuf>;   // the AGENT's rule: NOOB_CONFIG_DIR,
                                           // /config when present, ~/.config/noob
 pub const ENDPOINT/API_KEY/MODEL/API_STYLE/REASONING/CTX/MAX_ROUNDS/
           TASK_CONCURRENCY/TASK_MAX_TURNS/TASK_TOOLS/TASK_WALL_CLOCK: &str;
-pub const OWNED: [&str; 6];               // the keys the window edits freely
+pub const OWNED: [&str; 8];               // the keys the window edits freely
 pub const AGENTS_MD/TOOLS_MD: &str;  pub const AGENTS_CAP: u64;  // 16 KiB cap
 pub const AGENTS_DEFAULT/TOOLS_DEFAULT: &str;  // the CLI's shipped texts,
                                           // included from its own sources

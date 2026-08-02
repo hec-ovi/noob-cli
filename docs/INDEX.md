@@ -157,8 +157,8 @@ Boxes so far:
 - [`gui/clippy/src/picker`](../gui/clippy/src/picker/CONTRACT.md) - the
   startup chooser reunited: model, places, and paint over one geometry.
 - [`gui/clippy/src/view`](../gui/clippy/src/view/CONTRACT.md) - layout, hit
-  testing, and chrome: one geometry, one dispatch, the cut-corner
-  vocabulary.
+  testing, and chrome: one geometry, one dispatch, the cut-corner vocabulary,
+  and the scene rig every box's tests render a window with.
 - [`gui/clippy/src/packaging`](../gui/clippy/src/packaging/CONTRACT.md) -
   desktop entry, icons, app id, the per-user installer.
 - [`gui/clippy/src/install`](../gui/clippy/src/install/CONTRACT.md) - the

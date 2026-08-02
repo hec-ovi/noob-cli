@@ -1,6 +1,6 @@
 # view
 
-contractVersion: 1.0.0
+contractVersion: 2.0.0
 
 ## Purpose
 
@@ -47,8 +47,23 @@ Contracts: the dock box (the grid model), the design box (scales, icons),
 windows), the widget boxes and the settings/picker surfaces it composes,
 the state box (what the Frame borrows).
 
+## Files
+
+`mod.rs` holds the window's numbers, the `Hit`/`Landing`/`Shape`/`Frame`
+vocabulary, `Layout` with its `compute` and `hit`, and `build`. Beside it:
+
+- `place.rs` - the grid, the strips, the explorer's columns, the floors.
+- `chrome.rs` - what the window's own chrome paints: title strip, tabs, pane
+  surface, prompt row, drag marks.
+- `draw.rs` - the drawing vocabulary every box imports through `view::*`:
+  filled panel, cut corner, border, selection band, list rows, scrollbar, and
+  the text arithmetic that clips a line to its columns.
+- `testkit.rs` (`#[cfg(test)]`) - the scene rig every box's tests build a
+  window with: `shape`/`busy_state` builders, the `render*` family returning
+  `Rendered`, and the readers `text_of`/`covered`/`middle`/`box_of`.
+
 ## Tests
 
-Scene-level: rendered-scene tests assert placement, hit testing, and every
-composed surface's visible behavior through `build` and `Layout::hit`, the
-real entry points (the largest test suite in the workspace).
+96 tests here, on placement, hit testing and the window's own chrome, through
+`build` and `Layout::hit`. Every composed surface asserts its own drawing in
+its own box, on a window rendered through `testkit`.

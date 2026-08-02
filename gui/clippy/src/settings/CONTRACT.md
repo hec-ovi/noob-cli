@@ -135,7 +135,7 @@ drawn on the track, and the keyboard nudge keeps stepping by the plain step.
 
 ## Tests
 
-71 model tests drive key- and click-shaped calls with scratch files: the
-frame's 28 (cursor, rail, scroll, sliders, doc viewer, footer) in mod.rs,
-each section's in its own box. Scene-level placement and paint are asserted
-by the view box's rendered-scene tests.
+71 tests in this box: the frame's model tests in mod.rs (cursor, rail, scroll,
+sliders, doc viewer, footer) and the panel's own scene tests in paint.rs, which
+render a panel through `testkit` and read the boxes back. Each section's tests
+live in its own box.

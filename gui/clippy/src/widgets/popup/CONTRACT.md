@@ -40,6 +40,4 @@ Run, Text), [`text-geometry`](../../../../layers/text-geometry/CONTRACT.md)
 ## Tests
 
 Inline: the document's order and what a selection over it copies.
-Scene-level: the view box's rendered-scene tests assert the popup's visible
-behavior through `build`; the shell's hit tests cover the close mark and
-the track.
+Scene-level: this box renders its own window through `view::testkit` and reads what was drawn (2 tests in all here).

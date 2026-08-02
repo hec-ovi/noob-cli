@@ -70,4 +70,4 @@ bounds.
 Inline: the key coverage sweep, the palette's labels and groups, the theme
 naming and picking, the custom pick's two-press write, the swatch hex write
 path, the two transparencies, the round trip through the real file, and the
-restore (14 tests), driven through the frame's `Settings`.
+restore (21 tests), driven through the frame's `Settings`.

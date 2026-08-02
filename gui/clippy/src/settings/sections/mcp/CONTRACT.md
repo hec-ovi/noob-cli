@@ -46,5 +46,5 @@ shape.
 ## Tests
 
 Inline: the broken-file note, the toggle in its own file, the two-press
-uninstall on and off, and the refused removal (5 tests), driven through the
+uninstall on and off, and the refused removal (6 tests), driven through the
 frame's `Settings`.

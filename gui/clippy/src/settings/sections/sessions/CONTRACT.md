@@ -46,4 +46,4 @@ the agent-files box for the listing; the sessions box for `dir()` and
 ## Tests
 
 Inline: the picker match, arrow keys inside the table, marks and the
-armed delete (3 tests), driven through the frame's `Settings`.
+armed delete (6 tests), driven through the frame's `Settings`.

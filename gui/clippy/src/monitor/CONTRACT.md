@@ -41,4 +41,4 @@ box for nothing: gauges are data, the view paints them.
 
 ## Tests
 
-Inline: reading formats, fractions, degradation (12 tests).
+Inline: reading formats, fractions, degradation (13 tests).

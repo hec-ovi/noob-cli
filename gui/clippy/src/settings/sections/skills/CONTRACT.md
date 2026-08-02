@@ -60,4 +60,4 @@ for `websearch_on`.
 ## Tests
 
 Inline: the table off the disk, the install card and its cycle, the turn and
-the two-press uninstall (4 tests), driven through the frame's `Settings`.
+the two-press uninstall (6 tests), driven through the frame's `Settings`.
