@@ -93,6 +93,8 @@ impl McpSection {
             }));
         }
         rows.push(Row::Card(Card {
+            beside: false,
+            group: None,
             does: Some(Doing::AddServer),
             title: String::from("ADD A SERVER"),
             fields: vec![

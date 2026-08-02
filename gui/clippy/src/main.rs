@@ -125,23 +125,12 @@ const ESC_CANCEL_WINDOW: Duration = Duration::from_secs(5);
 const ANSWER_WAIT: Duration = Duration::from_secs(10);
 
 /// The line for a prompt that went out and started nothing.
-///
-/// Pure, and its own function, because the useful half is which of the two
-/// things happened: an agent from another release that could not read the
-/// command, or one that read it and never answered.
-fn unanswered(agent: Option<u16>, window: u16) -> String {
-    match agent {
-        Some(v) if v != window => format!(
-            "nothing came back in {}s. the agent speaks protocol {v} and this window {window}: \
-             install noob and no0b from the same release.",
-            ANSWER_WAIT.as_secs()
-        ),
-        _ => format!(
-            "nothing came back in {}s. the agent has the prompt and started no turn; \
-             run `noob doctor` to check its endpoint.",
-            ANSWER_WAIT.as_secs()
-        ),
-    }
+fn unanswered() -> String {
+    format!(
+        "nothing came back in {}s. the agent has the prompt and started no turn; \
+         run `noob doctor` to check its endpoint.",
+        ANSWER_WAIT.as_secs()
+    )
 }
 
 /// The window will not grow past this. Unbounded is not useful: a conversation
@@ -3016,9 +3005,6 @@ impl App {
             return;
         };
         let incoming = link.drain();
-        // Read here, while the link is still in hand: the version the agent
-        // announced is what a prompt that starts nothing is explained by.
-        let speaks = link.speaks();
         let mut turn_ended = false;
         for item in incoming {
             match item {
@@ -3032,22 +3018,6 @@ impl App {
                     // The one frame that says which session is running and where
                     // it is running, which is the note the session list needs.
                     if let noob_proto::Event::SessionStart { id, workspace, .. } = &event {
-                        // A window and an agent from two different releases
-                        // still talk, because commands go out at the agent's
-                        // version. It is worth one line all the same: half an
-                        // install being older is the sort of thing that
-                        // explains the next odd hour.
-                        if speaks.is_some_and(|v| v != noob_proto::VERSION) {
-                            let v = speaks.unwrap_or_default();
-                            self.state.output.say(
-                                format!(
-                                    "the agent speaks protocol {v}, this window {}: \
-                                     noob and no0b are from different releases.",
-                                    noob_proto::VERSION
-                                ),
-                                Tone::Dim,
-                            );
-                        }
                         self.remember_session(id, workspace);
                         // Kept for the rest of the session, so how full its
                         // context window got can be written on the same note
@@ -5110,10 +5080,7 @@ impl ApplicationHandler<Wake> for App {
         // happening.
         if self.answer_by.is_some_and(|by| now >= by) {
             self.answer_by = None;
-            let speaks = self.link.as_ref().and_then(link::Link::speaks);
-            self.state
-                .output
-                .say(unanswered(speaks, noob_proto::VERSION), Tone::Bad);
+            self.state.output.say(unanswered(), Tone::Bad);
             if self.state.phase == state::Phase::Thinking {
                 self.state.phase = state::Phase::Ready;
                 self.state.status = String::from("ready");
@@ -5609,19 +5576,13 @@ mod tests {
         assert_eq!(soonest([None, None, None, Some(answer)]), Some(answer));
     }
 
-    /// The line a prompt that started nothing leaves behind. Two releases in
-    /// one install is the cause worth naming, because it is the one the person
-    /// reading can fix; anything else points at the endpoint.
+    /// The line a prompt that started nothing leaves behind: what to run next,
+    /// with nothing in it about versions.
     #[test]
-    fn a_prompt_that_started_no_turn_says_which_of_the_two_happened() {
-        let split = unanswered(Some(1), 2);
-        assert!(split.contains("protocol 1"), "{split}");
-        assert!(split.contains("same release"), "{split}");
-        let quiet = unanswered(Some(2), 2);
-        assert!(quiet.contains("noob doctor"), "{quiet}");
-        assert!(!quiet.contains("protocol"), "{quiet}");
-        // Before the agent has said anything there is no version to blame.
-        assert_eq!(unanswered(None, 2), quiet);
+    fn a_prompt_that_started_no_turn_points_at_the_endpoint() {
+        let said = unanswered();
+        assert!(said.contains("noob doctor"), "{said}");
+        assert!(!said.contains("protocol"), "{said}");
     }
 
     /// The orb travels between its two formations over [`ORB_MORPH`] and is

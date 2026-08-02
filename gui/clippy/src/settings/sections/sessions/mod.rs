@@ -92,6 +92,8 @@ pub const SESSION_TITLE: &str = "SESSIONS";
 pub fn rows(agent: &Agent) -> Vec<Row> {
     let empty = agent.sessions.sessions.is_empty();
     let mut rows = vec![Row::Card(Card {
+        beside: false,
+        group: None,
         does: None,
         title: String::from("WHERE SESSIONS ARE KEPT"),
         fields: vec![CardField::reading(

@@ -376,6 +376,8 @@ fn value_of(config: &Config, key: &str, kind: Kind) -> String {
 pub fn rows(config: &Config, file: Option<&Path>) -> Vec<Row> {
     let mut rows = vec![
         Row::Card(Card {
+            beside: false,
+            group: None,
             title: String::from("HOW BIG THE TEXT IS"),
             fields: vec![
                 look_field(config, "font_size"),
@@ -391,6 +393,8 @@ pub fn rows(config: &Config, file: Option<&Path>) -> Vec<Row> {
         // the widget windows second, which is the order he asked to read them
         // in.
         Row::Card(Card {
+            beside: false,
+            group: None,
             title: String::from("TRANSPARENCY"),
             fields: vec![
                 look_field(config, "window_opacity"),
@@ -415,6 +419,8 @@ pub fn rows(config: &Config, file: Option<&Path>) -> Vec<Row> {
                 .collect(),
         }),
         Row::Card(Card {
+            beside: false,
+            group: None,
             title: String::from("INPUT PROMPT"),
             fields: vec![look_field(config, "prompt_rows")],
             hint: None,
@@ -455,6 +461,8 @@ fn colour_rows(config: &Config, file: Option<&Path>) -> Vec<Row> {
     // the options in colors" - the colour groups under the card are those
     // options, and picking custom makes them the user's own to edit.
     let mut rows = vec![Row::Card(Card {
+        beside: false,
+        group: None,
         title: String::from("DEFAULT THEMES"),
         fields: vec![
             look_field(config, THEME),
@@ -496,6 +504,8 @@ fn colour_rows(config: &Config, file: Option<&Path>) -> Vec<Row> {
         at += count;
     }
     rows.push(Row::Card(Card {
+        beside: false,
+        group: None,
         title: String::from("WHERE ALL THIS IS WRITTEN"),
         fields: vec![
             CardField::reading(
@@ -519,6 +529,8 @@ fn colour_rows(config: &Config, file: Option<&Path>) -> Vec<Row> {
     // The way out, on a card of its own and at the end, because it takes
     // back everything above it rather than anything on one card.
     rows.push(Row::Card(Card {
+        beside: false,
+        group: None,
         title: String::from("BACK TO THE DEFAULTS"),
         fields: Vec::new(),
         hint: Some(String::from(

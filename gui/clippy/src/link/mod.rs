@@ -264,10 +264,9 @@ impl Link {
                                     .ok();
                                 if !told {
                                     told = true;
-                                    let say = format!(
-                                        "the agent speaks protocol {v} and this window {}: \
-                                         its frames are being skipped. update no0b.",
-                                        noob_proto::VERSION
+                                    let say = String::from(
+                                        "the agent is from a newer release than this window \
+                                         and its output cannot be read. update no0b.",
                                     );
                                     if tx.send(Incoming::Diagnostic(say)).is_err() {
                                         return;

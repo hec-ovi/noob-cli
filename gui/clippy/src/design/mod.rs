@@ -49,6 +49,18 @@ pub fn apart(line: f32) -> f32 {
     line * APART
 }
 
+/// How tall the mark beside a chosen row stands: the band the letters beside it
+/// stand in, not the row box around them. A line box is half leading, so a mark
+/// drawn at the row's height is twice the word it marks.
+pub fn mark_height(line: f32) -> f32 {
+    (line * 0.5).round().max(1.0)
+}
+
+/// Where that mark starts inside a row of `height`, centred on the word.
+pub fn mark_top(y: f32, height: f32, line: f32) -> f32 {
+    y + ((height - mark_height(line)) * 0.5).round().max(0.0)
+}
+
 /// Type: five roles, five sizes, as multiples of the pane size. Nothing on a
 /// panel is drawn at a size that is not one of these.
 ///
@@ -145,6 +157,11 @@ pub fn card_row_lines(body: f32, footer: bool) -> usize {
     (card_lines(body, footer) + APART).ceil().max(1.0) as usize
 }
 
+/// The room a second group inside one card takes before its first band: air,
+/// the rule across the card, and the group's own title over it. The title is a
+/// card title, so it claims what a card's own title bar claims.
+pub const GROUP_LINES: f32 = STEP + TITLE_LINES + TIGHT;
+
 /// How tall one field is, in lines: its label, the input under it, and the
 /// sentence under that when it has one.
 pub fn field_lines(hint: bool) -> f32 {
@@ -168,13 +185,19 @@ pub fn field_lines(hint: bool) -> f32 {
 /// sentence. The model counts a card's height with this and the layout places
 /// the fields with it, which is what keeps the counted height and the drawn one
 /// the same height.
-pub fn field_slots(hints: &[bool], across: usize) -> Vec<(f32, f32)> {
+///
+/// `group` is the field a second titled group starts at, which is given
+/// [`GROUP_LINES`] of room above it.
+pub fn field_slots(hints: &[bool], across: usize, group: Option<usize>) -> Vec<(f32, f32)> {
     let across = across.max(1);
     let mut out = Vec::with_capacity(hints.len());
     let mut top = 0.0;
-    for band in hints.chunks(across) {
-        let tall = field_lines(band.iter().any(|hint| *hint));
-        for _ in band {
+    for (band, fields) in hints.chunks(across).enumerate() {
+        if group.is_some_and(|at| at == band * across) {
+            top += GROUP_LINES;
+        }
+        let tall = field_lines(fields.iter().any(|hint| *hint));
+        for _ in fields {
             out.push((top, tall));
         }
         top += tall + STEP;
@@ -184,8 +207,8 @@ pub fn field_slots(hints: &[bool], across: usize) -> Vec<(f32, f32)> {
 
 /// How tall those fields come to, in lines, with nothing under them. Zero for a
 /// card with no fields at all, which is a card that is all sentence.
-pub fn fields_lines(hints: &[bool], across: usize) -> f32 {
-    field_slots(hints, across)
+pub fn fields_lines(hints: &[bool], across: usize, group: Option<usize>) -> f32 {
+    field_slots(hints, across, group)
         .last()
         .map(|(top, tall)| top + tall)
         .unwrap_or(0.0)
@@ -320,21 +343,21 @@ mod tests {
     #[test]
     fn the_fields_of_a_card_stand_in_bands_that_add_up_to_the_body() {
         let hints = [false, true, false];
-        let across = field_slots(&hints, 2);
+        let across = field_slots(&hints, 2, None);
         assert_eq!(across[0].0, across[1].0, "two across are not on one band");
         assert_eq!(across[0].1, across[1].1, "two across are not one height");
         assert_eq!(across[0].1, field_lines(true), "the sentence costs nothing");
         assert!(across[2].0 >= across[0].0 + across[0].1 + STEP - 0.001);
         assert_eq!(across[2].1, field_lines(false));
-        assert_eq!(fields_lines(&hints, 2), across[2].0 + across[2].1);
+        assert_eq!(fields_lines(&hints, 2, None), across[2].0 + across[2].1);
 
         // Stacked, every field is its own band, and the whole is taller than it
         // was two across.
-        let down = field_slots(&hints, 1);
+        let down = field_slots(&hints, 1, None);
         assert_eq!(down.len(), 3);
         assert!(down[1].1 > down[0].1, "the sentence is not a line taller");
-        assert!(fields_lines(&hints, 1) > fields_lines(&hints, 2));
-        assert_eq!(fields_lines(&[], 2), 0.0, "an empty body claims a band");
+        assert!(fields_lines(&hints, 1, None) > fields_lines(&hints, 2, None));
+        assert_eq!(fields_lines(&[], 2, None), 0.0, "an empty body claims a band");
     }
 
     /// The palette reflows with the window instead of chunking at three

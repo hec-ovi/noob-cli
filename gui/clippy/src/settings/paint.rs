@@ -124,7 +124,15 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
             // the full cell; only the paint tightened.
             let band = (MARK_W + 3.0 + (shown.chars().count() as f32 + 1.0) * column).min(at.w);
             scene.rect(Panel::new(at.x, at.y, band, at.h).fill(skin.strip));
-            scene.rect(Panel::new(at.x, at.y, MARK_W, at.h).fill(skin.edge_focus));
+            scene.rect(
+                Panel::new(
+                    at.x,
+                    design::mark_top(at.y, at.h, line),
+                    MARK_W,
+                    design::mark_height(line),
+                )
+                .fill(skin.edge_focus),
+            );
         }
         let tint = match (chosen, frame.hot == Some(Hit::SettingsSection(*index))) {
             (true, _) => skin.heading,
@@ -135,24 +143,13 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
     }
     // The hairline between the rail and what it chose, so the two columns read
     // as two columns rather than as a list with a gap in it. Anchored off the
-    // rail's edge, not the list's: the list stands its own padding in from
-    // this line.
-    // Only as far down as the names it separates. It ran the whole height of
-    // the panel, which left a hairline standing in empty space under the last
-    // section: "the bar border EXCEED to down of the total height of the
-    // text". The rail is what it divides, so the rail is how long it is.
+    // rail's edge, not the list's: the list stands its own padding in from this
+    // line, and it runs the full height of the panel, which is what the two
+    // columns are.
     if list.w >= 1.0 && list.h >= 1.0 {
-        let bottom = layout
-            .settings_rail
-            .iter()
-            .map(|(_, at)| at.y + at.h)
-            .fold(list.y, f32::max);
-        let tall = (bottom - list.y).clamp(0.0, list.h);
-        if tall >= 1.0 {
-            scene.rect(
-                Panel::new(list.x - PAD - (GAP * 0.5).floor(), list.y, 1.0, tall).fill(skin.edge),
-            );
-        }
+        scene.rect(
+            Panel::new(list.x - PAD - (GAP * 0.5).floor(), list.y, 1.0, list.h).fill(skin.edge),
+        );
     }
 
     // The width a card's body has, in columns, which is what the model counted
@@ -193,11 +190,16 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
             full.y -= over;
             full.h += over;
         }
-        let natural = crate::settings::lines(entry, list_cols) as f32 * line;
+        // The band this row stands in: its own height, or the pair's, so two
+        // cards side by side are drawn as one row at one height.
+        let natural = crate::settings::band_lines(panel.rows(), *index, list_cols) as f32 * line;
         if full.h + 0.5 < natural {
             full.h = natural;
         }
         let row = &full;
+        // The columns this row wraps in: its own width, which is half the list
+        // for either card of a pair.
+        let list_cols = settings_entry_cols(row.w, column);
         let label_w = settings_label_w(row.w, column);
         let label_cols = columns_in(label_w, column).saturating_sub(1);
         let on = *index == panel.cursor() && panel.on_row();
@@ -901,7 +903,47 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 );
                 let hints = crate::settings::card_hints(card);
                 let across = design::across(card.fields.len(), design::card_cols(list_cols));
-                let slots = settings_card_slots(parts.body, line, &hints, across);
+                let group = card.group.as_ref().map(|group| group.at);
+                let slots = settings_card_slots(parts.body, line, &hints, across, group);
+                // A second group inside the card: a rule the width of the body
+                // with its title over the band it opens, so two batches of
+                // settings read as two batches under one heading.
+                if let (Some(group), Some(slot)) =
+                    (card.group.as_ref(), slots.get(group.unwrap_or(0)))
+                {
+                    let big = design::card_title_size(size);
+                    let big_column = design::column_for(column, size, design::CARD_TITLE);
+                    let tall = design::TITLE_LINES * line;
+                    let title = Panel::new(
+                        parts.body.x,
+                        slot.y - design::tight(line) - tall,
+                        parts.body.w,
+                        tall,
+                    );
+                    let rule = Panel::new(
+                        parts.body.x,
+                        (title.y - design::tight(line)).floor(),
+                        parts.body.w,
+                        1.0,
+                    );
+                    if rule.y >= parts.body.y && keep.holds(rule) {
+                        scene.rect(rule.fill(skin.edge));
+                    }
+                    if let Some(text) = keep.text(Text::rich(
+                        vec![Run::tinted(
+                            clip(
+                                &group.title,
+                                columns_in(title.w, big_column).saturating_sub(1),
+                            ),
+                            skin.heading,
+                        )],
+                        title,
+                        big,
+                        skin.heading,
+                    )) {
+                        scene.text(text);
+                    }
+                }
                 for (at, (field, slot)) in card.fields.iter().zip(&slots).enumerate() {
                     if slot.y + slot.h > parts.body.y + parts.body.h + 0.01 {
                         continue;
@@ -914,14 +956,10 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     }
                     // Which slot the keys are in, so the field being changed is
                     // the one wearing the focus edge. A card says the keys are
-                    // on it with its border; the field says which of its two
-                    // they are on.
-                    let slot_side = match at {
-                        0 => Side::Left,
-                        1 => Side::Right,
-                        _ => Side::Left,
-                    };
-                    let here = on && at < 2 && panel.side() == slot_side;
+                    // on it with its border; the field says which of them they
+                    // are on.
+                    let slot_side = Side::of(at).unwrap_or(Side::Left);
+                    let here = on && Side::of(at).is_some() && panel.side() == slot_side;
                     settings_card_field(
                         scene,
                         frame,
@@ -943,7 +981,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     let hint_at = Panel::new(
                         parts.body.x,
                         parts.body.y
-                            + design::fields_lines(&hints, across) * line
+                            + design::fields_lines(&hints, across, group) * line
                             + design::step(line),
                         parts.body.w,
                         Text::line_for(small).min(line),

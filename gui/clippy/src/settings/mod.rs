@@ -392,6 +392,30 @@ pub struct Card {
     /// One, and at the bottom right where a card's own action belongs. A card
     /// with several would be a form with a toolbar in it.
     pub does: Option<Doing>,
+    /// This card and the card after it stand side by side in one band, each
+    /// half the list wide.
+    ///
+    /// Two short cards that are read together are a row of two columns rather
+    /// than two rows: the second one stops being something to scroll to. Both
+    /// halves are measured in half the columns and drawn at the band's height,
+    /// so the pair reads as one row whatever either one holds.
+    pub beside: bool,
+    /// A second titled group inside this card: which field it starts at, and
+    /// what it is called. A rule across the card and that title stand over it.
+    ///
+    /// For settings that belong under one heading but are read in two batches.
+    /// Two cards would say they are two subjects; one card with a rule in it
+    /// says they are one subject read in two parts.
+    pub group: Option<Group>,
+}
+
+/// The second titled group inside a card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Group {
+    /// The field it starts at, counted in [`Card::fields`].
+    pub at: usize,
+    /// Its title, upper case, drawn the way the card's own title is.
+    pub title: String,
 }
 
 /// What the button in a card's footer does.
@@ -548,17 +572,15 @@ impl CardField {
     }
 }
 
-/// Which field of a card one side names.
+/// Which field of a card one slot names.
 ///
-/// A press carries a [`Side`] and a side is one of two, so the fields a card
-/// lets anybody change are its first two. Everything after them is read out,
-/// and `a_cards_editable_fields_are_the_two_a_press_can_name` fails on a card
-/// built the other way round.
+/// A card lays its fields out two to a band, so a slot is a column and a band:
+/// the first two fields are the top band, the next two the band under it. Four
+/// is what a press can name, and
+/// `a_cards_editable_fields_are_the_ones_a_press_can_name` fails on a card
+/// built with more than that to set.
 pub fn card_slot(side: Side) -> usize {
-    match side {
-        Side::Left => 0,
-        Side::Right => 1,
-    }
+    side.slot()
 }
 
 /// The one field of a card a side names, or nothing when the card has none
@@ -569,12 +591,16 @@ pub fn card_field(card: &Card, side: Side) -> Option<&CardField> {
 
 /// Whether every field of a card that can be changed is one a press can name.
 ///
-/// Read by the test that walks every section: a card with a third field that
+/// Read by the test that walks every section: a card with a fifth field that
 /// can be changed is a control the pointer cannot reach and the keyboard cannot
 /// cross to.
 #[cfg(test)]
 pub fn card_is_reachable(card: &Card) -> bool {
-    !card.fields.iter().skip(2).any(CardField::editable)
+    !card
+        .fields
+        .iter()
+        .skip(Side::ALL.len())
+        .any(CardField::editable)
 }
 
 /// One flag per field of a card, saying whether it carries a sentence.
@@ -787,13 +813,40 @@ impl Table {
 pub enum Side {
     Left,
     Right,
+    LeftBelow,
+    RightBelow,
 }
 
 impl Side {
-    pub fn other(self) -> Side {
+    /// Every slot a press can name, in reading order.
+    pub const ALL: [Side; 4] = [
+        Side::Left,
+        Side::Right,
+        Side::LeftBelow,
+        Side::RightBelow,
+    ];
+
+    /// Which field of a card this slot is.
+    pub fn slot(self) -> usize {
         match self {
-            Side::Left => Side::Right,
-            Side::Right => Side::Left,
+            Side::Left => 0,
+            Side::Right => 1,
+            Side::LeftBelow => 2,
+            Side::RightBelow => 3,
+        }
+    }
+
+    /// The slot a field sits in, or nothing past the fourth: a card with more
+    /// settable fields than that is a card no press could name.
+    pub fn of(slot: usize) -> Option<Side> {
+        Side::ALL.get(slot).copied()
+    }
+
+    /// The next slot in one direction, or nothing at either end.
+    pub fn step(self, forward: bool) -> Option<Side> {
+        match forward {
+            true => Side::of(self.slot() + 1),
+            false => Side::of(self.slot().checked_sub(1)?),
         }
     }
 }
@@ -1001,6 +1054,49 @@ pub fn lines(row: &Row, cols: usize) -> usize {
     }
 }
 
+/// The air between two cards standing side by side, in columns.
+///
+/// In columns rather than pixels because the width each half is measured in is
+/// counted in columns: the two halves and the gap between them have to come to
+/// the list, or a card is measured in one width and drawn in another.
+pub const PAIR_GAP_COLUMNS: usize = 3;
+
+/// The columns one half of a side-by-side pair is measured and drawn in.
+pub fn half_cols(cols: usize) -> usize {
+    cols.saturating_sub(PAIR_GAP_COLUMNS) / 2
+}
+
+/// Whether the row at `at` is the left half of a band it shares with the row
+/// after it.
+///
+/// Both have to be cards: a card standing beside a table or a block of text
+/// would be half a row beside something that scrolls inside itself.
+pub fn stands_beside(rows: &[Row], at: usize) -> bool {
+    matches!(
+        (rows.get(at), rows.get(at + 1)),
+        (Some(Row::Card(card)), Some(Row::Card(_))) if card.beside
+    )
+}
+
+/// How tall the band a row stands in is, in lines: its own height, or, for two
+/// cards side by side, the taller of the pair measured in half the columns.
+///
+/// The one place either half's height comes from. The model counts the scroll
+/// with it, the layout places both halves with it and the painter draws both
+/// borders with it, so a pair is one row of the list at one height.
+pub fn band_lines(rows: &[Row], at: usize, cols: usize) -> usize {
+    let half = half_cols(cols);
+    let pair = |left: usize| lines(&rows[left], half).max(lines(&rows[left + 1], half));
+    match rows.get(at) {
+        None => 0,
+        Some(row) => match (stands_beside(rows, at), at > 0 && stands_beside(rows, at - 1)) {
+            (true, _) => pair(at),
+            (_, true) => pair(at - 1),
+            _ => lines(row, cols),
+        },
+    }
+}
+
 /// How tall a block of text is inside its card, in lines: where it came from,
 /// and the [`PAPER_LINES`] of the text itself under that.
 pub fn paper_body_lines() -> f32 {
@@ -1020,7 +1116,11 @@ pub fn paper_body_lines() -> f32 {
 pub fn card_body_lines(card: &Card, cols: usize) -> f32 {
     let cols = crate::design::card_cols(cols);
     let across = crate::design::across(card.fields.len(), cols);
-    let tall = crate::design::fields_lines(&card_hints(card), across);
+    let tall = crate::design::fields_lines(
+        &card_hints(card),
+        across,
+        card.group.as_ref().map(|group| group.at),
+    );
     match card.hint.is_some() {
         true => tall + crate::design::STEP + crate::design::TEXT_LINES,
         false => tall,
@@ -1571,7 +1671,8 @@ impl Settings {
         })
     }
 
-    #[cfg(test)]
+    /// The section's rows. What a row stands in is decided by the rows around
+    /// it (two cards to a band), so the layout reads the list, not one row.
     pub fn rows(&self) -> &[Row] {
         &self.here().rows
     }
@@ -1600,7 +1701,7 @@ impl Settings {
         }
         match landable_at(row, here.side) {
             true => here.side,
-            false => here.side.other(),
+            false => first_landing(row).unwrap_or(Side::Left),
         }
     }
 
@@ -1615,32 +1716,44 @@ impl Settings {
         control(self.row(index)?, side)
     }
 
-    /// Move to one half of a form row, which is the one thing on this panel the
-    /// plain arrow keys cannot do: left and right are the nudge. False when the
-    /// cursor is not on a form, when it is already in that half, or when that
-    /// half is a reading.
+    /// Cross a card's fields, one the way `to` points. False when the cursor is
+    /// not on a card, or when there is no field it can hold that way.
+    ///
+    /// A step rather than a jump to one half: a card holds up to four fields
+    /// and the shifted arrow walks them in reading order, so every field a card
+    /// can set is one the keyboard reaches.
     ///
     /// This was `swap`, a toggle on Tab. Tab is how the keyboard walks the rail
     /// now ([`Settings::walk_section`]), so the crossing is the shifted arrow
-    /// instead: it points at the half it lands on, and the shift is what takes
-    /// the nudge off the key.
+    /// instead: it points the way it moves, and the shift is what takes the
+    /// nudge off the key.
     pub fn cross(&mut self, to: Side) -> bool {
         if self.editing.is_some() {
-            return false;
-        }
-        if self.side() == to {
             return false;
         }
         let here = self.here();
         let Some(row) = here.rows.get(here.cursor).filter(|row| two_sided(row)) else {
             return false;
         };
-        if !landable_at(row, to) {
+        // The side the key points at is the direction it walks: right is on
+        // through the card's fields, left is back through them.
+        let forward = matches!(to, Side::Right | Side::RightBelow);
+        let mut at = self.side();
+        let landed = loop {
+            let Some(next) = at.step(forward) else {
+                break None;
+            };
+            if landable_at(row, next) {
+                break Some(next);
+            }
+            at = next;
+        };
+        let Some(landed) = landed else {
             return false;
-        }
+        };
         self.picked = None;
         self.arming = None;
-        self.here_mut().side = to;
+        self.here_mut().side = landed;
         true
     }
 
@@ -3002,20 +3115,19 @@ impl Settings {
     /// Put the cursor on the row under the pointer, when that row can hold it,
     /// so the keyboard follows the pointer.
     ///
-    /// `side` is which half of a form row was pressed. A press on the half that
-    /// is a reading lands on the control beside it rather than on nothing, the
-    /// same way the keyboard resolves it.
+    /// `side` is which slot of the row was pressed. A press on a slot that is a
+    /// reading lands on the first field the row can hold the cursor in rather
+    /// than on nothing, the same way the keyboard resolves it.
     pub fn point_at(&mut self, index: usize, side: Side) -> bool {
         let Some(row) = self.row(index) else {
             return false;
         };
-        let side = match landable_at(row, side) {
-            true => side,
-            false => side.other(),
-        };
-        if !landable_at(row, side) {
+        let Some(side) = (match landable_at(row, side) {
+            true => Some(side),
+            false => first_landing(row),
+        }) else {
             return false;
-        }
+        };
         self.unpick();
         // Only when the pointer moved to another row: the press that deletes is
         // the second one on the same uninstall, and it comes through here first.
@@ -3038,8 +3150,26 @@ impl Settings {
     /// ([`lines`]). A value too long for the panel is still clipped rather than
     /// wrapped, so a click still cannot resolve to a setting other than the one
     /// under the pointer.
+    /// Two cards side by side are one band: the left one carries its height and
+    /// the right one carries none, so the pair scrolls as the single row of the
+    /// list it is drawn as.
     pub fn heights(&self, cols: usize) -> Vec<usize> {
-        text_geometry::heights(self.here().rows.iter().map(|row| lines(row, cols)), 1)
+        let rows = &self.here().rows;
+        (0..rows.len())
+            .map(|at| match at > 0 && stands_beside(rows, at - 1) {
+                true => 0,
+                false => band_lines(rows, at, cols).max(1),
+            })
+            .collect()
+    }
+
+    /// The row whose height carries the band a row stands in: itself, or the
+    /// card it stands beside.
+    fn band_row(&self, at: usize) -> usize {
+        match at > 0 && stands_beside(&self.here().rows, at - 1) {
+            true => at - 1,
+            false => at,
+        }
     }
 
     /// Which rows are on screen in a list `rows` of text tall and `cols` wide:
@@ -3067,8 +3197,11 @@ impl Settings {
         }
         let heights = self.heights(cols);
         let most = text_geometry::max_scrollback(&heights, rows);
+        // The band, not the row: the right half of a pair carries no height of
+        // its own, and revealing it means revealing the band it stands in.
+        let cursor = self.band_row(self.here().cursor);
         let section = self.here_mut();
-        let cursor = section.cursor.min(heights.len() - 1);
+        let cursor = cursor.min(heights.len() - 1);
         let top: usize = heights[..cursor].iter().sum();
         let tall = heights[cursor];
         let mut next = section.first.min(most);
@@ -3182,6 +3315,13 @@ fn landable(row: &Row) -> bool {
 /// or the half of a form.
 fn landable_at(row: &Row, side: Side) -> bool {
     control(row, side).is_some_and(landable)
+}
+
+/// The first slot of a row the cursor can land in.
+fn first_landing(row: &Row) -> Option<Side> {
+    Side::ALL
+        .into_iter()
+        .find(|side| landable_at(row, *side))
 }
 
 /// Whether a row is read a slot at a time, which is what makes the shifted

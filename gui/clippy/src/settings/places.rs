@@ -415,14 +415,20 @@ pub(crate) fn settings_card_parts(
 /// is the same list [`crate::settings::card_body_lines`] counted the card's
 /// height with: a band drawn taller than it was measured puts every press below
 /// it on another field.
-pub(crate) fn settings_card_slots(body: Panel, line: f32, hints: &[bool], across: usize) -> Vec<Panel> {
+pub(crate) fn settings_card_slots(
+    body: Panel,
+    line: f32,
+    hints: &[bool],
+    across: usize,
+    group: Option<usize>,
+) -> Vec<Panel> {
     let across = across.max(1);
     let step = design::step(line);
     // Three steps between two fields across: the halves read as two columns
     // with air between them, not as one line that collides mid-card.
     let gutter = step * 3.0;
     let wide = ((body.w - gutter * (across - 1) as f32) / across as f32).max(1.0);
-    design::field_slots(hints, across)
+    design::field_slots(hints, across, group)
         .into_iter()
         .enumerate()
         .map(|(at, (top, tall))| {
@@ -1045,6 +1051,21 @@ pub(crate) fn settings_entry_cols(list_w: f32, column: f32) -> usize {
     columns_in((list_w - MARK_W - 3.0).max(1.0), column)
 }
 
+/// The two halves of a band two cards share: the left one against the left edge
+/// and the right one against the right, with the rest of the width as air
+/// between them.
+///
+/// Each half is exactly the width [`crate::settings::half_cols`] counted it in,
+/// so a card measured in half the list is drawn in half the list.
+pub(crate) fn settings_card_halves(band: Panel, column: f32) -> (Panel, Panel) {
+    let cols = crate::settings::half_cols(settings_entry_cols(band.w, column));
+    let wide = (cols as f32 * column + MARK_W + 3.0).min(band.w);
+    (
+        Panel::new(band.x, band.y, wide, band.h),
+        Panel::new(band.x + band.w - wide, band.y, wide, band.h),
+    )
+}
+
 /// The strip down the right of the list that belongs to the list's own
 /// scrollbar, and to nothing else.
 ///
@@ -1321,12 +1342,16 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
     // then held to the clip, so a card sliding off the top keeps its geometry
     // and loses only the part that is really gone.
     let mut y = cards.y - window.skip as f32 * line;
+    // Where the band a pair shares stands, kept from the left half for the right
+    // one: the running y has already passed it by the time the second arrives.
+    let mut band = Panel::new(cards.x, cards.y, cards.w, 0.0);
     for step in 0..window.count {
         let index = window.first + step;
         let Some(entry) = panel.row(index) else {
             break;
         };
-        let tall = crate::settings::lines(entry, entry_cols) as f32 * line;
+        let all = panel.rows();
+        let tall = crate::settings::band_lines(all, index, entry_cols) as f32 * line;
         // The last row of a section, when it is a table, takes the room under
         // it: a list with dead space below it is a list that stopped short.
         // Nothing scrolls differently, because nothing scrolls when it fits.
@@ -1336,8 +1361,26 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
             }
             _ => tall,
         };
-        let row = Panel::new(cards.x, y, cards.w, tall);
-        y += tall;
+        // Two cards to a band: the left half opens it and the right half stands
+        // in the same band, so the running height passes it once.
+        let beside = crate::settings::stands_beside(all, index);
+        let second = index > 0 && crate::settings::stands_beside(all, index - 1);
+        let row = match (beside, second) {
+            (true, _) => {
+                band = Panel::new(cards.x, y, cards.w, tall);
+                y += tall;
+                settings_card_halves(band, column).0
+            }
+            (_, true) => settings_card_halves(band, column).1,
+            _ => {
+                let row = Panel::new(cards.x, y, cards.w, tall);
+                y += tall;
+                row
+            }
+        };
+        // The columns this row wraps in: its own width, which is half the list
+        // for either card of a pair.
+        let entry_cols = settings_entry_cols(row.w, column);
         // One box per row, always, cut to what is on screen: a press can only
         // land on the part of a card that is really there. It was two side by
         // side on a form row, which is what the AGENT section was before it
@@ -1556,12 +1599,11 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
                     line,
                     &crate::settings::card_hints(card),
                     across,
+                    card.group.as_ref().map(|group| group.at),
                 );
                 for (at, slot) in slots.iter().enumerate() {
-                    let side = match at {
-                        0 => Side::Left,
-                        1 => Side::Right,
-                        _ => continue,
+                    let Some(side) = Side::of(at) else {
+                        continue;
                     };
                     // A field cut by either edge of the list is not a control:
                     // the painter draws the whole slot or none of it, so half

@@ -10099,7 +10099,7 @@ mod tests {
     fn option_name(side: crate::settings::Side, option: usize) -> &'static str {
         match side {
             crate::settings::Side::Left => crate::config::THEMES[option],
-            crate::settings::Side::Right => "custom",
+            _ => "custom",
         }
     }
 
@@ -13047,9 +13047,22 @@ mod tests {
             let Some(SettingRow::Card(card)) = panel.row(*index) else {
                 panic!("row {index} is not a card");
             };
-            assert!((row.x - list.x).abs() < 0.01, "a card is not full width");
-            assert!((row.w - list.w).abs() < 0.01, "a card is not full width");
-            let counted = crate::settings::lines(panel.row(*index).expect("the row"), cols);
+            // Full width, or one half of a band two cards share.
+            let (left, right) = settings_card_halves(list, PANE_TEXT.1);
+            let paired = crate::settings::stands_beside(panel.rows(), *index)
+                || (*index > 0 && crate::settings::stands_beside(panel.rows(), index - 1));
+            match paired {
+                true => assert!(
+                    ((row.x - left.x).abs() < 0.01 || (row.x - right.x).abs() < 0.01)
+                        && (row.w - left.w).abs() < 0.01,
+                    "a card of a pair is not half the list: {row:?}"
+                ),
+                false => {
+                    assert!((row.x - list.x).abs() < 0.01, "a card is not full width");
+                    assert!((row.w - list.w).abs() < 0.01, "a card is not full width");
+                }
+            }
+            let counted = crate::settings::band_lines(panel.rows(), *index, cols);
             assert!(
                 (row.h - counted as f32 * line).abs() < 0.01,
                 "card {index} is {row:?} and the model counted {counted} lines"
@@ -13059,8 +13072,16 @@ mod tests {
             // that, and the whole of it inside the card.
             let (box_, parts) = the_card(&out, *row, false);
             let hints = crate::settings::card_hints(card);
-            let across = design::across(card.fields.len(), design::card_cols(cols));
-            let slots = settings_card_slots(parts.body, line, &hints, across);
+            // The card's own width, which is half the list on one of a pair.
+            let card_cols = settings_entry_cols(row.w, PANE_TEXT.1);
+            let across = design::across(card.fields.len(), design::card_cols(card_cols));
+            let slots = settings_card_slots(
+                parts.body,
+                line,
+                &hints,
+                across,
+                card.group.as_ref().map(|group| group.at),
+            );
             for (field, slot) in card.fields.iter().zip(&slots) {
                 let (label_at, input_at) = settings_field_boxes(*slot, line);
                 assert_eq!(
@@ -14106,7 +14127,9 @@ mod tests {
     /// the drawing go through.
     fn the_card(out: &Rendered, row: Panel, footer: bool) -> (Panel, CardParts) {
         let line = Text::line_for(PANE_TEXT.0);
-        let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
+        // The row's own width, which is half the list for a card standing
+        // beside another one, and the whole of it otherwise.
+        let cols = settings_entry_cols(row.w, PANE_TEXT.1);
         let card = settings_card(row, line);
         let parts = settings_card_parts(card, line, PANE_TEXT.0, PANE_TEXT.1, cols, footer);
         (card, parts)
@@ -15783,9 +15806,13 @@ mod tests {
             .settings_tracks
             .iter()
             .copied()
-            .find(|(at, half, _)| panel.cell(*at, half.other()).is_none())
+            .find(|(at, half, _)| {
+                half.step(true)
+                    .is_none_or(|next| panel.cell(*at, next).is_none())
+            })
             .expect("a card of one field");
-        assert_eq!(layout.slider_at(alone, half.other(), box_.x), None);
+        let past = half.step(true).unwrap_or(crate::settings::Side::RightBelow);
+        assert_eq!(layout.slider_at(alone, past, box_.x), None);
 
         // The track is drawn where it is pressed: an unlit bar the width of the
         // track and a lit one as far along it as the value.
@@ -15966,6 +15993,7 @@ mod tests {
             line,
             &crate::settings::card_hints(card),
             across,
+            card.group.as_ref().map(|group| group.at),
         );
         for (field, slot) in card.fields.iter().zip(&slots) {
             let (label_at, input_at) = settings_field_boxes(*slot, line);
@@ -16076,6 +16104,7 @@ mod tests {
                 line,
                 &crate::settings::card_hints(card),
                 across,
+                card.group.as_ref().map(|group| group.at),
             )
         };
         let side_by_side = places(&wide, wide_row, wide_cols);
@@ -16821,7 +16850,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .find_map(|(at, row)| {
-                    [Side::Left, Side::Right].into_iter().find_map(|side| {
+                    Side::ALL.into_iter().find_map(|side| {
                         matches!(crate::settings::control(row, side), Some(crate::settings::Row::Setting { key: k, .. }) if *k == key)
                             .then_some((at, side))
                     })

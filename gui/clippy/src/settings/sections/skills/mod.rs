@@ -186,6 +186,8 @@ impl SkillsSection {
         let suggesting = self.source == WEBSEARCH_SUGGESTION
             && agent.skills.iter().all(|skill| skill.name != "web-search");
         rows.push(Row::Card(Card {
+            beside: false,
+            group: None,
             // The act the card exists for: validate what was typed, and once
             // the source checks out, install it. One button, two steps.
             does: Some(match self.checked_ok() {

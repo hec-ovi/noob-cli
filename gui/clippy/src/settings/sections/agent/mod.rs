@@ -229,6 +229,8 @@ pub fn rows(agent: &Agent, health: Option<&str>, show_key: bool) -> Vec<Row> {
         // sends beside it and, under both, whether the thing at the other end
         // actually answered.
         Row::Card(Card {
+            beside: false,
+            group: None,
             title: String::from("CONNECTION"),
             fields: vec![
                 CardField::text(
@@ -246,8 +248,12 @@ pub fn rows(agent: &Agent, health: Option<&str>, show_key: bool) -> Vec<Row> {
         }),
         // The way back, under the field it writes and shaped like every other
         // restore on this panel: its own card, its own button, and the value
-        // it writes said in words rather than left to be discovered.
+        // it writes said in words rather than left to be discovered. Beside the
+        // credential, because both are one short answer about the connection
+        // above them and two half cards read as one row.
         Row::Card(Card {
+            beside: true,
+            group: None,
             title: String::from("BACK TO THE DEFAULT ENDPOINT"),
             fields: Vec::new(),
             hint: Some(format!(
@@ -259,6 +265,8 @@ pub fn rows(agent: &Agent, health: Option<&str>, show_key: bool) -> Vec<Row> {
         // The credential on a card of its own, because the one button it has
         // is the one that shows it.
         Row::Card(Card {
+            beside: false,
+            group: None,
             title: String::from("CREDENTIAL"),
             fields: vec![CardField::reading(
                 &titled(agent::API_KEY),
@@ -270,7 +278,11 @@ pub fn rows(agent: &Agent, health: Option<&str>, show_key: bool) -> Vec<Row> {
                 false => Doing::Reveal,
             }),
         }),
+        // The model, with the file every one of these settings is written in
+        // beside it.
         Row::Card(Card {
+            beside: true,
+            group: None,
             title: String::from("MODEL"),
             fields: vec![
                 CardField::text(
@@ -289,26 +301,8 @@ pub fn rows(agent: &Agent, health: Option<&str>, show_key: bool) -> Vec<Row> {
             does: None,
         }),
         Row::Card(Card {
-            title: String::from("LIMITS"),
-            fields: vec![ctx, rounds],
-            hint: None,
-            does: None,
-        }),
-        // The fleet on cards of its own: how many children and what each may
-        // touch, then the two budgets that stop one.
-        Row::Card(Card {
-            title: String::from("MULTI-AGENT"),
-            fields: vec![tasks, task_tools],
-            hint: None,
-            does: None,
-        }),
-        Row::Card(Card {
-            title: String::from("MULTI-AGENT BUDGETS"),
-            fields: vec![task_rounds, wall_clock],
-            hint: None,
-            does: None,
-        }),
-        Row::Card(Card {
+            beside: false,
+            group: None,
             title: String::from("THE SETTINGS FILE"),
             fields: vec![
                 CardField::reading(
@@ -329,6 +323,28 @@ pub fn rows(agent: &Agent, health: Option<&str>, show_key: bool) -> Vec<Row> {
             hint: None,
             does: None,
         }),
+        Row::Card(Card {
+            beside: false,
+            group: None,
+            title: String::from("LIMITS"),
+            fields: vec![ctx, rounds],
+            hint: None,
+            does: None,
+        }),
+        // The fleet on one card: how many children and what each may touch,
+        // then, under a rule of its own, the two budgets that stop one. One
+        // subject read in two parts rather than two cards saying it is two.
+        Row::Card(Card {
+            beside: false,
+            group: Some(crate::settings::Group {
+                at: 2,
+                title: String::from("MULTI-AGENT BUDGETS"),
+            }),
+            title: String::from("MULTI-AGENT"),
+            fields: vec![tasks, task_tools, task_rounds, wall_clock],
+            hint: None,
+            does: None,
+        }),
     ];
     // Whatever else the file carries, under one title rather than as loose
     // rows: a key this window has never heard of is still a key the agent
@@ -342,6 +358,8 @@ pub fn rows(agent: &Agent, health: Option<&str>, show_key: bool) -> Vec<Row> {
         .collect();
     if !rest.is_empty() {
         rows.push(Row::Card(Card {
+            beside: false,
+            group: None,
             title: String::from("THE REST OF THE FILE"),
             fields: rest,
             hint: Some(String::from(
@@ -722,10 +740,9 @@ mod tests {
                 "BACK TO THE DEFAULT ENDPOINT",
                 "CREDENTIAL",
                 "MODEL",
+                "THE SETTINGS FILE",
                 "LIMITS",
-                "MULTI-AGENT",
-                "MULTI-AGENT BUDGETS",
-                "THE SETTINGS FILE"
+                "MULTI-AGENT"
             ],
             "{titles:?}"
         );
@@ -739,7 +756,7 @@ mod tests {
             };
             assert!(
                 card_is_reachable(card),
-                "{}: a field that can be set is past the two a press can name",
+                "{}: a field that can be set is past the ones a press can name",
                 card.title
             );
             for field in &card.fields {
@@ -850,12 +867,12 @@ mod tests {
         while panel.step(true) {
             seen.push(panel.cursor());
         }
-        // Every card down to the last budget: the restore's button and the
-        // credential's are stops of their own, and the settings file at the
-        // end is the one card with nothing to do on it.
+        // Every card down to the fleet: the restore's button and the
+        // credential's are stops of their own, and the settings file beside the
+        // model is the one card with nothing to do on it.
         assert_eq!(
             seen,
-            vec![0, 1, 2, 3, numbers, fleet, fleet + 1],
+            vec![0, 1, 2, 3, numbers, fleet],
             "the keyboard cannot walk the section: {seen:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
