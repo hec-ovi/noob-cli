@@ -14,6 +14,13 @@ pub const CLOSE: char = '\u{eab8}';
 pub const MAXIMIZE: char = '\u{eab9}';
 pub const MINIMIZE: char = '\u{eaba}';
 
+/// The two states of the button that uncovers a credential: an eye, and an
+/// eye with a line through it. Named for what they do rather than for what
+/// they look like everywhere else, which is the one control on the panel that
+/// puts a secret on the screen.
+pub const EYE: char = '\u{ea70}';
+pub const EYE_OFF: char = '\u{eae7}';
+
 /// The gear on a menu's settings row.
 pub const SETTINGS: char = '\u{eb51}';
 
@@ -154,6 +161,8 @@ mod tests {
             MAXIMIZE,
             MINIMIZE,
             SETTINGS,
+            EYE,
+            EYE_OFF,
             COPY,
             PASTE,
             WIDGETS,

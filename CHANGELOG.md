@@ -22,7 +22,7 @@ tags rather than here; this file starts where it was added.
   switch are lists, and the connection card has a button that writes what
   is typed and then asks `noob doctor` whether that endpoint answers,
   reporting the line it came back with. The credential is a run of dots
-  with a button that shows it.
+  with an eye beside it that shows it.
 - A slider's number stands clear of the end of its track.
 - A prompt document keeps its load, restore and save in the footer whether
   or not edition is on, dim while it is off; the enable-edition checkbox no

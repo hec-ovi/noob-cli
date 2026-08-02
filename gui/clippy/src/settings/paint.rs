@@ -969,11 +969,25 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                             true => "sure?",
                             false => doing.word(),
                         };
+                        // The one button that says what it does with a mark as
+                        // well as a word: an eye, open or struck through, for
+                        // the press that puts a credential on the screen.
+                        let runs = match (armed, doing) {
+                            (false, crate::settings::Doing::Reveal) => vec![
+                                Run::icon(icons::EYE.to_string(), tint),
+                                Run::tinted(format!(" {word}"), tint),
+                            ],
+                            (false, crate::settings::Doing::Hide) => vec![
+                                Run::icon(icons::EYE_OFF.to_string(), tint),
+                                Run::tinted(format!(" {word}"), tint),
+                            ],
+                            _ => vec![Run::tinted(word, tint)],
+                        };
                         settings_button(
                             scene,
                             *box_,
                             kind,
-                            vec![Run::tinted(word, tint)],
+                            runs,
                             tint,
                             frame.hot == Some(Hit::SettingsAct(*index, *act)),
                             skin,
