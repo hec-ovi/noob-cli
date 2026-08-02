@@ -409,6 +409,14 @@ pub enum Doing {
     /// Take every line the appearance settings own out of the file, so all of
     /// them go back to what the window ships with.
     Restore,
+    /// Write what is typed into the connection card and ask the CLI whether
+    /// the endpoint answers. The one button on this panel whose answer comes
+    /// back from a process.
+    Check,
+    /// Show the credential this card holds, in place of its dots.
+    Reveal,
+    /// Cover it again. The same button, once it is showing.
+    Hide,
 }
 
 impl Doing {
@@ -419,6 +427,9 @@ impl Doing {
             Doing::Install => "install",
             Doing::AddServer => "add",
             Doing::Restore => "restore",
+            Doing::Check => "check",
+            Doing::Reveal => "show",
+            Doing::Hide => "hide",
         }
     }
 
@@ -1182,6 +1193,13 @@ pub struct Settings {
     /// The system prompt section's own state: the document's editor, while it
     /// is open ([`sections::prompt::PromptSection`]).
     prompt_section: sections::prompt::PromptSection,
+    /// What the last connection check answered, in one line. Nothing until the
+    /// button on the connection card has been pressed: the panel reports what
+    /// it asked for and never a verdict it did not.
+    health: Option<String>,
+    /// Whether the credential card is showing its value rather than dots.
+    /// Never remembered anywhere: closing the panel covers it again.
+    show_key: bool,
 }
 
 impl Settings {
@@ -1206,10 +1224,31 @@ impl Settings {
             skills: sections::skills::SkillsSection::new(&agent.skills),
             mcp: sections::mcp::McpSection::default(),
             prompt_section: sections::prompt::PromptSection::default(),
+            health: None,
+            show_key: false,
             agent,
         };
         panel.sections = panel.build(config);
         panel
+    }
+
+    /// Take what the connection check answered and put it on the card.
+    pub fn adopt_health(&mut self, line: String, config: &Config) {
+        self.health = Some(line);
+        self.refresh(config);
+    }
+
+    /// Show the credential, or cover it again.
+    pub fn flip_key(&mut self, config: &Config) {
+        self.show_key = !self.show_key;
+        self.refresh(config);
+    }
+
+    /// Whether the credential is showing. Read by the test that proves the
+    /// value is nowhere on the panel until the button is pressed.
+    #[cfg(test)]
+    pub fn key_shown(&self) -> bool {
+        self.show_key
     }
 
     /// What is in the install field right now. Only the tests want it on its
@@ -1457,7 +1496,7 @@ impl Settings {
             .into_iter()
             .map(|name| {
                 let rows = match name {
-                    AGENT => sections::agent::rows(&self.agent),
+                    AGENT => sections::agent::rows(&self.agent, self.health.as_deref(), self.show_key),
                     PROMPT => self.prompt_section.rows(&self.agent, &self.env),
                     SESSIONS => sections::sessions::rows(&self.agent),
                     SKILLS => self.skills.rows(&self.agent),
@@ -2558,7 +2597,18 @@ impl Settings {
             return false;
         }
         self.point_at(index, Side::Left);
-        self.editing = Some(String::new());
+        // Opened on the folder the file itself lives in, with the separator
+        // already there: a line that starts empty says nothing about what it
+        // wants, and this one wants a path.
+        self.editing = Some(
+            self.agent
+                .instructions
+                .path
+                .as_deref()
+                .and_then(std::path::Path::parent)
+                .map(|dir| format!("{}/", dir.display()))
+                .unwrap_or_default(),
+        );
         self.loading = true;
         true
     }
@@ -3575,7 +3625,7 @@ mod tests {
         assert!(panel.step(true));
         assert!(panel.step(true));
         let was = panel.cursor();
-        assert_eq!(was, 2);
+        assert_eq!(was, 3);
         go_to(&mut panel, SESSIONS);
         assert_ne!(panel.cursor(), was, "the two sections share a cursor");
         go_to(&mut panel, APPEARANCE);
@@ -4401,17 +4451,17 @@ mod tests {
             "the wrapped card did not grow by the rows it wrapped to"
         );
 
-        // And the window counts it: the section is the card naming the skills
-        // directory and the entry under it. In a list one row of text short of
-        // both, the entry is still on screen with its last row cut by the
-        // bottom, and one step of the wheel cuts the first card by one row of
-        // text instead: the rows of text the entry wrapped to are the rows the
-        // scroll walks through.
-        assert_eq!(panel.rows().len(), 2, "{:?}", panel.rows());
+        // And the window counts it: the section is the install form, the line
+        // naming the list, and the entry under them. In a list one row of text
+        // short of all three, the entry is still on screen with its last row
+        // cut by the bottom, and one step of the wheel cuts the first card by
+        // one row of text instead: the rows of text the entry wrapped to are
+        // the rows the scroll walks through.
+        assert_eq!(panel.rows().len(), 3, "{:?}", panel.rows());
         let both: usize = panel.heights(wide).iter().sum();
         let whole = text_geometry::Window {
             first: 0,
-            count: 2,
+            count: 3,
             skip: 0,
         };
         assert_eq!(panel.window(both, wide), whole, "the section fits");
@@ -4425,7 +4475,7 @@ mod tests {
             panel.window(both - 1, wide),
             text_geometry::Window {
                 first: 0,
-                count: 2,
+                count: 3,
                 skip: 1,
             },
             "the scroll did not walk into the first card"
@@ -4560,7 +4610,7 @@ mod tests {
             (MCP, "none configured"),
             (SKILLS, "none installed"),
             (SESSIONS, "none saved yet"),
-            (AGENT, "probes the usual local ports"),
+            (AGENT, "the CLI probes :8080"),
         ] {
             go_to(&mut panel, section);
             let text = said(&panel);

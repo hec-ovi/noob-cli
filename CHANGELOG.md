@@ -14,6 +14,27 @@ tags rather than here; this file starts where it was added.
 - A prompt that starts no turn within ten seconds is said out loud in the
   transcript, and the orb stops turning over a conversation that has
   stopped.
+- Every setting on the panel is labelled with what it does and the key it
+  writes at once: `rounds per input (NOOB_MAX_ROUNDS)`, with the line under
+  it saying only what neither of those says.
+- The AGENT section sets everything the CLI takes a value for. The model
+  and the endpoint are typed into, the request shape and the thinking
+  switch are lists, and the connection card has a button that writes what
+  is typed and then asks `noob doctor` whether that endpoint answers,
+  reporting the line it came back with. The credential is a run of dots
+  with a button that shows it.
+- A slider's number stands clear of the end of its track.
+- A prompt document keeps its load, restore and save in the footer whether
+  or not edition is on, dim while it is off; the enable-edition checkbox no
+  longer fills in under the pointer; the load opens on the folder the
+  document lives in and shows the path being typed where the document's own
+  path is; and TOOLS.md says on the block what editing it costs.
+- Installing a skill is the form at the top of its section, with the
+  installed list under it.
+- The colour of the base application and the colour of the widget windows
+  are swatches on the APPEARANCE section beside the two transparencies that
+  move the same two surfaces.
+- `/set_api_style` and `/set_reasoning`.
 
 ## 0.11.2 - 2026-08-01
 

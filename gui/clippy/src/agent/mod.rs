@@ -121,7 +121,9 @@ pub const TASK_WALL_CLOCK: &str = "NOOB_TASK_WALL_CLOCK_S";
 /// The endpoint is not one of them. It is typed rather than nudged, and a
 /// machine that points the agent somewhere with an exported `NOOB_BASE_URL` is
 /// a machine doing that on purpose.
-pub const OWNED: [&str; 6] = [
+pub const OWNED: [&str; 8] = [
+    API_STYLE,
+    REASONING,
     CTX,
     MAX_ROUNDS,
     TASK_CONCURRENCY,

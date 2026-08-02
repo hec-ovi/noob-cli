@@ -6,77 +6,32 @@
 //! the agent's env keys; the frame owns the cursor and the writes.
 
 use crate::agent::{self, Agent};
-use crate::settings::{Card, CardField, File, Kind, Row, SECRET, UNSET};
+use crate::settings::{Card, CardField, Doing, File, Kind, Row, SECRET, UNSET};
+
+/// What the connection card says before anybody has pressed its button. Not a
+/// verdict: the window has asked nothing yet, and a card that said "ok" off no
+/// evidence would be the worst line on the panel.
+const NOT_CHECKED: &str = "not checked yet";
 
 /// The keys of the agent's file this section draws a field of its own for: what
-/// to call each one in plain words, and the sentence under it.
+/// to call each one in plain words, and the short line under it.
 ///
-/// The key is in the sentence rather than in the label. `NOOB_TASK_CONCURRENCY`
-/// over a number says nothing to somebody who has not read the CLI, and the
-/// whole complaint about this section was that half its rows said nothing about
-/// what they did; the sentence is also the answer to "which line do I edit",
-/// since three of these five are only editable in the file.
-///
-/// Every sentence here is read off the CLI: the bounds and the fallbacks are in
-/// [`crate::agent`], the two request shapes and the thinking switch are what
-/// `noob-provider` refuses anything else for, and the probe is what a missing
-/// base URL really does.
+/// The label is the plain words and the key together, `rounds per input
+/// (NOOB_MAX_ROUNDS)`, because both are wanted at once: the words say what the
+/// control does and the key says which line it writes. The line under it is
+/// only what neither of those says, which on most of these is nothing at all.
 const AGENT_FIELDS: [(&str, &str, &str); 11] = [
-    (
-        agent::ENDPOINT,
-        "endpoint",
-        "NOOB_BASE_URL. Left empty, noob probes the usual local ports",
-    ),
-    (
-        agent::API_KEY,
-        "api key",
-        "NOOB_API_KEY. Sent as the bearer token, and never shown here",
-    ),
-    (
-        agent::MODEL,
-        "model",
-        "NOOB_MODEL. Which model to ask that endpoint for, by its name",
-    ),
-    (
-        agent::API_STYLE,
-        "api style",
-        "NOOB_API_STYLE. chat or responses; unset, noob picks by the address",
-    ),
-    (
-        agent::REASONING,
-        "reasoning",
-        "NOOB_REASONING. on or off; unset, the server's own flags decide",
-    ),
-    (
-        agent::CTX,
-        "context window",
-        "NOOB_CTX. Tokens a session is budgeted before the CLI compacts it",
-    ),
-    (
-        agent::MAX_ROUNDS,
-        "rounds per input",
-        "NOOB_MAX_ROUNDS. Inference rounds one instruction may take; 0 is no limit",
-    ),
-    (
-        agent::TASK_CONCURRENCY,
-        "max sub-agents",
-        "NOOB_TASK_CONCURRENCY. How many sub-agent tasks may run at once, capped at sixty-four",
-    ),
-    (
-        agent::TASK_MAX_TURNS,
-        "sub-agent rounds",
-        "NOOB_TASK_MAX_TURNS. Inference rounds each sub-agent gets; 0 is no limit",
-    ),
-    (
-        agent::TASK_TOOLS,
-        "sub-agent tools",
-        "NOOB_TASK_TOOLS. What a sub-agent may touch when the model does not choose",
-    ),
-    (
-        agent::TASK_WALL_CLOCK,
-        "sub-agent seconds",
-        "NOOB_TASK_WALL_CLOCK_S. Seconds before a sub-agent is stopped; 0 is no limit",
-    ),
+    (agent::ENDPOINT, "endpoint", ""),
+    (agent::API_KEY, "api key", ""),
+    (agent::MODEL, "model", "as the endpoint names it"),
+    (agent::API_STYLE, "api style", "chat or responses"),
+    (agent::REASONING, "reasoning", "on or off"),
+    (agent::CTX, "context window", "tokens before a session compacts"),
+    (agent::MAX_ROUNDS, "rounds per input", "0 for no limit"),
+    (agent::TASK_CONCURRENCY, "max sub-agents", "1 to 64"),
+    (agent::TASK_MAX_TURNS, "sub-agent rounds", "0 for no limit"),
+    (agent::TASK_TOOLS, "sub-agent tools", "read-only, web, or all"),
+    (agent::TASK_WALL_CLOCK, "sub-agent seconds", "0 for no limit"),
 ];
 
 /// What to call one of the agent's keys, and what to say under it. The key
@@ -86,6 +41,35 @@ fn agent_says(key: &str) -> (&str, &'static str) {
     match AGENT_FIELDS.iter().find(|(known, ..)| *known == key) {
         Some((_, label, hint)) => (label, hint),
         None => (key, ""),
+    }
+}
+
+/// The label a field carries: the plain words with the key it writes after
+/// them.
+fn titled(key: &str) -> String {
+    match agent_says(key).0 {
+        words if words == key => String::from(key),
+        words => format!("{words} ({key})"),
+    }
+}
+
+/// The line under a field: what it means, and whether anybody has set it.
+///
+/// Two short facts at most, because that is all there is to say once the label
+/// carries the key: a value nobody wrote is the CLI's own default, and a budget
+/// where 0 means no limit says so.
+fn under(key: &str, set: bool) -> Option<String> {
+    let mut parts = Vec::new();
+    if !set {
+        parts.push("not set: the default");
+    }
+    match agent_says(key).1 {
+        "" => {}
+        line => parts.push(line),
+    }
+    match parts.is_empty() {
+        true => None,
+        false => Some(parts.join(", ")),
     }
 }
 
@@ -104,7 +88,9 @@ fn agent_has_a_field(key: &str) -> bool {
 /// right end of the concurrency track is the maximum the agent will honour and
 /// there is nothing to guess. Every other key in that file is listed as a
 /// reading, because the window does not know what the CLI would accept for it.
-pub(crate) const AGENT_SETTINGS: [(&str, Kind); 6] = [
+pub(crate) const AGENT_SETTINGS: [(&str, Kind); 8] = [
+    (agent::API_STYLE, Kind::Choice(&CHOICE_API_STYLE)),
+    (agent::REASONING, Kind::Choice(&CHOICE_REASONING)),
     (
         agent::CTX,
         Kind::Number {
@@ -161,6 +147,14 @@ pub(crate) const AGENT_SETTINGS: [(&str, Kind); 6] = [
 /// [`agent::TASK_TOOLS_CHOICES`] with the static shape `Kind::Choice` wants.
 const CHOICE_TASK_TOOLS: [&str; 3] = agent::TASK_TOOLS_CHOICES;
 
+/// The two request shapes `noob-provider` speaks, and the thinking switch.
+/// Both are what the CLI refuses anything else for, so the list is the whole
+/// of what can be written. Neither has a default to show: unset, the CLI picks
+/// the shape by the address and leaves the thinking to the server's own flags,
+/// so an unset row reads [`UNSET`] and the first nudge sets it.
+const CHOICE_API_STYLE: [&str; 2] = ["chat", "responses"];
+const CHOICE_REASONING: [&str; 2] = ["on", "off"];
+
 /// What the CLI uses for one of its own settings when the file does not carry
 /// it. Read off the CLI rather than chosen here: a row that shows a number the
 /// agent is not actually running with is worse than no row.
@@ -180,102 +174,122 @@ fn agent_default(key: &str) -> String {
 /// What the agent is pointed at, out of the file the CLI owns.
 ///
 /// Cards, in the order somebody meeting this window needs them: where the
-/// model is, which model it is, how much the agent gets, the file all of it
-/// is written in, and whatever else that file carries.
+/// model is and whether it answers, the credential, which model it is, how
+/// much the agent gets, the file all of it is written in, and whatever else
+/// that file carries.
 ///
-/// "actually is awful as is now, unclear because has too many lines
-/// between". It was a two column form of raw environment keys with three
-/// notes standing in the middle of it, and half its rows said nothing about
-/// what they did: `NOOB_TASK_CONCURRENCY 4` is not a setting anybody can
-/// act on. Every field is a plain-words label over its value now, with the
-/// key and what it decides in one sentence under it, and the space between
-/// them is the card rather than a line.
-pub fn rows(agent: &Agent) -> Vec<Row> {
-    let mut unset = Vec::new();
+/// Every field is one label over one value, and the label carries both the
+/// plain words and the key it writes: `rounds per input (NOOB_MAX_ROUNDS)`.
+/// The line under a field is only what neither of those says, which is
+/// usually nothing. Everything the CLI accepts a value for is set from here:
+/// the two request shapes and the thinking switch are lists, the budgets are
+/// tracks, and the endpoint and the model are typed into.
+///
+/// `health` is what the last connection check answered, and `show_key`
+/// whether the credential is being looked at; both live in the frame, since
+/// one comes off a process and the other off a button.
+pub fn rows(agent: &Agent, health: Option<&str>, show_key: bool) -> Vec<Row> {
     let mut controls = Vec::new();
     for (key, kind) in AGENT_SETTINGS {
+        let set = agent.setting(key).is_some();
         let value = match agent.setting(key) {
             Some(value) => value.to_string(),
-            None => {
-                unset.push(key);
-                agent_default(key)
-            }
+            // A list with no default has nothing honest to show but that
+            // nobody has set it; a track has to stand somewhere, so it stands
+            // on the number the CLI would use.
+            None => match kind {
+                Kind::Choice(_) => String::from(UNSET),
+                Kind::Number { .. } => agent_default(key),
+            },
         };
-        let (label, hint) = agent_says(key);
-        controls.push(CardField::setting(label, key, value, kind, File::Agent).saying(hint));
+        let field = CardField::setting(&titled(key), key, value, kind, File::Agent);
+        controls.push(match under(key, set) {
+            Some(line) => field.saying(line.as_str()),
+            None => field,
+        });
     }
-    // AGENT_SETTINGS order. A card carries at most two controls (the two
-    // halves a press can name), so the six become three pairs.
+    // AGENT_SETTINGS order. A card carries at most two controls, since two is
+    // what a press can name, so the eight are four pairs.
     let mut it = controls.into_iter();
-    let (ctx, rounds) = (it.next().expect("six controls"), it.next().expect("six controls"));
-    let (tasks, task_rounds) = (it.next().expect("six controls"), it.next().expect("six controls"));
-    let (task_tools, wall_clock) = (it.next().expect("six controls"), it.next().expect("six controls"));
+    let mut next = || it.next().expect("eight controls");
+    let (api_style, reasoning) = (next(), next());
+    let (ctx, rounds) = (next(), next());
+    let (tasks, task_rounds) = (next(), next());
+    let (task_tools, wall_clock) = (next(), next());
     let mut rows = vec![
-        // The endpoint first, because an agent pointed at nothing is the
-        // one state this window cannot work in, and its credential beside
-        // it, because that is the other half of reaching a server.
+        // The endpoint first, because an agent pointed at nothing is the one
+        // state this window cannot work in, with the shape of the requests it
+        // sends beside it and, under both, whether the thing at the other end
+        // actually answered.
         Row::Card(Card {
-        does: None,
             title: String::from("CONNECTION"),
             fields: vec![
                 CardField::text(
-                    "endpoint",
+                    &titled(agent::ENDPOINT),
                     agent::ENDPOINT,
                     agent.endpoint().unwrap_or_default().to_string(),
+                ),
+                api_style,
+                CardField::reading("answered", String::from(health.unwrap_or(NOT_CHECKED))),
+            ],
+            hint: Some(String::from(
+                "empty endpoint: the CLI probes :8080 :8090 :11434 :1234 :8000. check writes what is typed, then asks",
+            )),
+            does: Some(Doing::Check),
+        }),
+        // The credential on a card of its own, because the one button it has
+        // is the one that shows it.
+        Row::Card(Card {
+            title: String::from("CREDENTIAL"),
+            fields: vec![CardField::reading(
+                &titled(agent::API_KEY),
+                key_says(agent, show_key),
+            )],
+            hint: Some(String::from("sent as the bearer token")),
+            does: Some(match show_key {
+                true => Doing::Hide,
+                false => Doing::Reveal,
+            }),
+        }),
+        Row::Card(Card {
+            title: String::from("MODEL"),
+            fields: vec![
+                CardField::text(
+                    &titled(agent::MODEL),
+                    agent::MODEL,
+                    agent.setting(agent::MODEL).unwrap_or_default().to_string(),
                 )
-                .saying(agent_says(agent::ENDPOINT).1),
-                CardField::reading("api key", env_says(agent, agent::API_KEY))
-                    .saying(agent_says(agent::API_KEY).1),
+                .saying(
+                    under(agent::MODEL, agent.setting(agent::MODEL).is_some())
+                        .unwrap_or_default()
+                        .as_str(),
+                ),
+                reasoning,
             ],
             hint: None,
+            does: None,
         }),
         Row::Card(Card {
-        does: None,
-            title: String::from("MODEL"),
-            fields: [agent::MODEL, agent::API_STYLE, agent::REASONING]
-                .into_iter()
-                .map(|key| {
-                    let (label, hint) = agent_says(key);
-                    CardField::reading(label, env_says(agent, key)).saying(hint)
-                })
-                .collect(),
-            // Said once, on the card, rather than three times under three
-            // fields that cannot be typed into.
-            hint: Some(String::from(
-                "read from the settings file; edit them there, or export the variable",
-            )),
-        }),
-        Row::Card(Card {
-        does: None,
             title: String::from("LIMITS"),
             fields: vec![ctx, rounds],
-            hint: match unset.is_empty() {
-                true => None,
-                // A slider showing a number nobody wrote, with nothing
-                // saying so, is a window inventing a setting.
-                false => Some(format!(
-                    "{} not set: showing the built-in default; changing it writes the line",
-                    unset.join(" and ")
-                )),
-            },
+            hint: None,
+            does: None,
         }),
         // The fleet on cards of its own: how many children and what each may
-        // touch, then the two budgets that stop one. Every budget's 0 is the
-        // CLI's "no limit", and it is the default on all of them.
+        // touch, then the two budgets that stop one.
         Row::Card(Card {
-        does: None,
             title: String::from("MULTI-AGENT"),
             fields: vec![tasks, task_tools],
             hint: None,
+            does: None,
         }),
         Row::Card(Card {
-        does: None,
             title: String::from("MULTI-AGENT BUDGETS"),
             fields: vec![task_rounds, wall_clock],
-            hint: Some(String::from("0 means no limit, and it is the default")),
+            hint: None,
+            does: None,
         }),
         Row::Card(Card {
-        does: None,
             title: String::from("THE SETTINGS FILE"),
             fields: vec![
                 CardField::reading(
@@ -294,6 +308,7 @@ pub fn rows(agent: &Agent) -> Vec<Row> {
                 .saying("one KEY=value to a line; the CLI re-reads it on every request"),
             ],
             hint: None,
+            does: None,
         }),
     ];
     // Whatever else the file carries, under one title rather than as loose
@@ -304,25 +319,33 @@ pub fn rows(agent: &Agent) -> Vec<Row> {
         .env
         .iter()
         .filter(|(key, _)| !agent_has_a_field(key))
-        .map(|(key, _)| {
-            // A credential is reported as set and never as itself. The CLI
-            // keeps secrets out of settable config on purpose, and a window
-            // is a worse place for one than a terminal: it is on a screen
-            // somebody else can be standing behind.
-            CardField::reading(key, env_says(agent, key))
-        })
+        .map(|(key, _)| CardField::reading(key, env_says(agent, key)))
         .collect();
     if !rest.is_empty() {
         rows.push(Row::Card(Card {
-        does: None,
             title: String::from("THE REST OF THE FILE"),
             fields: rest,
             hint: Some(String::from(
                 "keys the CLI reads that this window has no control for: edit them in the file",
             )),
+            does: None,
         }));
     }
     rows
+}
+
+/// What the credential field shows: nothing anybody set, the value itself
+/// while it is being looked at, or a run of dots the length of it.
+///
+/// Dots rather than the value, because a settings panel is on a screen
+/// somebody else can be standing behind; the button beside it is how it is
+/// read out when that is not the case.
+fn key_says(agent: &Agent, show: bool) -> String {
+    match agent.env.iter().find(|(known, _)| known == agent::API_KEY) {
+        None => String::from(UNSET),
+        Some((_, value)) if show => value.clone(),
+        Some((_, value)) => "\u{2022}".repeat(value.chars().count().clamp(8, 32)),
+    }
 }
 
 /// What the agent's file says for one key, said the way this panel says it.
@@ -368,17 +391,40 @@ mod tests {
             "the panel does not say where the file is: {text}"
         );
         assert!(text.contains("http://localhost:8080/v1"), "{text}");
-        // The number is under a name anybody can read, with the key that writes
-        // it in the sentence under it rather than standing in for the name.
-        assert!(text.contains("context window 262144"), "{text}");
-        assert!(text.contains("NOOB_CTX."), "{text}");
+        // The number is under a name anybody can read, and the key that writes
+        // it is in that name: both are wanted at once, and a sentence under
+        // every field to carry the second one was the pile of prose this
+        // section was.
+        assert!(text.contains("context window (NOOB_CTX) 262144"), "{text}");
         // The concurrency row is named for what it caps, not for a phrase
         // nobody could map to the key.
-        assert!(text.contains("max sub-agents"), "{text}");
-        assert!(text.contains("sub-agent tasks may run at once"), "{text}");
-        assert!(!text.contains("sk-secret"), "a credential is on the panel: {text}");
-        assert!(text.contains(&format!("api key {SECRET}")), "{text}");
+        assert!(
+            text.contains("max sub-agents (NOOB_TASK_CONCURRENCY)"),
+            "{text}"
+        );
         assert_eq!(panel.agent_file(), Some(dir.join(".env").as_path()));
+
+        // The credential is dots until its own button is pressed, and the
+        // value itself after it. Nothing about it is remembered: the panel
+        // opens covered.
+        assert!(!panel.key_shown());
+        assert!(!text.contains("sk-secret"), "a credential is on the panel: {text}");
+        assert!(text.contains("api key (NOOB_API_KEY) \u{2022}"), "{text}");
+        panel.flip_key(&Config::default());
+        go_to(&mut panel, AGENT);
+        assert!(said(&panel).contains("sk-secret"), "the button showed nothing");
+        panel.flip_key(&Config::default());
+        go_to(&mut panel, AGENT);
+        assert!(!said(&panel).contains("sk-secret"), "it never went back");
+
+        // What the connection check answered lands on the card that asked.
+        assert!(said(&panel).contains("not checked yet"));
+        panel.adopt_health(
+            String::from("http://localhost:8080/v1 answers /models (HTTP 200)"),
+            &Config::default(),
+        );
+        go_to(&mut panel, AGENT);
+        assert!(said(&panel).contains("answers /models (HTTP 200)"), "{text}");
 
         // The endpoint is the one thing here that is typed into rather than
         // nudged, and it is where the section opens: the first field of the
@@ -605,9 +651,13 @@ mod tests {
             agent::TASK_CONCURRENCY_DEFAULT.to_string()
         );
         let text = said(&panel);
-        assert!(text.contains("not set: showing the built-in default"), "{text}");
+        assert!(text.contains("not set: the default"), "{text}");
         assert!(text.contains(agent::CTX), "{text}");
         assert!(text.contains(agent::TASK_CONCURRENCY), "{text}");
+        // A list with no default has nothing to stand on, so it says so rather
+        // than showing one of its names as though somebody chose it.
+        assert_eq!(value(&panel, agent::API_STYLE), UNSET);
+        assert_eq!(value(&panel, agent::REASONING), UNSET);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -648,6 +698,7 @@ mod tests {
             titles,
             [
                 "CONNECTION",
+                "CREDENTIAL",
                 "MODEL",
                 "LIMITS",
                 "MULTI-AGENT",
@@ -671,9 +722,12 @@ mod tests {
             );
             for field in &card.fields {
                 assert!(!field.label.is_empty(), "{}: a field has no name", card.title);
+                // Plain words first and the key after them, never the key on
+                // its own: `NOOB_TASK_CONCURRENCY 4` was the complaint, and a
+                // label with no key in it was the half-answer to it.
                 assert!(
-                    field.label.chars().all(|ch| !ch.is_ascii_uppercase()),
-                    "{}: {} is a key rather than a name",
+                    field.label.starts_with(|ch: char| ch.is_ascii_lowercase()),
+                    "{}: {} leads with something other than what it is",
                     card.title,
                     field.label
                 );
@@ -704,9 +758,15 @@ mod tests {
         assert_eq!((panel.cursor(), panel.side()), (0, Side::Left));
         assert!(matches!(panel.at_cursor(), Some(Row::Field { .. })));
         assert!(panel.hint().contains("enter edits it"), "{}", panel.hint());
-        // The api key beside it is read out, so there is nowhere to cross to and
-        // the cursor stays where something can be done.
-        assert!(!panel.cross(Side::Right), "the cursor crossed onto a reading");
+        // The request shape beside it is a list, so the shifted arrow crosses
+        // to it and the plain ones then walk the names.
+        assert!(panel.cross(Side::Right), "the endpoint's card has no second half");
+        assert!(
+            matches!(panel.at_cursor(), Some(Row::Setting { key, .. }) if *key == agent::API_STYLE),
+            "{:?}",
+            panel.at_cursor()
+        );
+        assert!(panel.cross(Side::Left));
 
         // Down to the card of numbers: two fields, both of them tracks, and the
         // shifted arrow crosses between them.
@@ -744,10 +804,13 @@ mod tests {
             let Row::Card(card) = row else {
                 continue;
             };
-            let settable = card.fields.iter().any(CardField::editable);
+            // A button counts as something to do: the credential card is read
+            // out and its one act is the press that shows it, and a card the
+            // keys cannot reach is a button only a pointer can press.
+            let doable = card.fields.iter().any(CardField::editable) || card.does.is_some();
             assert_eq!(
                 landable(row),
-                settable,
+                doable,
                 "row {at}, {}, holds the cursor over nothing",
                 card.title
             );
@@ -765,9 +828,12 @@ mod tests {
         while panel.step(true) {
             seen.push(panel.cursor());
         }
+        // Every card down to the last budget, the credential's button among
+        // them: the settings file at the end is the one card with nothing to
+        // do on it.
         assert_eq!(
             seen,
-            vec![0, numbers, fleet, fleet + 1],
+            vec![0, 1, 2, numbers, fleet, fleet + 1],
             "the keyboard cannot walk the section: {seen:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);

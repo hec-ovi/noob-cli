@@ -124,7 +124,7 @@ pub(crate) enum Does {
 
 /// Every command, in the order the COMMANDS section lists them: the agent's
 /// own settings first, then each section's acts, the panel itself, and help.
-pub const ALL: [Command; 28] = [
+pub const ALL: [Command; 30] = [
     Command {
         name: "set_endpoint",
         about: "point the agent at a model server",
@@ -137,6 +137,32 @@ pub const ALL: [Command; 28] = [
         args: &[Arg::of("url", Shape::Rest)],
         does: Does::Set {
             key: crate::agent::ENDPOINT,
+            file: File::Agent,
+        },
+    },
+    Command {
+        name: "set_api_style",
+        about: "which request shape the endpoint is asked in",
+        help: &[
+            "Writes NOOB_API_STYLE in the agent's .env: chat or responses,",
+            "the two shapes noob speaks. Unset, noob picks by the address.",
+        ],
+        args: &[Arg::of("shape", Shape::Value)],
+        does: Does::Set {
+            key: crate::agent::API_STYLE,
+            file: File::Agent,
+        },
+    },
+    Command {
+        name: "set_reasoning",
+        about: "ask the endpoint to think before it answers",
+        help: &[
+            "Writes NOOB_REASONING in the agent's .env: on or off. Unset,",
+            "the server's own flags decide.",
+        ],
+        args: &[Arg::of("switch", Shape::Value)],
+        does: Does::Set {
+            key: crate::agent::REASONING,
             file: File::Agent,
         },
     },
@@ -607,11 +633,17 @@ mod tests {
                 Deed::RestoreLooks => "restore_appearance",
             }
         }
-        fn command_for_button(doing: Doing) -> &'static str {
+        fn command_for_button(doing: Doing) -> Option<&'static str> {
             match doing {
-                Doing::Validate | Doing::Install => "skill_install",
-                Doing::AddServer => "mcp_add",
-                Doing::Restore => "restore_appearance",
+                Doing::Validate | Doing::Install => Some("skill_install"),
+                Doing::AddServer => Some("mcp_add"),
+                Doing::Restore => Some("restore_appearance"),
+                // The two buttons that write nothing: one asks the CLI a
+                // question about the endpoint the endpoint command already
+                // writes, and the other uncovers a value that is on screen
+                // either way. A command for either would be a command with
+                // nothing to do.
+                Doing::Check | Doing::Reveal | Doing::Hide => None,
             }
         }
         let deeds = [
@@ -659,8 +691,18 @@ mod tests {
         for deed in &deeds {
             named(command_for(deed));
         }
-        for doing in [Doing::Validate, Doing::Install, Doing::AddServer, Doing::Restore] {
-            named(command_for_button(doing));
+        for doing in [
+            Doing::Validate,
+            Doing::Install,
+            Doing::AddServer,
+            Doing::Restore,
+            Doing::Check,
+            Doing::Reveal,
+            Doing::Hide,
+        ] {
+            if let Some(name) = command_for_button(doing) {
+                named(name);
+            }
         }
     }
 }

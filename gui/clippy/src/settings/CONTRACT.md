@@ -40,9 +40,11 @@ pub const SECTIONS: [&str; 7];   // AGENT, SYSTEM PROMPT, SESSIONS, SKILLS,
 pub struct Settings;             // the panel state machine: rows per
                                  // section, cursor and side, field editing,
                                  // sliders, swatches, the sessions table,
-                                 // the doc viewer, footer text, and the
-                                 // Change/Deed a commit writes. Embeds the
-                                 // section boxes' state and delegates
+                                 // the doc viewer, footer text, the last
+                                 // connection check, whether the credential
+                                 // is uncovered, and the Change/Deed a commit
+                                 // writes. Embeds the section boxes' state
+                                 // and delegates
 pub enum Row;  pub enum Side;  pub enum Doing;   // what a row is, which
                                  // half is active, what a button does
 pub mod places;                  // SettingsPlaces: every rectangle on the
@@ -87,7 +89,11 @@ be `Which::Fixed`: only read, no toggle, no uninstall, no deed.
    config parser and commits the value under the swatch's key into the
    window file, and a value the parser refuses is said on the footer with
    nothing written. Escape or any cursor movement lets the press go.
-9. A prompt document is edited behind its enable-edition checkbox: ticking
+9. A card's own button is one of `Doing`; `Check` and `Reveal`/`Hide` write
+   nothing on a disk, so they are answered in the window (a `noob doctor`
+   run for the first, the reveal flag for the second) rather than as a
+   Change or a Deed.
+10. A prompt document is edited behind its enable-edition checkbox: ticking
    it opens the editor on the file's text (the shipped default when there is
    none), the block shows the buffer with a caret while it is open, nothing
    lands until Ctrl-S or the save button writes the whole file through the

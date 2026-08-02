@@ -509,6 +509,12 @@ pub enum Act {
     /// Open the line an `.md` path is typed into, to load that file into the
     /// editor as an unsaved edit.
     LoadPrompt,
+    /// Write what is typed into the connection card, then ask the CLI whether
+    /// that endpoint answers.
+    Check,
+    /// Show the credential on the card this button stands in, or cover it
+    /// again when it is already showing.
+    Reveal,
 }
 
 /// Something the pointer can land on. Returned by [`Layout::hit`] so every
@@ -13356,8 +13362,10 @@ mod tests {
         );
         assert!(text.contains("enable edition"), "{text}");
 
-        // The checkbox is pressed where it is drawn, and until it is ticked
-        // the only action beside it is the load on the AGENTS.md block.
+        // The checkbox is pressed where it is drawn, and every action the
+        // block has stands beside it whether or not edition is on: they are
+        // drawn dim while it is off, rather than appearing out of a footer
+        // that was empty a moment ago.
         let acts: Vec<Act> = out
             .layout
             .settings_acts
@@ -13365,7 +13373,11 @@ mod tests {
             .filter(|(index, ..)| *index == 0)
             .map(|(_, act, _)| *act)
             .collect();
-        assert_eq!(acts, [Act::EditPrompt, Act::LoadPrompt], "{acts:?}");
+        assert_eq!(
+            acts,
+            [Act::EditPrompt, Act::LoadPrompt, Act::RestorePrompt, Act::SavePrompt],
+            "{acts:?}"
+        );
         let (index, _, box_) = out
             .layout
             .settings_acts
@@ -14507,9 +14519,12 @@ mod tests {
     /// read through. The border says the same thing and leaves the words alone.
     #[test]
     fn the_entry_under_the_cursor_is_the_card_with_the_focus_border() {
-        let panel = a_wordy_skills_panel();
-        // The section opens on the skill itself: the list comes first and the
-        // install card stands under it.
+        let mut panel = a_wordy_skills_panel();
+        // The section opens on the install form, so the cursor is walked down
+        // to the entry this test is about.
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let (index, _) = the_entry_row(&out, &panel);
+        assert!(panel.point_at(index, crate::settings::Side::Left));
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let (index, row) = the_entry_row(&out, &panel);
         let (card, _) = the_card(&out, row, true);
@@ -15041,6 +15056,10 @@ mod tests {
     #[test]
     fn a_block_of_text_carries_its_own_bar_and_a_short_one_carries_none() {
         let mut panel = a_wordy_install_panel();
+        // The block is the second row of the section now, and what is on
+        // screen is wherever the cursor is: put it on the block this test is
+        // about rather than rendering whatever the install left behind.
+        while panel.scroll(4, false, 8, 80) {}
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let line = Text::line_for(PANE_TEXT.0);
         let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
@@ -15051,7 +15070,7 @@ mod tests {
             .find(|(index, _, _)| {
                 matches!(panel.row(*index), Some(SettingRow::Paper(paper)) if paper.title.contains("INSTALL"))
             })
-            .expect("the section carries the install block");
+            .expect("the install block is on screen");
         let card = settings_card(row, line);
         let parts = settings_card_parts(card, line, PANE_TEXT.0, PANE_TEXT.1, cols, false);
         let text = settings_paper_text(&parts, line);
@@ -15468,7 +15487,7 @@ mod tests {
         panel.choose(looks);
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let text = text_of(&out.scene);
-        assert!(text.contains("THE WINDOW"), "{text}");
+        assert!(text.contains("BACKGROUNDS"), "{text}");
         assert!(!text.contains("api keys"), "the agent section is still up");
         assert_eq!(tint_of(&out, "APPEARANCE"), out.skin.heading);
     }
@@ -16203,7 +16222,9 @@ mod tests {
         let mut panel = a_panel_on(&Config::default(), crate::settings::APPEARANCE);
         // A section of cards is taller than any window, so each title is looked
         // for on the screenful its own card is on rather than on the first one.
-        let shape = render_settings(&panel, 1400.0, 1200.0, None);
+        // Tall on purpose: the last card here is ten swatches, and what this
+        // test is about is the title's tint and the row it was measured in.
+        let shape = render_settings(&panel, 1400.0, 1800.0, None);
         let rows = shape.layout.settings_capacity(13.0);
         let cols = shape.layout.settings_entry_columns(PANE_TEXT.1);
         for heading in [
@@ -16222,8 +16243,11 @@ mod tests {
                     _ => false,
                 })
                 .unwrap_or_else(|| panic!("{heading} is not a group of the section"));
+            // From the top of the section every time, so where one heading was
+            // found does not decide where the next one is looked for.
+            while panel.scroll(4, false, rows, cols) {}
             while panel.first() < at && panel.scroll(1, true, rows, cols) {}
-            let out = render_settings(&panel, 1400.0, 1200.0, None);
+            let out = render_settings(&panel, 1400.0, 1800.0, None);
             let text = out
                 .scene
                 .texts
@@ -16640,7 +16664,6 @@ mod tests {
         for (section, wanted) in [
             (crate::settings::AGENT, "NOOB_BASE_URL"),
             (crate::settings::AGENT, "http://localhost:8080/v1"),
-            (crate::settings::AGENT, "/home/hec/.config/noob/.env"),
             (crate::settings::SESSIONS, "rebuild the settings panel"),
             (crate::settings::SKILLS, "coding"),
             (crate::settings::MCP, "none configured"),
@@ -16658,6 +16681,16 @@ mod tests {
                 "{wanted:?} is not in {section}: {text}"
             );
         }
+        // Where the agent's file is, on the last card of a section taller than
+        // the window: a panel that only says it on a screenful nobody scrolls
+        // to is a panel that does not say it.
+        let mut agent = a_panel_on(&config, crate::settings::AGENT);
+        scrolled_to_the_end(&mut agent);
+        let text = text_of(&render_settings(&agent, 1400.0, 1200.0, None).scene);
+        assert!(
+            text.contains("/home/hec/.config/noob/.env"),
+            "the agent's file is nowhere on its section: {text}"
+        );
         // And what it does not say: the pane toggles and the divider ratios are
         // off the panel, so their names are nowhere in the text any section
         // draws. `show_files` was on this list until PANES was really removed.
@@ -16770,9 +16803,12 @@ mod tests {
 
         // And every number among them is a track, so the maximum concurrency
         // is a place to drop the pointer rather than a number to type. The
-        // one choice (the sub-agent tools mode) has no track to draw.
+        // ones that are a name out of a list have no track to draw.
         for key in crate::agent::OWNED {
-            if key == crate::agent::TASK_TOOLS {
+            let listed = crate::settings::AGENT_SETTINGS.iter().any(|(known, kind)| {
+                *known == key && matches!(kind, crate::settings::Kind::Choice(_))
+            });
+            if listed {
                 continue;
             }
             let (index, side) = panel
@@ -16914,13 +16950,17 @@ mod tests {
                 .find(|(index, _, _)| *index == at)
                 .map(|(_, _, row)| *row)
                 .expect("the theme row is on screen");
+            // The grid under the card, which is every swatch below it: the
+            // two backgrounds have a card of their own up beside the
+            // transparencies, and those are not what this is about.
             let first = out
                 .layout
                 .settings_cells
                 .iter()
                 .map(|(_, _, cell)| cell.y)
+                .filter(|y| *y > row.y)
                 .fold(f32::MAX, f32::min);
-            assert!(first < f32::MAX, "no swatch is drawn at all");
+            assert!(first < f32::MAX, "no swatch is drawn under the card at all");
             assert!(
                 row.y + row.h <= first + 0.01,
                 "the theme control is drawn at {row:?}, not above the first swatch at {first}"

@@ -1075,6 +1075,9 @@ struct App {
     /// it is still reading it. Dropped as soon as it answers, so a panel
     /// opened twice does not take the first run's answer for the second one's.
     asking: Option<std::sync::mpsc::Receiver<link::Asked>>,
+    /// The thread asking the CLI whether the endpoint answers, while it is
+    /// still asking. Dropped the moment it does, for the same reason.
+    checking: Option<std::sync::mpsc::Receiver<String>>,
     /// The thread installing a skill, while it is still installing it: the
     /// source it was given, and the name it landed under or why it did not.
     ///
@@ -1215,6 +1218,7 @@ impl App {
             thumbing: None,
             sliding: None,
             asking: None,
+            checking: None,
             installing: None,
             install_from_command: false,
             selecting: false,
@@ -1526,6 +1530,63 @@ impl App {
             let _ = tx.send((at, answer));
             let _ = proxy.send_event(Wake);
         });
+    }
+
+    /// Answer the connection card's button: write whatever endpoint is being
+    /// typed, then ask the CLI whether it answers.
+    ///
+    /// The write first, because the point of pressing it after typing an
+    /// address is to check that address; leaving the buffer open would check
+    /// the old one and read as a button that does nothing. Then `noob doctor`
+    /// on a thread of its own, since it opens a socket and this is the
+    /// interface thread.
+    fn check_connection(&mut self) {
+        if let Some(path) = self
+            .settings
+            .as_ref()
+            .and_then(Settings::agent_file)
+            .map(std::path::Path::to_path_buf)
+            && let Some((key, value)) = self.settings.as_mut().and_then(Settings::finish_edit)
+        {
+            self.write_agent_setting(&path, key, &value);
+        }
+        if let Some(panel) = self.settings.as_mut() {
+            let config = self.config.clone();
+            panel.adopt_health(String::from("asking..."), &config);
+        }
+        let program = std::env::var("NOOB_BIN").unwrap_or_else(|_| String::from("noob"));
+        let workspace = match self.state.workspace.is_empty() {
+            false => PathBuf::from(&self.state.workspace),
+            true => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.checking = Some(rx);
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let answer = match link::doctor_command(&program, &workspace, &agent::OWNED).output() {
+                Ok(out) => link::health_from(out.status.success(), &out.stdout, &out.stderr),
+                Err(e) => format!("cannot run {program:?}: {e}; is noob on PATH, or set NOOB_BIN"),
+            };
+            let _ = tx.send(answer);
+            let _ = proxy.send_event(Wake);
+        });
+        self.dirty = true;
+    }
+
+    /// Take what the connection check answered, if it has.
+    fn take_health(&mut self) {
+        let Some(rx) = self.checking.as_ref() else {
+            return;
+        };
+        let Ok(answer) = rx.try_recv() else {
+            return;
+        };
+        self.checking = None;
+        let config = self.config.clone();
+        if let Some(panel) = self.settings.as_mut() {
+            panel.adopt_health(answer, &config);
+        }
+        self.dirty = true;
     }
 
     /// Take what that thread answered, if it has.
@@ -2409,12 +2470,20 @@ impl App {
                             None
                         }
                         // The save in that footer: the same whole-file deed
-                        // Ctrl-S asks for.
-                        view::Act::SavePrompt => panel.finish_instructions(),
+                        // Ctrl-S asks for. Both it and the restore stand there
+                        // with edition off, drawn dim, and a dim button does
+                        // nothing when it is pressed.
+                        view::Act::SavePrompt => match panel.edition_on(index) {
+                            true => panel.finish_instructions(),
+                            false => None,
+                        },
                         // The restore beside it: armed on the first press,
                         // acted on the second, like every button that loses
                         // something.
-                        view::Act::RestorePrompt => panel.restore_prompt(index),
+                        view::Act::RestorePrompt => match panel.edition_on(index) {
+                            true => panel.restore_prompt(index),
+                            false => None,
+                        },
                         // The load beside those: opens the path line; Enter
                         // then reads the file ([`App::load_prompt_md`]).
                         view::Act::LoadPrompt => {
@@ -2440,6 +2509,20 @@ impl App {
                             self.dirty |= panel.point_at(index, settings::Side::Left);
                             None
                         }
+                        // The credential's own button: dots, or the value.
+                        // Nothing on a disk changes.
+                        view::Act::Reveal => {
+                            let config = self.config.clone();
+                            panel.flip_key(&config);
+                            self.dirty = true;
+                            None
+                        }
+                        // The connection card's button, answered by a process
+                        // ([`App::check_connection`]).
+                        view::Act::Check => {
+                            self.dirty |= panel.point_at(index, settings::Side::Left);
+                            None
+                        }
                     },
                     None => None,
                 };
@@ -2448,6 +2531,9 @@ impl App {
                 }
                 if matches!(act, view::Act::Validate) {
                     self.validate_source();
+                }
+                if matches!(act, view::Act::Check) {
+                    self.check_connection();
                 }
                 self.do_deed(deed);
             }
@@ -2823,6 +2909,9 @@ impl App {
         // The same, for the skill being installed: it answers on its own
         // thread and wakes the loop.
         self.take_install();
+        // And for the connection check, which is one more process answering
+        // on a thread.
+        self.take_health();
         let Some(link) = self.link.as_mut() else {
             return;
         };

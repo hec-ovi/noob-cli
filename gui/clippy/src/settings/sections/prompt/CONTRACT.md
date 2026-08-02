@@ -44,11 +44,15 @@ pub fn PromptSection::editing(&self) -> bool
    ticked, ticking opens the buffer on the file's text (the default when
    there is none), and Escape or unticking drops the buffer with the file
    untouched. One editor at a time; ticking one file drops the other's.
+   Every button the block has stands in its footer either way, drawn dim
+   and doing nothing while edition is off.
 4. Each block saves its own file whole; a file past the CLI's 16 KiB cap
    refuses edition, since saving the capped text would lose the tail.
-5. The environment block never offers edition: it is computed by the CLI
+5. TOOLS.md says on the block itself what editing it costs: it is what the
+   model knows its tools from.
+6. The environment block never offers edition: it is computed by the CLI
    for each request, and its `under` line says so.
-6. No config directory is said as trouble, never offered and never edited.
+7. No config directory is said as trouble, never offered and never edited.
 
 ## Dependencies
 

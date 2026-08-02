@@ -96,6 +96,60 @@ pub fn env_command(program: &str, workspace: &std::path::Path, clear: &[&str]) -
     command
 }
 
+/// Exactly the command the connection check is run with, built without
+/// running it.
+///
+/// `noob doctor` is the CLI's own account of whether it can reach a model
+/// server: it resolves the endpoint the way a session does, autodetect
+/// included, asks it for its models and says what came back. Run the way the
+/// session is started, for the same reason [`env_command`] is: a check that
+/// read another folder's settings would be answering about another agent.
+pub fn doctor_command(program: &str, workspace: &std::path::Path, clear: &[&str]) -> Command {
+    let mut command = Command::new(program);
+    command.arg("doctor");
+    for key in clear {
+        command.env_remove(key);
+    }
+    command.current_dir(workspace);
+    command
+}
+
+/// The one line the connection card shows out of everything that answered.
+///
+/// `doctor` reports on a dozen things and the card asked about one, so what
+/// comes back is the line about the endpoint: the failure if there is one,
+/// since that is the answer, and otherwise what the endpoint said it is. A
+/// run that could not happen at all is its own answer.
+pub fn health_from(ok: bool, stdout: &[u8], stderr: &[u8]) -> String {
+    let said = String::from_utf8_lossy(stdout);
+    let about_endpoint = |line: &&str| line.contains("endpoint") || line.contains("base url");
+    let verdict = |mark: &str| {
+        said.lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(mark))
+            .filter(about_endpoint)
+            .map(|line| line[mark.len()..].trim().to_string())
+            .next_back()
+    };
+    // A failure first, whatever else is on the report: a run where the
+    // endpoint answered and something after it did not is still an endpoint
+    // that answered, and a run where it did not is nothing else.
+    if let Some(bad) = verdict("fail").or_else(|| verdict("warn")) {
+        return bad;
+    }
+    if let Some(good) = verdict("ok") {
+        return good;
+    }
+    // Nothing about the endpoint anywhere, which happens when the CLI refused
+    // before it got that far. Its own last word, then, rather than silence.
+    let why = String::from_utf8_lossy(stderr);
+    match why.lines().map(str::trim).rfind(|line| !line.is_empty()) {
+        Some(line) => format!("noob doctor said: {line}"),
+        None if ok => String::from("noob doctor said nothing about the endpoint"),
+        None => String::from("noob doctor failed and said nothing"),
+    }
+}
+
 /// What the panel makes of what that command answered.
 ///
 /// The other half of the seam: the window runs the process and hands the
@@ -655,6 +709,33 @@ mod tests {
         );
         drop(link);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What the connection card shows out of a whole doctor report: the line
+    /// about the endpoint, and the failure ahead of the success when the
+    /// report carries both.
+    #[test]
+    fn the_connection_check_reads_down_to_the_line_about_the_endpoint() {
+        let good = b"ok    config dir /home/h/.config/noob (writable)\n\
+                     ok    endpoint autodetected: http://localhost:8080/v1\n\
+                     ok    endpoint http://localhost:8080/v1 answers /models (HTTP 200)\n\
+                     ok    workspace /home/h/work (writable)\n";
+        let said = health_from(true, good, b"");
+        assert_eq!(said, "endpoint http://localhost:8080/v1 answers /models (HTTP 200)");
+
+        // A refusal is the answer, whatever else on the report went well.
+        let bad = b"ok    config dir /home/h/.config/noob (writable)\n\
+                    fail  endpoint http://localhost:8080/v1 refused the connection\n";
+        assert!(health_from(false, bad, b"").starts_with("endpoint http"));
+        assert!(health_from(false, bad, b"").contains("refused"));
+
+        // Nothing about the endpoint anywhere: the CLI's own last word, so a
+        // press is never answered with a blank.
+        let short = b"ok    config dir /home/h/.config/noob (writable)\n";
+        assert!(health_from(true, short, b"").contains("nothing about the endpoint"));
+        let refused = health_from(false, b"", b"noob: no config directory\n");
+        assert!(refused.contains("no config directory"), "{refused}");
+        assert!(health_from(false, b"", b"").contains("said nothing"));
     }
 
     /// A program that is not there is a message in the window, not a panic and

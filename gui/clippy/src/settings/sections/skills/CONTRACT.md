@@ -4,8 +4,9 @@ contractVersion: 1.0.0
 
 ## Purpose
 
-The SKILLS section of the settings panel: the installed skills as entry
-rows, and the install card under them with its validate-then-install cycle.
+The SKILLS section of the settings panel: the install form with its
+validate-then-install cycle, and under it the installed skills as entry
+rows behind a line saying how many there are.
 
 ## Public surface
 
@@ -37,6 +38,9 @@ impl SkillsSection {
    the field, and the list still comes off the disk reading, never off what
    the install said.
 4. The suggestion appears only while no `web-search` skill is installed.
+5. The form is the first row of the section and the list is under it: a card
+   at the foot of a list of skills reads as a note about the last one rather
+   than as the way to add another.
 
 ## Dependencies
 

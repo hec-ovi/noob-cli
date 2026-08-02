@@ -26,6 +26,11 @@ pub fn env_command(program: &str, workspace: &Path, clear: &[&str]) -> Command;
 pub fn env_from(ok: bool, stdout: &[u8], stderr: &[u8]) -> Result<Vec<String>, String>;
                              // noob debug env, run and read the way serve
                              // is started, for the panel's environment block
+pub fn doctor_command(program: &str, workspace: &Path, clear: &[&str]) -> Command;
+pub fn health_from(ok: bool, stdout: &[u8], stderr: &[u8]) -> String;
+                             // noob doctor, run the same way, read down to
+                             // the one line about the endpoint: the failure
+                             // when there is one, otherwise what answered
 ```
 
 ## Invariants
@@ -50,5 +55,5 @@ surface it drives; nothing deeper in the CLI).
 ## Tests
 
 Inline: frame decode paths, trouble surfacing, a missing binary, the env
-command and its parsing, a command written at an older agent's version
-(6 tests).
+command and its parsing, a command written at an older agent's version,
+the connection check's reading of a doctor report (7 tests).

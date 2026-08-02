@@ -6,10 +6,11 @@ contractVersion: 1.2.0
 
 The APPEARANCE section of the settings panel: the window-file settings as
 cards (TRANSPARENCY with the base application before the widget windows,
-INPUT PROMPT), the DEFAULT THEMES card with the three presets beside a
-custom option, the palette as labelled swatch grids under it (each swatch
-editable in place by a press and a typed hex value), and the restore back
-to the defaults.
+BACKGROUNDS with the colour of each of those two surfaces, INPUT PROMPT),
+the DEFAULT THEMES card with the three presets beside a custom option, the
+rest of the palette as labelled swatch grids under it (each swatch editable
+in place by a press and a typed hex value), and the restore back to the
+defaults.
 
 ## Public surface
 
@@ -54,6 +55,9 @@ pub(crate) const LOOKS: [(&str, Kind); 6]
    parser refuses is said on the footer with nothing written. The swatch
    always shows the value the file really carries.
 7. `restoring()` never contains an `OFF_PANEL` key.
+8. `background` and `panel` are swatches on the BACKGROUNDS card beside the
+   two transparencies that move the same two surfaces, and are not in the
+   grid as well: one line of the file is one control on the panel.
 
 ## Dependencies
 

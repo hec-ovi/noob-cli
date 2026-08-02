@@ -219,6 +219,16 @@ pub fn colours(config: &Config) -> Vec<(&'static str, [u8; 3])> {
     out
 }
 
+/// The two surfaces the transparency card moves, drawn beside it as swatches
+/// rather than left in the grid: the base application behind everything, and
+/// the widget windows over it.
+pub(crate) const BACKGROUND: &str = "background";
+pub(crate) const PANEL: &str = "panel";
+
+/// How many of the window's own tones those two are, so the grid under them
+/// counts what is left.
+const BACKGROUNDS: usize = 2;
+
 /// How many of [`colours`] are the window's own tones, and how many of the rest
 /// belong to the highlighter. The tools and the gauges are the two lists after
 /// them, and both name their own keys.
@@ -389,6 +399,21 @@ pub fn rows(config: &Config, file: Option<&Path>) -> Vec<Row> {
             hint: None,
             does: None,
         }),
+        // The two surfaces the transparencies move, in the same order and by
+        // the same names: what shows through is half the question and what it
+        // shows through to is the other half, and hunting the two down in a
+        // grid of thirty-seven swatches was the wrong half of an answer.
+        Row::Palette(Palette {
+            title: "BACKGROUNDS",
+            cells: [BACKGROUND, PANEL]
+                .into_iter()
+                .map(|key| Swatch {
+                    key,
+                    about: about(key),
+                    rgb: config.colour_of(key).unwrap_or_default(),
+                })
+                .collect(),
+        }),
         Row::Card(Card {
             title: String::from("INPUT PROMPT"),
             fields: vec![look_field(config, "prompt_rows")],
@@ -415,7 +440,13 @@ pub fn rows(config: &Config, file: Option<&Path>) -> Vec<Row> {
 /// paints rather than with the keys it holds, for the same reason the
 /// swatches are labelled in words.
 fn colour_rows(config: &Config, file: Option<&Path>) -> Vec<Row> {
-    let all = colours(config);
+    // Every colour but the two backgrounds, which stand on their own card
+    // beside the transparencies that move the same two surfaces. A colour on
+    // the panel twice is two controls for one line of the file.
+    let all: Vec<(&'static str, [u8; 3])> = colours(config)
+        .into_iter()
+        .filter(|(key, _)| ![BACKGROUND, PANEL].contains(key))
+        .collect();
     // The control that writes every colour under it, first, out of the same
     // table the sizes are built from so the field is the field: same
     // choices, same nudge, same writer. Two columns: the three presets on
@@ -443,7 +474,7 @@ fn colour_rows(config: &Config, file: Option<&Path>) -> Vec<Row> {
     })];
     let mut at = 0;
     for (title, count) in [
-        ("THE WINDOW'S OWN TONES", WINDOW_TONES),
+        ("THE WINDOW'S OWN TONES", WINDOW_TONES - BACKGROUNDS),
         ("THE CODE COLOURS", SYNTAX_TONES),
         ("THE TOOL MARKS", config::TOOL_KEYS.len()),
         ("THE METERS", config::GAUGE_KEYS.len()),
@@ -682,7 +713,9 @@ mod tests {
                 .expect("the theme card");
             let first = rows
                 .iter()
-                .position(|row| matches!(row, Row::Palette(_)))
+                .position(|row| {
+                    matches!(row, Row::Palette(palette) if palette.title != "BACKGROUNDS")
+                })
                 .expect("the grid");
             assert_eq!(at + 1, first, "{:?} came between them", rows[at + 1]);
             let Row::Card(card) = &rows[at] else {
@@ -755,15 +788,19 @@ mod tests {
         assert_eq!(
             titles,
             vec![
+                // The two surfaces the transparencies move, up beside them.
+                "BACKGROUNDS",
                 "THE WINDOW'S OWN TONES",
                 "THE CODE COLOURS",
                 "THE TOOL MARKS",
                 "THE METERS",
             ]
         );
-        // And every colour in the file is in exactly one of them, in file
-        // order: a group that dropped one is a colour nobody can find.
-        let cells: Vec<&str> = panel
+        // And every colour in the file is in exactly one of them: a group that
+        // dropped one is a colour nobody can find. Not in file order any
+        // more, since the two backgrounds are lifted out of the grid to the
+        // card beside the transparencies, so both lists are sorted.
+        let mut cells: Vec<&str> = panel
             .rows()
             .iter()
             .flat_map(|row| match row {
@@ -773,10 +810,12 @@ mod tests {
                 _ => Vec::new(),
             })
             .collect();
-        let all: Vec<&str> = colours(&Config::default())
+        let mut all: Vec<&str> = colours(&Config::default())
             .into_iter()
             .map(|(key, _)| key)
             .collect();
+        cells.sort_unstable();
+        all.sort_unstable();
         assert_eq!(cells, all);
     }
 

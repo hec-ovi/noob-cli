@@ -437,7 +437,9 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                         | Act::EditPrompt
                         | Act::SavePrompt
                         | Act::RestorePrompt
-                        | Act::LoadPrompt => continue,
+                        | Act::LoadPrompt
+                        | Act::Check
+                        | Act::Reveal => continue,
                     };
                     settings_button(
                         scene,
@@ -583,10 +585,11 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                             )
                             .fill(skin.edge_focus),
                         );
+                        let gap = column * crate::settings::places::SETTING_TRACK_GAP_COLUMNS;
                         let number = Panel::new(
-                            track.x + track.w + column,
+                            track.x + track.w + gap,
                             row.y,
-                            (value_at.w - track.w - column).max(1.0),
+                            (value_at.x + value_at.w - track.x - track.w - gap).max(1.0),
                             line,
                         );
                         say(
@@ -1030,16 +1033,25 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 // Where the text came from, in the hint role: a path under a
                 // title is the quietest thing a block carries, and drawing it at
                 // the size of the text made the two one run of words.
-                let under = match paper.bad {
-                    true => skin.bad,
-                    false => skin.dim,
+                // While the load line is open on this block, that line stands
+                // where the path does, so the press is answered where it was
+                // made: the legend at the foot of the panel was the only sign
+                // the button had done anything, which read as a dead button.
+                let loading_here = panel.loading() && panel.cursor() == *index;
+                let (under_words, under) = match (loading_here, paper.bad) {
+                    (true, _) => (
+                        format!("load: {}", panel.editing().unwrap_or_default()),
+                        skin.bright,
+                    ),
+                    (false, true) => (paper.under.clone(), skin.bad),
+                    (false, false) => (paper.under.clone(), skin.dim),
                 };
                 let small = design::hint_size(size);
                 let small_column = design::column_for(column, size, design::HINT);
                 if let Some(from) = held_text(Text::rich(
                     vec![Run::tinted(
                         clip(
-                            &paper.under,
+                            &under_words,
                             columns_in(parts.body.w, small_column).saturating_sub(1),
                         ),
                         under,
@@ -1114,15 +1126,15 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                         }
                         match act {
                             Act::EditPrompt => {
+                                // No band under the pointer: a checkbox that
+                                // fills in as the pointer crosses it reads as
+                                // a row being selected, and this one is not a
+                                // row. The mark is the state and the only
+                                // state it has.
                                 let ink = match ticked {
                                     true => skin.heading,
                                     false => skin.dim,
                                 };
-                                if frame.hot == Some(Hit::SettingsAct(*index, Act::EditPrompt))
-                                    && keep.holds(*box2)
-                                {
-                                    scene.rect(panel_fill(*box2, skin.hot));
-                                }
                                 hold_say(
                                     scene,
                                     vec![
@@ -1144,18 +1156,34 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                                     ink,
                                 );
                             }
-                            Act::SavePrompt => settings_button(
-                                scene,
-                                *box2,
-                                ButtonKind::Primary,
-                                vec![Run::tinted("save", skin.bright)],
-                                skin.bright,
-                                frame.hot == Some(Hit::SettingsAct(*index, Act::SavePrompt)),
-                                skin,
-                                size,
-                            ),
+                            // The save and the restore stand in the footer
+                            // whether or not edition is on, dim while it is
+                            // off: a button that appears when a checkbox is
+                            // ticked is a button nobody knew was there.
+                            Act::SavePrompt => {
+                                let ink = match ticked {
+                                    true => skin.bright,
+                                    false => skin.dim,
+                                };
+                                settings_button(
+                                    scene,
+                                    *box2,
+                                    ButtonKind::Primary,
+                                    vec![Run::tinted("save", ink)],
+                                    ink,
+                                    ticked
+                                        && frame.hot
+                                            == Some(Hit::SettingsAct(*index, Act::SavePrompt)),
+                                    skin,
+                                    size,
+                                );
+                            }
                             Act::RestorePrompt => {
                                 let armed = panel.arming() == Some(*index);
+                                let ink = match ticked {
+                                    true => skin.bad,
+                                    false => skin.dim,
+                                };
                                 settings_button(
                                     scene,
                                     *box2,
@@ -1165,11 +1193,12 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                                             true => "sure?",
                                             false => "restore",
                                         },
-                                        skin.bad,
+                                        ink,
                                     )],
-                                    skin.bad,
-                                    frame.hot
-                                        == Some(Hit::SettingsAct(*index, Act::RestorePrompt)),
+                                    ink,
+                                    ticked
+                                        && frame.hot
+                                            == Some(Hit::SettingsAct(*index, Act::RestorePrompt)),
                                     skin,
                                     size,
                                 );

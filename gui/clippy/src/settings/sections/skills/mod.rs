@@ -178,27 +178,11 @@ impl SkillsSection {
     /// The card at the top is the one thing this section could not do: it could
     /// list, turn off and delete, and installing one meant a terminal.
     pub fn rows(&self, agent: &Agent) -> Vec<Row> {
-        // The installed list first, the install box under it: what is here is
-        // the section's subject, and adding one is the act at the bottom of it.
+        // The form first, the list under it. It was the other way round, and
+        // a card at the foot of a list of skills read as a note about the
+        // last one rather than as the way to add another: "must be extremely
+        // clear a install a skill, IS A FORM. AND UNDER A LIST".
         let mut rows = Vec::new();
-        for skill in &agent.skills {
-            rows.push(Row::Entry(Entry {
-                name: skill.name.clone(),
-                about: skill.about.clone(),
-                under: match &skill.repo {
-                    Some(repo) => repo.clone(),
-                    // Nothing on disk records the repository of an installed
-                    // skill, so where it is is the truthful second line.
-                    None => skill.path.display().to_string(),
-                },
-                on: skill.on,
-                what: Which::Skill {
-                    dir: skill.dir.clone(),
-                },
-                removable: true,
-                doc: skill.doc.clone(),
-            }));
-        }
         let suggesting = self.source == WEBSEARCH_SUGGESTION
             && agent.skills.iter().all(|skill| skill.name != "web-search");
         rows.push(Row::Card(Card {
@@ -247,6 +231,35 @@ impl SkillsSection {
         }
         if let Some(paper) = self.install_paper() {
             rows.push(Row::Paper(paper));
+        }
+        // Then what is installed, under a line that says that is what it is:
+        // a list with no heading over it, under a card, is a list nothing
+        // introduces.
+        rows.push(Row::Note {
+            text: match agent.skills.len() {
+                0 => String::from("INSTALLED: none yet"),
+                1 => String::from("INSTALLED: one skill"),
+                many => format!("INSTALLED: {many} skills"),
+            },
+            bad: false,
+        });
+        for skill in &agent.skills {
+            rows.push(Row::Entry(Entry {
+                name: skill.name.clone(),
+                about: skill.about.clone(),
+                under: match &skill.repo {
+                    Some(repo) => repo.clone(),
+                    // Nothing on disk records the repository of an installed
+                    // skill, so where it is is the truthful second line.
+                    None => skill.path.display().to_string(),
+                },
+                on: skill.on,
+                what: Which::Skill {
+                    dir: skill.dir.clone(),
+                },
+                removable: true,
+                doc: skill.doc.clone(),
+            }));
         }
         rows
     }
@@ -377,13 +390,25 @@ mod tests {
             "the panel does not say where they live"
         );
 
-        // The section opens on the list itself: what is installed is the
-        // section's subject, and the install card stands under it.
+        // The section opens on the form: installing one is what somebody
+        // comes here to do, and the list of what is already installed reads
+        // under it.
         assert!(
-            matches!(panel.at_cursor(), Some(Row::Entry(entry)) if entry.name == "coding"),
-            "the section does not open on the first skill"
+            matches!(panel.at_cursor(), Some(Row::Field { key, .. }) if *key == SKILL_SOURCE),
+            "the section does not open on the install form: {:?}",
+            panel.at_cursor()
         );
-        // The column beside the list is the skill under the cursor.
+        // The column beside the list is the skill under the cursor, and the
+        // first of them while the cursor is still on the form: a column that
+        // went blank until somebody walked into the list would be a column
+        // nobody knew was a document.
+        assert_eq!(panel.showing().expect("something to show").name, "coding");
+        let first = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, Row::Entry(_)))
+            .expect("the skills are listed");
+        assert!(panel.point_at(first, crate::settings::Side::Left));
         let showing = panel.showing().expect("something to show");
         assert_eq!(showing.name, "coding");
         assert_eq!(
@@ -415,7 +440,7 @@ mod tests {
             .iter()
             .position(|row| matches!(row, Row::Card(card) if card.title == "INSTALL A SKILL"))
             .expect("the install card is on the section");
-        assert!(at > 0, "the card does not stand under the list");
+        assert_eq!(at, 0, "the form does not stand over the list");
         let Some(Row::Card(card)) = panel.row(at) else {
             panic!("no card at {at}");
         };
@@ -552,9 +577,13 @@ mod tests {
         let read = || Agent::read(Some(&dir), None, crate::sessions::Listing::default());
         let mut panel = Settings::open(&Config::default(), None, read());
         go_to(&mut panel, SKILLS);
-        // The section opens on the skill itself; the install card is under
-        // the list now.
-        let at = panel.cursor();
+        // The section opens on the form, and the list is under it.
+        let at = panel
+            .rows()
+            .iter()
+            .position(|row| matches!(row, Row::Entry(_)))
+            .expect("the skill is listed");
+        assert!(panel.point_at(at, crate::settings::Side::Left));
         assert!(matches!(panel.row(at), Some(Row::Entry(entry)) if entry.on));
 
         let deed = panel.toggle(at).expect("an entry toggles");

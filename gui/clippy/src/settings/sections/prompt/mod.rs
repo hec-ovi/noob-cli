@@ -315,6 +315,20 @@ impl PromptSection {
         ]
     }
 
+    /// The warning a block carries after wherever its text came from.
+    ///
+    /// TOOLS.md is the description the model works its tools from, so a word
+    /// changed in it costs a tool rather than a paragraph, and that is worth
+    /// saying on the block itself rather than in a document nobody opened.
+    fn caution(file: PromptFile) -> &'static str {
+        match file {
+            PromptFile::Tools => {
+                " \u{2022} this is what the model knows its tools from: an edit here can cost it one"
+            }
+            PromptFile::Agents => "",
+        }
+    }
+
     /// One file's block: its buffer while edition is enabled on it, the file's
     /// own text while there is one, and the shipped default, said honestly,
     /// while there is not.
@@ -328,8 +342,9 @@ impl PromptSection {
         {
             return Paper {
                 title,
-                under: String::from(
-                    "being edited \u{2022} nothing lands in the file until ctrl+s",
+                under: format!(
+                    "being edited \u{2022} nothing lands in the file until ctrl+s{}",
+                    Self::caution(file)
                 ),
                 body: editor.lines.clone(),
                 first: editor.first,
@@ -355,8 +370,9 @@ impl PromptSection {
             return Paper {
                 title,
                 under: format!(
-                    "{}: not written yet; this is the built-in text, enable edition and save to own it",
-                    path.display()
+                    "{}: not written yet; this is the built-in text, enable edition and save to own it{}",
+                    path.display(),
+                    Self::caution(file)
                 ),
                 body: file.default_text().lines().map(str::to_string).collect(),
                 first: 0,
@@ -374,7 +390,7 @@ impl PromptSection {
         }
         Paper {
             title,
-            under: path.display().to_string(),
+            under: format!("{}{}", path.display(), Self::caution(file)),
             body,
             first: 0,
             does: acts,
@@ -694,7 +710,15 @@ mod tests {
         assert!(!panel.begin_load(1), "TOOLS.md offered a load");
         assert!(panel.begin_load(0));
         assert!(panel.loading());
-        assert!(panel.type_text(&mine.display().to_string()));
+        // It opens on the folder AGENTS.md itself is in, so what is typed is
+        // the name rather than the whole path. A line that opened empty was a
+        // button that looked like it had done nothing.
+        assert_eq!(
+            panel.editing(),
+            Some(format!("{}/", dir.display()).as_str()),
+            "the load line did not open on the file's own folder"
+        );
+        assert!(panel.type_text("mine.md"));
         assert!(panel.says().contains("load:"), "{}", panel.says());
         assert_eq!(panel.load_path().as_deref(), Some(mine.as_path()));
 

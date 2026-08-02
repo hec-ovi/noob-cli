@@ -184,6 +184,8 @@ pub(crate) fn settings_act_for(doing: crate::settings::Doing) -> Act {
         crate::settings::Doing::Install => Act::Install,
         crate::settings::Doing::AddServer => Act::AddServer,
         crate::settings::Doing::Restore => Act::Restore,
+        crate::settings::Doing::Check => Act::Check,
+        crate::settings::Doing::Reveal | crate::settings::Doing::Hide => Act::Reveal,
     }
 }
 
@@ -194,18 +196,19 @@ const SETTING_EDIT_COLUMNS: usize = 18;
 /// The footer of an editable document block: the enable-edition checkbox at
 /// the left, and the actions at the right, where every card action sits.
 ///
-/// While edition is off the only action is the load, on the block that offers
-/// one: there is nothing to save and nothing armed. On, the save and the
-/// restore appear beside it. Asked by the placement and by the drawing, so a
-/// button is drawn exactly where the press on it is tested for; buttons that
-/// do not fit the footer are dropped as a group, since a button drawn over
-/// the checkbox is a press nobody can aim.
+/// Every action the block has, always, whether or not edition is on: they are
+/// drawn dim and do nothing while it is off. Buttons that come and go under
+/// the pointer are a footer whose shape depends on a checkbox two clicks ago,
+/// and the two that appeared were the two anybody was looking for. Asked by
+/// the placement and by the drawing, so a button is drawn exactly where the
+/// press on it is tested for; buttons that do not fit the footer are dropped
+/// as a group, since a button drawn over the checkbox is a press nobody can
+/// aim.
 pub(crate) fn settings_paper_acts(
     footer: Panel,
     line: f32,
     column: f32,
     load: bool,
-    on: bool,
 ) -> Vec<(Act, Panel)> {
     if footer.w < 1.0 || footer.h < 1.0 {
         return Vec::new();
@@ -219,13 +222,8 @@ pub(crate) fn settings_paper_acts(
     if load {
         acts.push(Act::LoadPrompt);
     }
-    if on {
-        acts.push(Act::RestorePrompt);
-        acts.push(Act::SavePrompt);
-    }
-    if acts.is_empty() {
-        return out;
-    }
+    acts.push(Act::RestorePrompt);
+    acts.push(Act::SavePrompt);
     let wide = SETTING_DOING_COLUMNS as f32 * column;
     let step = design::step(line);
     let whole = wide * acts.len() as f32 + step * acts.len().saturating_sub(1) as f32;
@@ -1010,6 +1008,15 @@ pub(crate) fn settings_label_w(list_w: f32, column: f32) -> f32 {
 /// whose number cannot be read at the end anybody would drag it to.
 pub(crate) const SETTING_TRACK_VALUE_COLUMNS: usize = 8;
 
+/// The air between the end of a track and the number that reads it, in columns
+/// of pane text.
+///
+/// Two, not one. At one the digits sat against the end of the track and read as
+/// part of it, which is the whole of "after the slider give the text value a
+/// margin": a number touching the thing it measures is a number you have to
+/// stop and separate by eye.
+pub(crate) const SETTING_TRACK_GAP_COLUMNS: f32 = 2.0;
+
 /// What the two controls on an entry row take, in columns of pane text: the
 /// toggle that turns it on and off, and the uninstall beside it.
 ///
@@ -1347,12 +1354,13 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
         match entry {
             SettingRow::Setting { kind, .. } if kind.fraction(0.0).is_some() => {
                 let number = (SETTING_TRACK_VALUE_COLUMNS as f32 * column).min(value_at.w * 0.5);
-                // A column of air on either side: a track that starts on the
-                // border reads as part of the frame.
+                // A column of air before it, and the number's own margin after
+                // it: a track that starts on the border reads as part of the
+                // frame, and one its number sits against reads as one thing.
                 let track = Panel::new(
                     value_at.x + column,
                     value_at.y,
-                    (value_at.w - number - column * 2.0).max(1.0),
+                    (value_at.w - number - column * (1.0 + SETTING_TRACK_GAP_COLUMNS)).max(1.0),
                     value_at.h,
                 );
                 if clip.holds(track) {
@@ -1504,13 +1512,9 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
                 let inside = parts.footer.y >= card.y
                     && parts.footer.y + parts.footer.h <= card.y + card.h + 0.01;
                 if inside {
-                    for (act, at) in settings_paper_acts(
-                        parts.footer,
-                        line,
-                        column,
-                        acts_of.load,
-                        panel.edition_on(index),
-                    ) {
+                    for (act, at) in
+                        settings_paper_acts(parts.footer, line, column, acts_of.load)
+                    {
                         if clip.holds(at) {
                             acts.push((index, act, at));
                         }
@@ -1592,7 +1596,10 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
                                 Panel::new(
                                     input.x + column,
                                     input.y,
-                                    (input.w - number - column * 2.0).max(1.0),
+                                    (input.w
+                                        - number
+                                        - column * (1.0 + SETTING_TRACK_GAP_COLUMNS))
+                                        .max(1.0),
                                     input.h,
                                 ),
                             ));

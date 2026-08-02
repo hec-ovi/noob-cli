@@ -1,6 +1,6 @@
 # settings/sections/agent
 
-contractVersion: 2.0.0
+contractVersion: 3.0.0
 
 ## Purpose
 
@@ -11,41 +11,59 @@ section's documents ([`sections/prompt`](../prompt/CONTRACT.md)).
 ## Public surface
 
 ```rust
-pub fn rows(agent: &Agent) -> Vec<Row>
+pub fn rows(agent: &Agent, health: Option<&str>, show_key: bool) -> Vec<Row>
                                  // the section's rows, built fresh from the
-                                 // snapshot handed in
-pub(crate) const AGENT_SETTINGS: [(&str, Kind); 6]
-                                 // the six controls of the agent's file:
-                                 // NOOB_CTX, NOOB_MAX_ROUNDS,
+                                 // snapshot handed in. `health` is what the
+                                 // last connection check answered and
+                                 // `show_key` whether the credential is
+                                 // uncovered; both are the frame's state
+pub(crate) const AGENT_SETTINGS: [(&str, Kind); 8]
+                                 // every control of the agent's file:
+                                 // NOOB_API_STYLE and NOOB_REASONING
+                                 // (choices), NOOB_CTX, NOOB_MAX_ROUNDS,
                                  // NOOB_TASK_CONCURRENCY,
-                                 // NOOB_TASK_MAX_TURNS (tracks),
-                                 // NOOB_TASK_TOOLS (choice),
-                                 // NOOB_TASK_WALL_CLOCK_S (track); bounds
-                                 // and detents read off the CLI box; the
-                                 // frame's slider test walks them
+                                 // NOOB_TASK_MAX_TURNS,
+                                 // NOOB_TASK_WALL_CLOCK_S (tracks),
+                                 // NOOB_TASK_TOOLS (choice); bounds and
+                                 // detents read off the CLI box
 ```
+
+## The cards
+
+CONNECTION (endpoint, api style, what the last check answered; its button
+writes what is typed and asks), CREDENTIAL (the key as dots, its button
+shows it), MODEL (model, reasoning), LIMITS, MULTI-AGENT, MULTI-AGENT
+BUDGETS, THE SETTINGS FILE, and THE REST OF THE FILE when the file carries
+keys this window has no control for.
 
 ## Invariants
 
-1. Pure: rows are built from the `Agent` snapshot and nothing else; no I/O
-   here.
-2. A credential is reported as set and never shown; a missing key reads as
-   the frame's UNSET.
-3. Every key the file carries is on a card: known keys by their plain-words
-   field, the rest on THE REST OF THE FILE. The fleet's four live on the
-   MULTI-AGENT and MULTI-AGENT BUDGETS cards; a round or clock budget of 0
-   reads as the CLI's "no limit" and is the default.
-4. Every number with CLI bounds is a track; unset, it shows the CLI's
-   default and the card says so.
+1. Pure: rows are built from the `Agent` snapshot, the health line and the
+   reveal flag, and nothing else; no I/O here.
+2. A field's label is the plain words with the key after them, `rounds per
+   input (NOOB_MAX_ROUNDS)`. The line under it carries only what neither
+   says: that nobody has set it, and what its values mean.
+3. A credential is dots until the card's own button is pressed, and the
+   value again as soon as it is pressed a second time. Nothing about that
+   is remembered: a panel opens covered.
+4. Every key the file carries is on a card: known keys by their own field,
+   the rest on THE REST OF THE FILE.
+5. Everything the CLI accepts a value for is set from here. A number with
+   CLI bounds is a track showing the CLI's default until it is written; a
+   choice with no default reads UNSET until it is.
+6. The connection card reports what it was told and never a verdict of its
+   own: before any check it says so.
 
 ## Dependencies
 
-The settings box's shared vocabulary (Row, Card, CardField, Kind, File,
-SECRET, UNSET); the agent-files box (`crate::agent`) for the snapshot, the
-key names, the bounds and the detents.
+The settings box's shared vocabulary (Row, Card, CardField, Doing, Kind,
+File, SECRET, UNSET); the agent-files box (`crate::agent`) for the
+snapshot, the key names, the bounds and the detents. The health line comes
+from the link box's `noob doctor` reader, through the frame.
 
 ## Tests
 
-Inline: the section's cards, the walkable keyboard, the tracks and their
-defaults, the magnetic checkpoints, and every key kept on a card (6 tests),
-driven through the frame's `Settings`.
+Inline: the section's cards, the credential's two states, the health line,
+the walkable keyboard, the tracks and their defaults, the magnetic
+checkpoints, and every key kept on a card (6 tests), driven through the
+frame's `Settings`.
