@@ -26,7 +26,7 @@ tags rather than here; this file starts where it was added.
 - The endpoint has a way back: one button under the connection card writes
   `http://localhost:8080/v1`, llama.cpp's own port and the first address the
   CLI probes when nothing is set.
-- A slider's number stands clear of the end of its track.
+- A slider's number stands four columns clear of the end of its track.
 - A prompt document keeps its load, restore and save in the footer whether
   or not edition is on, dim while it is off; the enable-edition checkbox no
   longer fills in under the pointer; the load opens on the folder the
@@ -34,6 +34,12 @@ tags rather than here; this file starts where it was added.
   path is; and TOOLS.md says on the block what editing it costs.
 - The prompt's document blocks are text you can drag over and copy, the way
   every other body of text in the window is.
+- Pressing load opens a real input on the block: the box, the outline and
+  the caret every other typed value on the panel has, on the folder the
+  document lives in.
+- TOOLS.md wears an asterisk in its title and one clause under it.
+- The line beside the rail stops at the last section name instead of running
+  the height of the window.
 - Installing a skill is the form at the top of its section, with the
   installed list under it.
 - The colour of the base application and the colour of the widget windows

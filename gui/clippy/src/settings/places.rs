@@ -1012,11 +1012,11 @@ pub(crate) const SETTING_TRACK_VALUE_COLUMNS: usize = 8;
 /// The air between the end of a track and the number that reads it, in columns
 /// of pane text.
 ///
-/// Two, not one. At one the digits sat against the end of the track and read as
-/// part of it, which is the whole of "after the slider give the text value a
-/// margin": a number touching the thing it measures is a number you have to
-/// stop and separate by eye.
-pub(crate) const SETTING_TRACK_GAP_COLUMNS: f32 = 2.0;
+/// Four. Two was still read as stuck to it: at a pane font that is fifteen
+/// pixels, and the track's grip sits at the very end of the track at the top
+/// of its range, which puts the mark and the digits a hair apart exactly where
+/// somebody drags to. Four columns is a gap nobody has to look twice at.
+pub(crate) const SETTING_TRACK_GAP_COLUMNS: f32 = 4.0;
 
 /// What the two controls on an entry row take, in columns of pane text: the
 /// toggle that turns it on and off, and the uninstall beside it.

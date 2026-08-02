@@ -137,10 +137,22 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
     // as two columns rather than as a list with a gap in it. Anchored off the
     // rail's edge, not the list's: the list stands its own padding in from
     // this line.
+    // Only as far down as the names it separates. It ran the whole height of
+    // the panel, which left a hairline standing in empty space under the last
+    // section: "the bar border EXCEED to down of the total height of the
+    // text". The rail is what it divides, so the rail is how long it is.
     if list.w >= 1.0 && list.h >= 1.0 {
-        scene.rect(
-            Panel::new(list.x - PAD - (GAP * 0.5).floor(), list.y, 1.0, list.h).fill(skin.edge),
-        );
+        let bottom = layout
+            .settings_rail
+            .iter()
+            .map(|(_, at)| at.y + at.h)
+            .fold(list.y, f32::max);
+        let tall = (bottom - list.y).clamp(0.0, list.h);
+        if tall >= 1.0 {
+            scene.rect(
+                Panel::new(list.x - PAD - (GAP * 0.5).floor(), list.y, 1.0, tall).fill(skin.edge),
+            );
+        }
     }
 
     // The width a card's body has, in columns, which is what the model counted
@@ -1048,39 +1060,66 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                 // Where the text came from, in the hint role: a path under a
                 // title is the quietest thing a block carries, and drawing it at
                 // the size of the text made the two one run of words.
-                // While the load line is open on this block, that line stands
-                // where the path does, so the press is answered where it was
-                // made: the legend at the foot of the panel was the only sign
-                // the button had done anything, which read as a dead button.
+                // While the load line is open on this block it stands where the
+                // path does, drawn as the box every other typed value on this
+                // panel is drawn as: fill, outline, caret. It was a line of
+                // hint-sized prose, which is why pressing load read as a
+                // button that did nothing.
                 let loading_here = panel.loading() && panel.cursor() == *index;
-                let (under_words, under) = match (loading_here, paper.bad) {
-                    (true, _) => (
-                        format!("load: {}", panel.editing().unwrap_or_default()),
-                        skin.bright,
-                    ),
-                    (false, true) => (paper.under.clone(), skin.bad),
-                    (false, false) => (paper.under.clone(), skin.dim),
-                };
                 let small = design::hint_size(size);
                 let small_column = design::column_for(column, size, design::HINT);
-                if let Some(from) = held_text(Text::rich(
-                    vec![Run::tinted(
-                        clip(
-                            &under_words,
-                            columns_in(parts.body.w, small_column).saturating_sub(1),
-                        ),
+                let under_at = Panel::new(
+                    parts.body.x,
+                    parts.body.y,
+                    parts.body.w,
+                    Text::line_for(small).min(line),
+                );
+                if loading_here {
+                    let field = Panel::new(parts.body.x, parts.body.y, parts.body.w, line);
+                    scene.rect(panel_fill(field, skin.input));
+                    scene.rect(panel_edge(field, skin.edge_focus));
+                    let inside = Panel::new(
+                        field.x + INPUT_PAD,
+                        field.y,
+                        (field.w - INPUT_PAD * 2.0).max(1.0),
+                        field.h,
+                    );
+                    let room = columns_in(inside.w, column).saturating_sub(1);
+                    let typed = tail(panel.editing().unwrap_or_default(), room);
+                    say(
+                        scene,
+                        vec![Run::tinted(format!("load {typed}"), skin.bright)],
+                        inside,
+                        skin.bright,
+                    );
+                    scene.rect(
+                        Panel::new(
+                            inside.x + (typed.chars().count() + 5) as f32 * column,
+                            inside.y,
+                            2.0,
+                            line,
+                        )
+                        .fill(skin.caret),
+                    );
+                } else {
+                    let under = match paper.bad {
+                        true => skin.bad,
+                        false => skin.dim,
+                    };
+                    if let Some(from) = held_text(Text::rich(
+                        vec![Run::tinted(
+                            clip(
+                                &paper.under,
+                                columns_in(parts.body.w, small_column).saturating_sub(1),
+                            ),
+                            under,
+                        )],
+                        under_at,
+                        small,
                         under,
-                    )],
-                    Panel::new(
-                        parts.body.x,
-                        parts.body.y,
-                        parts.body.w,
-                        Text::line_for(small).min(line),
-                    ),
-                    small,
-                    under,
-                )) {
-                    scene.text(from);
+                    )) {
+                        scene.text(from);
+                    }
                 }
                 // Where the fences stand after everything scrolled off, so a
                 // block that starts inside a code block is drawn as code.

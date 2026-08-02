@@ -315,16 +315,24 @@ impl PromptSection {
         ]
     }
 
-    /// The warning a block carries after wherever its text came from.
+    /// The mark a block's title carries, and the short line that says what it
+    /// means.
     ///
     /// TOOLS.md is the description the model works its tools from, so a word
-    /// changed in it costs a tool rather than a paragraph, and that is worth
-    /// saying on the block itself rather than in a document nobody opened.
+    /// changed in it costs a tool rather than a paragraph. The title wears the
+    /// asterisk and the line under it stays to one clause: a paragraph of
+    /// warning on a block somebody reads every day is a paragraph they stop
+    /// seeing.
+    fn marked(file: PromptFile) -> String {
+        match file {
+            PromptFile::Tools => format!("{} *", file.name()),
+            PromptFile::Agents => String::from(file.name()),
+        }
+    }
+
     fn caution(file: PromptFile) -> &'static str {
         match file {
-            PromptFile::Tools => {
-                " \u{2022} this is what the model knows its tools from: an edit here can cost it one"
-            }
+            PromptFile::Tools => " \u{2022} * an edit here can cost the agent a tool",
             PromptFile::Agents => "",
         }
     }
@@ -333,7 +341,7 @@ impl PromptSection {
     /// own text while there is one, and the shipped default, said honestly,
     /// while there is not.
     fn file_paper(&self, file: PromptFile, agent: &Agent) -> Paper {
-        let title = String::from(file.name());
+        let title = Self::marked(file);
         let acts = Some(PaperActs {
             load: file == PromptFile::Agents,
         });
@@ -521,7 +529,9 @@ say");
                 _ => None,
             })
             .collect();
-        assert_eq!(titles, ["AGENTS.md", "TOOLS.md", "THE ENVIRONMENT BLOCK"]);
+        // The tools block's title wears the asterisk its warning line refers
+        // to: the file the model reads its tools out of.
+        assert_eq!(titles, ["AGENTS.md", "TOOLS.md *", "THE ENVIRONMENT BLOCK"]);
         let text = said(&panel);
         assert!(text.contains(&dir.join(agent::AGENTS_MD).display().to_string()), "{text}");
         assert!(text.contains(&dir.join(agent::TOOLS_MD).display().to_string()), "{text}");
