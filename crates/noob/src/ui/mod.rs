@@ -21,6 +21,7 @@ use noob_provider::types::{Item, Usage};
 
 pub(crate) mod commands;
 mod dock;
+pub(crate) mod regions;
 mod markdown;
 pub(crate) mod prompt;
 mod scanner;
@@ -1147,7 +1148,7 @@ impl Ui {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum RegionTone {
+pub(crate) enum RegionTone {
     Activity,
     Dim,
 }
