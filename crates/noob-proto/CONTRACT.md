@@ -32,7 +32,8 @@ pub trait Body: Sized {                // implemented by Event and Command
     fn from_value(value: &Value) -> Self;   // never fails; invariants 4 and 5
 }
 
-pub fn encode<T: Body>(body: &T) -> String;             // one line, newline included
+pub fn encode<T: Body>(body: &T) -> String;             // one line, newline included, stamped VERSION
+pub fn encode_at<T: Body>(v: u16, body: &T) -> String;  // stamped at the reader's version, clamped to VERSION
 pub fn decode<T: Body>(line: &str) -> Option<Frame<T>>; // None only per the error set
 
 pub use serde_json::Value;   // Event::ToolStart carries one; consumers stay self-contained
@@ -117,7 +118,9 @@ else degrades instead of failing, per invariants 4 and 5.
    `decode` takes one line and trims surrounding whitespace.
 2. `v` then `t` lead every line, in that order.
 3. The writer stamps `VERSION`; a reader accepts `v` at or below its own and
-   refuses anything above rather than half-understanding it. Additive changes
+   refuses anything above rather than half-understanding it. That refusal is
+   silent, so a writer that has learned the other side's version writes at it
+   (`encode_at`, clamped to `VERSION`) and its frames arrive. Additive changes
    bump `VERSION`; a breaking change ships a new `t` beside the old, callers
    migrate, the old one retires. A frame is never redefined in place.
 4. An unknown `t` decodes to the `Unknown` variant, never `None`: a feature

@@ -194,17 +194,6 @@ impl Line {
         self
     }
 
-    /// The line split into that column and the rest of it, which is what the
-    /// drawing needs to give the two of them different tones.
-    pub fn split_gutter(&self) -> (&str, &str) {
-        let at = self
-            .text
-            .char_indices()
-            .nth(self.gutter)
-            .map_or(self.text.len(), |(byte, _)| byte);
-        self.text.split_at(at)
-    }
-
     /// The text this line is drawn as, which is the text everything else about
     /// it is counted in.
     pub fn shown(&self) -> &str {
@@ -298,11 +287,6 @@ impl Pane {
     pub fn clipped(mut self) -> Pane {
         self.one_row = true;
         self
-    }
-
-    /// Whether this pane's painter clips rather than wraps.
-    pub fn one_row(&self) -> bool {
-        self.one_row
     }
 
     /// Park the window on a top-anchored first visual row: how a surface
@@ -2074,6 +2058,18 @@ mod tests {
             .collect()
     }
 
+    /// A line cut at its gutter: the subordinate column, then the rest. The
+    /// activity painter tones the two halves differently, and this is the same
+    /// cut in the terms the assertions want to read.
+    fn split(line: &Line) -> (&str, &str) {
+        let at = line
+            .text
+            .char_indices()
+            .nth(line.gutter)
+            .map_or(line.text.len(), |(byte, _)| byte);
+        line.text.split_at(at)
+    }
+
     /// A transcript's thumb drags between its ends: 0.0 is the oldest row
     /// still held, 1.0 the live end it rests at.
     #[test]
@@ -2626,8 +2622,8 @@ mod tests {
         // And the clock column is the row's dim part, not the call's color.
         let line = state.activity.line(0).expect("held");
         assert_eq!(line.tone, Tone::Call(Kind::Bash));
-        assert_eq!(line.split_gutter().0, "14:30:07  ");
-        assert!(line.split_gutter().1.starts_with(" bash"), "{line:?}");
+        assert_eq!(split(line).0, "14:30:07  ");
+        assert!(split(line).1.starts_with(" bash"), "{line:?}");
     }
 
     /// Two calls a minute apart are two different readings on their own rows.
@@ -2679,7 +2675,7 @@ mod tests {
         state.noted(Some(70.0), "could not reach the clipboard", Tone::Bad);
         let line = state.activity.line(0).expect("held");
         assert_eq!(
-            line.split_gutter(),
+            split(line),
             ("00:02:10  ", "could not reach the clipboard")
         );
 
@@ -2688,7 +2684,7 @@ mod tests {
         state.activity.say("older than the clock", Tone::Dim);
         let line = state.activity.line(1).expect("held");
         assert_eq!(line.gutter, 0);
-        assert_eq!(line.split_gutter(), ("", "older than the clock"));
+        assert_eq!(split(line), ("", "older than the clock"));
     }
 
     /// The parallel mark stands in the blank between the tag and the subject,

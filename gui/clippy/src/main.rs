@@ -114,6 +114,36 @@ const DRAG_SLOP: f64 = 5.0;
 /// dock gives its double-ESC, so the gesture is one habit across both.
 const ESC_CANCEL_WINDOW: Duration = Duration::from_secs(5);
 
+/// How long a sent prompt has to produce a turn before the window says it did
+/// not.
+///
+/// `turn.start` leaves the agent the moment it takes the prompt, before the
+/// endpoint is called at all, so this is a pipe's round trip and not a model's:
+/// ten seconds is a long way past generous. What it protects against is the
+/// prompt that never arrived, which otherwise leaves the orb turning over a
+/// conversation that has stopped, with nothing anywhere saying so.
+const ANSWER_WAIT: Duration = Duration::from_secs(10);
+
+/// The line for a prompt that went out and started nothing.
+///
+/// Pure, and its own function, because the useful half is which of the two
+/// things happened: an agent from another release that could not read the
+/// command, or one that read it and never answered.
+fn unanswered(agent: Option<u16>, window: u16) -> String {
+    match agent {
+        Some(v) if v != window => format!(
+            "nothing came back in {}s. the agent speaks protocol {v} and this window {window}: \
+             install noob and no0b from the same release.",
+            ANSWER_WAIT.as_secs()
+        ),
+        _ => format!(
+            "nothing came back in {}s. the agent has the prompt and started no turn; \
+             run `noob doctor` to check its endpoint.",
+            ANSWER_WAIT.as_secs()
+        ),
+    }
+}
+
 /// The window will not grow past this. Unbounded is not useful: a conversation
 /// at four thousand pixels wide is one long line per paragraph, and the panes
 /// stop being panes.
@@ -422,7 +452,7 @@ impl Morph {
 /// leave whichever ran last in charge, and the other one either wakes late or
 /// never wakes at all, which is a monitor that stops sampling as soon as
 /// something animates.
-fn soonest(deadlines: [Option<Instant>; 3]) -> Option<Instant> {
+fn soonest(deadlines: [Option<Instant>; 4]) -> Option<Instant> {
     deadlines.into_iter().flatten().min()
 }
 
@@ -995,6 +1025,9 @@ struct App {
     /// window lapsing, disarms. One tap was too easy to spend by accident: a
     /// key meant for a menu or a selection that had already gone cost a turn.
     esc_armed: Option<Instant>,
+    /// When the prompt that was just sent stops being given the benefit of the
+    /// doubt. Cleared by the turn it starts. See [`ANSWER_WAIT`].
+    answer_by: Option<Instant>,
 
     /// The folder named on the command line, until it has been connected to.
     /// Taken in `resumed`, because a folder given up front skips the picker.
@@ -1169,6 +1202,7 @@ impl App {
             link: None,
             trouble: None,
             esc_armed: None,
+            answer_by: None,
             popup_scroll: 0,
             workspace,
             session: None,
@@ -2792,15 +2826,39 @@ impl App {
         let Some(link) = self.link.as_mut() else {
             return;
         };
+        let incoming = link.drain();
+        // Read here, while the link is still in hand: the version the agent
+        // announced is what a prompt that starts nothing is explained by.
+        let speaks = link.speaks();
         let mut turn_ended = false;
-        for item in link.drain() {
+        for item in incoming {
             match item {
                 Incoming::Frame(event) => {
                     let at = self.epoch.elapsed().as_secs_f64();
                     turn_ended |= matches!(event, noob_proto::Event::TurnEnd { .. });
+                    // The prompt arrived: the turn it asked for is running.
+                    if matches!(event, noob_proto::Event::TurnStart { .. }) {
+                        self.answer_by = None;
+                    }
                     // The one frame that says which session is running and where
                     // it is running, which is the note the session list needs.
                     if let noob_proto::Event::SessionStart { id, workspace, .. } = &event {
+                        // A window and an agent from two different releases
+                        // still talk, because commands go out at the agent's
+                        // version. It is worth one line all the same: half an
+                        // install being older is the sort of thing that
+                        // explains the next odd hour.
+                        if speaks.is_some_and(|v| v != noob_proto::VERSION) {
+                            let v = speaks.unwrap_or_default();
+                            self.state.output.say(
+                                format!(
+                                    "the agent speaks protocol {v}, this window {}: \
+                                     noob and no0b are from different releases.",
+                                    noob_proto::VERSION
+                                ),
+                                Tone::Dim,
+                            );
+                        }
                         self.remember_session(id, workspace);
                         // Kept for the rest of the session, so how full its
                         // context window got can be written on the same note
@@ -2817,6 +2875,9 @@ impl App {
                 Incoming::Ended(reason) => {
                     self.state.phase = state::Phase::Gone;
                     self.trouble = Some(reason);
+                    // A child that is gone is its own answer; the wait would
+                    // otherwise land on top of it ten seconds later.
+                    self.answer_by = None;
                     self.dirty = true;
                 }
             }
@@ -2894,7 +2955,13 @@ impl App {
         } else {
             self.state.submitted(&text);
             match self.link.as_mut() {
-                Some(link) if link.is_alive() => link.send(Cmd::PromptSubmit { text }),
+                Some(link) if link.is_alive() => {
+                    link.send(Cmd::PromptSubmit { text });
+                    // The turn this asks for has to start, or the window says
+                    // it did not: the phase is Thinking from here, and only a
+                    // frame moves it off.
+                    self.answer_by = Some(Instant::now() + ANSWER_WAIT);
+                }
                 _ => self.state.output.say("no agent is running", Tone::Bad),
             }
         }
@@ -4815,6 +4882,22 @@ impl ApplicationHandler<Wake> for App {
             self.esc_armed = None;
             self.dirty = true;
         }
+        // A prompt that went out and started nothing. Said once, and the phase
+        // goes back to where another prompt can be typed: an orb turning over a
+        // conversation that has stopped is the window lying about what is
+        // happening.
+        if self.answer_by.is_some_and(|by| now >= by) {
+            self.answer_by = None;
+            let speaks = self.link.as_ref().and_then(link::Link::speaks);
+            self.state
+                .output
+                .say(unanswered(speaks, noob_proto::VERSION), Tone::Bad);
+            if self.state.phase == state::Phase::Thinking {
+                self.state.phase = state::Phase::Ready;
+                self.state.status = String::from("ready");
+            }
+            self.dirty = true;
+        }
         self.redraw();
         // Every clock, never one of them: the earliest deadline wins and the
         // others are still there when it comes round.
@@ -4822,6 +4905,7 @@ impl ApplicationHandler<Wake> for App {
             self.next_sample,
             self.next_orb,
             self.esc_armed,
+            self.answer_by,
         ]) {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
@@ -5287,11 +5371,35 @@ mod tests {
         let now = Instant::now();
         let (sample, orb) = (now + SAMPLE_EVERY, now + ORB_EVERY);
         assert!(ORB_EVERY < SAMPLE_EVERY, "the orb is the faster clock");
-        assert_eq!(soonest([Some(sample), Some(orb), None]), Some(orb));
-        assert_eq!(soonest([Some(orb), Some(sample), None]), Some(orb));
-        assert_eq!(soonest([None, Some(sample), None]), Some(sample));
-        assert_eq!(soonest([Some(orb), None, None]), Some(orb));
-        assert_eq!(soonest([None, None, None]), None, "an idle window blocks");
+        assert_eq!(soonest([Some(sample), Some(orb), None, None]), Some(orb));
+        assert_eq!(soonest([Some(orb), Some(sample), None, None]), Some(orb));
+        assert_eq!(soonest([None, Some(sample), None, None]), Some(sample));
+        assert_eq!(soonest([Some(orb), None, None, None]), Some(orb));
+        assert_eq!(
+            soonest([None, None, None, None]),
+            None,
+            "an idle window blocks"
+        );
+        // The wait on an unanswered prompt is a clock like the others: it has
+        // to survive an orb that is turning the whole time it runs.
+        let answer = now + ANSWER_WAIT;
+        assert_eq!(soonest([None, Some(orb), None, Some(answer)]), Some(orb));
+        assert_eq!(soonest([None, None, None, Some(answer)]), Some(answer));
+    }
+
+    /// The line a prompt that started nothing leaves behind. Two releases in
+    /// one install is the cause worth naming, because it is the one the person
+    /// reading can fix; anything else points at the endpoint.
+    #[test]
+    fn a_prompt_that_started_no_turn_says_which_of_the_two_happened() {
+        let split = unanswered(Some(1), 2);
+        assert!(split.contains("protocol 1"), "{split}");
+        assert!(split.contains("same release"), "{split}");
+        let quiet = unanswered(Some(2), 2);
+        assert!(quiet.contains("noob doctor"), "{quiet}");
+        assert!(!quiet.contains("protocol"), "{quiet}");
+        // Before the agent has said anything there is no version to blame.
+        assert_eq!(unanswered(None, 2), quiet);
     }
 
     /// The orb travels between its two formations over [`ORB_MORPH`] and is

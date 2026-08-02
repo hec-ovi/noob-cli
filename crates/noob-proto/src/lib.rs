@@ -11,6 +11,10 @@
 //! changes and the reader accepts anything less than or equal to its own.
 //! A breaking change ships a new frame type beside the old one and retires the
 //! old one after callers migrate; frames are never redefined in place.
+//! The refusal is silent, so a writer that has learned the other side's version
+//! writes at it ([`encode_at`]) rather than at its own: a newer front end drives
+//! an older agent, instead of every command it sends being dropped without a
+//! word.
 //!
 //! **An unknown frame is skipped, never guessed at.** Both enums carry an
 //! `Unknown` catch-all, so a newer agent talking to an older front end degrades
@@ -881,11 +885,21 @@ pub fn decode<T: Body>(line: &str) -> Option<Frame<T>> {
     frame.readable().then_some(frame)
 }
 
-/// Encode one frame as a line, newline included.
+/// Encode one frame as a line, newline included, stamped [`VERSION`].
 pub fn encode<T: Body>(body: &T) -> String {
+    encode_at(VERSION, body)
+}
+
+/// The same, stamped at the version the other side reads.
+///
+/// A reader refuses a frame stamped above its own version, so a writer that
+/// knows it is talking to an older reader writes at that reader's version
+/// instead of losing every frame to a silent skip. `v` above [`VERSION`] is
+/// clamped to it: a writer never claims to speak a version it does not.
+pub fn encode_at<T: Body>(v: u16, body: &T) -> String {
     let mut line = String::with_capacity(96);
     line.push_str("{\"v\":");
-    push_u64(&mut line, u64::from(VERSION));
+    push_u64(&mut line, u64::from(v.min(VERSION)));
     line.push_str(",\"t\":");
     push_json_str(&mut line, body.tag());
     body.write_fields(&mut line);
@@ -1412,6 +1426,28 @@ mod tests {
     fn a_future_version_is_refused() {
         let line = format!(r#"{{"v":{},"t":"text.delta","d":"x"}}"#, VERSION + 1);
         assert!(decode::<Event>(&line).is_none());
+    }
+
+    /// The other half of that refusal: a writer that knows the reader is older
+    /// writes at the reader's version, so the frame arrives instead of being
+    /// skipped in silence. This is what lets a newer window drive an older
+    /// agent, which is the pairing every machine has for as long as one half of
+    /// an install is newer than the other.
+    #[test]
+    fn a_frame_can_be_written_at_the_version_the_reader_speaks() {
+        let command = Command::PromptSubmit {
+            text: "say hi".into(),
+        };
+        let older = encode_at(1, &command);
+        assert!(older.starts_with(r#"{"v":1,"t":"prompt.submit""#), "{older}");
+        let back: Frame<Command> = decode(&older).expect("a reader at 1 takes it");
+        assert_eq!(back.v, 1);
+        assert_eq!(back.body, command);
+
+        // And a version above this writer's own is clamped: claiming to speak
+        // a protocol you do not is how a reader gets fields that are not there.
+        let ahead = encode_at(VERSION + 7, &command);
+        assert_eq!(ahead, encode(&command));
     }
 
     #[test]

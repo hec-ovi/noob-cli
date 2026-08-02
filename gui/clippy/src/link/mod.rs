@@ -11,6 +11,8 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 
 use noob_proto::{Command as Cmd, Event};
@@ -125,12 +127,39 @@ pub fn env_from(ok: bool, stdout: &[u8], stderr: &[u8]) -> Result<Vec<String>, S
     Ok(lines)
 }
 
+/// The version an agent that has not said anything yet is assumed to speak.
+///
+/// Nothing: its first frame says which, and a command written before that is
+/// held rather than guessed at.
+const UNKNOWN: u16 = 0;
+
+/// One decoded frame's version, off the line it arrived on.
+///
+/// `v` leads every line by the protocol's own rule, so this reads the one field
+/// it needs without paying for the rest. Used on the two lines that matter: the
+/// first frame of a session, and a frame this window had to skip.
+fn version_of(line: &str) -> Option<u16> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    u16::try_from(value.get("v")?.as_u64()?).ok()
+}
+
 pub struct Link {
     child: Child,
     stdin: Option<ChildStdin>,
     rx: Receiver<Incoming>,
     /// Set once the child has exited, so a send does not try a closed pipe.
     ended: bool,
+    /// The protocol version the agent stamps its frames with, learned from the
+    /// first one it sends. [`UNKNOWN`] until then.
+    ///
+    /// Written by the reader thread, read here: the channel between them makes
+    /// the write visible before the frame that carried it is handed over.
+    speaks: Arc<AtomicU16>,
+    /// Commands typed before the agent said which version it speaks. Sent in
+    /// order the moment it does. A prompt at a starting window would otherwise
+    /// be written at this window's version and dropped by an older agent, which
+    /// is a prompt that vanishes with nothing anywhere saying why.
+    waiting: Vec<Cmd>,
 }
 
 impl Link {
@@ -157,19 +186,62 @@ impl Link {
         let stderr = child.stderr.take();
         let (tx, rx) = channel();
 
+        let speaks = Arc::new(AtomicU16::new(UNKNOWN));
         {
             let tx: Sender<Incoming> = tx.clone();
+            let speaks = Arc::clone(&speaks);
             std::thread::spawn(move || {
                 let reader = BufReader::new(stdout);
+                let mut told = false;
                 for line in reader.lines() {
                     let Ok(line) = line else { break };
                     // A line that does not decode is skipped rather than fatal,
                     // which is the protocol's own rule: one bad frame must not
                     // end a session.
-                    if let Some(frame) = noob_proto::decode::<Event>(&line)
-                        && tx.send(Incoming::Frame(frame.body)).is_err()
-                    {
-                        return;
+                    match noob_proto::decode::<Event>(&line) {
+                        Some(frame) => {
+                            // Before the frame goes over: what the agent stamps
+                            // is what this window has to write back to it.
+                            speaks
+                                .compare_exchange(
+                                    UNKNOWN,
+                                    frame.v,
+                                    Ordering::Release,
+                                    Ordering::Relaxed,
+                                )
+                                .ok();
+                            if tx.send(Incoming::Frame(frame.body)).is_err() {
+                                return;
+                            }
+                        }
+                        // The one skip worth a word: an agent newer than this
+                        // window, whose frames are being dropped whole. Said
+                        // once, since it is true of every frame after it.
+                        None => {
+                            if let Some(v) = version_of(&line)
+                                && v > noob_proto::VERSION
+                            {
+                                speaks
+                                    .compare_exchange(
+                                        UNKNOWN,
+                                        v,
+                                        Ordering::Release,
+                                        Ordering::Relaxed,
+                                    )
+                                    .ok();
+                                if !told {
+                                    told = true;
+                                    let say = format!(
+                                        "the agent speaks protocol {v} and this window {}: \
+                                         its frames are being skipped. update no0b.",
+                                        noob_proto::VERSION
+                                    );
+                                    if tx.send(Incoming::Diagnostic(say)).is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
                     }
                     notify();
                 }
@@ -193,19 +265,42 @@ impl Link {
             stdin,
             rx,
             ended: false,
+            speaks,
+            waiting: Vec::new(),
         })
     }
 
-    /// Send one command. A closed pipe ends the link rather than erroring at
-    /// every later call.
+    /// Which protocol version the agent speaks, or `None` before its first
+    /// frame. The window says so when it is not this window's own.
+    pub fn speaks(&self) -> Option<u16> {
+        match self.speaks.load(Ordering::Acquire) {
+            UNKNOWN => None,
+            v => Some(v),
+        }
+    }
+
+    /// Send one command, written at the version the agent reads. A closed pipe
+    /// ends the link rather than erroring at every later call.
+    ///
+    /// Held until the agent's first frame says which version that is: a reader
+    /// refuses anything stamped above its own and says nothing about it, so a
+    /// command written a version too high is a command that never happened.
     pub fn send(&mut self, command: Cmd) {
         if self.ended {
             return;
         }
+        let Some(v) = self.speaks() else {
+            self.waiting.push(command);
+            return;
+        };
+        self.write(v, &command);
+    }
+
+    fn write(&mut self, v: u16, command: &Cmd) {
         let Some(stdin) = self.stdin.as_mut() else {
             return;
         };
-        let line = noob_proto::encode(&command);
+        let line = noob_proto::encode_at(v, command);
         if stdin.write_all(line.as_bytes()).is_err() || stdin.flush().is_err() {
             self.ended = true;
             self.stdin = None;
@@ -228,6 +323,16 @@ impl Link {
                     self.ended = true;
                     break;
                 }
+            }
+        }
+        // Whatever was typed before the agent's first frame goes out now, in
+        // the order it was typed, at the version that frame announced.
+        if !self.waiting.is_empty()
+            && !self.ended
+            && let Some(v) = self.speaks()
+        {
+            for command in std::mem::take(&mut self.waiting) {
+                self.write(v, &command);
             }
         }
         out
@@ -495,6 +600,61 @@ mod tests {
         let cut = env_from(true, long.as_bytes(), b"").expect("a tail");
         assert_eq!(cut.len(), ENV_LINES + 1);
         assert!(cut[ENV_LINES].contains("stops reading"), "{:?}", cut[ENV_LINES]);
+    }
+
+    /// An agent older than this window still gets what is typed at it.
+    ///
+    /// The protocol's reader refuses a frame stamped above its own version and
+    /// says nothing about the refusal, so a window that writes at its own
+    /// version has every prompt swallowed by an agent one release behind: the
+    /// orb turns, no turn ever starts, and nothing anywhere says why. This is
+    /// the shape of that install (a 0.11.2 window over a 0.11.1 agent), and
+    /// what it must produce is a command the agent can read.
+    #[test]
+    fn a_command_is_written_at_the_version_the_agent_speaks() {
+        let dir = temp("older-agent");
+        let log = dir.join("heard");
+        let path = dir.join("older-noob");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\n\
+                 echo '{{\"v\":1,\"t\":\"session.start\",\"id\":\"i\",\"workspace\":\"/w\",\
+                 \"model\":\"m\",\"resumed\":false}}'\n\
+                 while IFS= read -r line; do echo \"$line\" >> {log}; done\n",
+                log = log.display()
+            ),
+        )
+        .expect("a stub agent");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("a runnable stub");
+
+        let mut link = spawn_stub(&path, &dir, None);
+        // Typed before the agent has said anything, which is the case that
+        // used to go out at this window's version and vanish.
+        link.send(Cmd::PromptSubmit {
+            text: String::from("say hi"),
+        });
+        let mut saw_start = false;
+        for _ in 0..1000 {
+            for item in link.drain() {
+                saw_start |= matches!(item, Incoming::Frame(Event::SessionStart { .. }));
+            }
+            if saw_start && log.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(saw_start, "the stub agent never announced its session");
+        assert_eq!(link.speaks(), Some(1), "the agent's version was not learned");
+        let heard = written(&log, 1);
+        assert_eq!(
+            heard[0],
+            r#"{"v":1,"t":"prompt.submit","text":"say hi"}"#,
+            "the prompt has to arrive stamped at the version the agent reads"
+        );
+        drop(link);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A program that is not there is a message in the window, not a panic and

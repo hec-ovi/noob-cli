@@ -3,6 +3,18 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.11.3 - 2026-08-02
+
+- A window and an agent from two different releases talk to each other. The
+  window writes its commands at the version the agent's first frame
+  announced, so a prompt reaches an agent one release behind instead of
+  being dropped by its reader without a word; a command typed before that
+  first frame waits for it. The window says which release each half is on
+  when they differ, and an agent ahead of the window says so too.
+- A prompt that starts no turn within ten seconds is said out loud in the
+  transcript, and the orb stops turning over a conversation that has
+  stopped.
+
 ## 0.11.2 - 2026-08-01
 
 - The call popup is its own widget box, rebuilt: a header with the
