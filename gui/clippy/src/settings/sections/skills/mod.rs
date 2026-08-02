@@ -7,7 +7,7 @@
 //! editing buffer and the process that actually clones; what arrives back
 //! lands here and the rows are rebuilt from it.
 
-use crate::agent::{self, Agent};
+use crate::agent::Agent;
 use crate::settings::{Align, Card, CardField, Doing, Kept, Paper, Row, Table, TableOf};
 
 /// The columns of the installed list, in order: the name, the width in columns
@@ -327,6 +327,7 @@ impl SkillsSection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent;
     use crate::config::Config;
     use crate::settings::testing::*;
     use crate::settings::{card_body_lines, card_is_reachable, lines, Deed, Settings, SKILLS};

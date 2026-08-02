@@ -15568,7 +15568,7 @@ mod tests {
         panel.choose(looks);
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let text = text_of(&out.scene);
-        assert!(text.contains("BACKGROUNDS"), "{text}");
+        assert!(text.contains("BACKGROUND COLORS"), "{text}");
         assert!(!text.contains("api keys"), "the agent section is still up");
         assert_eq!(tint_of(&out, "APPEARANCE"), out.skin.heading);
     }

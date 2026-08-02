@@ -180,9 +180,9 @@ pub const SECTIONS: [&str; 7] = [AGENT, PROMPT, SESSIONS, SKILLS, MCP, COMMANDS,
 
 /// The sessions section's own vocabulary, re-exported so the frame, the
 /// painter and the panel's callers keep one `settings::` path to it.
-pub use sections::sessions::{
-    table_body_lines, Align, SESSION_COLUMNS, SESSION_TITLE, TABLE_ROWS,
-};
+pub use sections::sessions::{table_body_lines, Align, SESSION_TITLE, TABLE_ROWS};
+#[cfg(test)]
+pub use sections::sessions::SESSION_COLUMNS;
 
 /// The skills section's field key, re-exported for the same reason: `main`
 /// branches on it before any write.

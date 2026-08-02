@@ -717,9 +717,10 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     if held {
                         scene.rect(at.fill(skin.strip));
                     }
-                    if frame.hot == Some(Hit::SettingsSwatch(*index, cell)) {
-                        scene.rect(at.fill(skin.hot));
-                    }
+                    // The pointer lights the block of colour and nothing else.
+                    // It used to wash the whole row, which on a list of colours
+                    // is a band over the two things being compared.
+                    let hot = frame.hot == Some(Hit::SettingsSwatch(*index, cell));
                     // Between two colours on one line, and never down the left
                     // edge of the body: a rule there would be a second border a
                     // column in from the card's own.
@@ -735,7 +736,16 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     scene.rect(block.fill(swatch(colour.rgb)));
                     // An outline round the block as well: a swatch of the
                     // panel's own colour on the panel would have no edges at all.
-                    scene.rect(block.fill(skin.edge).stroke(1.0));
+                    // It is the focus colour under the pointer, which is the
+                    // whole of the rollover.
+                    scene.rect(
+                        block
+                            .fill(match hot {
+                                true => skin.edge_focus,
+                                false => skin.edge,
+                            })
+                            .stroke(1.0),
+                    );
                     let words = Panel::new(
                         block.x + side + column,
                         at.y,

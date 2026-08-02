@@ -43,13 +43,13 @@ const LOOK_FIELDS: [(&str, &str, &str); 6] = [
     ),
     (
         "opacity",
-        "widget windows",
+        "widget windows transparency",
         "opacity. The widget windows: the panes, the bars and the menus, everything with words on it",
     ),
     (
         "window_opacity",
-        "base application",
-        "window_opacity. The base application: the empty space between the panes, where your desktop shows through",
+        "main background transparency",
+        "window_opacity. The main background: the empty space between the panes, where your desktop shows through",
     ),
     (
         "font_size",
@@ -255,8 +255,8 @@ fn about(key: &str) -> &'static str {
         "bright" => "loud text",
         "good" => "it worked",
         "bad" => "it failed",
-        "panel" => "the widget windows",
-        "background" => "behind everything",
+        "panel" => "widget windows background color",
+        "background" => "main background color",
         "bar" => "the title bar",
         "syntax_comment" => "comments",
         "syntax_string" => "strings",
@@ -408,7 +408,7 @@ pub fn rows(config: &Config, file: Option<&Path>) -> Vec<Row> {
         // shows through to is the other half, and hunting the two down in a
         // grid of thirty-seven swatches was the wrong half of an answer.
         Row::Palette(Palette {
-            title: "BACKGROUNDS",
+            title: "BACKGROUND COLORS",
             cells: [BACKGROUND, PANEL]
                 .into_iter()
                 .map(|key| Swatch {
@@ -726,7 +726,7 @@ mod tests {
             let first = rows
                 .iter()
                 .position(|row| {
-                    matches!(row, Row::Palette(palette) if palette.title != "BACKGROUNDS")
+                    matches!(row, Row::Palette(palette) if palette.title != "BACKGROUND COLORS")
                 })
                 .expect("the grid");
             assert_eq!(at + 1, first, "{:?} came between them", rows[at + 1]);
@@ -801,7 +801,7 @@ mod tests {
             titles,
             vec![
                 // The two surfaces the transparencies move, up beside them.
-                "BACKGROUNDS",
+                "BACKGROUND COLORS",
                 "THE WINDOW'S OWN TONES",
                 "THE CODE COLOURS",
                 "THE TOOL MARKS",
@@ -1380,8 +1380,8 @@ font_size = 15   # mine
         assert_eq!(card.title, "TRANSPARENCY");
         assert_eq!(card.fields.len(), 2);
         assert_ne!(card.fields[0].label, card.fields[1].label);
-        assert_eq!(card.fields[0].label, "base application");
-        assert_eq!(card.fields[1].label, "widget windows");
+        assert_eq!(card.fields[0].label, "main background transparency");
+        assert_eq!(card.fields[1].label, "widget windows transparency");
         assert!(
             card.fields[0]
                 .hint
