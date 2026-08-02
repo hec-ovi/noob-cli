@@ -1,6 +1,6 @@
 # tools
 
-contractVersion: 1.0.0
+contractVersion: 1.1.0
 
 ## Purpose
 
@@ -90,6 +90,10 @@ is the closed class set; every classified error also says what to do next.
    agent); a grant covers exactly one applied mutation of its exact target.
 4. Truncation policy is resolved once at bootstrap; when lifted, no
    truncation marker ever renders.
+5. Every description the model reads is a file: `prompts/tools/<name>.md`,
+   loaded by the `describes!` macro. They are prompt text and they are paid
+   for on every request, so they are edited as text and budget-tested as a
+   whole (`tests/budget.rs`).
 
 ## Dependencies
 

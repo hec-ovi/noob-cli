@@ -111,8 +111,7 @@ struct RunCfg {
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "subagent".to_string(),
-        description: "Spawn, inspect, or cancel detached sub-agents; reports return automatically."
-            .to_string(),
+        description: crate::tools::describes!("subagent").to_string(),
         parameters: json!({"type": "object", "properties": {
             "prompt": {"type": "string", "description": "complete standalone instructions"},
             "tools": {"type": "string", "enum": ["read-only", "web", "all"],

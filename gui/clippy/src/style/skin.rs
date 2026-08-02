@@ -363,18 +363,19 @@ mod tests {
     /// the widget windows alone.
     #[test]
     fn the_base_and_the_panels_tint_independently() {
+        let base = Skin::default();
         let tinted = Skin::from(&Config {
             background: [0x40, 0x00, 0x00],
             ..Config::default()
         });
-        assert!(tinted.backdrop[0] > 0.0, "{:?}", tinted.backdrop);
-        assert_eq!(tinted.panel[0], 0.0, "the reading surface moved too");
+        assert!(tinted.backdrop[0] > base.backdrop[0], "{:?}", tinted.backdrop);
+        assert_eq!(tinted.panel, base.panel, "the reading surface moved too");
         let panes = Skin::from(&Config {
             panel: [0x00, 0x00, 0x40],
             ..Config::default()
         });
-        assert!(panes.panel[2] > 0.0);
-        assert_eq!(panes.backdrop[2], 0.0, "the floor moved with the panes");
+        assert!(panes.panel[2] > base.panel[2]);
+        assert_eq!(panes.backdrop, base.backdrop, "the floor moved with the panes");
     }
 
     /// The reading surface is the most solid thing in the window, so the eye
@@ -720,14 +721,14 @@ mod tests {
                     "{name}: slot {slot}"
                 );
             }
-            if name == "noob-matrix" {
+            if name == "noob-cool" {
                 assert_eq!(skin.gauges, noob.gauges, "{name}: the window in use moved");
                 assert_eq!(skin.gauge_ink, noob.gauge_ink, "{name}");
             } else {
                 for slot in 0..skin.gauges.len() {
                     assert_ne!(
                         skin.gauges[slot], noob.gauges[slot],
-                        "{name}: slot {slot} is still the matrix hue"
+                        "{name}: slot {slot} is still the default hue"
                     );
                 }
             }
@@ -746,7 +747,7 @@ mod tests {
     /// twelve name tools across themes, and the prose pair is covered by
     /// `body` and `bright`.
     #[test]
-    fn each_theme_leads_with_its_own_hue_and_shares_no_tone_with_matrix() {
+    fn each_theme_leads_with_its_own_hue_and_shares_no_tone_with_the_default() {
         let of = |ink: [u8; 4]| [ink[0] as f32 / 255.0, ink[1] as f32 / 255.0, ink[2] as f32 / 255.0];
         let noob = Skin::default();
         for (name, heavy) in [("noob-matrix", 1), ("noob-cool", 2), ("noob-red", 0)] {
@@ -778,7 +779,9 @@ mod tests {
                 }
             }
         }
-        for name in ["noob-cool", "noob-red"] {
+        // Against the palette the window opens on, which is one of the three:
+        // the claim is about the other two.
+        for name in ["noob-matrix", "noob-red"] {
             let skin = Skin::from(&crate::config::theme(name).expect(name));
             for (what, mine, matrix) in [
                 ("ordinary text", skin.body, noob.body),
@@ -794,7 +797,7 @@ mod tests {
                 ("markup", skin.markup, noob.markup),
                 ("headings", skin.heading, noob.heading),
             ] {
-                assert_ne!(mine, matrix, "{name}: {what} is still the matrix tone");
+                assert_ne!(mine, matrix, "{name}: {what} is still the default tone");
             }
             for (what, mine, matrix) in [
                 ("the caret", skin.caret, noob.caret),
@@ -804,7 +807,7 @@ mod tests {
                 ("the picked band", skin.picked, noob.picked),
                 ("the lit row", skin.hot, noob.hot),
             ] {
-                assert_ne!(mine, matrix, "{name}: {what} is still the matrix fill");
+                assert_ne!(mine, matrix, "{name}: {what} is still the default fill");
             }
         }
         // The three bars are three different fills, so switching themes moves

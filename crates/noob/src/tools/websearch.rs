@@ -87,13 +87,10 @@ fn which(program: &str) -> Option<std::path::PathBuf> {
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "websearch".to_string(),
-        description:
-            // Every word here is paid on every request forever, so the action
-            // enum below carries the per-action detail and this says only what
-            // the tool is and the one thing to do first.
-            "Search the web, fetch a page as clean Markdown, or find papers and repositories. \
-             Run action=\"init\" once before searching."
-                .to_string(),
+        // Every word here is paid on every request forever, so the action enum
+        // below carries the per-action detail and the file says only what the
+        // tool is and the one thing to do first.
+        description: super::describes!("websearch").to_string(),
         parameters: json!({"type": "object", "properties": {
             "action": {
                 "type": "string",

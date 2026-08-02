@@ -718,10 +718,21 @@ fn dispatch_resolved(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
     }
 }
 
+/// One tool's description, out of `prompts/tools/<name>.md`.
+///
+/// Every description this crate registers is a file of its own: they are
+/// prompt text, they are paid for on every request, and editing prose inside a
+/// Rust literal is how they drifted apart in the first place.
+macro_rules! describes {
+    ($name:literal) => {
+        include_str!(concat!("../../prompts/tools/", $name, ".md")).trim()
+    };
+}
+pub(crate) use describes;
+
 /// The core tool schemas, registered at session start and byte-stable for
-/// the whole session (both bootstrap sites start from this set). Descriptions
-/// <= 20 words each; the serialized array is budget-tested against the
-/// 940-token ceiling.
+/// the whole session (both bootstrap sites start from this set). The
+/// serialized array is budget-tested against its own ceiling.
 pub fn specs() -> Vec<ToolSpec> {
     fn spec(name: &str, description: &str, parameters: Value) -> ToolSpec {
         ToolSpec {
@@ -733,9 +744,7 @@ pub fn specs() -> Vec<ToolSpec> {
     vec![
         spec(
             "read",
-            "Read a text file as plain lines; page big files with offset and limit. \
-             Re-reading unchanged content returns a note, not the body, so work from the \
-             earlier result.",
+            describes!("read"),
             json!({"type": "object", "properties": {
                 "path": {"type": "string"},
                 "offset": {"type": "integer", "description": "1-based first line"},
@@ -744,8 +753,7 @@ pub fn specs() -> Vec<ToolSpec> {
         ),
         spec(
             "write",
-            "Create a file, or fully replace one you have read. For a change to an existing \
-             file use edit instead: write regenerates every byte you send.",
+            describes!("write"),
             json!({"type": "object", "properties": {
                 "path": {"type": "string"},
                 "content": {"type": "string"}
@@ -753,7 +761,7 @@ pub fn specs() -> Vec<ToolSpec> {
         ),
         spec(
             "edit",
-            "Replace old with new in a file; old must match exactly one spot; read first.",
+            describes!("edit"),
             json!({"type": "object", "properties": {
                 "path": {"type": "string"},
                 "old": {"type": "string"},
@@ -763,7 +771,7 @@ pub fn specs() -> Vec<ToolSpec> {
         ),
         spec(
             "bash",
-            "Run a shell command; returns merged stdout and stderr; default timeout 120s.",
+            describes!("bash"),
             json!({"type": "object", "properties": {
                 "cmd": {"type": "string"},
                 "timeout_s": {"type": "integer", "description": "seconds, max 600"}
@@ -771,7 +779,7 @@ pub fn specs() -> Vec<ToolSpec> {
         ),
         spec(
             "grep",
-            "Search file contents with a regex; returns path: line matches, gitignore-aware.",
+            describes!("grep"),
             json!({"type": "object", "properties": {
                 "pattern": {"type": "string"},
                 "path": {"type": "string", "description": "file or directory to search"},
@@ -781,14 +789,14 @@ pub fn specs() -> Vec<ToolSpec> {
         ),
         spec(
             "glob",
-            "List files matching a glob pattern, newest first, gitignore-aware.",
+            describes!("glob"),
             json!({"type": "object", "properties": {
                 "pattern": {"type": "string", "description": "e.g. src/**/*.rs"}
             }, "required": ["pattern"]}),
         ),
         spec(
             "ls",
-            "List a directory; directories end with /.",
+            describes!("ls"),
             json!({"type": "object", "properties": {
                 "path": {"type": "string", "description": "default: working directory"}
             }}),

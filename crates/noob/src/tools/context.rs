@@ -11,9 +11,7 @@ use super::{ContextGauge, ToolOutcome};
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "context".to_string(),
-        description:
-            "Report estimated context use, total window, and the automatic compaction threshold."
-                .to_string(),
+        description: super::describes!("context").to_string(),
         parameters: json!({"type": "object", "properties": {}}),
     }
 }

@@ -3,6 +3,29 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.11.4 - 2026-08-02
+
+- The window opens with one pane in each of its four spaces: the conversation
+  over the plan down the left at 70/30, what the machine is doing over the
+  fleet down the right at 60/40. ACTIVITY and FILES are tabs of the
+  conversation's own space and open closed; HARDWARE, CONTEXT and SESSION are
+  the three tabs of the meters' space, in that order.
+- noob-cool is the palette the window opens on.
+- The mark beside the chosen section stands on the top of the word it marks,
+  at the height of its capitals.
+- A card standing beside another one is drawn even when its partner is the
+  last row the window counted: a pair is one band, and the row that carries no
+  height of its own is no longer dropped from the walk.
+- The SKILLS section is two rows: the install form across the width, and the
+  installed table under it with the row's own `SKILL.md` beside it. Only the
+  rows the document belongs to stand narrow.
+- Every native tool's description is a file of its own under
+  `prompts/tools/`, loaded rather than written into the Rust that registers
+  it.
+- The plan tool says when to call it: anything with steps, work run in
+  sequence, tasks for sub-agents in parallel, or an approach with several
+  parts.
+
 ## 0.11.3 - 2026-08-02
 
 - A window and an agent from two different releases talk to each other. The

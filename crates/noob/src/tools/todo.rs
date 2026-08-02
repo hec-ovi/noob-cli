@@ -17,9 +17,7 @@ use super::{PlanState, TodoItem, TodoStatus, ToolOutcome};
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "plan".to_string(),
-        description:
-            "Create or update the visible plan checklist; send the whole updated list each call."
-                .to_string(),
+        description: super::describes!("plan").to_string(),
         parameters: json!({"type": "object", "properties": {
             "todos": {"type": "array", "items": {"type": "object", "properties": {
                 "content": {"type": "string"},
@@ -318,11 +316,17 @@ mod tests {
         );
     }
 
+    /// The description is what makes the plan automatic: it says when to call
+    /// it, not only what it does. A tool nobody knows the moment for is a tool
+    /// whose job gets written out as prose instead.
     #[test]
-    fn spec_stays_terse() {
+    fn the_spec_says_when_to_call_it() {
         let s = spec();
         assert_eq!(s.name, "plan");
-        assert!(s.description.split_whitespace().count() <= 20);
+        for word in ["steps", "sequence", "parallel", "sub-agents"] {
+            assert!(s.description.contains(word), "{word}: {}", s.description);
+        }
+        assert!(s.description.split_whitespace().count() <= 45);
         assert!(s.parameters.get("type").is_some());
     }
 }

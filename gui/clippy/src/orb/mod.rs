@@ -449,6 +449,13 @@ mod tests {
         Skin::from(&Config::default())
     }
 
+    /// The palette the pinned frame below was measured in. Its own rather than
+    /// the window's default, which moves when the shipped theme does: the claim
+    /// is about the geometry and the fades, not about which theme ships.
+    fn pinned_skin() -> Skin {
+        Skin::from(&crate::config::theme("noob-matrix").expect("a preset"))
+    }
+
     /// A scene as numbers, so two of them can be compared. [`Rect`] is a shader
     /// struct and has no equality of its own.
     fn frozen(rects: &[Rect]) -> Vec<([f32; 4], [f32; 4], [f32; 4])> {
@@ -607,7 +614,7 @@ mod tests {
     /// and every corner, so anything that moves the turning frame lands here.
     #[test]
     fn the_turning_orb_is_the_frame_it_was_before_the_resting_one_changed() {
-        let (skin, block) = (skin(), block());
+        let (skin, block) = (pinned_skin(), block());
         // seconds, the sum, and the first, middle and last disc's box.
         for (seconds, sum, first, middle, last) in [
             (

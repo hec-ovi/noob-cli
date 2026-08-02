@@ -5759,6 +5759,10 @@ mod tests {
     fn the_arrows_walk_a_narrow_strip_to_its_last_tab_and_back() {
         const NARROW: (f32, f32) = (680.0, 380.0);
         let mut dock = Dock::new();
+        for view in [View::Activity, View::Files, View::Plan, View::Agents] {
+            dock.move_view(view, Space::TopRight);
+        }
+        dock.slot_mut(Space::TopRight).show_at(0);
         let views = dock.slot(Space::TopRight).views.clone();
         let showing = |dock: &Dock| {
             let layout = laid_out_at(dock, None, NARROW.0, NARROW.1);
@@ -5819,7 +5823,12 @@ mod tests {
     /// pane or on one of its file rows does.
     #[test]
     fn an_arrow_carries_the_menu_of_the_space_it_is_in() {
-        let dock = Dock::new();
+        let mut dock = Dock::new();
+        for view in [View::Output, View::Activity, View::Files, View::Plan] {
+            dock.move_view(view, Space::TopRight);
+        }
+        dock.move_view(View::Agents, Space::TopLeft);
+        dock.slot_mut(Space::TopRight).show_at(0);
         let layout = laid_out_at(&dock, None, 680.0, 380.0);
         let showing = dock.slot(Space::TopRight).active().unwrap();
         for panel in [
@@ -6562,7 +6571,7 @@ mod tests {
 
         // In the window, and out: no tab, no space, nothing walks to it. Dragged
         // somewhere else first, so where it comes back to says something.
-        assert!(dock.move_view(View::Files, Space::TopLeft));
+        assert!(dock.move_view(View::Files, Space::TopRight));
         let toggled = toggle_view(&mut dock, &mut menu, View::Files);
         assert!(toggled.hidden);
         assert!(dock.is_hidden(View::Files));
@@ -6584,7 +6593,7 @@ mod tests {
                 .expect("its default space"),
             "back where it opens rather than where it was"
         );
-        assert_ne!(home, Space::TopLeft, "which is not where it was dragged to");
+        assert_ne!(home, Space::TopRight, "which is not where it was dragged to");
         assert!(dock.is_sound(), "{dock:?}");
 
         // And the marks follow, so the row says which way it will go next.
@@ -6672,15 +6681,16 @@ mod tests {
     /// pane is on and every change would resurrect it.
     #[test]
     fn only_the_pane_setting_that_moved_turns_a_pane_on_or_off() {
-        let on = Config::default();
+        let on = Config::parse("show_activity = on\nshow_files = on");
         assert!(on.show_activity && on.show_files);
+        assert!(!Config::default().show_activity, "both open closed");
 
         // A change to something else moves neither.
-        let bigger = Config::parse("font_size = 20");
+        let bigger = Config::parse("show_activity = on\nshow_files = on\nfont_size = 20");
         assert_eq!(pane_changes(&on, &bigger), Vec::new());
 
         // And one that does moves only its own.
-        let off = Config::parse("show_activity = off");
+        let off = Config::parse("show_activity = off\nshow_files = on");
         assert_eq!(pane_changes(&on, &off), vec![(View::Activity, false)]);
         assert_eq!(pane_changes(&off, &on), vec![(View::Activity, true)]);
         let neither = Config::parse("show_activity = off\nshow_files = off");
@@ -6708,8 +6718,8 @@ mod tests {
     #[test]
     fn a_tab_dropped_off_the_window_is_closed_rather_than_moved() {
         let mut dock = Dock::new();
-        assert!(land(&mut dock, View::Files, Landing::In(Space::TopLeft, None)));
-        assert_eq!(dock.space_of(View::Files), Some(Space::TopLeft));
+        assert!(land(&mut dock, View::Files, Landing::In(Space::TopRight, None)));
+        assert_eq!(dock.space_of(View::Files), Some(Space::TopRight));
 
         let before = dock.clone();
         assert!(!land(&mut dock, View::Files, Landing::Nowhere));
@@ -6884,7 +6894,7 @@ mod tests {
     #[test]
     fn the_layout_the_panel_stopped_listing_still_comes_out_of_the_file() {
         let config = Config::parse(
-            "show_activity = off\nleft_width = 0.30\nleft_width_bottom = 0.70\ntop_height = 0.35\ntop_height_right = 0.65\nsettings_rail = 0.40\n",
+            "show_activity = off\nshow_files = on\nleft_width = 0.30\nleft_width_bottom = 0.70\ntop_height = 0.35\ntop_height_right = 0.65\nsettings_rail = 0.40\n",
         );
         // Every key the panel dropped is still a key the file understands, and
         // the parser still read all six of these off it.
@@ -7032,7 +7042,7 @@ mod tests {
     fn a_drop_that_names_a_place_in_the_strip_reorders_the_tabs() {
         let mut dock = Dock::new();
         let order = |dock: &Dock| dock.slot(Space::TopRight).views.clone();
-        assert_eq!(order(&dock)[0], View::Activity);
+        assert_eq!(order(&dock)[0], View::Hardware);
 
         // In front of the first tab of the space it is already in.
         assert!(land(&mut dock, View::Session, Landing::In(Space::TopRight, Some(0))));
@@ -7185,11 +7195,9 @@ mod tests {
             args: serde_json::json!({"cmd": "cargo test"}),
         });
 
-        let dock = Dock::new();
-        let space = Space::ALL
-            .into_iter()
-            .find(|space| dock.slot(*space).active() == Some(View::Activity))
-            .expect("the activity list is in the window");
+        let mut dock = Dock::new();
+        dock.reveal(View::Activity);
+        let space = dock.space_of(View::Activity).expect("the activity list is in the window");
         let layout = laid_out(&dock, None);
         let size = Config::default().pane_font_size;
         let inner = layout.content(space).inset(9.0);
@@ -7432,12 +7440,10 @@ mod tests {
     /// the left edge, a click on one landed four characters along.
     #[test]
     fn a_click_on_a_row_that_continues_a_file_line_lands_on_the_character_under_it() {
-        let dock = Dock::new();
+        let mut dock = Dock::new();
+        dock.reveal(View::Files);
         let layout = laid_out(&dock, None);
-        let space = Space::ALL
-            .into_iter()
-            .find(|space| dock.slot(*space).active() == Some(View::Files))
-            .expect("the file view is in the window");
+        let space = dock.space_of(View::Files).expect("the file view is in the window");
         let body = layout.content(space);
         let size = Config::default().pane_font_size;
         let (cols, chrome) = view::text_columns(View::Files, body, COLUMN);

@@ -314,40 +314,36 @@ impl Dock {
     fn full() -> Dock {
         Dock {
             hidden: Vec::new(),
-            // Columns before rows, and the cell under the conversation left
-            // empty, which is today's window written in the grid: the left
-            // column spans both rows because nothing is under it, the monitors
-            // sit above right and the files below them.
+            // Columns before rows: four spaces, one subject each. The
+            // conversation and what it is planning down the left, the machine
+            // and the fleet down the right.
             rows_first: false,
             slots: [
-                // The agent-output view homes here, the priority cell, so a
-                // clicked agent opens beside the conversation's own space.
+                // The conversation, with the two panes that read alongside it
+                // as tabs of its own space; the agent-output view homes here
+                // too, so a clicked agent opens beside the conversation.
                 Slot {
-                    views: vec![View::Output, View::Agent],
+                    views: vec![View::Output, View::Activity, View::Files, View::Agent],
                     active: 0,
                     folded: false,
                     tab_first: 0,
                 },
-                Slot::default(),
                 Slot {
-                    views: vec![
-                        View::Activity,
-                        View::Plan,
-                        View::Agents,
-                        View::Hardware,
-                        View::Context,
-                        View::Session,
-                    ],
+                    views: vec![View::Plan],
                     active: 0,
                     folded: false,
                     tab_first: 0,
                 },
-                // FILES has this space to itself. DEBUG opened down here beside
-                // it, to keep the strip above from opening with seven tabs in
-                // it; that pane is gone, and one tab in each of the two right
-                // spaces is what is left rather than a reason to move FILES up.
+                // What the machine is doing, and what this run is holding and
+                // has cost: three readings of the same subject, in that order.
                 Slot {
-                    views: vec![View::Files],
+                    views: vec![View::Hardware, View::Context, View::Session],
+                    active: 0,
+                    folded: false,
+                    tab_first: 0,
+                },
+                Slot {
+                    views: vec![View::Agents],
                     active: 0,
                     folded: false,
                     tab_first: 0,
@@ -648,13 +644,34 @@ impl Dock {
 mod tests {
     use super::*;
 
+    /// Every view in one space, for the tests about a strip of many tabs: the
+    /// arrangement the window opens with gives each space a few.
+    fn a_crowded_dock(space: Space) -> Dock {
+        let mut dock = Dock::new();
+        for view in View::ALL {
+            if dock.space_of(view).is_some() {
+                dock.move_view(view, space);
+            }
+        }
+        dock.slot_mut(space).show_at(0);
+        dock
+    }
+
     #[test]
     fn the_default_arrangement_holds_every_view_once() {
         let dock = Dock::new();
         assert!(dock.is_sound());
+        // One subject per space: the conversation and its plan down the left,
+        // the machine and the fleet down the right.
         assert_eq!(dock.slot(Space::TopLeft).active(), Some(View::Output));
-        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Activity));
-        assert_eq!(dock.slot(Space::BottomRight).active(), Some(View::Files));
+        assert_eq!(dock.slot(Space::BottomLeft).active(), Some(View::Plan));
+        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Hardware));
+        assert_eq!(dock.slot(Space::BottomRight).active(), Some(View::Agents));
+        assert_eq!(
+            dock.slot(Space::TopRight).views,
+            vec![View::Hardware, View::Context, View::Session],
+            "the meters read hardware, context, session"
+        );
         // Every view but the agent-output one, which waits hidden for an
         // agent to be clicked.
         assert_eq!(dock.walk().len(), View::ALL.len() - 1);
@@ -683,10 +700,13 @@ mod tests {
         }
         let dock = Dock::new();
         assert!(dock.is_sound());
-        // FILES has the bottom right space to itself: DEBUG opened beside it
-        // and there is no such view any more.
-        assert_eq!(dock.slot(Space::BottomRight).views, vec![View::Files]);
-        assert_eq!(dock.slot(Space::BottomRight).active(), Some(View::Files));
+        // FILES is a tab of the conversation's own space, behind ACTIVITY, and
+        // both of them open closed.
+        assert_eq!(
+            dock.slot(Space::TopLeft).views,
+            vec![View::Output, View::Activity, View::Files]
+        );
+        assert_eq!(dock.slot(Space::TopLeft).active(), Some(View::Output));
     }
 
     /// The three labels the rename asked for, each in the slot it already had.
@@ -756,7 +776,7 @@ mod tests {
     /// was showing.
     #[test]
     fn dropping_a_view_where_it_already_is_changes_nothing() {
-        let mut dock = Dock::new();
+        let mut dock = a_crowded_dock(Space::TopRight);
         dock.slot_mut(Space::TopRight).show(View::Agents);
         let before = dock.clone();
         assert!(!dock.move_view(View::Agents, Space::TopRight));
@@ -782,47 +802,32 @@ mod tests {
         let mut dock = Dock::new();
         let order = |dock: &Dock| dock.slot(Space::TopRight).views.clone();
         let start = order(&dock);
-        assert_eq!(start[0], View::Activity);
-        assert_eq!(start[4], View::Context);
+        assert_eq!(start, vec![View::Hardware, View::Context, View::Session]);
 
-        // Backwards: the fifth tab in front of the first.
-        assert!(dock.place_view(View::Context, Space::TopRight, 0));
+        // Backwards: the last tab in front of the first.
+        assert!(dock.place_view(View::Session, Space::TopRight, 0));
         assert!(dock.is_sound());
         assert_eq!(
             order(&dock),
-            vec![
-                View::Context,
-                View::Activity,
-                View::Plan,
-                View::Agents,
-                View::Hardware,
-                View::Session,
-            ]
+            vec![View::Session, View::Hardware, View::Context]
         );
-        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Context));
+        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Session));
 
-        // Forwards: the same tab back in behind the fourth. The insertion point
-        // counts the tabs as they are before the move, so 4 means "in front of
-        // whatever is fourth now", which is HARDWARE.
-        assert!(dock.place_view(View::Context, Space::TopRight, 4));
+        // Forwards: the same tab back in behind the second. The insertion point
+        // counts the tabs as they are before the move, so 2 means "in front of
+        // whatever is second now", which is CONTEXT.
+        assert!(dock.place_view(View::Session, Space::TopRight, 2));
         assert!(dock.is_sound());
         assert_eq!(
             order(&dock),
-            vec![
-                View::Activity,
-                View::Plan,
-                View::Agents,
-                View::Context,
-                View::Hardware,
-                View::Session,
-            ]
+            vec![View::Hardware, View::Session, View::Context]
         );
-        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Context));
+        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Session));
 
         // And onto the end of its own strip.
         let end = order(&dock).len();
-        assert!(dock.place_view(View::Activity, Space::TopRight, end));
-        assert_eq!(order(&dock).last(), Some(&View::Activity));
+        assert!(dock.place_view(View::Hardware, Space::TopRight, end));
+        assert_eq!(order(&dock).last(), Some(&View::Hardware));
         assert!(dock.is_sound());
     }
 
@@ -835,32 +840,16 @@ mod tests {
         assert!(dock.is_sound());
         assert_eq!(
             dock.slot(Space::TopRight).views,
-            vec![
-                View::Activity,
-                View::Plan,
-                View::Output,
-                View::Agents,
-                View::Hardware,
-                View::Context,
-                View::Session,
-            ]
+            vec![View::Hardware, View::Context, View::Output, View::Session],
+            "it landed where it was dropped rather than at the end"
         );
         assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Output));
         assert_eq!(dock.space_of(View::Output), Some(Space::TopRight));
-        // Its old space is empty rather than still holding it.
-        assert!(dock.slot(Space::TopLeft).is_empty());
-
-        // A place past the end is the end, not a panic and not a hole.
-        assert!(dock.place_view(View::Output, Space::BottomRight, 99));
-        assert!(dock.is_sound());
         assert_eq!(
-            dock.slot(Space::BottomRight).views,
-            vec![View::Files, View::Output]
+            dock.slot(Space::TopLeft).views,
+            vec![View::Activity, View::Files],
+            "it left the space it came from"
         );
-        // An empty space takes a drop at any place at all.
-        assert!(dock.place_view(View::Output, Space::TopLeft, 7));
-        assert_eq!(dock.slot(Space::TopLeft).views, vec![View::Output]);
-        assert!(dock.is_sound());
     }
 
     /// The invariant again, driven by the reorder rather than by the plain move:
@@ -923,7 +912,7 @@ mod tests {
 
     #[test]
     fn cycling_walks_the_tabs_of_one_space_and_wraps() {
-        let mut dock = Dock::new();
+        let mut dock = a_crowded_dock(Space::TopRight);
         let slot = dock.slot_mut(Space::TopRight);
         let first = slot.active().unwrap();
         for _ in 0..slot.views.len() {
@@ -959,19 +948,19 @@ mod tests {
     #[test]
     fn a_hidden_view_is_gone_rather_than_folded() {
         // The bottom right space's only tab, so that space ends up empty.
-        let dock = Dock::hiding(&[View::Files, View::Activity]);
+        let dock = Dock::hiding(&[View::Agents, View::Activity]);
         assert!(dock.is_sound());
-        assert_eq!(dock.space_of(View::Files), None);
+        assert_eq!(dock.space_of(View::Agents), None);
         assert_eq!(dock.space_of(View::Activity), None);
         assert_eq!(dock.walk().len(), View::ALL.len() - 3);
-        assert!(!dock.walk().contains(&View::Files));
+        assert!(!dock.walk().contains(&View::Agents));
         // The space those two were the only occupants of is empty, not broken.
         assert!(dock.slot(Space::BottomRight).is_empty());
         assert_eq!(dock.slot(Space::BottomRight).active(), None);
 
         let mut dock = dock;
-        assert!(!dock.move_view(View::Files, Space::TopLeft));
-        assert_eq!(dock.space_of(View::Files), None);
+        assert!(!dock.move_view(View::Agents, Space::TopLeft));
+        assert_eq!(dock.space_of(View::Agents), None);
         assert!(dock.is_sound());
         // The views that are on still walk, and still wrap.
         let mut at = View::Output;
@@ -1002,8 +991,8 @@ mod tests {
         assert!(dock.unhide(View::Plan));
         assert!(dock.is_sound());
         assert!(!dock.is_hidden(View::Plan));
-        assert_eq!(dock.space_of(View::Plan), Some(Space::TopRight));
-        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Plan));
+        assert_eq!(dock.space_of(View::Plan), Some(Space::BottomLeft));
+        assert_eq!(dock.slot(Space::BottomLeft).active(), Some(View::Plan));
         assert_eq!(dock.walk().len(), View::ALL.len() - 1);
         assert!(!dock.unhide(View::Plan), "it was not hidden any more");
     }
@@ -1013,10 +1002,10 @@ mod tests {
     #[test]
     fn a_view_comes_back_in_the_space_it_opens_in() {
         let mut dock = Dock::new();
-        dock.move_view(View::Files, Space::TopLeft);
+        dock.move_view(View::Files, Space::BottomRight);
         assert!(dock.hide(View::Files));
         assert!(dock.unhide(View::Files));
-        assert_eq!(dock.space_of(View::Files), Some(Space::BottomRight));
+        assert_eq!(dock.space_of(View::Files), Some(Space::TopLeft));
         assert!(dock.is_sound());
     }
 
@@ -1026,7 +1015,7 @@ mod tests {
     #[test]
     fn hiding_the_last_tab_in_a_space_leaves_it_empty_and_usable() {
         let mut dock = Dock::new();
-        assert!(dock.hide(View::Files));
+        assert!(dock.hide(View::Agents));
         let slot = dock.slot(Space::BottomRight);
         assert!(slot.is_empty());
         assert_eq!(slot.active(), None);
@@ -1062,7 +1051,7 @@ mod tests {
     /// past the end of the views is nonsense on its own terms.
     #[test]
     fn a_strip_cannot_be_scrolled_past_its_last_tab() {
-        let mut dock = Dock::new();
+        let mut dock = a_crowded_dock(Space::TopRight);
         let slot = dock.slot_mut(Space::TopRight);
         let tabs = slot.views.len();
         assert_eq!(slot.tab_first(), 0, "it opens at the first tab");
@@ -1086,7 +1075,7 @@ mod tests {
     /// past everything it holds.
     #[test]
     fn closing_a_tab_pulls_the_strip_back_onto_one_that_exists() {
-        let mut dock = Dock::new();
+        let mut dock = a_crowded_dock(Space::TopRight);
         let tabs = dock.slot(Space::TopRight).views.len();
         dock.slot_mut(Space::TopRight).scroll_tabs(tabs - 1);
         // Closing one tab is one fewer place the strip can start.
@@ -1100,7 +1089,7 @@ mod tests {
         assert_eq!(slot.tab_first(), slot.views.len() - 1);
         assert!(dock.is_sound());
         // And emptying it leaves no offset behind.
-        for view in [View::Activity, View::Plan, View::Agents] {
+        for view in dock.slot(Space::TopRight).views.clone() {
             assert!(dock.move_view(view, Space::TopLeft));
         }
         assert!(dock.slot(Space::TopRight).is_empty());
@@ -1111,7 +1100,7 @@ mod tests {
     /// walk is the strip.
     #[test]
     fn a_tab_can_be_shown_by_its_position() {
-        let mut dock = Dock::new();
+        let mut dock = a_crowded_dock(Space::TopRight);
         let slot = dock.slot_mut(Space::TopRight);
         assert_eq!(slot.active_index(), Some(0));
         assert!(slot.show_at(3));
@@ -1144,22 +1133,22 @@ mod tests {
     /// Nothing an existing user sees changes, and the grid can say what was
     /// hardcoded before, which is the whole point of the model.
     #[test]
-    fn the_window_opens_with_the_left_column_spanning_both_rows() {
+    fn the_window_opens_with_one_pane_in_every_cell() {
         let dock = Dock::new();
         assert!(!dock.rows_first(), "columns before rows");
         assert_eq!(dock.slot(Space::TopLeft).active(), Some(View::Output));
-        assert!(dock.slot(Space::BottomLeft).is_empty());
-        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Activity));
-        assert_eq!(dock.slot(Space::BottomRight).active(), Some(View::Files));
+        assert_eq!(dock.slot(Space::BottomLeft).active(), Some(View::Plan));
+        assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Hardware));
+        assert_eq!(dock.slot(Space::BottomRight).active(), Some(View::Agents));
+        // Nothing spans: every cell holds a pane of its own.
         assert_eq!(
             dock.cover(),
             [
                 Some(Space::TopLeft),
-                Some(Space::TopLeft),
+                Some(Space::BottomLeft),
                 Some(Space::TopRight),
                 Some(Space::BottomRight),
-            ],
-            "the conversation covers the cell under it"
+            ]
         );
         assert!(dock.is_sound());
     }
@@ -1173,15 +1162,7 @@ mod tests {
         assert!(dock.is_sound());
         assert_eq!(
             dock.slot(Space::TopRight).views,
-            vec![
-                View::Activity,
-                View::Plan,
-                View::Agents,
-                View::Hardware,
-                View::Context,
-                View::Files,
-                View::Session,
-            ],
+            vec![View::Hardware, View::Context, View::Agents, View::Session],
             "both cells' tabs, in the order they were in"
         );
         assert_eq!(dock.slot(Space::TopRight).active(), Some(View::Session));
@@ -1191,11 +1172,11 @@ mod tests {
             dock.cover(),
             [
                 Some(Space::TopLeft),
-                Some(Space::TopLeft),
+                Some(Space::BottomLeft),
                 Some(Space::TopRight),
                 Some(Space::TopRight),
             ],
-            "two columns, each spanning both rows"
+            "the right column is one pane over both rows"
         );
         assert_eq!(dock.walk().len(), View::ALL.len() - 1);
     }
@@ -1206,6 +1187,9 @@ mod tests {
     #[test]
     fn a_drop_inside_one_cell_takes_a_span_apart() {
         let mut dock = Dock::new();
+        // The plan out of the way first, so its cell is the empty one the
+        // conversation covers.
+        assert!(dock.move_view(View::Plan, Space::TopLeft));
         assert_eq!(dock.cover()[Space::BottomLeft.index()], Some(Space::TopLeft));
         assert!(dock.move_view(View::Hardware, Space::BottomLeft));
         assert!(dock.is_sound());
@@ -1231,8 +1215,10 @@ mod tests {
     fn a_span_across_a_row_turns_the_grid_the_other_way() {
         let mut dock = Dock::new();
         // Something in the bottom right that is not the tab being spanned, so
-        // the row it leaves still has a pane in it.
+        // the row it leaves still has a pane in it, and the bottom left cell
+        // empty so the row below is one pane.
         assert!(dock.move_view(View::Session, Space::BottomRight));
+        assert!(dock.move_view(View::Plan, Space::BottomRight));
         assert!(dock.span_view(View::Files, Space::TopLeft, Space::TopRight));
         assert!(dock.is_sound());
         assert!(dock.rows_first());
@@ -1286,7 +1272,7 @@ mod tests {
     fn an_empty_half_of_the_grid_gives_its_room_across() {
         let mut dock = Dock::new();
         // Everything into the left column, split between its two cells.
-        for view in [View::Activity, View::Plan, View::Agents] {
+        for view in [View::Agents, View::Hardware, View::Context] {
             assert!(dock.move_view(view, Space::TopLeft));
         }
         for view in [

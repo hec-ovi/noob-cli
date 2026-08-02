@@ -49,16 +49,26 @@ pub fn apart(line: f32) -> f32 {
     line * APART
 }
 
-/// How tall the mark beside a chosen row stands: the band the letters beside it
-/// stand in, not the row box around them. A line box is half leading, so a mark
-/// drawn at the row's height is twice the word it marks.
+/// Where the capital letters of a line stand inside its line box, as fractions
+/// of that box: the top of a capital, and the height of one.
+///
+/// Measured off the face the window embeds. A line box carries the ascender,
+/// the descender and the leading, so its top is well above any letter: a mark
+/// centred in the box sits below the word it marks, and one as tall as the box
+/// is twice the word.
+pub const CAP_TOP: f32 = 0.2;
+pub const CAP_LINES: f32 = 0.3;
+
+/// How tall the mark beside a chosen row stands: the height of the capitals
+/// beside it.
 pub fn mark_height(line: f32) -> f32 {
-    (line * 0.5).round().max(1.0)
+    (line * CAP_LINES).round().max(1.0)
 }
 
-/// Where that mark starts inside a row of `height`, centred on the word.
-pub fn mark_top(y: f32, height: f32, line: f32) -> f32 {
-    y + ((height - mark_height(line)) * 0.5).round().max(0.0)
+/// Where that mark starts: on the top of those capitals, so the bar and the
+/// word begin on the same pixel.
+pub fn mark_top(y: f32, _height: f32, line: f32) -> f32 {
+    y + (line * CAP_TOP).round()
 }
 
 /// Type: five roles, five sizes, as multiples of the pane size. Nothing on a

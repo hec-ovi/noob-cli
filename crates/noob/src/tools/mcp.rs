@@ -29,9 +29,7 @@ pub const TOOL_ERROR_MARKER: &str = "(tool error) ";
 pub fn connect_spec() -> ToolSpec {
     ToolSpec {
         name: "mcp_connect".to_string(),
-        description: "Connect an MCP server by name and list its tools; servers are named \
-                      in the system prompt."
-            .to_string(),
+        description: super::describes!("mcp_connect").to_string(),
         parameters: json!({"type": "object", "properties": {
             "server": {"type": "string"}
         }, "required": ["server"]}),
@@ -41,7 +39,7 @@ pub fn connect_spec() -> ToolSpec {
 pub fn call_spec() -> ToolSpec {
     ToolSpec {
         name: "mcp_call".to_string(),
-        description: "Call a tool on a connected MCP server.".to_string(),
+        description: super::describes!("mcp_call").to_string(),
         parameters: json!({"type": "object", "properties": {
             "server": {"type": "string"},
             "tool": {"type": "string"},

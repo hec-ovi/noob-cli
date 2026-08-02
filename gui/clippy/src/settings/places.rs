@@ -1281,11 +1281,11 @@ pub(crate) fn settings_bar_box(of: Panel, down: Panel) -> Panel {
 /// Below either of them the split is not made at all and the section is one
 /// column: a document forty characters wide is a column of hyphenated words,
 /// and a list of skills squeezed to nothing is a list nobody can read.
-const SETTING_DOC_MIN_COLUMNS: usize = 40;
-const SETTING_ENTRY_MIN_COLUMNS: usize = 34;
+pub(crate) const SETTING_DOC_MIN_COLUMNS: usize = 40;
+pub(crate) const SETTING_ENTRY_MIN_COLUMNS: usize = 34;
 
 /// How much of the two-column split the list takes. The document gets the rest.
-const SETTING_ENTRY_SHARE: f32 = 0.45;
+pub(crate) const SETTING_ENTRY_SHARE: f32 = 0.45;
 
 pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> SettingsPlaces {
     if area.w < 1.0 || area.h < 1.0 {
@@ -1353,33 +1353,6 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
         track: body,
         floor: rail_floor,
     };
-    // A section that lists skills or servers is two columns: the entries on the
-    // left and the one under the cursor beside them. Split off the list rather
-    // than off the body, so the rail keeps the width it was dragged to and the
-    // document takes its share of what is left. Not split at all when either
-    // half would be too narrow to read, which is what a small window gets: the
-    // entries win, since the document is what the entry is for.
-    let (list, doc) = match panel.showing() {
-        Some(_) => {
-            let total = columns_in(list.w, column);
-            match total.checked_sub(SETTING_DOC_MIN_COLUMNS + SETTING_ENTRY_MIN_COLUMNS) {
-                Some(_) => {
-                    let want = (list.w * SETTING_ENTRY_SHARE).floor();
-                    let least = SETTING_ENTRY_MIN_COLUMNS as f32 * column;
-                    let most = list.w - SETTING_DOC_MIN_COLUMNS as f32 * column;
-                    list.split_left(want.clamp(least, most.max(least)))
-                }
-                None => (list, nowhere()),
-            }
-        }
-        None => (list, nowhere()),
-    };
-    // The entries themselves stop a gap short of the document, so the two
-    // columns read as two columns and a long name does not run into the text.
-    let list = match doc.w >= 1.0 {
-        true => Panel::new(list.x, list.y, (list.w - GAP).max(1.0), list.h),
-        false => list,
-    };
     let rows_fit = Text::rows_for(shape.pane_size, list.h);
     // The rows themselves stop short of the list's own scrollbar. Everything
     // below is placed and measured in this box, never in `list`, or the bar is
@@ -1413,7 +1386,24 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
     // Where the band a pair shares stands, kept from the left half for the right
     // one: the running y has already passed it by the time the second arrives.
     let mut band = Panel::new(cards.x, cards.y, cards.w, 0.0);
-    for step in 0..window.count {
+    // The top and the bottom of the rows the document stands beside, so the
+    // column beside them is exactly as tall as they are.
+    let mut beside_doc: Option<(f32, f32)> = None;
+    // One row past what the window counted when that row is the right half of a
+    // pair: it carries no height of its own, so the walk that counts rows of
+    // text stops before it.
+    let count = match panel.row(window.first + window.count) {
+        Some(_) if window.count > 0
+            && crate::settings::stands_beside(
+                panel.rows(),
+                window.first + window.count - 1,
+            ) =>
+        {
+            window.count + 1
+        }
+        _ => window.count,
+    };
+    for step in 0..count {
         let index = window.first + step;
         let Some(entry) = panel.row(index) else {
             break;
@@ -1441,9 +1431,26 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
             }
             (_, true) => settings_card_halves(band, column).1,
             _ => {
-                let row = Panel::new(cards.x, y, cards.w, tall);
+                let whole = Panel::new(cards.x, y, cards.w, tall);
                 y += tall;
-                row
+                // A row the document belongs to keeps its share of the width
+                // and the document stands in the rest of that band. Only those
+                // rows: a form over a list with a document is a form squeezed
+                // into half a panel for no reason of its own.
+                match crate::settings::shows_doc(entry) {
+                    false => whole,
+                    true => {
+                        let cols = crate::settings::beside_doc_cols(entry_cols);
+                        let wide = match cols == entry_cols {
+                            true => whole.w,
+                            false => (cols as f32 * column + MARK_W + 3.0).min(whole.w),
+                        };
+                        let (top, bottom) = beside_doc.unwrap_or((whole.y, whole.y));
+                        beside_doc =
+                            Some((top.min(whole.y), bottom.max(whole.y + whole.h)));
+                        Panel::new(whole.x, whole.y, wide, whole.h)
+                    }
+                }
             }
         };
         // The columns this row wraps in: its own width, which is half the list
@@ -1734,6 +1741,26 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
             _ => {}
         }
     }
+    // The column beside the rows that own it: the rest of their band, from the
+    // top of the first of them to the bottom of the last. Nothing at all when
+    // the list is too narrow to split, or when none of those rows is on screen.
+    let doc = match beside_doc {
+        Some((top, bottom))
+            if crate::settings::beside_doc_cols(entry_cols) != entry_cols =>
+        {
+            let wide = crate::settings::beside_doc_cols(entry_cols) as f32 * column
+                + MARK_W
+                + 3.0;
+            let x = cards.x + wide + GAP;
+            let top = top.max(cards.y);
+            let bottom = bottom.min(cards.y + cards.h);
+            match (cards.x + cards.w - x >= 1.0, bottom - top >= line) {
+                (true, true) => Panel::new(x, top, cards.x + cards.w - x, bottom - top),
+                _ => nowhere(),
+            }
+        }
+        _ => nowhere(),
+    };
     // Top right, its right edge on the content's own right edge: the padding
     // already clears the corner's cut, and a cross floating a glyph further
     // in reads as an offset, not a corner.

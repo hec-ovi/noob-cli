@@ -30,7 +30,10 @@ use std::os::unix::fs::OpenOptionsExt;
 /// left. One number per divider pair because a first window has both halves
 /// breaking in the same place; dragging is what lets them differ.
 pub const LEFT_WIDTH: f32 = 0.54;
-pub const TOP_HEIGHT: f32 = 0.46;
+/// The conversation takes most of its column and the plan under it takes the
+/// rest; the machine's meters take rather more than the fleet under them.
+pub const TOP_HEIGHT: f32 = 0.70;
+pub const TOP_HEIGHT_RIGHT: f32 = 0.60;
 /// The settings rail: a tenth, about fourteen columns of pane text on the
 /// usual window, held up to the longest section name on a narrower one.
 pub const SETTINGS_RAIL: f32 = 0.10;
@@ -137,7 +140,12 @@ pub struct Config {
 }
 
 impl Default for Config {
+    /// The window as it opens: noob-cool, cyan over a panel with just enough
+    /// blue in it to be a colour rather than black. `good` stays green because
+    /// it is the window's yes and reads as one on a cold palette; the cyan
+    /// next to it is the accent, which is a different job.
     fn default() -> Config {
+        let (bright, text) = ([0xdf, 0xf2, 0xff], [0xa6, 0xc8, 0xe8]);
         Config {
             opacity: 0.90,
             // What the backdrop has always been drawn at: 55% of the 90% the
@@ -150,26 +158,29 @@ impl Default for Config {
             left_width: LEFT_WIDTH,
             left_width_bottom: LEFT_WIDTH,
             top_height: TOP_HEIGHT,
-            top_height_right: TOP_HEIGHT,
+            top_height_right: TOP_HEIGHT_RIGHT,
             settings_rail: SETTINGS_RAIL,
-            accent: [0x7c, 0xd8, 0x94],
-            text: [0x9a, 0xd6, 0xac],
-            dim: [0x58, 0x96, 0x6e],
-            bright: [0xce, 0xfa, 0xdb],
-            good: [0x74, 0xd1, 0x94],
-            bad: [0xe8, 0x7a, 0x6c],
-            panel: [0x00, 0x00, 0x00],
-            background: [0x00, 0x00, 0x00],
-            bar: [0x0e, 0x2e, 0x1e],
-            tools: TOOLS,
-            gauges: GAUGES,
-            syntax_comment: [0x56, 0x84, 0x66],
-            syntax_string: [0xd6, 0xc4, 0x7a],
-            syntax_number: [0xb2, 0xce, 0xf0],
-            syntax_keyword: [0x82, 0xce, 0xf0],
-            syntax_markup: [0xba, 0xa0, 0xe8],
-            show_activity: true,
-            show_files: true,
+            accent: [0x5c, 0xc8, 0xf5],
+            text,
+            dim: [0x62, 0x8a, 0xa8],
+            bright,
+            good: [0x62, 0xd8, 0xa0],
+            bad: [0xf0, 0x74, 0x84],
+            panel: [0x02, 0x05, 0x0b],
+            background: [0x02, 0x05, 0x0b],
+            bar: [0x0f, 0x24, 0x3c],
+            tools: prose_tools(bright, text),
+            gauges: COOL_GAUGES,
+            syntax_comment: [0x5c, 0x82, 0x9c],
+            syntax_string: [0x8f, 0xd8, 0xd0],
+            syntax_number: [0xb8, 0xbe, 0xf5],
+            syntax_keyword: [0x8f, 0xbc, 0xff],
+            syntax_markup: [0xd4, 0xa8, 0xf0],
+            // The two panes that open closed: both are tabs of the
+            // conversation's own space, and a window that opens on three tabs
+            // there opens on two nobody asked for.
+            show_activity: false,
+            show_files: false,
             tuned: false,
             unknown: Vec::new(),
         }
@@ -349,37 +360,32 @@ pub fn theme(name: &str) -> Option<Config> {
         .find(|(was, _)| *was == asked)
         .map_or(asked.as_str(), |(_, now)| *now);
     Some(match name {
-        // The window's own green, and the defaults verbatim. A window that
-        // opens on nothing at all is this one.
-        "noob-matrix" => base,
-        // The same window at night: cyan where matrix is green, over a panel
-        // with just enough blue in it to be a colour rather than black. `good`
-        // stays green because it is the window's yes and reads as one on a cold
-        // palette; the cyan next to it is the accent, which is a different job.
-        // The gauges come with it: a cold window drawing its meters in the
-        // green window's ten was the one thing a theme did not reach.
-        "noob-cool" => {
-            let (bright, text) = ([0xdf, 0xf2, 0xff], [0xa6, 0xc8, 0xe8]);
+        // The window's own green, the palette it was built in.
+        "noob-matrix" => {
+            let (bright, text) = ([0xce, 0xfa, 0xdb], [0x9a, 0xd6, 0xac]);
             Config {
-                accent: [0x5c, 0xc8, 0xf5],
+                accent: [0x7c, 0xd8, 0x94],
                 text,
-                dim: [0x62, 0x8a, 0xa8],
+                dim: [0x58, 0x96, 0x6e],
                 bright,
-                good: [0x62, 0xd8, 0xa0],
-                bad: [0xf0, 0x74, 0x84],
-                panel: [0x02, 0x05, 0x0b],
-                background: [0x02, 0x05, 0x0b],
-                bar: [0x0f, 0x24, 0x3c],
-                tools: prose_tools(bright, text),
-                gauges: COOL_GAUGES,
-                syntax_comment: [0x5c, 0x82, 0x9c],
-                syntax_string: [0x8f, 0xd8, 0xd0],
-                syntax_number: [0xb8, 0xbe, 0xf5],
-                syntax_keyword: [0x8f, 0xbc, 0xff],
-                syntax_markup: [0xd4, 0xa8, 0xf0],
+                good: [0x74, 0xd1, 0x94],
+                bad: [0xe8, 0x7a, 0x6c],
+                panel: [0x00, 0x00, 0x00],
+                background: [0x00, 0x00, 0x00],
+                bar: [0x0e, 0x2e, 0x1e],
+                tools: TOOLS,
+                gauges: GAUGES,
+                syntax_comment: [0x56, 0x84, 0x66],
+                syntax_string: [0xd6, 0xc4, 0x7a],
+                syntax_number: [0xb2, 0xce, 0xf0],
+                syntax_keyword: [0x82, 0xce, 0xf0],
+                syntax_markup: [0xba, 0xa0, 0xe8],
                 ..base
             }
         }
+        // The window as it opens, and the defaults verbatim. A window that
+        // opens on nothing at all is this one.
+        "noob-cool" => base,
         // Red as the window's colour, not as its alarm. The tones are warm and
         // the bar is a deep maroon, while `bad` stays the one thing louder than
         // the palette around it: a hot orange-red, so a failed call is still
@@ -1234,8 +1240,8 @@ prompt_rows = 1
 # whatever these say.
 left_width = 0.54
 left_width_bottom = 0.54
-top_height = 0.46
-top_height_right = 0.46
+top_height = 0.70
+top_height_right = 0.60
 
 # How much of the settings panel goes to the rail of section names down its
 # left, as a fraction of the panel's width. Dragging the line between the rail
@@ -1245,19 +1251,19 @@ settings_rail = 0.10
 # The whole palette, by name: noob-matrix, noob-cool, noob-red. An older file
 # saying noob, amber, ice or plum still opens; each one reads as the closest of
 # the three.
-theme = noob-matrix
+theme = noob-cool
 
-# Every color the theme sets, #rrggbb, written out here as the noob-matrix theme.
+# Every color the theme sets, #rrggbb, written out here as the noob-cool theme.
 # Uncomment a line to keep the theme and override that one color.
-# accent = #7cd894        # focus edges, the caret, the context gauge
-# text   = #9ad6ac        # ordinary content
-# dim    = #58966e        # headers, timings, structure
-# bright = #cefadb        # what just happened, and what you typed
-# good   = #74d194        # a call that worked, and the showing tab's line
-# bad    = #e87a6c        # a call that did not, and a turn in flight
-# panel  = #000000        # panel fill under the text: the widget windows
-# background = #000000    # the base application: the space behind the panes
-# bar    = #0e2e1e        # the title and status bars
+# accent = #5cc8f5        # focus edges, the caret, the context gauge
+# text   = #a6c8e8        # ordinary content
+# dim    = #628aa8        # headers, timings, structure
+# bright = #dff2ff        # what just happened, and what you typed
+# good   = #62d8a0        # a call that worked, and the showing tab's line
+# bad    = #f07484        # a call that did not, and a turn in flight
+# panel  = #02050b        # panel fill under the text: the widget windows
+# background = #02050b    # the base application: the space behind the panes
+# bar    = #0f243c        # the title and status bars
 
 # One color per tool. These name the tools rather than the window, so a theme
 # leaves them alone; the last two are prose and follow bright and text.
@@ -1273,34 +1279,35 @@ theme = noob-matrix
 # tool_skill   = #f57fc8
 # tool_mcp     = #f5d84f
 # tool_agent   = #7f7ff5
-# tool_plan    = #cefadb
-# tool_other   = #9ad6ac
+# tool_plan    = #dff2ff
+# tool_other   = #a6c8e8
 
 # The gauge palette, in slot order. Every reading in a monitor names one of
 # these, so a block and its number carry the metric's own colour rather than one
 # colour shared by every gauge in the window. A theme sets these too: these ten
-# are noob-matrix's, and the other two themes have ten of their own.
-# gauge_1  = #f0655c
-# gauge_2  = #f59a4f
-# gauge_3  = #f5e05a
-# gauge_4  = #b9e04f
-# gauge_5  = #7cd894
-# gauge_6  = #4fd6c8
-# gauge_7  = #5fa3f2
-# gauge_8  = #8f8ff5
-# gauge_9  = #c682ed
-# gauge_10 = #f075c3
+# are noob-cool's, and the other two themes have ten of their own.
+# gauge_1  = #3fbf6a
+# gauge_2  = #3fd9c4
+# gauge_3  = #5cc8f5
+# gauge_4  = #a8d8ff
+# gauge_5  = #8fa8bc
+# gauge_6  = #6f8ff0
+# gauge_7  = #a86ef5
+# gauge_8  = #d98cf5
+# gauge_9  = #f57fc8
+# gauge_10 = #7cf2c0
 
 # Code in a message: the five things the highlighter can name.
-# syntax_comment = #568466
-# syntax_string  = #d6c47a
-# syntax_number  = #b2cef0
-# syntax_keyword = #82cef0
-# syntax_markup  = #baa0e8
+# syntax_comment = #5c829c
+# syntax_string  = #8fd8d0
+# syntax_number  = #b8bef5
+# syntax_keyword = #8fbcff
+# syntax_markup  = #d4a8f0
 
-# Panes. A hidden pane gives its room to the conversation.
-show_activity = true
-show_files    = true
+# Panes. Both open closed: they are tabs of the conversation's own space, and
+# a hidden pane gives its room to the conversation.
+show_activity = false
+show_files    = false
 ";
 
 #[cfg(test)]
@@ -1924,8 +1931,8 @@ mod tests {
         const SHARED: &[&str] = &[];
 
         let base = colours(&Config::default());
-        // noob-matrix is the defaults on purpose, which is its own test above.
-        for name in THEMES.iter().filter(|name| **name != "noob-matrix") {
+        // noob-cool is the defaults on purpose, which is its own test above.
+        for name in THEMES.iter().filter(|name| **name != "noob-cool") {
             let preset = colours(&theme(name).expect(name));
             assert_eq!(preset.len(), base.len());
             for ((key, mine), (was, default)) in preset.iter().zip(&base) {
@@ -1962,11 +1969,11 @@ mod tests {
         }
     }
 
-    /// `theme = noob-matrix` is what the shipped file says, so it has to be
+    /// `theme = noob-cool` is what the shipped file says, so it has to be
     /// exactly the defaults or a fresh install is not the design.
     #[test]
-    fn the_matrix_theme_is_the_default_and_the_others_are_not() {
-        assert_eq!(theme("noob-matrix"), Some(Config::default()));
+    fn the_cool_theme_is_the_default_and_the_others_are_not() {
+        assert_eq!(theme("noob-cool"), Some(Config::default()));
         for name in THEMES {
             let preset = theme(name).expect(name);
             assert!(preset.unknown.is_empty(), "{name}");
@@ -1982,7 +1989,7 @@ mod tests {
             // Every preset opens at the opacity the defaults do, since each one
             // is the defaults with the colours changed.
             assert_eq!(preset.opacity, 0.90, "{name}");
-            if name != "noob-matrix" {
+            if name != "noob-cool" {
                 assert_ne!(preset, Config::default(), "{name} is the default twice");
             }
         }
@@ -2002,7 +2009,7 @@ mod tests {
             assert_eq!(config, theme(now).expect(now), "{was} is not {now}");
         }
         // And the panel then names the palette in hand, which is one of three.
-        assert_eq!(theme("noob"), Some(Config::default()));
+        assert_eq!(theme("noob"), theme("noob-matrix"));
         assert!(!THEMES.contains(&"noob"), "the old name is not offered");
     }
 
@@ -2302,12 +2309,12 @@ something_else = keep me
         assert!(config.unknown.is_empty(), "{:?}", config.unknown);
         assert!(after.contains("# opacity = 30%"), "{after}");
         assert!(after.contains("# window_opacity = 50%"), "{after}");
-        assert!(after.contains("# theme = noob-matrix"), "{after}");
+        assert!(after.contains("# theme = noob-cool"), "{after}");
         // The lines the file never had live are left exactly as they were.
-        assert!(after.contains("# gauge_3  = #f5e05a"), "{after}");
+        assert!(after.contains("# gauge_3  = #5cc8f5"), "{after}");
         // Everything not on the list is untouched.
         assert!(after.contains("font_size = 14"), "{after}");
-        assert!(after.contains("show_files    = true"), "{after}");
+        assert!(after.contains("show_files    = false"), "{after}");
 
         // A second pass has nothing to do and says so by doing nothing.
         clear_settings(&scratch.conf(), &keys).unwrap();
@@ -2333,7 +2340,6 @@ something_else = keep me
         // Every key that holds a colour is on it: a colour is what the parser
         // reads with `color`, which is every key whose default is three bytes.
         let default = Config::default();
-        let cool = theme("noob-cool").expect("the preset");
         let moved: Vec<&str> = keys()
             .into_iter()
             .filter(|key| {
@@ -2348,7 +2354,11 @@ something_else = keep me
             assert!(colours.contains(key), "{key} holds a colour and is not listed");
         }
         assert_eq!(colours.len(), moved.len(), "{colours:?} against {moved:?}");
-        assert_ne!(cool.accent, default.accent, "the presets share a palette");
+        assert_ne!(
+            theme("noob-matrix").expect("matrix").accent,
+            default.accent,
+            "the presets share a palette"
+        );
     }
 
     /// The writer refuses anything the reader would refuse, so a written

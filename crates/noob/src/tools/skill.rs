@@ -18,8 +18,7 @@ use super::ToolCtx;
 pub fn spec() -> ToolSpec {
     ToolSpec {
         name: "skill".to_string(),
-        description: "Load a skill by name; the available skills are listed in the system prompt."
-            .to_string(),
+        description: super::describes!("skill").to_string(),
         parameters: json!({"type": "object", "properties": {
             "name": {"type": "string"}
         }, "required": ["name"]}),

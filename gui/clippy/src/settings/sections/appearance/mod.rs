@@ -897,11 +897,11 @@ mod tests {
         let config = Config::default();
         let mut forward = over(&config);
         put_cursor(&mut forward, "theme");
-        assert_eq!(forward.change(true).expect("a choice").value, "noob-cool");
+        assert_eq!(forward.change(true).expect("a choice").value, "noob-red");
         assert_eq!(
             forward.change(false).expect("a choice").value,
-            "noob-red",
-            "back from the first preset is the last one"
+            "noob-matrix",
+            "back from the palette in hand is the one before it"
         );
 
         // A name an older build wrote is a palette the panel can name, since it
@@ -995,7 +995,7 @@ mod tests {
         // The press opens the hex line on the value in hand; retyping it is
         // the same buffer every field edits with.
         assert!(panel.pick(at, cell));
-        assert_eq!(panel.editing(), Some("#7cd894"));
+        assert_eq!(panel.editing(), Some("#5cc8f5"));
         while panel.backspace() {}
         assert!(panel.type_text("#12ff34"));
         let says = panel.says();
@@ -1519,7 +1519,7 @@ something_else = keep me
         panel.refresh(&after);
         go_to(&mut panel, APPEARANCE);
         assert_eq!(value(&panel, "opacity"), "0.90");
-        assert_eq!(value(&panel, THEME), "noob-matrix");
+        assert_eq!(value(&panel, THEME), "noob-cool");
         let _ = std::fs::remove_file(&path);
     }
 }

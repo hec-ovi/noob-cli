@@ -5184,7 +5184,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert_eq!(checked, 3, "only {checked} spaces had a showing tab");
+        assert_eq!(checked, 4, "only {checked} spaces had a showing tab");
     }
 
     /// No tab has a bottom border. The showing tab's border used to turn a second
@@ -5551,7 +5551,7 @@ mod tests {
             &state,
             1400.0,
             900.0,
-            &Dock::new(),
+            &a_dock_showing(View::Files),
             &names.iter().map(String::as_str).collect::<Vec<_>>(),
         );
         assert_eq!(out.layout.file_rows.len(), 3);
@@ -5643,7 +5643,7 @@ mod tests {
         let names = labels(&borrowed);
         let short: Vec<&str> = names.iter().map(String::as_str).collect();
 
-        let dock = Dock::new();
+        let dock = a_dock_showing(View::Files);
         let out = render(&state, 1400.0, 900.0, &dock, &short);
         let shown = out.layout.file_rows.len();
         assert!(shown > 4, "only {shown} rows fit");
@@ -5690,7 +5690,7 @@ mod tests {
         let names = labels(&paths);
         let short: Vec<&str> = names.iter().map(String::as_str).collect();
         for (w, h) in [(680.0, 380.0), (900.0, 700.0), (2200.0, 1400.0)] {
-            let out = render(&state, w, h, &Dock::new(), &short);
+            let out = render(&state, w, h, &a_dock_showing(View::Files), &short);
             let (list, diff) = (out.layout.file_list, out.layout.file_diff);
             assert!(list.w > 1.0, "no list at {w}x{h}");
             assert!(
@@ -5720,15 +5720,15 @@ mod tests {
             &state,
             1400.0,
             900.0,
-            &Dock::new(),
+            &a_dock_showing(View::Files),
             &names.iter().map(String::as_str).collect::<Vec<_>>(),
         );
-        let space = Space::BottomRight;
+        let space = Space::TopLeft;
         assert_eq!(out.layout.content(space), out.layout.file_diff);
         // The other spaces are unchanged: their content is their whole body.
         assert_eq!(
-            out.layout.content(Space::TopLeft),
-            out.layout.placed(Space::TopLeft).body
+            out.layout.content(Space::TopRight),
+            out.layout.placed(Space::TopRight).body
         );
 
         let diff = out.layout.file_diff.inset(PAD);
@@ -5799,7 +5799,7 @@ mod tests {
             &state,
             1400.0,
             900.0,
-            &Dock::new(),
+            &a_dock_showing(View::Files),
             &names.iter().map(String::as_str).collect::<Vec<_>>(),
         );
         let body = out.layout.file_diff;
@@ -5913,7 +5913,7 @@ mod tests {
             selection
         };
 
-        let dock = Dock::new();
+        let dock = a_dock_showing(View::Files);
         let shape = shape(&dock, &files);
         let layout = Layout::compute(1400.0, 900.0, &shape);
         let skin = Skin::from(&Config::default());
@@ -6128,7 +6128,9 @@ mod tests {
     #[test]
     fn an_empty_left_column_hands_the_width_over() {
         let mut dock = Dock::new();
-        dock.move_view(View::Output, Space::TopRight);
+        for view in [View::Output, View::Activity, View::Files, View::Plan] {
+            dock.move_view(view, Space::TopRight);
+        }
         let out = render(&busy_state(), 1200.0, 800.0, &dock, &[]);
         assert_eq!(out.layout.placed(Space::TopLeft).strip.w, 0.0);
         let top = out.layout.placed(Space::TopRight);
@@ -6349,7 +6351,9 @@ mod tests {
     fn a_divider_beside_an_empty_or_folded_space_is_not_there() {
         // Nothing on the left: one column, so no divider between two of them.
         let mut dock = Dock::new();
-        dock.move_view(View::Output, Space::TopRight);
+        for view in [View::Output, View::Activity, View::Files, View::Plan] {
+            dock.move_view(view, Space::TopRight);
+        }
         let out = render(&busy_state(), 1200.0, 800.0, &dock, &[]);
         assert!(!out.layout.column_divider[0].live());
         assert!(out.layout.row_divider[1].live(), "the two right spaces are still there");
@@ -6358,7 +6362,8 @@ mod tests {
         // Nothing in the bottom right: one space in that column, so no divider
         // across it, and the vertical one is still there.
         let mut dock = Dock::new();
-        dock.move_view(View::Files, Space::TopRight);
+        dock.move_view(View::Agents, Space::TopRight);
+        dock.move_view(View::Plan, Space::TopLeft);
         let out = render(&busy_state(), 1200.0, 800.0, &dock, &[]);
         assert!(out.layout.column_divider[0].live());
         assert!(out.layout.row_divider.iter().all(|line| !line.live()));
@@ -6377,7 +6382,9 @@ mod tests {
         // And with no divider under it, the point that would have been on one
         // belongs to the pane again.
         let mut dock = Dock::new();
-        dock.move_view(View::Output, Space::TopRight);
+        for view in [View::Output, View::Activity, View::Files, View::Plan] {
+            dock.move_view(view, Space::TopRight);
+        }
         let out = render(&busy_state(), 1200.0, 800.0, &dock, &[]);
         let full = render(&busy_state(), 1200.0, 800.0, &Dock::new(), &[]);
         let band = full.layout.column_divider[0].band;
@@ -6962,11 +6969,16 @@ mod tests {
             }
         }
         // Under the line the band runs its full depth wherever no strip is in
-        // the way, which is any cell standing empty: the left column is one
-        // pane over both of its cells, so the whole band there is a pair.
+        // the way, which is a cell standing empty: every space holds a pane in
+        // the arrangement the window opens with, so the cell is emptied here.
+        let mut bare = Dock::new();
+        for view in bare.slot(Space::BottomLeft).views.clone() {
+            bare.move_view(view, Space::TopLeft);
+        }
+        let bare = Layout::compute(1400.0, 900.0, &shape(&bare, &[]));
         let x = cells[0].x + cells[0].w * 0.5;
         assert_eq!(
-            layout.landing(x, line_y + SPAN_BAND),
+            bare.landing(x, line_y + SPAN_BAND),
             Landing::Span(Space::TopLeft, Space::BottomLeft),
         );
 
@@ -7107,27 +7119,24 @@ mod tests {
         );
 
         // A cell whose neighbour is left empty by the drop: the pane covers
-        // both, so the box says both. The conversation dropped back into the
-        // cell it is already in leaves the cell under it empty, and it keeps the
-        // whole column.
-        let (rect, grid) = boxed_view(View::Output, Landing::In(Space::TopLeft, None));
+        // both, so the box says both. The plan dropped into the conversation's
+        // cell leaves the cell under it empty, and the pane keeps the whole
+        // column.
+        let (rect, grid) = boxed_view(View::Plan, Landing::In(Space::TopLeft, None));
         assert_eq!(
             rect,
             want(&[Space::TopLeft, Space::BottomLeft], grid),
             "the pane still spans the column it is alone in"
         );
-        // And the same drop one cell down moves it there, where it still has
-        // the column to itself.
+        // A pane that leaves something behind it is what keeps the two cells
+        // apart: the conversation dropped into the cell under it leaves its own
+        // cell occupied, so the box is one cell.
         let (rect, grid) = boxed_view(View::Output, Landing::In(Space::BottomLeft, None));
         assert_eq!(
             rect,
-            want(&[Space::TopLeft, Space::BottomLeft], grid),
-            "nothing is left above it, so it still spans"
+            want(&[Space::BottomLeft], grid),
+            "the cell it came from still holds panes"
         );
-        // A second pane in that column is what takes the span apart, and then
-        // the box is one cell.
-        let (rect, grid) = boxed(Landing::In(Space::BottomLeft, None));
-        assert_eq!(rect, want(&[Space::BottomLeft], grid), "beside the conversation");
     }
 
     /// Item 7's other half: the tab in the air over the outside of the window
@@ -7396,7 +7405,7 @@ mod tests {
     #[test]
     fn a_pane_is_drawn_in_the_columns_its_selection_is_counted_in() {
         let mut state = busy_state();
-        let dock = Dock::new();
+        let dock = a_dock_showing(View::Activity);
         let space = Space::ALL
             .into_iter()
             .find(|space| dock.slot(*space).active() == Some(View::Activity))
@@ -7536,7 +7545,7 @@ mod tests {
             },
             Some(9.0),
         );
-        let out = render(&state, 1400.0, 900.0, &Dock::new(), &[]);
+        let out = render(&state, 1400.0, 900.0, &a_dock_showing(View::Activity), &[]);
         let text = out
             .scene
             .texts
@@ -7888,7 +7897,7 @@ mod tests {
     #[test]
     fn the_conversation_stays_visible_whatever_the_other_space_shows() {
         let state = busy_state();
-        for view in [View::Activity, View::Plan, View::Agents] {
+        for view in [View::Hardware, View::Context, View::Agents] {
             let mut dock = Dock::new();
             dock.reveal(view);
             let text = text_of(&render(&state, 1400.0, 900.0, &dock, &["calc.py"]).scene);
@@ -7899,13 +7908,13 @@ mod tests {
 
     #[test]
     fn a_changed_file_is_marked_in_its_tab() {
-        let text = text_of(&render(&busy_state(), 1400.0, 900.0, &Dock::new(), &["calc.py"]).scene);
+        let text = text_of(&render(&busy_state(), 1400.0, 900.0, &a_dock_showing(View::Files), &["calc.py"]).scene);
         assert!(text.contains("calc.py \u{2022}"), "{text}");
     }
 
     #[test]
     fn the_file_strip_says_so_when_there_are_no_files() {
-        let text = text_of(&render(&State::new(), 1200.0, 800.0, &Dock::new(), &[]).scene);
+        let text = text_of(&render(&State::new(), 1200.0, 800.0, &a_dock_showing(View::Files), &[]).scene);
         assert!(text.contains("no files touched yet"), "{text}");
     }
 
@@ -7924,7 +7933,7 @@ mod tests {
             after: "x = \"hello\"  # a note".into(),
             call_id: None,
         });
-        let out = render(&state, 1400.0, 900.0, &Dock::new(), &["calc.py"]);
+        let out = render(&state, 1400.0, 900.0, &a_dock_showing(View::Files), &["calc.py"]);
         let colors: Vec<Option<[u8; 4]>> = out
             .scene
             .texts
@@ -8647,7 +8656,7 @@ mod tests {
             (View::Plan, 1400.0, 900.0, "step 39"),
             (View::Agents, 1400.0, 900.0, "child 23 is reading"),
             // The monitor pane is five readings in a box that holds fewer.
-            (View::Session, 900.0, 330.0, "DECODE"),
+            (View::Session, 900.0, 260.0, "DECODE"),
         ] {
             let state = crowded_state();
             let mut scrolls = crate::scroll::Scrolls::default();
@@ -9331,7 +9340,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert_eq!(checked, 3, "only {checked} spaces had a showing tab");
+        assert_eq!(checked, 4, "only {checked} spaces had a showing tab");
     }
 
     /// The cut corner, on the fill and on the border alike. A square fill under
@@ -9646,13 +9655,12 @@ mod tests {
     /// says so.
     #[test]
     fn tabs_that_do_not_fit_are_dropped_not_squeezed() {
-        let mut dock = Dock::new();
         // Every view but one in the left space, which is more than its strip can
         // hold. The one left behind keeps the space split, so the strip is the
         // width it usually is rather than the whole window.
-        for view in View::ALL.into_iter().filter(|v| *v != View::Files) {
-            dock.move_view(view, Space::TopLeft);
-        }
+        let mut dock = a_crowded_dock(Space::TopLeft);
+        dock.move_view(View::Files, Space::TopRight);
+        dock.move_view(View::Output, Space::TopLeft);
         let out = render(&busy_state(), 900.0, 700.0, &dock, &["calc.py"]);
         let placed = out.layout.placed(Space::TopLeft);
         let tabs = &placed.tabs;
@@ -9782,11 +9790,11 @@ mod tests {
     /// strip where it was scrolled to.
     #[test]
     fn narrowing_the_window_puts_the_tabs_behind_arrows_rather_than_losing_them() {
-        let mut dock = Dock::new();
+        let mut dock = a_crowded_dock(Space::TopRight);
         let all = dock.slot(Space::TopRight).views.len();
         let roomy = Layout::compute(1400.0, 900.0, &shape(&dock, &[]));
         let placed = roomy.placed(Space::TopRight);
-        assert_eq!(placed.tabs.len(), all, "six tabs fit in a wide window");
+        assert_eq!(placed.tabs.len(), all, "every tab fits in a wide window");
         assert_eq!(placed.arrow_left.w, 0.0, "arrows on a strip that fits");
 
         // At the smallest the window goes, most of them are off the edge.
@@ -9922,7 +9930,7 @@ mod tests {
     /// answers, and a click on one would land in the pane's body instead.
     #[test]
     fn an_arrow_is_hit_tested_in_the_strip_beside_the_tabs() {
-        let dock = Dock::new();
+        let dock = a_crowded_dock(Space::TopRight);
         let layout = Layout::compute(680.0, 380.0, &shape(&dock, &[]));
         let placed = layout.placed(Space::TopRight);
         for (panel, hit) in [
@@ -9959,7 +9967,7 @@ mod tests {
     /// direction with nowhere left to go is dimmed rather than taken away.
     #[test]
     fn the_arrows_are_drawn_and_the_spent_one_is_dimmed() {
-        let mut dock = Dock::new();
+        let mut dock = a_crowded_dock(Space::TopRight);
         let out = render(&busy_state(), 680.0, 380.0, &dock, &[]);
         let arrows: Vec<&Run> = out
             .scene
@@ -11266,7 +11274,7 @@ mod tests {
         let full = Layout::compute(1400.0, 900.0, &shape(&Dock::new(), &[]));
         let mut dock = Dock::new();
         // The bottom right space's only tab.
-        assert!(dock.hide(View::Files));
+        assert!(dock.hide(View::Agents));
         let out = render(&busy_state(), 1400.0, 900.0, &dock, &[]);
 
         assert_eq!(out.layout.placed(Space::BottomRight).body.h, 0.0);
@@ -12088,12 +12096,11 @@ mod tests {
         // rectangle of this colour anywhere in the region would be the fill the
         // glyph used to be.
         assert_eq!(box_.extra()[3], 1.0, "the box is not a hairline");
-        assert_eq!(box_.rgba(), out.skin.mark_edge, "the box is not green");
-        assert!(
-            out.skin.mark_edge[1] > out.skin.mark_edge[0]
-                && out.skin.mark_edge[1] > out.skin.mark_edge[2],
-            "{:?} is not green",
-            out.skin.mark_edge
+        assert_eq!(box_.rgba(), out.skin.mark_edge, "the box is not the accent");
+        assert_eq!(
+            out.skin.mark_edge,
+            out.skin.picked,
+            "the folder mark is not the colour the window picks with"
         );
         let filled = out
             .scene
@@ -12813,6 +12820,36 @@ mod tests {
     /// The panel with one section chosen, which is what a press on the rail or
     /// a Tab leaves behind. The keyboard is on the rows of it either way: no
     /// arrow key touches the rail.
+    /// The arrangement the window opens with, with one view's tab brought to
+    /// the front of the space it lives in: FILES and ACTIVITY are tabs of the
+    /// conversation's own space now, so a test about either has to show it the
+    /// way a press on its tab would.
+    /// Every view in one space, for the tests about a strip with more tabs
+    /// than it can draw. The arrangement the window opens with gives each
+    /// space a few, which is not a strip that overflows.
+    fn a_crowded_dock(space: Space) -> Dock {
+        let mut dock = Dock::new();
+        for view in View::ALL {
+            // The conversation stays where it is, so the grid keeps its
+            // columns: a window with one space in it gives that space the whole
+            // width, and a strip that wide fits every tab there is.
+            if view != View::Output && dock.space_of(view).is_some() {
+                dock.move_view(view, space);
+            }
+        }
+        dock.slot_mut(space).show_at(0);
+        dock
+    }
+
+    fn a_dock_showing(view: crate::dock::View) -> Dock {
+        let mut dock = Dock::new();
+        let space = dock
+            .space_of(view)
+            .unwrap_or_else(|| panic!("{view:?} is not in the arrangement"));
+        dock.slot_mut(space).show(view);
+        dock
+    }
+
     fn a_panel_on(config: &Config, section: &str) -> Settings {
         let mut panel = a_settings_panel(config);
         let at = panel
@@ -13472,21 +13509,28 @@ mod tests {
         let (list, doc) = (layout.settings_list, layout.settings_doc);
         assert!(doc.w >= 1.0, "there is no second column");
         assert!(
-            list.x + list.w <= doc.x,
-            "the two columns overlap: {list:?} and {doc:?}"
+            doc.x + doc.w <= list.x + list.w + 0.01,
+            "the document runs off the list: {doc:?} in {list:?}"
         );
-        assert!(
-            doc.x + doc.w <= layout.settings.x + layout.settings.w,
-            "the document runs off the panel"
-        );
-        // Every row of the list is in the left column, so a press in the
-        // document cannot land on a skill.
+        // The document stands beside the rows it belongs to and over nothing
+        // else: the install form above the table keeps the whole width, and no
+        // row runs into the document's column.
+        let mut wide = 0;
         for (index, _, row) in &layout.settings_rows {
-            assert!(
-                row.x + row.w <= doc.x,
-                "row {index} runs into the document: {row:?}"
-            );
+            let inside = row.y + row.h > doc.y && row.y < doc.y + doc.h;
+            match inside {
+                true => assert!(
+                    row.x + row.w <= doc.x + 0.01,
+                    "row {index} runs into the document: {row:?}"
+                ),
+                false => {
+                    wide += usize::from(
+                        (row.w - settings_list_rows(list).w).abs() < 1.01,
+                    );
+                }
+            }
         }
+        assert!(wide > 0, "no row above the table keeps the whole width");
         // The text of the document is its own region, because there is a
         // selection to begin there. This asserted `Hit::Settings` for as long as
         // the whole panel body was one swallowed press, and the region is what
@@ -13528,7 +13572,18 @@ mod tests {
             None,
         );
         assert!(plain.layout.settings_doc.w < 1.0, "APPEARANCE grew a column");
-        assert!(plain.layout.settings_list.w > list.w, "the list did not split");
+        // The list itself is the same width on both: what narrows is the row
+        // the document stands beside, not the column the rows are drawn in.
+        assert!(
+            (plain.layout.settings_list.w - list.w).abs() < 0.01,
+            "the list changed width for a section with a document"
+        );
+        let widest = layout
+            .settings_rows
+            .iter()
+            .map(|(_, _, row)| row.w)
+            .fold(0.0_f32, f32::max);
+        assert!(widest > doc.x - list.x, "no row is wider than the document's column");
     }
 
     /// A window too narrow to hold both columns is one column: the entries win,
@@ -14228,7 +14283,7 @@ mod tests {
         // the three, and the one that used to look exactly like the other two.
         let wrapped = crate::settings::about_rows(
             A_LONG_ABOUT,
-            design::card_cols(out.layout.settings_entry_columns(PANE_TEXT.1)),
+            design::card_cols(settings_entry_cols(row.w, PANE_TEXT.1)),
         );
         let under = out
             .scene
@@ -14403,12 +14458,12 @@ mod tests {
         let panel = a_wrapping_skills_panel();
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let line = Text::line_for(PANE_TEXT.0);
-        let cols = design::card_cols(out.layout.settings_entry_columns(PANE_TEXT.1));
+        let (_, row) = the_entry_rows(&out, &panel)[0];
+        let cols = design::card_cols(settings_entry_cols(row.w, PANE_TEXT.1));
         assert!(
             A_WRAPPING_ABOUT.chars().count() > cols,
             "the description fits in {cols} columns, so this proves nothing"
         );
-        let (_, row) = the_entry_rows(&out, &panel)[0];
         let (_, parts) = the_card(&out, row, true);
         let drawn = out
             .scene
@@ -14449,7 +14504,7 @@ mod tests {
                         Some(crate::settings::Row::Entry(entry)) => entry,
                         other => panic!("{other:?}"),
                     },
-                    out.layout.settings_entry_columns(PANE_TEXT.1)
+                    settings_entry_cols(row.w, PANE_TEXT.1)
                 ),
                 true
             ) as f32
@@ -14464,9 +14519,9 @@ mod tests {
         let panel = a_wrapping_skills_panel();
         let out = render_settings(&panel, 1400.0, 900.0, None);
         let line = Text::line_for(PANE_TEXT.0);
-        let cols = design::card_cols(out.layout.settings_entry_columns(PANE_TEXT.1));
-        let wrapped = crate::settings::about_rows(A_WRAPPING_ABOUT, cols);
         let rows = the_entry_rows(&out, &panel);
+        let cols = design::card_cols(settings_entry_cols(rows[0].1.w, PANE_TEXT.1));
+        let wrapped = crate::settings::about_rows(A_WRAPPING_ABOUT, cols);
         assert_eq!(rows.len(), 2, "two servers are two cards");
         let ((_, first), (_, second)) = (rows[0], rows[1]);
         assert!(
@@ -14816,7 +14871,7 @@ mod tests {
         assert!(inside.y >= parts.rule.y + design::room(line) - 0.01);
         assert!(inside.x + inside.w <= box_.x + box_.w + 0.01);
         assert!(inside.y + inside.h <= box_.y + box_.h - design::room(line) + 0.01);
-        assert!(inside.x >= layout.settings_list.x + layout.settings_list.w);
+        assert!(inside.x > layout.settings_list.x);
 
         // The text wraps at the columns the box holds, by the same rule the
         // panes wrap at, and the long line is written whole.

@@ -1134,6 +1134,48 @@ pub fn stands_beside(rows: &[Row], at: usize) -> bool {
     )
 }
 
+/// Whether a row is one the column beside the list belongs to: an entry, or a
+/// table whose rows carry a document of their own.
+///
+/// Those rows are the ones that stand narrow, with the document beside them.
+/// Everything else on the section keeps the whole width: an install form
+/// squeezed into half a panel because the list under it has a document is a
+/// form nobody can read.
+pub fn shows_doc(row: &Row) -> bool {
+    match row {
+        Row::Entry(_) => true,
+        Row::Table(table) => table.rows.iter().any(|row| !row.doc.is_empty()),
+        _ => false,
+    }
+}
+
+/// The columns such a row keeps, out of the `cols` the list has: its share,
+/// held to what either side needs to be readable, and all of them when the
+/// panel is too narrow to split at all.
+pub fn beside_doc_cols(cols: usize) -> usize {
+    let least = places::SETTING_ENTRY_MIN_COLUMNS;
+    match cols.checked_sub(places::SETTING_DOC_MIN_COLUMNS) {
+        Some(most) if most >= least => {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let want = (cols as f32 * places::SETTING_ENTRY_SHARE) as usize;
+            want.clamp(least, most)
+        }
+        _ => cols,
+    }
+}
+
+/// How wide a row is, in columns: the whole list, half of it for one of a pair,
+/// or its share for a row the document stands beside.
+pub fn row_cols(rows: &[Row], at: usize, cols: usize) -> usize {
+    if stands_beside(rows, at) || (at > 0 && stands_beside(rows, at - 1)) {
+        return half_cols(cols);
+    }
+    match rows.get(at) {
+        Some(row) if shows_doc(row) => beside_doc_cols(cols),
+        _ => cols,
+    }
+}
+
 /// How tall the band a row stands in is, in lines: its own height, or, for two
 /// cards side by side, the taller of the pair measured in half the columns.
 ///
@@ -1148,7 +1190,7 @@ pub fn band_lines(rows: &[Row], at: usize, cols: usize) -> usize {
         Some(row) => match (stands_beside(rows, at), at > 0 && stands_beside(rows, at - 1)) {
             (true, _) => pair(at),
             (_, true) => pair(at - 1),
-            _ => lines(row, cols),
+            _ => lines(row, row_cols(rows, at, cols)),
         },
     }
 }
