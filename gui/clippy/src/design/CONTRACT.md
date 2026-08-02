@@ -1,6 +1,6 @@
 # design
 
-contractVersion: 1.0.0
+contractVersion: 1.1.0
 
 ## Purpose
 
@@ -15,6 +15,13 @@ pub const TIGHT/STEP/ROOM/APART: f32;      // the four gaps, in line units
 pub fn tight/step/room/apart(line: f32) -> f32;
 pub const PANEL_TITLE/CARD_TITLE/LABEL/VALUE/HINT: f32;   // the type scale
 pub fn panel_title_size(...) and friends;  // scale times the base size
+pub fn mark_height/mark_top(...);          // the mark beside a chosen row:
+                                           // the height of the word, not of
+                                           // the row box around it
+pub const GROUP_LINES: f32;                // the room a second titled group
+                                           // inside one card takes
+pub fn field_slots(hints, across, group);  // where a card's fields sit
+pub fn fields_lines(hints, across, group); // how tall they come to
 pub mod icons;                             // named codepoints in the
                                            // embedded symbol font
 ```

@@ -1,6 +1,6 @@
 # settings
 
-contractVersion: 2.6.0
+contractVersion: 3.0.0
 
 ## Purpose
 
@@ -45,19 +45,32 @@ pub struct Settings;             // the panel state machine: rows per
                                  // is uncovered, and the Change/Deed a commit
                                  // writes. Embeds the section boxes' state
                                  // and delegates
-pub enum Row;  pub enum Side;  pub enum Doing;   // what a row is, which
-                                 // half is active, what a button does
+pub enum Row;  pub enum Side;  pub enum Doing;   // what a row is, which of
+                                 // a card's four slots is active, what a
+                                 // button does
+pub enum TableOf;                // which list a table is: the conversations,
+                                 // or the installed skills
+pub struct Shown<'a>;            // what the column beside a list shows: the
+                                 // title over it and the document under it
 pub mod places;                  // SettingsPlaces: every rectangle on the
                                  // panel from one Panel + Shape + &Settings
 pub mod paint;                   // settings_panel(scene, frame)
 ```
 
 Section vocabulary the rest of the window reads keeps its `settings::` path
-by re-export: `SESSION_COLUMNS` and the table constants, `SKILL_SOURCE`,
-`SERVER_NAME`, `SERVER_HOW`, `restoring`. The two settings tables and the
-preset key (`LOOKS`, `AGENT_SETTINGS`, `THEME`) are re-exported crate-wide
-for the command registry, whose bounds are the panel's own. An `Entry` can
-be `Which::Fixed`: only read, no toggle, no uninstall, no deed.
+by re-export: the table constants, `SKILL_SOURCE`, `SERVER_NAME`,
+`SERVER_HOW`, `restoring`. The two settings tables and the preset key
+(`LOOKS`, `AGENT_SETTINGS`, `THEME`) are re-exported crate-wide for the
+command registry, whose bounds are the panel's own. An `Entry` can be
+`Which::Fixed`: only read, no toggle, no uninstall, no deed.
+
+A `Card` carries up to four settings, two to a band; `Side` names which one a
+press or a key is on, and the shifted arrows walk them. `Card::beside` puts a
+card and the one after it side by side in one band, each measured and drawn in
+half the list's columns (`half_cols`, `settings_card_halves`) and both as tall
+as the taller of the two (`band_lines`). `Card::group` puts a second titled
+group inside one card: a rule across the body and that title over the field it
+names.
 
 ## Invariants
 
@@ -93,7 +106,12 @@ be `Which::Fixed`: only read, no toggle, no uninstall, no deed.
    nothing on a disk, so they are answered in the window (a `noob doctor`
    run for the first, the reveal flag for the second) rather than as a
    Change or a Deed.
-10. A prompt document is edited behind its enable-edition checkbox: ticking
+10. A `Table` is one card holding a list: its columns, its rows, its own
+   cursor and scroll, and the buttons under it. The conversations are marked
+   and deleted in a batch; the skills are not marked, and the two buttons act
+   on the row the keys are on. A row can carry a document, which is what the
+   column beside the table shows.
+11. A prompt document is edited behind its enable-edition checkbox: ticking
    it opens the editor on the file's text (the shipped default when there is
    none), the block shows the buffer with a caret while it is open, nothing
    lands until Ctrl-S or the save button writes the whole file through the
@@ -101,7 +119,8 @@ be `Which::Fixed`: only read, no toggle, no uninstall, no deed.
    parks the file in the `.bak` beside it and writes the shipped default,
    armed on the first press; the load reads a named `.md` into the editor
    and writes nothing. A failed write keeps the buffer, with the reason on
-   the footer.
+   the footer. Only AGENTS.md is edited here: TOOLS.md is read out and
+   changed in the file itself.
 
 ## Dependencies
 

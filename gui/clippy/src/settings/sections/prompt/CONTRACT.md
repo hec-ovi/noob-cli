@@ -1,15 +1,14 @@
 # settings/sections/prompt
 
-contractVersion: 2.0.0
+contractVersion: 3.0.0
 
 ## Purpose
 
 The SYSTEM PROMPT section of the settings panel: the prompt as the three
-layers the CLI assembles it from, stacked in order. AGENTS.md and TOOLS.md
-are documents edited in place behind an enable-edition checkbox, each with
-its shipped default shown honestly when the file is absent; the environment
-block is what `noob debug env` printed, read and never edited; a line under
-them names the assembly order.
+layers the CLI assembles it from, stacked in order. AGENTS.md is edited in
+place behind an enable-edition checkbox; TOOLS.md and the environment block
+are read out; each shows its shipped default when the file is absent, and a
+line under them names the assembly order.
 
 ## Public surface
 
@@ -26,9 +25,8 @@ pub enum PromptFile;             // Agents | Tools: which file a row or the
                                  // open editor is about
 pub fn PromptSection::rows(&self, agent: &Agent, env: &EnvBlock) -> Vec<Row>
                                  // the three blocks in assembly order, then
-                                 // the note naming that order. Each file
-                                 // block carries PaperActs (the footer);
-                                 // only AGENTS.md offers the load
+                                 // the note naming that order. Only the
+                                 // AGENTS.md block carries a footer
 pub fn PromptSection::editing(&self) -> bool
 ```
 
@@ -47,13 +45,13 @@ business and not the section's.
 3. Edition gates the editor: typing does nothing until the checkbox is
    ticked, ticking opens the buffer on the file's text (the default when
    there is none), and Escape or unticking drops the buffer with the file
-   untouched. One editor at a time; ticking one file drops the other's.
-   Every button the block has stands in its footer either way, drawn dim
-   and doing nothing while edition is off.
-4. Each block saves its own file whole; a file past the CLI's 16 KiB cap
-   refuses edition, since saving the capped text would lose the tail.
-5. TOOLS.md says on the block itself what editing it costs: it is what the
-   model knows its tools from.
+   untouched. Every button the block has stands in its footer either way,
+   drawn dim and doing nothing while edition is off.
+4. The block saves its file whole; a file past the CLI's 16 KiB cap refuses
+   edition, since saving the capped text would lose the tail.
+5. TOOLS.md is read out here and changed in the file itself: it is what the
+   model knows its tools from, so it carries no editor at all, and its title
+   and the clause under it say so.
 6. The environment block never offers edition: it is computed by the CLI
    for each request, and its `under` line says so.
 7. No config directory is said as trouble, never offered and never edited.
@@ -63,14 +61,14 @@ business and not the section's.
 
 ## Dependencies
 
-The settings box's shared vocabulary (Row, Paper, PaperActs, EnvBlock,
-PAPER_LINES); the agent-files box (`crate::agent`) for the two `Instructions`
+The settings box's shared vocabulary (Row, Paper, EnvBlock, PAPER_LINES); the agent-files box (`crate::agent`) for the two `Instructions`
 snapshots, the shipped defaults, and the whole-file writes.
 
 ## Tests
 
 Inline: the three blocks in order with the env answer and its failure, the
-default shown and owned by saving, the edition gate, the two independent
-saves, the armed restore with its bak, the load into the editor, the
+default shown and owned by saving, the edition gate, the one editor with the
+read-out block beside it, the armed restore with its bak, the load into the
+editor, the
 read-only environment, the caret-following scroll, and the refused write
 with the cap (9 tests), driven through the frame's `Settings`.

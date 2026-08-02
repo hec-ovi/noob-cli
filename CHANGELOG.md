@@ -9,8 +9,7 @@ tags rather than here; this file starts where it was added.
   window writes its commands at the version the agent's first frame
   announced, so a prompt reaches an agent one release behind instead of
   being dropped by its reader without a word; a command typed before that
-  first frame waits for it. The window says which release each half is on
-  when they differ, and an agent ahead of the window says so too.
+  first frame waits for it.
 - A prompt that starts no turn within ten seconds is said out loud in the
   transcript, and the orb stops turning over a conversation that has
   stopped.
@@ -26,22 +25,41 @@ tags rather than here; this file starts where it was added.
 - The endpoint has a way back: one button under the connection card writes
   `http://localhost:8080/v1`, llama.cpp's own port and the first address the
   CLI probes when nothing is set.
-- A slider's number stands four columns clear of the end of its track.
-- A prompt document keeps its load, restore and save in the footer whether
+- A slider's number stands four columns clear of the end of its track,
+  inside a card as well as on a row.
+- The AGENTS.md block keeps its load, restore and save in the footer whether
   or not edition is on, dim while it is off; the enable-edition checkbox no
-  longer fills in under the pointer; the load opens on the folder the
-  document lives in and shows the path being typed where the document's own
-  path is; and TOOLS.md says on the block what editing it costs.
+  longer fills in under the pointer; and the load opens on the folder the
+  document lives in, showing the path being typed where the document's own
+  path is.
 - The prompt's document blocks are text you can drag over and copy, the way
   every other body of text in the window is.
 - Pressing load opens a real input on the block: the box, the outline and
   the caret every other typed value on the panel has, on the folder the
   document lives in.
-- TOOLS.md wears an asterisk in its title and one clause under it.
-- The line beside the rail stops at the last section name instead of running
-  the height of the window.
+- TOOLS.md is read out here and edited in the file itself: it wears an
+  asterisk in its title, one clause under it saying why, and no editor. It is
+  still text a drag can copy out of.
 - Installing a skill is the form at the top of its section, with the
-  installed list under it.
+  installed list under it as a table of four columns: the name, whether the
+  agent loads it, where it is and what it is for. The row under the keys is
+  written out in the column beside it, and the two buttons under the table
+  turn that one off or uninstall it.
+- The web search the CLI ships with is a row of that table, on when the
+  `websearch` program is on PATH, with what to run when it is not beside it.
+- The address a skill is installed from is drawn as a link: the chain, the
+  address and a dotted rule, rather than an input box.
+- The two short cards under the connection stand side by side, and so do the
+  model and the settings file: four cards, two rows.
+- The fleet is one card: MULTI-AGENT, a rule across it, and MULTI-AGENT
+  BUDGETS under that. A card holds up to four settings now, and the shifted
+  arrows walk all of them.
+- The mark beside the section the rail is on is the height of the word it
+  marks, and the line down the rail runs the full height of the panel.
+- The two backgrounds and the two transparencies carry the same two names:
+  the main background and the widget windows. A swatch lights its own block
+  of colour under the pointer rather than the whole row.
+- The restore under a prompt document is red only while it can act.
 - The colour of the base application and the colour of the widget windows
   are swatches on the APPEARANCE section beside the two transparencies that
   move the same two surfaces.

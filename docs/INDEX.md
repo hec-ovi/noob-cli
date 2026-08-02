@@ -143,12 +143,13 @@ Boxes so far:
   - [`settings/sections/agent`](../gui/clippy/src/settings/sections/agent/CONTRACT.md) -
     the CLI's file as cards.
   - [`settings/sections/prompt`](../gui/clippy/src/settings/sections/prompt/CONTRACT.md) -
-    the prompt's three layers: AGENTS.md and TOOLS.md edited behind an
-    edition checkbox, the environment block read out.
+    the prompt's three layers: AGENTS.md edited behind an edition checkbox,
+    TOOLS.md and the environment block read out.
   - [`settings/sections/sessions`](../gui/clippy/src/settings/sections/sessions/CONTRACT.md) -
     the saved conversations table, its columns and cells.
   - [`settings/sections/skills`](../gui/clippy/src/settings/sections/skills/CONTRACT.md) -
-    the installed list and the validate-then-install cycle.
+    the installed table, the shipped web search on it, and the
+    validate-then-install cycle.
   - [`settings/sections/mcp`](../gui/clippy/src/settings/sections/mcp/CONTRACT.md) -
     the configured servers and the add-a-server card.
   - [`settings/sections/appearance`](../gui/clippy/src/settings/sections/appearance/CONTRACT.md) -

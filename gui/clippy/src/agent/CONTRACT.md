@@ -1,6 +1,6 @@
 # agent-files
 
-contractVersion: 1.2.0
+contractVersion: 1.3.0
 
 ## Purpose
 
@@ -39,6 +39,11 @@ pub fn bak_path(path: &Path) -> PathBuf;  // that .bak's name
 pub fn load_md(path: &Path) -> Result<Vec<String>, String>;
                                           // a named .md as editor lines,
                                           // refused past the cap; no writes
+pub const WEBSEARCH_PROGRAM/WEBSEARCH_OVERRIDE: &str;
+pub fn websearch_on() -> bool;            // whether the CLI would register
+                                          // its websearch tool: the program
+                                          // on PATH, or what the override
+                                          // names (which can turn it off)
 // plus the read/toggle/remove operations the settings panel calls
 ```
 
@@ -51,6 +56,8 @@ pub fn load_md(path: &Path) -> Result<Vec<String>, String>;
    deliberately separate (the two rules must be free to differ).
 3. Toggling a skill or server is an on-disk rename to the `.off`/
    `disabled` convention, reversible, never a deletion.
+4. `websearch_on` reads the same two things the CLI reads and nothing else,
+   so the panel's row cannot claim a tool the agent does not have.
 
 ## Dependencies
 

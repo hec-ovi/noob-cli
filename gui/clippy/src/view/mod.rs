@@ -14090,15 +14090,13 @@ mod tests {
         "reads the file before it writes one, and says which file it read";
     const A_LONG_DOC_LINE: &str = "the whole point of a column beside the list is that a sentence written in it can be read all the way to the end of itself rather than stopping in three dots";
 
-    /// The skills section with one skill whose description and whose document
-    /// are both longer than the room they are given.
-
-    /// A panel on the section whose rows are entries, with a description long
-    /// enough to wrap and a document beside it: the configured MCP servers.
+    /// An agent with the servers a section of entries is asserted on: one with
+    /// a description long enough to wrap and a document beside it, and one that
+    /// is turned off.
     ///
-    /// The entries of the panel are the servers. The skills are a table now,
-    /// and every rule about an entry (its card, its two buttons, the column
-    /// beside it) is asserted here, on the list that has them.
+    /// The entries of the panel are the servers. The skills are a table, and
+    /// every rule about an entry (its card, its two buttons, the column beside
+    /// it) is asserted here, on the list that has them.
     fn an_agent_with_servers() -> crate::agent::Agent {
         let mut agent = an_agent();
         agent.mcp = crate::agent::Mcp {
@@ -14179,7 +14177,7 @@ mod tests {
     /// Where the card drawn in a row has its title, its divider, its body and
     /// its footer, worked out through the same two functions the placement and
     /// the drawing go through.
-    fn the_card(out: &Rendered, row: Panel, footer: bool) -> (Panel, CardParts) {
+    fn the_card(_out: &Rendered, row: Panel, footer: bool) -> (Panel, CardParts) {
         let line = Text::line_for(PANE_TEXT.0);
         // The row's own width, which is half the list for a card standing
         // beside another one, and the whole of it otherwise.
