@@ -671,3 +671,18 @@ pub(crate) fn option_name(side: crate::settings::Side, option: usize) -> &'stati
         _ => "custom",
     }
 }
+
+/// space a few, which is not a strip that overflows.
+pub(crate) fn a_crowded_dock(space: Space) -> Dock {
+    let mut dock = Dock::new();
+    for view in View::ALL {
+        // The conversation stays where it is, so the grid keeps its
+        // columns: a window with one space in it gives that space the whole
+        // width, and a strip that wide fits every tab there is.
+        if view != View::Output && dock.space_of(view).is_some() {
+            dock.move_view(view, space);
+        }
+    }
+    dock.slot_mut(space).show_at(0);
+    dock
+}

@@ -327,6 +327,17 @@ impl SkillsSection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::settings::testkit::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::view::testkit::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::settings::places::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::view::*;
+    
+    use crate::settings::Act;
+    
     use crate::agent;
     use crate::config::Config;
     use crate::settings::testing::*;
@@ -758,5 +769,138 @@ mod tests {
         assert!(panel.step(true) || panel.arming().is_none());
         assert_eq!(panel.arming(), None, "a key left it armed");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The skills section is two columns: the entries down the left, and the
+    /// `SKILL.md` of the one under the cursor beside them, rendered rather than
+    /// printed with its marks in.
+    #[test]
+    fn the_skills_section_puts_the_skill_beside_the_list() {
+        let mut panel = a_panel_on(&Config::default(), crate::settings::SKILLS);
+        on_the_installed_skill(&mut panel);
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let layout = &out.layout;
+        let (list, doc) = (layout.settings_list, layout.settings_doc);
+        assert!(doc.w >= 1.0, "there is no second column");
+        assert!(
+            doc.x + doc.w <= list.x + list.w + 0.01,
+            "the document runs off the list: {doc:?} in {list:?}"
+        );
+        // The document stands beside the rows it belongs to and over nothing
+        // else: the install form above the table keeps the whole width, and no
+        // row runs into the document's column.
+        let mut wide = 0;
+        for (index, _, row) in &layout.settings_rows {
+            let inside = row.y + row.h > doc.y && row.y < doc.y + doc.h;
+            match inside {
+                true => assert!(
+                    row.x + row.w <= doc.x + 0.01,
+                    "row {index} runs into the document: {row:?}"
+                ),
+                false => {
+                    wide += usize::from(
+                        (row.w - settings_list_rows(list).w).abs() < 1.01,
+                    );
+                }
+            }
+        }
+        assert!(wide > 0, "no row above the table keeps the whole width");
+        // The text of the document is its own region, because there is a
+        // selection to begin there. This asserted `Hit::Settings` for as long as
+        // the whole panel body was one swallowed press, and the region is what
+        // changed rather than the geometry around it: the title line over the
+        // box and the border around it are still panel.
+        let (x, y) = middle(doc);
+        assert_eq!(layout.hit(x, y), Some(Hit::SettingsDoc), "{doc:?}");
+        let text = layout.settings_doc_text;
+        assert!(text.w >= 1.0 && text.contains(x, y), "{text:?}");
+        assert_eq!(
+            layout.hit(doc.x + PAD, doc.y + 1.0),
+            Some(Hit::Settings),
+            "the title over the box is not text to select"
+        );
+
+        // What is drawn: the row on the left, the document on the right, and
+        // no Markdown marks in it.
+        let text = text_of(&out.scene);
+        assert!(text.contains("coding"), "{text}");
+        assert!(
+            text.contains("https://github.com/someone/cod"),
+            "the row does not say where the skill came from: {text}"
+        );
+        assert!(
+            text.contains("Read the file before writing it."),
+            "the skill's own document is not beside the list: {text}"
+        );
+        assert!(
+            !text.contains("# Changing code"),
+            "the document is printed rather than rendered: {text}"
+        );
+
+        // A section with no entries is one column, so the settings keep the
+        // whole width they had.
+        let plain = render_settings(
+            &a_panel_on(&Config::default(), crate::settings::APPEARANCE),
+            1400.0,
+            900.0,
+            None,
+        );
+        assert!(plain.layout.settings_doc.w < 1.0, "APPEARANCE grew a column");
+        // The list itself is the same width on both: what narrows is the row
+        // the document stands beside, not the column the rows are drawn in.
+        assert!(
+            (plain.layout.settings_list.w - list.w).abs() < 0.01,
+            "the list changed width for a section with a document"
+        );
+        let widest = layout
+            .settings_rows
+            .iter()
+            .map(|(_, _, row)| row.w)
+            .fold(0.0_f32, f32::max);
+        assert!(widest > doc.x - list.x, "no row is wider than the document's column");
+    }
+    /// The install card's button: filled, in its own footer, at the bottom
+    /// right of the card, and pressed where it is drawn.
+    #[test]
+    fn the_install_button_is_filled_and_stands_in_the_card_s_footer() {
+        let panel = a_panel_on(&Config::default(), crate::settings::SKILLS);
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let (index, row) = the_card_row(&out, &panel);
+        let (card, parts) = the_card(&out, row, true);
+        let (_, act, box_) = *out
+            .layout
+            .settings_acts
+            .iter()
+            .find(|(at, ..)| *at == index)
+            .expect("the install card has no button");
+        assert_eq!(act, Act::Validate, "an unchecked source validates first");
+
+        // In the footer, at the bottom right, and inside its own card.
+        assert!(
+            (box_.y - parts.footer.y).abs() < 0.01,
+            "{box_:?} is not on the footer {:?}",
+            parts.footer
+        );
+        assert!(box_.y >= parts.body.y + parts.body.h - 0.01, "over the body");
+        assert!(box_.x + box_.w <= parts.footer.x + parts.footer.w + 0.01);
+        assert!(box_.x > parts.footer.x + parts.footer.w * 0.5, "not at the right");
+        assert!(box_.y + box_.h <= card.y + card.h + 0.01, "outside the card");
+
+        // Filled, which is what a primary is, and holding the word.
+        assert!(
+            covered(&out, box_, box_.h, out.skin.button),
+            "the install button is not filled: {box_:?}"
+        );
+        assert!(
+            line_of(&out, box_.x + INPUT_PAD, box_.y).contains("validate"),
+            "the button has no word in it"
+        );
+
+        // And a press inside it is that button and not the row under it.
+        let (x, y) = (box_.x + box_.w * 0.5, box_.y + box_.h * 0.5);
+        assert_eq!(
+            out.layout.hit(x, y),
+            Some(Hit::SettingsAct(index, Act::Validate))
+        );
     }
 }

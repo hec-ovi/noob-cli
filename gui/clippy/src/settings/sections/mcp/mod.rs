@@ -164,6 +164,14 @@ fn server_doc(server: &agent::Server) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::settings::testkit::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::view::testkit::*;
+    
+    
+    use crate::design;
+    use noob_draw::Text;
     use crate::config::Config;
     use crate::settings::testing::*;
     use crate::settings::{Settings, MCP};
@@ -412,5 +420,57 @@ mod tests {
         );
         assert_eq!(panel.arming(), None, "it stayed armed after it fired");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A server's three strings are three roles too, at three sizes, the way a
+    /// skill's are: the two lists are drawn by the same arm, and a server is
+    /// the worse of the two to read when they all look alike, because its
+    /// address and the file it came out of are both paths.
+    #[test]
+    fn a_server_says_its_name_its_address_and_its_file_in_three_roles() {
+        let panel = a_servers_panel();
+        let out = render_settings(&panel, 1400.0, 900.0, None);
+        let line = Text::line_for(PANE_TEXT.0);
+        let (_, row) = the_entry_row(&out, &panel);
+        let (_, parts) = the_card(&out, row, true);
+
+        let title = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| (text.at.y - parts.title.y).abs() < 0.51)
+            .expect("the name");
+        assert_eq!(
+            title.runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+            "deepwiki"
+        );
+        assert_eq!(title.size, design::card_title_size(PANE_TEXT.0));
+        // The address in the body at the value size, and the file it is
+        // configured in under it at the hint size.
+        assert_eq!(
+            line_of(&out, parts.body.x, parts.body.y),
+            "https://mcp.deepwiki.com/mcp"
+        );
+        let under = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| {
+                (text.at.x - parts.body.x).abs() < 0.51
+                    && (text.at.y - (parts.body.y + line + design::tight(line))).abs() < 0.51
+            })
+            .expect("the file it came from");
+        assert!(
+            under
+                .runs
+                .iter()
+                .map(|run| run.text.as_str())
+                .collect::<String>()
+                .contains("mcp.json"),
+            "{:?}",
+            under.runs
+        );
+        assert!(under.size < PANE_TEXT.0);
+        assert!(title.size > under.size);
     }
 }

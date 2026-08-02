@@ -147,6 +147,8 @@
 
 pub mod paint;
 pub mod places;
+#[cfg(test)]
+pub(crate) mod testkit;
 pub mod sections;
 
 use std::path::{Path, PathBuf};

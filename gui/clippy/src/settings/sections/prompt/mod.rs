@@ -449,6 +449,16 @@ fn env_paper(env: &EnvBlock) -> Paper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::settings::testkit::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::view::testkit::*;
+    
+    #[allow(clippy::wildcard_imports)]
+    use crate::view::*;
+    use crate::design;
+    use crate::settings::{Act, Side};
+    use noob_draw::Text;
     use crate::config::Config;
     use crate::settings::testing::*;
     use crate::settings::{
@@ -907,5 +917,234 @@ say");
         assert!(!paper.does, "it offers edition with nowhere to save");
         assert!(!nowhere.toggle_edition(0, &config));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The document draws where it lives: the global AGENTS.md on the SYSTEM
+    /// PROMPT section, with its title, its path and its text.
+    #[test]
+    fn the_system_prompt_draws_the_document() {
+        let mut panel = Settings::open(
+            &Config::default(),
+            None,
+            an_agent_with_instructions(),
+        );
+        let doc = panel
+            .section_names()
+            .iter()
+            .position(|name| *name == crate::settings::PROMPT)
+            .expect("the system prompt section");
+        panel.choose(doc);
+        let out = render_settings(&panel, 1400.0, 1200.0, None);
+        let text = text_of(&out.scene);
+
+        // The file, by name and by path, with what is in it under the title.
+        assert!(text.contains("AGENTS.md"), "{text}");
+        assert!(text.contains("/home/hec/.config/noob/AGENTS.md"), "{text}");
+        assert!(
+            text.contains("Answer in as few words as carry the answer."),
+            "the instructions are not drawn: {text}"
+        );
+        // Rendered as Markdown rather than printed with its marks in, the way
+        // the column beside the skills list renders a SKILL.md.
+        assert!(text.contains("Global instructions"), "{text}");
+        assert!(!text.contains("# Global instructions"), "{text}");
+
+        // The title is the theme's accent, the way every heading on this
+        // panel is, so the block reads as a block rather than as more rows.
+        let title = out
+            .scene
+            .texts
+            .iter()
+            .flat_map(|text| text.runs.iter())
+            .find(|run| run.text == "AGENTS.md")
+            .expect("the document's title");
+        assert_eq!(title.color, Some(out.skin.heading));
+    }
+    /// A block of text is a card too, and it scrolls inside itself: its title
+    /// stays in the header, its border stays where it was, and the rows around
+    /// it do not move.
+    ///
+    /// Before it was a card the two documents were the one thing on a panel of
+    /// boxes with nothing round them: a bare title, a bare path and twelve lines
+    /// of prose reading as loose text between two cards.
+    #[test]
+    fn a_document_is_a_card_that_scrolls_inside_itself() {
+        let body: Vec<String> = (0..crate::settings::PAPER_LINES * 3)
+            .map(|at| format!("line {at} of the document"))
+            .collect();
+        let mut agent = an_agent();
+        agent.instructions = crate::agent::Instructions {
+            path: Some(std::path::PathBuf::from("/home/hec/.config/noob/AGENTS.md")),
+            body: body.clone(),
+            capped: false,
+        };
+        let mut panel = Settings::open(&Config::default(), None, agent);
+        let section = panel
+            .section_names()
+            .iter()
+            .position(|name| *name == crate::settings::PROMPT)
+            .expect("the system prompt section");
+        panel.choose(section);
+        let out = render_settings(&panel, 1400.0, 1200.0, None);
+        let line = Text::line_for(PANE_TEXT.0);
+        let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
+
+        let at = panel
+            .rows()
+            .iter()
+            .position(|row| {
+                matches!(row, crate::settings::Row::Paper(paper) if !paper.body.is_empty())
+            })
+            .expect("the document block");
+        let row = out
+            .layout
+            .settings_rows
+            .iter()
+            .find(|(index, ..)| *index == at)
+            .map(|(_, _, row)| *row)
+            .expect("the block is on screen");
+
+        // It stands in the room the model counted, as a card with its title in
+        // the header and a border round the whole of it.
+        let counted = crate::settings::lines(panel.row(at).expect("the row"), cols);
+        assert_eq!(
+            counted,
+            design::card_row_lines(crate::settings::paper_body_lines(), true),
+            "an editable document is a card with a footer"
+        );
+        assert!((row.h - counted as f32 * line).abs() < 0.01, "{row:?}");
+        let (box_, parts) = the_card(&out, row, true);
+        assert!(
+            out.scene.rects.iter().any(|rect| {
+                let [x, y, w, h] = rect.xywh();
+                (x - box_.x).abs() < 0.01
+                    && (y - box_.y).abs() < 0.01
+                    && (w - box_.w).abs() < 0.01
+                    && (h - box_.h).abs() < 0.01
+                    && rect.extra()[3] >= 1.0
+            }),
+            "the block has no border round it"
+        );
+        let title = out
+            .scene
+            .texts
+            .iter()
+            .find(|text| text.runs.iter().any(|run| run.text == "AGENTS.md"))
+            .expect("the title");
+        assert!(
+            (title.at.y - parts.title.y).abs() < 0.01,
+            "the title is not in the header: {:?}",
+            title.at
+        );
+
+        // Its text is inside the body, and the first line of it is the first
+        // line of the document.
+        let first = parts.body.y + line + design::tight(line);
+        assert_eq!(line_of(&out, parts.body.x, first), body[0]);
+        let last = parts.body.y + parts.body.h;
+        assert!(
+            first + crate::settings::PAPER_LINES as f32 * line <= last + 0.01,
+            "the twelve lines it holds do not fit its body"
+        );
+
+        // Paged, the text moves and the card does not: the same box, the same
+        // title, another twelve lines. A block that walked the list under it
+        // would take the rows below it with it.
+        panel.point_at(at, Side::Left);
+        assert_eq!(panel.cursor(), at);
+        assert!(panel.page(20, true), "the block did not scroll");
+        let after = render_settings(&panel, 1400.0, 1200.0, None);
+        let moved = after
+            .layout
+            .settings_rows
+            .iter()
+            .find(|(index, ..)| *index == at)
+            .map(|(_, _, row)| *row)
+            .expect("the block is still on screen");
+        assert_eq!(moved, row, "the card moved while its text was read");
+        assert_eq!(
+            line_of(&after, parts.body.x, first),
+            body[crate::settings::PAPER_LINES],
+            "the text did not scroll inside the card"
+        );
+        assert!(
+            text_of(&after.scene).contains("13-24 of 36"),
+            "the block does not say how far down it is: {}",
+            text_of(&after.scene)
+        );
+    }
+    /// A file that is not there shows the shipped default under a
+    /// note, with the checkbox that starts owning it. Never an empty box.
+    #[test]
+    fn a_missing_file_shows_the_built_in_text_on_its_own_block() {
+        // `an_agent` has neither AGENTS.md nor TOOLS.md, so both blocks say
+        // where the file would go and draw the text the agent runs with.
+        let out = render_settings(
+            &a_panel_on(&Config::default(), crate::settings::PROMPT),
+            1400.0,
+            1200.0,
+            None,
+        );
+        let text = text_of(&out.scene);
+        assert!(text.contains("not written yet"), "{text}");
+        assert!(text.contains("/home/hec/.config/noob/AGENTS.md"), "{text}");
+        assert!(text.contains("/home/hec/.config/noob/TOOLS.md"), "{text}");
+        assert!(
+            text.contains("You are noob, an agent working in the current directory."),
+            "the built-in text is not drawn: {text}"
+        );
+        assert!(text.contains("enable edition"), "{text}");
+
+        // The checkbox is pressed where it is drawn, and every action the
+        // block has stands beside it whether or not edition is on: they are
+        // drawn dim while it is off, rather than appearing out of a footer
+        // that was empty a moment ago.
+        let acts: Vec<Act> = out
+            .layout
+            .settings_acts
+            .iter()
+            .filter(|(index, ..)| *index == 0)
+            .map(|(_, act, _)| *act)
+            .collect();
+        assert_eq!(
+            acts,
+            [Act::EditPrompt, Act::LoadPrompt, Act::RestorePrompt, Act::SavePrompt],
+            "{acts:?}"
+        );
+        let (index, _, box_) = out
+            .layout
+            .settings_acts
+            .iter()
+            .find(|(index, act, _)| *index == 0 && *act == Act::EditPrompt)
+            .expect("the checkbox has a box");
+        let (x, y) = middle(*box_);
+        assert_eq!(out.layout.hit(x, y), Some(Hit::SettingsAct(*index, Act::EditPrompt)));
+
+        // Ticked, the save and the armed restore appear beside it, each
+        // pressed where it is drawn.
+        let mut panel = a_panel_on(&Config::default(), crate::settings::PROMPT);
+        assert!(panel.toggle_edition(0, &Config::default()));
+        let on = render_settings(&panel, 1400.0, 1200.0, None);
+        let acts: Vec<Act> = on
+            .layout
+            .settings_acts
+            .iter()
+            .filter(|(index, ..)| *index == 0)
+            .map(|(_, act, _)| *act)
+            .collect();
+        assert_eq!(
+            acts,
+            [Act::EditPrompt, Act::LoadPrompt, Act::RestorePrompt, Act::SavePrompt],
+            "{acts:?}"
+        );
+        let text = text_of(&on.scene);
+        for word in ["save", "restore", "load"] {
+            assert!(text.contains(word), "{word} is not drawn: {text}");
+        }
+        for (index, act, box_) in on.layout.settings_acts.iter().filter(|(index, ..)| *index == 0)
+        {
+            let (x, y) = middle(*box_);
+            assert_eq!(on.layout.hit(x, y), Some(Hit::SettingsAct(*index, *act)));
+        }
     }
 }

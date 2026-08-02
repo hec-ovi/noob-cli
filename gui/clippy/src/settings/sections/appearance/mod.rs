@@ -544,6 +544,18 @@ fn colour_rows(config: &Config, file: Option<&Path>) -> Vec<Row> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::settings::testkit::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::view::testkit::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::settings::places::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::view::*;
+    
+    use crate::settings::paint::swatch;
+    use crate::settings::Act;
+    use noob_draw::{Panel, Text};
     use crate::agent::{self, Agent};
     use crate::settings::testing::*;
     use crate::settings::{
@@ -1521,5 +1533,547 @@ something_else = keep me
         assert_eq!(value(&panel, "opacity"), "0.90");
         assert_eq!(value(&panel, THEME), "noob-cool");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// What each section says: its own heading, the agent's file, the sessions
+    /// and the skills read off the disk, the settings it can change, and the
+    /// palette drawn as itself.
+    #[test]
+    fn the_panel_says_what_it_is_and_draws_the_palette() {
+        let config = Config::parse("accent = #123456");
+        let words = |section: &str| {
+            text_of(&render_settings(&a_panel_on(&config, section), 1400.0, 1200.0, None).scene)
+        };
+        for (section, wanted) in [
+            (crate::settings::AGENT, "NOOB_BASE_URL"),
+            (crate::settings::AGENT, "http://localhost:8080/v1"),
+            (crate::settings::SESSIONS, "rebuild the settings panel"),
+            (crate::settings::SKILLS, "coding"),
+            (crate::settings::MCP, "ADD A SERVER"),
+            (crate::settings::APPEARANCE, "theme"),
+            (crate::settings::APPEARANCE, "opacity"),
+            (crate::settings::APPEARANCE, "pane_font_size"),
+            // The palette is under APPEARANCE too now, and it is labelled with
+            // what each colour colours rather than with its key.
+            (crate::settings::APPEARANCE, "the accent"),
+            (crate::settings::APPEARANCE, "the title bar"),
+        ] {
+            let text = words(section);
+            assert!(
+                text.contains(wanted),
+                "{wanted:?} is not in {section}: {text}"
+            );
+        }
+        // Where the agent's file is, on the last card of a section taller than
+        // the window: a panel that only says it on a screenful nobody scrolls
+        // to is a panel that does not say it.
+        let mut agent = a_panel_on(&config, crate::settings::AGENT);
+        scrolled_to_the_end(&mut agent);
+        let text = text_of(&render_settings(&agent, 1400.0, 1200.0, None).scene);
+        assert!(
+            text.contains("/home/hec/.config/noob/.env"),
+            "the agent's file is nowhere on its section: {text}"
+        );
+        // And what it does not say: the pane toggles and the divider ratios are
+        // off the panel, so their names are nowhere in the text any section
+        // draws. `show_files` was on this list until PANES was really removed.
+        for section in crate::settings::SECTIONS {
+            let text = words(section);
+            for key in crate::settings::OFF_PANEL {
+                assert!(!text.contains(key), "{section} still draws {key}: {text}");
+            }
+        }
+
+        // The panel says what it is and which section it is showing.
+        assert!(words(crate::settings::MCP).contains("SETTINGS"));
+
+        // The colour is drawn as a block of itself, which is the only way a
+        // palette can be read.
+        let out = render_settings(
+            &a_panel_on(&config, crate::settings::APPEARANCE),
+            1400.0,
+            1200.0,
+            None,
+        );
+        let wanted = [0x12 as f32 / 255.0, 0x34 as f32 / 255.0, 0x56 as f32 / 255.0, 1.0];
+        assert!(
+            out.scene.rects.iter().any(|rect| rect.rgba() == wanted),
+            "no swatch in the accent's own colour"
+        );
+
+        // The card the cursor is on carries the focus border and the mark down
+        // its edge. Not a band: this section is cards now, and a filled strip
+        // nine lines tall is a highlight nobody can read through.
+        let panel = a_panel_on(&config, crate::settings::APPEARANCE);
+        let out = render_settings(&panel, 1400.0, 1200.0, None);
+        let row = out
+            .layout
+            .settings_rows
+            .iter()
+            .find(|(index, side, _)| *index == panel.cursor() && *side == panel.side())
+            .map(|(_, _, row)| *row)
+            .expect("the cursor's row is on screen");
+        let card = [row.x, row.y, row.w, row.h - GAP];
+        assert!(
+            out.scene.rects.iter().any(|rect| {
+                let [x, y, w, h] = rect.xywh();
+                rect.rgba() == out.skin.edge_focus
+                    && rect.extra()[3] >= 1.0
+                    && (x - card[0]).abs() < 0.01
+                    && (y - card[1]).abs() < 0.01
+                    && (w - card[2]).abs() < 0.01
+                    && h > row.h * 0.5
+            }),
+            "the card the keys are on has no border"
+        );
+        assert!(
+            out.scene.rects.iter().any(|rect| {
+                let [x, y, w, h] = rect.xywh();
+                rect.rgba() == out.skin.edge_focus
+                    && (x - row.x).abs() < 0.01
+                    && (y - row.y).abs() < 0.01
+                    && (w - MARK_W).abs() < 0.01
+                    && h > row.h * 0.5
+            }),
+            "the card the keys are on has no mark down its edge"
+        );
+        assert!(
+            !out.scene
+                .rects
+                .iter()
+                .any(|rect| rect.rgba() == out.skin.strip
+                    && rect.xywh() == [row.x, row.y, row.w, row.h]),
+            "a card nine lines tall is banded"
+        );
+    }
+    /// The palette is a grid: more than one colour to a row, each one hit where
+    /// its own block is drawn, and a press on the second column is that colour
+    /// and not the first one on the row.
+    ///
+    /// It was one colour per row, so the row index was the colour. Nothing else
+    /// on the panel is more than one control wide, which is why the cells carry
+    /// their place along the row as well as the row.
+    #[test]
+    fn a_press_on_the_grid_lands_on_the_colour_under_it() {
+        let config = Config::parse("accent = #123456");
+        let mut panel = a_panel_on(&config, crate::settings::APPEARANCE);
+        let out = render_settings(&panel, 1400.0, 1200.0, None);
+        let layout = &out.layout;
+
+        // The row the accent is on carries more than one colour, which is the
+        // whole of what makes this a grid.
+        let row = layout
+            .settings_cells
+            .iter()
+            .find(|(row, cell, _)| {
+                panel.swatch(*row, *cell).is_some_and(|it| it.key == "accent")
+            })
+            .map(|(row, ..)| *row)
+            .expect("the accent is on the grid");
+        let on_the_row: Vec<(usize, Panel)> = layout
+            .settings_cells
+            .iter()
+            .filter(|(at, ..)| *at == row)
+            .map(|(_, cell, panel)| (*cell, *panel))
+            .collect();
+        assert!(
+            on_the_row.len() > 1,
+            "one swatch to a row is the list again: {on_the_row:?}"
+        );
+        // Side by side along a line, left to right and never overlapping, and
+        // the one after the end of a line starts again at the left edge of the
+        // card one line lower.
+        for pair in on_the_row.windows(2) {
+            let (a, b) = (pair[0].1, pair[1].1);
+            match (a.y - b.y).abs() < 0.01 {
+                true => assert!(a.x + a.w <= b.x + 0.01, "{pair:?} share a column"),
+                false => {
+                    assert!(b.y > a.y, "{pair:?} run back up the card");
+                    assert!(b.x <= a.x + 0.01, "{pair:?} did not start a line");
+                }
+            }
+        }
+
+        // The second column is the second colour, not the first: this is the
+        // press a full width row per colour got wrong.
+        let (first, second) = (on_the_row[0], on_the_row[1]);
+        let (x, y) = middle(second.1);
+        assert_eq!(layout.hit(x, y), Some(Hit::SettingsSwatch(row, second.0)));
+        assert_ne!(
+            layout.hit(x, y),
+            Some(Hit::SettingsSwatch(row, first.0)),
+            "the second column answers as the first"
+        );
+        assert!(panel.pick(row, second.0));
+        let wanted = panel.swatch(row, second.0).expect("the second colour").key;
+        let says = panel.says();
+        assert!(says.contains(wanted), "the footer says {says}");
+        let out = render_settings(&panel, 1400.0, 1200.0, None);
+        assert!(
+            text_of(&out.scene).contains(wanted),
+            "the panel never says which key writes the pressed colour"
+        );
+
+        // Each cell draws a block of its own colour inside itself. Looked for
+        // inside the cell rather than anywhere on screen: the panel's own
+        // colour is a swatch as well as the fill of half the boxes on the
+        // panel, so the first rect wearing it is not this one.
+        for (cell, at) in &on_the_row {
+            let colour = panel.swatch(row, *cell).expect("a colour");
+            assert!(
+                out.scene.rects.iter().any(|rect| {
+                    let [x, y, ..] = rect.xywh();
+                    rect.rgba() == swatch(colour.rgb) && at.contains(x + 0.5, y + 0.5)
+                }),
+                "{} is not drawn as itself inside {at:?}",
+                colour.key
+            );
+        }
+    }
+    /// Item G2: the palette is drawn under the control that wrote it, and says
+    /// which theme those colours belong to.
+    ///
+    /// "colors as theme groups i did not saw on the setup... i just sawe many
+    /// colors... so i dont know". `theme` was drawn with the sizes, several rows
+    /// and a heading above the grid, so the block was a wall of swatches with
+    /// nothing on it saying where they came from. The control is the first thing
+    /// over the colours now, with one line under it naming the theme that set
+    /// them, and every block of colour is drawn with what it paints beside it.
+    #[test]
+    fn the_palette_is_drawn_under_the_theme_that_set_it() {
+        for name in crate::config::THEMES {
+            let config = Config::parse(&format!("theme = {name}"));
+            let panel = a_panel_on(&config, crate::settings::APPEARANCE);
+            let out = render_settings(&panel, 1400.0, 1200.0, None);
+            let at = panel
+                .rows()
+                .iter()
+                .position(|row| {
+                    matches!(row, crate::settings::Row::Card(card)
+                        if card.fields.iter().any(|field| matches!(
+                            field.holds.as_ref(),
+                            crate::settings::Row::Setting { key, .. } if *key == "theme"
+                        )))
+                })
+                .expect("the theme card");
+            let row = out
+                .layout
+                .settings_rows
+                .iter()
+                .find(|(index, _, _)| *index == at)
+                .map(|(_, _, row)| *row)
+                .expect("the theme row is on screen");
+            // The grid under the card, which is every swatch below it: the
+            // two backgrounds have a card of their own up beside the
+            // transparencies, and those are not what this is about.
+            let first = out
+                .layout
+                .settings_cells
+                .iter()
+                .map(|(_, _, cell)| cell.y)
+                .filter(|y| *y > row.y)
+                .fold(f32::MAX, f32::min);
+            assert!(first < f32::MAX, "no swatch is drawn under the card at all");
+            assert!(
+                row.y + row.h <= first + 0.01,
+                "the theme control is drawn at {row:?}, not above the first swatch at {first}"
+            );
+            // And the line under it names the theme that is really set, rather
+            // than saying the colours came from somewhere in general.
+            let text = text_of(&out.scene);
+            assert!(
+                text.contains(&format!("the {name} theme set these")),
+                "the palette does not say whose colours it is showing: {text}"
+            );
+            // Every swatch on screen is drawn with what it paints beside it,
+            // inside its own cell: a block of colour on its own is what he could
+            // not read anything out of.
+            for (grid, cell, box_) in &out.layout.settings_cells {
+                let colour = panel.swatch(*grid, *cell).expect("a colour");
+                let words = out
+                    .scene
+                    .texts
+                    .iter()
+                    .flat_map(|text| {
+                        text.runs
+                            .iter()
+                            .map(move |run| (text.at, run.text.trim_end_matches('\u{2026}')))
+                    })
+                    .filter(|(place, _)| box_.contains(place.x + 1.0, place.y + 1.0))
+                    .find(|(_, said)| !said.is_empty())
+                    .map(|(_, said)| String::from(said))
+                    .unwrap_or_else(|| panic!("{} is drawn with no label", colour.key));
+                assert!(
+                    colour.about.starts_with(&words),
+                    "{} is labelled {words:?}, which is not {:?}",
+                    colour.key,
+                    colour.about
+                );
+                assert_ne!(words, colour.key, "{} is drawn as its own key", colour.key);
+            }
+        }
+    }
+    /// The palette reflows with the card it stands in, and the model counts it
+    /// at the width it is really drawn in.
+    ///
+    /// It was three colours to a row whatever the window was, because the model
+    /// was never handed a width. A grid measured at one height and drawn at
+    /// another is every press below it on the wrong row, so the two read the
+    /// same number here: the cells drawn are all the cells, they are inside the
+    /// card, and a wider window puts more of them on a line.
+    #[test]
+    fn the_palette_reflows_with_the_window_and_is_counted_where_it_is_drawn() {
+        let mut across = Vec::new();
+        for (w, h) in [(2200.0, 1400.0), (1400.0, 1200.0), (700.0, 1200.0), (460.0, 900.0)] {
+            let mut panel = a_panel_on(&Config::default(), crate::settings::APPEARANCE);
+            let shape = render_settings(&panel, w, h, None);
+            let rows = shape.layout.settings_capacity(13.0);
+            let cols = shape.layout.settings_entry_columns(PANE_TEXT.1);
+            let at = panel
+                .rows()
+                .iter()
+                .position(|row| {
+                    matches!(row, crate::settings::Row::Palette(palette)
+                        if palette.title == "THE TOOL MARKS")
+                })
+                .expect("the tools");
+            // Scroll the card's own top line to the top of the window: the
+            // scroll counts rows of text now, and the assertions below want
+            // the card whole on screen.
+            let top: usize = panel.heights(cols).iter().take(at).sum();
+            while panel.first() < top && panel.scroll(1, true, rows, cols) {}
+            let out = render_settings(&panel, w, h, None);
+            let Some(crate::settings::Row::Palette(palette)) = panel.row(at) else {
+                panic!("the tools are not a palette card");
+            };
+            let cells: Vec<Panel> = out
+                .layout
+                .settings_cells
+                .iter()
+                .filter(|(index, ..)| *index == at)
+                .map(|(_, _, box_)| *box_)
+                .collect();
+            assert_eq!(
+                cells.len(),
+                palette.cells.len(),
+                "{w}x{h}: the card drew {} of {} colours",
+                cells.len(),
+                palette.cells.len()
+            );
+            let row = out
+                .layout
+                .settings_rows
+                .iter()
+                .find(|(index, ..)| *index == at)
+                .map(|(_, _, row)| *row)
+                .expect("the card is on screen");
+            let card = settings_card(row, Text::line_for(PANE_TEXT.0));
+            for box_ in &cells {
+                assert!(
+                    box_.y >= card.y - 0.01 && box_.y + box_.h <= card.y + card.h + 0.01,
+                    "{w}x{h}: {box_:?} is outside {card:?}"
+                );
+            }
+            // How many share the first line, which is what the width decides.
+            let first = cells[0].y;
+            across.push(cells.iter().filter(|box_| (box_.y - first).abs() < 0.01).count());
+            // And the row is as tall as the model said it was, whatever that
+            // came to at this width.
+            let lines = crate::settings::lines(panel.row(at).expect("the card"), cols);
+            assert_eq!(
+                row.h,
+                lines as f32 * Text::line_for(PANE_TEXT.0),
+                "{w}x{h}: the row is not the height the model counted"
+            );
+        }
+        assert!(
+            across.windows(2).all(|pair| pair[0] >= pair[1]),
+            "the palette does not narrow with the window: {across:?}"
+        );
+        assert!(across[0] > across[3], "it never reflows at all: {across:?}");
+    }
+    /// Item H5: every theme is drawn by name and every one of them is a press.
+    ///
+    /// "i only see noob matrix the others i asked are absent". The control was
+    /// one box holding one word, and the only way to find out there were three
+    /// was to press it twice. All three stand side by side now, the one the
+    /// window is wearing is filled, and each of them answers where it is drawn.
+    #[test]
+    fn every_theme_is_drawn_by_name_and_can_be_pressed() {
+        for wearing in crate::config::THEMES {
+            let config = Config::parse(&format!("theme = {wearing}"));
+            let panel = a_panel_on(&config, crate::settings::APPEARANCE);
+            let out = render_settings(&panel, 1400.0, 1200.0, None);
+            let options = &out.layout.settings_choices;
+            // The three presets, and custom in the column beside them.
+            assert_eq!(options.len(), crate::config::THEMES.len() + 1);
+            let words = text_of(&out.scene);
+            for name in crate::config::THEMES {
+                assert!(words.contains(name), "{name} is not drawn: {words}");
+            }
+            assert!(words.contains("custom"), "custom is not drawn: {words}");
+            for (index, side, option, at) in options {
+                // Each name inside its own box, so a name and the box that
+                // writes it cannot come apart.
+                let said = out
+                    .scene
+                    .texts
+                    .iter()
+                    .flat_map(|text| text.runs.iter().map(move |run| (text.at, run.text.clone())))
+                    .find(|(place, said)| {
+                        at.contains(place.x + 1.0, place.y + 1.0) && !said.is_empty()
+                    })
+                    .map(|(_, said)| said)
+                    .unwrap_or_else(|| panic!("option {option} is drawn with no name"));
+                assert_eq!(said.trim(), option_name(*side, *option));
+                // And it is the press: the middle of the box answers as that
+                // option and no other.
+                let (x, y) = middle(*at);
+                assert_eq!(
+                    out.layout.hit(x, y),
+                    Some(Hit::SettingsChoice(*index, *side, *option))
+                );
+                // Which one the window is wearing is said by the fill, since a
+                // row of identical boxes says nothing about what is set.
+                let filled = out.scene.rects.iter().any(|rect| {
+                    let [x, y, w, _] = rect.xywh();
+                    rect.rgba() == out.skin.button
+                        && (x - at.x).abs() < 0.01
+                        && (y - at.y).abs() < 0.01
+                        && (w - at.w).abs() < 0.01
+                });
+                assert_eq!(
+                    filled,
+                    option_name(*side, *option) == wearing,
+                    "{wearing}: option {option} is filled as {filled}"
+                );
+            }
+        }
+    }
+    /// The way back to the defaults is a button in a card's footer, drawn in the
+    /// colour this window keeps for anything that loses work, and it asks once
+    /// before it acts.
+    #[test]
+    fn the_restore_is_a_danger_button_in_its_own_card_and_asks_first() {
+        let mut panel = a_panel_on(&Config::default(), crate::settings::APPEARANCE);
+        let at = panel
+            .rows()
+            .iter()
+            .position(|row| {
+                matches!(row, crate::settings::Row::Card(card)
+                    if card.does == Some(crate::settings::Doing::Restore))
+            })
+            .expect("the card that puts it back");
+        // It is the last card of the section: it takes back everything above it.
+        assert_eq!(at, panel.rows().len() - 1);
+        let shape = render_settings(&panel, 1400.0, 1200.0, None);
+        let rows = shape.layout.settings_capacity(13.0);
+        let cols = shape.layout.settings_entry_columns(PANE_TEXT.1);
+        // The scroll counts rows of text: walk the card's own top line up to
+        // the window, which the clamp then holds whole on the last screenful.
+        let top: usize = panel.heights(cols).iter().take(at).sum();
+        while panel.first() < top && panel.scroll(1, true, rows, cols) {}
+        let out = render_settings(&panel, 1400.0, 1200.0, None);
+        let (act, box_) = out
+            .layout
+            .settings_acts
+            .iter()
+            .find(|(index, ..)| *index == at)
+            .map(|(_, act, box_)| (*act, *box_))
+            .expect("the button is on screen");
+        assert_eq!(act, Act::Restore);
+        // In the footer, at the bottom right of the card and inside it.
+        let row = out
+            .layout
+            .settings_rows
+            .iter()
+            .find(|(index, ..)| *index == at)
+            .map(|(_, _, row)| *row)
+            .expect("the card is on screen");
+        assert!(box_.y > row.y + row.h * 0.5, "{box_:?} is not in the footer");
+        assert!(box_.x + box_.w <= row.x + row.w + 0.01);
+        assert!(box_.y + box_.h <= row.y + row.h + 0.01);
+        // Outlined in the danger colour and filled with nothing: a delete is
+        // never the thing a card is filled for.
+        let outlined = |out: &Rendered| {
+            out.scene.rects.iter().any(|rect| {
+                let [x, y, w, _] = rect.xywh();
+                rect.rgba() == out.skin.close_hot
+                    && (x - box_.x).abs() < 0.01
+                    && (y - box_.y).abs() < 0.01
+                    && (w - box_.w).abs() < 0.01
+            })
+        };
+        assert!(outlined(&out), "the restore is not drawn as a danger");
+        assert!(
+            !out.scene.rects.iter().any(|rect| {
+                let [x, ..] = rect.xywh();
+                rect.rgba() == out.skin.button && (x - box_.x).abs() < 0.01
+            }),
+            "the restore is filled like a primary"
+        );
+        let words = text_of(&out.scene);
+        assert!(words.contains("restore"), "{words}");
+        assert!(words.contains("comments out the sizes"), "{words}");
+
+        // Armed, it says so on itself as well as on the footer: the second
+        // press is the one that acts.
+        assert!(panel.uninstall(at).is_none());
+        let armed = render_settings(&panel, 1400.0, 1200.0, None);
+        assert!(text_of(&armed.scene).contains("sure?"), "the button never asks");
+        assert!(outlined(&armed), "the armed button changed kind");
+    }
+    /// Scrolling the panel moves the cells with the rows they are on. A hit
+    /// region left where the row used to be is a press that changes the wrong
+    /// colour, and the grid is the one place a row is more than one control.
+    #[test]
+    fn the_grid_cells_follow_the_list_when_it_scrolls() {
+        let mut panel = a_panel_on(&Config::default(), crate::settings::APPEARANCE);
+        // A short window, so the palette is off the bottom until it is scrolled
+        // to and the rows on screen change as it moves.
+        let (w, h) = (1400.0, 520.0);
+        let out = render_settings(&panel, w, h, None);
+        let rows = out.layout.settings_capacity(13.0);
+        let cols = out.layout.settings_entry_columns(PANE_TEXT.1);
+        assert!(rows > 2, "the list is too short to scroll: {rows}");
+        let mut seen = 0;
+        for _ in 0..40 {
+            let out = render_settings(&panel, w, h, None);
+            let layout = &out.layout;
+            for (row, cell, at) in &layout.settings_cells {
+                // Where it is drawn: the block of colour is inside the cell.
+                let colour = panel
+                    .swatch(*row, *cell)
+                    .unwrap_or_else(|| panic!("no colour at {row}/{cell}"));
+                let block = out
+                    .scene
+                    .rects
+                    .iter()
+                    .find(|rect| {
+                        rect.rgba() == swatch(colour.rgb)
+                            && at.contains(rect.xywh()[0] + 0.5, rect.xywh()[1] + 0.5)
+                    })
+                    .unwrap_or_else(|| panic!("{} is not drawn in its cell", colour.key));
+                assert!(
+                    layout
+                        .settings_list
+                        .contains(block.xywh()[0], block.xywh()[1]),
+                    "{} is drawn outside the list",
+                    colour.key
+                );
+                // And where it is pressed: the same cell answers for it.
+                let (x, y) = middle(*at);
+                assert_eq!(
+                    layout.hit(x, y),
+                    Some(Hit::SettingsSwatch(*row, *cell)),
+                    "the cell moved out from under its own colour"
+                );
+                seen += 1;
+            }
+            if !panel.scroll(1, true, rows, cols) {
+                break;
+            }
+        }
+        assert!(seen > 20, "the palette never came into view: {seen}");
     }
 }

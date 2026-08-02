@@ -401,6 +401,17 @@ fn env_says(agent: &Agent, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::settings::testkit::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::view::testkit::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::settings::places::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::view::*;
+    use crate::design;
+    use crate::settings::Row as SettingRow;
+    use noob_draw::{Panel, Text};
     use crate::config::Config;
     use crate::settings::testing::*;
     use crate::settings::{
@@ -968,4 +979,211 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The AGENT section is cards: every field a label over its value with the
+    /// sentence that says what it is under that, and each one pressed where it
+    /// is drawn.
+    ///
+    /// "all text looks the same name, description, repo, find a way each thing
+    /// is different": a label, a value and a sentence are three sizes and three
+    /// tints here, and none of them is the raw environment key the row used to
+    /// be named with.
+    #[test]
+    fn the_agent_cards_draw_a_labelled_field_for_everything_they_hold() {
+        let panel = a_panel_on(&Config::default(), crate::settings::AGENT);
+        let out = render_settings(&panel, 1400.0, 1600.0, None);
+        let layout = &out.layout;
+        let line = Text::line_for(PANE_TEXT.0);
+        let cols = layout.settings_entry_columns(PANE_TEXT.1);
+        // Full width is the width the rows are drawn in, which is the list less
+        // the gutter its own scrollbar stands in.
+        let list = settings_list_rows(layout.settings_list);
+
+        // Every card is full width and stands in the row the model counted for
+        // it, with the space between two of them under the one above.
+        let cards: Vec<(usize, Panel)> = layout
+            .settings_rows
+            .iter()
+            .filter(|(index, ..)| matches!(panel.row(*index), Some(SettingRow::Card(_))))
+            .map(|(index, _, at)| (*index, *at))
+            .collect();
+        assert!(cards.len() >= 4, "the section is not cards: {cards:?}");
+        for (index, row) in &cards {
+            let Some(SettingRow::Card(card)) = panel.row(*index) else {
+                panic!("row {index} is not a card");
+            };
+            // Full width, or one half of a band two cards share.
+            let (left, right) = settings_card_halves(list, PANE_TEXT.1);
+            let paired = crate::settings::stands_beside(panel.rows(), *index)
+                || (*index > 0 && crate::settings::stands_beside(panel.rows(), index - 1));
+            match paired {
+                true => assert!(
+                    ((row.x - left.x).abs() < 0.01 || (row.x - right.x).abs() < 0.01)
+                        && (row.w - left.w).abs() < 0.01,
+                    "a card of a pair is not half the list: {row:?}"
+                ),
+                false => {
+                    assert!((row.x - list.x).abs() < 0.01, "a card is not full width");
+                    assert!((row.w - list.w).abs() < 0.01, "a card is not full width");
+                }
+            }
+            let counted = crate::settings::band_lines(panel.rows(), *index, cols);
+            assert!(
+                (row.h - counted as f32 * line).abs() < 0.01,
+                "card {index} is {row:?} and the model counted {counted} lines"
+            );
+
+            // Every field: its label, its value under it, its sentence under
+            // that, and the whole of it inside the card.
+            let (box_, parts) = the_card(&out, *row, false);
+            let hints = crate::settings::card_hints(card);
+            // The card's own width, which is half the list on one of a pair.
+            let card_cols = settings_entry_cols(row.w, PANE_TEXT.1);
+            let across = design::across(card.fields.len(), design::card_cols(card_cols));
+            let slots = settings_card_slots(
+                parts.body,
+                line,
+                &hints,
+                across,
+                card.group.as_ref().map(|group| group.at),
+            );
+            for (field, slot) in card.fields.iter().zip(&slots) {
+                let (label_at, input_at) = settings_field_boxes(*slot, line);
+                assert_eq!(
+                    line_of(&out, label_at.x, label_at.y),
+                    field.label,
+                    "the label of a field is not on its own line"
+                );
+                assert!(
+                    input_at.y >= label_at.y + label_at.h - 0.01,
+                    "a value is beside its label rather than under it"
+                );
+                let Some(hint) = &field.hint else {
+                    continue;
+                };
+                let hint_at = settings_hint_box(*slot, line, PANE_TEXT.0);
+                // Clipped to what the field is wide enough for, so what is
+                // drawn is the head of the sentence and the mark that says so.
+                let said = line_of(&out, hint_at.x, hint_at.y);
+                let head = said.trim_end_matches('\u{2026}');
+                assert!(
+                    !head.is_empty() && hint.starts_with(head),
+                    "{said:?} is not the sentence under {}",
+                    field.label
+                );
+                // Smaller than the value it explains, and inside its own card.
+                assert!(hint_at.y + hint_at.h <= box_.y + box_.h + 0.01);
+            }
+        }
+
+        // The two things this section can change are drawn as controls, in the
+        // fields they belong to, and each is pressed where it is drawn: the
+        // endpoint is typed into, the context window is dragged.
+        let endpoint = *layout
+            .settings_values
+            .first()
+            .expect("the endpoint has a box");
+        let ctx = *layout
+            .settings_tracks
+            .first()
+            .expect("the context window has a track");
+        for (index, _, at) in [endpoint, ctx] {
+            let row = cards
+                .iter()
+                .find(|(card, _)| *card == index)
+                .map(|(_, row)| *row)
+                .unwrap_or_else(|| panic!("row {index} is not a card"));
+            assert!(row.contains(at.x + 1.0, at.y + 1.0), "{at:?} is outside {row:?}");
+        }
+        let (x, y) = middle(endpoint.2);
+        assert_eq!(
+            layout.hit(x, y),
+            Some(Hit::SettingsValue(endpoint.0, endpoint.1))
+        );
+        let (x, y) = middle(ctx.2);
+        assert_eq!(layout.hit(x, y), Some(Hit::SettingsSlider(ctx.0, ctx.1)));
+
+        // What is drawn: plain-words names, the values off the file, and the
+        // keys in the sentences under them rather than as the names.
+        let text = text_of(&out.scene);
+        for wanted in [
+            "endpoint",
+            "context window",
+            "THE SETTINGS FILE",
+            "http://localhost:8080/v1",
+            crate::agent::ENDPOINT,
+            crate::agent::CTX,
+        ] {
+            assert!(text.contains(wanted), "{wanted} is not drawn: {text}");
+        }
+    }
+    /// The agent's own numbers are tracks like every other number on the panel,
+    /// and the number beside one is drawn whole.
+    ///
+    /// The context window is seven digits at the top of its range, which is two
+    /// more than the value column beside a track used to hold: a slider reading
+    /// `10485\u{2026}` at the end anybody would drag it to says nothing at all.
+    #[test]
+    fn the_agent_s_context_window_is_a_track_with_its_number_beside_it() {
+        let agent = crate::agent::Agent {
+            env: vec![
+                (
+                    String::from(crate::agent::ENDPOINT),
+                    String::from("http://localhost:8080/v1"),
+                ),
+                (String::from(crate::agent::CTX), String::from("1048576")),
+            ],
+            ..an_agent()
+        };
+        let mut panel = Settings::open(
+            &Config::default(),
+            Some(std::path::Path::new("/home/hec/.config/noob/no0b.conf")),
+            agent,
+        );
+        let at = panel
+            .section_names()
+            .iter()
+            .position(|name| *name == crate::settings::AGENT)
+            .expect("the agent section");
+        panel.choose(at);
+
+        // Tall enough for the whole section: every track has to be drawn to
+        // be checked, and this is about what a number looks like rather than
+        // about how a short window scrolls.
+        let out = render_settings(&panel, 1400.0, 2000.0, None);
+        assert!(
+            text_of(&out.scene).contains("1048576"),
+            "the context window is not drawn as the number it is: {}",
+            text_of(&out.scene)
+        );
+
+        // And every number among them is a track, so the maximum concurrency
+        // is a place to drop the pointer rather than a number to type. The
+        // ones that are a name out of a list have no track to draw.
+        for key in crate::agent::OWNED {
+            let listed = crate::settings::AGENT_SETTINGS.iter().any(|(known, kind)| {
+                *known == key && matches!(kind, crate::settings::Kind::Choice(_))
+            });
+            if listed {
+                continue;
+            }
+            let (index, side) = panel
+                .rows()
+                .iter()
+                .enumerate()
+                .find_map(|(at, row)| {
+                    Side::ALL.into_iter().find_map(|side| {
+                        matches!(crate::settings::control(row, side), Some(crate::settings::Row::Setting { key: k, .. }) if *k == key)
+                            .then_some((at, side))
+                    })
+                })
+                .unwrap_or_else(|| panic!("{key} is not on the agent section"));
+            assert!(
+                out.layout
+                    .settings_tracks
+                    .iter()
+                    .any(|(row, half, _)| *row == index && *half == side),
+                "{key} is not drawn as a track"
+            );
+        }
+    }
 }
