@@ -104,3 +104,113 @@ fn one_row(runs: Vec<Run>, cols: usize) -> ListRow {
     }
     ListRow::new(kept)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::view::testkit::*;
+    use crate::config::Config;
+    use crate::dock::Dock;
+    use crate::monitor::Monitor;
+    use noob_draw::Text;
+    
+
+    /// A child's brief is a paragraph and its output lines run long; the
+    /// list clips both to one row each, so the pane stays a list however
+    /// long the fleet's prompts run.
+    #[test]
+    fn an_agent_entry_is_one_row_however_long_its_text() {
+        let mut state = busy_state();
+        state.apply(noob_proto::Event::AgentSpawn {
+            agent_id: "kid".into(),
+            prompt: "Research Arthur Schopenhauer. Focus on his main ideas. ".repeat(8),
+            tools: "all".into(),
+        });
+        state.apply(noob_proto::Event::AgentOutput {
+            agent_id: "kid".into(),
+            line: "* websearch search over a very long query string ".repeat(8),
+        });
+        let skin = Skin::from(&Config::default());
+        let cols = 48;
+        let rows = crate::widgets::agents::agent_rows(&state, &skin, cols);
+        for row in &rows {
+            assert_eq!(row.rows(cols), 1, "an entry wrapped");
+        }
+    }
+    /// A press on an agent's rows resolves to that agent, through the same
+    /// geometry the list is drawn with, and a press past the list resolves
+    /// to nothing.
+    #[test]
+    fn a_press_on_the_agents_list_names_the_agent_under_it() {
+        let mut state = busy_state();
+        for n in 1..=2 {
+            state.apply(noob_proto::Event::AgentSpawn {
+                agent_id: format!("kid-{n}"),
+                prompt: format!("task {n}"),
+                tools: "read".into(),
+            });
+            state.apply(noob_proto::Event::AgentOutput {
+                agent_id: format!("kid-{n}"),
+                line: format!("news {n}"),
+            });
+        }
+        let mut dock = Dock::new();
+        dock.reveal(View::Agents);
+        let shape = shape(&dock, &[]);
+        let layout = Layout::compute(1400.0, 900.0, &shape);
+        let skin = Skin::from(&Config::default());
+        let frame = Frame {
+            state: &state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &crate::prompt::Prompt::default(),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            clock: 0.0,
+            orb_morph: None,
+            drag: None,
+            hot: None,
+            trouble: None,
+            esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
+            selection: None,
+            menu: None,
+            picker: None,
+            settings: None,
+        };
+        let space = dock.space_of(View::Agents).expect("the pane is somewhere");
+        let panel = layout.placed(space).body;
+        let inset = panel.inset(PAD);
+        let line = Text::line_for(13.0);
+        // One row per agent: busy_state's own child, then the two spawned.
+        let rows: Vec<Option<usize>> = (0..4)
+            .map(|row| {
+                crate::widgets::agents::agent_at(
+                    &frame,
+                    panel,
+                    inset.x + 4.0,
+                    inset.y + row as f32 * line + line * 0.5,
+                )
+            })
+            .collect();
+        assert_eq!(rows, vec![Some(1), Some(2), Some(3), None]);
+        assert_eq!(
+            crate::widgets::agents::agent_at(
+                &frame,
+                panel,
+                inset.x + 4.0,
+                inset.y + 20.0 * line,
+            ),
+            None,
+            "past the list is nobody"
+        );
+    }
+}

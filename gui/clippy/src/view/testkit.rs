@@ -552,3 +552,68 @@ pub(crate) fn discs_of(scene: &Scene) -> Vec<&Rect> {
         })
         .collect()
 }
+
+pub(crate) fn a_dock_showing(view: crate::dock::View) -> Dock {
+    let mut dock = Dock::new();
+    let space = dock
+        .space_of(view)
+        .unwrap_or_else(|| panic!("{view:?} is not in the arrangement"));
+    dock.slot_mut(space).show(view);
+    dock
+}
+
+/// One frame at a given moment on the orb's clock, with the orb settled at
+/// whichever formation the state names.
+pub(crate) fn render_at(state: &State, clock: f32) -> Rendered {
+    render_moving(state, clock, None)
+}
+
+/// The same with the orb partway through the move between its two
+/// formations, which is what the window draws for [`ORB_MORPH`] either side
+/// of a turn.
+pub(crate) fn render_moving(state: &State, clock: f32, orb_morph: Option<f32>) -> Rendered {
+    let dock = Dock::new();
+    let shape = shape(&dock, &[]);
+    let layout = Layout::compute(1400.0, 900.0, &shape);
+    let skin = Skin::from(&Config::default());
+    let scene = build(&Frame {
+        state,
+        scrolls: &crate::scroll::Scrolls::default(),
+        file_scroll: 0,
+        monitor: &Monitor::new(),
+        dock: &dock,
+        skin: &skin,
+        layout: &layout,
+        prompt: &crate::prompt::Prompt::default(),
+        column: 8.0,
+        pane_column: 8.0,
+        body_size: 14.0,
+        pane_size: 13.0,
+        clock,
+        orb_morph,
+        drag: None,
+        hot: None,
+        trouble: None,
+        esc_armed: false,
+        popup_scroll: 0,
+        cursor: (-100.0, -100.0),
+        selection: None,
+        menu: None,
+        picker: None,
+        settings: None,
+    });
+    Rendered {
+        scene,
+        layout,
+        skin,
+    }
+}
+/// Whether any text in this list has a glyph box overlapping the panel.
+pub(crate) fn text_over(texts: &[Text], panel: Panel) -> bool {
+    texts.iter().any(|text| {
+        text.at.x < panel.x + panel.w
+            && panel.x < text.at.x + text.at.w
+            && text.at.y < panel.y + panel.h
+            && panel.y < text.at.y + text.at.h
+    })
+}

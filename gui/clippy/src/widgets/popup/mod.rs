@@ -268,6 +268,53 @@ pub(crate) fn popup(scene: &mut Scene, frame: &Frame) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::view::testkit::*;
+    use crate::config::Config;
+    use crate::dock::Dock;
+    use crate::monitor::Monitor;
+    use noob_draw::Rect;
+
+    /// The same window with one activity row opened out.
+    fn render_popup(state: &State, w: f32, h: f32, dock: &Dock) -> Rendered {
+        let shape = Shape {
+            popup: state.popped(),
+            ..shape(dock, &[])
+        };
+        let layout = Layout::compute(w, h, &shape);
+        let skin = Skin::from(&Config::default());
+        let scene = build(&Frame {
+            state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
+            monitor: &Monitor::new(),
+            dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &typed_prompt("type here", 4),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            clock: 0.0,
+            orb_morph: None,
+            drag: None,
+            hot: None,
+            trouble: None,
+            esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
+            selection: None,
+            menu: None,
+            picker: None,
+            settings: None,
+        });
+        Rendered {
+            scene,
+            layout,
+            skin,
+        }
+    }
 
     fn a_failed_call() -> crate::state::State {
         let mut state = crate::state::State::new();
@@ -320,5 +367,82 @@ mod tests {
         let copied = selection.text(&document(call));
         assert!(copied.contains("exit_status 127"), "{copied}");
         assert!(copied.contains("cargo: command not found"), "{copied}");
+    }
+
+    /// The popup is on the floating layer, it carries the four things it
+    /// promises, and shutting it takes the whole thing off the screen.
+    ///
+    /// On the overlay for the reason the menu is: the renderer paints a layer's
+    /// rectangles in one pass and its glyphs in a later one, so a box pushed onto
+    /// the base layer lands under the pane text it is covering, however late it
+    /// was pushed.
+    #[test]
+    fn the_activity_popup_is_painted_over_the_window_and_closes_off_it() {
+        let mut state = busy_state();
+        state.apply(noob_proto::Event::ToolEnd {
+            call_id: "c1".into(),
+            summary: "bash cargo test (2.0s, exit 101)".into(),
+            elapsed_ms: 2000,
+            error: Some(noob_proto::ToolError {
+                kind: "exit_status".into(),
+                code: Some(101),
+                message: "1 test failed".into(),
+                detail: Some("thread 'a' panicked at src/lib.rs:9".into()),
+                remedy: Some("run it again with --nocapture".into()),
+            }),
+        });
+        let dock = Dock::new();
+
+        // Shut, there is no box and nothing on the overlay.
+        let shut = render_popup(&state, 1400.0, 900.0, &dock);
+        assert!(shut.layout.call_popup.w < 1.0);
+        assert!(shut.scene.over_rects.is_empty(), "something is floating already");
+
+        state.open_call = state.call_at_line(0);
+        assert!(state.open_call.is_some(), "the first row is the bash call");
+        let out = render_popup(&state, 1400.0, 900.0, &dock);
+        let box_ = out.layout.call_popup;
+        assert!(box_.w >= 1.0 && box_.h >= 1.0);
+
+        // The condition that makes the overlay the point: there is pane text
+        // under it.
+        assert!(
+            text_over(&out.scene.texts, box_),
+            "nothing is written under the popup, so this proves nothing"
+        );
+        let surface = |rects: &[Rect]| {
+            rects
+                .iter()
+                .any(|r| r.xywh() == [box_.x, box_.y, box_.w, box_.h] && r.extra()[3] == 0.0)
+        };
+        assert!(surface(&out.scene.over_rects), "the popup has no surface");
+        assert!(
+            !surface(&out.scene.rects),
+            "the popup's surface is in the base layer, under every glyph"
+        );
+
+        // Everything on the overlay is the popup's, and every cell it promised
+        // is written.
+        let floating: String = out
+            .scene
+            .over_texts
+            .iter()
+            .flat_map(|t| t.runs.iter().map(|r| r.text.as_str()))
+            .collect();
+        for want in ["INVOKED", "GENERATED", "RETURNED", "DETAIL", "WHEN"] {
+            assert!(floating.contains(want), "no {want} cell: {floating}");
+        }
+        assert!(floating.contains("cargo test --workspace"), "{floating}");
+        assert!(floating.contains("exit_status 101"), "{floating}");
+        assert!(floating.contains("panicked at src/lib.rs:9"), "{floating}");
+        assert!(floating.contains("run it again with --nocapture"), "{floating}");
+
+        for text in &out.scene.over_texts {
+            assert!(
+                text.at.x >= box_.x - 0.01 && text.at.y >= box_.y - 0.01,
+                "{:?} is on the overlay but is not the popup",
+                text.at
+            );
+        }
     }
 }

@@ -46,3 +46,51 @@ pub(crate) fn agent(scene: &mut Scene, frame: &Frame, panel: Panel) {
     );
     scrollbar(scene, skin, panel, chosen.pane.thumb(rows, cols));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[allow(clippy::wildcard_imports)]
+    use crate::view::testkit::*;
+    
+    use crate::dock::{Dock, Space};
+    
+    
+
+    /// Clicking an agent's row opens that child's own output as a tab in
+    /// the top-left space: the strip reads the agent's number, the pane its
+    /// lines, and the AGENTS list leads every row with the number a click
+    /// means.
+    #[test]
+    fn a_chosen_agent_has_its_own_output_tab() {
+        let mut state = busy_state();
+        state.apply(noob_proto::Event::AgentSpawn {
+            agent_id: "kid".into(),
+            prompt: "look around".into(),
+            tools: "read".into(),
+        });
+        state.apply(noob_proto::Event::AgentOutput {
+            agent_id: "kid".into(),
+            line: "reading src/main.rs".into(),
+        });
+
+        // The list names every agent by its number: busy_state's own child
+        // is [1], the one spawned here is [2].
+        let mut listing = Dock::new();
+        listing.reveal(View::Agents);
+        let text = text_of(&render(&state, 1400.0, 900.0, &listing, &[]).scene);
+        assert!(text.contains("[1] Agent"), "{text}");
+        assert!(text.contains("[2] Agent"), "{text}");
+
+        // Chosen, the tab stands in the top-left space under the agent's
+        // number and carries that child's own lines, nobody else's.
+        assert!(state.show_agent(2));
+        let mut dock = Dock::new();
+        assert!(dock.unhide(View::Agent));
+        assert_eq!(dock.space_of(View::Agent), Some(Space::TopLeft));
+        let out = render(&state, 1400.0, 900.0, &dock, &[]);
+        let text = text_of(&out.scene);
+        assert!(text.contains("[2] AGENT - OUTPUT"), "{text}");
+        assert!(text.contains("reading src/main.rs"), "{text}");
+    }
+}

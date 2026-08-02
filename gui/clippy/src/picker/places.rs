@@ -8,6 +8,7 @@ use crate::design::{self, icons};
 use crate::picker::Picker;
 #[allow(clippy::wildcard_imports)]
 use crate::picker::metrics::*;
+use crate::widgets::files::ROW_ICON_COLUMNS;
 #[allow(clippy::wildcard_imports)]
 use crate::view::*;
 

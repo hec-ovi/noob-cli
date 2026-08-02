@@ -8,6 +8,7 @@ use crate::picker::places::{picker_indent, picker_mark_box};
 use crate::picker::Row as PickerRow;
 #[allow(clippy::wildcard_imports)]
 use crate::picker::metrics::*;
+use crate::widgets::files::ROW_ICON_COLUMNS;
 #[allow(clippy::wildcard_imports)]
 use crate::view::*;
 

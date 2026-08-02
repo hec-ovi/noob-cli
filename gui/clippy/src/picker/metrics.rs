@@ -7,7 +7,8 @@
 
 use noob_draw::Panel;
 
-use crate::view::{clip, GAP, ROW_ICON_COLUMNS};
+use crate::view::{clip, GAP};
+use crate::widgets::files::ROW_ICON_COLUMNS;
 
 /// The rows the picker spends above its list on plain writing: the heading and
 /// the folder it is listing. What has been typed sits under them in a bordered
