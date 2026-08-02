@@ -3,6 +3,31 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.11.5 - 2026-08-02
+
+- Every box carries its own tests. The window's view file held 13,410 lines
+  proving nine widgets, the settings panel, the picker, the menu and the dock;
+  each of those now renders its own window through one shared rig
+  (`view::testkit`) and reads what was drawn in its own folder. `view/mod.rs`
+  went from 17,438 lines to 6,517, of which 2,115 is code.
+- The picker measures itself, the meters own their dot block, the file explorer
+  owns the columns it draws in, the settings own the button their footer draws,
+  and the popup owns its margin: vocabulary that lived in `view` now lives in
+  the box that reads it.
+- The menu draws itself: its placement, its painter and its numbers moved out of
+  the window's shared file into `menu/paint.rs`.
+- The window's own file is four: the layout and the vocabulary in `mod.rs`, the
+  grid arithmetic in `place.rs`, the chrome painters in `chrome.rs`, the shared
+  drawing in `draw.rs`. The shell's helpers and its tests are files beside the
+  event loop.
+- The dock's pinned rows (the plan, the fleet, a queued message) are their own
+  file.
+- The settings list stops placing and painting three row kinds nothing builds,
+  and the symbol scanner nothing called is gone: 900 lines of unreachable code
+  out.
+- Contracts say where each box's tests are and how many, and the two surface
+  counts that had drifted are right again.
+
 ## 0.11.4 - 2026-08-02
 
 - The window opens with one pane in each of its four spaces: the conversation

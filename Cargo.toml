@@ -8,7 +8,7 @@ members = ["crates/noob", "crates/noob-proto", "crates/noob-provider", "crates/n
 exclude = ["gui"]
 
 [workspace.package]
-version = "0.11.4"
+version = "0.11.5"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
