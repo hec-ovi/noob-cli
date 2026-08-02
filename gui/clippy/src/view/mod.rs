@@ -259,14 +259,6 @@ pub(crate) fn held(ratio: f32, room: f32, floor: f32) -> f32 {
     ratio.clamp(edge, 1.0 - edge)
 }
 
-/// Columns the settings panel keeps at the right of a row for its value.
-///
-/// Wide enough for the longest value on the panel, which is a rate reading like
-/// `312 mean, 340 median tok/s`, and no wider: past that the label and the value
-/// it belongs to are at opposite ends of the window with nothing between them.
-/// A path is longer than this and is clipped, which is what the panel is for
-/// rather than what it says.
-pub(crate) const SETTING_VALUE_COLUMNS: usize = 28;
 
 /// The rows the picker spends above its list on plain writing: the heading and
 /// the folder it is listing. What has been typed sits under them in a bordered
@@ -1108,8 +1100,8 @@ impl Layout {
                 (
                     box_,
                     Panel::new(
-                        box_.x + box_.w - mark - POPUP_PAD,
-                        box_.y + POPUP_PAD,
+                        box_.x + box_.w - mark - crate::widgets::popup::POPUP_PAD,
+                        box_.y + crate::widgets::popup::POPUP_PAD,
                         mark,
                         mark,
                     ),
@@ -2342,9 +2334,6 @@ fn place_menu(menu: &Menu, column: f32, width: f32, height: f32) -> MenuPlaces {
 fn in_cut(panel: Panel, x: f32, y: f32) -> bool {
     (panel.x + panel.w - x) + (y - panel.y) < cut_of(panel)
 }
-
-/// The margin the activity popup keeps inside its box, and inside each block.
-const POPUP_PAD: f32 = 10.0;
 
 /// Where the activity popup sits: the whole surface under the title strip,
 /// a margin in from every edge.

@@ -13,16 +13,18 @@ use crate::style::skin::Skin;
 #[allow(clippy::wildcard_imports)]
 use crate::view::*;
 
-/// The extra room the popup keeps inside its box and inside each block.
-const PAD: f32 = 10.0;
+/// The extra room the popup keeps inside its box and inside each block. Named
+/// for the popup rather than `PAD`, which is the window's own margin arriving
+/// on the wildcard import above.
+pub(crate) const POPUP_PAD: f32 = 10.0;
 /// The tone bar's columns: the bar itself and the air after it.
 const BAR_COLS: usize = 2;
 
 /// How many text columns the popup's blocks wrap in, from the same box the
 /// drawing uses, so the wheel, the track and the glyphs agree.
 fn block_cols(box_: Panel, column: f32) -> usize {
-    let inside = box_.inset(PAD);
-    let text = inside.w - BAR_COLS as f32 * column - SCROLL_W - SCROLL_GAP * 2.0 - PAD;
+    let inside = box_.inset(POPUP_PAD);
+    let text = inside.w - BAR_COLS as f32 * column - SCROLL_W - SCROLL_GAP * 2.0 - POPUP_PAD;
     ((text / column.max(1.0)).floor() as usize).max(8)
 }
 
@@ -59,7 +61,7 @@ pub(crate) fn scroll_geometry(frame: &Frame) -> Option<(usize, usize)> {
 
 /// The box the blocks scroll in: under the header row, inside the padding.
 fn viewport(box_: Panel, line: f32) -> Panel {
-    let inside = box_.inset(PAD);
+    let inside = box_.inset(POPUP_PAD);
     Panel::new(
         inside.x,
         inside.y + line * 2.0,
@@ -126,7 +128,7 @@ pub(crate) fn popup(scene: &mut Scene, frame: &Frame) {
     scene.over_rect(panel_edge(box_, skin.edge_focus));
     let size = frame.pane_size;
     let line = Text::line_for(size);
-    let inside = box_.inset(PAD);
+    let inside = box_.inset(POPUP_PAD);
 
     // The header: the tool, its target and how it stands, with the close
     // mark at the far end, the same close the settings panel has.

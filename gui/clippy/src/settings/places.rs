@@ -977,35 +977,13 @@ fn settings_card_border(scene: &mut Scene, card: Panel, edge: [f32; 4], held: Li
 /// Where a row's control sits: one column in from the label, the width a value
 /// needs and no more.
 ///
-/// Beside the label rather than pinned to the right edge of the panel. The panel
-/// is the whole window now, and a value at the far right of a 1400 pixel row is
-/// a value nobody can read against the key it belongs to: the eye has to cross
-/// the width of the screen. Everything lines up in the one column instead, which
-/// is what makes a screen of settings scannable.
+/// The least the rail of section names goes down to, in columns of pane text.
 ///
-/// Asked by the placement and by the drawing, so a value is drawn exactly where
-/// the click that changes it is tested for.
-pub(crate) fn settings_control(row: Panel, label_w: f32, column: f32) -> Panel {
-    let x = row.x + MARK_W + 3.0 + label_w;
-    let room = (row.x + row.w - x).max(1.0);
-    Panel::new(
-        x,
-        row.y,
-        (SETTING_VALUE_COLUMNS as f32 * column).min(room),
-        row.h,
-    )
-}
-
-/// The least the rail of section names goes down to, and how wide the label
-/// column of a row is, both in columns of pane text.
-///
-/// The rail holds the longest section name (SYSTEM PROMPT) with room for its
-/// mark; the label column holds the longest key in the settings file. The
-/// rail's number is a floor rather than its width, because the rail is
-/// dragged: it is the room the names need, and the settings beside them are
-/// held to the same floor, so neither side of the drag can be squeezed away.
+/// It holds the longest section name (SYSTEM PROMPT) with room for its mark. A
+/// floor rather than a width, because the rail is dragged: it is the room the
+/// names need, and the settings beside them are held to the same floor, so
+/// neither side of the drag can be squeezed away.
 const SETTING_RAIL_COLUMNS: usize = 17;
-const SETTING_LABEL_COLUMNS: usize = 24;
 
 pub(crate) fn settings_rail_floor(column: f32) -> f32 {
     SETTING_RAIL_COLUMNS as f32 * column.max(1.0)
@@ -1064,15 +1042,6 @@ pub(crate) fn settings_rail_cells(body: Panel, rail_w: f32, line: f32, names: us
         .collect()
 }
 
-/// Where a row's value starts when it is a reading rather than a control: after
-/// the label, and running to the end of the row.
-///
-/// A reading's value is usually a path, which is longer than the value column
-/// and would be three dots in it. A control's value is short and lines up down
-/// the right instead.
-pub(crate) fn settings_label_w(list_w: f32, column: f32) -> f32 {
-    (SETTING_LABEL_COLUMNS as f32 * column).min((list_w * 0.5).floor())
-}
 
 /// How much of a slider's row the number beside the track takes. The track gets
 /// the rest.
@@ -1465,32 +1434,8 @@ pub(crate) fn place_settings(area: Panel, shape: &Shape, panel: &Settings) -> Se
             continue;
         };
         rows.push((index, Side::Left, shown));
-        let label_w = settings_label_w(row.w, column);
-        let value_at = settings_control(row, label_w, column);
-        // Only a row that carries a control gets one, and a control is either a
-        // value or a track. A heading or a reading with a click region over its
-        // value would answer a press with nothing.
-        match entry {
-            SettingRow::Setting { kind, .. } if kind.fraction(0.0).is_some() => {
-                let number = (SETTING_TRACK_VALUE_COLUMNS as f32 * column).min(value_at.w * 0.5);
-                // A column of air before it, and the number's own margin after
-                // it: a track that starts on the border reads as part of the
-                // frame, and one its number sits against reads as one thing.
-                let track = Panel::new(
-                    value_at.x + column,
-                    value_at.y,
-                    (value_at.w - number - column * (1.0 + SETTING_TRACK_GAP_COLUMNS)).max(1.0),
-                    value_at.h,
-                );
-                if clip.holds(track) {
-                    tracks.push((index, Side::Left, track));
-                }
-            }
-            SettingRow::Setting { .. } | SettingRow::Field { .. } if clip.holds(value_at) => {
-                values.push((index, Side::Left, value_at));
-            }
-            _ => {}
-        }
+        // A setting, a typed line and a reading are fields of a card: nothing
+        // builds one as a row of the list, so the list places none.
         match entry {
             // A group of the palette: a card whose body is all controls, one
             // cell per colour, as many across as the model counted it with.

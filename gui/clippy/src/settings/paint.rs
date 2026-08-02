@@ -175,7 +175,7 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
             scene.text(text);
         }
     };
-    for (index, side, shown) in &layout.settings_rows {
+    for (index, _, shown) in &layout.settings_rows {
         let Some(whole_row) = panel.row(*index) else {
             continue;
         };
@@ -200,8 +200,6 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
         // The columns this row wraps in: its own width, which is half the list
         // for either card of a pair.
         let list_cols = settings_entry_cols(row.w, column);
-        let label_w = settings_label_w(row.w, column);
-        let label_cols = columns_in(label_w, column).saturating_sub(1);
         let on = *index == panel.cursor() && panel.on_row();
         // Not on a block of text: a filled strip fourteen lines tall over a page
         // of prose is a highlight nobody can read through, and the mark down its
@@ -250,8 +248,6 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
         // cut fits inside it: a clipped line whose ellipsis does not fit wraps
         // out of a one line box and reads as a sentence that simply stops.
         let whole_cols = columns_in(whole.w, column).saturating_sub(1);
-        let label_room = Panel::new(text_x, row.y, label_w.max(1.0), line);
-        let value_at = settings_control(*row, label_w, column);
         match entry {
             // Prose, and the one row that can be trouble. The whole width: a
             // sentence in a label column is two words and three dots.
@@ -498,189 +494,6 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                         skin,
                         size,
                     );
-                }
-            }
-            // A reading's value starts in the same column a control does and
-            // runs to the end of the row rather than stopping where a value
-            // would: most of them are paths, and a path in a value column is
-            // three dots.
-            SettingRow::Reading { label, value } => {
-                say(
-                    scene,
-                    vec![Run::tinted(clip(label, label_cols), skin.dim)],
-                    label_room,
-                    skin.dim,
-                );
-                let value_room = Panel::new(
-                    value_at.x,
-                    row.y,
-                    (row.x + row.w - value_at.x).max(1.0),
-                    line,
-                );
-                say(
-                    scene,
-                    vec![Run::tinted(
-                        clip(value, columns_in(value_room.w, column)),
-                        skin.body,
-                    )],
-                    value_room,
-                    skin.body,
-                );
-            }
-            // The one field: text, and while it is being typed into, what has
-            // been typed with a caret after it.
-            SettingRow::Field { key, value } => {
-                let tint = if on { skin.bright } else { skin.body };
-                say(
-                    scene,
-                    vec![Run::tinted(clip(key, label_cols), tint)],
-                    label_room,
-                    tint,
-                );
-                let typing = on.then(|| panel.editing()).flatten();
-                let (shown, ink) = match (typing, value.is_empty()) {
-                    (Some(typed), _) => (typed.to_string(), skin.bright),
-                    (None, true) => (String::from(crate::settings::UNSET), skin.dim),
-                    (None, false) => (value.clone(), skin.bright),
-                };
-                // The box a field is typed into, drawn as a box: the prompt's
-                // own fill and an outline round it. Without one an editable row
-                // looked exactly like a reading, and the only way to find out
-                // which was which was to press one.
-                scene.rect(panel_fill(value_at, skin.input));
-                if frame.hot == Some(Hit::SettingsValue(*index, *side)) {
-                    scene.rect(panel_fill(value_at, skin.hot));
-                }
-                scene.rect(panel_edge(
-                    value_at,
-                    match typing.is_some() || on {
-                        true => skin.edge_focus,
-                        false => skin.edge,
-                    },
-                ));
-                // The end of it rather than the start: what changes in an
-                // endpoint is the port and the path, and a URL clipped from the
-                // left keeps the half being typed on screen. Inside the box
-                // rather than on its stroke, and two columns short of it, so the
-                // caret after the text is inside the box as well.
-                let inside = Panel::new(
-                    value_at.x + INPUT_PAD,
-                    value_at.y,
-                    (value_at.w - INPUT_PAD * 2.0).max(1.0),
-                    value_at.h,
-                );
-                let shown = tail(&shown, SETTING_VALUE_COLUMNS.saturating_sub(2));
-                say(scene, vec![Run::tinted(shown.clone(), ink)], inside, ink);
-                // The same caret the prompt draws, in the same colour: a block
-                // character would be a glyph that can be missing, and a missing
-                // glyph draws as nothing at all.
-                if typing.is_some() {
-                    scene.rect(
-                        Panel::new(
-                            inside.x + shown.chars().count() as f32 * column,
-                            inside.y,
-                            2.0,
-                            line,
-                        )
-                        .fill(skin.caret),
-                    );
-                }
-            }
-            SettingRow::Setting { key, value, kind, .. } => {
-                let tint = if on { skin.bright } else { skin.body };
-                say(
-                    scene,
-                    vec![Run::tinted(clip(key, label_cols), tint)],
-                    label_room,
-                    tint,
-                );
-                let track = layout
-                    .settings_tracks
-                    .iter()
-                    .find(|(at, half, _)| at == index && half == side)
-                    .map(|(_, _, track)| *track);
-                let value = panel.preview(*index, *side).unwrap_or(value);
-                match track {
-                    // A setting with a range is a position on a track, with the
-                    // number it is at beside it. Nineteen presses of an arrow
-                    // key from one end of opacity to the other is not a control.
-                    Some(track) if track.w >= 1.0 => {
-                        // Nothing changes on rollover: a slider that lights
-                        // up under a passing pointer read as a selection
-                        // effect nobody asked for.
-                        let thick = (line * 0.3).floor().max(2.0);
-                        let up = ((line - thick) * 0.5).floor();
-                        let at = panel.fraction(*index, *side).unwrap_or(0.0);
-                        scene.rect(
-                            Panel::new(track.x, track.y + up, track.w, thick)
-                                .fill(skin.gauge_track),
-                        );
-                        scene.rect(
-                            Panel::new(track.x, track.y + up, (track.w * at).floor(), thick)
-                                .fill(skin.gauge),
-                        );
-                        settings_track_ticks(scene, track, *kind, line, skin);
-                        // The grip: a bar at the position, tall enough to
-                        // press, brighter while the pointer is on the track.
-                        let grip = CARET_W;
-                        scene.rect(
-                            Panel::new(
-                                track.x + ((track.w - grip) * at).floor(),
-                                track.y + 1.0,
-                                grip,
-                                (line - 2.0).max(1.0),
-                            )
-                            .fill(skin.edge_focus),
-                        );
-                        let gap = column * crate::settings::places::SETTING_TRACK_GAP_COLUMNS;
-                        let number = Panel::new(
-                            track.x + track.w + gap,
-                            row.y,
-                            (value_at.x + value_at.w - track.x - track.w - gap).max(1.0),
-                            line,
-                        );
-                        say(
-                            scene,
-                            vec![Run::tinted(
-                                clip(value, SETTING_TRACK_VALUE_COLUMNS.saturating_sub(1)),
-                                skin.bright,
-                            )],
-                            number,
-                            skin.bright,
-                        );
-                    }
-                    // The value of a setting that can change is drawn as the
-                    // control it is: a box with an outline round it, accent
-                    // tinted, and lit under the pointer the way a window button
-                    // is. The same box the field gets, because they answer the
-                    // same press: anything with an outline here can be changed.
-                    _ => {
-                        scene.rect(panel_fill(value_at, skin.input));
-                        if frame.hot == Some(Hit::SettingsValue(*index, *side)) {
-                            scene.rect(panel_fill(value_at, skin.hot));
-                        }
-                        scene.rect(panel_edge(
-                            value_at,
-                            match on {
-                                true => skin.edge_focus,
-                                false => skin.edge,
-                            },
-                        ));
-                        say(
-                            scene,
-                            vec![Run::tinted(
-                                clip(value, SETTING_VALUE_COLUMNS.saturating_sub(2)),
-                                skin.bright,
-                            )],
-                            Panel::new(
-                                value_at.x + INPUT_PAD,
-                                value_at.y,
-                                (value_at.w - INPUT_PAD * 2.0).max(1.0),
-                                value_at.h,
-                            ),
-                            skin.bright,
-                        );
-                    }
                 }
             }
             // One group of the palette, as a card: what the group paints in the
@@ -1381,6 +1194,9 @@ pub(crate) fn settings_panel(scene: &mut Scene, frame: &Frame) {
                     }
                 }
             }
+            // A setting, a typed line and a reading are fields of a card:
+            // nothing builds one as a row of the list, so the list draws none.
+            _ => {}
         }
     }
     // The column beside that list: the entry under the cursor, rendered the way
