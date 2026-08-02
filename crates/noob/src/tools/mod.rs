@@ -85,7 +85,7 @@ pub struct Core {
     pub sandbox: Sandbox,
     /// The folder lock for model-typed commands, built once per boot in
     /// workspace mode when the kernel provides it. None means bash runs
-    /// unlocked and its one-time warning stays honest about that.
+    /// unlocked and its one-time warning says so.
     pub lockdown: Option<crate::exec::Lockdown>,
     /// Truncation policy for every tool result (NOOB_TOOL_CAPS). Defaults to
     /// the shipped caps; bootstrap swaps in Caps::uncapped() when the setting
@@ -368,7 +368,7 @@ impl ToolCtx {
 /// system gave it, and what to do next. Every tool already writes the answer
 /// into its error prose, but that prose is asserted verbatim by tests and
 /// parsing it back out is a guess. Set at the point the failure is minted,
-/// where it is known for free. None means unclassified, which is honest.
+/// where it is known for free. None means unclassified, which is what it is.
 #[derive(Clone)]
 pub struct ToolOutcome {
     pub content: String,

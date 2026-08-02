@@ -456,7 +456,7 @@ fn a_shell_command_sends_its_output_line_by_line_as_it_runs() {
     assert!(error["message"].as_str().unwrap().contains("it broke"), "{error}");
 }
 
-/// Compaction is the one honest end of a file's life: content the model saw
+/// Compaction is the one end of a file's life: content the model saw
 /// is no longer in its context. A code view that never hears this keeps
 /// showing pages the agent has forgotten.
 #[test]

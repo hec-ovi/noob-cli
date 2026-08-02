@@ -75,7 +75,7 @@ is the closed class set; every classified error also says what to do next.
   under the temp tree so builds keep working. bash's one-time UI notice
   states whichever is true: folder-locked, or no sandbox at all.
 - `truncate`: `Caps` (every cap in one struct, `uncapped()` lifts all),
-  head+tail truncation with honest markers, line clipping, the frozen
+  head+tail truncation with markers where the middle went, line clipping, the frozen
   trailer phrasings.
 - `paths`: near-miss resolution for the correction rail.
 - `untrusted`: delimiter-wrapping for content that came from outside.

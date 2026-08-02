@@ -906,7 +906,7 @@ impl Call {
         line == self.line
     }
 
-    /// How long it ran, in whatever the window can honestly say.
+    /// How long it ran, in whatever the window can say.
     fn duration(&self) -> Option<f64> {
         match (self.started, self.ended) {
             (Some(start), Some(end)) if end >= start => Some(end - start),
@@ -1773,7 +1773,7 @@ impl State {
     ///
     /// PLAN, AGENTS and the two monitors are built from lists and readings
     /// rather than from lines, so there is nothing there to select. Returning
-    /// nothing for them is the honest answer and keeps selection off the views
+    /// nothing for them is the answer and keeps selection off the views
     /// where it would mean guessing at a layout.
     pub fn pane_of(&self, view: crate::dock::View) -> Option<&Pane> {
         match view {
@@ -2497,7 +2497,7 @@ mod tests {
     /// There is no field on the wire that says "these ran in parallel": no batch
     /// id, no ordinal, no agent-side timestamp. What there is, is the set of
     /// calls still open when a start frame arrives, and that set is exact. So
-    /// the rule under test is the whole of what the window can honestly claim.
+    /// the rule under test is the whole of what the window can claim.
     #[test]
     fn calls_that_overlap_are_marked_and_calls_that_do_not_are_not() {
         let end = |id: &str| Event::ToolEnd {

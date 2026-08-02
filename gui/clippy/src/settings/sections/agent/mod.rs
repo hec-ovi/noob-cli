@@ -42,7 +42,7 @@ const AGENT_FIELDS: [(&str, &str, &str); 11] = [
 ];
 
 /// What to call one of the agent's keys, and what to say under it. The key
-/// itself for anything not on [`AGENT_FIELDS`], which is the honest label for a
+/// itself for anything not on [`AGENT_FIELDS`], which is the plainest label for a
 /// line this window knows nothing about.
 fn agent_says(key: &str) -> (&str, &'static str) {
     match AGENT_FIELDS.iter().find(|(known, ..)| *known == key) {
@@ -172,7 +172,7 @@ fn agent_default(key: &str) -> String {
         agent::MAX_ROUNDS | agent::TASK_MAX_TURNS => agent::ROUNDS_DEFAULT.to_string(),
         agent::TASK_TOOLS => agent::TASK_TOOLS_DEFAULT.to_string(),
         agent::TASK_WALL_CLOCK => agent::WALL_CLOCK_DEFAULT.to_string(),
-        // Unreachable through AGENT_SETTINGS, and a number is the honest answer
+        // Unreachable through AGENT_SETTINGS, and a number is the answer that fits
         // for a row that says it is one.
         _ => String::from("0"),
     }
@@ -201,7 +201,7 @@ pub fn rows(agent: &Agent, health: Option<&str>, show_key: bool) -> Vec<Row> {
         let set = agent.setting(key).is_some();
         let value = match agent.setting(key) {
             Some(value) => value.to_string(),
-            // A list with no default has nothing honest to show but that
+            // A list with no default has nothing to show but that
             // nobody has set it; a track has to stand somewhere, so it stands
             // on the number the CLI would use.
             None => match kind {

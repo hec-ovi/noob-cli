@@ -52,7 +52,7 @@ What callers may rely on, however a platform implements it:
 - The child and every process it starts form one killable unit; timeout,
   cancellation, and end-of-call cleanup terminate the whole unit.
 - stdout and stderr arrive merged, interleaved as a terminal would show
-  them, bounded to the head+tail budget with an honest omission marker.
+  them, bounded to the head+tail budget with a marker where the middle went.
 - A fast producer can never deadlock the runner, and an abandoned output
   stream can never grow memory without bound.
 - The leader's real exit code survives cleanup.

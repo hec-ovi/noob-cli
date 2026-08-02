@@ -163,7 +163,7 @@ fn run_inner(core: &Core, fs: &FsState, args: &Value) -> Result<ToolOutcome, Str
                 span: noob_proto::Span {
                     start: u32::try_from(offset).unwrap_or(u32::MAX),
                     end: u32::try_from(last_emitted).unwrap_or(u32::MAX),
-                    // What a read can honestly say: this is the page the model
+                    // What a read can say: this is the page the model
                     // asked for, not a function anybody parsed.
                     kind: Some(String::from("selection")),
                     name: None,

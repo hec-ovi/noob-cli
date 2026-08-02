@@ -68,7 +68,7 @@ fn run_inner(core: &Core, fs: &FsState, grants: &WriteGrants, args: &Value) -> R
     grants.consume(&core.workspace, raw);
     // After the write, so nothing is announced that did not land. A file that
     // did not exist has no before side; one that is not text is reported as
-    // what it looked like, which is the honest answer for a diff view.
+    // what it looked like, which is what a diff view is asking for.
     if core.emitter.is_on() {
         let before = current
             .as_deref()

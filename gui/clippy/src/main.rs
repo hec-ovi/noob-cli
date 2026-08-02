@@ -7568,7 +7568,7 @@ mod tests {
         let panel = layout.placed(Space::TopRight).body;
         for view in View::ALL {
             // A machine that reports no hardware at all has no rows there to
-            // scroll, and that is the one honest exception.
+            // scroll, and that is the one exception.
             if view == View::Hardware && monitor.hardware().is_empty() {
                 continue;
             }

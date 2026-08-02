@@ -237,7 +237,7 @@ pub fn card_cols(cols: usize) -> usize {
 pub const FIELD_COLUMNS: usize = 24;
 
 /// The gap between two fields side by side, in columns. [`STEP`] is under a
-/// column wide at every size, and a column is the honest way to spend it in an
+/// column wide at every size, and a column is the way to spend it in an
 /// arithmetic that is counting columns.
 pub const STEP_COLUMNS: usize = 1;
 

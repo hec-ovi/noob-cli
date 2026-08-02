@@ -257,7 +257,7 @@ fn pick_format(formats: &[wgpu::TextureFormat]) -> wgpu::TextureFormat {
 }
 
 /// Mailbox when it exists: a burst of agent output must not queue frames behind
-/// the compositor. Fifo is guaranteed present and is the honest fallback.
+/// the compositor. Fifo is guaranteed present and is the fallback.
 fn pick_present(modes: &[wgpu::PresentMode]) -> wgpu::PresentMode {
     if modes.contains(&wgpu::PresentMode::Mailbox) {
         wgpu::PresentMode::Mailbox

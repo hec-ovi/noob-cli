@@ -128,7 +128,7 @@ fn count(
     if status == 404 {
         return Err(format!(
             "{url} answered 404: this endpoint has no tokenizer route, so the only \
-             honest answer is none. llama.cpp's server has one; hosted APIs generally \
+             answer is none. llama.cpp's server has one; hosted APIs generally \
              do not."
         ));
     }

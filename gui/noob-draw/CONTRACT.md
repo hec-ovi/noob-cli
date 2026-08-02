@@ -177,7 +177,7 @@ string with, so a WGSL typo is a failing test rather than a black window.
 
 The shader is a string handed to a driver, so the build cannot catch a
 mistake in it: `the_shader_compiles` is the gate, and any change to `Rect`'s
-shape has to keep `a_rect_is_exactly_three_vec4s` honest on the Rust side and
+shape has to keep `a_rect_is_exactly_three_vec4s` passing on the Rust side and
 edit the WGSL struct in the same commit. The `extra` vector is full; a fifth
 shape parameter means packing two values into one slot or growing both
 structs together.

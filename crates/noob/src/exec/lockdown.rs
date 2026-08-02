@@ -8,7 +8,7 @@
 //! Built once in the parent (one ruleset fd, reused for every spawn),
 //! applied in the child between fork and exec. A kernel without Landlock
 //! (before 5.13, or an lsm= list that omits it) says so at build time and
-//! the caller runs unlocked and honest about it: that is the best-effort
+//! the caller runs unlocked and says so: that is the best-effort
 //! half of the contract.
 
 #[cfg(target_os = "linux")]

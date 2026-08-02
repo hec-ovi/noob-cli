@@ -150,7 +150,7 @@ command for everything, and the whole authored prompt in the user's hands.
   tasks at once; the command is `/set_max_subagents`) at 3 and 5.
 - DEFAULT THEMES offers CUSTOM beside the three presets: two presses write
   every colour of the palette in hand into the settings file as the user's
-  own lines, every swatch stays editable, and the row honestly reads custom
+  own lines, every swatch stays editable, and the row reads custom
   whenever a written colour overrides its preset.
 
 - The system prompt is two user-owned files in the config directory:

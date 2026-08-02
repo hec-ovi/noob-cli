@@ -965,7 +965,7 @@ impl Agent {
                                 // whatever the tool set: a tool cannot know it
                                 // was skipped. Everything else is the class the
                                 // failure was minted with, and "error" is the
-                                // honest word for one nobody classified.
+                                // plain word for one nobody classified.
                                 kind: if outcome.canceled {
                                     tools::fail::CANCELED.to_string()
                                 } else {

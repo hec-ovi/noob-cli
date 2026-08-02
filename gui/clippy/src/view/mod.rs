@@ -106,8 +106,8 @@ pub(crate) const CONTEXT_HEAD: usize = 4;
 /// The smallest a dot shrinks to, across or down, when a pane has more readings
 /// than room. Below this the block stops reading as a block, so it is not drawn:
 /// too tall for its rows and they scroll off, too narrow for its columns and the
-/// pane draws numbers alone. A reading that scrolled off is honest and a number
-/// with no block is honest; a smear is not.
+/// pane draws numbers alone. A reading that scrolled off is true and a number
+/// with no block is true; a smear is not.
 pub(crate) const SMALL_DOT: f32 = 4.0;
 const PROMPT_COLUMNS: usize = 2;
 /// The three dots that stand in for the prompt's marker while a turn runs: how
@@ -13385,7 +13385,7 @@ mod tests {
         );
     }
 
-    /// A file that is not there shows the shipped default under an honest
+    /// A file that is not there shows the shipped default under a
     /// note, with the checkbox that starts owning it. Never an empty box.
     #[test]
     fn a_missing_file_shows_the_built_in_text_on_its_own_block() {

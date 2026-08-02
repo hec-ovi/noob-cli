@@ -143,7 +143,7 @@ mod tests {
     /// icon and the launcher but not the icon's small variant, whose name has
     /// a suffix before the extension. The install died on a missing file with
     /// no clue which one, because `install` reports the error and not the
-    /// path. The glob is gone; this keeps the list honest.
+    /// path. The glob is gone; this keeps the list true to what ships.
     #[test]
     fn the_installer_only_places_files_that_exist() {
         let placed: Vec<&str> = INSTALLER

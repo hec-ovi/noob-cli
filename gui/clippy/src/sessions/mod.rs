@@ -94,7 +94,7 @@ pub struct Saved {
     /// How full the context window was the last time this window watched this
     /// session run, when it ever did. Nothing at all for a session written
     /// before the note started carrying it, and for every session the CLI wrote
-    /// on its own: the transcript does not record it and there is no honest
+    /// on its own: the transcript does not record it and there is no
     /// guess at it. See [`Index`].
     pub context: Option<Context>,
     /// The opening of the first thing the human said, on one line.

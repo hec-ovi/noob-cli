@@ -427,7 +427,7 @@ mod tests {
     }
 
     /// `MemFree` excludes the page cache, so a healthy machine reads as nearly
-    /// full and the bar sits at 95% forever. `MemAvailable` is the honest one.
+    /// full and the bar sits at 95% forever. `MemAvailable` is the one that answers it.
     #[test]
     fn memory_uses_available_rather_than_free() {
         let meminfo = "\

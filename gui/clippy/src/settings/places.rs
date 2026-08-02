@@ -1198,7 +1198,7 @@ impl ListClip {
     }
 
     /// The visible part of a box, or nothing when it is off screen: for a hit
-    /// region or a fill that can honestly be cut, since what comes back is
+    /// region or a fill that can be cut, since what comes back is
     /// exactly the part that is on screen.
     pub(crate) fn cut(&self, panel: Panel) -> Option<Panel> {
         let y = panel.y.max(self.top);

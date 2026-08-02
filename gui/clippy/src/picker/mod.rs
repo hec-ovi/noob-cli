@@ -761,7 +761,7 @@ impl Picker {
     ///
     /// A session is a folder and an id together. One whose folder has been
     /// deleted since is not a choice at all: `noob serve` is started in that
-    /// directory, and there is no honest guess at another one, so the press is
+    /// directory, and there is no guess at another one, so the press is
     /// refused and the row says why rather than starting an agent somewhere
     /// nobody named. A session written by the CLI, which this window has no note
     /// of, resumes in the folder being looked at: that is the folder the row was

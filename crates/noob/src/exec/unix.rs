@@ -217,7 +217,7 @@ pub(crate) fn run(
     } else {
         // Something escaped the process group (setsid) and still holds the
         // pipe. Stop and join the non-blocking collector; the escapee was
-        // NOT killed and the result must say so honestly.
+        // NOT killed and the result must say so.
         abandoned.store(true, Ordering::SeqCst);
         let _ = collector.join();
     }

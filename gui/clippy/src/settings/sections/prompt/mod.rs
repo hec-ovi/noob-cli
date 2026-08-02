@@ -5,7 +5,7 @@
 //! and then appends an environment block it computes for the request. The
 //! first two are user-owned files with shipped defaults behind them: when a
 //! file is absent the agent runs with the built-in text, so that is what the
-//! block shows, said honestly. The third is data about the machine and the
+//! block shows, said as the shipped text. The third is data about the machine and the
 //! moment, so its block is read and never edited; `noob debug env` prints it
 //! and the frame hands what it answered in here ([`EnvBlock`]).
 //!
@@ -340,7 +340,7 @@ impl PromptSection {
     }
 
     /// One file's block: its buffer while edition is enabled on it, the file's
-    /// own text while there is one, and the shipped default, said honestly,
+    /// own text while there is one, and the shipped default, named as one,
     /// while there is not.
     fn file_paper(&self, file: PromptFile, agent: &Agent) -> Paper {
         let title = Self::marked(file);
@@ -571,7 +571,7 @@ say");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A file that is not there shows the shipped default under an honest
+    /// A file that is not there shows the shipped default under a
     /// note, and saving after enabling edition writes that text as the file:
     /// the built-in becomes owned.
     #[test]

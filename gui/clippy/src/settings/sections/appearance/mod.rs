@@ -320,7 +320,7 @@ fn palette_line(config: &Config) -> String {
 /// palette nobody named.
 ///
 /// The `theme` key is resolved into colours as the file is read and is not kept
-/// anywhere afterwards, so the only honest way to fill this row in is to ask
+/// anywhere afterwards, so the only way to fill this row in is to ask
 /// which preset the colours in hand match. A file that sets `theme = ice` and
 /// then one colour of its own is custom, which is exactly what it is.
 fn theme_name(config: &Config) -> &'static str {
@@ -352,7 +352,7 @@ fn value_of(config: &Config, key: &str, kind: Kind) -> String {
                 "window_opacity" => config.window_opacity,
                 "font_size" => config.font_size,
                 "pane_font_size" => config.pane_font_size,
-                // Unreachable through the groups, and a number is the honest
+                // Unreachable through the groups, and a number is the plain
                 // answer for a row that says it is one.
                 _ => 0.0,
             };

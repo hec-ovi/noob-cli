@@ -495,7 +495,7 @@ impl Agent {
     /// again. `clear_plan_history` deliberately calls plain `adopt`: it
     /// rewrites plan payloads in place and never removes a file body.
     pub(crate) fn adopt_compacted(&mut self, items: Vec<Item>, ui: &mut Ui) {
-        // The one honest end of a file's life. `invalidate_freshness` already
+        // The one end of a file's life. `invalidate_freshness` already
         // means exactly this: content the model saw earlier is no longer in
         // context. Nothing else in the process ends a file, so a code view
         // that never hears this keeps showing pages the agent has forgotten.
