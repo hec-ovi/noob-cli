@@ -10,7 +10,6 @@ pub mod grep;
 pub mod guard;
 pub mod ls;
 pub mod mcp;
-pub mod outline;
 pub mod paths;
 pub mod read;
 pub mod skill;
