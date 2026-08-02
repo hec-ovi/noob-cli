@@ -27,6 +27,8 @@
 //! row is one number wherever it is drawn and the keyboard walks straight
 //! from the column into the flyout and back.
 
+pub mod paint;
+
 use crate::dock::{Dock, Space, View};
 use crate::design::icons;
 

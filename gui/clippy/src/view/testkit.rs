@@ -617,3 +617,57 @@ pub(crate) fn text_over(texts: &[Text], panel: Panel) -> bool {
             && panel.y < text.at.y + text.at.h
     })
 }
+
+/// How many one pixel bars are drawn in that box: two for a plus, one for
+/// the minus an open folder carries.
+pub(crate) fn bars_in(out: &Rendered, mark: Panel) -> usize {
+    out.scene
+        .rects
+        .iter()
+        .filter(|rect| {
+            let [_, _, w, h] = rect.xywh();
+            rect.extra()[3] == 0.0 && (w == 1.0 || h == 1.0) && inside(**rect, mark)
+        })
+        .count()
+}
+
+pub(crate) fn a_settings_panel(config: &Config) -> Settings {
+    Settings::open(
+        config,
+        Some(std::path::Path::new("/home/hec/.config/noob/no0b.conf")),
+        an_agent(),
+    )
+}
+
+/// Everything drawn at this line, left to right, as one string.
+pub(crate) fn line_at(out: &Rendered, y: f32) -> String {
+    let mut texts: Vec<&noob_draw::Text> = out
+        .scene
+        .texts
+        .iter()
+        .filter(|text| (text.at.y - y).abs() < 0.01)
+        .collect();
+    texts.sort_by(|a, b| a.at.x.total_cmp(&b.at.x));
+    texts
+        .iter()
+        .flat_map(|text| text.runs.iter().map(|run| run.text.as_str()))
+        .collect()
+}
+
+pub(crate) fn a_picker(inside: &[&str], recents: &[&str]) -> Picker {
+    Picker::open(
+        Box::new(crate::picker::Fixed(
+            inside.iter().map(|s| s.to_string()).collect(),
+        )),
+        std::path::PathBuf::from("/home/hec"),
+        recents.iter().map(std::path::PathBuf::from).collect(),
+    )
+}
+
+/// left column, custom alone on the right.
+pub(crate) fn option_name(side: crate::settings::Side, option: usize) -> &'static str {
+    match side {
+        crate::settings::Side::Left => crate::config::THEMES[option],
+        _ => "custom",
+    }
+}

@@ -1166,7 +1166,7 @@ struct App {
     column: f32,
     pane_column: f32,
     /// One column at the size a menu's rows are written at, which is not the
-    /// size anything else in the window is written at. See [`view::MENU_SIZE`].
+    /// size anything else in the window is written at. See [`menu::paint::MENU_SIZE`].
     menu_column: f32,
 
     cursor: PhysicalPosition<f64>,
@@ -2806,7 +2806,7 @@ impl App {
         if let Some(renderer) = self.renderer.as_mut() {
             self.column = renderer.column_width(self.config.font_size);
             self.pane_column = renderer.column_width(self.config.pane_font_size);
-            self.menu_column = renderer.column_width(view::MENU_SIZE);
+            self.menu_column = renderer.column_width(menu::paint::MENU_SIZE);
         }
         self.dirty = true;
     }
@@ -4847,7 +4847,7 @@ impl ApplicationHandler<Wake> for App {
                 let mut renderer = noob_draw::Renderer::new(&gpu);
                 self.column = renderer.column_width(self.config.font_size);
                 self.pane_column = renderer.column_width(self.config.pane_font_size);
-                self.menu_column = renderer.column_width(view::MENU_SIZE);
+                self.menu_column = renderer.column_width(menu::paint::MENU_SIZE);
                 self.renderer = Some(renderer);
                 self.gpu = Some(gpu);
             }
