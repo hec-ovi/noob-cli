@@ -1,71 +1,28 @@
-//! The SYSTEM PROMPT section: the prompt the agent gets, as the three layers
-//! it is built from, stacked in the order the CLI assembles them.
+//! The SYSTEM PROMPT section: the prompt the agent gets, as the two layers it
+//! is built from, stacked in the order the CLI assembles them.
 //!
-//! The CLI reads `<config dir>/AGENTS.md`, appends `<config dir>/TOOLS.md`,
-//! and then appends an environment block it computes for the request. The
-//! first two are user-owned files with shipped defaults behind them: when a
-//! file is absent the agent runs with the built-in text, so that is what the
-//! block shows, said as the shipped text. The third is data about the machine and the
-//! moment, so its block is read and never edited; `noob debug env` prints it
-//! and the frame hands what it answered in here ([`EnvBlock`]).
+//! The CLI reads `<config dir>/AGENTS.md` and then appends an environment
+//! block it computes for the request. The first is the one user-owned file,
+//! with the shipped prompt behind it: when the file is absent the agent runs
+//! with the built-in text, so that is what the block shows, said as the
+//! shipped text. The second is data about the machine and the moment, so its
+//! block is read and never edited; `noob debug env` prints it and the frame
+//! hands what it answered in here ([`EnvBlock`]).
 //!
 //! One of the settings panel's nested section boxes, and one that carries
 //! state of its own: [`PromptSection`] owns the document editor (the lines
-//! being typed, the caret, the scroll that follows it) for whichever of the
-//! two files has edition enabled. One editor at a time, because there is one
-//! keyboard: enabling edition on one file drops an edit running on the other.
-//! The frame routes the keys here and every save is a deed done in `main`
-//! through the agent-files box, so nothing in this file touches a disk.
+//! being typed, the caret, the scroll that follows it) while edition is
+//! enabled. The frame routes the keys here and every save is a deed done in
+//! `main` through the agent-files box, so nothing in this file touches a disk.
 
-use crate::agent::{self, Agent, Instructions};
+use crate::agent::{self, Agent};
 use crate::settings::{EnvBlock, Paper, Row, PAPER_LINES};
-
-/// Which of the two user-owned prompt files a row or an editor is about.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PromptFile {
-    Agents,
-    Tools,
-}
-
-impl PromptFile {
-    /// The file's name, which is also its block's title.
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            PromptFile::Agents => agent::AGENTS_MD,
-            PromptFile::Tools => agent::TOOLS_MD,
-        }
-    }
-
-    /// The text the CLI runs with when the file is absent.
-    pub(crate) fn default_text(self) -> &'static str {
-        match self {
-            PromptFile::Agents => agent::AGENTS_DEFAULT,
-            PromptFile::Tools => agent::TOOLS_DEFAULT,
-        }
-    }
-
-    /// The file's reading off the agent snapshot.
-    pub(crate) fn of(self, agent: &Agent) -> &Instructions {
-        match self {
-            PromptFile::Agents => &agent.instructions,
-            PromptFile::Tools => &agent.tools,
-        }
-    }
-
-    /// Which row of the section the file's block is.
-    pub(crate) fn row(self) -> usize {
-        match self {
-            PromptFile::Agents => 0,
-            PromptFile::Tools => 1,
-        }
-    }
-}
 
 /// The section's own state: the document editor, while edition is enabled on
 /// one of the two files.
 #[derive(Default)]
 pub struct PromptSection {
-    editing: Option<(PromptFile, Editor)>,
+    editing: Option<Editor>,
 }
 
 /// The document being retyped: its lines, the caret, and the first line the
@@ -112,16 +69,10 @@ impl Editor {
 }
 
 impl PromptSection {
-    /// The file a row of the section is, or nothing for the rows that are not
-    /// one of the two.
-    /// Which file a row of this section is edited from. Only AGENTS.md: the row
-    /// under TOOLS.md is read out here and changed in the file itself, so no
-    /// key and no press opens an editor on it.
-    pub(crate) fn file_at(index: usize) -> Option<PromptFile> {
-        match index {
-            0 => Some(PromptFile::Agents),
-            _ => None,
-        }
+    /// Whether a row of this section opens an editor. Only AGENTS.md does:
+    /// the environment block is data, read out and never edited.
+    pub(crate) fn edits_at(index: usize) -> bool {
+        index == 0
     }
 
     /// Whether edition is enabled anywhere in the section.
@@ -129,43 +80,37 @@ impl PromptSection {
         self.editing.is_some()
     }
 
-    /// Which file the open editor is on, when one is open.
-    pub(crate) fn editing_file(&self) -> Option<PromptFile> {
-        self.editing.as_ref().map(|(file, _)| *file)
-    }
+
 
     /// Which row the open editor is on, for whoever keeps scroll positions.
     pub(crate) fn editing_row(&self) -> Option<usize> {
-        self.editing_file().map(PromptFile::row)
+        self.editing.as_ref().map(|_| 0)
     }
 
-    /// Enable edition on one file: the editor opens on the file's own text,
-    /// or on the shipped default when there is no file, which is what "edit
-    /// and save to own it" means.
-    pub(crate) fn begin(&mut self, file: PromptFile, agent: &Agent) {
-        let it = file.of(agent);
+    /// Enable edition: the editor opens on the file's own text, or on the
+    /// shipped prompt when there is no file, which is what "edit and save to
+    /// own it" means.
+    pub(crate) fn begin(&mut self, agent: &Agent) {
+        let it = &agent.instructions;
         let lines = match it.body.is_empty() {
-            true => file.default_text().lines().map(str::to_string).collect(),
+            true => agent::AGENTS_DEFAULT.lines().map(str::to_string).collect(),
             false => it.body.clone(),
         };
-        self.begin_with(file, lines);
+        self.begin_with(lines);
     }
 
     /// The same, on lines somebody handed in: the load action's way in.
-    pub(crate) fn begin_with(&mut self, file: PromptFile, lines: Vec<String>) {
+    pub(crate) fn begin_with(&mut self, lines: Vec<String>) {
         let lines = match lines.is_empty() {
             true => vec![String::new()],
             false => lines,
         };
-        self.editing = Some((
-            file,
-            Editor {
-                lines,
-                line: 0,
-                col: 0,
-                first: 0,
-            },
-        ));
+        self.editing = Some(Editor {
+            lines,
+            line: 0,
+            col: 0,
+            first: 0,
+        });
     }
 
     /// Drop the editor and everything typed into it. True when there was one.
@@ -177,7 +122,7 @@ impl PromptSection {
     /// it closes when the write lands ([`PromptSection::end`]), so a refusal
     /// loses nothing.
     pub(crate) fn take(&self) -> Option<String> {
-        let (_, editor) = self.editing.as_ref()?;
+        let editor = self.editing.as_ref()?;
         Some(editor.lines.join("\n"))
     }
 
@@ -189,7 +134,7 @@ impl PromptSection {
     /// Type into the caret. Control characters are dropped; a newline is
     /// [`PromptSection::newline`], on its own key.
     pub(crate) fn insert(&mut self, text: &str) -> bool {
-        let Some((_, editor)) = self.editing.as_mut() else {
+        let Some(editor) = self.editing.as_mut() else {
             return false;
         };
         let mut typed = false;
@@ -208,7 +153,7 @@ impl PromptSection {
 
     /// Split the line at the caret, which is what Enter means in a document.
     pub(crate) fn newline(&mut self) -> bool {
-        let Some((_, editor)) = self.editing.as_mut() else {
+        let Some(editor) = self.editing.as_mut() else {
             return false;
         };
         let at = editor.at();
@@ -226,7 +171,7 @@ impl PromptSection {
     /// Take the character before the caret back off, joining two lines when
     /// the caret is at the head of one.
     pub(crate) fn backspace(&mut self) -> bool {
-        let Some((_, editor)) = self.editing.as_mut() else {
+        let Some(editor) = self.editing.as_mut() else {
             return false;
         };
         if editor.col > 0 {
@@ -254,7 +199,7 @@ impl PromptSection {
     /// The caret one line up or down, holding its column to the line it lands
     /// on.
     pub(crate) fn step(&mut self, down: bool) -> bool {
-        let Some((_, editor)) = self.editing.as_mut() else {
+        let Some(editor) = self.editing.as_mut() else {
             return false;
         };
         let next = match down {
@@ -273,7 +218,7 @@ impl PromptSection {
     /// The caret one character along, wrapping over a line's end onto the
     /// next, the way every text caret walks.
     pub(crate) fn cross(&mut self, right: bool) -> bool {
-        let Some((_, editor)) = self.editing.as_mut() else {
+        let Some(editor) = self.editing.as_mut() else {
             return false;
         };
         match right {
@@ -298,64 +243,35 @@ impl PromptSection {
     pub(crate) fn caret(&self) -> Option<(usize, usize)> {
         self.editing
             .as_ref()
-            .map(|(_, editor)| (editor.line, editor.col))
+            .map(|editor| (editor.line, editor.col))
     }
 
     /// The section's rows: the two files in the order the CLI reads them, the
     /// environment block, and the line naming that order.
     pub fn rows(&self, agent: &Agent, env: &EnvBlock) -> Vec<Row> {
         vec![
-            Row::Paper(self.file_paper(PromptFile::Agents, agent)),
-            Row::Paper(self.file_paper(PromptFile::Tools, agent)),
+            Row::Paper(self.file_paper(agent)),
             Row::Paper(env_paper(env)),
             Row::Note {
                 text: String::from(
-                    "the CLI assembles the prompt in this order: AGENTS.md, then TOOLS.md, then the environment block",
+                    "the CLI assembles the prompt in this order: AGENTS.md, then the environment block",
                 ),
                 bad: false,
             },
         ]
     }
 
-    /// The mark a block's title carries, and the short line that says what it
-    /// means.
-    ///
-    /// TOOLS.md is the description the model works its tools from, so a word
-    /// changed in it costs a tool rather than a paragraph. It is read out here
-    /// and edited in the file itself: the title wears the asterisk and the line
-    /// under it stays to one clause: a paragraph of warning on a block somebody
-    /// reads every day is a paragraph they stop seeing.
-    fn marked(file: PromptFile) -> String {
-        match file {
-            PromptFile::Tools => format!("{} *", file.name()),
-            PromptFile::Agents => String::from(file.name()),
-        }
-    }
-
-    fn caution(file: PromptFile) -> &'static str {
-        match file {
-            PromptFile::Tools => " \u{2022} * read out here: an edit costs the agent a tool, so it is made in the file",
-            PromptFile::Agents => "",
-        }
-    }
-
-    /// One file's block: its buffer while edition is enabled on it, the file's
-    /// own text while there is one, and the shipped default, named as one,
-    /// while there is not.
-    fn file_paper(&self, file: PromptFile, agent: &Agent) -> Paper {
-        let title = Self::marked(file);
-        // Only AGENTS.md is written from here. TOOLS.md is the description the
-        // model works its tools from: it is read out and dragged over like any
-        // other block here, and changed in the file itself.
-        let acts = file == PromptFile::Agents;
-        if let Some((editing, editor)) = self.editing.as_ref()
-            && *editing == file
-        {
+    /// The AGENTS.md block: its buffer while edition is enabled, the file's own
+    /// text while there is one, and the shipped prompt, named as one, while
+    /// there is not.
+    fn file_paper(&self, agent: &Agent) -> Paper {
+        let title = String::from(agent::AGENTS_MD);
+        let acts = true;
+        if let Some(editor) = self.editing.as_ref() {
             return Paper {
                 title,
-                under: format!(
-                    "being edited \u{2022} nothing lands in the file until ctrl+s{}",
-                    Self::caution(file)
+                under: String::from(
+                    "being edited \u{2022} nothing lands in the file until ctrl+s",
                 ),
                 body: editor.lines.clone(),
                 first: editor.first,
@@ -363,7 +279,7 @@ impl PromptSection {
                 bad: false,
             };
         }
-        let it = file.of(agent);
+        let it = &agent.instructions;
         let Some(path) = it.path.as_deref() else {
             return Paper {
                 title,
@@ -381,11 +297,10 @@ impl PromptSection {
             return Paper {
                 title,
                 under: format!(
-                    "{}: not written yet; this is the built-in text, enable edition and save to own it{}",
+                    "{}: not written yet; this is the built-in text, enable edition and save to own it",
                     path.display(),
-                    Self::caution(file)
                 ),
-                body: file.default_text().lines().map(str::to_string).collect(),
+                body: agent::AGENTS_DEFAULT.lines().map(str::to_string).collect(),
                 first: 0,
                 does: acts,
                 bad: false,
@@ -401,7 +316,7 @@ impl PromptSection {
         }
         Paper {
             title,
-            under: format!("{}{}", path.display(), Self::caution(file)),
+            under: path.display().to_string(),
             body,
             first: 0,
             does: acts,
@@ -518,12 +433,12 @@ say");
     }
 
     /// The section is on the rail between AGENT and SESSIONS and it stacks the
-    /// three layers in assembly order: AGENTS.md, TOOLS.md, the environment
+    /// two layers in assembly order: AGENTS.md, then the environment
     /// block, with the order named under them. Files that are there show their
     /// text under their path; the environment block shows what `noob debug
     /// env` answered, or why it did not.
     #[test]
-    fn the_section_stacks_the_three_layers_in_assembly_order() {
+    fn the_section_stacks_the_two_layers_in_assembly_order() {
         assert_eq!(
             SECTIONS,
             [AGENT, PROMPT, SESSIONS, SKILLS, MCP, COMMANDS, APPEARANCE],
@@ -531,7 +446,6 @@ say");
         );
         let dir = scratch_dir("prompt-layers");
         std::fs::write(dir.join(agent::AGENTS_MD), "# Mine\n\nbe brief\n").expect("a file");
-        std::fs::write(dir.join(agent::TOOLS_MD), "batch the reads\n").expect("a file");
         let mut panel = Settings::open(&Config::default(), None, read(&dir));
         go_to(&mut panel, PROMPT);
         let titles: Vec<String> = panel
@@ -542,23 +456,19 @@ say");
                 _ => None,
             })
             .collect();
-        // The tools block's title wears the asterisk its warning line refers
-        // to: the file the model reads its tools out of.
-        assert_eq!(titles, ["AGENTS.md", "TOOLS.md *", "THE ENVIRONMENT BLOCK"]);
+        assert_eq!(titles, ["AGENTS.md", "THE ENVIRONMENT BLOCK"]);
         let text = said(&panel);
         assert!(text.contains(&dir.join(agent::AGENTS_MD).display().to_string()), "{text}");
-        assert!(text.contains(&dir.join(agent::TOOLS_MD).display().to_string()), "{text}");
         assert!(text.contains("be brief"), "{text}");
-        assert!(text.contains("batch the reads"), "{text}");
         assert!(
-            text.contains("AGENTS.md, then TOOLS.md, then the environment block"),
+            text.contains("AGENTS.md, then the environment block"),
             "nothing names the assembly order: {text}"
         );
 
         // The environment block says it is being read, then what came back,
         // with the one line on why there is nothing to edit; a run that failed
         // says why instead of showing nothing.
-        let env = panel.paper(2).expect("the environment block").clone();
+        let env = panel.paper(1).expect("the environment block").clone();
         assert!(env.under.contains("running noob debug env"), "{}", env.under);
         panel.adopt_env(
             String::from("/tmp/work"),
@@ -566,7 +476,7 @@ say");
             &Config::default(),
         );
         go_to(&mut panel, PROMPT);
-        let env = panel.paper(2).expect("the environment block");
+        let env = panel.paper(1).expect("the environment block");
         assert_eq!(env.body, ["<env>", "cwd: /tmp/work"]);
         assert!(env.under.contains("nothing here to edit"), "{}", env.under);
         panel.adopt_env(
@@ -575,7 +485,7 @@ say");
             &Config::default(),
         );
         go_to(&mut panel, PROMPT);
-        let env = panel.paper(2).expect("the environment block");
+        let env = panel.paper(1).expect("the environment block");
         assert!(env.bad, "a failure is not marked as one");
         assert!(env.under.contains("no such subcommand"), "{}", env.under);
         let _ = std::fs::remove_dir_all(&dir);
@@ -663,32 +573,29 @@ say");
             "an abandoned edit reached the file"
         );
 
-        // And the tools block takes no editor at all: it is read out here and
-        // changed in the file itself.
-        assert!(!panel.toggle_edition(1, &config), "TOOLS.md opened an editor");
+        // And the environment block takes no editor at all: it is machine
+        // facts, read out and never typed into.
+        assert!(!panel.toggle_edition(1, &config), "the env block opened an editor");
         assert!(!panel.edition_on(1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// One editor, on AGENTS.md: it saves its own file, and the block beside it
+    /// The one editor saves its own file, and the environment block beside it
     /// is read out with nothing to press.
     #[test]
-    fn the_agents_block_saves_its_file_and_the_tools_block_is_read_out() {
+    fn the_agents_block_saves_its_file_and_the_env_block_is_read_out() {
         let config = Config::default();
-        let dir = scratch_dir("prompt-two-files");
+        let dir = scratch_dir("prompt-one-file");
         let agents = dir.join(agent::AGENTS_MD);
-        let tools = dir.join(agent::TOOLS_MD);
-        std::fs::write(&agents, "agents text\n").expect("a file");
-        std::fs::write(&tools, "tools text\n").expect("a file");
+        std::fs::write(&agents, "agents text
+").expect("a file");
         let mut panel = Settings::open(&config, None, read(&dir));
         go_to(&mut panel, PROMPT);
 
-        // The tools block: the file's own text, no footer to act in, and no
-        // editor behind it.
-        let tools_block = panel.paper(1).expect("the block");
-        assert_eq!(tools_block.body, ["tools text"]);
-        assert!(!tools_block.does, "TOOLS.md offers edition");
-        assert!(!panel.toggle_edition(1, &config), "TOOLS.md opened an editor");
+        // The environment block: no footer to act in, and no editor behind it.
+        let env_block = panel.paper(1).expect("the block");
+        assert!(!env_block.does, "the env block offers edition");
+        assert!(!panel.toggle_edition(1, &config), "the env block opened an editor");
 
         // AGENTS.md is the one that writes.
         assert!(panel.toggle_edition(0, &config));
@@ -700,9 +607,9 @@ say");
         assert_eq!(path, &agents);
         agent::write_instructions(path, text).expect("the file takes it");
         assert_eq!(
-            std::fs::read_to_string(&tools).expect("the file"),
-            "tools text\n",
-            "saving AGENTS.md touched TOOLS.md"
+            std::fs::read_to_string(&agents).expect("the file"),
+            "first agents text
+"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -818,14 +725,14 @@ say");
             &config,
         );
         go_to(&mut panel, PROMPT);
-        assert!(!panel.paper(2).expect("the block").does, "the block offers edition");
-        assert!(panel.point_at(2, crate::settings::Side::Left));
-        assert!(!panel.toggle_edition(2, &config), "edition opened on the environment");
+        assert!(!panel.paper(1).expect("the block").does, "the block offers edition");
+        assert!(panel.point_at(1, crate::settings::Side::Left));
+        assert!(!panel.toggle_edition(1, &config), "edition opened on the environment");
         assert!(!panel.type_instructions("x", &config));
-        assert!(!panel.begin_load(2), "a load aimed at the environment");
+        assert!(!panel.begin_load(1), "a load aimed at the environment");
         assert!(panel.hint().contains("page"), "{}", panel.hint());
         assert!(panel.page(20, true));
-        assert_eq!(panel.paper(2).expect("the block").first, PAPER_LINES);
+        assert_eq!(panel.paper(1).expect("the block").first, PAPER_LINES);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1088,7 +995,6 @@ say");
         let text = text_of(&out.scene);
         assert!(text.contains("not written yet"), "{text}");
         assert!(text.contains("/home/hec/.config/noob/AGENTS.md"), "{text}");
-        assert!(text.contains("/home/hec/.config/noob/TOOLS.md"), "{text}");
         assert!(
             text.contains("You are noob, an agent working in the current directory."),
             "the built-in text is not drawn: {text}"

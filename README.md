@@ -194,9 +194,9 @@ Three small things the persistent dock does while a turn streams above it.
 
 ## Configuration
 
-The mounted config directory contains `.env`, optional `AGENTS.md` and `TOOLS.md`, `mcp.json`, global `skills/`, and `sessions/`.
+The mounted config directory contains `.env`, an optional `AGENTS.md`, `mcp.json`, global `skills/`, and `sessions/`.
 
-The system prompt is yours: `AGENTS.md` is its main text and `TOOLS.md` its tool guidance, merged in that order ahead of the runtime facts (environment, skills index, MCP servers). Each file, when present, replaces the built-in default wholesale; the shipped tool guidance ends by noting it is the basic set, to adjust at your discretion. `noob debug prompt` prints the merged result, `noob debug env` prints only the runtime lines appended after the two files, and `noob doctor` says which text is in effect. A project-local `AGENTS.md` in the working directory is still appended as project instructions.
+The system prompt is yours. See [The prompt](#the-prompt) below for what it is made of and what a file of your own replaces.
 
 | Key | Default | Meaning | Reload |
 |---|---|---|---|
@@ -233,9 +233,40 @@ Display variables can be set in the shell or the checkout's root `.env` for Comp
 | `COLORTERM` | `truecolor` in the dev container | Terminal color capability |
 | `NO_COLOR` | unset | Disable color while keeping structure and status |
 
+## The prompt
+
+Two things reach the model on every request: one system prompt string, and the tool schemas as a separate field. Nothing else.
+
+The system prompt is built from layers, each announced by a markdown heading, with a tag fencing any text noob did not write:
+
+```
+# Agent
+<instructions>   your AGENTS.md, or the shipped prompt
+# (env)          <env> cwd, platform, date, model, sandbox </env>
+# Project instructions
+<instructions>   the working directory's AGENTS.md, when it has one
+# Skills
+<available_skills>   one "- name: description" line per installed skill
+# MCP servers
+<mcp_servers>    the configured names
+```
+
+`AGENTS.md` in the config directory replaces the shipped prompt whole, identity and tool guidance together. noob has no paired model: the reinforcement that makes a tool work on one local model is wrong for the next, so all of it is yours to rewrite. Start from what ships with `noob debug prompt > ~/.config/noob/AGENTS.md`.
+
+Tool schemas are not part of that text. Each tool is sent as a name, a one-line description from its own file under `crates/noob/prompts/tools/`, and a JSON schema for its arguments. A tool that is not registered costs nothing, so its rules live in its description rather than in the prompt. Rules that decide which tool to reach for (prefer editing over creating, when to plan) stay in the prompt, because the model reads them before it picks anything.
+
+Two of the tools earn a section in the prompt of their own:
+
+- **plan** keeps a checklist pinned above the prompt while the turn runs. The prompt says to call it when the work takes several actions, when steps depend on each other, when you asked for more than one thing in one message, or when sub-agents will run in parallel, and to skip it for what can just be done.
+- **subagent** spawns detached children of the same binary. The prompt says to spawn for work that is genuinely separate, that each one is a whole model run so small work is not worth it, and never to wait for them.
+
+Progressive disclosure is the rule everywhere: a skill contributes one line to the index and its body loads only when the model calls the `skill` tool for it; MCP servers contribute their names and their catalogs arrive when `mcp_connect` runs.
+
+`noob debug prompt` prints the assembled result, `--json` adds the tool array, `noob debug env` prints only the runtime layers, and `noob doctor` says which prompt text is in effect.
+
 ## Prompt budget
 
-`noob debug prompt --json` prints the exact system prompt and tool schemas the binary sends. The budget test registers all 14 tools, including websearch and both generic MCP tools, plus a skill and an MCP server. With the embedded default prompt files, that artifact is about 1,901 o200k tokens: the tool schemas are 1,319 exactly, and the system prompt lands within a token or two of 582 because its environment block carries the working directory, so a deeper path costs a little more. The locked ceiling is 1,925 and the hard limit is 2,000. Both figures are o200k; another tokenizer gives another number for the same bytes. The budget guards the shipped defaults; your own `AGENTS.md` and `TOOLS.md` size is your call, capped at 16 KiB each.
+`noob debug prompt --json` prints the exact system prompt and tool schemas the binary sends. The budget test registers all 14 tools, including websearch and both generic MCP tools, plus a skill and an MCP server. With the shipped prompt, that artifact is about 1,969 o200k tokens: the tool schemas are 1,376 and the system prompt lands near 593, give or take the working directory its environment block carries. The locked ceiling is 1,980 and the hard limit is 2,000. Both figures are o200k; another tokenizer gives another number for the same bytes. The budget guards the shipped text; the size of your own `AGENTS.md` is your call, capped at 16 KiB.
 
 Model-specific chat-template framing is added by the server and is not part of those bytes. llama.cpp caches the prefix, so it is normally prefilled once per slot. Reproduce the noob side with `noob debug prompt --json`; use the server's `/tokenize` endpoint for its framing.
 

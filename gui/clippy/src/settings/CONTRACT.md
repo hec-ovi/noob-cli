@@ -16,9 +16,9 @@ One folder, one contract each; a design change to one section happens inside
 its folder alone:
 
 - [`sections/agent`](sections/agent/CONTRACT.md) - the CLI's file as cards.
-- [`sections/prompt`](sections/prompt/CONTRACT.md) - the prompt's three
-  layers: AGENTS.md and TOOLS.md edited behind an edition checkbox, the
-  environment block read out.
+- [`sections/prompt`](sections/prompt/CONTRACT.md) - the prompt's two
+  layers: AGENTS.md edited behind an edition checkbox, the environment
+  block read out.
 - [`sections/sessions`](sections/sessions/CONTRACT.md) - the saved
   conversations table, its columns and cells.
 - [`sections/skills`](sections/skills/CONTRACT.md) - the installed list and
@@ -119,8 +119,8 @@ names.
    parks the file in the `.bak` beside it and writes the shipped default,
    armed on the first press; the load reads a named `.md` into the editor
    and writes nothing. A failed write keeps the buffer, with the reason on
-   the footer. Only AGENTS.md is edited here: TOOLS.md is read out and
-   changed in the file itself.
+   the footer. Only AGENTS.md is edited here: the environment block is
+   computed per request and read out.
 
 ## Dependencies
 

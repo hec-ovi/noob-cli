@@ -159,7 +159,7 @@ use crate::config::{self, Config};
 /// The sections, in the order the rail lists them: the agent first, because
 /// what the window is a front end for matters more than what colour it is.
 pub const AGENT: &str = "AGENT";
-/// The system prompt: its three layers as documents, AGENTS.md and TOOLS.md
+/// The system prompt: its two layers as documents, AGENTS.md
 /// edited in place and the environment block read out.
 pub const PROMPT: &str = "SYSTEM PROMPT";
 pub const SESSIONS: &str = "SESSIONS";
@@ -2841,8 +2841,8 @@ impl Settings {
     /// checkbox shows and what puts the save and the restore in its footer.
     pub fn edition_on(&self, index: usize) -> bool {
         self.here().name == PROMPT
-            && sections::prompt::PromptSection::file_at(index)
-                .is_some_and(|file| self.prompt_section.editing_file() == Some(file))
+            && sections::prompt::PromptSection::edits_at(index)
+            && self.prompt_section.editing()
     }
 
     /// The enable-edition checkbox on one document block: ticking it opens
@@ -2857,22 +2857,22 @@ impl Settings {
         if self.here().name != PROMPT {
             return false;
         }
-        let Some(file) = sections::prompt::PromptSection::file_at(index) else {
+        if !sections::prompt::PromptSection::edits_at(index) {
             return false;
-        };
+        }
         // A load path being typed gives way: the press said what it wants.
         self.cancel_edit();
         self.point_at(index, Side::Left);
-        if self.prompt_section.editing_file() == Some(file) {
+        if self.prompt_section.editing() {
             self.prompt_section.cancel();
             self.refresh(config);
             return true;
         }
-        let it = file.of(&self.agent);
+        let it = &self.agent.instructions;
         if it.path.is_none() {
             self.trouble = Some(format!(
                 "there is no config directory to keep {} in",
-                file.name()
+                agent::AGENTS_MD
             ));
             return false;
         }
@@ -2884,7 +2884,7 @@ impl Settings {
             return false;
         }
         self.prompt_section.cancel();
-        self.prompt_section.begin(file, &self.agent);
+        self.prompt_section.begin(&self.agent);
         self.refresh(config);
         true
     }
@@ -2939,8 +2939,7 @@ impl Settings {
         self.loading = false;
         self.editing = None;
         self.prompt_section.cancel();
-        self.prompt_section
-            .begin_with(sections::prompt::PromptFile::Agents, body);
+        self.prompt_section.begin_with(body);
         self.refresh(config);
     }
 
@@ -2952,11 +2951,10 @@ impl Settings {
         if !self.edition_on(index) {
             return None;
         }
-        let file = sections::prompt::PromptSection::file_at(index)?;
-        let path = file.of(&self.agent).path.clone()?;
+        let path = self.agent.instructions.path.clone()?;
         let deed = Deed::RestorePrompt {
             path,
-            default: file.default_text(),
+            default: agent::AGENTS_DEFAULT,
         };
         if self.arming == Some(index) {
             self.arming = None;
@@ -3016,9 +3014,8 @@ impl Settings {
     /// on. The editor stays open until the write lands
     /// ([`Settings::end_instructions_edit`]), so a refusal loses nothing.
     pub fn finish_instructions(&self) -> Option<Deed> {
-        let file = self.prompt_section.editing_file()?;
         let text = self.prompt_section.take()?;
-        let path = file.of(&self.agent).path.clone()?;
+        let path = self.agent.instructions.path.clone()?;
         Some(Deed::SaveInstructions { path, text })
     }
 

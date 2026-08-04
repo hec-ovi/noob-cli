@@ -323,7 +323,7 @@ mod tests {
     fn the_spec_says_when_to_call_it() {
         let s = spec();
         assert_eq!(s.name, "plan");
-        for word in ["steps", "sequence", "parallel", "sub-agents"] {
+        for word in ["steps", "parallel", "sub-agents"] {
             assert!(s.description.contains(word), "{word}: {}", s.description);
         }
         assert!(s.description.split_whitespace().count() <= 45);

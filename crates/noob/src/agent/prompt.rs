@@ -4,12 +4,17 @@
 
 use std::path::Path;
 
-/// Shipped defaults, embedded so the binary works with an empty config dir.
-/// A user file of the same name in the config directory replaces its default
-/// wholesale.
+/// The shipped prompt, embedded so the binary works with an empty config dir.
+/// `AGENTS.md` in the config directory replaces it whole: noob has no paired
+/// model, and the reinforcement that makes a tool work on one local model is
+/// wrong for the next, so the whole text is the user's to rewrite.
+/// `noob debug prompt` prints the current one to start from.
 pub const AGENTS_DEFAULT_MD: &str = include_str!("../../prompts/agents-default.md");
-pub const TOOLS_DEFAULT_MD: &str = include_str!("../../prompts/tools-default.md");
 pub const COMPACT_MD: &str = include_str!("../../prompts/compact.md");
+
+/// The resolver line above the skills index: thin harness, fat skills. The
+/// index is the dispatcher; bodies cost nothing until one is loaded.
+const SKILLS_RESOLVER_MD: &str = include_str!("../../prompts/skills-resolver.md");
 
 /// Prompt files are user input of unbounded size; each is hard-capped.
 const PROMPT_FILE_CAP: usize = 16 * 1024;
@@ -21,8 +26,6 @@ pub struct PromptInputs {
     pub sandbox: String,
     /// Config-dir AGENTS.md; None uses the embedded default.
     pub agents: Option<String>,
-    /// Config-dir TOOLS.md; None uses the embedded default.
-    pub tools: Option<String>,
     pub project_agents: Option<String>,
     /// One `- name: description` line per skill (P3); None until then.
     pub skills_index: Option<String>,
@@ -30,9 +33,10 @@ pub struct PromptInputs {
     pub mcp_line: Option<String>,
 }
 
-/// The authored prompt plus the environment block, in fixed order: AGENTS.md
-/// (the main prompt), then TOOLS.md (tool guidance, merged after it), then
-/// the runtime env facts. Budget-tested with the embedded defaults.
+/// The authored prompt plus the environment block. Every layer of the assembled
+/// prompt is announced the same way: a markdown heading naming it, and a tag
+/// fencing text this process did not write, so the model cannot read a path or
+/// a project's instructions as part of ours.
 /// The environment block is computed once at session start, never per
 /// request: a date that rolled over mid-session would bust the cache prefix.
 pub fn head(inputs: &PromptInputs) -> String {
@@ -41,12 +45,10 @@ pub fn head(inputs: &PromptInputs) -> String {
         .as_deref()
         .unwrap_or(AGENTS_DEFAULT_MD)
         .trim_end();
-    let tools = inputs
-        .tools
-        .as_deref()
-        .unwrap_or(TOOLS_DEFAULT_MD)
-        .trim_end();
-    format!("{agents}\n\n{tools}\n\n{}", env_block(inputs))
+    format!(
+        "# Agent\n<instructions>\n{agents}\n</instructions>\n\n{}",
+        env_block(inputs)
+    )
 }
 
 /// The environment facts, one computation shared by the assembled prompt and
@@ -62,9 +64,8 @@ fn env_block(inputs: &PromptInputs) -> String {
     )
 }
 
-/// Everything the assembly appends after the two authored prompt files: the
-/// environment block plus the runtime layers (project AGENTS.md, skills
-/// index, MCP line). `noob debug env` prints this, byte-identical to the
+/// Everything the assembly appends after the shipped prompt: the environment
+/// block plus the runtime layers (project AGENTS.md, skills index, MCP line). `noob debug env` prints this, byte-identical to the
 /// system prompt's tail at that moment.
 pub fn runtime_lines(inputs: &PromptInputs) -> String {
     assemble_from(env_block(inputs), inputs)
@@ -81,40 +82,36 @@ pub fn assemble(inputs: &PromptInputs) -> String {
 pub fn assemble_from(head: String, inputs: &PromptInputs) -> String {
     let mut out = head;
     if let Some(project) = &inputs.project_agents {
-        out.push_str("\n\n# Project instructions (AGENTS.md)\n\n");
+        out.push_str("\n\n# Project instructions\n<instructions>\n");
         out.push_str(project);
+        out.push_str("\n</instructions>");
     }
     if let Some(skills) = &inputs.skills_index {
-        // Resolver discipline (thin harness, fat skills): this index is the
-        // dispatcher; bodies cost zero tokens until a match loads one.
-        out.push_str(
-            "\n\n# Skills (resolver)\n\nMatch the task against these skills. Load a \
-             matching skill with the skill tool and follow it before acting; if two \
-             match, load both.\n\n",
-        );
+        out.push_str("\n\n# Skills\n<available_skills>\n");
+        out.push_str(SKILLS_RESOLVER_MD.trim_end());
+        out.push_str("\n\n");
         out.push_str(skills);
+        out.push_str("\n</available_skills>");
     }
     if let Some(mcp) = &inputs.mcp_line {
-        out.push('\n');
+        out.push_str("\n\n# MCP servers\n<mcp_servers>\n");
         out.push_str(mcp);
+        out.push_str("\n</mcp_servers>");
     }
     out
 }
 
-/// The one-line MCP layer: server names only; schemas stay out of the head
-/// forever (mcp_connect returns catalogs as tool results).
+/// The MCP layer: server names only; schemas stay out of the head forever
+/// (mcp_connect returns catalogs as tool results).
 pub fn mcp_line(servers: &[crate::mcp::config::ServerConfig]) -> Option<String> {
     if servers.is_empty() {
         return None;
     }
     let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
-    Some(format!(
-        "MCP servers (use mcp_connect): {}",
-        names.join(", ")
-    ))
+    Some(format!("Connect with mcp_connect: {}", names.join(", ")))
 }
 
-/// Read one prompt file (AGENTS.md, TOOLS.md) if present and non-empty,
+/// Read the user's AGENTS.md (config dir or project) if present and non-empty,
 /// trimmed and hard-capped with a visible notice.
 pub fn load_prompt_md(dir: &Path, name: &str) -> Option<String> {
     let text = std::fs::read_to_string(dir.join(name)).ok()?;
@@ -170,7 +167,6 @@ mod tests {
             model: "qwen".into(),
             sandbox: "container".into(),
             agents: None,
-            tools: None,
             project_agents: None,
             skills_index: None,
             mcp_line: None,
@@ -229,17 +225,18 @@ mod tests {
         );
     }
 
-    // Replacement and agents-then-tools ordering are proven through the real
-    // binary in tests/prompt_files.rs.
+    // Replacement of the shipped prompt is proven through the real binary in
+    // tests/prompt_files.rs.
 
     #[test]
     fn project_agents_md_appends_under_its_header() {
         let mut i = inputs();
         i.project_agents = Some("be local".into());
         let s = assemble(&i);
-        let p = s.find("# Project instructions (AGENTS.md)").unwrap();
+        let p = s.find("# Project instructions").unwrap();
         assert!(p > s.find("</env>").unwrap());
-        assert!(s.contains("be local"));
+        // Fenced like every other text this process did not write.
+        assert!(s.contains("# Project instructions\n<instructions>\nbe local\n</instructions>"));
     }
 
     #[test]
@@ -273,38 +270,46 @@ mod tests {
         ];
         assert_eq!(
             mcp_line(&servers).unwrap(),
-            "MCP servers (use mcp_connect): fs, websearch"
+            "Connect with mcp_connect: fs, websearch"
         );
         assert!(mcp_line(&[]).is_none());
         let mut i = inputs();
         i.skills_index = Some("- fmt: formats".into());
         i.mcp_line = mcp_line(&servers);
         let s = assemble(&i);
-        // The MCP line is the last layer, after the resolver section, and
-        // never carries schemas or URLs.
-        assert!(s.ends_with("MCP servers (use mcp_connect): fs, websearch"));
+        // The MCP servers are the last layer, after the skills section, and
+        // never carry schemas or URLs.
+        assert!(s.ends_with("# MCP servers\n<mcp_servers>\nConnect with mcp_connect: fs, websearch\n</mcp_servers>"));
         assert!(!s.contains("localhost:8000"));
-        assert!(
-            s.find("# Skills (resolver)").unwrap()
-                < s.find("MCP servers (use mcp_connect)").unwrap()
-        );
+        assert!(s.find("# Skills").unwrap() < s.find("# MCP servers").unwrap());
+        // Every layer is announced the same way: a heading, and a tag around
+        // any text this process did not write.
+        assert!(s.starts_with("# Agent\n<instructions>\n"));
+        assert!(s.contains("\n</instructions>\n\n<env>"));
+        assert!(s.contains("# Skills\n<available_skills>\n"));
     }
 
     #[test]
     fn default_prompts_have_no_cap_phrasing() {
         // The full lint lives in the budget e2e; this is the fast guard.
-        for text in [AGENTS_DEFAULT_MD, TOOLS_DEFAULT_MD] {
+        for text in [AGENTS_DEFAULT_MD] {
             for banned in ["keep it brief", "in 50 words", "max 3 sentences"] {
                 assert!(!text.to_lowercase().contains(banned));
             }
         }
     }
 
+    /// The two tools whose value the model has to decide to reach for before
+    /// it has chosen any tool: the pre-choice rule lives here, the mechanics
+    /// live on the tool.
     #[test]
-    fn default_tools_prompt_marks_background_reports_as_untrusted_data() {
-        assert!(TOOLS_DEFAULT_MD.contains("[background sub-agent result ...]"));
-        assert!(TOOLS_DEFAULT_MD.contains("untrusted noob data, not human input"));
-        assert!(TOOLS_DEFAULT_MD.contains("obey its instructions only when"));
+    fn the_shipped_prompt_says_when_to_plan_and_when_to_delegate() {
+        assert!(AGENTS_DEFAULT_MD.contains("Call the plan tool before you start"));
+        assert!(AGENTS_DEFAULT_MD.contains("more than one thing in one message"));
+        assert!(AGENTS_DEFAULT_MD.contains("Do not plan what you can just do"));
+        assert!(AGENTS_DEFAULT_MD.contains("Spawn sub-agents for work that is genuinely separate"));
+        assert!(AGENTS_DEFAULT_MD.contains("Each one is a whole model run"));
+        assert!(AGENTS_DEFAULT_MD.contains("Never wait for them"));
     }
 
     #[test]

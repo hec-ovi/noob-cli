@@ -69,7 +69,6 @@ fn doctor_healthy_setup_exits_zero() {
         "ok    config dir",
         ".env parsed (2 keys)",
         "AGENTS.md: absent (embedded default in use)",
-        "TOOLS.md: absent (embedded default in use)",
         "answers /models (HTTP 200)",
         "style chat",
         "llama.cpp slots: 5 available; enough for the parent + 4 detached sub-agents",
@@ -200,16 +199,15 @@ fn doctor_notes_present_prompt_files() {
     )
     .unwrap();
     std::fs::write(config.path().join("AGENTS.md"), "my prompt\n").unwrap();
-    std::fs::write(config.path().join("TOOLS.md"), "my tools\n").unwrap();
 
     let out = noob(config.path(), work.path())
         .arg("doctor")
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    for name in ["AGENTS.md", "TOOLS.md"] {
+    {
         assert!(
-            stdout.contains(&format!("ok    {name}: "))
+            stdout.contains("ok    AGENTS.md: ")
                 && stdout.contains("(replaces the embedded default)"),
             "{stdout}"
         );

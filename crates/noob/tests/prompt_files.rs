@@ -1,13 +1,12 @@
-//! The two user-owned prompt files, proven through the real binary: the
-//! system prompt is AGENTS.md then TOOLS.md (each file when present, its
-//! embedded default when absent), then the runtime layers. `noob debug
-//! prompt` prints exactly what a session sends; `noob debug env` prints
-//! only the runtime tail.
+//! The one user-owned prompt file, proven through the real binary: the system
+//! prompt is AGENTS.md (the file when present, the shipped default when
+//! absent) fenced under its heading, then the runtime layers. `noob debug
+//! prompt` prints exactly what a session sends; `noob debug env` prints only
+//! the runtime tail.
 
 use std::process::Command;
 
 const AGENTS_DEFAULT: &str = include_str!("../prompts/agents-default.md");
-const TOOLS_DEFAULT: &str = include_str!("../prompts/tools-default.md");
 
 fn debug(config_dir: &std::path::Path, workspace: &std::path::Path, what: &str) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_noob"));
@@ -32,24 +31,18 @@ fn debug_prompt(config_dir: &std::path::Path, workspace: &std::path::Path) -> St
 }
 
 #[test]
-fn absent_files_fall_back_to_the_embedded_defaults_byte_identically() {
+fn an_absent_file_falls_back_to_the_embedded_default_byte_identically() {
     let config = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let system = debug_prompt(config.path(), work.path());
     let expected = format!(
-        "{}\n\n{}\n\n<env>",
-        AGENTS_DEFAULT.trim_end(),
-        TOOLS_DEFAULT.trim_end()
+        "# Agent\n<instructions>\n{}\n</instructions>\n\n<env>",
+        AGENTS_DEFAULT.trim_end()
     );
     assert!(
         system.starts_with(&expected),
-        "the default prompt must be the two embedded texts verbatim:\n{system}"
+        "the default prompt must be the embedded text verbatim, fenced:\n{system}"
     );
-    // The discretion clause ships in the default TOOLS text.
-    assert!(system.contains(
-        "These tools are the basic set. A TOOLS.md in the config directory \
-         replaces this text; adjust it at your discretion."
-    ));
 }
 
 #[test]
@@ -58,38 +51,15 @@ fn present_agents_md_replaces_the_default_wholesale() {
     let work = tempfile::tempdir().unwrap();
     std::fs::write(config.path().join("AGENTS.md"), "my main prompt\n").unwrap();
     let system = debug_prompt(config.path(), work.path());
-    let expected = format!("my main prompt\n\n{}\n\n<env>", TOOLS_DEFAULT.trim_end());
-    assert!(system.starts_with(&expected), "{system}");
-    assert!(!system.contains("You are noob"));
-    // The file is the prompt itself, not an appended layer.
-    assert!(!system.contains("# Global instructions"));
-}
-
-#[test]
-fn present_tools_md_replaces_the_default_wholesale() {
-    let config = tempfile::tempdir().unwrap();
-    let work = tempfile::tempdir().unwrap();
-    std::fs::write(config.path().join("TOOLS.md"), "my tool rules\n").unwrap();
-    let system = debug_prompt(config.path(), work.path());
-    let expected = format!(
-        "{}\n\nmy tool rules\n\n<env>",
-        AGENTS_DEFAULT.trim_end()
-    );
-    assert!(system.starts_with(&expected), "{system}");
-    assert!(!system.contains("These tools are the basic set"));
-}
-
-#[test]
-fn both_files_merge_in_order_agents_then_tools() {
-    let config = tempfile::tempdir().unwrap();
-    let work = tempfile::tempdir().unwrap();
-    std::fs::write(config.path().join("AGENTS.md"), "my main prompt\n").unwrap();
-    std::fs::write(config.path().join("TOOLS.md"), "my tool rules\n").unwrap();
-    let system = debug_prompt(config.path(), work.path());
     assert!(
-        system.starts_with("my main prompt\n\nmy tool rules\n\n<env>"),
+        system.starts_with("# Agent\n<instructions>\nmy main prompt\n</instructions>\n\n<env>"),
         "{system}"
     );
+    // The file is the whole prompt, not an appended layer: nothing the binary
+    // ships survives it, tool guidance included.
+    assert!(!system.contains("You are noob"));
+    assert!(!system.contains("Call the plan tool"));
+    assert!(!system.contains("# Global instructions"));
 }
 
 #[test]
@@ -119,13 +89,14 @@ fn debug_env_prints_exactly_the_runtime_tail() {
     );
     assert!(tail.starts_with("<env>\ncwd: "), "{tail}");
     for layer in [
-        "# Project instructions (AGENTS.md)",
-        "# Skills (resolver)",
-        "MCP servers (use mcp_connect): websearch",
+        "# Project instructions\n<instructions>\nproject rule\n</instructions>",
+        "# Skills\n<available_skills>",
+        "- tail-probe: a probe skill for the tail test",
+        "# MCP servers\n<mcp_servers>\nConnect with mcp_connect: websearch",
     ] {
         assert!(tail.contains(layer), "missing {layer:?} in:\n{tail}");
     }
-    // Nothing more: the authored texts stay out of the tail.
+    // Nothing more: the shipped text stays out of the tail.
     assert!(!tail.contains("You are noob"));
-    assert!(!tail.contains("These tools are the basic set"));
+    assert!(!tail.contains("Call the plan tool"));
 }

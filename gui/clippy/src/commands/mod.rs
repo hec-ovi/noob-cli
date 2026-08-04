@@ -249,9 +249,9 @@ pub const ALL: [Command; 30] = [
     },
     Command {
         name: "show_system_prompt",
-        about: "open the prompt's three layers on the settings panel",
+        about: "open the prompt's two layers on the settings panel",
         help: &[
-            "Opens the SYSTEM PROMPT section: AGENTS.md, TOOLS.md and the",
+            "Opens the SYSTEM PROMPT section: AGENTS.md and the",
             "environment block, in the order the CLI assembles them.",
             "Editing happens on the panel, where the enable-edition",
             "checkbox opens a document and Ctrl-S writes its file; a",

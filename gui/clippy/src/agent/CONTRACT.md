@@ -5,7 +5,7 @@ contractVersion: 1.3.0
 ## Purpose
 
 The agent's files, read and written the way the CLI does: the `.env` keys
-the settings panel edits, the two prompt files (AGENTS.md and TOOLS.md)
+the settings panel edits, the prompt file (AGENTS.md)
 with the CLI's shipped defaults behind them, installed skills and their
 frontmatter, mcp.json entries, and the on/off conventions.
 
@@ -26,7 +26,6 @@ pub const CTX_STOPS/TASK_CONCURRENCY_STOPS/ROUNDS_STOPS/WALL_CLOCK_STOPS:
 pub const TASK_TOOLS_CHOICES: [&str; 3];  // read-only | web | all
 pub const OFF: &str;  pub const DISABLED: &str;          // on-disk toggles
 pub fn is_secret(key: &str) -> bool;      // by name, wrong in the safe way
-pub fn read_tools(dir) -> Instructions;   // TOOLS.md, read like AGENTS.md
 pub fn write_instructions(path: &Path, text: &str) -> Result<(), String>;
                                           // one prompt file whole, by the
                                           // same atomic rename as every

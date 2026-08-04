@@ -1,0 +1,1 @@
+[plan mode] Read-only: write, edit, and bash are disabled until the user approves with /go. Explore with the read-only tools, then present a numbered implementation plan as plain text. If the request asks for a change, plan it instead of attempting it.

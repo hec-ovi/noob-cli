@@ -35,22 +35,17 @@ const SKILL_BODY_BYTES: u64 = 256 * 1024;
 /// hardcoded in the CLI: no setting anywhere names another file.
 pub const AGENTS_MD: &str = "AGENTS.md";
 
-/// The tools text, appended after the instructions: the second user-owned
-/// layer of the prompt, in the config directory beside [`AGENTS_MD`].
-pub const TOOLS_MD: &str = "TOOLS.md";
-
-/// How much of each prompt file the CLI actually reads.
+/// How much of the prompt file the CLI actually reads.
 ///
-/// `crates/noob/src/agent/prompt.rs` caps `AGENTS.md` and `TOOLS.md` at 16 KiB
+/// `crates/noob/src/agent/prompt.rs` caps `AGENTS.md` at 16 KiB
 /// and appends a truncation notice, so a window showing more than this would be
 /// showing text the model never sees.
 pub const AGENTS_CAP: u64 = 16 * 1024;
 
-/// The texts the CLI ships for the two prompt files, used whenever a file is
+/// The text the CLI ships for the prompt file, used whenever the file is
 /// absent. Included from the CLI's own sources, so what the panel shows as the
 /// built-in text and what the agent runs with cannot drift.
 pub const AGENTS_DEFAULT: &str = include_str!("../../../../crates/noob/prompts/agents-default.md");
-pub const TOOLS_DEFAULT: &str = include_str!("../../../../crates/noob/prompts/tools-default.md");
 
 /// What is on the end of the directory a turned-off skill is moved to.
 ///
@@ -668,12 +663,6 @@ pub fn read_instructions(dir: Option<&Path>) -> Instructions {
     read_prompt_file(dir, AGENTS_MD)
 }
 
-/// Read the global `TOOLS.md` the same way: the CLI reads the two files with
-/// one loader, so the window does too.
-pub fn read_tools(dir: Option<&Path>) -> Instructions {
-    read_prompt_file(dir, TOOLS_MD)
-}
-
 fn read_prompt_file(dir: Option<&Path>, name: &str) -> Instructions {
     let path = dir.map(|dir| dir.join(name));
     let text = path
@@ -1087,10 +1076,8 @@ pub struct Agent {
     pub skills_at: Option<PathBuf>,
     pub skills: Vec<Skill>,
     pub mcp: Mcp,
-    /// The global `AGENTS.md`, which is the first thing in every prompt.
+    /// The global `AGENTS.md`, which is the whole authored prompt.
     pub instructions: Instructions,
-    /// The global `TOOLS.md`, appended after it.
-    pub tools: Instructions,
     /// The sessions on disk, read with the same reader the folder picker uses.
     pub sessions: crate::sessions::Listing,
     /// When the snapshot was taken, which is what the ages on the session rows
@@ -1109,7 +1096,6 @@ impl Default for Agent {
             skills: Vec::new(),
             mcp: Mcp::default(),
             instructions: Instructions::default(),
-            tools: Instructions::default(),
             sessions: crate::sessions::Listing::default(),
             now: std::time::SystemTime::UNIX_EPOCH,
         }
@@ -1145,7 +1131,6 @@ impl Agent {
             skills_at,
             mcp: read_mcp(dir, workspace),
             instructions: read_instructions(dir),
-            tools: read_tools(dir),
             env_path,
             sessions,
             now: std::time::SystemTime::now(),
@@ -1286,13 +1271,6 @@ mod tests {
             "more of the file is on the panel than the CLI reads"
         );
 
-        // TOOLS.md is read with the same loader from the same directory,
-        // because the CLI reads the two files with one.
-        std::fs::write(dir.join(TOOLS_MD), "tools text\n").expect("a file");
-        let tools = read_tools(Some(&dir));
-        assert_eq!(tools.body, ["tools text"]);
-        assert_eq!(tools.path.as_deref(), Some(dir.join(TOOLS_MD).as_path()));
-
         // And with no config directory there is nowhere to read one from, which
         // is said rather than guessed at.
         let nowhere = read_instructions(None);
@@ -1330,7 +1308,7 @@ mod tests {
             AGENTS_DEFAULT
         );
         std::fs::write(&path, "newer\n").expect("a file");
-        restore_prompt(&path, TOOLS_DEFAULT).expect("the default lands");
+        restore_prompt(&path, AGENTS_DEFAULT).expect("the default lands");
         assert_eq!(std::fs::read_to_string(&bak).expect("the bak"), "newer\n");
         let _ = std::fs::remove_dir_all(&dir);
     }

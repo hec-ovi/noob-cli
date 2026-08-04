@@ -333,16 +333,11 @@ pub(crate) fn an_agent() -> crate::agent::Agent {
             }],
             trouble: Vec::new(),
         },
-        // Where the global AGENTS.md and TOOLS.md would go, with nothing
-        // in either: the machine this fixture stands for has never
-        // written one, so the blocks show the shipped defaults.
+        // Where the global AGENTS.md would go, with nothing in it: the
+        // machine this fixture stands for has never written one, so the
+        // block shows the shipped prompt.
         instructions: crate::agent::Instructions {
             path: Some(std::path::PathBuf::from("/home/hec/.config/noob/AGENTS.md")),
-            body: Vec::new(),
-            capped: false,
-        },
-        tools: crate::agent::Instructions {
-            path: Some(std::path::PathBuf::from("/home/hec/.config/noob/TOOLS.md")),
             body: Vec::new(),
             capped: false,
         },

@@ -126,7 +126,7 @@ fn mcp_line_and_tool_registration() {
     let reqs = rig.api_requests();
     let system = reqs[0]["messages"][0]["content"].as_str().unwrap();
     assert!(
-        system.contains("MCP servers (use mcp_connect): alpha, beta"),
+        system.contains("# MCP servers\n<mcp_servers>\nConnect with mcp_connect: alpha, beta"),
         "prompt line missing or unsorted:\n{system}"
     );
     // Nothing was probed at session start: both URLs are dead ports and the
@@ -149,7 +149,7 @@ fn no_mcp_config_means_no_line_and_no_tools() {
     ok(&rig.run(&["exec", "-p", "hello"]));
     let reqs = rig.api_requests();
     let system = reqs[0]["messages"][0]["content"].as_str().unwrap();
-    assert!(!system.contains("MCP servers (use mcp_connect)"));
+    assert!(!system.contains("# MCP servers"));
     assert_eq!(reqs[0]["tools"].as_array().unwrap().len(), 10);
     rig.server.assert_clean();
 }
@@ -338,7 +338,7 @@ fn broken_config_warns_and_project_overrides_global() {
         .as_str()
         .unwrap();
     assert!(
-        system.contains("MCP servers (use mcp_connect): global-only, shared"),
+        system.contains("# MCP servers\n<mcp_servers>\nConnect with mcp_connect: global-only, shared"),
         "{system}"
     );
     rig.server.assert_clean();

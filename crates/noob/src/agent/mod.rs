@@ -53,25 +53,35 @@ const PLAN_TOOLS: &[&str] = tools::READ_ONLY_SET;
 #[cfg(test)]
 pub(crate) static TEST_PROVIDER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The injected user-role mode message (frozen phrasing; e2e-asserted).
-/// Spells out that mutation is structurally absent: a small model given a
-/// "do X" prompt otherwise tries to act, finds no write/edit/bash schema,
-/// and grinds the remaining read-only tools into the doom-loop breakers.
-pub const PLAN_ENTER_MSG: &str = "[plan mode] Read-only: write, edit, and bash are disabled until the user \
-     approves with /go. Explore with the read-only tools, then present a \
-     numbered implementation plan as plain text. If the request asks for a \
-     change, plan it instead of attempting it.";
+/// Every text this loop injects into the conversation is a file under
+/// `prompts/`, loaded here, never a literal: they are prompt authoring, they
+/// are paid for on the requests that carry them, and they are tuned per model.
+///
+/// The plan-mode message spells out that mutation is structurally absent: a
+/// small model given a "do X" prompt otherwise tries to act, finds no
+/// write/edit/bash schema, and grinds the remaining read-only tools into the
+/// doom-loop breakers. Phrasing is frozen and e2e-asserted.
+pub const PLAN_ENTER_MSG: &str = include_str!("../../prompts/plan-enter.md").trim_ascii_end();
 /// What /go appends when the user approves (frozen phrasing).
-pub const PLAN_APPROVED_MSG: &str = "Plan approved. Execute it.";
+pub const PLAN_APPROVED_MSG: &str = include_str!("../../prompts/plan-approved.md").trim_ascii_end();
+/// What a mutating call is refused with while planning; `{tool}` is filled in.
+const PLAN_REFUSED_MD: &str = include_str!("../../prompts/plan-refused.md").trim_ascii_end();
 
 /// Injected once, two rounds before a child's round cap (frozen phrasing;
 /// e2e-asserted). A child that hits its cap mid-gathering delivers nothing;
 /// this converts the cap from a silent cliff into a deliverable report. The
 /// live catch: a research child's evidence-gate correction run spent its
 /// whole remaining budget searching and aborted with no final message.
-pub const BUDGET_NUDGE_MSG: &str = "[budget] Only 2 inference rounds remain. Stop gathering: reply next with \
-     ONE final message carrying your complete report from the evidence you \
-     already have.";
+pub const BUDGET_NUDGE_MSG: &str = include_str!("../../prompts/budget-nudge.md").trim_ascii_end();
+
+const REPEAT_CALL_PLAN_MD: &str = include_str!("../../prompts/repeat-call-plan.md").trim_ascii_end();
+const REPEAT_CALL_READ_ONLY_MD: &str =
+    include_str!("../../prompts/repeat-call-read-only.md").trim_ascii_end();
+const REPEAT_CALL_MD: &str = include_str!("../../prompts/repeat-call.md").trim_ascii_end();
+const NUDGE_PLAN_MD: &str = include_str!("../../prompts/nudge-plan.md").trim_ascii_end();
+const NUDGE_READ_ONLY_MD: &str =
+    include_str!("../../prompts/nudge-read-only.md").trim_ascii_end();
+const NUDGE_MD: &str = include_str!("../../prompts/nudge.md").trim_ascii_end();
 
 /// The doom-loop breakers name the way out. "Take a different approach" is
 /// only actionable when a different approach exists: a gated agent has no
@@ -81,14 +91,11 @@ pub const BUDGET_NUDGE_MSG: &str = "[budget] Only 2 inference rounds remain. Sto
 /// the consecutive-error abort.
 fn repeat_intercept_msg(plan: bool, read_only: bool) -> String {
     if plan {
-        "repeated identical call; the result will not change; you have explored \
-         enough: present the numbered implementation plan as text now"
+        REPEAT_CALL_PLAN_MD
     } else if read_only {
-        "repeated identical call; the result will not change; stop exploring \
-         and report what you found"
+        REPEAT_CALL_READ_ONLY_MD
     } else {
-        "repeated identical call; the result will not change; take a different \
-         approach"
+        REPEAT_CALL_MD
     }
     .to_string()
 }
@@ -96,15 +103,11 @@ fn repeat_intercept_msg(plan: bool, read_only: bool) -> String {
 /// Same mode-awareness for the four-failure course-correct nudge.
 fn nudge_note(plan: bool, read_only: bool) -> &'static str {
     if plan {
-        "[note] the last four tool calls all failed; you are in plan mode \
-         (read-only): stop calling tools and present the numbered \
-         implementation plan as plain text"
+        NUDGE_PLAN_MD
     } else if read_only {
-        "[note] the last four tool calls all failed; stop calling tools and \
-         report what you found with what you already have"
+        NUDGE_READ_ONLY_MD
     } else {
-        "[note] the last four tool calls all failed; step back and reconsider: \
-         re-read the file or take a different approach"
+        NUDGE_MD
     }
 }
 
@@ -1472,11 +1475,7 @@ impl Agent {
         if self.plan && !PLAN_TOOLS.contains(&call.name.as_str()) {
             return (
                 sched::Planned::Canned(
-                    ToolOutcome::err(format!(
-                        "plan mode is read-only: {} is unavailable; present your plan \
-                         as text and wait for the user to approve it",
-                        call.name
-                    ))
+                    ToolOutcome::err(PLAN_REFUSED_MD.replace("{tool}", &call.name))
                     .classed(tools::fail::DENIED)
                     .remedy("present your plan as text and wait for the user to approve it"),
                 ),

@@ -24,6 +24,13 @@ mod background;
 pub use background::JobProgressSnapshot;
 pub use background::{BackgroundHub, JobsSnapshot, ReadyResult};
 
+/// The preamble a detached child's task is wrapped in when the web tool is
+/// available, and the extra clause a nonmutating research child gets. Files
+/// under `prompts/`, like every other text sent to a model.
+const CHILD_RUNTIME_MD: &str = include_str!("../../prompts/child-runtime.md").trim_ascii_end();
+const CHILD_NONMUTATING_MD: &str =
+    include_str!("../../prompts/child-nonmutating.md").trim_ascii_end();
+
 /// Recursion ceiling: depth 0 (the user's agent) and depth 1 children may
 /// spawn; at depth 2 the subagent tool is simply not registered.
 pub const MAX_DEPTH: u32 = 2;
@@ -320,20 +327,13 @@ fn child_prompt(prompt: String, web_available: bool, web_only: bool) -> String {
         return prompt;
     }
     let mutation_rule = if web_only {
-        " This is a nonmutating research child: Bash, write, and edit are unavailable. Do not \
-         create files; return the complete synthesis in your final message so the parent can \
-         validate and store it."
+        CHILD_NONMUTATING_MD
     } else {
         ""
     };
     format!(
-        "[noob child runtime: you are one leaf agent and cannot delegate. For live web access, \
-         do not load a web-search skill and do not invent WebSearch or WebFetch calls. Call \
-         websearch {{\"action\":\"init\"}} once, then websearch \
-         {{\"action\":\"search\",\"query\":\"...\"}} and \
-         {{\"action\":\"fetch\",\"url\":\"...\"}} to read the sources you found. Use the \
-         minimum evidence required by the brief; once its requirements are met, stop gathering \
-         and return the synthesis.{mutation_rule}]\n\n{prompt}"
+        "{}\n\n{prompt}",
+        CHILD_RUNTIME_MD.replace("{mutation_rule}", mutation_rule)
     )
 }
 

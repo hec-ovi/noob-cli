@@ -36,16 +36,19 @@ pub enum RunEnd;                  // how the turn ended
 ```
 
 `prompt::assemble` builds the fixed system prompt from `PromptInputs`, in
-order: the config directory's `AGENTS.md` (the main prompt), its `TOOLS.md`
-(tool guidance, merged after it), then the runtime layers (environment
-block, project `AGENTS.md`, skills index, MCP line). A present file
-replaces its embedded default wholesale; the defaults live in
-`crates/noob/prompts/agents-default.md` and `tools-default.md`, with
-`compact.md` for compaction, all loaded at compile time. User prompt files
-are capped at 16 KiB each. `prompt::runtime_lines` is the runtime tail
-alone, byte-identical to what follows the two authored texts in the
-assembled prompt; `noob debug env` prints it for front ends that show the
-generated lines read-only.
+order: `# Agent` (the config directory's `AGENTS.md`, or the shipped
+prompt), the environment block, then the runtime layers (`# Project
+instructions`, `# Skills`, `# MCP servers`). Every layer is announced the
+same way: a markdown heading naming it, and a tag fencing text this process
+did not write (`<instructions>`, `<available_skills>`, `<mcp_servers>`,
+`<env>`). A present `AGENTS.md` replaces the shipped prompt wholesale,
+identity and tool guidance together: noob has no paired model, so the text
+that makes a tool work on one local model is the user's to rewrite. The
+shipped texts live in `crates/noob/prompts/`, one file per text, loaded at
+compile time. The user's file is capped at 16 KiB. `prompt::runtime_lines`
+is the runtime tail alone, byte-identical to what follows the authored text
+in the assembled prompt; `noob debug env` prints it for front ends that show
+the generated lines read-only.
 
 ## The seam
 

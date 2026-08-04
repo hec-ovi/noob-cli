@@ -112,20 +112,16 @@ fn check_env_file(config_dir: &Path) -> Check {
     }
 }
 
-/// The two user-owned prompt files. Absence is fine (the binary ships an
-/// embedded default for each); the line says which text is in effect.
+/// The one user-owned prompt file. Absence is fine (the binary ships an
+/// embedded default); the line says which text is in effect.
 fn check_prompt_files(config_dir: &Path) -> Vec<Check> {
-    ["AGENTS.md", "TOOLS.md"]
-        .iter()
-        .map(|name| {
-            let path = config_dir.join(name);
-            Check::Ok(if path.is_file() {
-                format!("{name}: {} (replaces the embedded default)", path.display())
-            } else {
-                format!("{name}: absent (embedded default in use)")
-            })
-        })
-        .collect()
+    let name = "AGENTS.md";
+    let path = config_dir.join(name);
+    vec![Check::Ok(if path.is_file() {
+        format!("{name}: {} (replaces the embedded default)", path.display())
+    } else {
+        format!("{name}: absent (embedded default in use)")
+    })]
 }
 
 fn check_endpoint(config_dir: &Path) -> Vec<Check> {

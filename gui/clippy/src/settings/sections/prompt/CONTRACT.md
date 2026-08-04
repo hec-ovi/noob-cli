@@ -1,23 +1,23 @@
 # settings/sections/prompt
 
-contractVersion: 3.0.0
+contractVersion: 4.0.0
 
 ## Purpose
 
-The SYSTEM PROMPT section of the settings panel: the prompt as the three
+The SYSTEM PROMPT section of the settings panel: the prompt as the two
 layers the CLI assembles it from, stacked in order. AGENTS.md is edited in
-place behind an enable-edition checkbox; TOOLS.md and the environment block
-are read out; each shows its shipped default when the file is absent, and a
-line under them names the assembly order.
+place behind an enable-edition checkbox and the environment block is read
+out; the file's block shows the shipped prompt when the file is absent, and
+a line under them names the assembly order.
 
 ## Public surface
 
 ```rust
 pub struct PromptSection;        // the section's own state: the document
                                  // editor (lines, caret, follow-the-caret
-                                 // scroll) for whichever file has edition
-                                 // enabled, one at a time. The frame embeds
-                                 // it and routes keys through its own
+                                 // scroll) for AGENTS.md while edition is
+                                 // enabled. The frame embeds it and routes
+                                 // keys through its own
                                  // instructions_* delegation; every save and
                                  // restore is a Deed done in main through
                                  // the agent-files box
@@ -49,13 +49,10 @@ business and not the section's.
    drawn dim and doing nothing while edition is off.
 4. The block saves its file whole; a file past the CLI's 16 KiB cap refuses
    edition, since saving the capped text would lose the tail.
-5. TOOLS.md is read out here and changed in the file itself: it is what the
-   model knows its tools from, so it carries no editor at all, and its title
-   and the clause under it say so.
-6. The environment block never offers edition: it is computed by the CLI
+5. The environment block never offers edition: it is computed by the CLI
    for each request, and its `under` line says so.
-7. No config directory is said as trouble, never offered and never edited.
-8. A block's text is selected with the pointer and copied like any other
+6. No config directory is said as trouble, never offered and never edited.
+7. A block's text is selected with the pointer and copied like any other
    text in the window: the drag resolves against the block's own lines at
    the scroll it is read at.
 

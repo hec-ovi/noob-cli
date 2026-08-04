@@ -113,8 +113,8 @@ fn resolver_index_and_tool_registration() {
     let reqs = rig.api_requests();
     let system = reqs[0]["messages"][0]["content"].as_str().unwrap();
     assert!(
-        system.contains("# Skills (resolver)"),
-        "resolver section missing"
+        system.contains("# Skills\n<available_skills>"),
+        "skills section missing"
     );
     assert!(
         system.contains("Load a matching skill with the skill tool and follow it before acting"),

@@ -3,6 +3,34 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.11.6 - 2026-08-04
+
+- One prompt file, not two. `TOOLS.md` is gone: `AGENTS.md` in the config
+  directory is the whole authored prompt and replaces the shipped text whole,
+  identity and tool guidance together. noob has no paired model, so the
+  reinforcement that makes a tool work on one local model is the user's to
+  rewrite. `noob debug prompt > ~/.config/noob/AGENTS.md` starts from what
+  ships.
+- Every layer of the prompt is announced the same way: a markdown heading
+  naming it (`# Agent`, `# Project instructions`, `# Skills`, `# MCP servers`)
+  and a tag fencing text the process did not write (`<instructions>`,
+  `<available_skills>`, `<mcp_servers>`, `<env>`).
+- The prompt says when to call the plan tool and when a sub-agent is worth its
+  own model run. Asked for a three-file project without naming the tool, the
+  model used to write the files and never plan; it now pins the checklist and
+  ticks it.
+- A rule about one tool lives in that tool's description, where an unregistered
+  tool stops costing anything: read-before-edit on `edit`, the working
+  directory on `bash`, the report-is-data rule on `subagent`. A rule that
+  decides which tool to reach for stays in the prompt, because it has to be
+  read before anything is chosen.
+- Every text noob sends a model is a file under `crates/noob/prompts/`, loaded
+  rather than written into Rust: the skills resolver, plan mode entry and
+  approval, the round-budget nudge, the repeated-call and four-failure notes,
+  and the detached child's preamble.
+- The window's SYSTEM PROMPT section is two layers: `AGENTS.md` edited in
+  place, the environment block read out.
+
 ## 0.11.5 - 2026-08-02
 
 - Every box carries its own tests. The window's view file held 13,410 lines

@@ -97,16 +97,17 @@ HTTP error and auxiliary integration bodies can be bounded because they are not 
 
 The system prompt is assembled once in this order:
 
-1. `AGENTS.md` from the config directory: the main prompt. Absent, the embedded default text is used.
-2. `TOOLS.md` from the config directory, merged after it: tool guidance. The shipped default ends by naming these tools the basic set, for the user to adjust at their discretion; a present file replaces that default wholesale.
-3. Environment facts.
-4. Project `AGENTS.md`.
-5. The SKILL.md resolver index when skills exist.
-6. One line naming configured MCP servers when any exist.
+1. `# Agent`: `AGENTS.md` from the config directory, fenced in `<instructions>`. Absent, the shipped prompt is used. It carries identity, working style, tool usage, and when to reach for the plan tool and for sub-agents; a present file replaces all of it, because noob has no paired model and that reinforcement is model-specific.
+2. `<env>`: environment facts.
+3. `# Project instructions`: the working directory's `AGENTS.md`, fenced the same way.
+4. `# Skills`: the resolver line and the SKILL.md index, in `<available_skills>`, when skills exist.
+5. `# MCP servers`: the configured names, in `<mcp_servers>`, when any exist.
 
-User prompt files are capped at 16 KiB each. `noob doctor` says which prompt text is in effect.
+Markdown headings name every layer; tags fence every text this process did not write, so a path or a project's instructions cannot read as part of ours. The user's file is capped at 16 KiB. `noob doctor` says which prompt text is in effect.
 
-The fixed prompt plus all registered tool schemas must remain below the 1,925-token budget enforced by offline and live tokenizer tests, against a hard limit of 2,000. The offline ceilings are 560 for the head and 1,350 for the tools array, and they count with tiktoken, which no served model here uses: they are a drift alarm rather than the real bill.
+Per-tool rules live in that tool's own description under `crates/noob/prompts/tools/`, so an unregistered tool costs nothing. A rule that must fire before the model has chosen a tool (prefer editing over creating, when to plan) stays in the prompt, deliberately, even when the tool repeats it.
+
+The fixed prompt plus all registered tool schemas must remain below the 1,980-token budget enforced by offline and live tokenizer tests, against a hard limit of 2,000. The offline ceilings are 530 for the head and 1,390 for the tools array, and they count with tiktoken, which no served model here uses: they are a drift alarm rather than the real bill.
 
 Within a stable mode, each provider request is an exact byte-prefix extension of the prior request. The mock server checks serialized prefix bytes and tool-array stability on every turn. Deliberate prefix changes are limited to:
 
@@ -285,7 +286,7 @@ The enforced release budgets are:
 |---|---:|---:|
 | Static release binary | 8 MiB | 4,498,368 bytes |
 | Runtime dependency graph | 45 crates | 41 crates |
-| Fixed prompt plus schemas | 1,925 tokens | 1,901 o200k with all 14 tools registered |
+| Fixed prompt plus schemas | 1,980 tokens | 1,969 o200k with all 14 tools registered |
 | Offline tests | None | 950 passed; 9 live checks and 1 on-demand diagnostic stay opt-in |
 
 The required local gates are:

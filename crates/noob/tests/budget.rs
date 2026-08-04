@@ -2,8 +2,8 @@
 //! --json` prints the exact system prompt and wire tools array the binary
 //! sends; tiktoken o200k tokenizes them against the locked ceilings.
 //! The config dir here is empty, so the measured prompt is the embedded
-//! defaults (agents-default.md + tools-default.md): these ceilings guard
-//! what ships, not whatever a user puts in AGENTS.md or TOOLS.md.
+//! default (agents-default.md): these ceilings guard what ships, not
+//! whatever a user puts in AGENTS.md.
 //! The live suite closes the loop against the real qwen tokenizer via
 //! llama-server /tokenize (P7).
 
@@ -39,12 +39,15 @@ use serde_json::Value;
 // and then given back: the model never used them, so the cost was permanent
 // and the benefit was zero. Harness capability does not belong in the agent's
 // prompt; it belongs in the harness.
-// TOTAL_CEILING carries the owner-mandated clause in the default TOOLS text
-// that names the tool set as the basic one and the file as the user's to
-// adjust; that clause is what the 1,925 pays for.
-const HEAD_CEILING: usize = 560; // agents + tools defaults + environment block
-const TOOLS_CEILING: usize = 1350; // serialized wire tools array
-const TOTAL_CEILING: usize = 1925; // total fixed first-request overhead
+// TOOLS_CEILING and TOTAL_CEILING pay for the plan and sub-agent awareness:
+// the prompt now says when to call the plan tool and when a sub-agent is worth
+// its own model run, and the per-tool rules that used to sit in one shared
+// text moved onto the tools they belong to, where an unregistered tool stops
+// costing anything at all. The head paid for part of it by shedding that
+// shared text. OWNER_HARD_LIMIT is unchanged.
+const HEAD_CEILING: usize = 530; // the shipped prompt + environment block
+const TOOLS_CEILING: usize = 1390; // serialized wire tools array
+const TOTAL_CEILING: usize = 1980; // total fixed first-request overhead
 const OWNER_HARD_LIMIT: usize = 2000; // never exceed, whatever the above say
 
 /// The switches plant one skill, one configured MCP server, and one executable
@@ -114,8 +117,8 @@ fn no_output_cap_budget_and_phrasing() {
     let head = artifact["head"].as_str().unwrap();
     let tools = artifact["tools"].to_string();
 
-    // With no user prompt files, skills, or MCP, the system prompt IS the
-    // head: the embedded AGENTS and TOOLS defaults plus the env block.
+    // With no user prompt file, skills, or MCP, the system prompt IS the
+    // head: the shipped prompt plus the env block.
     assert_eq!(system, head);
     // 9 core (7 file/shell + context + todo) + subagent.
     assert_eq!(artifact["tools"].as_array().unwrap().len(), 10);
@@ -161,7 +164,7 @@ fn no_output_cap_budget_and_phrasing() {
 /// The ceilings hold for the full registered set: with a skill discovered,
 /// MCP configured, and websearch installed, the tools array grows to 14
 /// (9 core, subagent, skill, websearch, and the MCP pair). The system prompt
-/// gains the resolver section and MCP line; the head itself stays byte-exact.
+/// gains the skills and MCP sections; the head itself stays byte-exact.
 #[test]
 fn budget_holds_with_everything_registered() {
     let artifact = debug_prompt(true, true, true);
@@ -181,9 +184,9 @@ fn budget_holds_with_everything_registered() {
         );
     }
     assert!(system.starts_with(head), "the head never mutates");
-    assert!(system.contains("# Skills (resolver)"));
+    assert!(system.contains("# Skills\n<available_skills>"));
     assert!(system.contains("- budget-probe: a probe skill for the budget test"));
-    assert!(system.contains("MCP servers (use mcp_connect): websearch"));
+    assert!(system.contains("# MCP servers\n<mcp_servers>\nConnect with mcp_connect: websearch"));
 
     let head_tokens = tokens(head);
     let system_tokens = tokens(system);

@@ -129,7 +129,6 @@ pub(crate) fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), St
         model,
         sandbox: sandbox_label,
         agents: prompt::load_prompt_md(&config_dir, "AGENTS.md"),
-        tools: prompt::load_prompt_md(&config_dir, "TOOLS.md"),
         project_agents: prompt::load_prompt_md(&workspace, "AGENTS.md"),
         skills_index: skills::index(&discovered),
         // A read-only child has no mcp_call; naming servers would only

@@ -1194,8 +1194,8 @@ fn child_result(
 /// `noob debug prompt [--json]`: the EXACT assembled system prompt and wire
 /// tools array this binary would send, so budget tests measure the shipped
 /// artifact rather than a reimplementation. `noob debug env`: only the
-/// runtime lines the assembly appends after AGENTS.md and TOOLS.md, for a
-/// front end that shows them read-only under the two editable files.
+/// runtime lines the assembly appends after AGENTS.md, for a front end that
+/// shows them read-only under the one editable file.
 fn cmd_debug(args: &[String]) -> ExitCode {
     let env_mode = match args.first().map(String::as_str) {
         Some("prompt") => false,
@@ -1226,7 +1226,6 @@ fn cmd_debug(args: &[String]) -> ExitCode {
         model,
         sandbox: sandbox_label,
         agents: prompt::load_prompt_md(&config_dir, "AGENTS.md"),
-        tools: prompt::load_prompt_md(&config_dir, "TOOLS.md"),
         project_agents: prompt::load_prompt_md(&workspace, "AGENTS.md"),
         skills_index: skills::index(&discovered),
         mcp_line: prompt::mcp_line(&mcp_servers),
