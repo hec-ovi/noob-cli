@@ -30,6 +30,11 @@ tags rather than here; this file starts where it was added.
   and the detached child's preamble.
 - The window's SYSTEM PROMPT section is two layers: `AGENTS.md` edited in
   place, the environment block read out.
+- One transcript line is one screen line. An entry arriving with newlines in
+  it (a `[background sub-agent result]` record carries its header and its JSON
+  in one string) was drawn a row taller than it was measured, so from that row
+  down the selection bands, the clicks and the scroll extent all referred to a
+  different line than the text on screen.
 
 ## 0.11.5 - 2026-08-02
 
