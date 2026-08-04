@@ -1,6 +1,6 @@
 # text-geometry
 
-contractVersion: 1.3.0
+contractVersion: 1.4.0
 
 ## Purpose
 
@@ -13,7 +13,7 @@ and answer every question a caller has about that mapping.
 |---|---|---|
 | Line height request | [`schema/line-height-request.json`](schema/line-height-request.json) | `chars` is a character count, not bytes. `cols` may be 0 (a window mid-resize). |
 | Wrap request | [`schema/wrap-request.json`](schema/wrap-request.json) | `lengths` are character counts, not bytes. `cols` may be 0 (a window mid-resize). |
-| Rows request | [`schema/rows-request.json`](schema/rows-request.json) | `text` is one logical line; a newline in it is an ordinary character. `cols` may be 0. `break` is how the box is drawn, and the drawing and the counting must pass the same one. |
+| Rows request | [`schema/rows-request.json`](schema/rows-request.json) | `text` is one logical line; a newline in it ends the row it is on. `cols` may be 0. `break` is how the box is drawn, and the drawing and the counting must pass the same one. |
 | Visual row request | [`schema/visual-row-request.json`](schema/visual-row-request.json) | Same pairing rule as the row request: `window` came from this layer and was built from the same `heights` and `rows`. |
 | Scrollback bound request | [`schema/max-scrollback-request.json`](schema/max-scrollback-request.json) | `heights` came from this layer. `rows` may be 0. |
 | Window request | [`schema/window-request.json`](schema/window-request.json) | `heights` came from this layer. `rows` may be 0. `scrollback` past the top is clamped, not refused. |
@@ -73,7 +73,10 @@ dependencies, so it builds and tests without a GPU, a font, or a window.
    the column limit, and a word wider than the whole box ends on the column
    rather than running off the edge. A break opportunity is a blank or a tab,
    and nothing else: breaking after a hyphen or a slash would split a path or a
-   flag, and a transcript is full of both. The character a row broke at is
+   flag, and a transcript is full of both. A newline is not an opportunity but
+   an instruction: it ends the row it is on wherever it falls, so a line that
+   carries a shape of its own (a table row whose cells wrap inside their
+   columns) is counted in the rows it is drawn as. The character a row broke at is
    spent on the break, drawn on neither row, so nothing is indented by a blank
    the reader cannot see. It stays in the logical line, so copying a run that
    crosses a break gets it back exactly once. A `column` break has no break

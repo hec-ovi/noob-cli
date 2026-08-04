@@ -99,9 +99,12 @@ fn is_break(ch: char) -> bool {
 /// starts with a blank that the reader cannot see the reason for. It is still
 /// in the logical line, so copying across a break gets it back exactly once.
 ///
-/// `text` is one logical line. A newline inside it is not a break opportunity
-/// and is counted as an ordinary character; callers holding a run of lines
-/// split them first, which every caller here already does.
+/// `text` is one logical line. A newline inside it ends the row it is on and
+/// starts the next one, and is spent on that break the way a blank is: it is
+/// drawn on neither row and stays in the line, so copying across it gets it
+/// back exactly once. That is what lets one line hold a shape of its own, a
+/// laid-out table row being the case it exists for, and be counted in the rows
+/// it is really drawn as.
 ///
 /// Always at least one row: an empty line still occupies a row. Never a
 /// trailing empty row either, so a line that ends at a break opportunity does
@@ -121,16 +124,30 @@ pub fn rows_in(text: &str, cols: usize, at: Break) -> Vec<Row> {
 /// and nothing else.
 pub fn rows_into(text: &str, cols: usize, at: Break, rows: &mut Vec<Row>) {
     rows.clear();
+    let mut base = 0;
+    for (n, segment) in text.split('\n').enumerate() {
+        // The newline that ended the segment before this one: one character of
+        // the line, drawn on neither row.
+        base += usize::from(n > 0);
+        base += wrap(segment, cols, at, base, rows);
+    }
+}
+
+/// One segment of a line, wrapped into `rows` with every position offset by
+/// `base`. Returns the characters the segment holds.
+fn wrap(text: &str, cols: usize, at: Break, base: usize, rows: &mut Vec<Row>) -> usize {
     if cols == 0 {
+        let count = text.chars().count();
         rows.push(Row {
-            start: 0,
-            end: text.chars().count(),
+            start: base,
+            end: base + count,
         });
-        return;
+        return count;
     }
     let mut start = 0;
     let mut last_break: Option<usize> = None;
     let mut count = 0;
+    let taken = rows.len();
     for (i, ch) in text.chars().enumerate() {
         count = i + 1;
         if i == start + cols {
@@ -147,11 +164,17 @@ pub fn rows_into(text: &str, cols: usize, at: Break, rows: &mut Vec<Row>) {
             };
             match cut {
                 Some(p) => {
-                    rows.push(Row { start, end: p });
+                    rows.push(Row {
+                        start: base + start,
+                        end: base + p,
+                    });
                     start = p + 1;
                 }
                 None => {
-                    rows.push(Row { start, end: i });
+                    rows.push(Row {
+                        start: base + start,
+                        end: base + i,
+                    });
                     start = i;
                 }
             }
@@ -165,9 +188,15 @@ pub fn rows_into(text: &str, cols: usize, at: Break, rows: &mut Vec<Row>) {
             last_break = Some(i);
         }
     }
-    if start < count || rows.is_empty() {
-        rows.push(Row { start, end: count });
+    // An empty segment is still a row: a blank line inside a laid-out shape is
+    // a gap the reader can see, the same way a blank logical line is.
+    if start < count || rows.len() == taken {
+        rows.push(Row {
+            start: base + start,
+            end: base + count,
+        });
     }
+    count
 }
 
 /// Which line a visual row inside the window belongs to, and which of that
@@ -613,6 +642,31 @@ mod tests {
         }
     }
 
+    /// A line may carry a shape of its own, and a laid-out table row is one:
+    /// its cells wrap inside their columns, so the row reaches the pane as
+    /// several rows of text already broken where they belong. The break is the
+    /// newline, and it is counted here so a caller measuring the line and a
+    /// renderer drawing it land on the same rows.
+    #[test]
+    fn a_newline_ends_the_row_it_is_on() {
+        let rows = rows_in("head\nbody\ntail", 40, Break::Word);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[0], Row { start: 0, end: 4 });
+        assert_eq!(rows[1], Row { start: 5, end: 9 });
+        assert_eq!(rows[2], Row { start: 10, end: 14 });
+
+        // A segment still wraps by the one rule, so a wide cell adds rows of
+        // its own between the breaks it was handed.
+        let rows = rows_in("one two three\nfour", 7, Break::Word);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[2], Row { start: 14, end: 18 });
+
+        // A blank segment is a row, the way a blank line is.
+        assert_eq!(rows_in("a\n\nb", 40, Break::Word).len(), 3);
+        // And a box mid-resize keeps the shape rather than losing it.
+        assert_eq!(rows_in("a\nb", 0, Break::Word).len(), 2);
+    }
+
     /// The property the whole layer is for: what is on a row and what a
     /// selection there copies are the same characters, and the line can be put
     /// back together from its rows plus the one character each break ate.
@@ -627,6 +681,10 @@ mod tests {
             "wordwiderthanthepane",
             " leading blank",
             "trailing blank ",
+            "a shape\nof its own\nover three rows",
+            "with a gap\n\nin the middle of it",
+            "ending on a break\n",
+            "\nstarting on one",
         ];
         for text in cases {
             for cols in 1..24 {
@@ -642,7 +700,7 @@ mod tests {
                         match row.start - before.end {
                             0 => {}
                             1 => assert!(
-                                is_break(chars[before.end]),
+                                is_break(chars[before.end]) || chars[before.end] == '\n',
                                 "{text:?} at {cols}: dropped {:?}, which is not a break",
                                 chars[before.end]
                             ),
@@ -661,7 +719,7 @@ mod tests {
                 match chars.len() - end {
                     0 => {}
                     1 => assert!(
-                        is_break(chars[end]),
+                        is_break(chars[end]) || chars[end] == '\n',
                         "{text:?} at {cols}: {:?} is off the end and is not a break",
                         chars[end]
                     ),

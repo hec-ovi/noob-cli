@@ -39,7 +39,10 @@ pub struct Pane;   // wrapped scrollback: lines in, visual rows out, ring;
                    // .clipped() lists one row per line (activity), and
                    // anchor_first/spot_row lend the row arithmetic to a
                    // surface with an offset of its own (the call popup)
-pub struct Line;   // one logical line with its Tone and Kind
+    pub fn reflow(&mut self, cols: usize) -> bool;  // lay this pane's
+                   // tables out for a box that wide; moved?
+pub struct Line;   // one logical line with its Tone and Kind; .table()
+                   // says which line of a table it is, when it is one
 pub enum Tone;  pub enum Kind;   // what a tool call renders as
 pub struct Call;   // one remembered tool call, and its popup cells
 // plus Todo, AgentRow, ContextFill, FileView, Phase, Rates
@@ -55,6 +58,12 @@ pub struct Call;   // one remembered tool call, and its popup cells
 3. Display ownership ends here: scrolling, selection, and the open-file
    follow policy live in the shell; this box only says what exists.
 4. Unknown events are ignored (the proto degradation rule), never fatal.
+5. A line is drawn as it arrives, except a table: its columns come from its
+   whole block and from the width of the panel, so the shell calls `reflow`
+   with that width before it measures or draws. One source row stays one
+   line however many rows it is laid out as, and everything the pane
+   reports about it, its height, its bands and what a drag copies, is
+   counted in the laid-out text.
 
 ## Dependencies
 
@@ -65,5 +74,6 @@ dock box (`View` in pane addressing).
 
 ## Tests
 
-Inline: the reducer's event shapes, ring bounds, wrap behavior, call
-popups, phase transitions (headless, ~60 tests).
+Inline: the reducer's event shapes, ring bounds, wrap behavior, table
+blocks laid out and re-laid out, call popups, phase transitions (headless,
+~60 tests).

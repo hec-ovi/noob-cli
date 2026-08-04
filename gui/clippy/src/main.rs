@@ -41,7 +41,7 @@ mod settings;
 mod state;
 mod style;
 #[allow(unused_imports)]
-use style::{markdown, skin, syntax};
+use style::{markdown, skin, syntax, table};
 mod view;
 mod widgets;
 
@@ -3925,6 +3925,10 @@ impl App {
         // Computed before the surface is borrowed: the prompt's height is read
         // off the whole app and the renderer holds it mutably.
         let layout = self.layout();
+        // A table is laid out for the panel it is in, so it is settled before
+        // the pane is measured: its rows are what the scroll extent, the bands
+        // and the clipboard are all counted in.
+        self.lay_out_tables(&layout);
         // Every scrolling pane is clamped against what it currently holds, before
         // anything is drawn from it. This is the only place that catches a window
         // dragged shorter or a list that shrank while it was scrolled to the end,
@@ -3939,6 +3943,23 @@ impl App {
         };
         renderer.draw(gpu, &scene, frame);
         self.dirty = false;
+    }
+
+    /// Lay the transcript's tables out for the panel the transcript is in.
+    ///
+    /// Only while it is on screen: a folded space has no width to lay anything
+    /// out for, and the block is laid out again the moment it comes back.
+    fn lay_out_tables(&mut self, layout: &Layout) {
+        let Some(space) = Space::ALL.into_iter().find(|space| {
+            let slot = self.dock.slot(*space);
+            slot.active() == Some(View::Output) && !slot.folded
+        }) else {
+            return;
+        };
+        let panel = layout.placed(space).body;
+        let (_, column) = self.metrics_of(View::Output);
+        let (cols, _) = view::text_columns(View::Output, panel, column);
+        self.dirty |= self.state.output.reflow(cols);
     }
 
     /// Pull every scrolling pane's offset back inside the content it is showing.

@@ -3,6 +3,20 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## Unreleased
+
+- A Markdown table in the transcript is drawn as the columns it describes. It
+  is laid out across its whole block for the width of the panel it is in, so
+  the cells line up, a cell too long for its column wraps inside that column,
+  and dragging a divider lays the block out again for the panel's new width. A
+  panel too narrow for columns anything fits in gets the rows as a list of
+  `Header: value` lines instead, so nothing is ever cut.
+- One line of text can now hold a shape of its own. `text-geometry` counts a
+  newline as the end of a row, which is what the renderer was already doing
+  with one, so a table row that takes three rows on screen is measured as
+  three: its height, its selection band and what a drag over it copies all
+  come from the laid-out text.
+
 ## 0.11.7 - 2026-08-04
 
 - The activity row under the pointer turns red and wears a bullet in the last
@@ -1031,8 +1045,3 @@ CLI's behaviour is unchanged; only its version moved.
   build. The `show_avatar` and `avatar` settings stay retired rather than
   becoming unknown keys, because those lines are still sitting in people's
   files.
-
-### Reverted
-
-- Markdown tables were box drawn and then given sideways scrolling. Both were
-  rolled back and tables pass through as written.

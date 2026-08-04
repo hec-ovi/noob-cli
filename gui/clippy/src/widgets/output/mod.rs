@@ -33,6 +33,10 @@ pub(crate) fn output(scene: &mut Scene, frame: &Frame, panel: Panel) {
     let mut fence = state.output.fence_before(rows, cols);
     for line in state.output.visible(rows, cols) {
         match line.tone {
+            // A table is laid out across its block for this panel's width, so
+            // it arrives here as the columns it is drawn as: tinted, not
+            // marked up.
+            Tone::Body if line.table().is_some() => table(line, skin, &mut runs),
             // Only the model's prose is Markdown. What the human typed and
             // what the harness noted are shown as written.
             Tone::Body => crate::markdown::line(&line.text, &mut fence, skin, &mut runs),
@@ -79,6 +83,32 @@ pub(crate) fn output(scene: &mut Scene, frame: &Frame, panel: Panel) {
         scene.text(Text::rich(pinned, band, frame.body_size, skin.dim));
     }
     scrollbar(scene, skin, panel, state.output.thumb(rows, cols));
+}
+
+/// One line of a laid-out table: the columns it stands in are structure and
+/// wear the markup tint, the cells are text, and the row naming the columns is
+/// the bright one.
+fn table(line: &crate::state::Line, skin: &Skin, runs: &mut Vec<Run>) {
+    let ink = match line.table() {
+        Some(crate::table::Part::Head) => skin.bright,
+        _ => skin.body,
+    };
+    let mut cell = String::new();
+    for ch in line.shown().chars() {
+        // The rule row is all structure, and so is every separator on a body
+        // row. Everything between them is what the model wrote.
+        if matches!(ch, '│' | '─' | '┼') {
+            if !cell.is_empty() {
+                runs.push(Run::tinted(std::mem::take(&mut cell), ink));
+            }
+            runs.push(Run::tinted(ch.to_string(), skin.markup));
+            continue;
+        }
+        cell.push(ch);
+    }
+    if !cell.is_empty() {
+        runs.push(Run::tinted(cell, ink));
+    }
 }
 
 #[cfg(test)]
@@ -162,15 +192,54 @@ mod tests {
         assert_rows_hold_what_a_drag_would_copy(state);
     }
 
+    /// A table is drawn as the columns it describes, and everything the pane
+    /// reports about it is counted in those columns: this is the same rule as
+    /// the cases above, over the one kind of line that is laid out across a
+    /// whole block rather than on its own.
+    #[test]
+    fn a_table_is_drawn_as_columns_and_counted_in_them() {
+        let mut state = busy_state();
+        for text in [
+            "## Tools",
+            "| Tool | What it does |",
+            "|---|---|",
+            "| websearch | Search the web, fetch pages as Markdown, find papers and repos \
+             via SearXNG, then follow the links it comes back with |",
+            "| skill | Load a specialized skill to guide your actions |",
+            "",
+            "back to prose",
+        ] {
+            state.output.say(text, Tone::Body);
+        }
+        let drawn = assert_rows_hold_what_a_drag_would_copy(state);
+        let screen = drawn.join("\n");
+        assert!(screen.contains('│'), "the columns are drawn: {screen}");
+        assert!(!screen.contains("| Tool |"), "the source pipes are gone: {screen}");
+        assert!(screen.contains("back to prose"), "prose after it is prose");
+        // The separator stands in one column all the way down the block.
+        let at: Vec<usize> = drawn
+            .iter()
+            .filter_map(|row| row.find('│'))
+            .collect();
+        assert!(at.len() > 3, "every row of the table has one: {screen}");
+        assert!(at.windows(2).all(|two| two[0] == two[1]), "{screen}");
+    }
+
     /// Every visual row holds exactly the characters a drag across it would
     /// copy, and a wrapped line's rows add back up to the line. Shared by the
     /// cases below so one rule is proven once over several kinds of text.
-    fn assert_rows_hold_what_a_drag_would_copy(state: crate::state::State) {
+    ///
+    /// Returns the rows as they were laid out, for a case with something of its
+    /// own to say about them.
+    fn assert_rows_hold_what_a_drag_would_copy(mut state: crate::state::State) -> Vec<String> {
         let dock = Dock::new();
         let shape = shape(&dock, &["a.rs"]);
         let layout = Layout::compute(1400.0, 900.0, &shape);
         let panel = layout.placed(Space::TopLeft).body;
         let cols = cols_of(panel, 8.0);
+        // What the shell does before it draws, and for the same reason: a table
+        // is laid out for the panel it is in.
+        state.output.reflow(cols);
         let skin = Skin::from(&Config::default());
         let scene = build(&Frame {
             state: &state,
@@ -233,34 +302,25 @@ mod tests {
         }
         assert!(checked > 6, "only {checked} rows were on screen");
 
-        // And the row count of a marked-up line is the number of rows it is
-        // actually drawn as, which is what keeps every row below it in step.
-        let bullet = state.output.last() - 4;
-        let held = state.output.line(bullet).expect("the bullet is held");
-        let counted = state.output.rows_of_line(bullet, cols);
-        assert!(counted.len() > 1, "the bullet has to wrap");
-        let on_screen: Vec<&Vec<char>> = drawn
-            .iter()
-            .skip(
-                (0..rows)
-                    .find(|row| {
-                        state.output.spot_in(rows, cols, *row, 0).map(|(line, _)| line)
-                            == Some(bullet)
-                    })
-                    .expect("the bullet is on screen")
-                    + skip,
-            )
-            .take(counted.len())
-            .collect();
-        let rejoined: String = on_screen
-            .iter()
-            .map(|row| row.iter().collect::<String>())
-            .collect::<Vec<String>>()
-            .join(" ");
-        assert_eq!(
-            rejoined,
-            held.shown(),
-            "the rows drawn do not add back up to the line"
-        );
+        // And a line that takes several rows is drawn as the rows it is
+        // counted as, in order, which is what keeps every row below it in step.
+        let tall = (0..rows)
+            .filter_map(|row| state.output.spot_in(rows, cols, row, 0))
+            .map(|(line, _)| line)
+            .max_by_key(|line| state.output.rows_of_line(*line, cols).len())
+            .expect("something is on screen");
+        let held = state.output.line(tall).expect("the tallest line is held");
+        let counted = state.output.rows_of_line(tall, cols);
+        assert!(counted.len() > 1, "nothing on screen takes more than a row");
+        let top = (0..rows)
+            .find(|row| state.output.spot_in(rows, cols, *row, 0).map(|(l, _)| l) == Some(tall))
+            .expect("the line is on screen")
+            + skip;
+        for (step, span) in counted.iter().enumerate() {
+            let held: Vec<char> = held.shown().chars().take(span.end).skip(span.start).collect();
+            assert_eq!(drawn[top + step], held, "row {step} of the tallest line");
+        }
+
+        drawn.iter().map(|row| row.iter().collect()).collect()
     }
 }

@@ -30,7 +30,7 @@ package, the binary and everything a user sees are `no0b`.
 | Talking to the agent process | `gui/clippy/src/link/CONTRACT.md` |
 | Drawing primitives: rects, corners, text, anything the shader does | `gui/noob-draw/src/lib.rs` |
 | The GPU device, surface, transparency probing | `gui/noob-gpu/src/lib.rs` |
-| Markdown rendering in the transcript | `gui/clippy/src/style/CONTRACT.md` |
+| Markdown rendering in the transcript, tables included | `gui/clippy/src/style/CONTRACT.md`, laid out per frame by `Pane::reflow` in `gui/clippy/src/state/CONTRACT.md` |
 | Syntax colors in the file view | `gui/clippy/src/style/CONTRACT.md` |
 | The thinking orb in the title strip: its maths, its two states | `gui/clippy/src/orb/CONTRACT.md`, drawn by `view::title_bar`, clocked in `gui/clippy/src/main.rs` |
 | Desktop entry, icons, packaging | `gui/clippy/src/packaging/CONTRACT.md`, `gui/data/`, `dev.sh gui-package` |

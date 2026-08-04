@@ -131,6 +131,17 @@ pub fn shown(text: &str, fence: &mut Fence) -> String {
     runs.iter().map(|run| run.text.as_str()).collect()
 }
 
+/// One stretch of text with its inline marks consumed and nothing else applied.
+///
+/// What a table cell is shown as: it sits inside a laid-out column, so the line
+/// rules (a bullet, a heading, a rule) have nothing to do with it, but `**bold**`
+/// inside a cell is still bold text and is measured as the word it draws.
+pub fn inline_shown(text: &str) -> String {
+    let mut runs = Vec::new();
+    inline(text, [0; 4], &Skin::default(), &mut runs);
+    runs.iter().map(|run| run.text.as_str()).collect()
+}
+
 /// `1. text` or `12) text`, returning the marker and the rest.
 fn numbered(line: &str) -> Option<(&str, &str)> {
     let digits = line.chars().take_while(char::is_ascii_digit).count();

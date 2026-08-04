@@ -161,6 +161,10 @@ pub struct Line {
     /// A reader selects the glyphs he can see, so `- **read** a file` is
     /// thirteen columns of `• read a file` and not seventeen of the source.
     shown: Option<String>,
+    /// Which line of a table this is, when it is one. A table is laid out
+    /// across its whole block for the width of the box it is drawn in, so what
+    /// the painter does with this line is read it out rather than mark it up.
+    table: Option<crate::table::Part>,
     /// Where a fenced block stood in front of this line, so the pane can be
     /// drawn from any row of it without rescanning everything above.
     ///
@@ -179,6 +183,7 @@ impl Line {
             number: None,
             gutter: 0,
             shown: None,
+            table: None,
             fence: crate::markdown::Fence::default(),
         }
     }
@@ -198,6 +203,14 @@ impl Line {
     /// it is counted in.
     pub fn shown(&self) -> &str {
         self.shown.as_deref().unwrap_or(&self.text)
+    }
+
+    /// Which line of a table this is, and `None` for everything else.
+    ///
+    /// A table line is already laid out: it reaches the painter as the columns
+    /// it is drawn as, so the painter tints it rather than marking it up.
+    pub fn table(&self) -> Option<crate::table::Part> {
+        self.table
     }
 }
 
@@ -232,6 +245,12 @@ pub struct Pane {
     /// place, and a line that grew has to be drawn again from the state it
     /// started in.
     tail_fence: crate::markdown::Fence,
+    /// The width the tables in this pane are laid out for, and the oldest line
+    /// whose layout may have moved since. A table is the one thing here that
+    /// needs its whole block and the width of the box at once, so it is laid
+    /// out per frame rather than per line, and only over what changed.
+    laid_cols: Option<usize>,
+    laid_from: usize,
 }
 
 /// The wrapped height of every line, and what it was computed for.
@@ -278,6 +297,8 @@ impl Pane {
             one_row: false,
             fence: crate::markdown::Fence::default(),
             tail_fence: crate::markdown::Fence::default(),
+            laid_cols: None,
+            laid_from: usize::MAX,
         }
     }
 
@@ -340,6 +361,9 @@ impl Pane {
         self.tail_fence = self.fence.clone();
         line.fence = self.fence.clone();
         line.shown = drawn(&line.text, line.tone, &mut self.fence, self.rendered);
+        // A line arriving can open a table, close one, or land in the middle of
+        // one, so the block it belongs to is laid out again at the next frame.
+        self.laid_from = self.laid_from.min(self.dropped + self.lines.len());
         self.lines.push_back(line);
         while self.lines.len() > self.cap {
             self.lines.pop_front();
@@ -404,8 +428,122 @@ impl Pane {
         if let Some(last) = self.lines.back_mut() {
             let shown = drawn(&last.text, last.tone, &mut fence, render);
             last.shown = shown;
+            last.table = None;
         }
         self.fence = fence;
+        // The row a table is growing by is the row that changes its columns.
+        let tail = self.dropped + self.lines.len().saturating_sub(1);
+        self.laid_from = self.laid_from.min(tail);
+    }
+
+    /// Lay this pane's tables out for a box `cols` wide, and say whether
+    /// anything moved.
+    ///
+    /// The one thing here that cannot be settled when a line arrives. A bullet
+    /// is a bullet on its own, but a table row only knows its columns from the
+    /// rows above and below it and from the width of the panel, and the panel
+    /// is a thing the reader drags. So the block is laid out per frame, over
+    /// what changed since the last one, and the result is written back as what
+    /// each of its lines is shown as: from there the rows, the bands and the
+    /// clipboard are counted the way they are for every other line.
+    pub fn reflow(&mut self, cols: usize) -> bool {
+        if !self.rendered {
+            return false;
+        }
+        let resized = self.laid_cols != Some(cols);
+        let from = match resized {
+            true => 0,
+            false if self.laid_from == usize::MAX => return false,
+            false => self.laid_from.saturating_sub(self.dropped),
+        };
+        if from >= self.lines.len() && !resized {
+            self.laid_from = usize::MAX;
+            return false;
+        }
+        // Back up to where the block the change landed in starts: a row added
+        // to a table can widen every row above it.
+        let mut start = from.min(self.lines.len());
+        let floor = start.saturating_sub(crate::table::MAX_ROWS + 2);
+        while start > floor && self.row_at(start.saturating_sub(1)) {
+            start -= 1;
+        }
+
+        let mut moved = false;
+        let mut at = start;
+        while at < self.lines.len() {
+            let Some(end) = self.block_at(at) else {
+                moved |= self.untable(at);
+                at += 1;
+                continue;
+            };
+            let source: Vec<String> = (at..end)
+                .map(|index| self.lines[index].text.clone())
+                .collect();
+            let borrowed: Vec<&str> = source.iter().map(String::as_str).collect();
+            for (step, shown) in crate::table::layout(&borrowed, cols).into_iter().enumerate() {
+                let part = match step {
+                    0 => crate::table::Part::Head,
+                    1 => crate::table::Part::Rule,
+                    _ => crate::table::Part::Body,
+                };
+                let line = &mut self.lines[at + step];
+                moved |= line.shown.as_deref() != Some(shown.as_str()) || line.table != Some(part);
+                line.shown = Some(shown);
+                line.table = Some(part);
+            }
+            at = end;
+        }
+
+        self.laid_cols = Some(cols);
+        self.laid_from = usize::MAX;
+        if moved {
+            self.heights.borrow_mut().stale = true;
+        }
+        moved
+    }
+
+    /// Whether the line at `index` is a row of a table: written as one, in
+    /// prose the pane renders, and not inside a fenced block, where a pipe is
+    /// code and nothing else.
+    fn row_at(&self, index: usize) -> bool {
+        self.lines.get(index).is_some_and(|line| {
+            line.tone == Tone::Body && line.fence.0.is_none() && crate::table::is_row(&line.text)
+        })
+    }
+
+    /// Where the table opening at `index` ends, or `None` when none opens
+    /// there. The head and its rule are the opening; body rows run until
+    /// something that is not a row.
+    fn block_at(&self, index: usize) -> Option<usize> {
+        if !self.row_at(index) || !self.row_at(index + 1) {
+            return None;
+        }
+        let head = &self.lines[index].text;
+        let rule = &self.lines[index + 1].text;
+        if !crate::table::opens(head, rule) {
+            return None;
+        }
+        let mut end = index + 2;
+        while end < self.lines.len() && end - index < crate::table::MAX_ROWS && self.row_at(end) {
+            end += 1;
+        }
+        Some(end)
+    }
+
+    /// Give a line that is no longer part of a table its ordinary rendering
+    /// back, and say whether that changed anything.
+    fn untable(&mut self, index: usize) -> bool {
+        let render = self.rendered;
+        let Some(line) = self.lines.get_mut(index) else {
+            return false;
+        };
+        if line.table.is_none() {
+            return false;
+        }
+        let mut fence = line.fence.clone();
+        line.shown = drawn(&line.text, line.tone, &mut fence, render);
+        line.table = None;
+        true
     }
 
     /// The wrapped height of every line held, for a box `cols` wide.
@@ -3557,6 +3695,83 @@ mod tests {
         assert_eq!(pane.line(3).unwrap().shown(), "• bold");
         // The fence line itself is structure and is drawn as the block it opens.
         assert_eq!(pane.line(0).unwrap().shown(), "── python ");
+    }
+
+    /// A table is the one thing a pane cannot settle when a line arrives: its
+    /// columns come from the whole block and from the width of the panel, and
+    /// the panel is a thing the reader drags. So it is laid out per frame, and
+    /// what it is laid out as is what the pane counts it in.
+    #[test]
+    fn a_table_block_is_laid_out_for_the_box_it_is_drawn_in() {
+        let mut pane = Pane::new(100).rendered();
+        for text in [
+            "before",
+            "| Tool | What it does |",
+            "|---|---|",
+            "| websearch | Search the web and fetch pages as Markdown |",
+            "| skill | Load a skill |",
+            "after",
+        ] {
+            pane.say(text, Tone::Body);
+        }
+        assert!(pane.reflow(70), "the block is laid out");
+        fn shown_of(pane: &Pane, line: usize) -> String {
+            pane.line(line).expect("held").shown().to_string()
+        }
+        let shown = |line: usize| shown_of(&pane, line);
+        assert!(shown(1).starts_with("Tool "), "padded to its column: {:?}", shown(1));
+        assert!(shown(2).contains('┼'), "the rule is drawn: {:?}", shown(2));
+        assert!(!shown(3).contains('|'), "the source pipes are gone: {:?}", shown(3));
+        assert_eq!(shown(0), "before", "prose either side is untouched");
+        assert_eq!(shown(5), "after");
+        assert_eq!(pane.line(3).unwrap().table(), Some(crate::table::Part::Body));
+        assert_eq!(pane.line(0).unwrap().table(), None);
+        // Every row of the block stands in the same column.
+        let at = |line: usize| shown(line).find('│');
+        assert_eq!(at(1), at(3));
+        assert_eq!(at(3), at(4));
+
+        // Dragging the divider is a different box, so the block is laid out
+        // again for it, and the pane is measured in the new rows.
+        let wide = shown(3);
+        assert!(pane.reflow(40), "a narrower panel moves it");
+        assert_ne!(shown_of(&pane, 3), wide, "laid out for the box it is in now");
+        assert!(pane.rows_of_line(3, 40).len() > 1, "the cell wraps in its column");
+        assert!(!pane.reflow(40), "and asking again changes nothing");
+    }
+
+    /// A table arrives a row at a time, and every row that lands changes the
+    /// widths of the rows above it.
+    #[test]
+    fn a_table_that_is_still_arriving_is_laid_out_as_far_as_it_goes() {
+        let mut pane = Pane::new(100).rendered();
+        pane.say("| a | b |", Tone::Body);
+        pane.reflow(60);
+        assert_eq!(pane.line(0).unwrap().table(), None, "a head alone is prose");
+        pane.say("|---|---|", Tone::Body);
+        pane.reflow(60);
+        assert_eq!(pane.line(0).unwrap().table(), Some(crate::table::Part::Head));
+        pane.say("| x | a much longer cell than the head |", Tone::Body);
+        pane.reflow(60);
+        let head = pane.line(0).expect("held").shown().to_string();
+        let body = pane.line(2).expect("held").shown().to_string();
+        assert_eq!(
+            head.find('│'),
+            body.find('│'),
+            "the row that arrived widened the head above it: {head:?} {body:?}"
+        );
+    }
+
+    /// Inside a fenced block a pipe is code, and the fence is what says so.
+    #[test]
+    fn a_table_inside_a_fence_is_left_as_the_code_it_is() {
+        let mut pane = Pane::new(100).rendered();
+        for text in ["```sh", "| a | b |", "|---|---|", "| x | y |", "```"] {
+            pane.say(text, Tone::Body);
+        }
+        pane.reflow(70);
+        assert_eq!(pane.line(1).unwrap().shown(), "| a | b |");
+        assert_eq!(pane.line(3).unwrap().table(), None);
     }
 
     /// The line that opened a block can fall off the top while its body is
