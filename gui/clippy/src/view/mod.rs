@@ -4545,6 +4545,119 @@ mod tests {
         assert!((first[0] - (body.x + 6.0 * 8.0)).abs() < 0.01, "{first:?}");
     }
 
+    /// A band over a wrapped line has to sit on the glyphs of the row it is
+    /// drawn on, not out in the empty space to the right of them. The rows and
+    /// the clipboard already agree (widgets::output proves that); this is the
+    /// rectangle, which is the half a reader sees.
+    #[test]
+    fn a_band_over_a_wrapped_line_stays_on_the_glyphs_of_its_row() {
+        let mut state = busy_state();
+        // Enough wrapped lines to have something to scroll back through.
+        for _ in 0..30 {
+            state.output.say(
+                "| websearch | Search the web, fetch pages as Markdown, find \
+                 papers/repos via SearXNG (init \u{2192} search/fetch/arxiv/github) |",
+                Tone::Body,
+            );
+        }
+        for text in [
+            "1. **Websearch tool**: Online and working. `SearXNG 2026.8.1` with 83 \
+             engines, plus DuckDuckGo and Google as keyless providers.",
+            "2. Search result for `llama.cpp grammar tool calls`: the top hit is a \
+             GitHub discussion asking whether **custom grammars** can compose with \
+             tool calls ([link](https://github.com/ggml-org/llama.cpp/discussions/22408)).",
+            "| skill | Load a **specialized** skill (e.g., `cloudflare`, \
+             workers-best-practices) to guide your actions |",
+            "| context | Report estimated context window usage |",
+        ] {
+            state.output.say(text, Tone::Body);
+        }
+        let dock = Dock::new();
+        let shape = shape(&dock, &["a.rs"]);
+        let layout = Layout::compute(1400.0, 900.0, &shape);
+        // Scrolled back so the window starts partway down a wrapped line, which
+        // is what a reader looking at older output is always doing.
+        let panel0 = layout.placed(Space::TopLeft).body;
+        let cols0 = crate::view::draw::text_columns(View::Output, panel0, 8.0).0;
+        let fit0 = layout.rows(panel0, 14.0);
+        let rows0 = fit0 - state.output_reserved(fit0);
+        state.output.scrollback = 5;
+        let window0 = state.output.window(rows0, cols0);
+        assert!(
+            window0.skip > 0,
+            "the window has to start mid-line for this to prove anything"
+        );
+        // Selected across lines the scrolled window is actually showing.
+        let top = state.output.showing_from(rows0, cols0);
+        let mut selection = crate::select::Selection::new(
+            crate::select::Where::Pane(View::Output),
+            crate::select::Spot::new(top + 1, 4),
+        );
+        selection.extend(crate::select::Spot::new(top + 3, 12));
+        let skin = Skin::from(&Config::default());
+        let panel = layout.placed(Space::TopLeft).body;
+        let scene = build(&Frame {
+            state: &state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &crate::prompt::Prompt::default(),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            clock: 0.0,
+            orb_morph: None,
+            drag: None,
+            hot: None,
+            trouble: None,
+            esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
+            selection: Some(selection),
+            menu: None,
+            picker: None,
+            settings: None,
+        });
+
+        let content = panel.inset(PAD);
+        let cols = crate::view::draw::text_columns(View::Output, panel, 8.0).0;
+        let fit = layout.rows(panel, 14.0);
+        let rows = fit - state.output_reserved(fit);
+        let line_h = Text::line_for(14.0);
+        let bands: Vec<[f32; 4]> = scene
+            .rects
+            .iter()
+            .filter(|r| r.rgba() == skin.select)
+            .map(|r| r.xywh())
+            .collect();
+        assert!(bands.len() >= 4, "only {} bands: {bands:?}", bands.len());
+        for band in &bands {
+            let row = ((band[1] - content.y) / line_h).round() as usize;
+            let (line, start) = state
+                .output
+                .spot_in(rows, cols, row, 0)
+                .unwrap_or_else(|| panic!("band {band:?} sits on row {row}, which holds no line"));
+            let (_, end) = state
+                .output
+                .spot_in(rows, cols, row, cols + 9)
+                .expect("the row a moment ago is still a row");
+            // One column past the last glyph is the newline a full-line
+            // selection carries; anything further is empty space.
+            let widest = content.x + (end - start + 1) as f32 * 8.0;
+            assert!(
+                band[0] + band[2] <= widest + 0.01,
+                "band {band:?} on row {row} (line {line}) runs {:.1}px past the {} glyphs on it",
+                band[0] + band[2] - widest,
+                end - start
+            );
+            assert!(band[0] >= content.x - 0.01, "band {band:?} starts left of the text");
+        }
+    }
+
     /// The activity pane is a clipped list: every entry is exactly one
     /// screen row, that row is the one the wrap rule would have drawn first
     /// (so it still breaks at a blank, never mid-word when a blank exists),

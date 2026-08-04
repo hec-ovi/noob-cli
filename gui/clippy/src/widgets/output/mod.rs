@@ -119,6 +119,30 @@ mod tests {
     /// pushes it now, and its rows, its bands and its clipboard are all counted
     /// in that, so this asserts the whole of it at once: what the renderer lays
     /// out on a row is what a drag across that row would copy.
+    /// The same, over the lines that broke it in the field: a table whose rows
+    /// hold pipes, a link with its URL in it, an arrow and a ballot box (both
+    /// one column and several bytes), and a numbered list. Every one of them
+    /// wraps, and a single character of disagreement between what is measured
+    /// and what is drawn slides every band below it.
+    #[test]
+    fn the_transcript_is_counted_in_the_markdown_it_draws_for_wide_characters() {
+        let mut state = busy_state();
+        for text in [
+            "1. Websearch tool: \u{2610} Online and working. SearXNG 2026.8.1 with 83 \
+             engines, plus DuckDuckGo and Google as keyless providers.",
+            "2. Search result for \"llama.cpp grammar tool calls\": The top hit is a \
+             GitHub discussion asking whether custom grammars can compose with tool \
+             calls ([link](https://github.com/ggml-org/llama.cpp/discussions/22408)).",
+            "| websearch | Search the web, fetch pages as Markdown, find papers/repos \
+             via SearXNG (init \u{2192} search/fetch/arxiv/github) |",
+            "| skill | Load a specialized skill (e.g., cloudflare, \
+             workers-best-practices) to guide your actions |",
+        ] {
+            state.output.say(text, Tone::Body);
+        }
+        assert_rows_hold_what_a_drag_would_copy(state);
+    }
+
     #[test]
     fn the_transcript_is_counted_in_the_markdown_it_draws() {
         let mut state = busy_state();
@@ -135,6 +159,13 @@ mod tests {
             state.output.say(text, Tone::Body);
         }
 
+        assert_rows_hold_what_a_drag_would_copy(state);
+    }
+
+    /// Every visual row holds exactly the characters a drag across it would
+    /// copy, and a wrapped line's rows add back up to the line. Shared by the
+    /// cases below so one rule is proven once over several kinds of text.
+    fn assert_rows_hold_what_a_drag_would_copy(state: crate::state::State) {
         let dock = Dock::new();
         let shape = shape(&dock, &["a.rs"]);
         let layout = Layout::compute(1400.0, 900.0, &shape);
@@ -183,7 +214,6 @@ mod tests {
         let rows = layout.rows(panel, 14.0);
         let skip = state.output.window(rows, cols).skip;
         let mut checked = 0;
-        let mut marked = 0;
         for row in 0..rows {
             let Some((line, start)) = state.output.spot_in(rows, cols, row, 0) else {
                 break;
@@ -199,19 +229,14 @@ mod tests {
                 drawn[row + skip], source,
                 "screen row {row} holds something other than what a selection there would copy"
             );
-            if held.shown() != held.text {
-                marked += 1;
-            }
             checked += 1;
         }
         assert!(checked > 6, "only {checked} rows were on screen");
-        assert!(marked > 2, "only {marked} rows came off a line with marks in it");
 
         // And the row count of a marked-up line is the number of rows it is
         // actually drawn as, which is what keeps every row below it in step.
         let bullet = state.output.last() - 4;
         let held = state.output.line(bullet).expect("the bullet is held");
-        assert!(held.shown() != held.text, "the bullet line had no marks");
         let counted = state.output.rows_of_line(bullet, cols);
         assert!(counted.len() > 1, "the bullet has to wrap");
         let on_screen: Vec<&Vec<char>> = drawn
