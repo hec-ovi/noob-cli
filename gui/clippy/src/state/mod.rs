@@ -1085,8 +1085,9 @@ impl Call {
 /// A block of text as lines, bounded, with a last line saying what was left out.
 fn clipped(text: &str) -> Vec<String> {
     let mut lines: Vec<String> = text.lines().take(CELL_LINES).map(str::to_string).collect();
-    if text.lines().nth(CELL_LINES).is_some() {
-        lines.push(String::from("\u{2026}"));
+    let over = text.lines().count().saturating_sub(CELL_LINES);
+    if over > 0 {
+        lines.push(format!("\u{2026} {over} more line{}", if over == 1 { "" } else { "s" }));
     }
     lines
 }
@@ -1974,9 +1975,13 @@ const MAX_FILES: usize = 40;
 /// failure is still there to be clicked several minutes after it scrolled past,
 /// and bounded because a long session makes thousands of them.
 const MAX_CALLS: usize = 300;
-/// How many lines of any one popup cell are kept and shown. A build log is
-/// thousands of lines and the popup is a box on a window.
-const CELL_LINES: usize = 40;
+/// How many lines of any one popup cell are kept and shown.
+///
+/// The popup scrolls its own body, so this is a memory bound and not a view
+/// one: 40 was the height of a box, and it cut a websearch result off at its
+/// first few hits with a bare ellipsis. Deep enough now to hold a real tool
+/// result whole, and the row that stands for what is left out says how much.
+const CELL_LINES: usize = 500;
 /// Where in an activity row the parallel mark goes: the second of the two spaces
 /// between the tag column and the subject, so the mark stands in its own column
 /// down the whole list and every row is exactly as wide as it was.
@@ -3152,7 +3157,7 @@ mod tests {
             serde_json::json!({"cmd": "cargo test"}),
         ));
         let detail = std::iter::once(String::from("exit code 1"))
-            .chain((0..80).map(|n| format!("trace line {n}")))
+            .chain((0..CELL_LINES + 40).map(|n| format!("trace line {n}")))
             .collect::<Vec<_>>()
             .join("\n");
         state.apply(Event::ToolEnd {
@@ -3181,7 +3186,12 @@ mod tests {
             "{detail:?}"
         );
         assert!(detail.lines.iter().any(|l| l.contains("trace line 0")), "{detail:?}");
-        assert!(detail.lines.iter().any(|l| l.contains('…')), "{detail:?}");
+        // What was left out is counted rather than hinted at.
+        assert!(
+            detail.lines.iter().any(|l| l.contains("… 41 more lines")),
+            "{:?}",
+            detail.lines.last()
+        );
         assert!(
             detail.lines.len() <= CELL_LINES + 4,
             "the body is bounded: {}",

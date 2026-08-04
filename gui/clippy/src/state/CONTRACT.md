@@ -50,7 +50,8 @@ pub struct Call;   // one remembered tool call, and its popup cells
 1. Pure fold: same events in the same order, same state; time enters only
    as the `at` stamp the caller passes.
 2. Bounded: panes are rings, the file list caps at MAX_FILES, activity
-   keeps a bounded window; a long session cannot grow memory unbounded.
+   keeps a bounded window, and a popup cell keeps CELL_LINES with a row
+   counting what was left out; a long session cannot grow memory unbounded.
 3. Display ownership ends here: scrolling, selection, and the open-file
    follow policy live in the shell; this box only says what exists.
 4. Unknown events are ignored (the proto degradation rule), never fatal.

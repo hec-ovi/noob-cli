@@ -4144,6 +4144,16 @@ impl ApplicationHandler<Wake> for App {
                     self.hot = hot;
                     self.dirty = true;
                 }
+                // The activity list lights the row under the pointer, and it
+                // works that out while drawing, so nothing above marks the
+                // frame dirty for it. Without this the highlight waited for
+                // whatever redrew next (a monitor sample, a line of output),
+                // which is seconds of a row not answering the hand.
+                if let Some(space) = self.dock_space_of(View::Activity)
+                    && layout.placed(space).body.contains(x, y)
+                {
+                    self.dirty = true;
+                }
                 // An armed Delete on an open menu is disarmed by the pointer
                 // leaving its row, so the second press can only be made by a
                 // pointer that is still on the row which asked for it.
