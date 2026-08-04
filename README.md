@@ -235,34 +235,25 @@ Display variables can be set in the shell or the checkout's root `.env` for Comp
 
 ## The prompt
 
-Two things reach the model on every request: one system prompt string, and the tool schemas as a separate field. Nothing else.
+Two things reach the model: one system prompt string, and the tool schemas as a separate field.
 
-The system prompt is built from layers, each announced by a markdown heading, with a tag fencing any text noob did not write:
+Every layer of the prompt gets a heading, and a tag fences any text noob did not write:
 
 ```
-# Agent
-<instructions>   your AGENTS.md, or the shipped prompt
-# (env)          <env> cwd, platform, date, model, sandbox </env>
-# Project instructions
-<instructions>   the working directory's AGENTS.md, when it has one
-# Skills
-<available_skills>   one "- name: description" line per installed skill
-# MCP servers
-<mcp_servers>    the configured names
+# Agent               <instructions> your AGENTS.md, or the shipped prompt
+                      <env> cwd, platform, date, model, sandbox
+# Project instructions <instructions> the working directory's AGENTS.md
+# Skills              <available_skills> one "name: description" per skill
+# MCP servers         <mcp_servers> the configured names
 ```
 
-`AGENTS.md` in the config directory replaces the shipped prompt whole, identity and tool guidance together. noob has no paired model: the reinforcement that makes a tool work on one local model is wrong for the next, so all of it is yours to rewrite. Start from what ships with `noob debug prompt > ~/.config/noob/AGENTS.md`.
+`AGENTS.md` in the config directory replaces the shipped prompt whole. noob has no paired model, so the tool reinforcement that suits one local model is yours to rewrite. Start from `noob debug prompt > ~/.config/noob/AGENTS.md`.
 
-Tool schemas are not part of that text. Each tool is sent as a name, a one-line description from its own file under `crates/noob/prompts/tools/`, and a JSON schema for its arguments. A tool that is not registered costs nothing, so its rules live in its description rather than in the prompt. Rules that decide which tool to reach for (prefer editing over creating, when to plan) stay in the prompt, because the model reads them before it picks anything.
+Tools are not in that text. Each is a name, a one-line description from its own file, and an argument schema, so an unregistered tool costs nothing. A rule about using one tool lives on that tool; a rule that decides which tool to reach for stays in the prompt.
 
-Two of the tools earn a section in the prompt of their own:
+Two tools get a section of their own, because the model has to decide to want them: **plan**, which pins a live checklist above the prompt, and **subagent**, which spawns detached children. Bodies load late everywhere else too: a skill is one index line until the `skill` tool loads it, an MCP server is a name until `mcp_connect` fetches its catalog.
 
-- **plan** keeps a checklist pinned above the prompt while the turn runs. The prompt says to call it when the work takes several actions, when steps depend on each other, when you asked for more than one thing in one message, or when sub-agents will run in parallel, and to skip it for what can just be done.
-- **subagent** spawns detached children of the same binary. The prompt says to spawn for work that is genuinely separate, that each one is a whole model run so small work is not worth it, and never to wait for them.
-
-Progressive disclosure is the rule everywhere: a skill contributes one line to the index and its body loads only when the model calls the `skill` tool for it; MCP servers contribute their names and their catalogs arrive when `mcp_connect` runs.
-
-`noob debug prompt` prints the assembled result, `--json` adds the tool array, `noob debug env` prints only the runtime layers, and `noob doctor` says which prompt text is in effect.
+`noob debug prompt` prints the assembled result (`--json` adds the tools), `noob debug env` prints only the runtime layers, `noob doctor` says which text is in effect.
 
 ## Prompt budget
 
