@@ -4561,6 +4561,13 @@ mod tests {
             );
         }
         for text in [
+            "\u{2039} [background sub-agent result agent-1]",
+            "{\"job_id\":\"agent-1\",\"result\":\"Done. `/tmp/claude-1000/-home-hec/\
+             scratchpad/live-web/hello.txt` contains the single line `Hello, world!`.\",\
+             \"source\":\"noob_background_subagent\",\"status\":\"ok\",\
+             \"trust\":\"untrusted_data_not_human_instruction\"}",
+            "1. Websearch tool: \u{2705} Online and working. SearXNG 2026.8.1 with 83 \
+             engines, plus DuckDuckGo and Google as keyless providers.",
             "1. **Websearch tool**: Online and working. `SearXNG 2026.8.1` with 83 \
              engines, plus DuckDuckGo and Google as keyless providers.",
             "2. Search result for `llama.cpp grammar tool calls`: the top hit is a \
@@ -4581,12 +4588,16 @@ mod tests {
         let cols0 = crate::view::draw::text_columns(View::Output, panel0, 8.0).0;
         let fit0 = layout.rows(panel0, 14.0);
         let rows0 = fit0 - state.output_reserved(fit0);
-        state.output.scrollback = 5;
-        let window0 = state.output.window(rows0, cols0);
-        assert!(
-            window0.skip > 0,
-            "the window has to start mid-line for this to prove anything"
-        );
+        // Whatever the pane is scrolled to: at least one of these starts the
+        // window partway down a wrapped line, which is the case a reader
+        // looking at older output is always in.
+        let back = (0..8)
+            .find(|back| {
+                state.output.scrollback = *back;
+                state.output.window(rows0, cols0).skip > 0
+            })
+            .expect("some scrollback starts the window mid-line");
+        state.output.scrollback = back;
         // Selected across lines the scrolled window is actually showing.
         let top = state.output.showing_from(rows0, cols0);
         let mut selection = crate::select::Selection::new(

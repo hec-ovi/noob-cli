@@ -319,7 +319,24 @@ impl Pane {
         self
     }
 
-    pub fn push(&mut self, mut line: Line) {
+    /// One `Line` is one screen line. An entry that arrives with newlines in
+    /// it is pushed as the lines it is: the renderer breaks a row at every
+    /// newline while the geometry wraps the string as one, so a single entry
+    /// holding two lines is drawn a row taller than it is measured, and every
+    /// row below it belongs to a different line than the bands, the clicks and
+    /// the scroll extent think it does.
+    pub fn push(&mut self, line: Line) {
+        if line.text.contains('\n') {
+            let parts: Vec<String> = line.text.split('\n').map(str::to_string).collect();
+            for text in parts {
+                self.push_one(Line { text, ..line.clone() });
+            }
+            return;
+        }
+        self.push_one(line);
+    }
+
+    fn push_one(&mut self, mut line: Line) {
         self.tail_fence = self.fence.clone();
         line.fence = self.fence.clone();
         line.shown = drawn(&line.text, line.tone, &mut self.fence, self.rendered);
@@ -2039,6 +2056,36 @@ pub fn thousands(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// One entry, two lines: the renderer breaks a row at every newline, so a
+    /// pane that measured the whole string as one wrapped line drew a row it
+    /// had not counted and slid every band, click and scroll reading below it.
+    /// Caught in the field on a `[background sub-agent result]` record, which
+    /// arrives as its header and its JSON in one string.
+    #[test]
+    fn an_entry_holding_two_lines_is_pushed_as_two() {
+        let mut pane = Pane::new(100).rendered();
+        pane.say("head", Tone::Body);
+        pane.say(
+            "\u{2039} [background sub-agent result agent-1]\n{\"job_id\":\"agent-1\",\
+             \"status\":\"ok\"}",
+            Tone::Body,
+        );
+        pane.say("tail", Tone::Body);
+        assert_eq!(pane.last(), 4, "the two-line entry stayed one line");
+        assert_eq!(pane.line(1).expect("the header").text, "\u{2039} [background sub-agent result agent-1]");
+        assert_eq!(
+            pane.line(2).expect("the json").text,
+            "{\"job_id\":\"agent-1\",\"status\":\"ok\"}"
+        );
+        // And every line is one row wide enough to hold it, which is what the
+        // renderer draws and what the bands are placed against.
+        for absolute in 0..pane.last() {
+            let rows = pane.rows_of_line(absolute, 200);
+            assert_eq!(rows.len(), 1, "line {absolute} counted {} rows", rows.len());
+        }
+    }
+
     use super::*;
     use noob_proto::{Span, ToolError};
 
