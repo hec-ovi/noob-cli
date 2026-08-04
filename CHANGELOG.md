@@ -3,7 +3,7 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
-## Unreleased
+## 0.11.8 - 2026-08-04
 
 - A Markdown table in the transcript is drawn as the columns it describes. It
   is laid out across its whole block for the width of the panel it is in, so
