@@ -8,19 +8,23 @@ The static release binary is 4,502,464 bytes (4.29 MiB) with 41 runtime crates. 
 
 ## Showcase
 
-Recorded against a live qwen3.6-35b-a3b endpoint. Idle waits are sped up; the interactions themselves play close to real time.
+NO0B, the window described under [The window](#the-window), recorded at 0.11.8 against a local model endpoint. Everything plays close to real time.
 
-The `context` tool reports token use on demand:
+Open a folder and the window is already reporting: GPU, CPU, memory and VRAM on the right, the prompt waiting at the bottom. Ask it something and the answer streams into the transcript while the machine numbers move with it:
 
-![noob answering with its own context use through the context tool](docs/media/showcase-context.gif)
+![The window at rest, then a question typed and the answer streaming in](docs/media/showcase-window.gif)
 
-Install a skill straight from a GitHub repo, hand it a research task, and keep talking while the detached sub-agent works. Tab opens its live view, here the sub-agent running web search in the background:
+Ask for work in steps and the plan lands in its own panel, one line per step, ticking itself off as the agent goes:
 
-![Installing the research skill, then a sub-agent web-searching while the prompt stays live](docs/media/showcase-skills-agents.gif)
+![A four step plan appearing in the plan panel](docs/media/showcase-plan.gif)
 
-Ask for a three-step plan, then queue two follow-up messages while it builds. The plan finishes on its own and the queued messages dispatch in order, the first one right after the plan completes:
+Drag the split to give the transcript more room, and right-click any panel to add one. The list holds output, activity, plan, agents, hardware, context, session and files:
 
-![A plan building three files while two typed messages wait queued, then dispatch in order](docs/media/showcase-plan-queue.gif)
+![The split dragged wider, then the widget menu adding the activity panel](docs/media/showcase-layout.gif)
+
+The activity panel logs every tool call the agent makes. Click a row and the call opens over the window: what was invoked, when, what it generated, what came back:
+
+![An activity row clicked open, showing the full write call](docs/media/showcase-activity.gif)
 
 ## Install
 
@@ -288,6 +292,45 @@ CLI's 8 MiB and 45, because a GPU stack is several hundred crates and one
 lockfile for both would put a careless `workspace = true` between the two
 budgets. They share exactly one thing, `crates/noob-proto`, by path.
 Packaged for Linux. [`gui/README.md`](gui/README.md) is its documentation.
+
+Text size, transparency and colour are settings, and every change lands on the
+next frame. The theme row at the bottom carries the presets and a custom slot:
+
+![The transparency sliders moving, then the window changing theme colour](docs/media/showcase-appearance.gif)
+
+### The settings panels
+
+`AGENT` is where the endpoint lives: the base URL, the request shape, the API
+key, the model, and the file all of it is written to.
+
+![The agent settings panel](docs/media/settings-agent.png)
+
+`SYSTEM PROMPT` shows the prompt the agent is running with, built in until you
+enable edition and save your own. The environment block below it is what noob
+computes for each request, so there is nothing there to edit.
+
+![The system prompt settings panel](docs/media/settings-system-prompt.png)
+
+`SESSIONS` is one row per session the agent has had, with its size, its share of
+the context window and its first message. Mark the ones you are done with and
+delete them.
+
+![The sessions settings panel](docs/media/settings-sessions.png)
+
+`SKILLS` installs from a git address, an owner/name, or a folder with a
+`SKILL.md` in it, and lists what is installed with the text the agent reads.
+
+![The skills settings panel](docs/media/settings-skills.png)
+
+`MCP` adds a server by name and command or URL, written into `mcp.json`, which
+the agent reads in every project.
+
+![The MCP settings panel](docs/media/settings-mcp.png)
+
+`COMMANDS` is the same list `/help` prints, each one with its whole story beside
+it.
+
+![The commands settings panel](docs/media/settings-commands.png)
 
 ## Planned
 
