@@ -29,6 +29,49 @@ pub(crate) fn sized_shape<'a>(dock: &'a Dock, column: f32, pane_column: f32) -> 
 pub(crate) fn render(state: &State, w: f32, h: f32, dock: &Dock, files: &[&str]) -> Rendered {
     render_with(state, w, h, dock, files, &Monitor::new(), None)
 }
+
+/// The same window with the pointer somewhere in it, for the states a widget
+/// only wears under the hand.
+pub(crate) fn render_hovered(
+    state: &State,
+    w: f32,
+    h: f32,
+    dock: &Dock,
+    files: &[&str],
+    cursor: (f32, f32),
+) -> Rendered {
+    let shape = shape(dock, files);
+    let layout = Layout::compute(w, h, &shape);
+    let skin = Skin::from(&Config::default());
+    let monitor = Monitor::new();
+    let scene = build(&Frame {
+        state,
+        scrolls: &crate::scroll::Scrolls::default(),
+        file_scroll: 0,
+        monitor: &monitor,
+        dock,
+        skin: &skin,
+        layout: &layout,
+        prompt: &typed_prompt("type here", 4),
+        column: 8.0,
+        pane_column: 8.0,
+        body_size: 14.0,
+        pane_size: 13.0,
+        clock: 0.0,
+        orb_morph: None,
+        drag: None,
+        hot: None,
+        trouble: None,
+        esc_armed: false,
+        popup_scroll: 0,
+        cursor,
+        selection: None,
+        menu: None,
+        picker: None,
+        settings: None,
+    });
+    Rendered { scene, layout, skin }
+}
 pub(crate) fn render_with(
     state: &State,
     w: f32,

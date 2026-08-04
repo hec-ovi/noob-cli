@@ -6,8 +6,9 @@ contractVersion: 1.0.0
 
 The activity widget: exactly one clipped row per tool call - the row the
 wrap would have drawn first, a dim ellipsis after an entry that goes on,
-never a second row. The call row under the pointer brightens, which is what
-says these rows press. A call's progress, summary, and failure detail are
+never a second row. The row under the pointer turns red and grows a bullet in
+the last space of its clock column, over a character the row already had, so
+nothing moves under the hand. A call's progress, summary, and failure detail are
 never rows here; they live on the full-panel popup the row opens, and a
 failure recolors its row.
 
