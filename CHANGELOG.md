@@ -3,6 +3,20 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.11.7 - 2026-08-04
+
+- The activity row under the pointer turns red and wears a bullet in the last
+  space of its clock column, over a character the row already had, so nothing
+  moves under the hand.
+- That row answers the hand now. The list worked its lit row out while drawing,
+  so a move over it marked nothing dirty and the highlight waited for whatever
+  redrew next, a monitor sample or a line of output, seconds later.
+- A popup cell holds a whole tool result. It kept 40 lines because 40 was the
+  height of a box, which cut a web search off at its first few hits; the popup
+  scrolls its own body, so the bound is about memory rather than the view, and
+  the row standing for the rest says how many lines it is.
+- The release workflow runs GitHub's actions on Node 24.
+
 ## 0.11.6 - 2026-08-04
 
 - One prompt file, not two. `TOOLS.md` is gone: `AGENTS.md` in the config
