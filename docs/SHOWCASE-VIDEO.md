@@ -1,6 +1,6 @@
 # Showcase video, 0.11.16
 
-One 6:33 cut from two screencasts, narrated over the Lemmino Cipher loop.
+One 6:40 cut from two screencasts, narrated over the Lemmino Cipher loop.
 Everything in the beat table was read off a frame at that timestamp, not from
 memory.
 
@@ -21,6 +21,7 @@ Renders land in `~/Videos/noob-showcase/`, outside the repo.
 | 2:29 - 5:07 | v1 2:36 - 5:14 | pause at 2:33 dropped |
 | 5:07 - 6:17 | v2 0:14 - 1:24 | v2 head dropped |
 | 6:17 - 6:33 | v2 1:58 - 2:14 | the wait dropped, tail after the result dropped |
+| 6:33 - 6:40 | last frame held | room for the closing line, fading to black over the last four seconds |
 
 ```bash
 ffmpeg -i "$V1" -i "$V2" -filter_complex "
@@ -71,9 +72,14 @@ sides.
 
 ## Narration
 
-Eleven v3. Stability Natural, speed a touch under 1.0. Tags are v3 audio tags,
-not SSML, so `[pause]` rather than `<break>`. One file per block, named
-`vo-01.mp3` and so on, each one dropped at its in-point.
+Spoken by `noob-showcase-eva`, a Fish Audio clone of an Eleven sample, model
+`s2.1-pro-free` at prosody speed 0.88. The bracket tags are Fish's inline
+control tags, so `[pause]` and free descriptions like `[soft ASMR voice]` both
+work and neither is read aloud. `generate-voice.py` beside the renders writes
+all sixteen files; it spells the name Noob so the model says the word instead of
+the zero.
+
+Each block is generated on its own and dropped at its in-point.
 
 **01 — in at 0:04**
 
@@ -81,13 +87,13 @@ not SSML, so `[pause]` rather than `<break>`. One file per block, named
 > with the agent already inside. [pause] No terminal. [pause] No browser.
 > [drawn out] One window, drawn on the GPU, sitting on your desktop.
 
-**02 — in at 0:26**
+**02 — in at 0:24**
 
 > [calm] Every panel here is one you asked for. [pause] Right click anywhere and
 > the list is waiting: output, activity, plan, agents, hardware, context,
 > sessions, files. [pause] Tick one, and it takes a tab.
 
-**03 — in at 0:43**
+**03 — in at 0:45**
 
 > [softly] So ask for something real. [pause] List your tools. [pause] Run a web
 > search. [pause] Write the summary. [drawn out] Three steps, in one sentence.
@@ -160,7 +166,7 @@ not SSML, so `[pause]` rather than `<break>`. One file per block, named
 > [calm] Meanwhile the sub-agent has been busy. [pause] Two searches in parallel,
 > [pause] a handful of fetches, [pause] three files of its own.
 
-**15 — in at 6:18**
+**15 — in at 6:17**
 
 > [softly] Then it finishes, [pause] closes itself, [pause] and hands the whole
 > thing back to the agent you were talking to.
@@ -172,8 +178,9 @@ not SSML, so `[pause]` rather than `<break>`. One file per block, named
 
 ## Sound effects
 
-Generated on Eleven's sound effects, one file each, `sfx-01.wav` and so on.
-Each sits under the music, quiet, a little seasoning on the click.
+Still to make. Eleven's sound effects, one file each, `sfx-01.wav` and so on,
+dropped in `~/Videos/noob-showcase/sfx/`. Each sits under the music, quiet, a
+little seasoning on the click. The mix is complete without them.
 
 | File | In at | Prompt | Length |
 |---|---|---|---|
@@ -200,6 +207,13 @@ speaks and comes back up in the gaps.
 
 ## Assembling
 
-`assemble.sh` next to the renders takes the master cut, the `vo-*.mp3` blocks and
-the `sfx-*.wav` files, places each at its in-point, and writes the final mix.
-Run it again whenever a block is regenerated.
+In `~/Videos/noob-showcase/`:
+
+```bash
+./generate-voice.py        # all sixteen blocks, or ./generate-voice.py 03 11
+./assemble.sh              # places everything and writes noob-showcase.mp4
+```
+
+`assemble.sh` holds the in-points, ducks the bed under the voice, and finishes
+at -14.7 LUFS with peaks at -1.4 dB. It runs with pieces missing, so it is also
+how you check the cut with only the music on it.
