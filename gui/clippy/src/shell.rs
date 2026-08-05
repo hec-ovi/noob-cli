@@ -454,18 +454,27 @@ pub(crate) fn menu_for(
         // Close or a Copy row to act on.
         Hit::Menu | Hit::MenuRow(_) | Hit::CallPopup | Hit::CallPopupClose
         | Hit::CallPopupScrollbar => None,
-        // A row of the session list is the one thing in the picker a menu can
-        // act on: it names a file, so there is something to open and something
-        // to delete. A folder row is not, because pressing it is the whole of
-        // what it does and nothing here deletes a folder.
+        // A row of the session list names a file, so there is something to
+        // open and something to delete. A folder row gets the folders view's
+        // own menu: a new folder where you are looking.
         Hit::PickerRow(index) => {
-            let saved = picker?.session(index)?;
-            Some(Menu::for_session(at, index, saved.gone))
+            let picker = picker?;
+            match picker.session(index) {
+                Some(saved) => Some(Menu::for_session(at, index, saved.gone)),
+                // A folder row, but only on the folders view: an off-list
+                // press on the sessions view is not a place a folder can go.
+                None if !picker.on_sessions() => Some(Menu::for_picker(at)),
+                None => None,
+            }
         }
-        // The rest of the picker is not a widget: there is no pane to close, no
+        // The empty stretch of the folders view answers the same way; the
+        // rest of the picker is not a widget: there is no pane to close, no
         // settings behind it, and nothing in it to select.
-        Hit::Picker
-        | Hit::PickerMark(_)
+        Hit::Picker => match picker?.on_sessions() {
+            false => Some(Menu::for_picker(at)),
+            true => None,
+        },
+        Hit::PickerMark(_)
         | Hit::PickerOpen
         | Hit::PickerFolders
         | Hit::PickerSessions => None,

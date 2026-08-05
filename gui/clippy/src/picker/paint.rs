@@ -139,6 +139,21 @@ pub(crate) fn folder_picker(scene: &mut Scene, frame: &Frame) {
     // with a funnel in front of it, which said the list had been narrowed and
     // never said that this is the thing you type into.
     let field = layout.picker_filter;
+    // Naming a new folder borrows the input line whole: the folder icon says
+    // what the typing is for, and Enter is what makes it.
+    if let Some(name) = picker.naming() {
+        let room = cols.saturating_sub(ROW_ICON_COLUMNS + 2);
+        let runs = vec![
+            Run::icon(icons::FOLDER_OPEN.to_string(), skin.bright),
+            Run::plain(" "),
+            Run::tinted(
+                clip(&format!("new folder: {name}_"), room),
+                skin.bright,
+            ),
+        ];
+        scene.text(Text::rich(runs, field, size, skin.bright).line_height(field.h));
+        return;
+    }
     let mut runs = vec![Run::icon(icons::SEARCH.to_string(), skin.dim), Run::plain(" ")];
     let room = cols.saturating_sub(ROW_ICON_COLUMNS + 2);
     let tint = match (picker.refused().or(picker.trouble()), picker.filter()) {

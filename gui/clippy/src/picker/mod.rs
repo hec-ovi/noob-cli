@@ -241,6 +241,10 @@ pub struct Picker {
     /// silently does not work is the worst answer to that.
     refused: Option<String>,
     filter: String,
+    /// A new folder's name being typed, `Some` while the mode is on. The
+    /// keyboard goes here instead of the filter, Enter asks the window to
+    /// create it, Esc puts the keyboard back on the filter.
+    naming: Option<String>,
     /// The rows as they are now. Built once whenever anything they are made of
     /// changes, so what is drawn, what a click resolves against and what the
     /// cursor indexes cannot disagree.
@@ -272,6 +276,7 @@ impl Picker {
             note: None,
             refused: None,
             filter: String::new(),
+            naming: None,
             rows: Vec::new(),
             cursor: 0,
             first: 0,
@@ -816,6 +821,12 @@ impl Picker {
         if typed.is_empty() {
             return false;
         }
+        if let Some(name) = self.naming.as_mut() {
+            // A separator would quietly make a tree where one folder was
+            // asked for; the name is one path component.
+            name.extend(typed.chars().filter(|c| *c != '/'));
+            return true;
+        }
         self.filter.push_str(&typed);
         self.refilter();
         true
@@ -825,11 +836,47 @@ impl Picker {
     /// the folder, so Backspace walks up the tree the way it does in a file
     /// manager rather than doing nothing at all.
     pub fn backspace(&mut self) -> bool {
+        if let Some(name) = self.naming.as_mut() {
+            return name.pop().is_some();
+        }
         if self.filter.pop().is_some() {
             self.refilter();
             return true;
         }
         self.walk_out()
+    }
+
+    /// Start naming a new folder inside the folder being listed. Only on the
+    /// folders view: the sessions are not a place a folder can go.
+    pub fn begin_naming(&mut self) -> bool {
+        if self.sessions.is_some() || self.naming.is_some() {
+            return false;
+        }
+        self.refused = None;
+        self.naming = Some(String::new());
+        true
+    }
+
+    /// The name being typed, while the mode is on.
+    pub fn naming(&self) -> Option<&str> {
+        self.naming.as_deref()
+    }
+
+    /// Leave the mode with nothing made.
+    pub fn cancel_naming(&mut self) -> bool {
+        self.naming.take().is_some()
+    }
+
+    /// The window made the folder: read the list again and put the cursor on
+    /// it, so Enter walks straight in.
+    pub fn created(&mut self, name: &str) {
+        self.naming = None;
+        self.relist();
+        if let Some(at) = self.rows.iter().position(
+            |row| matches!(row, Row::Folder { name: n, .. } if n == name),
+        ) {
+            self.cursor = at;
+        }
     }
 
     pub fn clear_filter(&mut self) -> bool {
@@ -1184,6 +1231,52 @@ mod tests {
         fn is_folder(&self, at: &Path) -> bool {
             self.tree.contains_key(&at.display().to_string())
         }
+    }
+
+    /// Right click > New folder: the keyboard goes to the name, a slash
+    /// cannot smuggle a tree in, Esc walks away clean, and once the window
+    /// says the folder exists the cursor is standing on it.
+    #[test]
+    fn naming_a_folder_takes_the_keys_and_lands_the_cursor_on_it() {
+        let mut picker = Picker::open(home(), PathBuf::from("/home/hec"), Vec::new());
+        assert!(picker.begin_naming());
+        assert!(!picker.begin_naming(), "the mode does not stack");
+        assert!(picker.type_text("dro/ne"));
+        assert_eq!(picker.naming(), Some("drone"), "a separator cannot get in");
+        assert!(picker.backspace());
+        assert_eq!(picker.naming(), Some("dron"));
+        assert!(picker.cancel_naming());
+        assert_eq!(picker.naming(), None);
+        assert!(!picker.cancel_naming(), "nothing left to cancel");
+
+        // The window made it; the list is read again and the cursor is on it.
+        let mut picker = Picker::open(
+            Fake::new(&[
+                ("/home/hec", &["workspace", "drone"]),
+                ("/home", &["hec"]),
+                ("/", &["home"]),
+            ]),
+            PathBuf::from("/home/hec"),
+            Vec::new(),
+        );
+        picker.begin_naming();
+        picker.type_text("drone");
+        picker.created("drone");
+        assert_eq!(picker.naming(), None);
+        assert!(
+            matches!(picker.row(picker.cursor()), Some(Row::Folder { name, .. }) if name == "drone"),
+            "the cursor is on the folder that was just made"
+        );
+    }
+
+    /// The sessions list is not a place a folder can go, so the mode refuses
+    /// to start there.
+    #[test]
+    fn naming_does_not_start_over_the_session_list() {
+        let mut picker = Picker::open(home(), PathBuf::from("/home/hec"), Vec::new());
+        picker.show_sessions(crate::sessions::Listing::default());
+        assert!(!picker.begin_naming());
+        assert_eq!(picker.naming(), None);
     }
 
     fn home() -> Box<Fake> {

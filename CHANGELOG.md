@@ -3,6 +3,13 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.11.14 - 2026-08-05
+
+- Right click on the folders view offers "New folder". The name is typed on
+  the picker's own input line, Enter creates it inside the folder being
+  listed and stands the cursor on it, Esc walks away clean. A separator
+  cannot smuggle a tree in: the name is one path component.
+
 ## 0.11.13 - 2026-08-05
 
 - A one-column symbol with the emoji selector after it (a spade suit, a red

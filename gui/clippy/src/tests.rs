@@ -693,6 +693,25 @@ fn a_session_picker() -> Picker {
 /// folder row is the whole of what that row does and nothing here deletes a
 /// folder.
 #[test]
+fn a_right_click_on_the_folders_view_offers_a_new_folder() {
+    // A folder row and the empty stretch of the folders view both answer with
+    // the one act a folder list has; the sessions view keeps its own menu.
+    let dock = Dock::new();
+    let picker = a_session_picker();
+    let on_row = menu_for(Some(Hit::Picker), (300.0, 300.0), &dock, false, None, Some(&picker));
+    match picker.on_sessions() {
+        true => assert!(on_row.is_none(), "the sessions view has no folder to make"),
+        false => {
+            let menu = on_row.expect("the folders view has a menu");
+            assert_eq!(menu.target, Target::Picker);
+            assert_eq!(menu.pick(0), Some(Item::NewFolder));
+        }
+    }
+    // Without a picker there is nothing to name into.
+    assert!(menu_for(Some(Hit::Picker), (0.0, 0.0), &dock, false, None, None).is_none());
+}
+
+#[test]
 fn a_right_click_on_the_settings_table_offers_the_same_two_acts() {
     // A conversation on the settings SESSIONS table gets the picker row's
     // menu: open it, or delete it, while a window is connected.
@@ -772,23 +791,17 @@ fn a_right_click_on_a_saved_session_offers_opening_it_and_deleting_it() {
         );
     }
 
-    // And on the folder list there is no menu at all, on the same hit.
+    // And on the folder list the same hit answers with the folders view's
+    // own menu: the one act a folder list has.
     let folders = Picker::open(
         Box::new(picker::Fixed(vec![String::from("gui")])),
         PathBuf::from("/home/hec"),
         Vec::new(),
     );
-    assert!(
-        menu_for(
-            Some(Hit::PickerRow(0)),
-            at,
-            &dock,
-            false,
-            None,
-            Some(&folders)
-        )
-        .is_none()
-    );
+    let made = menu_for(Some(Hit::PickerRow(0)), at, &dock, false, None, Some(&folders))
+        .expect("a folder row has the folders menu");
+    assert_eq!(made.target, Target::Picker);
+    assert_eq!(made.pick(0), Some(Item::NewFolder));
 }
 
 /// The whole of what deleting a session does, over a real directory: the

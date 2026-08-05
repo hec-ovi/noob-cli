@@ -2077,15 +2077,33 @@ impl App {
             Key::Named(NamedKey::ArrowLeft) => picker.walk_out(),
             Key::Named(NamedKey::Backspace) => picker.backspace(),
             Key::Named(NamedKey::Enter) => {
-                chosen = picker.confirm();
+                match picker.naming().map(str::trim).map(str::to_string) {
+                    // The window is the half that touches the disk: the
+                    // picker asked, the answer lands back on its line.
+                    Some(name) if !name.is_empty() => {
+                        let at = picker.at().join(&name);
+                        match std::fs::create_dir(&at) {
+                            Ok(()) => picker.created(&name),
+                            Err(why) => {
+                                picker.cancel_naming();
+                                picker.refuse(format!("{name} was not made: {why}"));
+                            }
+                        }
+                    }
+                    Some(_) => {
+                        picker.cancel_naming();
+                    }
+                    None => chosen = picker.confirm(),
+                }
                 true
             }
             // Nothing has started yet, so there is nothing to cancel and no
-            // pane to fall back to: Escape drops what has been typed, then the
-            // session list if that is what is showing, and with neither there
-            // it closes the window.
+            // pane to fall back to: Escape drops the name being typed, then
+            // what has been typed into the filter, then the session list if
+            // that is what is showing, and with none of them it closes the
+            // window.
             Key::Named(NamedKey::Escape) => {
-                if !picker.clear_filter() && !picker.show_folders() {
+                if !picker.cancel_naming() && !picker.clear_filter() && !picker.show_folders() {
                     event_loop.exit();
                 }
                 true
@@ -2984,9 +3002,19 @@ impl App {
             // The prompt's menu has no Close row, so this cannot happen; it is
             // matched rather than caught by a wildcard so adding one is a
             // compile error here instead of a click that silently does nothing.
-            (Item::Close, Target::Input | Target::Session(_) | Target::Kept(..) | Target::SettingsDoc) => {}
+            (
+                Item::Close,
+                Target::Input | Target::Session(_) | Target::Kept(..) | Target::Picker
+                | Target::SettingsDoc,
+            ) => {}
             // The same two things pressing the row and pressing Delete do, from
             // the menu the right button opened over it.
+            // Naming happens on the picker's own input line; Enter makes it.
+            (Item::NewFolder, _) => {
+                if let Some(picker) = self.picker.as_mut() {
+                    self.dirty |= picker.begin_naming();
+                }
+            }
             (Item::OpenSession, Target::Session(index)) => self.open_session(index),
             // The same act off the settings table: the id comes off the row
             // the menu was opened over, resolved against the disk at press
@@ -3011,7 +3039,7 @@ impl App {
             }
             // Neither row is on any menu but a session's.
             (Item::OpenSession | Item::DeleteSession(_),
-                Target::Input | Target::Widget(..) | Target::SettingsDoc) => {}
+                Target::Input | Target::Widget(..) | Target::Picker | Target::SettingsDoc) => {}
             // A switch rather than a destination, so the menu stays open over it
             // and can be switched again. See [`toggle_view`] for the one case
             // where it cannot.

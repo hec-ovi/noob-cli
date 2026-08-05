@@ -14,7 +14,11 @@ input.
 ```rust
 pub struct Picker;           // the model: mode (folders or sessions), the
                              // walked tree, cursor, filter field, what
-                             // choosing returns
+                             // choosing returns, and the new-folder naming
+                             // mode (begin_naming/naming/cancel_naming take
+                             // the keyboard; the window creates on disk and
+                             // answers with created(name), which relists and
+                             // stands the cursor on it; folders view only)
 pub enum Row;                // one visible row: a folder at a depth, or a
                              // saved session
 pub mod places;              // PickerPlaces from one Panel + Shape + &Picker

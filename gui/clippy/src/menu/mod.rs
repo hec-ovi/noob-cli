@@ -62,6 +62,9 @@ pub enum Item {
     /// a saved session is chosen. On the pane menu because that screen is
     /// otherwise unreachable once a window is connected.
     NewSession,
+    /// Make a folder inside the folder the picker is listing: the name is
+    /// typed on the picker's own input line and Enter creates it.
+    NewFolder,
     /// Carry on the saved session the menu was opened over, which is what
     /// pressing the row does anyway. On the menu because a menu with one row
     /// says the row it does not have is the only thing you can do here.
@@ -85,6 +88,7 @@ impl Item {
             Item::CopySelection => "Copy selection",
             Item::Close => "Close this widget",
             Item::NewSession => "New session",
+            Item::NewFolder => "New folder",
             Item::Widgets(_) => "Widgets",
             // The tab's own name, so the list reads as the tabs it is a list of.
             Item::Widget(view, _) => view.label(),
@@ -165,6 +169,7 @@ impl Item {
             // The mark the picker's own Open button wears, because it is the
             // same act reached another way, and the bin for the row that is not.
             Item::NewSession => Some(icons::FOLDER),
+            Item::NewFolder => Some(icons::FOLDER_OPEN),
             Item::OpenSession => Some(icons::CONFIRM),
             // The bin either way. The gutter says what the row is, and what the
             // row is does not change when it starts asking.
@@ -215,6 +220,9 @@ pub enum Target {
     /// points at cannot move while the menu is up: nothing rebuilds the list
     /// until a row of the menu is picked.
     Session(usize),
+    /// The picker's folders view. It carries nothing: the one row starts
+    /// naming a folder inside whatever is being listed.
+    Picker,
     /// One conversation on the settings SESSIONS table, as the panel row the
     /// table is on and the row of the table itself. The same two acts the
     /// picker's session rows carry, reachable while a window is connected.
@@ -306,6 +314,11 @@ impl Menu {
         )
     }
 
+    /// The folders view's menu: one row, a new folder where you are looking.
+    pub fn for_picker(at: (f32, f32)) -> Menu {
+        Menu::of(at, Target::Picker, vec![Row::act(Item::NewFolder, true)])
+    }
+
     /// The same two rows for a conversation on the settings table, which is
     /// the same kind of thing in a different list.
     pub fn for_kept(at: (f32, f32), index: usize, row: usize) -> Menu {
@@ -357,7 +370,8 @@ impl Menu {
     pub fn target_view(&self) -> Option<View> {
         match self.target {
             Target::Widget(view, _) => Some(view),
-            Target::Input | Target::Session(_) | Target::Kept(..) | Target::SettingsDoc => None,
+            Target::Input | Target::Session(_) | Target::Kept(..) | Target::Picker
+            | Target::SettingsDoc => None,
         }
     }
 
