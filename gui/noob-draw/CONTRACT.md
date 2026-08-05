@@ -102,33 +102,57 @@ their own), `scroll_lines`, `wrap_cols: Option<usize>`,
 | `column_width(&mut self, size: f32) -> f32` | Width of one monospace column at this size, measured by shaping ten zeros; `size * 0.6` when no monospace font measures |
 | `draw(&mut self, gpu: &mut noob_gpu::Gpu, scene: &Scene, frame: noob_gpu::Frame)` | Draws the scene into the frame and presents it. Order: base rectangles, base glyphs, overlay rectangles, overlay glyphs. Clears to transparent and blends premultiplied, so the desktop shows through wherever nothing is drawn |
 
-### The embedded symbol font
+### The font pool
 
-Symbols Nerd Font Mono ships in the binary
-(`fonts/SymbolsNerdFontMono-Regular.ttf`, license alongside) and carries the
-Codicon, Seti and Devicon sets. `Run::icon` reaches it; font fallback cannot,
-because Nerd Font glyphs live in the private use area where fallback has no
-script to match on.
+Built, not inherited. The system's fonts, plus the two embedded ones, minus
+every face that draws in its own colours.
+
+Symbols Nerd Font Mono (`fonts/SymbolsNerdFontMono-Regular.ttf`, license
+alongside) carries the Codicon, Seti and Devicon sets. `Run::icon` reaches it;
+fallback cannot, because Nerd Font glyphs live in the private use area where
+fallback has no script to match on.
+
+Noto Emoji (`fonts/NotoEmoji[wght].ttf`, SIL Open Font License, text alongside)
+is the monochrome one, and every character it covers is drawn from it. That is
+the whole rule for what an emoji is here: this crate names no characters, it
+asks the font. Its coverage is the pictographs and not the text symbols, so a
+check mark and an arrow stay in the text face where they are one column wide.
+
+Two guarantees come out of that:
+
+- **One style.** A colour face paints its own bitmap or palette and ignores the
+  colour the text asks for, so one emoji out of the system's colour font lands
+  in a monochrome transcript as a coloured blot. Faces carrying `CBDT`, `sbix`
+  or `COLR` are dropped from the pool, read off the table directory rather than
+  a list of names, and the embedded font covers what they used to. Every glyph
+  the window draws is now a mask it tints.
+- **On the grid.** Every glyph in the emoji font is one width, and that width is
+  not two columns of the text face. An emoji span is drawn at a size that makes
+  it exactly the two columns `text-geometry` counts it as, so the text after it
+  on a row lands where the selection band and the caret are.
+
+A character that neither the text face nor these two has still falls back to
+whatever else is in the pool, which is what makes accents, arrows, box drawing
+and CJK draw at all.
 
 `has_glyph(ch: char) -> bool` reports whether that font has a real glyph
 (not `.notdef`) for a character. It builds a whole `FontSystem` per call, so
 it is for callers' tests, not for a draw path: a missing icon draws as
 nothing, and a test is where that surfaces instead of on someone's screen.
 
-### Characters the text face lacks
+### Shaping
 
-Every buffer shapes with fallback on, so a character the monospace face has no
-glyph for is looked up in the system's other fonts: emoji, accents, arrows,
-CJK. Without it each one drew as a blank box. Two cosmic-text features carry
-this, named in the workspace manifest: `shape-run-cache` (which makes fallback
-shaping cheaper than the no-fallback path, since the buffers are rebuilt every
-frame and a run that shaped before is looked up) and `monospace_fallback`
-(which prefers a monospace face when one has the character).
+Every buffer shapes with fallback on, so a character the text face has no glyph
+for is looked up in the rest of the pool. Without it each one drew as a blank
+box. Two cosmic-text features carry it, named in the workspace manifest:
+`shape-run-cache` (which makes fallback shaping cheaper than the no-fallback
+path, since the buffers are rebuilt every frame and a run that shaped before is
+looked up) and `monospace_fallback` (which prefers a monospace face when one has
+the character).
 
-A substituted glyph keeps the advance its own font gives it. Where no
-monospace face has the character, as with emoji, that advance is not one
-column, and the rest of that row draws right of where the column grid puts it.
-The columns a row is counted in do not move; only the glyphs on it do.
+A question about one face is asked with fallback off. With it on the answer is
+"some font in the pool has this", which is true of nearly every character and
+says nothing about the face that was named.
 
 ## Errors
 

@@ -18,7 +18,7 @@
         "minimum": 0
       },
       "end": {
-        "description": "Character index one past the last character on this row. Never before start, and never further than cols past it.",
+        "description": "Character index one past the last character on this row. Never before start, and the characters it names never fill more than cols columns.",
         "type": "integer",
         "minimum": 0
       }

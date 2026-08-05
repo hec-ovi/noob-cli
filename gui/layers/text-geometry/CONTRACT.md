@@ -1,18 +1,42 @@
 # text-geometry
 
-contractVersion: 1.4.0
+contractVersion: 2.0.0
 
 ## Purpose
 
 Turn a run of logical lines into the rows they occupy on a monospace screen,
 and answer every question a caller has about that mapping.
 
+## What a column is
+
+A column is a cell on screen, not a character. An emoji and a CJK ideograph
+fill two of them, a combining mark fills none, and everything else fills one.
+The table is Unicode Annex 11's, through `unicode-width`.
+
+This is the 2.0 change: `cols`, `columns` and `lengths` are cell counts
+everywhere in this contract. A caller that was passing `text.chars().count()`
+was passing a character count, and is wrong the moment a line holds an emoji:
+the selection band covered six and a half of eight of them, because eight
+characters were counted as eight columns and drawn as sixteen.
+
+| Operation | What it answers |
+|---|---|
+| `width_of(ch) -> usize` | The columns one character fills: 0, 1 or 2 |
+| `columns_in(text) -> usize` | The columns a string fills, which is what `cols` measures against |
+| `columns_between(text, from, to) -> usize` | The columns characters `from..to` fill, which turns a character range into a place on screen |
+| `column_of(text, chars) -> usize` | The column a character sits at. Past the end is the column after the last one, where a caret sits |
+| `char_at(text, column) -> usize` | The character drawn at a column. Both columns of a wide character give that character, so clicking either half of an emoji takes the emoji |
+
+Character positions have not changed: `Row`, `Window` and every index in them
+are still character offsets into a line. Columns are for placing pixels and
+reading a pointer, and these five are the only conversion between the two.
+
 ## Inputs
 
 | Name | Schema | Preconditions |
 |---|---|---|
-| Line height request | [`schema/line-height-request.json`](schema/line-height-request.json) | `chars` is a character count, not bytes. `cols` may be 0 (a window mid-resize). |
-| Wrap request | [`schema/wrap-request.json`](schema/wrap-request.json) | `lengths` are character counts, not bytes. `cols` may be 0 (a window mid-resize). |
+| Line height request | [`schema/line-height-request.json`](schema/line-height-request.json) | `chars` is the line's width in columns (`columns_in`), not bytes and not characters. `cols` may be 0 (a window mid-resize). |
+| Wrap request | [`schema/wrap-request.json`](schema/wrap-request.json) | `lengths` are widths in columns (`columns_in`), not bytes and not characters. `cols` may be 0 (a window mid-resize). |
 | Rows request | [`schema/rows-request.json`](schema/rows-request.json) | `text` is one logical line; a newline in it ends the row it is on. `cols` may be 0. `break` is how the box is drawn, and the drawing and the counting must pass the same one. |
 | Visual row request | [`schema/visual-row-request.json`](schema/visual-row-request.json) | Same pairing rule as the row request: `window` came from this layer and was built from the same `heights` and `rows`. |
 | Scrollback bound request | [`schema/max-scrollback-request.json`](schema/max-scrollback-request.json) | `heights` came from this layer. `rows` may be 0. |
@@ -30,8 +54,8 @@ and answer every question a caller has about that mapping.
 | Heights | [`schema/heights.json`](schema/heights.json) | One entry per input length, same order, every entry at least 1. |
 | Scrollback bound | [`schema/max-scrollback.json`](schema/max-scrollback.json) | 0 when the pane fits its viewport. Otherwise the scrollback that puts the first row at the top, and the value every other scrollback here is clamped against. |
 | Window | [`schema/window.json`](schema/window.json) | The lines it names cover the viewport and overshoot it by less than the height of one line. `first + count <= heights.len()`. |
-| Rows | [`schema/rows.json`](schema/rows.json) | At least one row, in order, none wider than `cols`. Together they cover the line except for the one character each break was spent on. A caller measuring a whole pane can have the same answer written into a buffer it owns, which is the same operation and the same shape. |
-| Line hit | [`schema/line-hit.json`](schema/line-hit.json) | Null exactly when the row is past the last line. Otherwise the line is inside the window. The offset is `row * cols`, which is where the row starts only under a `column` break. |
+| Rows | [`schema/rows.json`](schema/rows.json) | At least one row, in order, none wider than `cols` columns (a single character wider than the whole box is the one exception, and takes a row alone). Together they cover the line except for the one character each break was spent on. A caller measuring a whole pane can have the same answer written into a buffer it owns, which is the same operation and the same shape. |
+| Line hit | [`schema/line-hit.json`](schema/line-hit.json) | Null exactly when the row is past the last line. Otherwise the line is inside the window. The offset is `row * cols` in characters, so it is where the row starts only under a `column` break over one-column characters. |
 | Visual row | [`schema/visual-row.json`](schema/visual-row.json) | Null exactly when the row is past the last line. Otherwise the line is inside the window and the row number is below that line's height. |
 | Band | [`schema/band.json`](schema/band.json) | Null exactly when the line is not visible. Otherwise `top + height <= rows`. |
 | Thumb | [`schema/thumb.json`](schema/thumb.json) | Null exactly when the content fits. Otherwise `top + size <= 1`. |
@@ -50,8 +74,9 @@ because a window mid-resize legitimately produces all three.
 
 ## Dependencies
 
-None. This layer has no dependencies on other contracts and no crate
-dependencies, so it builds and tests without a GPU, a font, or a window.
+No other contract. One crate, `unicode-width`, which is the Annex 11 table
+behind `width_of` and nothing else. This layer still builds and tests without a
+GPU, a font, or a window.
 
 ## Invariants
 
@@ -68,8 +93,9 @@ dependencies, so it builds and tests without a GPU, a font, or a window.
    never dropped. This is what makes a long paragraph scroll a row at a time.
 5. Nothing here allocates per frame beyond the heights vector and the rows of
    the lines a caller asks about, and nothing shapes text or measures a font.
-6. There is one wrap rule and it lives here. A row takes as many characters as
-   fit; under a `word` break it ends at the last break opportunity at or before
+6. There is one wrap rule and it lives here. A row takes as many columns as
+   fit, measured with `width_of`, so a row of emoji holds half as many
+   characters as a row of letters; under a `word` break it ends at the last break opportunity at or before
    the column limit, and a word wider than the whole box ends on the column
    rather than running off the edge. A break opportunity is a blank or a tab,
    and nothing else: breaking after a hyphen or a slash would split a path or a

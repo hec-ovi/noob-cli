@@ -22,15 +22,72 @@
 //! Positions are always **visual rows**, never logical lines. The two are the
 //! same only when nothing wraps, which is exactly the assumption that broke.
 
+/// How many columns one character occupies on screen.
+///
+/// Not always one. An emoji and a CJK ideograph take two, a combining mark
+/// takes none, and a grid that counts every character as one column puts the
+/// selection band, the caret and the clipboard on different characters from the
+/// ones a reader is looking at. The table is Unicode Annex 11's.
+///
+/// A control character has no width of its own and is counted as one, because
+/// that is the cell the renderer leaves for it.
+pub fn width_of(ch: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1)
+}
+
+/// How many columns a string occupies, which is what every `cols` here means.
+pub fn columns_in(text: &str) -> usize {
+    text.chars().map(width_of).sum()
+}
+
+/// How many columns the characters `from..to` of `text` occupy.
+///
+/// What turns a character range into a place on screen, which is the step every
+/// caller used to skip: a band drawn `to - from` columns wide covers the right
+/// characters only while every character is one column.
+pub fn columns_between(text: &str, from: usize, to: usize) -> usize {
+    text.chars()
+        .take(to)
+        .skip(from)
+        .map(width_of)
+        .sum()
+}
+
+/// The column a character sits at, counting from the start of `text`.
+///
+/// Past the end gives the width of the whole string, which is the column just
+/// after the last character: a caret at the end of a line sits there.
+pub fn column_of(text: &str, chars: usize) -> usize {
+    columns_between(text, 0, chars)
+}
+
+/// The character `column` lands on, counting from the start of `text`.
+///
+/// The inverse of [`column_of`] and the half a pointer needs. A column inside a
+/// two-column character takes that character, not the one after it, so clicking
+/// either half of an emoji selects the emoji.
+pub fn char_at(text: &str, column: usize) -> usize {
+    let mut used = 0;
+    for (index, ch) in text.chars().enumerate() {
+        let next = used + width_of(ch);
+        if next > column {
+            return index;
+        }
+        used = next;
+    }
+    text.chars().count()
+}
+
 /// How many rows one logical line occupies in a box `cols` wide.
 ///
-/// An empty line still occupies one row: a blank line in a transcript is a
-/// paragraph break, and collapsing it to nothing would reflow the whole pane.
-pub fn rows_of(chars: usize, cols: usize) -> usize {
+/// `columns` is the width of the line, not its character count: see
+/// [`columns_in`]. An empty line still occupies one row, because a blank line
+/// in a transcript is a paragraph break and collapsing it would reflow the pane.
+pub fn rows_of(columns: usize, cols: usize) -> usize {
     if cols == 0 {
         return 1;
     }
-    chars.div_ceil(cols).max(1)
+    columns.div_ceil(cols).max(1)
 }
 
 /// The wrapped height of every line, which is the input to everything else.
@@ -145,12 +202,23 @@ fn wrap(text: &str, cols: usize, at: Break, base: usize, rows: &mut Vec<Row>) ->
         return count;
     }
     let mut start = 0;
-    let mut last_break: Option<usize> = None;
+    // A break opportunity, and the columns the row holds up to and including it,
+    // so cutting there leaves the next row's fill without a re-walk.
+    let mut last_break: Option<(usize, usize)> = None;
     let mut count = 0;
     let taken = rows.len();
+    // Columns the row being filled holds so far. A character is measured, not
+    // counted: an emoji fills two of them and a combining mark none.
+    let mut used = 0;
     for (i, ch) in text.chars().enumerate() {
         count = i + 1;
-        if i == start + cols {
+        let width = width_of(ch);
+        // Whether this character was spent on a break, and so belongs to
+        // neither the row that just ended nor the one that just started.
+        let mut spent = false;
+        // A row may not be empty, so a character wider than the whole box goes
+        // on a row of its own rather than never fitting anywhere.
+        if used + width > cols && i > start {
             // This character does not fit on the row being filled. Either the
             // row ends at a break opportunity, or the word is wider than the
             // box and the row ends on the column.
@@ -158,17 +226,21 @@ fn wrap(text: &str, cols: usize, at: Break, base: usize, rows: &mut Vec<Row>) ->
                 // A break opportunity sitting exactly on the boundary is the
                 // one the row ends at: the row before it is full, and the
                 // character is spent on the break.
-                Break::Word if is_break(ch) => Some(i),
+                Break::Word if is_break(ch) => Some((i, used + width)),
                 Break::Word => last_break,
                 Break::Column => None,
             };
             match cut {
-                Some(p) => {
+                Some((p, through)) => {
                     rows.push(Row {
                         start: base + start,
                         end: base + p,
                     });
                     start = p + 1;
+                    // What the new row already holds: everything after the
+                    // break that the old row had counted.
+                    used = used.saturating_sub(through);
+                    spent = p == i;
                 }
                 None => {
                     rows.push(Row {
@@ -176,16 +248,20 @@ fn wrap(text: &str, cols: usize, at: Break, base: usize, rows: &mut Vec<Row>) ->
                         end: base + i,
                     });
                     start = i;
+                    used = 0;
                 }
             }
             // Nothing between the cut and here can be a break opportunity:
             // it would have been the cut.
             last_break = None;
         }
+        if !spent {
+            used += width;
+        }
         // A row may not be empty, so the character it starts on is never a
         // break opportunity for that row.
         if i > start && is_break(ch) {
-            last_break = Some(i);
+            last_break = Some((i, used));
         }
     }
     // An empty segment is still a row: a blank line inside a laid-out shape is
@@ -375,6 +451,69 @@ pub fn thumb(heights: &[usize], rows: usize, scrollback: usize) -> Option<(f32, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole layer used to count a character as a column. It is not: the
+    /// selection band covered six and a half of eight emoji, because the eight
+    /// were counted as eight columns and drawn as sixteen.
+    #[test]
+    fn a_character_is_worth_the_columns_it_is_drawn_in() {
+        assert_eq!(width_of('a'), 1);
+        assert_eq!(width_of('\u{2705}'), 2, "an emoji fills two cells");
+        assert_eq!(width_of('\u{4e2d}'), 2, "and so does an ideograph");
+        assert_eq!(width_of('\u{0301}'), 0, "a combining mark rides the letter");
+        assert_eq!(columns_in("ok \u{2705}"), 5);
+    }
+
+    /// A pointer lands on a column, and every column of a wide character
+    /// belongs to that character: clicking either half of an emoji takes the
+    /// emoji, never the character after it.
+    #[test]
+    fn a_column_maps_back_to_the_character_drawn_under_it() {
+        let line = "a\u{2705}b";
+        assert_eq!(column_of(line, 0), 0);
+        assert_eq!(column_of(line, 1), 1);
+        assert_eq!(column_of(line, 2), 3, "b starts past both halves");
+        assert_eq!(column_of(line, 99), 4, "past the end is the caret column");
+        assert_eq!(char_at(line, 0), 0);
+        assert_eq!(char_at(line, 1), 1);
+        assert_eq!(char_at(line, 2), 1, "the emoji's second column is still it");
+        assert_eq!(char_at(line, 3), 2);
+        assert_eq!(char_at(line, 99), 3);
+    }
+
+    /// And the wrap rule counts the same way, or a row of emoji overruns the
+    /// box it was measured for.
+    #[test]
+    fn a_row_holds_the_columns_it_fits_not_the_characters() {
+        let emoji = "\u{2705}".repeat(5);
+        let rows = rows_in(&emoji, 4, Break::Column);
+        assert_eq!(rows.len(), 3, "four columns hold two emoji: {rows:?}");
+        assert_eq!(rows[0], Row { start: 0, end: 2 });
+        assert_eq!(rows[1], Row { start: 2, end: 4 });
+        assert_eq!(rows[2], Row { start: 4, end: 5 });
+        for row in &rows {
+            let text: String = emoji.chars().take(row.end).skip(row.start).collect();
+            assert!(columns_in(&text) <= 4, "{text:?} overruns the box");
+        }
+    }
+
+    /// A box one column wide cannot hold a two-column character, and must put
+    /// it somewhere anyway rather than never advancing.
+    #[test]
+    fn a_character_wider_than_the_box_still_gets_a_row() {
+        let rows = rows_in("\u{2705}\u{2705}", 1, Break::Word);
+        assert_eq!(rows.len(), 2, "one per row, not an empty loop: {rows:?}");
+    }
+
+    /// Wrapping at blanks measures in columns too, and the blank is still spent
+    /// on the break.
+    #[test]
+    fn a_wide_word_wraps_at_the_blank_before_it() {
+        let rows = rows_in("ab \u{2705}\u{2705}", 4, Break::Word);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0], Row { start: 0, end: 2 }, "the blank is spent");
+        assert_eq!(rows[1], Row { start: 3, end: 5 });
+    }
 
     #[test]
     fn a_line_that_fits_is_one_row_and_an_empty_line_still_is() {

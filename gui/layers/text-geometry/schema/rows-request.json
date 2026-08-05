@@ -15,12 +15,12 @@
       "type": "string"
     },
     "cols": {
-      "description": "Width of the box in monospace columns. Zero is legal and means a window mid-resize; the whole line then reports one row.",
+      "description": "Width of the box in monospace columns, where an emoji or an ideograph fills two and a combining mark none. Zero is legal and means a window mid-resize; the whole line then reports one row.",
       "type": "integer",
       "minimum": 0
     },
     "break": {
-      "description": "column: every row holds exactly cols characters, mid-word or not, which is what a caret placed as row * cols + column needs. word: a row ends at the last break opportunity that fits, and only a word wider than the whole box breaks on the column.",
+      "description": "column: every row is filled to cols columns, mid-word or not, which is what a caret placed as row * cols + column needs. word: a row ends at the last break opportunity that fits, and only a word wider than the whole box breaks on the column.",
       "type": "string",
       "enum": [
         "column",

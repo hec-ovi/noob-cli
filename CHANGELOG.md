@@ -3,6 +3,24 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.11.10 - 2026-08-05
+
+- A column is a cell on screen, not a character. An emoji and a CJK ideograph
+  fill two of them and a combining mark none, so the wrap rule, the selection
+  band and the pointer all measure with the Unicode Annex 11 table now. The
+  band used to cover six and a half of eight emoji, because eight characters
+  were counted as eight columns and drawn as sixteen. Clicking either half of a
+  wide character takes that character.
+- Every emoji comes from one font the window ships: Noto Emoji, monochrome,
+  under the SIL Open Font License. The style used to depend on which fonts a
+  machine had, so one row drew some faces as DejaVu outlines and one as a
+  full-colour Noto bitmap. Any face that paints its own colours is now out of
+  the pool, read off its table directory rather than a list of names, so every
+  glyph the window draws takes the colour of the text around it.
+- An emoji is drawn at the width the grid counts it as. The font's own advance
+  is about a quarter of a column wider than two cells, which slid everything
+  after it on the row.
+
 ## 0.11.9 - 2026-08-05
 
 - Text draws with font fallback on, so a character the monospace face has no

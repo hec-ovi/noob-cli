@@ -818,6 +818,8 @@ pub struct Renderer {
     /// Which characters come from the embedded emoji font, learned as they
     /// appear and kept for the life of the window.
     emoji: Emoji,
+    /// One column's width per text size, measured once each.
+    columns: std::collections::HashMap<u32, f32>,
     swash: SwashCache,
     atlas: TextAtlas,
     viewport: Viewport,
@@ -928,6 +930,7 @@ impl Renderer {
             written: Vec::new(),
             font_system: fonts::pool(),
             emoji: Emoji::default(),
+            columns: std::collections::HashMap::new(),
             swash: SwashCache::new(),
             atlas,
             viewport,
@@ -939,8 +942,19 @@ impl Renderer {
     /// Width of one monospace column at this text size.
     ///
     /// Measured by shaping, not guessed from the size: a guess is off by enough
-    /// to misplace a caret by several characters across a line.
+    /// to misplace a caret by several characters across a line. Remembered per
+    /// size, because every text box in every frame asks for it and a window uses
+    /// a handful of sizes.
     pub fn column_width(&mut self, size: f32) -> f32 {
+        if let Some(known) = self.columns.get(&size.to_bits()) {
+            return *known;
+        }
+        let measured = self.measure_column(size);
+        self.columns.insert(size.to_bits(), measured);
+        measured
+    }
+
+    fn measure_column(&mut self, size: f32) -> f32 {
         let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(size, size * 1.42));
         buffer.set_size(Some(4096.0), Some(size * 2.0));
         buffer.set_text(
@@ -1050,6 +1064,10 @@ impl Renderer {
         texts
             .iter()
             .map(|item| {
+                // What one column of this box is worth, which is what an emoji
+                // span is scaled against. Taken before the buffer borrows the
+                // font system, and cheap on repeat: the shaped run is cached.
+                let column = self.column_width(item.size);
                 let mut buffer = Buffer::new(
                     &mut self.font_system,
                     Metrics::new(item.size, item.line_height),
@@ -1097,12 +1115,27 @@ impl Renderer {
                             for (text, emoji) in
                                 self.emoji.spans(&mut self.font_system, &run.text)
                             {
-                                let family = if emoji {
-                                    Family::Name(EMOJI_FAMILY)
-                                } else {
-                                    Family::Monospace
-                                };
-                                spans.push((text, paint(Attrs::new().family(family))));
+                                if !emoji {
+                                    spans.push((
+                                        text,
+                                        paint(Attrs::new().family(Family::Monospace)),
+                                    ));
+                                    continue;
+                                }
+                                // Drawn as the two columns the grid counts it
+                                // as, which the font's own advance is not.
+                                let wide = text_geometry::width_of('\u{1f600}') as f32;
+                                let size = self
+                                    .emoji
+                                    .size_for(&mut self.font_system, wide * column);
+                                spans.push((
+                                    text,
+                                    paint(
+                                        Attrs::new()
+                                            .family(Family::Name(EMOJI_FAMILY))
+                                            .metrics(Metrics::new(size, item.line_height)),
+                                    ),
+                                ));
                             }
                         }
                         buffer.set_rich_text(spans, &mono, SHAPING, None);

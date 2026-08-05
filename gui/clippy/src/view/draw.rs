@@ -198,9 +198,14 @@ pub(crate) fn paint_selection(
                 continue;
             }
             // Past the chrome, which every row of the line carries: the gutter
-            // on the first row and the indent under it on the rest.
-            let x = content.x + (chrome + a - row_start) as f32 * column;
-            let width = ((b - a) as f32 * column).min(content.x + content.w - x);
+            // on the first row and the indent under it on the rest. Measured in
+            // columns rather than characters: an emoji is two of them, and a
+            // band counted in characters covered six and a half of eight.
+            let shown = line.shown();
+            let into = text_geometry::columns_between(shown, row_start, a);
+            let across = text_geometry::columns_between(shown, a, b);
+            let x = content.x + (chrome + into) as f32 * column;
+            let width = (across as f32 * column).min(content.x + content.w - x);
             let y = content.y + (top + i) as f32 * line_h;
             if width <= 0.0 || y + line_h > content.y + content.h {
                 continue;

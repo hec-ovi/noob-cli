@@ -611,7 +611,13 @@ impl Pane {
         let w = self.window(rows, cols);
         let (line, wrapped) = text_geometry::row_at(&self.heights(cols), w, row)?;
         let span = *self.rows_of_line(self.dropped + line, cols).get(wrapped)?;
-        Some((self.dropped + line, span.start + at.min(span.len())))
+        // `at` is a column, and a column is not a character: an emoji takes two
+        // of them. Both of its columns take the emoji, so clicking either half
+        // of one selects it rather than what follows it.
+        let shown = self.line(self.dropped + line)?.shown();
+        let row_text: String = shown.chars().take(span.end).skip(span.start).collect();
+        let into = text_geometry::char_at(&row_text, at).min(span.len());
+        Some((self.dropped + line, span.start + into))
     }
 
     /// The visual rows one line is drawn as, by the rule the renderer draws it

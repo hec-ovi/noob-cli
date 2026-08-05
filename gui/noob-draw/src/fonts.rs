@@ -114,9 +114,46 @@ fn draws_its_own_colours(data: &[u8], index: u32) -> bool {
 #[derive(Default)]
 pub struct Emoji {
     covered: HashMap<char, bool>,
+    em: Option<f32>,
 }
 
 impl Emoji {
+    /// The size to draw an emoji span at so it fills exactly `columns` columns.
+    ///
+    /// The font's glyphs are all one width, and that width is not two columns of
+    /// the text face: left alone, an emoji draws about a quarter of a column
+    /// wider than the grid counts it as, and everything after it on the row
+    /// slides. Scaling the span is what puts it back on the grid, and because
+    /// every glyph in the font is the same width one measurement covers them
+    /// all.
+    pub fn size_for(&mut self, fonts: &mut FontSystem, columns: f32) -> f32 {
+        let em = match self.em {
+            Some(em) => em,
+            None => {
+                // At a large size, so the ratio is not rounded by hinting.
+                const AT: f32 = 512.0;
+                let mut buffer = Buffer::new(fonts, Metrics::new(AT, AT));
+                buffer.set_size(Some(4096.0), Some(AT * 2.0));
+                buffer.set_text(
+                    "\u{1f600}",
+                    &Attrs::new().family(Family::Name(EMOJI_FAMILY)),
+                    COVERAGE,
+                    None,
+                );
+                buffer.shape_until_scroll(fonts, false);
+                let em = buffer
+                    .layout_runs()
+                    .next()
+                    .map(|run| run.line_w / AT)
+                    .filter(|w| *w > 0.0)
+                    .unwrap_or(1.0);
+                self.em = Some(em);
+                em
+            }
+        };
+        columns / em
+    }
+
     /// Whether this character is drawn from the embedded emoji font.
     pub fn covers(&mut self, fonts: &mut FontSystem, ch: char) -> bool {
         // ASCII is in every text face and in no emoji font; skipping it keeps
@@ -228,6 +265,34 @@ mod tests {
                 ch as u32
             );
         }
+    }
+
+    /// The point of the whole exercise: an emoji drawn as exactly the two
+    /// columns the grid counts it as. Left at its own advance it is about a
+    /// quarter of a column wider, and eight of them on a row put the text after
+    /// them two columns right of where the selection band is.
+    #[test]
+    fn an_emoji_is_drawn_as_exactly_two_columns() {
+        let mut system = pool();
+        let mut emoji = Emoji::default();
+        let column = 8.4;
+        let size = emoji.size_for(&mut system, 2.0 * column);
+
+        let mut buffer = Buffer::new(&mut system, Metrics::new(size, size * 1.42));
+        buffer.set_size(Some(4096.0), Some(size * 2.0));
+        buffer.set_text(
+            "\u{2705}\u{1f604}\u{274c}",
+            &Attrs::new().family(Family::Name(EMOJI_FAMILY)),
+            COVERAGE,
+            None,
+        );
+        buffer.shape_until_scroll(&mut system, false);
+        let drawn = buffer.layout_runs().next().map_or(0.0, |run| run.line_w);
+        let want = 3.0 * 2.0 * column;
+        assert!(
+            (drawn - want).abs() < 0.5,
+            "three emoji drew {drawn:.2} wide, the grid gives them {want:.2}"
+        );
     }
 
     /// A line is split into the fewest stretches that come from one face, so a

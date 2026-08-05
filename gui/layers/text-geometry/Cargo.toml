@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# No dependencies, on purpose. This layer is arithmetic over character counts,
-# so it builds and tests without a GPU, a font, or a window.
+# One dependency, and it is a table rather than a behaviour: how many columns a
+# character occupies, per Unicode Annex 11. Everything else here is arithmetic,
+# so this layer still builds and tests without a GPU, a font, or a window.
 [dependencies]
+unicode-width = "0.2"
