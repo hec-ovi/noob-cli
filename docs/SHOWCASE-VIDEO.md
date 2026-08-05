@@ -176,28 +176,6 @@ Each block is generated on its own and dropped at its in-point.
 > [drawn out] NO0B. [pause] Rust, one window, your own model. [pause] On GitHub,
 > as noob-cli.
 
-## Sound effects
-
-Still to make. Eleven's sound effects, one file each, `sfx-01.wav` and so on,
-dropped in `~/Videos/noob-showcase/sfx/`. Each sits under the music, quiet, a
-little seasoning on the click. The mix is complete without them.
-
-| File | In at | Prompt | Length |
-|---|---|---|---|
-| sfx-01 | 0:11 | soft synthetic interface confirm, single low tone with a short shimmer tail, clean and quiet | 1.5s |
-| sfx-02 | 0:25 | tiny UI panel open, soft airy whoosh with a light click at the front, very short | 1.0s |
-| sfx-03 | 0:44 | distant mechanical keyboard typing, soft and muffled, a few keys, no clatter | 3.0s |
-| sfx-04 | 1:03 | deep electronic hum swelling in, machine waking up, warm and low, no melody | 3.0s |
-| sfx-05 | 1:37 | short soft drag and dock sound, muted thud with an airy tail, interface feel | 1.0s |
-| sfx-06 | 1:56 | soft modal popup open, gentle upward whoosh with a glassy edge | 1.2s |
-| sfx-07 | 2:27 | quiet completion chime, two soft notes rising, clean digital, no reverb wash | 2.0s |
-| sfx-08 | 2:51 | a second presence powering up, low synth swell with a soft sparkle on top | 2.5s |
-| sfx-09 | 3:29 | settings panel sliding open, smooth low whoosh, soft and slow | 1.5s |
-| sfx-10 | 4:40 | colour shift shimmer, soft granular sweep, brief and dreamy, no impact | 2.0s |
-| sfx-11 | 5:24 | light paper or file card sliding into place, soft and dry, very short | 1.0s |
-| sfx-12 | 6:22 | soft power down, gentle descending hum fading out | 2.0s |
-| sfx-13 | 6:30 | final resolve, warm low pad with a single soft bell, calm and clean | 3.0s |
-
 ## Music
 
 `~/Music/experimental/youtubemusic/LEMMiNO - Cipher (BGM) (EXTENDED 1 HOUR [SEAMLESS]).mp3`,
@@ -211,7 +189,7 @@ In `~/Videos/noob-showcase/`:
 
 ```bash
 ./generate-voice.py        # all sixteen blocks, or ./generate-voice.py 03 11
-./assemble.sh              # places everything and writes noob-showcase.mp4
+./assemble.sh              # places them over the bed and writes noob-showcase.mp4
 ```
 
 `assemble.sh` holds the in-points, ducks the bed under the voice, and finishes
