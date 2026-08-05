@@ -8,23 +8,35 @@ The static release binary is 4,502,464 bytes (4.29 MiB) with 41 runtime crates. 
 
 ## Showcase
 
-NO0B, the window described under [The window](#the-window), recorded at 0.11.8 against a local model endpoint. Everything plays close to real time.
+NO0B, the window described under [The window](#the-window), recorded at 0.11.16 against a local model endpoint. Everything plays close to real time.
 
-Open a folder and the window is already reporting: GPU, CPU, memory and VRAM on the right, the prompt waiting at the bottom. Ask it something and the answer streams into the transcript while the machine numbers move with it:
+Name a folder that does not exist yet and NO0B makes it, then opens straight into it. GPU, CPU, memory and VRAM start reporting on the right, the prompt waits at the bottom:
 
-![The window at rest, then a question typed and the answer streaming in](docs/media/showcase-window.gif)
+![A new folder typed into the picker, then the window opening into it](docs/media/showcase-window.gif)
+
+Every panel is one you asked for. Right-click anywhere for the list: output, activity, plan, agents, hardware, context, session and files. Tick one and it takes a tab:
+
+![The right click menu adding the activity panel as a second tab](docs/media/showcase-widgets.gif)
 
 Ask for work in steps and the plan lands in its own panel, one line per step, ticking itself off as the agent goes:
 
-![A four step plan appearing in the plan panel](docs/media/showcase-plan.gif)
+![A three step plan appearing in the plan panel](docs/media/showcase-plan.gif)
 
-Drag the split to give the transcript more room, and right-click any panel to add one. The list holds output, activity, plan, agents, hardware, context, session and files:
+Drag the dividers for more room, and drag a tab from one dock to another. The layout lands on the next frame:
 
-![The split dragged wider, then the widget menu adding the activity panel](docs/media/showcase-layout.gif)
+![The hardware tab dragged out of the top dock and dropped into the lower one](docs/media/showcase-layout.gif)
 
 The activity panel logs every tool call the agent makes. Click a row and the call opens over the window: what was invoked, when, what it generated, what came back:
 
-![An activity row clicked open, showing the full write call](docs/media/showcase-activity.gif)
+![An activity row clicked open, showing the whole websearch call and its result](docs/media/showcase-activity.gif)
+
+Ask for a sub-agent and it starts beside the main one, listed under agents, with its own tab and its own transcript. It researches in the background while you keep talking to the agent in front:
+
+![A sub-agent starting, taking its own tab, and streaming its own transcript](docs/media/showcase-subagent.gif)
+
+The files panel lists what the agent wrote. Click one and it opens in the window, markdown or code:
+
+![The files panel dropped into a dock, listing three files, one open](docs/media/showcase-files.gif)
 
 ## Install
 
@@ -296,7 +308,7 @@ Packaged for Linux. [`gui/README.md`](gui/README.md) is its documentation.
 Text size, transparency and colour are settings, and every change lands on the
 next frame. The theme row at the bottom carries the presets and a custom slot:
 
-![The transparency sliders moving, then the window changing theme colour](docs/media/showcase-appearance.gif)
+![The appearance panel, then a theme picked and the whole window wearing it](docs/media/showcase-appearance.gif)
 
 ### The settings panels
 
