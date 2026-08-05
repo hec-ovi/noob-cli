@@ -38,11 +38,16 @@ pub enum RunEnd;                  // how the turn ended
 `prompt::assemble` builds the fixed system prompt from `PromptInputs`, in
 order: `# Agent` (the config directory's `AGENTS.md`, or the shipped
 prompt), the environment block, then the runtime layers (`# Project
-instructions`, `# Skills`, `# MCP servers`). Every layer is announced the
-same way: a markdown heading naming it, and a tag fencing text this process
-did not write (`<instructions>`, `<available_skills>`, `<mcp_servers>`,
-`<env>`). A present `AGENTS.md` replaces the shipped prompt wholesale,
-identity and tool guidance together: noob has no paired model, so the text
+instructions`, `# Skills`, `# MCP servers`, `# Session`). Every layer is
+announced the same way: a markdown heading naming it, and a tag fencing text
+this process did not write (`<instructions>`, `<available_skills>`,
+`<mcp_servers>`, `<env>`, `<session>`). `# Session` carries the id of the
+transcript this run appends to and is last for that reason: it is the only
+line two sessions of the same day, folder and model disagree on, so every
+byte a server can cache sits above it. It is absent when there is no session,
+which includes `noob debug prompt`. A present `AGENTS.md` replaces the shipped
+prompt wholesale, identity and tool guidance together: noob has no paired
+model, so the text
 that makes a tool work on one local model is the user's to rewrite. The
 shipped texts live in `crates/noob/prompts/`, one file per text, loaded at
 compile time. The user's file is capped at 16 KiB. `prompt::runtime_lines`

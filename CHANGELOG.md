@@ -3,6 +3,21 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.11.9 - 2026-08-05
+
+- Text draws with font fallback on, so a character the monospace face has no
+  glyph for is looked up in the machine's other fonts. Emoji, arrows, accents
+  and CJK in the transcript were blank boxes; they are the characters now. A
+  glyph a fallback font supplies keeps that font's width, so a row with an
+  emoji on it draws a little wider than its column count. Measured on this
+  machine, shaping a screenful this way costs less than the no-fallback path
+  did, because the shaped runs are cached between frames.
+- The system prompt ends naming the session: `# Session` carries the id of the
+  transcript the run appends to, so the agent can say which session it is in.
+  It sits last on purpose, since it is the only line two sessions of the same
+  day, folder and model disagree on, and everything a server caches is above
+  it. A run with no session, `noob debug prompt` included, has no such line.
+
 ## 0.11.8 - 2026-08-04
 
 - A Markdown table in the transcript is drawn as the columns it describes. It

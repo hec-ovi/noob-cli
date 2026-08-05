@@ -117,6 +117,34 @@ fn a_prompt_in_produces_a_whole_turn_out() {
     assert_eq!(frames.last().unwrap()["id"], id);
 }
 
+/// The agent could not say which session it was in, because nothing told it.
+/// The id the front end sees on `session.start` is the id the model reads.
+#[test]
+fn the_agent_is_told_which_session_it_is_in() {
+    let server = MockServer::start();
+    server.enqueue_completion("ok");
+    let config = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    write_env(config.path(), &server.base_url());
+
+    let (frames, _) = serve(
+        config.path(),
+        work.path(),
+        &[serde_json::json!({"v": 1, "t": "prompt.submit", "text": "hi"})],
+    );
+    let id = frames[0]["id"].as_str().unwrap();
+
+    let recorded = server.recorded();
+    let system = recorded[0].json().unwrap()["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        system.ends_with(&format!("\n\n# Session\n<session>\nid: {id}\n</session>")),
+        "the system prompt must end naming session {id}:\n{system}"
+    );
+}
+
 #[test]
 fn prompts_run_in_the_order_they_arrive_and_share_one_session() {
     let server = MockServer::start();

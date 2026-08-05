@@ -115,6 +115,21 @@ script to match on.
 it is for callers' tests, not for a draw path: a missing icon draws as
 nothing, and a test is where that surfaces instead of on someone's screen.
 
+### Characters the text face lacks
+
+Every buffer shapes with fallback on, so a character the monospace face has no
+glyph for is looked up in the system's other fonts: emoji, accents, arrows,
+CJK. Without it each one drew as a blank box. Two cosmic-text features carry
+this, named in the workspace manifest: `shape-run-cache` (which makes fallback
+shaping cheaper than the no-fallback path, since the buffers are rebuilt every
+frame and a run that shaped before is looked up) and `monospace_fallback`
+(which prefers a monospace face when one has the character).
+
+A substituted glyph keeps the advance its own font gives it. Where no
+monospace face has the character, as with emoji, that advance is not one
+column, and the rest of that row draws right of where the column grid puts it.
+The columns a row is counted in do not move; only the glyphs on it do.
+
 ## Errors
 
 The closed set has one member. A glyphon text prepare failure is written to

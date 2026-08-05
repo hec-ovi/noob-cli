@@ -1229,6 +1229,10 @@ fn cmd_debug(args: &[String]) -> ExitCode {
         project_agents: prompt::load_prompt_md(&workspace, "AGENTS.md"),
         skills_index: skills::index(&discovered),
         mcp_line: prompt::mcp_line(&mcp_servers),
+        // No session exists yet at debug time, and inventing an id would print
+        // a prompt no session ever sends. The tail is the one part of the
+        // output a live head has and this does not.
+        session: None,
     };
     if env_mode {
         println!("{}", prompt::runtime_lines(&inputs));

@@ -124,6 +124,29 @@ pub(crate) fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), St
     if boot.web_only {
         mcp_servers.clear();
     }
+    // The transcript opens before the prompt is assembled, because the prompt
+    // names the session it belongs to. Nothing between here and the agent
+    // writes to a surface, so the order the user sees is unchanged.
+    let (session, replayed, resume_missed, replay_report) = match boot.session {
+        None => (None, Vec::new(), false, ReplayReport::default()),
+        Some(id) => {
+            let requested = id.is_some();
+            let resolved = match id.as_deref() {
+                Some("latest") => Session::latest_id(&config_dir)?,
+                _ => id,
+            };
+            let (s, items, existed, report) = Session::open(&config_dir, resolved.as_deref())?;
+            (Some(s), items, requested && !existed, report)
+        }
+    };
+    if let Some(warning) = replay_report.warning() {
+        ui.error(&warning);
+    }
+    // A resumed session keeps counting where it left off: the readout is about
+    // the session, not about this process.
+    if let Some(session) = session.as_ref() {
+        ui.seed_tokens(session.tokens());
+    }
     let inputs = prompt::PromptInputs {
         cwd: workspace.display().to_string(),
         model,
@@ -138,6 +161,7 @@ pub(crate) fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), St
         } else {
             prompt::mcp_line(&mcp_servers)
         },
+        session: session.as_ref().map(|s| s.id().to_string()),
     };
     let system = prompt::assemble(&inputs);
     // Registered set is decided here and stays byte-stable for the session:
@@ -196,26 +220,6 @@ pub(crate) fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), St
         });
     }
 
-    let (session, replayed, resume_missed, replay_report) = match boot.session {
-        None => (None, Vec::new(), false, ReplayReport::default()),
-        Some(id) => {
-            let requested = id.is_some();
-            let resolved = match id.as_deref() {
-                Some("latest") => Session::latest_id(&config_dir)?,
-                _ => id,
-            };
-            let (s, items, existed, report) = Session::open(&config_dir, resolved.as_deref())?;
-            (Some(s), items, requested && !existed, report)
-        }
-    };
-    if let Some(warning) = replay_report.warning() {
-        ui.error(&warning);
-    }
-    // A resumed session keeps counting where it left off: the readout is about
-    // the session, not about this process.
-    if let Some(session) = session.as_ref() {
-        ui.seed_tokens(session.tokens());
-    }
     // The side-channel opens here, once every surface has been decided and
     // before the first frame anything could emit. Off unless NOOB_EMIT names
     // a file, in which case no byte on any existing surface moves.

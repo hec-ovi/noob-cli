@@ -31,6 +31,11 @@ pub struct PromptInputs {
     pub skills_index: Option<String>,
     /// One line naming configured MCP servers (P4); None until then.
     pub mcp_line: Option<String>,
+    /// The id of the transcript this session appends to, so the agent can say
+    /// which session it is in. None when there is no session to name: a
+    /// sessionless run, and `debug prompt`, which prints the head before one
+    /// exists.
+    pub session: Option<String>,
 }
 
 /// The authored prompt plus the environment block. Every layer of the assembled
@@ -97,6 +102,16 @@ pub fn assemble_from(head: String, inputs: &PromptInputs) -> String {
         out.push_str("\n\n# MCP servers\n<mcp_servers>\n");
         out.push_str(mcp);
         out.push_str("\n</mcp_servers>");
+    }
+    // Last, and deliberately not in the env block: the id is the one line that
+    // differs between two sessions started the same day in the same folder.
+    // In the env block it would move every layer under it, so a fresh session
+    // would re-send the skills index and the project instructions uncached.
+    // At the tail, the whole prefix above it still matches byte for byte.
+    if let Some(id) = &inputs.session {
+        out.push_str("\n\n# Session\n<session>\nid: ");
+        out.push_str(id);
+        out.push_str("\n</session>");
     }
     out
 }
@@ -170,6 +185,7 @@ mod tests {
             project_agents: None,
             skills_index: None,
             mcp_line: None,
+            session: None,
         }
     }
 
@@ -204,6 +220,26 @@ mod tests {
     #[test]
     fn assemble_without_extras_is_exactly_the_head() {
         assert_eq!(assemble(&inputs()), head(&inputs()));
+    }
+
+    /// The session id is the only line that differs between two sessions of the
+    /// same day, folder and model, so it goes last: everything a server can
+    /// cache has to be identical up to it.
+    #[test]
+    fn the_session_id_is_the_tail_and_nothing_above_it_moves() {
+        let mut with = inputs();
+        with.skills_index = Some("- one: a skill".into());
+        with.session = Some("19fd1a66dd3-13b79".into());
+        let mut without = inputs();
+        without.skills_index = with.skills_index.clone();
+
+        let assembled = assemble(&with);
+        assert!(assembled.ends_with("\n\n# Session\n<session>\nid: 19fd1a66dd3-13b79\n</session>"));
+        assert_eq!(
+            assembled.strip_suffix("\n\n# Session\n<session>\nid: 19fd1a66dd3-13b79\n</session>"),
+            Some(assemble(&without).as_str()),
+            "naming the session moved a byte above it"
+        );
     }
 
     #[test]

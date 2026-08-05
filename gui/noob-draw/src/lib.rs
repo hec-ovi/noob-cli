@@ -343,6 +343,23 @@ const ICON_FAMILY: &str = "Symbols Nerd Font Mono";
 /// The bytes of that font, embedded at build time.
 const ICON_FONT: &[u8] = include_bytes!("../fonts/SymbolsNerdFontMono-Regular.ttf");
 
+/// How every buffer in this crate is shaped.
+///
+/// `Advanced` is the only one of the two strategies that looks in the system's
+/// other fonts for a character the text face lacks. The cheap one resolves such
+/// a character to `.notdef` and draws it as a blank box, which is what an emoji,
+/// an accent or a CJK character in the transcript came out as.
+///
+/// It is also the faster of the two here, measured, because `shape-run-cache`
+/// is on: a run that shaped on an earlier frame is looked up instead of shaped
+/// again, and the buffers are rebuilt every frame.
+///
+/// What it does not do is make a substituted glyph one column wide. The
+/// fallback face carries its own advances, so a row with an emoji on it draws
+/// wider than its column count, and the text after the emoji sits right of
+/// where the column grid puts it.
+const SHAPING: Shaping = Shaping::Advanced;
+
 /// A font system holding the system fonts plus the embedded symbol font.
 fn icon_fonts() -> FontSystem {
     let mut system = FontSystem::new();
@@ -366,7 +383,7 @@ pub fn has_glyph(ch: char) -> bool {
     buffer.set_text(
         &ch.to_string(),
         &Attrs::new().family(Family::Name(ICON_FAMILY)),
-        Shaping::Advanced,
+        SHAPING,
         None,
     );
     buffer.shape_until_scroll(&mut fonts, false);
@@ -956,7 +973,7 @@ impl Renderer {
         buffer.set_text(
             "0000000000",
             &Attrs::new().family(Family::Monospace),
-            Shaping::Basic,
+            SHAPING,
             None,
         );
         buffer.shape_until_scroll(&mut self.font_system, false);
@@ -1082,7 +1099,7 @@ impl Renderer {
                 };
                 match runs {
                     [only] if only.color.is_none() => {
-                        buffer.set_text(&only.text, &mono, Shaping::Basic, None);
+                        buffer.set_text(&only.text, &mono, SHAPING, None);
                     }
                     runs => {
                         let spans = runs.iter().map(|run| {
@@ -1097,7 +1114,7 @@ impl Renderer {
                             };
                             (run.text.as_str(), attrs)
                         });
-                        buffer.set_rich_text(spans, &mono, Shaping::Basic, None);
+                        buffer.set_rich_text(spans, &mono, SHAPING, None);
                     }
                 }
                 if item.scroll_lines > 0.0 {
@@ -1211,7 +1228,7 @@ mod tests {
         let mut fonts = icon_fonts();
         let mut buffer = Buffer::new(&mut fonts, Metrics::new(14.0, 20.0));
         buffer.set_size(Some(400.0), Some(40.0));
-        buffer.set_text(text, &Attrs::new().family(family), Shaping::Advanced, None);
+        buffer.set_text(text, &Attrs::new().family(family), SHAPING, None);
         buffer.shape_until_scroll(&mut fonts, false);
         buffer
             .layout_runs()
@@ -1244,6 +1261,24 @@ mod tests {
             assert_ne!(
                 ids[0], 0,
                 "{name} (U+{:04X}) resolved to .notdef, so it would draw as nothing",
+                ch as u32
+            );
+        }
+    }
+
+    /// The transcript carries whatever the model wrote, and a model writes
+    /// emoji. The monospace face has none of them, so without fallback each one
+    /// came out as a blank box. These are the three the window was caught on,
+    /// plus a check mark and an arrow, and none of them is named anywhere in
+    /// this crate: the point is that any character resolves, not that a listed
+    /// set does.
+    #[test]
+    fn a_character_the_text_face_lacks_still_resolves_to_a_glyph() {
+        for ch in ['\u{2705}', '\u{274c}', '\u{1f604}', '\u{2713}', '\u{2192}'] {
+            let ids = glyph_ids(&ch.to_string(), Family::Monospace);
+            assert!(
+                ids.iter().all(|id| *id != 0),
+                "U+{:04X} resolved to .notdef, so it draws as a blank box: {ids:?}",
                 ch as u32
             );
         }
@@ -1618,7 +1653,7 @@ mod tests {
         ruler.set_text(
             "0000000000",
             &Attrs::new().family(Family::Monospace),
-            Shaping::Basic,
+            SHAPING,
             None,
         );
         ruler.shape_until_scroll(fonts, false);
@@ -1652,7 +1687,7 @@ mod tests {
         buffer.set_text(
             &laid,
             &Attrs::new().family(Family::Monospace),
-            Shaping::Basic,
+            SHAPING,
             None,
         );
         buffer.shape_until_scroll(&mut fonts, false);
@@ -1749,7 +1784,7 @@ mod tests {
             buffer.set_text(
                 text,
                 &Attrs::new().family(Family::Monospace),
-                Shaping::Basic,
+                SHAPING,
                 None,
             );
             buffer.shape_until_scroll(fonts, false);

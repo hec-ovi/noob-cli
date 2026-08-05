@@ -12,7 +12,7 @@ resolver = "2"
 members = ["noob-gpu", "noob-draw", "clippy", "layers/text-geometry"]
 
 [workspace.package]
-version = "0.11.8"
+version = "0.11.9"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
@@ -26,6 +26,16 @@ text-geometry = { path = "layers/text-geometry" }
 wgpu = "30"
 winit = "0.30"
 glyphon = "0.12"
+# glyphon's shaper, named here only to turn two of its features on. Cargo
+# unifies features across the graph, so glyphon's copy gets them too.
+# `shape-run-cache` keeps a shaped run keyed by its text, which is what makes
+# fallback shaping cheaper than the no-fallback path across frames;
+# `monospace_fallback` makes a fallback prefer a monospace face, so a
+# substituted glyph stays on the column grid where one exists.
+cosmic-text = { version = "0.19", default-features = false, features = [
+    "shape-run-cache",
+    "monospace_fallback",
+] }
 pollster = "0.4"
 serde_json = "1.0.150"
 bytemuck = { version = "1", features = ["derive"] }

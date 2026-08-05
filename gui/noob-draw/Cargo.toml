@@ -11,6 +11,9 @@ repository.workspace = true
 noob-gpu.workspace = true
 wgpu.workspace = true
 glyphon.workspace = true
+# Feature-only: see the note in the workspace manifest. Nothing here imports it
+# directly; the shaper reaches this crate through `glyphon::cosmic_text`.
+cosmic-text.workspace = true
 bytemuck.workspace = true
 # The wrap rule, so the rows this crate draws are the rows the window counts.
 # See layers/text-geometry/CONTRACT.md; nothing in here re-derives it.

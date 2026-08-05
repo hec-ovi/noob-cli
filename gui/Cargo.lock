@@ -1015,7 +1015,7 @@ dependencies = [
 
 [[package]]
 name = "no0b"
-version = "0.11.8"
+version = "0.11.9"
 dependencies = [
  "copypasta",
  "noob-draw",
@@ -1029,9 +1029,10 @@ dependencies = [
 
 [[package]]
 name = "noob-draw"
-version = "0.11.8"
+version = "0.11.9"
 dependencies = [
  "bytemuck",
+ "cosmic-text",
  "glyphon",
  "naga",
  "noob-gpu",
@@ -1041,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "noob-gpu"
-version = "0.11.8"
+version = "0.11.9"
 dependencies = [
  "wgpu",
  "winit",
@@ -1049,7 +1050,7 @@ dependencies = [
 
 [[package]]
 name = "noob-proto"
-version = "0.11.8"
+version = "0.11.9"
 dependencies = [
  "serde_json",
 ]
@@ -2013,7 +2014,7 @@ dependencies = [
 
 [[package]]
 name = "text-geometry"
-version = "0.11.8"
+version = "0.11.9"
 
 [[package]]
 name = "thiserror"
