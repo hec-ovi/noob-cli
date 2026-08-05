@@ -1818,6 +1818,18 @@ impl State {
                         | noob_proto::AgentState::Failed
                         | noob_proto::AgentState::Canceled
                 ) {
+                    // A child that worked is narrated by the parent's own
+                    // continuation turn. A failed or canceled one is not: the
+                    // parent deliberately stays idle so a broken child cannot
+                    // trigger an unrequested retry, which left the failure
+                    // with no visible trace anywhere. The conversation says
+                    // it, in the child's own words, so silence always means
+                    // "still working" and never "died quietly".
+                    if !matches!(state, noob_proto::AgentState::Done) {
+                        let why = detail.as_deref().unwrap_or("no detail was sent");
+                        self.output.blank_if_needed();
+                        self.output.say(format!("{agent_id} {word}: {why}"), tone);
+                    }
                     if let Some(at) = self.agents.iter().position(|a| a.label == agent_id) {
                         if self.shown_agent == Some(self.agents[at].ordinal) {
                             self.shown_agent = None;
@@ -2545,6 +2557,53 @@ mod tests {
     /// Clicking a row points the output tab at that agent; the agent
     /// finishing takes the choice away with the row, so the shell knows to
     /// close the tab rather than leave it over nothing.
+    /// A child that dies on its own says so in the conversation. The parent
+    /// deliberately stays idle on a failure, so without this line the death
+    /// had no visible trace anywhere: the row left the fleet, the output tab
+    /// went with it, and the window read as if nothing had happened.
+    #[test]
+    fn a_failed_child_is_said_in_the_conversation_and_a_done_one_is_not() {
+        let mut state = State::new();
+        for n in 1..=2 {
+            state.apply(Event::AgentSpawn {
+                agent_id: format!("agent-{n}"),
+                prompt: format!("task {n}"),
+                tools: "read".into(),
+            });
+        }
+        state.apply(Event::AgentStateChanged {
+            agent_id: "agent-1".into(),
+            state: noob_proto::AgentState::Failed,
+            detail: Some("stopped after 8 consecutive tool errors".into()),
+        });
+        let said = texts(&state.output).join("\n");
+        assert!(
+            said.contains("agent-1 failed: stopped after 8 consecutive tool errors"),
+            "{said}"
+        );
+        let bad = state
+            .output
+            .visible(usize::MAX, 200)
+            .into_iter()
+            .find(|line| line.text.contains("agent-1 failed"))
+            .expect("the line is in the pane");
+        assert_eq!(bad.tone, Tone::Bad);
+
+        // A child that worked is narrated by the parent's continuation turn;
+        // a second line here would say everything twice.
+        state.apply(Event::AgentStateChanged {
+            agent_id: "agent-2".into(),
+            state: noob_proto::AgentState::Done,
+            detail: None,
+        });
+        assert!(
+            !texts(&state.output).join("\n").contains("agent-2"),
+            "{:?}",
+            texts(&state.output)
+        );
+        assert!(state.agents.is_empty(), "both rows left the fleet");
+    }
+
     #[test]
     fn the_shown_agent_dies_with_its_row() {
         let mut state = State::new();

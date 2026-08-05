@@ -3,6 +3,16 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.11.15 - 2026-08-05
+
+- A sub-agent that fails or is canceled says so in the conversation, in its
+  own words ("agent-1 failed: stopped after 8 consecutive tool errors"). The
+  parent deliberately stays idle on a failure so a broken child cannot
+  trigger an unrequested retry, which left the death with no visible trace:
+  the row left the fleet and the window read as if nothing had happened.
+  Silence now always means still working. A child that succeeds is unchanged:
+  the parent wakes and reports it.
+
 ## 0.11.14 - 2026-08-05
 
 - Right click on the folders view offers "New folder". The name is typed on
