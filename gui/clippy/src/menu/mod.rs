@@ -215,6 +215,10 @@ pub enum Target {
     /// points at cannot move while the menu is up: nothing rebuilds the list
     /// until a row of the menu is picked.
     Session(usize),
+    /// One conversation on the settings SESSIONS table, as the panel row the
+    /// table is on and the row of the table itself. The same two acts the
+    /// picker's session rows carry, reachable while a window is connected.
+    Kept(usize, usize),
     /// The document beside the entry list on the settings panel. It carries
     /// nothing: the one row acts on whatever is highlighted there, and the
     /// panel already knows which entry that is.
@@ -302,6 +306,19 @@ impl Menu {
         )
     }
 
+    /// The same two rows for a conversation on the settings table, which is
+    /// the same kind of thing in a different list.
+    pub fn for_kept(at: (f32, f32), index: usize, row: usize) -> Menu {
+        Menu::of(
+            at,
+            Target::Kept(index, row),
+            vec![
+                Row::act(Item::OpenSession, true),
+                Row::act(Item::DeleteSession(false), true),
+            ],
+        )
+    }
+
     /// The settings document's menu: one row, which copies what is highlighted
     /// in it.
     ///
@@ -340,7 +357,7 @@ impl Menu {
     pub fn target_view(&self) -> Option<View> {
         match self.target {
             Target::Widget(view, _) => Some(view),
-            Target::Input | Target::Session(_) | Target::SettingsDoc => None,
+            Target::Input | Target::Session(_) | Target::Kept(..) | Target::SettingsDoc => None,
         }
     }
 

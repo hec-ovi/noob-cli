@@ -31,13 +31,44 @@
 ///
 /// A control character has no width of its own and is counted as one, because
 /// that is the cell the renderer leaves for it.
+///
+/// This is the character alone. A one-column symbol followed by the emoji
+/// variation selector is drawn as a two-column emoji, which only a walk over
+/// the string can see: [`widths`] is that walk, and every count in this
+/// contract uses it.
 pub fn width_of(ch: char) -> usize {
     unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1)
 }
 
+/// The emoji variation selector: invisible itself, and it turns the
+/// one-column symbol before it (a spade, a heart, a skull) into a two-column
+/// emoji. Counting the pair as one column is how a glyph ended up drawn past
+/// the edge of its row.
+pub const VS16: char = '\u{fe0f}';
+
+/// Whether a character the selector follows is promoted by it: a one-column
+/// character becomes the two-column emoji form.
+pub fn promoted(ch: char, next: Option<char>) -> bool {
+    next == Some(VS16) && width_of(ch) == 1
+}
+
+/// Each character of `text` with the columns it occupies, selector pairs
+/// resolved: the promoted character counts two, the selector itself none.
+fn widths(text: &str) -> impl Iterator<Item = (char, usize)> + '_ {
+    let mut chars = text.chars().peekable();
+    std::iter::from_fn(move || {
+        let ch = chars.next()?;
+        let width = match promoted(ch, chars.peek().copied()) {
+            true => 2,
+            false => width_of(ch),
+        };
+        Some((ch, width))
+    })
+}
+
 /// How many columns a string occupies, which is what every `cols` here means.
 pub fn columns_in(text: &str) -> usize {
-    text.chars().map(width_of).sum()
+    widths(text).map(|(_, w)| w).sum()
 }
 
 /// How many columns the characters `from..to` of `text` occupy.
@@ -46,10 +77,10 @@ pub fn columns_in(text: &str) -> usize {
 /// caller used to skip: a band drawn `to - from` columns wide covers the right
 /// characters only while every character is one column.
 pub fn columns_between(text: &str, from: usize, to: usize) -> usize {
-    text.chars()
+    widths(text)
         .take(to)
         .skip(from)
-        .map(width_of)
+        .map(|(_, w)| w)
         .sum()
 }
 
@@ -68,8 +99,8 @@ pub fn column_of(text: &str, chars: usize) -> usize {
 /// either half of an emoji selects the emoji.
 pub fn char_at(text: &str, column: usize) -> usize {
     let mut used = 0;
-    for (index, ch) in text.chars().enumerate() {
-        let next = used + width_of(ch);
+    for (index, (_, width)) in widths(text).enumerate() {
+        let next = used + width;
         if next > column {
             return index;
         }
@@ -210,9 +241,14 @@ fn wrap(text: &str, cols: usize, at: Break, base: usize, rows: &mut Vec<Row>) ->
     // Columns the row being filled holds so far. A character is measured, not
     // counted: an emoji fills two of them and a combining mark none.
     let mut used = 0;
-    for (i, ch) in text.chars().enumerate() {
+    let mut walk = text.chars().peekable();
+    let mut i = 0usize;
+    while let Some(ch) = walk.next() {
+        let width = match promoted(ch, walk.peek().copied()) {
+            true => 2,
+            false => width_of(ch),
+        };
         count = i + 1;
-        let width = width_of(ch);
         // Whether this character was spent on a break, and so belongs to
         // neither the row that just ended nor the one that just started.
         let mut spent = false;
@@ -263,6 +299,7 @@ fn wrap(text: &str, cols: usize, at: Break, base: usize, rows: &mut Vec<Row>) ->
         if i > start && is_break(ch) {
             last_break = Some((i, used));
         }
+        i += 1;
     }
     // An empty segment is still a row: a blank line inside a laid-out shape is
     // a gap the reader can see, the same way a blank logical line is.
@@ -462,6 +499,32 @@ mod tests {
         assert_eq!(width_of('\u{4e2d}'), 2, "and so does an ideograph");
         assert_eq!(width_of('\u{0301}'), 0, "a combining mark rides the letter");
         assert_eq!(columns_in("ok \u{2705}"), 5);
+    }
+
+    /// A one-column symbol with the emoji selector after it is drawn as the
+    /// two-column emoji, so it is counted as one: a spade suit was counted as
+    /// one column, drawn as two, and the last glyph of the row stood past the
+    /// edge of the panel.
+    #[test]
+    fn the_emoji_selector_promotes_its_symbol_to_two_columns() {
+        assert_eq!(columns_in("\u{2660}"), 1, "the bare spade is a text symbol");
+        assert_eq!(columns_in("\u{2660}\u{fe0f}"), 2, "the pair is an emoji");
+        assert_eq!(columns_in("a\u{2764}\u{fe0f}b"), 4);
+        // The pointer and the caret agree: both columns of the pair are the
+        // symbol, the selector has no cell of its own.
+        assert_eq!(char_at("\u{2764}\u{fe0f}x", 0), 0);
+        assert_eq!(char_at("\u{2764}\u{fe0f}x", 1), 0);
+        assert_eq!(char_at("\u{2764}\u{fe0f}x", 2), 2, "column two is the x, past the pair");
+        assert_eq!(column_of("\u{2764}\u{fe0f}x", 2), 2, "heart and selector, two columns");
+        assert_eq!(column_of("\u{2764}\u{fe0f}x", 3), 3);
+        // And the wrap: four suit-pairs in a four-column box are two rows.
+        let suits = "\u{2660}\u{fe0f}\u{2665}\u{fe0f}\u{2666}\u{fe0f}\u{2663}\u{fe0f}";
+        let rows = rows_in(suits, 4, Break::Column);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        for row in &rows {
+            let text: String = suits.chars().take(row.end).skip(row.start).collect();
+            assert!(columns_in(&text) <= 4, "{text:?} overruns the box");
+        }
     }
 
     /// A pointer lands on a column, and every column of a wide character

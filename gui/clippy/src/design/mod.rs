@@ -52,12 +52,15 @@ pub fn apart(line: f32) -> f32 {
 /// Where the capital letters of a line stand inside its line box, as fractions
 /// of that box: the top of a capital, and the height of one.
 ///
-/// Measured off the face the window embeds. A line box carries the ascender,
-/// the descender and the leading, so its top is well above any letter: a mark
-/// centred in the box sits below the word it marks, and one as tall as the box
-/// is twice the word.
-pub const CAP_TOP: f32 = 0.2;
-pub const CAP_LINES: f32 = 0.3;
+/// Measured off the face the window draws with: at a line box of 1.42 sizes,
+/// the baseline sits near 0.74 of the box and a capital stands about 0.73 of
+/// the text size over it, so the capitals span roughly 0.23..0.73 of the box.
+/// A line box carries the ascender, the descender and the leading, so its top
+/// is well above any letter: a mark centred in the box sits below the word it
+/// marks, and one as tall as the box is twice the word. The old 0.3 height
+/// stopped at half the capitals and read as a stub beside the word.
+pub const CAP_TOP: f32 = 0.23;
+pub const CAP_LINES: f32 = 0.5;
 
 /// How tall the mark beside a chosen row stands: the height of the capitals
 /// beside it.

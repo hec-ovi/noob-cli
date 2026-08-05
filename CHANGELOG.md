@@ -3,6 +3,19 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.11.13 - 2026-08-05
+
+- A one-column symbol with the emoji selector after it (a spade suit, a red
+  heart) counts as the two columns it is drawn in, so the last glyph of an
+  emoji row no longer stands past the edge of the panel. The routing follows
+  the same rule: two-column characters draw from the shipped emoji font,
+  one-column symbols stay in the text face.
+- The settings SESSIONS table answers the right button: Open carries the
+  conversation on in the folder its note names, Delete asks twice and removes
+  the transcript, the same two acts the first screen's list has.
+- The mark beside the chosen settings section stands as tall as the word's
+  capitals instead of half of them.
+
 ## 0.11.12 - 2026-08-05
 
 - The misaligned selection is fixed at its root. The text shaper, given a

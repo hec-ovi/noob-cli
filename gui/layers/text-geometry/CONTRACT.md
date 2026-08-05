@@ -21,7 +21,8 @@ characters were counted as eight columns and drawn as sixteen.
 
 | Operation | What it answers |
 |---|---|
-| `width_of(ch) -> usize` | The columns one character fills: 0, 1 or 2 |
+| `width_of(ch) -> usize` | The columns one character fills: 0, 1 or 2, the character alone |
+| `VS16`, `promoted(ch, next) -> bool` | The emoji variation selector, and whether it promotes the one-column symbol before it to the two-column emoji form. Every counting operation below resolves the pair: the symbol counts two, the selector none |
 | `columns_in(text) -> usize` | The columns a string fills, which is what `cols` measures against |
 | `columns_between(text, from, to) -> usize` | The columns characters `from..to` fill, which turns a character range into a place on screen |
 | `column_of(text, chars) -> usize` | The column a character sits at. Past the end is the column after the last one, where a caret sits |

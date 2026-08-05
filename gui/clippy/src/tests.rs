@@ -693,6 +693,36 @@ fn a_session_picker() -> Picker {
 /// folder row is the whole of what that row does and nothing here deletes a
 /// folder.
 #[test]
+fn a_right_click_on_the_settings_table_offers_the_same_two_acts() {
+    // A conversation on the settings SESSIONS table gets the picker row's
+    // menu: open it, or delete it, while a window is connected.
+    let dock = Dock::new();
+    let menu = menu_for(
+        Some(Hit::SettingsPick(3, 1)),
+        (500.0, 400.0),
+        &dock,
+        false,
+        None,
+        None,
+    )
+    .expect("a table row has a menu");
+    assert_eq!(menu.target, Target::Kept(3, 1));
+    assert_eq!(menu.pick(0), Some(Item::OpenSession));
+    assert_eq!(menu.pick(1), Some(Item::DeleteSession(false)));
+    // The mark in front of it answers the same way: both regions are the row.
+    let marked = menu_for(
+        Some(Hit::SettingsMark(3, 1)),
+        (500.0, 400.0),
+        &dock,
+        false,
+        None,
+        None,
+    )
+    .expect("the mark is the row too");
+    assert_eq!(marked.target, Target::Kept(3, 1));
+}
+
+#[test]
 fn a_right_click_on_a_saved_session_offers_opening_it_and_deleting_it() {
     let dock = Dock::new();
     let at = (500.0, 400.0);

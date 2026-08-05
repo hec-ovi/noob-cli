@@ -469,6 +469,12 @@ pub(crate) fn menu_for(
         | Hit::PickerOpen
         | Hit::PickerFolders
         | Hit::PickerSessions => None,
+        // A conversation on the SESSIONS table can be opened and deleted, the
+        // same two acts its row in the picker carries, reachable while a
+        // window is connected.
+        Hit::SettingsPick(index, row) | Hit::SettingsMark(index, row) => {
+            Some(Menu::for_kept(at, index, row))
+        }
         // The one thing on that panel a menu can act on: the document is a page
         // of prose, so there is something in it to highlight and something to
         // copy. The menu is already built and the row costs one line, which is
@@ -489,8 +495,6 @@ pub(crate) fn menu_for(
         | Hit::SettingsChoice(..)
         | Hit::SettingsToggle(_)
         | Hit::SettingsRemove(_)
-        | Hit::SettingsPick(..)
-        | Hit::SettingsMark(..)
         | Hit::SettingsAct(..)
         | Hit::SettingsClose => None,
         // A divider is the gap between two widgets and belongs to neither of

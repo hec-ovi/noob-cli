@@ -190,8 +190,24 @@ impl Emoji {
         let mut spans: Vec<(&str, bool)> = Vec::new();
         let mut start = 0;
         let mut current: Option<bool> = None;
-        for (at, ch) in text.char_indices() {
-            let emoji = self.covers(fonts, ch);
+        let mut walk = text.char_indices().peekable();
+        while let Some((at, ch)) = walk.next() {
+            let next = walk.peek().map(|(_, next)| *next);
+            // The routing rule is the grid's own: a character goes to the
+            // emoji font exactly when the grid counts it two columns (or the
+            // selector promotes it to two), so what is drawn two cells wide is
+            // what was counted two cells wide. A one-column symbol the emoji
+            // font happens to cover (a bare spade, a check mark) stays in the
+            // text face at one column, which is what it is counted as. The
+            // selector rides with whatever its symbol was routed to.
+            let emoji = match ch {
+                text_geometry::VS16 => current.unwrap_or(false),
+                _ => {
+                    self.covers(fonts, ch)
+                        && (text_geometry::width_of(ch) == 2
+                            || text_geometry::promoted(ch, next))
+                }
+            };
             match current {
                 Some(same) if same == emoji => {}
                 Some(other) => {
@@ -292,6 +308,26 @@ mod tests {
         assert!(
             (drawn - want).abs() < 0.5,
             "three emoji drew {drawn:.2} wide, the grid gives them {want:.2}"
+        );
+    }
+
+    /// The routing rule is the grid's: two-column characters go to the emoji
+    /// font, one-column symbols stay in the text face even when the emoji font
+    /// covers them, and the selector promotes its symbol, riding with it.
+    #[test]
+    fn routing_follows_the_grid_and_the_selector_rides_along() {
+        let mut system = pool();
+        let mut emoji = Emoji::default();
+        // Bare spade: one column, text face. With the selector: emoji font.
+        assert_eq!(
+            emoji.spans(&mut system, "a\u{2660}b"),
+            vec![("a\u{2660}b", false)],
+            "a bare suit is a one-column text symbol"
+        );
+        assert_eq!(
+            emoji.spans(&mut system, "a\u{2660}\u{fe0f}b"),
+            vec![("a", false), ("\u{2660}\u{fe0f}", true), ("b", false)],
+            "the selector promotes it and rides with it"
         );
     }
 

@@ -2172,6 +2172,55 @@ impl App {
         }
     }
 
+    /// The id on one row of the settings SESSIONS table, read off the panel
+    /// rather than off anything drawn.
+    fn kept_id(&self, row: usize, at: usize) -> Option<String> {
+        let panel = self.settings.as_ref()?;
+        let table = panel.table(row)?;
+        table.rows.get(at).map(|kept| kept.id.clone())
+    }
+
+    /// Carry on a conversation from the settings table: the settings close,
+    /// the running agent stops, and the chosen transcript is resumed in the
+    /// folder the note says it belongs to.
+    fn open_kept(&mut self, row: usize, at: usize) {
+        let Some(id) = self.kept_id(row, at) else {
+            return;
+        };
+        let listing = self.saved_sessions();
+        let Some(saved) = listing.sessions.iter().find(|saved| saved.id == id) else {
+            return;
+        };
+        let Some(workspace) = saved.workspace.clone().filter(|_| !saved.gone) else {
+            // A session without a folder note, or one whose folder is gone,
+            // cannot be resumed; the row stays and the panel stays up.
+            return;
+        };
+        self.settings = None;
+        self.new_session();
+        self.picker = None;
+        self.choose(Chosen {
+            workspace,
+            session: Some(id),
+        });
+        self.dirty = true;
+    }
+
+    /// Delete a conversation from the settings table: the same forget the
+    /// picker's row goes through, and the panel is rebuilt from the disk.
+    fn delete_kept(&mut self, row: usize, at: usize) {
+        let Some(id) = self.kept_id(row, at) else {
+            return;
+        };
+        if let Err(why) = forget_session(sessions::dir(), sessions::index_path(), &id)
+            && let Some(panel) = self.settings.as_mut()
+        {
+            panel.say_trouble(why);
+        }
+        self.adopt_fresh_agent();
+        self.dirty = true;
+    }
+
     /// Delete the session on the row at `index`: its transcript, and the note
     /// saying which folder it belonged to.
     ///
@@ -2935,10 +2984,14 @@ impl App {
             // The prompt's menu has no Close row, so this cannot happen; it is
             // matched rather than caught by a wildcard so adding one is a
             // compile error here instead of a click that silently does nothing.
-            (Item::Close, Target::Input | Target::Session(_) | Target::SettingsDoc) => {}
+            (Item::Close, Target::Input | Target::Session(_) | Target::Kept(..) | Target::SettingsDoc) => {}
             // The same two things pressing the row and pressing Delete do, from
             // the menu the right button opened over it.
             (Item::OpenSession, Target::Session(index)) => self.open_session(index),
+            // The same act off the settings table: the id comes off the row
+            // the menu was opened over, resolved against the disk at press
+            // time for the folder it belongs to.
+            (Item::OpenSession, Target::Kept(row, at)) => self.open_kept(row, at),
             // Delete is the one row here that is pressed twice. The first press
             // only arms it, and the menu stays open under the pointer so the
             // second press has something to land on; the rule is
@@ -2947,6 +3000,12 @@ impl App {
             (Item::DeleteSession(_), Target::Session(session)) => {
                 match menu.press_delete(index) {
                     true => self.delete_session(session),
+                    false => self.menu = Some(menu),
+                }
+            }
+            (Item::DeleteSession(_), Target::Kept(row, at)) => {
+                match menu.press_delete(index) {
+                    true => self.delete_kept(row, at),
                     false => self.menu = Some(menu),
                 }
             }
