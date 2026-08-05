@@ -37,7 +37,7 @@ pub enum RunEnd;                  // how the turn ended
 
 `prompt::assemble` builds the fixed system prompt from `PromptInputs`, in
 order: `# Agent` (the config directory's `AGENTS.md`, or the shipped
-prompt), the environment block, then the runtime layers (`# Project
+prompt), `# Environment`, then the runtime layers (`# Project
 instructions`, `# Skills`, `# MCP servers`, `# Session`). Every layer is
 announced the same way: a markdown heading naming it, and a tag fencing text
 this process did not write (`<instructions>`, `<available_skills>`,

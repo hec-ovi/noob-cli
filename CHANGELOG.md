@@ -3,6 +3,22 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.11.16 - 2026-08-05
+
+- Two rails no longer contradict each other into a dead sub-agent. The read
+  tool's unchanged-file note said "read it again to print the body" while the
+  repeat-call rail refuses an identical call, so an agent that obeyed the
+  note was refused until the error breaker killed it. The note now points at
+  the escape that works: work from the copy already in the conversation, or
+  read a line range to print it again.
+- The child runtime prompt carries failure handling: never repeat an
+  identical call, and when blocked, stop and return what you have with a
+  note on what is missing. A partial report is a valid result; silence is
+  not.
+- The environment block is announced like every other prompt layer: a
+  `# Environment` heading over its `<env>` tag. It was the one layer with a
+  tag and no title.
+
 ## 0.11.15 - 2026-08-05
 
 - A sub-agent that fails or is canceled says so in the conversation, in its

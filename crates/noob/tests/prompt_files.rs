@@ -36,7 +36,7 @@ fn an_absent_file_falls_back_to_the_embedded_default_byte_identically() {
     let work = tempfile::tempdir().unwrap();
     let system = debug_prompt(config.path(), work.path());
     let expected = format!(
-        "# Agent\n<instructions>\n{}\n</instructions>\n\n<env>",
+        "# Agent\n<instructions>\n{}\n</instructions>\n\n# Environment\n<env>",
         AGENTS_DEFAULT.trim_end()
     );
     assert!(
@@ -52,7 +52,7 @@ fn present_agents_md_replaces_the_default_wholesale() {
     std::fs::write(config.path().join("AGENTS.md"), "my main prompt\n").unwrap();
     let system = debug_prompt(config.path(), work.path());
     assert!(
-        system.starts_with("# Agent\n<instructions>\nmy main prompt\n</instructions>\n\n<env>"),
+        system.starts_with("# Agent\n<instructions>\nmy main prompt\n</instructions>\n\n# Environment\n<env>"),
         "{system}"
     );
     // The file is the whole prompt, not an appended layer: nothing the binary
@@ -87,7 +87,7 @@ fn debug_env_prints_exactly_the_runtime_tail() {
         system.ends_with(&tail),
         "debug env must be the byte-exact tail of debug prompt:\n{tail}"
     );
-    assert!(tail.starts_with("<env>\ncwd: "), "{tail}");
+    assert!(tail.starts_with("# Environment\n<env>\ncwd: "), "{tail}");
     for layer in [
         "# Project instructions\n<instructions>\nproject rule\n</instructions>",
         "# Skills\n<available_skills>",

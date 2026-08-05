@@ -177,7 +177,8 @@ fn run_inner(core: &Core, fs: &FsState, args: &Value) -> Result<ToolOutcome, Str
             format!(
                 "{shown_path} unchanged since you last read or wrote it \
                  ({total} lines, {byte_count} bytes); its content is already in the \
-                 conversation above. Read it again to print the body."
+                 conversation above; work from it there. To print it again, read a \
+                 line range (offset and limit)."
             ),
             format!("read {shown_path} (unchanged, {total} lines)"),
         ));

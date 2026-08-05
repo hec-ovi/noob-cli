@@ -60,7 +60,7 @@ pub fn head(inputs: &PromptInputs) -> String {
 /// `debug env` so the two can never disagree on the bytes.
 fn env_block(inputs: &PromptInputs) -> String {
     format!(
-        "<env>\ncwd: {}\nplatform: {}\ndate: {}\nmodel: {}\nsandbox: {}\n</env>",
+        "# Environment\n<env>\ncwd: {}\nplatform: {}\ndate: {}\nmodel: {}\nsandbox: {}\n</env>",
         inputs.cwd,
         std::env::consts::OS,
         today_utc(),
@@ -200,6 +200,10 @@ mod tests {
     #[test]
     fn head_contains_the_env_block_in_fixed_order() {
         let h = head(&inputs());
+        assert!(
+            h.contains("# Environment\n<env>"),
+            "the environment layer is announced like every other: a heading and a tag"
+        );
         let env_at = h.find("<env>").unwrap();
         let body = &h[env_at..];
         let order = [
@@ -321,7 +325,7 @@ mod tests {
         // Every layer is announced the same way: a heading, and a tag around
         // any text this process did not write.
         assert!(s.starts_with("# Agent\n<instructions>\n"));
-        assert!(s.contains("\n</instructions>\n\n<env>"));
+        assert!(s.contains("\n</instructions>\n\n# Environment\n<env>"));
         assert!(s.contains("# Skills\n<available_skills>\n"));
     }
 
