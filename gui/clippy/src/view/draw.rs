@@ -131,20 +131,6 @@ pub(crate) fn selection_band(scene: &mut Scene, frame: &Frame, panel: Panel, sho
     // band measured in the full width of the box was four columns wide of the
     // glyphs on every row of a file.
     let (cols, chrome) = text_columns(view, panel, column);
-    // Temporary: NOOB_BAND_DEBUG=1 prints what the band was computed from.
-    if std::env::var("NOOB_BAND_DEBUG").is_ok() {
-        let window = pane.window(rows, cols);
-        eprintln!(
-            "band: panel={:?} content={:?} size={size} column={column} fit={fit} rows={rows} \
-             cols={cols} chrome={chrome} window=({},{},{}) selection={:?}",
-            panel,
-            content,
-            window.first,
-            window.count,
-            window.skip,
-            selection.range(),
-        );
-    }
     paint_selection(scene, selection, pane, Painted {
         content,
         rows,

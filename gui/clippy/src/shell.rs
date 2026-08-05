@@ -273,7 +273,7 @@ pub(crate) fn soonest(deadlines: [Option<Instant>; 4]) -> Option<Instant> {
 pub(crate) enum Thumb {
     Pane(Space),
     Explorer(Space),
-    Popup,
+    Popup(crate::widgets::popup::Half),
 }
 /// The folder named on the command line, if one was.
 ///

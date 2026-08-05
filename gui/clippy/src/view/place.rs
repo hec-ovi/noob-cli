@@ -154,10 +154,9 @@ pub(crate) fn place_files(body: Panel, shape: &Shape) -> (Panel, Panel, Vec<(usi
 /// Where the activity popup sits: the whole surface under the title strip,
 /// a margin in from every edge.
 ///
-/// It was a floating note sized to its lines. Full panel now, so the call's
-/// blocks have the room a pretty-printed argument object and a stack trace
-/// need, and the window behind it stops competing with them. Nothing inside
-/// it scrolls; the cells are bounded at the source (`state::CELL_LINES`).
+/// It was a floating note sized to its lines. Full panel now, so the two
+/// halves have the room a long command and a stack trace need, and the
+/// window behind it stops competing with them. Each half scrolls on its own.
 pub(crate) fn place_popup(width: f32, height: f32) -> Panel {
     let margin = 2.0 * GAP;
     Panel::new(

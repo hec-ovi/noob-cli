@@ -179,7 +179,7 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
-            popup_scroll: 0,
+            popup_scroll: [0, 0],
             cursor: (-100.0, -100.0),
             selection: None,
             menu: None,

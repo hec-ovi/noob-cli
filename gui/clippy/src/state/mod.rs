@@ -1049,18 +1049,6 @@ pub struct Call {
     pub line: usize,
 }
 
-/// One cell of the popup: a heading and the lines under it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Cell {
-    pub label: &'static str,
-    pub lines: Vec<String>,
-    /// The lines are this window admitting it does not have the value, rather
-    /// than the value. A blank cell would read as "the tool returned nothing",
-    /// which is a different claim and usually a false one.
-    pub absent: bool,
-    pub tone: Tone,
-}
-
 impl Call {
     /// Whether an activity row belongs to this call: a call is one row.
     fn owns(&self, line: usize) -> bool {
@@ -1086,154 +1074,97 @@ impl Call {
         format!("{} \u{25b8} {} \u{25b8} {outcome}", self.kind.tag(), self.target)
     }
 
-    /// The popup's blocks, top to bottom: what was invoked, when, what the
-    /// model generated, what came back, and - for a failure - the detail.
+    /// The call half of the popup: what the model generated, as it reads.
     ///
-    /// Only the blocks with something to say: a filler block ("no detail")
-    /// under every working call taught nothing, and a failure's message
-    /// printed by three blocks at once read as three different failures.
-    /// Every line appears exactly once, in the block it belongs to.
-    pub fn cells(&self) -> Vec<Cell> {
-        let mut out = vec![self.invoked_cell(), self.when_cell()];
-        if let Some(generated) = self.generated_cell() {
-            out.push(generated);
-        }
-        out.push(self.returned_cell());
-        if let Some(detail) = self.detail_cell() {
-            out.push(detail);
-        }
-        let mut seen: Vec<String> = Vec::new();
-        for cell in &mut out {
-            cell.lines.retain(|line| {
-                let key = line.trim().to_string();
-                let fresh = key.is_empty() || !seen.contains(&key);
-                if fresh && !key.is_empty() {
-                    seen.push(key);
+    /// The arguments as lines rather than as JSON: a short value sits beside
+    /// its key, a multiline string becomes real lines under it, and anything
+    /// nested is pretty-printed. The escaped `\n` inside a JSON string is the
+    /// exact noise this replaces: a command the model wrote over four lines is
+    /// shown as four lines.
+    pub fn call_lines(&self) -> Vec<String> {
+        fn value_into(out: &mut Vec<String>, key: &str, value: &noob_proto::Value) {
+            match value {
+                noob_proto::Value::String(s) if !s.contains('\n') => {
+                    out.push(format!("{key}: {s}"));
                 }
-                fresh
-            });
+                noob_proto::Value::String(s) => {
+                    out.push(format!("{key}:"));
+                    out.extend(s.lines().map(str::to_string));
+                }
+                other => {
+                    let pretty = serde_json::to_string_pretty(other)
+                        .unwrap_or_else(|_| other.to_string());
+                    match pretty.contains('\n') {
+                        false => out.push(format!("{key}: {pretty}")),
+                        true => {
+                            out.push(format!("{key}:"));
+                            out.extend(pretty.lines().map(str::to_string));
+                        }
+                    }
+                }
+            }
         }
-        out.retain(|cell| !cell.lines.is_empty());
-        out
-    }
-
-    fn invoked_cell(&self) -> Cell {
-        let mut lines = vec![self.target.clone()];
-        if !self.brief.trim().is_empty() && self.brief != self.target {
-            lines.push(self.brief.clone());
+        let mut out = Vec::new();
+        match &self.args {
+            noob_proto::Value::Object(map) if !map.is_empty() => {
+                for (key, value) in map {
+                    value_into(&mut out, key, value);
+                }
+            }
+            noob_proto::Value::Null | noob_proto::Value::Object(_) => {
+                out.push(String::from("nothing was generated"));
+            }
+            other => {
+                let pretty =
+                    serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string());
+                out.extend(pretty.lines().map(str::to_string));
+            }
         }
-        // The skill's own file is computed agent side and written into the
-        // result body, which reaches this window only when the call fails.
         if self.kind == Kind::Skill {
-            lines.push(String::from(
+            out.push(String::from(
                 "the skill's own file is not on the wire: only its name is sent",
             ));
         }
-        Cell {
-            label: "INVOKED",
-            lines,
-            absent: false,
-            tone: Tone::Bright,
-        }
+        out
     }
 
-    fn when_cell(&self) -> Cell {
-        let mut lines = vec![format!("turn {}", self.turn)];
-        if self.parallel {
-            lines.push(String::from("ran beside another call in this turn"));
-        }
-        match self.duration() {
-            Some(seconds) => lines.push(format!("{seconds:.2}s in this window")),
-            None => lines.push(String::from("no arrival time was taken")),
-        }
-        if let Some(ms) = self.elapsed_ms {
-            lines.push(format!("{ms} ms by the agent's own clock"));
-        }
-        Cell {
-            label: "WHEN",
-            lines,
-            absent: false,
-            tone: Tone::Dim,
-        }
-    }
-
-    /// The arguments the model wrote, or nothing when it sent none: a block
-    /// explaining its own absence taught nothing.
-    fn generated_cell(&self) -> Option<Cell> {
-        let empty = matches!(&self.args, noob_proto::Value::Null)
-            || self.args.as_object().is_some_and(|o| o.is_empty());
-        if empty {
-            return None;
-        }
-        let text = serde_json::to_string_pretty(&self.args).unwrap_or_else(|_| self.args.to_string());
-        Some(Cell {
-            label: "GENERATED",
-            lines: clipped(&text),
-            absent: false,
-            tone: Tone::Body,
-        })
-    }
-
-    fn returned_cell(&self) -> Cell {
-        let mut lines = Vec::new();
+    /// The result half of the popup: what came back, each line with the tone
+    /// it is drawn in. The whole story in one place: the summary, whatever the
+    /// call printed, and for a failure its class, message, body and remedy.
+    pub fn result_lines(&self) -> Vec<(String, Tone)> {
+        let mut out = Vec::new();
         if !self.summary.trim().is_empty() {
-            lines.push(self.summary.clone());
+            out.push((self.summary.clone(), Tone::Bright));
         }
-        let (rest, absent, tone) = match (&self.error, self.done) {
-            // The failure's own story is the DETAIL block; this one keeps
-            // only the summary and whatever the call printed before it died.
-            (Some(_), _) => (self.output.clone(), false, Tone::Dim),
-            (None, false) if !self.output.is_empty() => (self.output.clone(), false, Tone::Body),
-            (None, false) => (vec![String::from("still running")], true, Tone::Dim),
-            (None, true) if !self.output.is_empty() => (self.output.clone(), false, Tone::Body),
-            // The wire carries a display summary and no result body for a call
-            // that worked. Saying so is the whole of what this window can do
-            // about it without a protocol change.
-            (None, true) => (
-                vec![String::from(
-                    "the return value is not on the wire: a call that worked sends this summary and nothing more",
-                )],
-                true,
+        for line in &self.output {
+            out.push((line.clone(), Tone::Body));
+        }
+        match (&self.error, self.done) {
+            (Some(error), _) => {
+                out.push((error.fault.clone(), Tone::Bad));
+                out.push((error.message.clone(), Tone::Bad));
+                if let Some(detail) = error.detail.as_deref() {
+                    out.extend(detail.lines().map(|l| (l.to_string(), Tone::Body)));
+                }
+                if let Some(remedy) = error.remedy.as_deref() {
+                    out.push((format!("\u{2192} {remedy}"), Tone::Dim));
+                }
+            }
+            (None, false) if self.output.is_empty() => {
+                out.push((String::from("still running"), Tone::Dim));
+            }
+            (None, true) if self.output.is_empty() => out.push((
+                String::from(
+                    "the return value is not on the wire: a call that worked sends this \
+                     summary and nothing more",
+                ),
                 Tone::Dim,
-            ),
-        };
-        lines.extend(rest);
-        Cell {
-            label: "RETURNED",
-            lines,
-            absent,
-            tone,
+            )),
+            _ => {}
         }
+        out
     }
 
-    /// The failure, whole and in one place: its class, its message, the body
-    /// the tool sent, and what to do next. Nothing for a call that worked.
-    fn detail_cell(&self) -> Option<Cell> {
-        let error = self.error.as_ref()?;
-        let mut lines = vec![error.fault.clone(), error.message.clone()];
-        if let Some(detail) = error.detail.as_deref() {
-            lines.extend(clipped(detail));
-        }
-        if let Some(remedy) = error.remedy.as_deref() {
-            lines.push(format!("-> {remedy}"));
-        }
-        Some(Cell {
-            label: "DETAIL",
-            lines,
-            absent: false,
-            tone: Tone::Bad,
-        })
-    }
-}
-
-/// A block of text as lines, bounded, with a last line saying what was left out.
-fn clipped(text: &str) -> Vec<String> {
-    let mut lines: Vec<String> = text.lines().take(CELL_LINES).map(str::to_string).collect();
-    let over = text.lines().count().saturating_sub(CELL_LINES);
-    if over > 0 {
-        lines.push(format!("\u{2026} {over} more line{}", if over == 1 { "" } else { "s" }));
-    }
-    lines
 }
 
 pub struct State {
@@ -1392,6 +1323,47 @@ impl State {
             .iter()
             .rposition(|call| call.owns(line))
             .map(|index| self.calls_dropped + index)
+    }
+
+    /// The popup's metadata, one fact per line: when the call happened, which
+    /// turn, how long it ran, the tool, the thing it reached for, the file
+    /// when the arguments name one, and the skill when the tool is one. On
+    /// `State` rather than on the call because the clock that turns a
+    /// monotonic second into a time of day lives here.
+    pub fn popup_header(&self, call: &Call) -> Vec<String> {
+        let mut when = Vec::new();
+        let stamp = self.stamp(call.started);
+        if !stamp.trim().is_empty() {
+            when.push(stamp.trim().to_string());
+        }
+        when.push(format!("turn {}", call.turn));
+        if let Some(seconds) = call.duration() {
+            when.push(format!("{seconds:.2}s"));
+        } else if let Some(ms) = call.elapsed_ms {
+            when.push(format!("{ms} ms"));
+        }
+        if call.parallel {
+            when.push(String::from("beside another call"));
+        }
+        let mut lines = vec![when.join("  \u{00b7}  ")];
+        let named = match call.kind {
+            Kind::Skill => "skill",
+            _ => "tool",
+        };
+        lines.push(format!("{named}: {}", call.name));
+        if !call.target.trim().is_empty() && call.target != call.name {
+            lines.push(format!("invoked: {}", call.target));
+        }
+        if !call.brief.trim().is_empty() && call.brief != call.target {
+            lines.push(format!("brief: {}", call.brief));
+        }
+        for key in ["path", "file", "filename"] {
+            if let Some(file) = call.args.get(key).and_then(|v| v.as_str()) {
+                lines.push(format!("file: {file}"));
+                break;
+            }
+        }
+        lines
     }
 
     /// The clock reading to write in front of a row, and the two blanks that
@@ -2675,16 +2647,14 @@ mod tests {
         assert_eq!(rows.len(), 1, "one call, one row: {:?}", texts(&state.activity));
         assert_eq!(rows[0].tone, Tone::Bad, "the row itself says it failed");
         let call = state.call(0).expect("the record");
-        let detail = call
-            .cells()
-            .into_iter()
-            .find(|cell| cell.label == "DETAIL")
-            .expect("the detail block");
-        assert!(detail.lines.contains(&String::from("exit_status 127")), "{detail:?}");
-        assert!(
-            detail.lines.contains(&String::from("-> available here: python3 node")),
-            "{detail:?}"
-        );
+        let text: String = call
+            .result_lines()
+            .iter()
+            .map(|(line, _)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("exit_status 127"), "{text}");
+        assert!(text.contains("\u{2192} available here: python3 node"), "{text}");
     }
 
     /// Two calls in flight together are marked as such; two that took turns are
@@ -2944,25 +2914,18 @@ mod tests {
             }),
         });
         let call = state.call(0).expect("the call was kept");
-        let cells = call.cells();
-        let cell = |label: &str| {
-            cells
-                .iter()
-                .find(|cell| cell.label == label)
-                .unwrap_or_else(|| panic!("no {label} cell"))
-        };
-
-        let generated = cell("GENERATED");
-        assert!(!generated.absent);
-        let text = generated.lines.join("\n");
+        let text = call.call_lines().join("\n");
         assert!(text.contains("cargo build"), "{text}");
         assert!(text.contains("timeout"), "{text}");
 
-        // The failure's whole story is one block: class, message, the body
-        // the tool sent, and what to do next, with nothing said twice.
-        let detail = cell("DETAIL");
-        assert!(!detail.absent);
-        let text = detail.lines.join("\n");
+        // The failure's whole story is the result half: class, message, the
+        // body the tool sent, and what to do next.
+        let text: String = call
+            .result_lines()
+            .iter()
+            .map(|(line, _)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(text.contains("exit_status 127"), "{text}");
         assert!(text.contains("cargo: command not found"), "{text}");
         assert!(text.contains("linker `cc` not found"), "{text}");
@@ -2983,24 +2946,21 @@ mod tests {
             elapsed_ms: 3,
             error: None,
         });
-        let cells = state.call(0).expect("kept").cells();
-        let returned = cells.iter().find(|c| c.label == "RETURNED").expect("a cell");
-        assert!(returned.absent, "the window does not have the value");
-        let text = returned.lines.join("\n");
+        let call = state.call(0).expect("kept");
+        let text: String = call
+            .result_lines()
+            .iter()
+            .map(|(line, _)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(text.contains("read 40 lines"), "the summary is still shown: {text}");
         assert!(text.contains("not on the wire"), "{text}");
-        assert!(!text.trim().is_empty());
-
-        // No failure, no DETAIL block: a filler cell taught nothing.
-        assert!(!cells.iter().any(|c| c.label == "DETAIL"), "{cells:?}");
+        assert!(!text.contains("exit_status"), "no failure story on a call that worked: {text}");
 
         // A skill says the same about its own file, which is also never sent.
         let mut skilled = State::new();
         skilled.apply(tool_start("s", "skill", serde_json::json!({"name": "web-perf"})));
-        let cells = skilled.call(0).expect("kept").cells();
-        let invoked = cells.iter().find(|c| c.label == "INVOKED").expect("a cell");
-        let text = invoked.lines.join("\n");
-        assert!(text.contains("skill web-perf"), "{text}");
+        let text = skilled.call(0).expect("kept").call_lines().join("\n");
         assert!(text.contains("not on the wire"), "{text}");
     }
 
@@ -3022,10 +2982,14 @@ mod tests {
             elapsed_ms: 1200,
             error: None,
         });
-        let cells = state.call(0).expect("kept").cells();
-        let returned = cells.iter().find(|c| c.label == "RETURNED").expect("a cell");
-        assert!(!returned.absent, "this one really did come back");
-        let text = returned.lines.join("\n");
+        let text: String = state
+            .call(0)
+            .expect("kept")
+            .result_lines()
+            .iter()
+            .map(|(line, _)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(text.contains("ld -o app"), "{text}");
     }
 
@@ -3290,10 +3254,11 @@ mod tests {
         );
     }
 
-    /// A failure says what broke on its popup, bounded. This is the same
-    /// failure that used to render as a bare `exit code 1`.
+    /// A failure says what broke on its popup, whole. This is the same
+    /// failure that used to render as a bare `exit code 1`; the body is not
+    /// clipped any more because the result half scrolls on its own.
     #[test]
-    fn a_failure_shows_its_message_and_a_bounded_body() {
+    fn a_failure_shows_its_message_and_its_whole_body() {
         let mut state = State::new();
         state.apply(tool_start(
             "x",
@@ -3316,30 +3281,20 @@ mod tests {
                 remedy: None,
             }),
         });
-        // The pane keeps the one recolored row; the popup's DETAIL block
-        // carries the message and the bounded body, nothing said twice.
+        // The pane keeps the one recolored row; the result half carries the
+        // message and the whole body.
         assert_eq!(texts(&state.activity).len(), 1);
-        let call = state.call(0).expect("the record");
-        let detail = call
-            .cells()
-            .into_iter()
-            .find(|cell| cell.label == "DETAIL")
-            .expect("the detail block");
+        let lines = state.call(0).expect("the record").result_lines();
+        let text: String = lines
+            .iter()
+            .map(|(line, _)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("could not compile"), "{text}");
+        assert!(text.contains("trace line 0"), "{text}");
         assert!(
-            detail.lines.iter().any(|l| l.contains("could not compile")),
-            "{detail:?}"
-        );
-        assert!(detail.lines.iter().any(|l| l.contains("trace line 0")), "{detail:?}");
-        // What was left out is counted rather than hinted at.
-        assert!(
-            detail.lines.iter().any(|l| l.contains("… 41 more lines")),
-            "{:?}",
-            detail.lines.last()
-        );
-        assert!(
-            detail.lines.len() <= CELL_LINES + 4,
-            "the body is bounded: {}",
-            detail.lines.len()
+            text.contains(&format!("trace line {}", CELL_LINES + 39)),
+            "the whole body is there, its own scroll holds it: {text}"
         );
     }
 

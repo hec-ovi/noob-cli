@@ -1838,7 +1838,7 @@ pub struct Frame<'a> {
     pub esc_armed: bool,
     /// The call popup's first visible content row, shell-owned like every
     /// other scroll offset.
-    pub popup_scroll: usize,
+    pub popup_scroll: [usize; 2],
     /// Where the pointer is, for the hover highlights. Off screen when the
     /// window has never seen it.
     pub cursor: (f32, f32),
@@ -2395,7 +2395,7 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
-            popup_scroll: 0,
+            popup_scroll: [0, 0],
             cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
@@ -2607,7 +2607,7 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: true,
-            popup_scroll: 0,
+            popup_scroll: [0, 0],
             cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
@@ -4499,7 +4499,7 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
-            popup_scroll: 0,
+            popup_scroll: [0, 0],
             cursor: (-100.0, -100.0),
             selection: Some(selection),
             menu: None,
@@ -4626,7 +4626,7 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
-            popup_scroll: 0,
+            popup_scroll: [0, 0],
             cursor: (-100.0, -100.0),
             selection: Some(selection),
             menu: None,
@@ -4727,7 +4727,7 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
-            popup_scroll: 0,
+            popup_scroll: [0, 0],
             cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
@@ -4763,6 +4763,64 @@ mod tests {
             "the renderer lays out {drawn_rows} rows but the pane counts {counted}: \
              every band and click below the difference lands on the wrong text\n{laid:?}"
         );
+    }
+
+    /// Throwaway probe: replay a session (PROBE_FRAMES=path), reflow at many
+    /// widths, and report every line whose counted rows differ from the rows
+    /// the renderer would lay out. Tables included, which is the point.
+    #[test]
+    fn probe_tables() {
+        let Ok(path) = std::env::var("PROBE_FRAMES") else {
+            return;
+        };
+        let mut state = State::new();
+        for line in std::fs::read_to_string(path).unwrap().lines() {
+            if let Some(frame) = noob_proto::decode::<noob_proto::Event>(line) {
+                state.apply(frame.body);
+            }
+        }
+        let skin = Skin::from(&Config::default());
+        for cols in 40..90usize {
+            state.output.reflow(cols);
+            let mut fence = state.output.fence_before(0, cols);
+            let mut cum_counted = 0usize;
+            let mut cum_drawn = 0usize;
+            for n in 0.. {
+                let Some(line) = state.output.line(n) else {
+                    break;
+                };
+                let counted = state.output.rows_of_line(n, cols).len();
+                let mut runs = Vec::new();
+                match line.tone {
+                    crate::state::Tone::Body if line.table().is_some() => {
+                        crate::widgets::output::table(line, &skin, &mut runs);
+                    }
+                    crate::state::Tone::Body => {
+                        crate::markdown::line(&line.text, &mut fence, &skin, &mut runs);
+                    }
+                    tone => runs.push(noob_draw::Run::tinted(&line.text, skin.tone(tone))),
+                }
+                let laid: String = noob_draw::Run::wrapped(&runs, cols, text_geometry::Break::Word)
+                    .iter()
+                    .map(|run| run.text.as_str())
+                    .collect();
+                let drawn = laid.split('\n').count();
+                let drawn_text: String = runs.iter().map(|r| r.text.as_str()).collect();
+                cum_counted += counted;
+                cum_drawn += drawn;
+                if counted != drawn || drawn_text != line.shown() {
+                    println!(
+                        "cols={cols} line={n} counted={counted} drawn={drawn} table={:?}\n  shown={:?}\n  laid ={:?}",
+                        line.table(),
+                        line.shown().chars().take(90).collect::<String>(),
+                        laid.chars().take(90).collect::<String>(),
+                    );
+                }
+            }
+            if cum_counted != cum_drawn {
+                println!("cols={cols} TOTAL counted={cum_counted} drawn={cum_drawn}");
+            }
+        }
     }
 
     /// The activity pane is a clipped list: every entry is exactly one
@@ -4814,7 +4872,7 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
-            popup_scroll: 0,
+            popup_scroll: [0, 0],
             cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
@@ -4932,7 +4990,7 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
-            popup_scroll: 0,
+            popup_scroll: [0, 0],
             cursor: (-100.0, -100.0),
             selection: Some(selection),
             menu: None,
@@ -5294,7 +5352,7 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
-            popup_scroll: 0,
+            popup_scroll: [0, 0],
             cursor: (-100.0, -100.0),
             selection: None,
             menu: None,
@@ -5878,7 +5936,7 @@ mod tests {
             hot: None,
             trouble: None,
             esc_armed: false,
-            popup_scroll: 0,
+            popup_scroll: [0, 0],
             cursor: (-100.0, -100.0),
             selection: None,
             menu: None,

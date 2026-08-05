@@ -1072,8 +1072,16 @@ impl Renderer {
                     &mut self.font_system,
                     Metrics::new(item.size, item.line_height),
                 );
-                // Wrap width and clip rectangle from the same content box.
-                buffer.set_size(Some(item.at.w), Some(item.at.h));
+                // The wrap width only. The height is deliberately not given:
+                // cosmic-text clamps its scroll to keep a sized buffer's box
+                // full, silently sliding every row off the grid the selection
+                // bands are computed on whenever the content below the scroll
+                // ran short (a streaming tail, a reflowed table). Scrolling is
+                // done outside the buffer instead - the drawn area is
+                // translated up by the scrolled rows and the box's bounds clip
+                // what lands outside - so a row's position is always exactly
+                // its row number times the line height.
+                buffer.set_size(Some(item.at.w), None);
                 // A box that names its column count is broken into rows here,
                 // so there is nothing left for the shaper to wrap and no
                 // chance of it putting a row boundary somewhere the arithmetic
@@ -1141,11 +1149,6 @@ impl Renderer {
                         buffer.set_rich_text(spans, &mono, SHAPING, None);
                     }
                 }
-                if item.scroll_lines > 0.0 {
-                    let mut scroll = buffer.scroll();
-                    scroll.vertical = item.scroll_lines * item.line_height;
-                    buffer.set_scroll(scroll);
-                }
                 buffer.shape_until_scroll(&mut self.font_system, false);
                 buffer
             })
@@ -1171,7 +1174,10 @@ impl Renderer {
             .map(|(item, buffer)| TextArea {
                 buffer,
                 left: item.at.x,
-                top: item.at.y,
+                // The scroll: the buffer is laid out whole and drawn shifted
+                // up by the rows above the window, and the bounds clip them.
+                // See `shape` for why the buffer must not scroll itself.
+                top: item.at.y - item.scroll_lines * item.line_height,
                 scale: 1.0,
                 bounds: item.at.bounds(),
                 default_color: Color::rgba(

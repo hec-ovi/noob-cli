@@ -266,7 +266,7 @@ struct App {
     trouble: Option<String>,
     /// The call popup's first visible content row. Reset when a call opens;
     /// clamped against the popup's own extent on every move.
-    popup_scroll: usize,
+    popup_scroll: [usize; 2],
     /// Armed until this instant by a first ESC that had nothing left to drop.
     /// A second ESC inside the window cancels the turn; any other key, or the
     /// window lapsing, disarms. One tap was too easy to spend by accident: a
@@ -447,7 +447,7 @@ impl App {
             trouble: None,
             esc_armed: None,
             answer_by: None,
-            popup_scroll: 0,
+            popup_scroll: [0, 0],
             workspace,
             session: None,
             picker: None,
@@ -2702,18 +2702,21 @@ impl App {
             // band and the copy resolve against the same lines the blocks
             // are drawn from.
             Hit::CallPopup => {
-                let spot = {
+                let took = {
                     let layout = self.layout();
                     let frame = self.frame(&layout);
-                    crate::widgets::popup::spot_at(
-                        &frame,
-                        self.cursor.x as f32,
-                        self.cursor.y as f32,
-                    )
+                    let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
+                    crate::widgets::popup::half_at(&frame, y).and_then(|half| {
+                        crate::widgets::popup::spot_at(&frame, half, x, y)
+                            .map(|spot| (half, spot))
+                    })
                 };
-                if let Some(spot) = spot {
-                    self.selection =
-                        Some(select::Selection::new(select::Where::CallPopup, spot));
+                if let Some((half, spot)) = took {
+                    let at = match half {
+                        crate::widgets::popup::Half::Call => select::Where::CallPopup,
+                        crate::widgets::popup::Half::Result => select::Where::CallResult,
+                    };
+                    self.selection = Some(select::Selection::new(at, spot));
                     self.selecting = true;
                     self.dirty = true;
                 }
@@ -2727,8 +2730,15 @@ impl App {
             // The popup's own track: the press takes the thumb, like every
             // other scrollbar in the window.
             Hit::CallPopupScrollbar => {
-                self.thumbing = Some(Thumb::Popup);
-                self.drag_thumb();
+                let half = {
+                    let layout = self.layout();
+                    let frame = self.frame(&layout);
+                    crate::widgets::popup::half_at(&frame, self.cursor.y as f32)
+                };
+                if let Some(half) = half {
+                    self.thumbing = Some(Thumb::Popup(half));
+                    self.drag_thumb();
+                }
             }
         }
     }
@@ -2783,7 +2793,7 @@ impl App {
             return;
         };
         self.state.open_call = Some(ordinal);
-        self.popup_scroll = 0;
+        self.popup_scroll = [0, 0];
         self.dirty = true;
     }
 
@@ -2807,23 +2817,29 @@ impl App {
         self.state.call_at_line(line)
     }
 
-    /// Move the popup's window by pages of itself, the way every pane moves.
+    /// Move one half of the popup by pages of itself, the way every pane
+    /// moves. Which half is the pointer's: the wheel scrolls what it is over.
     fn scroll_popup(&mut self, layout: &view::Layout, pages: f32) {
-        let geometry = {
+        let (half, geometry) = {
             let frame = self.frame(layout);
-            crate::widgets::popup::scroll_geometry(&frame)
+            let Some(half) = crate::widgets::popup::half_at(&frame, self.cursor.y as f32)
+            else {
+                return;
+            };
+            (half, crate::widgets::popup::scroll_geometry(&frame, half))
         };
         let Some((total, fit)) = geometry else {
             return;
         };
+        let held = self.popup_scroll[half.index()];
         let by = ((fit.saturating_sub(1).max(1) as f32 * pages.abs()).round() as usize).max(1);
         let most = total.saturating_sub(fit);
         let next = match pages > 0.0 {
-            true => self.popup_scroll.saturating_sub(by),
-            false => (self.popup_scroll + by).min(most),
+            true => held.saturating_sub(by),
+            false => (held + by).min(most),
         };
-        self.dirty |= next != self.popup_scroll;
-        self.popup_scroll = next.min(most);
+        self.dirty |= next != held;
+        self.popup_scroll[half.index()] = next.min(most);
     }
 
     /// Walk one space's tab strip by one tab, which is what its arrows do. The
@@ -2989,7 +3005,7 @@ impl App {
         self.scrolls = scroll::Scrolls::default();
         self.file_scroll = 0;
         self.last_open_file = 0;
-        self.popup_scroll = 0;
+        self.popup_scroll = [0, 0];
         self.trouble = None;
         self.esc_armed = None;
         self.session = None;
@@ -3177,7 +3193,21 @@ impl App {
             select::Where::SettingsPaper(index) => self.paper_spot_at(&layout, index),
             select::Where::CallPopup => {
                 let frame = self.frame(&layout);
-                crate::widgets::popup::spot_at(&frame, self.cursor.x as f32, self.cursor.y as f32)
+                crate::widgets::popup::spot_at(
+                    &frame,
+                    crate::widgets::popup::Half::Call,
+                    self.cursor.x as f32,
+                    self.cursor.y as f32,
+                )
+            }
+            select::Where::CallResult => {
+                let frame = self.frame(&layout);
+                crate::widgets::popup::spot_at(
+                    &frame,
+                    crate::widgets::popup::Half::Result,
+                    self.cursor.x as f32,
+                    self.cursor.y as f32,
+                )
             }
         };
         if let Some(spot) = spot {
@@ -3186,7 +3216,12 @@ impl App {
             // popup the press put up goes away as soon as the drag has
             // selected something. A drag inside the popup is the opposite -
             // selecting its text is what the popup is open for.
-            if !selection.is_empty() && selection.at != select::Where::CallPopup {
+            if !selection.is_empty()
+                && !matches!(
+                    selection.at,
+                    select::Where::CallPopup | select::Where::CallResult
+                )
+            {
                 self.state.open_call = None;
             }
             self.selection = Some(selection);
@@ -3228,7 +3263,17 @@ impl App {
             // Off the popup's own document, whole lines included however the
             // clip drew them.
             select::Where::CallPopup => match self.state.popped() {
-                Some(call) => selection.text(&crate::widgets::popup::document(call)),
+                Some(call) => selection.text(&crate::widgets::popup::half_document(
+                    call,
+                    crate::widgets::popup::Half::Call,
+                )),
+                None => return false,
+            },
+            select::Where::CallResult => match self.state.popped() {
+                Some(call) => selection.text(&crate::widgets::popup::half_document(
+                    call,
+                    crate::widgets::popup::Half::Result,
+                )),
                 None => return false,
             },
         };
@@ -3376,26 +3421,26 @@ impl App {
         };
         let layout = self.layout();
         // The popup's track first: while it is up it covers the panes.
-        if matches!(grip, Thumb::Popup) {
+        if let Thumb::Popup(half) = grip {
             let track = view::scroll_track(layout.call_popup);
             let fraction = ((self.cursor.y as f32 - track.y) / track.h.max(1.0)).clamp(0.0, 1.0);
             let geometry = {
                 let frame = self.frame(&layout);
-                crate::widgets::popup::scroll_geometry(&frame)
+                crate::widgets::popup::scroll_geometry(&frame, half)
             };
             let Some((total, fit)) = geometry else {
                 return;
             };
             let most = total.saturating_sub(fit);
             let next = ((fraction * most as f32).round() as usize).min(most);
-            self.dirty |= next != self.popup_scroll;
-            self.popup_scroll = next;
+            self.dirty |= next != self.popup_scroll[half.index()];
+            self.popup_scroll[half.index()] = next;
             return;
         }
         let (space, explorer) = match grip {
             Thumb::Pane(space) => (space, false),
             Thumb::Explorer(space) => (space, true),
-            Thumb::Popup => unreachable!("handled above"),
+            Thumb::Popup(_) => unreachable!("handled above"),
         };
         let Some(view) = self.dock.slot(space).active() else {
             return;

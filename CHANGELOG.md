@@ -3,6 +3,24 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.11.12 - 2026-08-05
+
+- The misaligned selection is fixed at its root. The text shaper, given a
+  box's height, silently clamps its own scroll to keep the box full, sliding
+  every row off the grid the selection bands are computed on whenever the
+  content below the scroll ran short: a streaming tail, a reflowed table, an
+  emoji list arriving. That is why the highlight sat one row off and healed
+  by itself. Buffers are laid out whole now and the drawn area is translated
+  instead, so a row's position is always exactly its row number times the
+  line height; a test pins the claim at the layout itself.
+- The activity popup reads as a report. A metadata header (when the call
+  happened, which turn, how long, the tool, the thing it reached for, the
+  file when the arguments name one), then two halves splitting the room:
+  CALL, the arguments as real lines (a four-line command is four lines, never
+  `\n` spelled out), and RESULT, the summary, the output and the whole
+  failure story. Each half scrolls on its own, holds its own selection, and
+  long bodies are no longer clipped: the scroll holds them.
+
 ## 0.11.11 - 2026-08-05
 
 - `no0b <folder>` carries on the newest session saved for that folder;

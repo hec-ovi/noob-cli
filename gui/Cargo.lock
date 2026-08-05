@@ -1015,7 +1015,7 @@ dependencies = [
 
 [[package]]
 name = "no0b"
-version = "0.11.11"
+version = "0.11.12"
 dependencies = [
  "copypasta",
  "noob-draw",
@@ -1029,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "noob-draw"
-version = "0.11.11"
+version = "0.11.12"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -1042,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "noob-gpu"
-version = "0.11.11"
+version = "0.11.12"
 dependencies = [
  "wgpu",
  "winit",
@@ -1050,7 +1050,7 @@ dependencies = [
 
 [[package]]
 name = "noob-proto"
-version = "0.11.11"
+version = "0.11.12"
 dependencies = [
  "serde_json",
 ]
@@ -2014,7 +2014,7 @@ dependencies = [
 
 [[package]]
 name = "text-geometry"
-version = "0.11.11"
+version = "0.11.12"
 dependencies = [
  "unicode-width",
 ]

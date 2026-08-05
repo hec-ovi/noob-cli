@@ -38,9 +38,12 @@ impl Spot {
 pub enum Where {
     /// A pane in the dock, named by the view showing in it.
     Pane(View),
-    /// The call popup's document: its blocks flattened to the lines they
-    /// are drawn as. Not a view either; the popup floats over every space.
+    /// The call popup's CALL half: what the model generated, as lines. Not
+    /// a view either; the popup floats over every space.
     CallPopup,
+    /// The call popup's RESULT half: what came back. Its own place because a
+    /// drag that starts in one half selects that half's lines only.
+    CallResult,
     /// The document beside the entry list on the settings panel.
     ///
     /// Not a view and not in a space: the panel is a takeover and covers every
@@ -79,7 +82,7 @@ impl Selection {
     pub fn view(&self) -> Option<View> {
         match self.at {
             Where::Pane(view) => Some(view),
-            Where::CallPopup => None,
+            Where::CallPopup | Where::CallResult => None,
             Where::SettingsDoc | Where::SettingsPaper(_) => None,
         }
     }
