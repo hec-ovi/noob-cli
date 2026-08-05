@@ -147,6 +147,19 @@ fn dir_in(config: &Path) -> PathBuf {
     config.join("sessions")
 }
 
+/// The newest session started in this folder, when one is on disk to resume.
+///
+/// What `no0b <folder>` opens by default: the conversation you were having
+/// there, not a fresh one. The listing is newest first, so the first row that
+/// names the folder and still has one is the answer.
+pub fn latest_for(listing: &Listing, folder: &Path) -> Option<String> {
+    listing
+        .sessions
+        .iter()
+        .find(|saved| !saved.gone && saved.workspace.as_deref() == Some(folder))
+        .map(|saved| saved.id.clone())
+}
+
 /// Describe every session in `at`, newest first.
 ///
 /// `index` says which folder each one belongs to and `folders` answers whether
@@ -527,6 +540,37 @@ pub fn save_index(path: &Path, index: &Index) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// `no0b <folder>` resumes the newest session of that folder and nobody
+    /// else's: not another folder's, not one whose folder is gone, and none
+    /// when the folder has none.
+    #[test]
+    fn the_latest_session_for_a_folder_is_the_newest_live_one_of_that_folder() {
+        let saved = |id: &str, folder: Option<&str>, gone: bool| Saved {
+            id: id.into(),
+            when: std::time::SystemTime::UNIX_EPOCH,
+            workspace: folder.map(PathBuf::from),
+            gone,
+            bytes: 1,
+            context: None,
+            opening: String::new(),
+        };
+        let listing = Listing {
+            sessions: vec![
+                saved("newest-elsewhere", Some("/other"), false),
+                saved("gone-here", Some("/work"), true),
+                saved("newest-here", Some("/work"), false),
+                saved("older-here", Some("/work"), false),
+                saved("noteless", None, false),
+            ],
+            skipped: Vec::new(),
+        };
+        assert_eq!(
+            latest_for(&listing, Path::new("/work")),
+            Some("newest-here".into())
+        );
+        assert_eq!(latest_for(&listing, Path::new("/empty")), None);
+    }
 
     /// The real filesystem, which is what these tests drive: the fixtures are
     /// written to a temp directory, so the reader is exercised over files a

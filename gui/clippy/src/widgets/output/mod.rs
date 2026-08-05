@@ -51,6 +51,21 @@ pub(crate) fn output(scene: &mut Scene, frame: &Frame, panel: Panel) {
     // same `text-geometry` call the pane was measured with rather than wrapping
     // them itself. Left to the shaper the columns drift by one per blank it
     // swallows at a break, and the selection lands on the wrong glyphs.
+    // Temporary: NOOB_BAND_DEBUG=1 prints what the transcript was drawn from.
+    if std::env::var("NOOB_BAND_DEBUG").is_ok() {
+        let window = state.output.window(rows, cols);
+        eprintln!(
+            "paint: panel={:?} inset={:?} body_size={} column={} fit={fit} reserved={reserved} \
+             rows={rows} cols={cols} window=({},{},{})",
+            panel,
+            panel.inset(PAD),
+            frame.body_size,
+            frame.column,
+            window.first,
+            window.count,
+            window.skip,
+        );
+    }
     scene.text(
         Text::rich(runs, panel.inset(PAD), frame.body_size, frame.skin.body)
             .scrolled(state.output.window(rows, cols).skip as f32)
@@ -88,7 +103,7 @@ pub(crate) fn output(scene: &mut Scene, frame: &Frame, panel: Panel) {
 /// One line of a laid-out table: the columns it stands in are structure and
 /// wear the markup tint, the cells are text, and the row naming the columns is
 /// the bright one.
-fn table(line: &crate::state::Line, skin: &Skin, runs: &mut Vec<Run>) {
+pub(crate) fn table(line: &crate::state::Line, skin: &Skin, runs: &mut Vec<Run>) {
     let ink = match line.table() {
         Some(crate::table::Part::Head) => skin.bright,
         _ => skin.body,

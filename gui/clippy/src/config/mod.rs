@@ -129,6 +129,12 @@ pub struct Config {
     pub show_activity: bool,
     pub show_files: bool,
 
+    /// The saved pane arrangement, as [`crate::dock::Dock::arrangement`]
+    /// writes it. `None` until the window has saved one; the window then
+    /// falls back to the default arrangement seeded by the two switches
+    /// above.
+    pub dock: Option<String>,
+
     /// Whether any colour key was set explicitly, by a line of the file or
     /// through [`Config::apply`]. The palette is then the user's own, whatever
     /// preset its values happen to match, and the panel names it custom: an
@@ -181,6 +187,7 @@ impl Default for Config {
             // there opens on two nobody asked for.
             show_activity: false,
             show_files: false,
+            dock: None,
             tuned: false,
             unknown: Vec::new(),
         }
@@ -754,6 +761,10 @@ impl Config {
             }
             "show_activity" => set(&mut self.show_activity, boolean(value)),
             "show_files" => set(&mut self.show_files, boolean(value)),
+            "dock" => {
+                self.dock = Some(value.to_string());
+                true
+            }
             // Including `theme`, which is not a slot: it is a whole palette,
             // resolved by [`Config::parse`] before any line lands on top of it.
             _ => false,
@@ -1308,6 +1319,11 @@ theme = noob-cool
 # a hidden pane gives its room to the conversation.
 show_activity = false
 show_files    = false
+
+# Where each pane sits, written by the window whenever a tab is moved, shown,
+# closed or switched, and read back at the next launch. Delete the line to get
+# the default arrangement again.
+# dock = output|plan|hardware*,context,session|agents
 ";
 
 #[cfg(test)]
@@ -1892,6 +1908,7 @@ mod tests {
             syntax_markup,
             show_activity: _,
             show_files: _,
+            dock: _,
             tuned: _,
             unknown: _,
         } = config;

@@ -22,6 +22,16 @@ pub enum Space;              // the four cells; row/column/index/at,
 pub struct Slot;             // one cell's tab strip: tabs, active view
 pub struct Dock;             // the whole arrangement: which view where,
                              // divider ratios, move/focus operations
+impl Dock {
+    pub fn arrangement(&self) -> String;
+                             // the arrangement as one settings word:
+                             // cells joined by |, tabs by ,, active tab
+                             // marked *; the agent view never written
+    pub fn from_arrangement(word: &str) -> Option<Dock>;
+                             // the dock that word describes; None for a
+                             // word that does not describe one (fail
+                             // closed, caller falls back to the default)
+}
 ```
 
 ## Invariants

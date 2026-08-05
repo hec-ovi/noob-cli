@@ -13,10 +13,13 @@ starts from.
 ```rust
 pub struct Config;           // every setting the window remembers: theme,
                              // opacity, text size, grid ratios, input rows,
-                             // per-view state; parse() tolerant, write()
-                             // atomic via replace. `tuned` says whether any
-                             // colour key was set explicitly (the palette is
-                             // then the user's own); colour_of(key) reads one
+                             // per-view state, the saved pane arrangement
+                             // (`dock`, written by the window on every tab
+                             // change, read back at launch); parse()
+                             // tolerant, write() atomic via replace. `tuned`
+                             // says whether any colour key was set
+                             // explicitly (the palette is then the user's
+                             // own); colour_of(key) reads one
 pub fn own_palette(path);    // write every colour in hand into the file as a
                              // live line under its own key, values unchanged:
                              // what the panel's custom option does

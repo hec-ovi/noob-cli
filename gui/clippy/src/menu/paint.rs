@@ -476,6 +476,7 @@ mod tests {
                 Some(Item::Settings),
                 Some(Item::CopySelection),
                 Some(Item::Close),
+                Some(Item::NewSession),
                 Some(Item::Widgets(false)),
             ]
         );
@@ -487,6 +488,7 @@ mod tests {
                 Some(Item::Settings),
                 None,
                 Some(Item::Close),
+                Some(Item::NewSession),
                 Some(Item::Widgets(false)),
             ],
             "a row with nothing to copy is drawn and refuses to act"
@@ -494,13 +496,14 @@ mod tests {
         // With the flyout open, the column's rows stay exactly where they
         // were, and the flyout's rows answer in their own box beside it.
         let mut open = Menu::for_widget(at, View::Plan, Space::TopRight, false);
-        open.fold(3, &dock);
+        open.fold(4, &dock);
         assert_eq!(
             picked(&open),
             vec![
                 Some(Item::Settings),
                 None,
                 Some(Item::Close),
+                Some(Item::NewSession),
                 Some(Item::Widgets(true)),
             ],
             "opening the flyout moved a row of the column"
@@ -522,7 +525,7 @@ mod tests {
         let header = layout
             .menu_rows
             .iter()
-            .find(|(index, _)| *index == 3)
+            .find(|(index, _)| *index == 4)
             .map(|(_, panel)| panel.y)
             .expect("the header is on screen");
         assert!((layout.menu_fly.y + MENU_EDGE - header).abs() < 0.6);
@@ -558,7 +561,7 @@ mod tests {
         let at = (400.0, 300.0);
         let shut = Menu::for_widget(at, View::Plan, Space::TopLeft, false);
         let closed = with_menu(&dock, &shut, w, h);
-        assert_eq!(closed.menu_rows.len(), 4);
+        assert_eq!(closed.menu_rows.len(), 5);
         assert!(closed.menu_fly.w < 1.0, "a shut flyout has no box");
 
         // Opened the way the pointer opens it: whatever row the press lands on
@@ -577,7 +580,7 @@ mod tests {
         };
         assert!(menu.fold(pressed, &dock));
         let layout = with_menu(&dock, &menu, w, h);
-        assert_eq!(layout.menu_rows.len(), 4, "a row of the column moved");
+        assert_eq!(layout.menu_rows.len(), 5, "a row of the column moved");
         assert_eq!(layout.menu.h, closed.menu.h, "the box changed size");
         assert_eq!(layout.menu.x, closed.menu.x, "the box moved sideways");
         assert_eq!(layout.menu_fly_rows.len(), View::ALL.len() - 1);
@@ -646,7 +649,7 @@ mod tests {
         }
         // The flyout stays whole and inside the window even here.
         menu.scroll(menu.rows.len(), false, capacity);
-        menu.fold(3, &dock);
+        menu.fold(4, &dock);
         let layout = with_menu(&dock, &menu, w, short);
         assert_eq!(layout.menu_fly_rows.len(), View::ALL.len() - 1);
         assert!(layout.menu_fly.y >= 0.0);
@@ -682,7 +685,7 @@ mod tests {
     fn a_menu_bigger_than_the_window_is_cut_to_it() {
         let dock = Dock::new();
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
-        menu.fold(3, &dock);
+        menu.fold(4, &dock);
         let (w, h) = (90.0, 120.0);
         let layout = with_menu(&dock, &menu, w, h);
         assert!(layout.menu.x >= 0.0 && layout.menu.x + layout.menu.w <= w + 0.01);
@@ -706,7 +709,7 @@ mod tests {
         let dock = Dock::new();
         let (w, h) = (1400.0, 900.0);
         let mut menu = Menu::for_widget((400.0, 300.0), View::Plan, Space::TopLeft, true);
-        menu.fold(3, &dock);
+        menu.fold(4, &dock);
         for (index, _) in with_menu(&dock, &menu, w, h).menu_rows.clone() {
             let out = render_menu(
                 &busy_state(),
@@ -829,7 +832,7 @@ mod tests {
         let dock = Dock::new();
         let (w, h) = (1400.0, 900.0);
         let mut menu = Menu::for_widget((400.0, 300.0), View::Plan, Space::TopLeft, false);
-        menu.fold(3, &dock);
+        menu.fold(4, &dock);
         let out = render_menu(&busy_state(), w, h, &dock, &menu, None);
 
         let written = |label: &str| -> Panel {
@@ -893,7 +896,7 @@ mod tests {
             .filter(|t| *t == icons::SUBMENU.to_string())
             .collect();
         assert_eq!(marks.len(), 1, "the header keeps its one side chevron");
-        assert_eq!(menu.pick(3), Some(Item::Widgets(true)));
+        assert_eq!(menu.pick(4), Some(Item::Widgets(true)));
     }
     /// The row that opens a group is marked twice: the mark in the gutter in
     /// front, saying what the row is, and the chevron at its END, saying it
@@ -905,7 +908,7 @@ mod tests {
         for open in [false, true] {
             let mut menu = Menu::for_widget((400.0, 300.0), View::Plan, Space::TopLeft, false);
             if open {
-                menu.fold(3, &dock);
+                menu.fold(4, &dock);
             }
             let out = render_menu(&busy_state(), 1400.0, 900.0, &dock, &menu, None);
             let row = out
@@ -1020,7 +1023,7 @@ mod tests {
     fn the_whole_menu_is_drawn_on_the_floating_layer() {
         let dock = Dock::hiding(&[View::Hardware]);
         let mut menu = Menu::for_widget((400.0, 200.0), View::Plan, Space::TopLeft, false);
-        menu.fold(3, &dock);
+        menu.fold(4, &dock);
         let out = render_menu(&busy_state(), 1400.0, 900.0, &dock, &menu, None);
         let box_ = out.layout.menu;
         let runs: Vec<String> = out
@@ -1084,7 +1087,7 @@ mod tests {
         use crate::menu::Item;
         let dock = Dock::hiding(&[View::Hardware]);
         let mut widget = Menu::for_widget((400.0, 300.0), View::Plan, Space::TopLeft, true);
-        widget.fold(3, &dock);
+        widget.fold(4, &dock);
         for menu in [widget, Menu::for_input((400.0, 300.0), true)] {
             let out = render_menu(&busy_state(), 1400.0, 900.0, &dock, &menu, None);
             let mut seen = 0;

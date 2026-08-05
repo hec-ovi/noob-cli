@@ -58,6 +58,10 @@ pub enum Item {
     /// picking a closed one puts it back, picking one that is in the window
     /// takes it out.
     Widget(View, bool),
+    /// Stop this session and go back to the first screen, where a folder or
+    /// a saved session is chosen. On the pane menu because that screen is
+    /// otherwise unreachable once a window is connected.
+    NewSession,
     /// Carry on the saved session the menu was opened over, which is what
     /// pressing the row does anyway. On the menu because a menu with one row
     /// says the row it does not have is the only thing you can do here.
@@ -80,6 +84,7 @@ impl Item {
             Item::Settings => "Settings",
             Item::CopySelection => "Copy selection",
             Item::Close => "Close this widget",
+            Item::NewSession => "New session",
             Item::Widgets(_) => "Widgets",
             // The tab's own name, so the list reads as the tabs it is a list of.
             Item::Widget(view, _) => view.label(),
@@ -159,6 +164,7 @@ impl Item {
             }),
             // The mark the picker's own Open button wears, because it is the
             // same act reached another way, and the bin for the row that is not.
+            Item::NewSession => Some(icons::FOLDER),
             Item::OpenSession => Some(icons::CONFIRM),
             // The bin either way. The gutter says what the row is, and what the
             // row is does not change when it starts asking.
@@ -269,6 +275,7 @@ impl Menu {
                 Row::act(Item::Settings, true),
                 Row::act(Item::CopySelection, has_selection),
                 Row::act(Item::Close, true),
+                Row::act(Item::NewSession, true),
                 Row::act(Item::Widgets(false), true),
             ],
         )
@@ -684,6 +691,7 @@ mod tests {
                 Item::Settings,
                 Item::CopySelection,
                 Item::Close,
+                Item::NewSession,
                 Item::Widgets(false)
             ]
         );
@@ -691,9 +699,9 @@ mod tests {
         assert_eq!(menu.pick(0), Some(Item::Settings));
         assert_eq!(menu.pick(1), Some(Item::CopySelection));
         assert_eq!(menu.pick(2), Some(Item::Close));
-        assert_eq!(menu.pick(3), Some(Item::Widgets(false)));
+        assert_eq!(menu.pick(4), Some(Item::Widgets(false)));
         assert_eq!(menu.fly_start, None, "the flyout opens shut");
-        assert_eq!(menu.main_len(), 4);
+        assert_eq!(menu.main_len(), 5);
     }
 
     /// The correction this round: opening the widget list moves nothing. Its
@@ -704,7 +712,7 @@ mod tests {
         let dock = Dock::new();
         let mut menu = Menu::for_widget((10.0, 10.0), View::Plan, Space::TopLeft, false);
         let shut = items(&menu);
-        let at = 3;
+        let at = 4;
 
         assert!(menu.fold(at, &dock));
         assert_eq!(menu.rows[at].item, Item::Widgets(true));
@@ -761,7 +769,7 @@ mod tests {
         );
         assert_eq!(menu.fly_width_chars(), 0, "a shut flyout is no box at all");
         let column = menu.width_chars();
-        menu.fold(3, &dock);
+        menu.fold(4, &dock);
         assert_eq!(
             menu.width_chars(),
             column,
@@ -786,7 +794,7 @@ mod tests {
     fn the_flyout_marks_what_is_closed_and_every_row_of_it_can_be_picked() {
         let dock = Dock::hiding(&[View::Hardware, View::Files]);
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
-        let at = 3;
+        let at = 4;
         menu.fold(at, &dock);
         for (step, view) in switchable().into_iter().enumerate() {
             let index = at + 1 + step;
@@ -851,7 +859,7 @@ mod tests {
     fn the_flyout_reads_its_marks_off_the_dock_again_without_moving_a_row() {
         let mut dock = Dock::new();
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
-        menu.fold(3, &dock);
+        menu.fold(4, &dock);
         let places = fly_views(&menu);
 
         assert!(dock.hide(View::Hardware));
@@ -859,13 +867,13 @@ mod tests {
         assert_eq!(fly_views(&menu), places, "no row moved");
         for (step, view) in switchable().into_iter().enumerate() {
             assert_eq!(
-                menu.pick(4 + step),
+                menu.pick(5 + step),
                 Some(Item::Widget(view, view == View::Hardware))
             );
         }
         // Nothing to read, either because the flyout is shut or because the
         // menu has no widget row at all.
-        menu.fold(3, &dock);
+        menu.fold(4, &dock);
         assert!(!menu.relist(&dock));
         assert!(!Menu::for_input((0.0, 0.0), false).relist(&dock));
     }
@@ -886,17 +894,17 @@ mod tests {
         let dock = Dock::new();
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
         assert!(
-            !menu.scroll(1, true, 4),
+            !menu.scroll(1, true, 5),
             "a menu that fits has nothing to scroll"
         );
         assert!(menu.scroll(99, true, 3));
-        assert_eq!(menu.first, 1, "it stops at the last row of the column");
+        assert_eq!(menu.first, 2, "it stops at the last row of the column");
         assert!(menu.scroll(99, false, 3));
         assert_eq!(menu.first, 0);
         assert!(!menu.scroll(1, false, 3));
-        menu.fold(3, &dock);
+        menu.fold(4, &dock);
         assert!(
-            !menu.scroll(1, true, 4),
+            !menu.scroll(1, true, 5),
             "the flyout added nothing to scroll through"
         );
     }
@@ -913,7 +921,11 @@ mod tests {
         assert_eq!(menu.cursor, Some(2), "the greyed copy row was stepped over");
         assert!(menu.walk(true, 8));
         assert_eq!(menu.cursor, Some(3));
+        assert!(menu.walk(true, 8));
+        assert_eq!(menu.cursor, Some(4));
         assert!(!menu.walk(true, 8), "it stopped at the end");
+        assert_eq!(menu.cursor, Some(4));
+        assert!(menu.walk(false, 8));
         assert_eq!(menu.cursor, Some(3));
         assert!(menu.walk(false, 8));
         assert_eq!(menu.cursor, Some(2));
@@ -925,7 +937,7 @@ mod tests {
         // useful on a menu that has only just opened.
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
         assert!(menu.walk(false, 8));
-        assert_eq!(menu.cursor, Some(3));
+        assert_eq!(menu.cursor, Some(4));
     }
 
     /// The flyout opens on rollover, the way every desktop menu opens its
@@ -936,23 +948,23 @@ mod tests {
     fn resting_on_the_header_opens_the_flyout_and_resting_elsewhere_shuts_it() {
         let dock = Dock::new();
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, true);
-        assert!(menu.hover(Some(3), &dock), "rollover did not open it");
-        assert_eq!(menu.rows[3].item, Item::Widgets(true));
+        assert!(menu.hover(Some(4), &dock), "rollover did not open it");
+        assert_eq!(menu.rows[4].item, Item::Widgets(true));
         let fly = menu.fly_start.expect("the flyout is out");
 
         // Inside the flyout, and off the menu entirely: it stays out.
         assert!(!menu.hover(Some(fly + 2), &dock));
-        assert_eq!(menu.rows[3].item, Item::Widgets(true));
+        assert_eq!(menu.rows[4].item, Item::Widgets(true));
         assert!(!menu.hover(None, &dock));
-        assert_eq!(menu.rows[3].item, Item::Widgets(true));
+        assert_eq!(menu.rows[4].item, Item::Widgets(true));
 
         // Back on the header: still out, not toggled shut under the pointer.
-        assert!(!menu.hover(Some(3), &dock));
-        assert_eq!(menu.rows[3].item, Item::Widgets(true));
+        assert!(!menu.hover(Some(4), &dock));
+        assert_eq!(menu.rows[4].item, Item::Widgets(true));
 
         // Resting on another row of the column puts it away.
         assert!(menu.hover(Some(0), &dock));
-        assert_eq!(menu.rows[3].item, Item::Widgets(false));
+        assert_eq!(menu.rows[4].item, Item::Widgets(false));
         assert_eq!(menu.fly_start, None);
     }
 
@@ -979,16 +991,16 @@ mod tests {
     fn the_arrows_open_the_flyout_step_in_and_out_and_shut_it() {
         let dock = Dock::new();
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
-        menu.cursor = Some(3);
+        menu.cursor = Some(4);
 
         assert!(menu.unfold_here(&dock, 20), "right did not open the flyout");
-        assert_eq!(menu.rows[3].item, Item::Widgets(true));
-        assert_eq!(menu.cursor, Some(3), "the cursor stayed on the header");
+        assert_eq!(menu.rows[4].item, Item::Widgets(true));
+        assert_eq!(menu.cursor, Some(4), "the cursor stayed on the header");
 
         // Right again steps into the flyout, onto its first row.
         assert!(menu.unfold_here(&dock, 20));
-        assert_eq!(menu.cursor, Some(4));
-        assert!(matches!(menu.rows[4].item, Item::Widget(..)));
+        assert_eq!(menu.cursor, Some(5));
+        assert!(matches!(menu.rows[5].item, Item::Widget(..)));
         assert!(
             !menu.unfold_here(&dock, 20),
             "a row that is not a header does not open"
@@ -996,9 +1008,9 @@ mod tests {
 
         // Left from inside steps out to the header; left again shuts it.
         assert!(menu.fold_here(&dock, 20));
-        assert_eq!(menu.cursor, Some(3));
+        assert_eq!(menu.cursor, Some(4));
         assert!(menu.fold_here(&dock, 20));
-        assert_eq!(menu.rows[3].item, Item::Widgets(false));
+        assert_eq!(menu.rows[4].item, Item::Widgets(false));
         assert_eq!(menu.fly_start, None);
         assert!(
             !menu.fold_here(&dock, 20),
@@ -1014,7 +1026,7 @@ mod tests {
         let dock = Dock::new();
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, true);
         let rows = 3;
-        for expect in [0usize, 1, 2, 3] {
+        for expect in [0usize, 1, 2, 3, 4] {
             menu.walk(true, rows);
             assert_eq!(menu.cursor, Some(expect));
             let at = expect;
@@ -1024,12 +1036,12 @@ mod tests {
                 menu.first
             );
         }
-        assert_eq!(menu.first, 1, "the column followed the cursor down");
-        menu.fold(3, &dock);
-        menu.cursor = Some(3);
+        assert_eq!(menu.first, 2, "the column followed the cursor down");
+        menu.fold(4, &dock);
+        menu.cursor = Some(4);
         let first = menu.first;
         assert!(menu.walk(true, rows), "down crosses into the flyout");
-        assert_eq!(menu.cursor, Some(4));
+        assert_eq!(menu.cursor, Some(5));
         assert_eq!(menu.first, first, "the flyout does not scroll the column");
     }
 
@@ -1088,7 +1100,7 @@ mod tests {
     fn every_row_of_every_menu_is_marked_in_its_gutter() {
         let dock = Dock::hiding(&[View::Hardware]);
         let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, true);
-        menu.fold(3, &dock);
+        menu.fold(4, &dock);
         let prompt = Menu::for_input((0.0, 0.0), true);
         let session = Menu::for_session((0.0, 0.0), 0, false);
         for row in menu

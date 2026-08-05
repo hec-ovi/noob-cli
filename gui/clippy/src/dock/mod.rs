@@ -604,6 +604,83 @@ impl Dock {
         order.get((at + 1) % order.len()).copied()
     }
 
+    /// The arrangement as one settings-file word: the four cells joined by
+    /// `|`, each cell its tabs joined by `,`, the active tab marked `*`.
+    /// `output*,activity|plan*|hardware*,context,session|agents*`.
+    ///
+    /// A view not named is hidden. The agent view is never named: it is a
+    /// window onto one running sub-agent, and there is no agent to show at
+    /// the next launch.
+    ///
+    /// No spaces anywhere, because a settings value ends at the first blank.
+    pub fn arrangement(&self) -> String {
+        let cells: Vec<String> = Space::ALL
+            .into_iter()
+            .map(|space| {
+                let slot = self.slot(space);
+                slot.views
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, view)| **view != View::Agent)
+                    .map(|(at, view)| {
+                        let mark = if at == slot.active { "*" } else { "" };
+                        format!("{}{mark}", view.label().to_ascii_lowercase())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .collect();
+        cells.join("|")
+    }
+
+    /// The arrangement a settings-file word describes, or `None` when the
+    /// word does not describe one: not four cells, a name that is no view,
+    /// a view named twice, or nothing visible at all. Fail closed and the
+    /// caller falls back to the default, which is what a hand-edited line
+    /// deserves instead of a half-built window.
+    ///
+    /// Views not named are hidden. The agent view is hidden whatever the
+    /// word says, for the reason [`Dock::arrangement`] never writes it.
+    pub fn from_arrangement(word: &str) -> Option<Dock> {
+        let cells: Vec<&str> = word.split('|').collect();
+        if cells.len() != Space::ALL.len() {
+            return None;
+        }
+        let mut dock = Dock::full();
+        let mut seen = Vec::new();
+        for (space, cell) in Space::ALL.into_iter().zip(&cells) {
+            let slot = dock.slot_mut(space);
+            slot.views.clear();
+            slot.active = 0;
+            for (at, tab) in cell.split(',').filter(|t| !t.is_empty()).enumerate() {
+                let (name, active) = match tab.strip_suffix('*') {
+                    Some(name) => (name, true),
+                    None => (tab, false),
+                };
+                let view = View::ALL
+                    .into_iter()
+                    .find(|view| view.label().eq_ignore_ascii_case(name))?;
+                if view == View::Agent || seen.contains(&view) {
+                    return None;
+                }
+                seen.push(view);
+                let slot = dock.slot_mut(space);
+                slot.views.push(view);
+                if active {
+                    slot.active = at;
+                }
+            }
+        }
+        if seen.is_empty() {
+            return None;
+        }
+        dock.hidden = View::ALL
+            .into_iter()
+            .filter(|view| !seen.contains(view))
+            .collect();
+        Some(dock)
+    }
+
     /// Whether the arrangement still holds: every view in exactly one space,
     /// every space showing one of its own, and every cell of the grid covered
     /// by a pane that exists.
@@ -1357,5 +1434,56 @@ mod tests {
         dock.unhide(View::Output);
         check(&dock, "one widget back");
         assert_eq!(dock.slot(Space::TopLeft).active(), Some(View::Output));
+    }
+
+    /// The settings file remembers the arrangement, so what is written must
+    /// come back as the dock it described: tabs, order, active tab, hidden
+    /// views, all of it.
+    #[test]
+    fn an_arrangement_survives_the_settings_file() {
+        let mut dock = Dock::hiding(&[View::Files]);
+        dock.move_view(View::Activity, Space::BottomRight);
+        dock.slot_mut(Space::TopRight).show(View::Context);
+        let word = dock.arrangement();
+        assert!(!word.contains(' '), "a settings value ends at a blank: {word}");
+        let back = Dock::from_arrangement(&word).expect("its own word parses");
+        for space in Space::ALL {
+            assert_eq!(back.slot(space).views, dock.slot(space).views, "{word}");
+            assert_eq!(back.slot(space).active(), dock.slot(space).active(), "{word}");
+        }
+        assert!(back.is_sound());
+        assert!(back.hidden.contains(&View::Files));
+        assert!(back.hidden.contains(&View::Agent));
+    }
+
+    /// A hand-edited word that does not describe an arrangement falls back
+    /// rather than half-building: wrong cell count, unknown names, a view in
+    /// two cells, the agent view, or nothing at all.
+    #[test]
+    fn a_broken_arrangement_word_is_refused_whole() {
+        for word in [
+            "output|plan|hardware",
+            "output|plan|hardware|agents|extra",
+            "outpvt*|plan|hardware|agents",
+            "output,output|plan|hardware|agents",
+            "output|plan|output|agents",
+            "agent*|plan|hardware|agents",
+            "|||",
+            "",
+        ] {
+            assert!(Dock::from_arrangement(word).is_none(), "{word:?} parsed");
+        }
+    }
+
+    /// The agent view is a window onto one running sub-agent, so it is never
+    /// written and never read back visible.
+    #[test]
+    fn the_agent_view_stays_out_of_the_settings_file() {
+        let mut dock = Dock::new();
+        dock.unhide(View::Agent);
+        assert!(!dock.arrangement().contains("agent,"), "{}", dock.arrangement());
+        assert!(!dock.arrangement().contains("agent*"), "{}", dock.arrangement());
+        let back = Dock::from_arrangement(&dock.arrangement()).unwrap();
+        assert!(back.hidden.contains(&View::Agent));
     }
 }

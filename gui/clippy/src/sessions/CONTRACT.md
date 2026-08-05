@@ -20,6 +20,9 @@ pub struct Context;          // tokens held / window, percent()
 pub struct Listing;          // the rows plus any read trouble
 pub fn dir() -> Option<PathBuf>;    // the agent's sessions directory
 pub fn read(at: &Path, index: &Index, folders: &dyn Folders) -> Listing;
+pub fn latest_for(listing: &Listing, folder: &Path) -> Option<String>;
+                             // the newest live session of one folder,
+                             // which is what `no0b <folder>` resumes
 pub fn ago(when: SystemTime, now: SystemTime) -> String;
 pub struct Index;            // id -> workspace (+context) memory, capped
 pub const REMEMBERED: usize = 400;

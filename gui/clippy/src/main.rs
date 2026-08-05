@@ -416,8 +416,15 @@ impl App {
         let mut state = State::new();
         state.day_zero = local_day_second();
         let epoch = Instant::now();
+        // The saved arrangement wins over the two switches when it parses;
+        // a hand-broken line falls back whole rather than half-building.
+        let dock = config
+            .dock
+            .as_deref()
+            .and_then(Dock::from_arrangement)
+            .unwrap_or_else(|| Dock::hiding(&hidden));
         App {
-            dock: Dock::hiding(&hidden),
+            dock,
             left_width: [config.left_width, config.left_width_bottom],
             top_height: [config.top_height, config.top_height_right],
             settings_rail: config.settings_rail,
@@ -1983,17 +1990,22 @@ impl App {
         self.top_height = [self.config.top_height, self.config.top_height_right];
         self.settings_rail = self.config.settings_rail;
         self.restyle();
+        let mut changed = false;
         for (view, wanted) in panes {
             match wanted {
                 true => {
-                    self.dock.unhide(view);
+                    changed |= self.dock.unhide(view);
                 }
                 false => {
                     if self.dock.hide(view) {
                         self.forget_selection_in(view);
+                        changed = true;
                     }
                 }
             }
+        }
+        if changed {
+            self.save_dock();
         }
     }
 
@@ -2887,6 +2899,9 @@ impl App {
             (Item::Settings, _) => {
                 self.open_settings();
             }
+            (Item::NewSession, _) => {
+                self.new_session();
+            }
             // The flyout header: its rows come out beside it and the menu
             // stays open over them. A press on a header the rollover already
             // opened leaves it open, or the click would take back what the
@@ -2946,8 +2961,39 @@ impl App {
     fn close_view(&mut self, view: View) {
         if self.dock.hide(view) {
             self.forget_selection_in(view);
+            self.save_dock();
             self.dirty = true;
         }
+    }
+
+    /// Write the arrangement down, so the next launch opens the panes where
+    /// they were left. On every user change: a moved tab, a shown or closed
+    /// widget, a switched tab. Never for the agent view's comings and goings,
+    /// which are the session's, not the user's, and are not in the word anyway.
+    fn save_dock(&mut self) {
+        let Some(path) = config::path() else {
+            return;
+        };
+        let _ = config::write_setting(&path, "dock", Some(&self.dock.arrangement()));
+    }
+
+    /// Right click > New session: stop this agent and go back to the first
+    /// screen, where a folder or a saved session is chosen. Dropping the link
+    /// stops the child; the window state that belonged to the session goes
+    /// with it, and the picker owns the screen until something is chosen.
+    fn new_session(&mut self) {
+        self.link = None;
+        self.state = State::new();
+        self.state.day_zero = local_day_second();
+        self.selection = None;
+        self.scrolls = scroll::Scrolls::default();
+        self.file_scroll = 0;
+        self.last_open_file = 0;
+        self.popup_scroll = 0;
+        self.trouble = None;
+        self.esc_armed = None;
+        self.session = None;
+        self.open_picker();
     }
 
 
@@ -3265,12 +3311,14 @@ impl App {
             if self.dock.is_hidden(drag.view) {
                 self.forget_selection_in(drag.view);
             }
+            self.save_dock();
             self.holding = None;
             self.dirty = true;
             return;
         }
         if let Some((view, space, _)) = self.holding.take() {
             click_tab(self.dock.slot_mut(space), view);
+            self.save_dock();
             self.dirty = true;
         }
     }
@@ -3662,7 +3710,10 @@ impl App {
                     .hit(self.cursor.x as f32, self.cursor.y as f32)
                     .and_then(Hit::space)
                     .unwrap_or(Space::TopRight);
-                self.dirty |= self.dock.slot_mut(space).cycle();
+                if self.dock.slot_mut(space).cycle() {
+                    self.save_dock();
+                    self.dirty = true;
+                }
             }
             Key::Named(NamedKey::Tab) => {
                 let showing = Space::ALL
@@ -3676,6 +3727,7 @@ impl App {
                     .unwrap_or(showing);
                 if let Some(next) = self.dock.after(at) {
                     self.dock.reveal(next);
+                    self.save_dock();
                 }
                 self.dirty = true;
             }
@@ -4083,10 +4135,15 @@ impl ApplicationHandler<Wake> for App {
         }
         self.window = Some(window);
         // A folder on the command line means the window was opened for it and
-        // there is nothing to ask. Without one, the picker is the first thing on
-        // screen and it calls `connect` itself.
+        // there is nothing to ask: the newest session saved for that folder
+        // carries on, and only a folder with none starts fresh. Without one,
+        // the picker is the first thing on screen and it calls `connect`
+        // itself; right click > New session is the way back to it.
         match self.workspace.take() {
-            Some(workspace) => self.connect(Chosen::folder(workspace)),
+            Some(workspace) => {
+                let session = sessions::latest_for(&self.saved_sessions(), &workspace);
+                self.connect(Chosen { workspace, session });
+            }
             None => self.open_picker(),
         }
     }

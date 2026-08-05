@@ -4669,6 +4669,102 @@ mod tests {
         }
     }
 
+    /// The transcript's bands sat one row above their text the moment the
+    /// conversation held emoji. The bytes here are the session that showed it
+    /// (19fd1a66dd3, 2026-08-05): a bold header, a row of spaced emoji, and
+    /// the server's own error line. The claim is the pane's whole geometry:
+    /// every line's counted rows equal the rows the renderer really lays out,
+    /// so the selection band, the pointer and the scrollbar sit on the glyphs.
+    #[test]
+    fn the_transcript_is_counted_in_the_rows_it_is_drawn_in() {
+        let mut state = State::new();
+        state.apply(noob_proto::Event::SessionStart {
+            id: "s1".into(),
+            workspace: "/w".into(),
+            model: "m".into(),
+            resumed: false,
+        });
+        state.apply(noob_proto::Event::TurnStart { turn: 1 });
+        state.apply(noob_proto::Event::TextDelta {
+            d: "Here's a big list of emojis/icons I can use:\n\n\
+                **Smileys & Emotions**\n\
+                \u{1f600} \u{1f603} \u{1f604} \u{1f601} \u{1f606} \u{1f605} \u{1f923} \u{1f602}"
+                .into(),
+        });
+        state.apply(noob_proto::Event::Error {
+            line: "model response failed: The model produced output that does not match \
+                   the expected peg-native format; the partial response was discarded and \
+                   no tool calls were executed"
+                .into(),
+        });
+
+        let dock = a_dock_showing(View::Output);
+        let space = Space::ALL
+            .into_iter()
+            .find(|space| dock.slot(*space).active() == Some(View::Output))
+            .expect("the output pane is in the window");
+        let shape = shape(&dock, &[]);
+        let layout = Layout::compute(1180.0, 760.0, &shape);
+        let panel = layout.placed(space).body;
+        let cols = cols_of(panel, 8.0);
+        let skin = Skin::from(&Config::default());
+        let scene = build(&Frame {
+            state: &state,
+            scrolls: &crate::scroll::Scrolls::default(),
+            file_scroll: 0,
+            monitor: &Monitor::new(),
+            dock: &dock,
+            skin: &skin,
+            layout: &layout,
+            prompt: &crate::prompt::Prompt::default(),
+            column: 8.0,
+            pane_column: 8.0,
+            body_size: 14.0,
+            pane_size: 13.0,
+            clock: 0.0,
+            orb_morph: None,
+            drag: None,
+            hot: None,
+            trouble: None,
+            esc_armed: false,
+            popup_scroll: 0,
+            cursor: (-100.0, -100.0),
+            selection: None,
+            menu: None,
+            picker: None,
+            settings: None,
+        });
+
+        let text = scene
+            .texts
+            .iter()
+            .find(|text| text.at == panel.inset(PAD))
+            .expect("the transcript draws its text");
+        assert_eq!(text.wrap_cols, Some(cols), "the box names its columns");
+
+        // The rows the renderer will really lay out, per logical line.
+        let laid: String = noob_draw::Run::wrapped(&text.runs, cols, text.wrap_break)
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect();
+        // The painter ends every line with a newline, the last included, so
+        // the laid buffer carries one empty row after the content. It is
+        // clipped, nothing is counted against it, and it is not a content row.
+        let drawn_rows = laid.strip_suffix('\n').unwrap_or(&laid).split('\n').count();
+
+        let counted: usize = (0..)
+            .map_while(|n| {
+                let spans = state.output.rows_of_line(n, cols);
+                (!spans.is_empty()).then_some(spans.len())
+            })
+            .sum();
+        assert_eq!(
+            drawn_rows, counted,
+            "the renderer lays out {drawn_rows} rows but the pane counts {counted}: \
+             every band and click below the difference lands on the wrong text\n{laid:?}"
+        );
+    }
+
     /// The activity pane is a clipped list: every entry is exactly one
     /// screen row, that row is the one the wrap rule would have drawn first
     /// (so it still breaks at a blank, never mid-word when a blank exists),

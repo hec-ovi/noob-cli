@@ -3,6 +3,19 @@
 Notable changes, newest first. Releases before 0.6.0 are recorded in the git
 tags rather than here; this file starts where it was added.
 
+## 0.11.11 - 2026-08-05
+
+- `no0b <folder>` carries on the newest session saved for that folder;
+  only a folder with none starts fresh. The first screen (bare `no0b`) still
+  offers every folder and saved session.
+- Right click gains "New session": it stops the running agent and returns to
+  the first screen, where a folder or a saved session is chosen. That screen
+  was unreachable once a window was connected.
+- The window remembers its arrangement. Every tab move, close, show and
+  switch writes a `dock` line to the settings file, and the next launch opens
+  the panes exactly where they were left. Delete the line to get the default
+  arrangement back.
+
 ## 0.11.10 - 2026-08-05
 
 - A column is a cell on screen, not a character. An emoji and a CJK ideograph

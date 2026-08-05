@@ -1338,7 +1338,7 @@ fn the_copy_row_reads_the_selection_of_its_own_pane() {
 fn picking_a_widget_takes_it_out_of_the_window_or_puts_it_back() {
     let mut dock = Dock::new();
     let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
-    menu.fold(3, &dock);
+    menu.fold(4, &dock);
 
     // In the window, and out: no tab, no space, nothing walks to it. Dragged
     // somewhere else first, so where it comes back to says something.
@@ -1369,13 +1369,13 @@ fn picking_a_widget_takes_it_out_of_the_window_or_puts_it_back() {
 
     // And the marks follow, so the row says which way it will go next.
     assert_eq!(
-        menu.pick(4 + 7),
+        menu.pick(5 + 7),
         Some(Item::Widget(View::Files, false)),
         "FILES is the eighth widget and it is back in the window"
     );
     toggle_view(&mut dock, &mut menu, View::Files);
     assert_eq!(
-        menu.pick(4 + 7),
+        menu.pick(5 + 7),
         Some(Item::Widget(View::Files, true))
     );
 }
@@ -1389,7 +1389,7 @@ fn picking_a_widget_takes_it_out_of_the_window_or_puts_it_back() {
 fn the_menu_stays_open_over_the_list_unless_its_own_widget_goes_out() {
     let mut dock = Dock::new();
     let mut menu = Menu::for_widget((0.0, 0.0), View::Plan, Space::TopLeft, false);
-    menu.fold(3, &dock);
+    menu.fold(4, &dock);
 
     // Another widget, either way round: the menu stays.
     assert!(toggle_view(&mut dock, &mut menu, View::Hardware).keep_open);
@@ -1415,7 +1415,7 @@ fn the_menu_stays_open_over_the_list_unless_its_own_widget_goes_out() {
 fn switching_every_widget_off_and_back_on_keeps_the_dock_sound() {
     let mut dock = Dock::new();
     let mut menu = Menu::for_widget((0.0, 0.0), View::Output, Space::TopLeft, false);
-    menu.fold(3, &dock);
+    menu.fold(4, &dock);
     // Every switchable view: the agent-output one has no switch, opening
     // and closing with the agent it is on instead.
     let switchable: Vec<View> = View::ALL
@@ -1439,7 +1439,7 @@ fn switching_every_widget_off_and_back_on_keeps_the_dock_sound() {
     // Every row of the list says the widget is in the window again.
     for (step, view) in switchable.iter().copied().enumerate() {
         assert_eq!(
-            menu.pick(4 + step),
+            menu.pick(5 + step),
             Some(Item::Widget(view, false)),
             "{view:?}"
         );
@@ -1698,7 +1698,7 @@ fn the_layout_the_panel_stopped_listing_still_comes_out_of_the_file() {
     assert!(dock.is_hidden(View::Activity));
     assert!(!dock.is_hidden(View::Files));
     let mut menu = Menu::for_widget((0.0, 0.0), View::Output, Space::TopLeft, false);
-    menu.fold(3, &dock);
+    menu.fold(4, &dock);
     assert!(!toggle_view(&mut dock, &mut menu, View::Activity).hidden);
     assert!(!dock.is_hidden(View::Activity), "the menu cannot reopen it");
 
