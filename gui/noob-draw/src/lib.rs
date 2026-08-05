@@ -1270,15 +1270,44 @@ mod tests {
     /// emoji. The monospace face has none of them, so without fallback each one
     /// came out as a blank box. These are the three the window was caught on,
     /// plus a check mark and an arrow, and none of them is named anywhere in
-    /// this crate: the point is that any character resolves, not that a listed
+    /// this crate: the point is that any character arrives, not that a listed
     /// set does.
+    ///
+    /// Resolving to a real glyph id is half the claim. The other half is that
+    /// the glyph rasterizes to pixels, which is what the atlas uploads, so this
+    /// goes as far as a test without a GPU can: shape it, then draw it into an
+    /// image and look for ink.
     #[test]
-    fn a_character_the_text_face_lacks_still_resolves_to_a_glyph() {
+    fn a_character_the_text_face_lacks_still_draws() {
+        let mut fonts = icon_fonts();
+        let mut cache = SwashCache::new();
         for ch in ['\u{2705}', '\u{274c}', '\u{1f604}', '\u{2713}', '\u{2192}'] {
-            let ids = glyph_ids(&ch.to_string(), Family::Monospace);
+            let mut buffer = Buffer::new(&mut fonts, Metrics::new(14.0, 20.0));
+            buffer.set_size(Some(400.0), Some(40.0));
+            buffer.set_text(
+                &ch.to_string(),
+                &Attrs::new().family(Family::Monospace),
+                SHAPING,
+                None,
+            );
+            buffer.shape_until_scroll(&mut fonts, false);
+            let glyphs: Vec<_> = buffer
+                .layout_runs()
+                .flat_map(|run| run.glyphs.iter().cloned())
+                .collect();
+            assert_eq!(glyphs.len(), 1, "U+{:04X} shaped oddly", ch as u32);
+            assert_ne!(
+                glyphs[0].glyph_id, 0,
+                "U+{:04X} resolved to .notdef, so it draws as a blank box",
+                ch as u32
+            );
+            let key = glyphs[0].physical((0.0, 0.0), 1.0).cache_key;
+            let image = cache
+                .get_image_uncached(&mut fonts, key)
+                .unwrap_or_else(|| panic!("U+{:04X} rasterized to nothing", ch as u32));
             assert!(
-                ids.iter().all(|id| *id != 0),
-                "U+{:04X} resolved to .notdef, so it draws as a blank box: {ids:?}",
+                image.data.iter().any(|byte| *byte != 0),
+                "U+{:04X} rasterized to a blank image",
                 ch as u32
             );
         }
