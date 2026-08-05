@@ -39,7 +39,7 @@
 //! rectangles were not, which is exactly the drift the single flag prevents.
 
 use glyphon::{
-    Attrs, Buffer, Cache, Color, ColorMode, Family, FontSystem, Metrics, Resolution, Shaping,
+    Attrs, Buffer, Cache, Color, ColorMode, Family, FontSystem, Metrics, Resolution,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
 };
 use std::ops::Range;
@@ -333,39 +333,8 @@ pub fn text_color_mode(srgb: bool) -> ColorMode {
     }
 }
 
-/// The family name of the embedded symbol font.
-///
-/// Symbols Nerd Font Mono, shipped in the binary rather than looked for on the
-/// system. It carries the Codicon, Seti and Devicon sets, which is what a
-/// window button and a file-type mark need.
-const ICON_FAMILY: &str = "Symbols Nerd Font Mono";
-
-/// The bytes of that font, embedded at build time.
-const ICON_FONT: &[u8] = include_bytes!("../fonts/SymbolsNerdFontMono-Regular.ttf");
-
-/// How every buffer in this crate is shaped.
-///
-/// `Advanced` is the only one of the two strategies that looks in the system's
-/// other fonts for a character the text face lacks. The cheap one resolves such
-/// a character to `.notdef` and draws it as a blank box, which is what an emoji,
-/// an accent or a CJK character in the transcript came out as.
-///
-/// It is also the faster of the two here, measured, because `shape-run-cache`
-/// is on: a run that shaped on an earlier frame is looked up instead of shaped
-/// again, and the buffers are rebuilt every frame.
-///
-/// What it does not do is make a substituted glyph one column wide. The
-/// fallback face carries its own advances, so a row with an emoji on it draws
-/// wider than its column count, and the text after the emoji sits right of
-/// where the column grid puts it.
-const SHAPING: Shaping = Shaping::Advanced;
-
-/// A font system holding the system fonts plus the embedded symbol font.
-fn icon_fonts() -> FontSystem {
-    let mut system = FontSystem::new();
-    system.db_mut().load_font_data(ICON_FONT.to_vec());
-    system
-}
+mod fonts;
+use fonts::{EMOJI_FAMILY, Emoji, ICON_FAMILY, SHAPING};
 
 /// Whether the embedded symbol font has a real glyph for this character.
 ///
@@ -377,13 +346,13 @@ fn icon_fonts() -> FontSystem {
 /// Builds a whole `FontSystem` per call, which is why this is for tests and not
 /// for a draw path.
 pub fn has_glyph(ch: char) -> bool {
-    let mut fonts = icon_fonts();
+    let mut fonts = fonts::pool();
     let mut buffer = Buffer::new(&mut fonts, Metrics::new(14.0, 20.0));
     buffer.set_size(Some(64.0), Some(32.0));
     buffer.set_text(
         &ch.to_string(),
         &Attrs::new().family(Family::Name(ICON_FAMILY)),
-        SHAPING,
+        fonts::COVERAGE,
         None,
     );
     buffer.shape_until_scroll(&mut fonts, false);
@@ -846,6 +815,9 @@ pub struct Renderer {
     /// allocation per frame.
     written: Vec<Rect>,
     font_system: FontSystem,
+    /// Which characters come from the embedded emoji font, learned as they
+    /// appear and kept for the life of the window.
+    emoji: Emoji,
     swash: SwashCache,
     atlas: TextAtlas,
     viewport: Viewport,
@@ -954,7 +926,8 @@ impl Renderer {
             capacity,
             srgb,
             written: Vec::new(),
-            font_system: icon_fonts(),
+            font_system: fonts::pool(),
+            emoji: Emoji::default(),
             swash: SwashCache::new(),
             atlas,
             viewport,
@@ -1098,22 +1071,40 @@ impl Renderer {
                     None => item.runs.as_slice(),
                 };
                 match runs {
-                    [only] if only.color.is_none() => {
+                    // The whole box in one face and one colour: no span list to
+                    // build. Plain ASCII cannot hold an emoji, so the check that
+                    // keeps this path is a byte scan.
+                    [only] if only.color.is_none() && !only.icon && only.text.is_ascii() => {
                         buffer.set_text(&only.text, &mono, SHAPING, None);
                     }
                     runs => {
-                        let spans = runs.iter().map(|run| {
-                            let attrs = Attrs::new().family(if run.icon {
-                                Family::Name(ICON_FAMILY)
-                            } else {
-                                Family::Monospace
-                            });
-                            let attrs = match run.color {
+                        // An emoji comes from the font this crate ships, never
+                        // from whatever the machine happens to have, so a line of
+                        // them is one style. Icon runs already name their face.
+                        let mut spans: Vec<(&str, Attrs)> = Vec::new();
+                        for run in runs {
+                            let paint = |attrs: Attrs<'static>| match run.color {
                                 Some([r, g, b, a]) => attrs.color(Color::rgba(r, g, b, a)),
                                 None => attrs,
                             };
-                            (run.text.as_str(), attrs)
-                        });
+                            if run.icon {
+                                spans.push((
+                                    run.text.as_str(),
+                                    paint(Attrs::new().family(Family::Name(ICON_FAMILY))),
+                                ));
+                                continue;
+                            }
+                            for (text, emoji) in
+                                self.emoji.spans(&mut self.font_system, &run.text)
+                            {
+                                let family = if emoji {
+                                    Family::Name(EMOJI_FAMILY)
+                                } else {
+                                    Family::Monospace
+                                };
+                                spans.push((text, paint(Attrs::new().family(family))));
+                            }
+                        }
                         buffer.set_rich_text(spans, &mono, SHAPING, None);
                     }
                 }
@@ -1225,7 +1216,7 @@ mod tests {
     /// Glyph 0 is `.notdef`, the empty box a font returns for a character it
     /// does not have.
     fn glyph_ids(text: &str, family: Family) -> Vec<u16> {
-        let mut fonts = icon_fonts();
+        let mut fonts = fonts::pool();
         let mut buffer = Buffer::new(&mut fonts, Metrics::new(14.0, 20.0));
         buffer.set_size(Some(400.0), Some(40.0));
         buffer.set_text(text, &Attrs::new().family(family), SHAPING, None);
@@ -1279,7 +1270,7 @@ mod tests {
     /// image and look for ink.
     #[test]
     fn a_character_the_text_face_lacks_still_draws() {
-        let mut fonts = icon_fonts();
+        let mut fonts = fonts::pool();
         let mut cache = SwashCache::new();
         for ch in ['\u{2705}', '\u{274c}', '\u{1f604}', '\u{2713}', '\u{2192}'] {
             let mut buffer = Buffer::new(&mut fonts, Metrics::new(14.0, 20.0));
@@ -1702,7 +1693,7 @@ mod tests {
         wrap: Wrap,
     ) -> Vec<String> {
         let size = 14.0;
-        let mut fonts = icon_fonts();
+        let mut fonts = fonts::pool();
         let column = column_of(&mut fonts, size);
         let laid = match named {
             Some(at) => Run::wrapped(&[Run::plain(text)], cols, at).swap_remove(0).text,
@@ -1804,7 +1795,7 @@ mod tests {
     #[test]
     fn blanks_at_the_start_of_a_box_hold_their_columns() {
         let size = 14.0;
-        let mut fonts = icon_fonts();
+        let mut fonts = fonts::pool();
         let column = column_of(&mut fonts, size);
         let start_of = |fonts: &mut FontSystem, text: &str| -> f32 {
             let mut buffer = Buffer::new(fonts, Metrics::new(size, Text::line_for(size)));

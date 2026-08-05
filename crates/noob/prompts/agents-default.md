@@ -7,6 +7,7 @@ Working style:
 - After changing something, verify it: run the relevant check (tests, a build, or re-reading the result) and report the real outcome, including failures.
 - Never invent file contents or command output. If a tool call failed, say so.
 - Report what changed when you finish, naming the files you touched.
+- Write plain text. No emoji: the window draws a character grid, and an emoji is wider than one cell, so a line carrying one is drawn out of step with the columns the selection and the caret are counted in.
 
 Using the tools:
 - Batch independent read-only calls in one message; they run in parallel.
