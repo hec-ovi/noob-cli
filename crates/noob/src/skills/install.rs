@@ -1,6 +1,7 @@
-//! On-the-fly skill install and remove (the /skills command family; REPL
-//! only): local paths, git URLs, and the `owner/repo` GitHub shorthand, all
-//! staged beside the install root and published with one rename.
+//! On-the-fly skill install and remove (the /skills command family, and the
+//! skill tool's install action): local paths, git URLs, and the `owner/repo`
+//! GitHub shorthand, all staged beside the install root and published with
+//! one rename.
 
 use std::ffi::OsStr;
 use std::io::{Read, Write};
@@ -25,25 +26,62 @@ fn install_root(workspace: &Path) -> PathBuf {
     workspace.join(".noob/skills")
 }
 
+/// What the collision error tells the user to do, which depends on who owns
+/// the root: a workspace install has the /skills remove command, any other
+/// root is removed from the settings window or by hand.
+#[derive(Clone, Copy)]
+enum RemoveHint {
+    Repl,
+    ByHand,
+}
+
+impl RemoveHint {
+    fn collision(self, name: &str, dest: &Path) -> String {
+        match self {
+            RemoveHint::Repl => format!(
+                "a skill named {name:?} is already installed; remove it first with /skills remove {name}"
+            ),
+            RemoveHint::ByHand => format!(
+                "a skill named {name:?} is already installed at {}; remove it first",
+                dest.display()
+            ),
+        }
+    }
+}
+
 /// Install a skill from a local path (a skill directory or a bare SKILL.md),
 /// a git URL, or an `owner/repo` GitHub shorthand (the same registry shape
 /// `npx skills add` uses) into `<workspace>/.noob/skills/<name>`. The source
 /// is parsed and validated before anything is committed, so a malformed skill
 /// is rejected with a reason and nothing is copied. Returns the installed name.
 pub fn install(workspace: &Path, source: &str) -> Result<String, String> {
-    sweep_stale_staging(workspace);
+    install_into_root(&install_root(workspace), source, RemoveHint::Repl)
+}
+
+/// The same install aimed at an explicit skills root (the config dir's
+/// `skills/`, where the settings window installs and lists): the root's
+/// parent holds the hidden staging, the publish is the same one rename.
+pub fn install_into(skills_at: &Path, source: &str) -> Result<String, String> {
+    install_into_root(skills_at, source, RemoveHint::ByHand)
+}
+
+fn install_into_root(root: &Path, source: &str, hint: RemoveHint) -> Result<String, String> {
+    sweep_stale_staging(root);
     match git_url_for(source, Path::new(source).exists()) {
-        Some(url) => install_git(workspace, &url),
-        None => install_path(workspace, Path::new(source)),
+        Some(url) => install_git(root, &url, hint),
+        None => install_path(root, Path::new(source), hint),
     }
 }
 
-/// Remove sibling staging leftovers (`.noob/.skill-*`) whose embedded pid is
-/// no longer alive: a killed install can never clean up after itself, so the
-/// next install does. Entries whose pid is still alive (a concurrent install)
-/// or whose name does not parse are kept.
-fn sweep_stale_staging(workspace: &Path) {
-    let Ok(entries) = std::fs::read_dir(workspace.join(".noob")) else {
+/// Remove staging leftovers (`.skill-*` beside the root) whose embedded pid
+/// is no longer alive: a killed install can never clean up after itself, so
+/// the next install does. Entries whose pid is still alive (a concurrent
+/// install) or whose name does not parse are kept.
+fn sweep_stale_staging(root: &Path) {
+    let Some(parent) = root.parent() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
         return;
     };
     for entry in entries.flatten() {
@@ -97,7 +135,7 @@ pub(super) fn git_url_for(source: &str, exists_locally: bool) -> Option<String> 
     (valid(owner) && valid(repo)).then(|| format!("https://github.com/{owner}/{repo}.git"))
 }
 
-fn install_path(workspace: &Path, source: &Path) -> Result<String, String> {
+fn install_path(root: &Path, source: &Path, hint: RemoveHint) -> Result<String, String> {
     let source_type = std::fs::symlink_metadata(source)
         .map_err(|e| format!("cannot inspect {}: {e}", source.display()))?
         .file_type();
@@ -128,16 +166,14 @@ fn install_path(workspace: &Path, source: &Path) -> Result<String, String> {
     let parsed = parse(&text)?;
     let (name, _desc) = validate(&parsed.fields)?;
 
-    let dest = install_root(workspace).join(&name);
+    let dest = root.join(&name);
     if dest.exists() {
-        return Err(format!(
-            "a skill named {name:?} is already installed; remove it first with /skills remove {name}"
-        ));
+        return Err(hint.collision(&name, &dest));
     }
     // Build beside the skills root and publish with one rename. Discovery can
     // never observe half a skill, and a failed copy only leaves hidden staging
     // data that this invocation removes before returning.
-    let staging = staging_path(workspace, "install");
+    let staging = staging_path(root, "install");
     let copied = if source.is_dir() {
         copy_dir(&source, &staging)
     } else {
@@ -155,15 +191,13 @@ fn install_path(workspace: &Path, source: &Path) -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&staging);
         return Err("skill installation canceled by user".to_string());
     }
-    if let Err(error) = std::fs::create_dir_all(install_root(workspace)) {
+    if let Err(error) = std::fs::create_dir_all(root) {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(format!("cannot create the skills dir: {error}"));
     }
     if dest.exists() {
         let _ = std::fs::remove_dir_all(&staging);
-        return Err(format!(
-            "a skill named {name:?} was installed concurrently; remove it first with /skills remove {name}"
-        ));
+        return Err(hint.collision(&name, &dest));
     }
     if let Err(error) = std::fs::rename(&staging, &dest) {
         let _ = std::fs::remove_dir_all(&staging);
@@ -172,10 +206,10 @@ fn install_path(workspace: &Path, source: &Path) -> Result<String, String> {
     Ok(name)
 }
 
-fn install_git(workspace: &Path, url: &str) -> Result<String, String> {
+fn install_git(root: &Path, url: &str, hint: RemoveHint) -> Result<String, String> {
     // Clone into a hidden sibling of the install root. It is never a discovery
     // candidate, even if the process dies before cleanup.
-    let staging = staging_path(workspace, "git");
+    let staging = staging_path(root, "git");
     if let Some(parent) = staging.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create the skills dir: {e}"))?;
@@ -196,7 +230,7 @@ fn install_git(workspace: &Path, url: &str) -> Result<String, String> {
     let result = loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => {
-                break find_skill_dir(&staging).and_then(|dir| install_path(workspace, &dir));
+                break find_skill_dir(&staging).and_then(|dir| install_path(root, &dir, hint));
             }
             Ok(Some(_)) => {
                 let detail = error_reader.join().unwrap_or_default();
@@ -227,13 +261,14 @@ fn install_git(workspace: &Path, url: &str) -> Result<String, String> {
     result
 }
 
-fn staging_path(workspace: &Path, kind: &str) -> PathBuf {
+/// A hidden sibling of the skills root, never a discovery candidate.
+fn staging_path(root: &Path, kind: &str) -> PathBuf {
     let serial = STAGING_SERIAL.fetch_add(1, Ordering::Relaxed);
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    workspace.join(".noob").join(format!(
+    root.parent().unwrap_or(root).join(format!(
         ".skill-{kind}-{}-{stamp:x}-{serial:x}",
         std::process::id(),
     ))

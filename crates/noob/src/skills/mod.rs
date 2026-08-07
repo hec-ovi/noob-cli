@@ -13,7 +13,7 @@ mod install;
 mod tests;
 
 pub use frontmatter::body_of;
-pub use install::{install, remove};
+pub use install::{install, install_into, remove};
 
 /// Index section budget in chars (~1,000 tokens at chars/4).
 pub const INDEX_CHAR_BUDGET: usize = 4_000;

@@ -5,8 +5,9 @@ contractVersion: 1.0.0
 ## Purpose
 
 SKILL.md discovery and the L1 index (agentskills.io standard), plus install
-and remove for the `/skills` command family. Level 2, the `skill` tool, lives
-in the tools box; level 3 is a plain read of the skill's files.
+and remove for the `/skills` command family and the skill tool's install
+action. Level 2, the `skill` tool, lives in the tools box; level 3 is a
+plain read of the skill's files.
 
 ## Public surface
 
@@ -32,6 +33,9 @@ pub fn install(workspace: &Path, source: &str) -> Result<String, String>;
     // a local skill dir or bare SKILL.md, a git URL, or an owner/repo
     // GitHub shorthand; validated before anything is written; returns the
     // installed name
+pub fn install_into(skills_at: &Path, source: &str) -> Result<String, String>;
+    // the same install aimed at an explicit skills root (the config dir's
+    // skills/, shared with the settings window); staging beside that root
 pub fn remove(workspace: &Path, skill_dir: &Path) -> Result<(), String>;
 
 pub fn body_of(text: &str) -> (Cow<'_, str>, usize);

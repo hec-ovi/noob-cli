@@ -357,6 +357,28 @@ fn installing_from_the_workspace_root_does_not_copy_staging_into_itself() {
 }
 
 #[test]
+fn install_into_publishes_under_the_named_root_and_stages_beside_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("source");
+    write_skill(dir.path(), "source", &skill_md("global", "d"));
+    let root = dir.path().join("config/skills");
+    let name = install_into(&root, src.to_str().unwrap()).unwrap();
+    assert_eq!(name, "global");
+    assert!(root.join("global/SKILL.md").is_file());
+    // No staging residue beside the root, and the collision error names the
+    // installed directory instead of a REPL command that cannot remove it.
+    let leftovers: Vec<_> = std::fs::read_dir(root.parent().unwrap())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".skill-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    let err = install_into(&root, src.to_str().unwrap()).unwrap_err();
+    assert!(err.contains("already installed at"), "{err}");
+    assert!(!err.contains("/skills remove"), "{err}");
+}
+
+#[test]
 fn install_rejects_malformed_and_duplicate_without_writing() {
     let ws = tempfile::tempdir().unwrap();
     // Malformed frontmatter: rejected, nothing written.
