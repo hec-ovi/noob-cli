@@ -947,7 +947,7 @@ mod tests {
         );
         assert!(!ok.is_error, "{}", ok.content);
         assert!(
-            !ctx.grants.granted(&target)
+            !ctx.grants.holds(&target)
         );
         let refused = run(
             &ctx.core,

@@ -38,7 +38,7 @@ file per tool, one slice list per signature, no nested folders.
 | write, edit | `&Core, &FsState, &WriteGrants` |
 | grep, glob, ls | `&Core` |
 | bash | `&Core, &AtomicBool` |
-| skill | `&Core, &SkillsState, can_delegate: bool` |
+| skill | `&Core, &SkillsState, &WriteGrants, can_delegate: bool` |
 | plan | `&PlanState` |
 | context | `&ContextGauge` |
 | websearch | `&Core, &Evidence` |
@@ -88,6 +88,9 @@ is the closed class set; every classified error also says what to do next.
    dispatch itself.
 3. Unspent skills-write grants die at batch end (`grants.clear()` in the
    agent); a grant covers exactly one applied mutation of its exact target.
+   The skill tool's install action rides the same gate, keyed on the
+   install root (the config dir's `skills/`); a landed install raises
+   `SkillsState.installed` and the agent reloads discovery at batch end.
 4. Truncation policy is resolved once at bootstrap; when lifted, no
    truncation marker ever renders.
 5. Every description the model reads is a file: `prompts/tools/<name>.md`,

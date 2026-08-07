@@ -79,7 +79,10 @@ renders and never decides.
    raises the effective threshold it reports.
 4. Every batch ends with unspent skills-write grants cleared; a canceled
    batch heals its dangling tool calls before the next request, so the
-   transcript is always API-valid.
+   transcript is always API-valid. A skills-dir write and the skill tool's
+   install both plan through a user confirmation (`ui.ask`, every mode;
+   headless denies) that grants the exact target, and an install that
+   landed reloads discovery at batch end.
 5. Background results are integrated at round boundaries, mid-turn when a
    turn is running, at the prompt otherwise; the parent never blocks on a
    child inside a round.

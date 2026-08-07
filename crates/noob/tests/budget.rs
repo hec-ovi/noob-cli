@@ -44,10 +44,13 @@ use serde_json::Value;
 // its own model run, and the per-tool rules that used to sit in one shared
 // text moved onto the tools they belong to, where an unregistered tool stops
 // costing anything at all. The head paid for part of it by shedding that
-// shared text. OWNER_HARD_LIMIT is unchanged.
+// shared text. The last raise pays for the skill tool's install action (the
+// agent can add a skill the user points at, gated by confirmation), which
+// also registers the skill tool at the top level always. OWNER_HARD_LIMIT
+// is unchanged.
 const HEAD_CEILING: usize = 530; // the shipped prompt + environment block
-const TOOLS_CEILING: usize = 1390; // serialized wire tools array
-const TOTAL_CEILING: usize = 1980; // total fixed first-request overhead
+const TOOLS_CEILING: usize = 1400; // serialized wire tools array
+const TOTAL_CEILING: usize = 1995; // total fixed first-request overhead
 const OWNER_HARD_LIMIT: usize = 2000; // never exceed, whatever the above say
 
 /// The switches plant one skill, one configured MCP server, and one executable
@@ -120,8 +123,9 @@ fn no_output_cap_budget_and_phrasing() {
     // With no user prompt file, skills, or MCP, the system prompt IS the
     // head: the shipped prompt plus the env block.
     assert_eq!(system, head);
-    // 9 core (7 file/shell + context + todo) + subagent.
-    assert_eq!(artifact["tools"].as_array().unwrap().len(), 10);
+    // 9 core (7 file/shell + context + todo) + skill (always at the top
+    // level: its install action must work before any skill does) + subagent.
+    assert_eq!(artifact["tools"].as_array().unwrap().len(), 11);
 
     let head_tokens = tokens(head);
     let tools_tokens = tokens(&tools);

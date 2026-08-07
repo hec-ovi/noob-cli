@@ -1244,7 +1244,7 @@ fn cmd_debug(args: &[String]) -> ExitCode {
     let system = prompt::assemble_from(head.clone(), &inputs);
     if json_mode {
         let mut tool_specs = tools::specs();
-        if !discovered.is_empty() {
+        if !discovered.is_empty() || current_depth() == 0 {
             tool_specs.push(tools::skill::spec());
         }
         if !mcp_servers.is_empty() {

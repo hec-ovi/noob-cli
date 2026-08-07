@@ -107,7 +107,7 @@ Markdown headings name every layer; tags fence every text this process did not w
 
 Per-tool rules live in that tool's own description under `crates/noob/prompts/tools/`, so an unregistered tool costs nothing. A rule that must fire before the model has chosen a tool (prefer editing over creating, when to plan) stays in the prompt, deliberately, even when the tool repeats it.
 
-The fixed prompt plus all registered tool schemas must remain below the 1,980-token budget enforced by offline and live tokenizer tests, against a hard limit of 2,000. The offline ceilings are 530 for the head and 1,390 for the tools array, and they count with tiktoken, which no served model here uses: they are a drift alarm rather than the real bill.
+The fixed prompt plus all registered tool schemas must remain below the 1,995-token budget enforced by offline and live tokenizer tests, against a hard limit of 2,000. The offline ceilings are 530 for the head and 1,400 for the tools array, and they count with tiktoken, which no served model here uses: they are a drift alarm rather than the real bill.
 
 Within a stable mode, each provider request is an exact byte-prefix extension of the prior request. The mock server checks serialized prefix bytes and tool-array stability on every turn. Deliberate prefix changes are limited to:
 

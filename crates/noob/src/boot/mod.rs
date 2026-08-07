@@ -165,12 +165,14 @@ pub(crate) fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), St
     };
     let system = prompt::assemble(&inputs);
     // Registered set is decided here and stays byte-stable for the session:
-    // the skill tool exists only when discovery found at least one skill,
-    // the MCP pair only when mcp.json configured at least one server, and
-    // the task tool only below the recursion ceiling with the full set.
+    // the skill tool exists at the top level always (its install action must
+    // work before any skill does) and in children only when discovery found
+    // at least one skill, the MCP pair only when mcp.json configured at
+    // least one server, and the task tool only below the recursion ceiling
+    // with the full set.
     let depth = current_depth();
     let mut tool_specs = tools::specs();
-    if !discovered.is_empty() {
+    if !discovered.is_empty() || depth == 0 {
         tool_specs.push(tools::skill::spec());
     }
     if !mcp_servers.is_empty() {
@@ -201,6 +203,7 @@ pub(crate) fn bootstrap(boot: BootArgs, ui: &mut Ui) -> Result<(Agent, bool), St
     };
     tool_ctx.fs.read_dedup = config::read_dedup(&config_dir);
     tool_ctx.skills.list = discovered;
+    tool_ctx.skills.install_at = config_dir.join("skills");
     tool_ctx.websearch = websearch;
     if !mcp_servers.is_empty() && (!boot.read_only || boot.web_only) {
         tool_ctx.mcp = Some(mcp::Mcp::new(mcp_servers));

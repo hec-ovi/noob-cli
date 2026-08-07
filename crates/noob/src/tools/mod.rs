@@ -137,20 +137,32 @@ impl WriteGrants {
         )
     }
 
-    /// Consume exactly one grant for a skills-dir mutation that applied.
-    /// No-op for non-skills paths.
-    pub(crate) fn consume(&self, workspace: &Path, raw: &str) {
-        let Some(target) = guard::skill_write_target(workspace, raw) else {
-            return;
-        };
+    /// Is a grant currently recorded for this exact target?
+    pub(crate) fn holds(&self, target: &Path) -> bool {
+        self.approved.lock().unwrap().contains_key(target)
+    }
+
+    /// Consume one grant for this exact target.
+    pub(crate) fn consume_target(&self, target: &Path) {
         let mut approvals = self.approved.lock().unwrap();
-        if let std::collections::hash_map::Entry::Occupied(mut entry) = approvals.entry(target) {
+        if let std::collections::hash_map::Entry::Occupied(mut entry) =
+            approvals.entry(target.to_path_buf())
+        {
             if *entry.get() > 1 {
                 *entry.get_mut() -= 1;
             } else {
                 entry.remove();
             }
         }
+    }
+
+    /// Consume exactly one grant for a skills-dir mutation that applied.
+    /// No-op for non-skills paths.
+    pub(crate) fn consume(&self, workspace: &Path, raw: &str) {
+        let Some(target) = guard::skill_write_target(workspace, raw) else {
+            return;
+        };
+        self.consume_target(&target);
     }
 
     /// Record one user approval for this exact target.
@@ -163,12 +175,6 @@ impl WriteGrants {
             .or_insert(1);
     }
 
-    /// Test seam: is a grant currently recorded for this exact target?
-    #[cfg(test)]
-    pub(crate) fn granted(&self, target: &Path) -> bool {
-        self.approved.lock().unwrap().contains_key(target)
-    }
-
     /// Batch end: unspent grants never survive into the next batch.
     pub(crate) fn clear(&self) {
         self.approved.lock().unwrap().clear();
@@ -177,11 +183,18 @@ impl WriteGrants {
 
 /// Session skills for the skill tool and the post-compaction re-listing.
 pub struct SkillsState {
-    /// Skills discovered at session start; empty means the skill tool is
-    /// not registered. Set once at bootstrap, read-only afterwards.
+    /// Skills discovered at session start, refreshed when one is added or
+    /// removed mid-session (`reload_skills`).
     pub list: Vec<crate::skills::Skill>,
     /// Names of skills loaded this session, in load order.
     pub loaded: Mutex<Vec<String>>,
+    /// Where the tool's install action publishes: the config dir's
+    /// `skills/`, the same root the settings window installs to and lists.
+    /// Set at bootstrap; empty means install is unavailable.
+    pub install_at: PathBuf,
+    /// A skill landed this batch: the agent reloads discovery at batch end
+    /// and clears this.
+    pub installed: AtomicBool,
 }
 
 /// The plan tool's checklist and its display-only timing.
@@ -321,6 +334,8 @@ impl ToolCtx {
             skills: SkillsState {
                 list: Vec::new(),
                 loaded: Mutex::new(Vec::new()),
+                install_at: PathBuf::new(),
+                installed: AtomicBool::new(false),
             },
             plan: PlanState {
                 todos: Mutex::new(Vec::new()),
@@ -694,7 +709,7 @@ fn dispatch_resolved(ctx: &ToolCtx, name: &str, args: &Value) -> ToolOutcome {
         "grep" => grep::run(&ctx.core, args),
         "glob" => glob::run(&ctx.core, args),
         "ls" => ls::run(&ctx.core, args),
-        "skill" => skill::run(&ctx.core, &ctx.skills, ctx.task.is_some(), args),
+        "skill" => skill::run(&ctx.core, &ctx.skills, &ctx.grants, ctx.task.is_some(), args),
         // `todo` accepts historical/replayed calls; only `plan` is registered.
         "plan" | "todo" => todo::run(&ctx.plan, args),
         "websearch" => websearch::run(&ctx.core, &ctx.evidence, args),

@@ -1,7 +1,9 @@
-//! skill: level-2 disclosure. Returns the SKILL.md body (frontmatter
-//! stripped) plus the skill's directory path as an ordinary tool result, so
-//! the prompt head never mutates when a skill loads. Registered only when
-//! discovery found at least one skill. Skill bodies are untrusted input.
+//! skill: level-2 disclosure, plus the gated install action. Loading returns
+//! the SKILL.md body (frontmatter stripped) plus the skill's directory path
+//! as an ordinary tool result, so the prompt head never mutates when a skill
+//! loads. Skill bodies are untrusted input. Always registered at the top
+//! level (install must work before any skill does); in children only when
+//! discovery found at least one skill.
 
 use std::sync::atomic::Ordering;
 
@@ -11,7 +13,7 @@ use serde_json::{Value, json};
 use noob_provider::types::ToolSpec;
 
 use super::truncate::{floor_char_boundary, skill_cap_marker};
-use super::{Core, SkillsState, ToolOutcome, display_path, need_str};
+use super::{Core, SkillsState, ToolOutcome, WriteGrants, display_path, fail, need_str};
 #[cfg(test)]
 use super::ToolCtx;
 
@@ -20,18 +22,37 @@ pub fn spec() -> ToolSpec {
         name: "skill".to_string(),
         description: super::describes!("skill").to_string(),
         parameters: json!({"type": "object", "properties": {
-            "name": {"type": "string"}
-        }, "required": ["name"]}),
+            "name": {"type": "string"},
+            "install": {"type": "string"}
+        }}),
     }
 }
 
-pub fn run(core: &Core, skills: &SkillsState, can_delegate: bool, args: &Value) -> ToolOutcome {
-    run_with(core, skills, can_delegate, args, || INTERRUPTED.load(Ordering::SeqCst))
+pub fn run(
+    core: &Core,
+    skills: &SkillsState,
+    grants: &WriteGrants,
+    can_delegate: bool,
+    args: &Value,
+) -> ToolOutcome {
+    run_with(core, skills, grants, can_delegate, args, || {
+        INTERRUPTED.load(Ordering::SeqCst)
+    })
 }
 
-fn run_with(core: &Core, skills: &SkillsState, can_delegate: bool, args: &Value, interrupted: impl Fn() -> bool) -> ToolOutcome {
+fn run_with(
+    core: &Core,
+    skills: &SkillsState,
+    grants: &WriteGrants,
+    can_delegate: bool,
+    args: &Value,
+    interrupted: impl Fn() -> bool,
+) -> ToolOutcome {
     if interrupted() {
         return ToolOutcome::canceled();
+    }
+    if let Some(source) = args.get("install").and_then(Value::as_str) {
+        return install(skills, grants, source);
     }
     let name = match need_str(args, "name") {
         Ok(n) => n,
@@ -134,6 +155,44 @@ fn run_with(core: &Core, skills: &SkillsState, can_delegate: bool, args: &Value,
     }
 }
 
+/// The install action. The user confirmed at plan time (the agent's gate
+/// granted the exact install root); this re-check keeps a call that never
+/// passed the gate from writing anything. Validation, staging and the
+/// atomic publish are the skills contract's.
+fn install(skills: &SkillsState, grants: &WriteGrants, source: &str) -> ToolOutcome {
+    if skills.install_at.as_os_str().is_empty() {
+        return ToolOutcome::err(
+            "skill install is unavailable here (no config directory); \
+             continue without installing"
+                .to_string(),
+        );
+    }
+    if !grants.holds(&skills.install_at) {
+        return ToolOutcome::err(
+            "refused: installing a skill needs the user's confirmation and it \
+             was not granted; continue without installing"
+                .to_string(),
+        )
+        .classed(fail::DENIED)
+        .remedy("continue without installing the skill");
+    }
+    match crate::skills::install_into(&skills.install_at, source) {
+        Ok(name) => {
+            grants.consume_target(&skills.install_at);
+            skills.installed.store(true, Ordering::SeqCst);
+            ToolOutcome::ok(
+                format!(
+                    "installed skill {name} into {}; it becomes loadable with \
+                     this tool (name: {name:?}) after this batch",
+                    skills.install_at.join(&name).display()
+                ),
+                format!("installed skill {name}"),
+            )
+        }
+        Err(reason) => ToolOutcome::err(format!("skill install failed: {reason}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,7 +238,7 @@ mod tests {
             ancestor_skills: Vec::new(),
             background: None,
         });
-        let out = run(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({"name": "pdf-tools"}));
+        let out = run(&ctx.core, &ctx.skills, &ctx.grants, ctx.task.is_some(), &json!({"name": "pdf-tools"}));
         assert!(!out.is_error, "{}", out.content);
         assert!(
             out.content
@@ -202,7 +261,7 @@ mod tests {
         // ceiling) the mapping must not advertise delegation the schema
         // cannot honor.
         ctx.task = None;
-        let leaf = run(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({"name": "pdf-tools"}));
+        let leaf = run(&ctx.core, &ctx.skills, &ctx.grants, ctx.task.is_some(), &json!({"name": "pdf-tools"}));
         assert!(!leaf.is_error, "{}", leaf.content);
         assert!(
             leaf.content
@@ -221,7 +280,7 @@ mod tests {
             vec!["pdf-tools".to_string()]
         );
         // Loading again does not duplicate the tracking entry.
-        run(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({"name": "pdf-tools"}));
+        run(&ctx.core, &ctx.skills, &ctx.grants, ctx.task.is_some(), &json!({"name": "pdf-tools"}));
         assert_eq!(ctx.skills.loaded.lock().unwrap().len(), 1);
     }
 
@@ -230,7 +289,7 @@ mod tests {
         let (_tmp, mut ctx) = test_ctx();
         install_skill(&mut ctx, "alpha", "a\n");
         install_skill(&mut ctx, "beta", "b\n");
-        let out = run(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({"name": "gamma"}));
+        let out = run(&ctx.core, &ctx.skills, &ctx.grants, ctx.task.is_some(), &json!({"name": "gamma"}));
         assert!(out.is_error);
         assert!(out.content.contains("unknown skill \"gamma\""));
         assert!(out.content.contains("alpha, beta"));
@@ -241,7 +300,7 @@ mod tests {
     fn load_cancellation_is_structural() {
         let (_tmp, mut ctx) = test_ctx();
         install_skill(&mut ctx, "alpha", "body\n");
-        let out = run_with(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({"name": "alpha"}), || true);
+        let out = run_with(&ctx.core, &ctx.skills, &ctx.grants, ctx.task.is_some(), &json!({"name": "alpha"}), || true);
         assert!(out.canceled);
         assert!(out.is_error);
         assert!(ctx.skills.loaded.lock().unwrap().is_empty());
@@ -254,7 +313,7 @@ mod tests {
         // The same 30 KiB fixture that gets cut at 24 KiB under the defaults.
         let body: String = (0..3000).map(|i| format!("body line {i}\n")).collect();
         install_skill(&mut ctx, "big", &body);
-        let out = run(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({"name": "big"}));
+        let out = run(&ctx.core, &ctx.skills, &ctx.grants, ctx.task.is_some(), &json!({"name": "big"}));
         assert!(!out.is_error);
         assert!(!out.content.contains("[skill body capped"));
         assert!(out.content.contains("body line 2999\n"));
@@ -269,7 +328,7 @@ mod tests {
         // 30 KiB body: past the 24 KiB cap and the ~5k-token recommendation.
         let body: String = (0..3000).map(|i| format!("body line {i}\n")).collect();
         install_skill(&mut ctx, "big", &body);
-        let out = run(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({"name": "big"}));
+        let out = run(&ctx.core, &ctx.skills, &ctx.grants, ctx.task.is_some(), &json!({"name": "big"}));
         assert!(!out.is_error);
         assert!(out.content.len() < 25 * 1024 + 200);
         // The cap must deliver the leading ~24 KiB, not an empty stub.
@@ -331,19 +390,49 @@ mod tests {
     fn missing_name_and_missing_file_are_typed_errors() {
         let (_tmp, mut ctx) = test_ctx();
         install_skill(&mut ctx, "gone", "body\n");
-        let out = run(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({}));
+        let out = run(&ctx.core, &ctx.skills, &ctx.grants, ctx.task.is_some(), &json!({}));
         assert!(out.is_error);
         assert!(out.content.contains("missing required parameter"));
         std::fs::remove_file(&ctx.skills.list[0].file).unwrap();
-        let out = run(&ctx.core, &ctx.skills, ctx.task.is_some(), &json!({"name": "gone"}));
+        let out = run(&ctx.core, &ctx.skills, &ctx.grants, ctx.task.is_some(), &json!({"name": "gone"}));
         assert!(out.is_error);
         assert!(out.content.contains("cannot read skill"));
     }
 
     #[test]
+    fn install_is_refused_without_a_grant_and_lands_with_one() {
+        let (_tmp, mut ctx) = test_ctx();
+        let src = ctx.core.workspace.join("their-skill");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("SKILL.md"),
+            "---\nname: fresh\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        ctx.skills.install_at = ctx.core.workspace.join("config/skills");
+        let call = json!({"install": src.to_str().unwrap()});
+
+        // No grant: refused, and nothing is written.
+        let out = run(&ctx.core, &ctx.skills, &ctx.grants, ctx.task.is_some(), &call);
+        assert!(out.is_error);
+        assert!(out.content.contains("confirmation"), "{}", out.content);
+        assert!(!ctx.skills.install_at.join("fresh").exists());
+
+        // Granted: the skill publishes, the grant is consumed, and the
+        // batch-end reload flag is raised.
+        ctx.grants.grant(ctx.skills.install_at.clone());
+        let out = run(&ctx.core, &ctx.skills, &ctx.grants, ctx.task.is_some(), &call);
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("installed skill fresh"), "{}", out.content);
+        assert!(ctx.skills.install_at.join("fresh/SKILL.md").is_file());
+        assert!(ctx.skills.installed.load(Ordering::SeqCst));
+        assert!(!ctx.grants.holds(&ctx.skills.install_at), "grant consumed");
+    }
+
+    #[test]
     fn spec_stays_terse() {
         let s = spec();
-        assert!(s.description.split_whitespace().count() <= 20);
+        assert!(s.description.split_whitespace().count() <= 30);
         assert_eq!(s.name, "skill");
     }
 }

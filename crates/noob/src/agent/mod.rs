@@ -881,6 +881,7 @@ impl Agent {
                 });
                 shown_briefs.push(brief);
                 let planned = self.gate_skills_write(planned, ui);
+                let planned = self.gate_skill_install(planned, ui);
                 batch.push(planned);
                 if INTERRUPTED.load(Ordering::SeqCst) {
                     self.tool_ctx.grants.clear();
@@ -1003,6 +1004,18 @@ impl Agent {
             // consumed their counts; cancellation or a crash must not leak an
             // unused grant into a later model turn.
             self.tool_ctx.grants.clear();
+
+            // A skill the skill tool installed this batch: rediscover, so the
+            // new skill is loadable in-session and the model hears about it
+            // through the same [skills updated] message a /skills add sends.
+            if self
+                .tool_ctx
+                .skills
+                .installed
+                .swap(false, Ordering::SeqCst)
+            {
+                self.reload_skills(ui);
+            }
 
             let mut nudge = false;
             for (call, outcome) in turn.tool_calls.iter().zip(&outcomes) {
@@ -1419,6 +1432,42 @@ impl Agent {
             )
             .classed(tools::fail::DENIED)
             .remedy("leave skill files unchanged and continue without them"),
+        )
+    }
+
+    /// The install half of the same rail: a skill is installed, never
+    /// slipped in. A planned `skill` call carrying `install` needs explicit
+    /// confirmation in every mode, container included; headless surfaces
+    /// degrade to deny. A yes grants the install root, which the tool
+    /// re-checks at execution time.
+    fn gate_skill_install(&self, planned: sched::Planned, ui: &mut Ui) -> sched::Planned {
+        let sched::Planned::Run { name, args, .. } = &planned else {
+            return planned;
+        };
+        if name != "skill" {
+            return planned;
+        }
+        let Some(source) = args.get("install").and_then(Value::as_str) else {
+            return planned;
+        };
+        let root = self.tool_ctx.skills.install_at.clone();
+        if !root.as_os_str().is_empty()
+            && ui.ask(&format!(
+                "install skill from {source} into {}?",
+                root.display()
+            ))
+        {
+            self.tool_ctx.grants.grant(root);
+            return planned;
+        }
+        sched::Planned::Canned(
+            ToolOutcome::err(
+                "refused: installing a skill needs the user's confirmation and it \
+                 was not granted; continue without installing"
+                    .to_string(),
+            )
+            .classed(tools::fail::DENIED)
+            .remedy("continue without installing the skill"),
         )
     }
 
@@ -2420,6 +2469,50 @@ mod tests {
         assert!(matches!(
             agent.gate_skills_write(planned, &mut ui),
             sched::Planned::Canned(_)
+        ));
+    }
+
+    #[test]
+    fn skill_install_gate_asks_grants_the_root_and_denies_headless() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().canonicalize().unwrap();
+        let mut ctx = ToolCtx::new(ws, crate::tools::guard::Sandbox::Container);
+        ctx.skills.install_at = tmp.path().join("config/skills");
+        let agent = test_agent(vec![], ctx, tmp.path());
+        let planned = || sched::Planned::Run {
+            call_id: "i1".into(),
+            name: "skill".into(),
+            args: json!({"install": "./their-skill"}),
+        };
+
+        // Headless: ask degrades to deny, and nothing is granted.
+        let mut ui = crate::ui::Ui::new(crate::ui::Mode::Exec);
+        match agent.gate_skill_install(planned(), &mut ui) {
+            sched::Planned::Canned(out) => {
+                assert!(out.content.contains("confirmation"), "{}", out.content);
+            }
+            sched::Planned::Run { .. } => panic!("headless install must be denied"),
+        }
+        assert!(!agent.tool_ctx.grants.holds(&agent.tool_ctx.skills.install_at));
+
+        // A granted ask lets the call through with the root granted; a plain
+        // skill load is never gated.
+        let mut ui = crate::ui::Ui::new(crate::ui::Mode::Repl);
+        ui.forced_ask = Some(true);
+        assert!(matches!(
+            agent.gate_skill_install(planned(), &mut ui),
+            sched::Planned::Run { .. }
+        ));
+        assert!(agent.tool_ctx.grants.holds(&agent.tool_ctx.skills.install_at));
+        let load = sched::Planned::Run {
+            call_id: "i2".into(),
+            name: "skill".into(),
+            args: json!({"name": "pdf-tools"}),
+        };
+        let mut headless = crate::ui::Ui::new(crate::ui::Mode::Exec);
+        assert!(matches!(
+            agent.gate_skill_install(load, &mut headless),
+            sched::Planned::Run { .. }
         ));
     }
 
